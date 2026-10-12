@@ -198,6 +198,21 @@ export async function fetchAgents(): Promise<AgentRow[]> {
   return req<AgentRow[]>('GET', '/api/agents')
 }
 
+/**
+ * `POST /api/agents/{id}/start` — wake a stopped agent (ADR-087: `start` is
+ * `Op::Use`, so even a guest may wake an agent it can already see). Idempotent
+ * server-side (fast 200 when already online). `agentId` is the INSTANCE id —
+ * same key the directory row uses. Resolves when the command is accepted; the
+ * Runtime's `alive` verdict arrives a moment later over MQTT, so callers that
+ * must confirm startup re-read the directory.
+ */
+export async function startAgent(agentId: string): Promise<void> {
+  // The handler extracts `Json<StartAgentRequest>` — a bodyless POST is a 415
+  // (Unsupported Media Type). `StartAgentRequest` is `#[serde(default)]`, so
+  // an explicit `{ dev_mode: false }` both sets Content-Type and parses.
+  await req<void>('POST', `/api/agents/${agentId}/start`, { dev_mode: false })
+}
+
 export async function fetchDirectory(): Promise<DirectoryEntry[]> {
   const r = await req<{ users: DirectoryEntry[] }>('GET', '/api/users/directory')
   return r.users ?? []

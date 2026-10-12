@@ -310,12 +310,38 @@
   height: 8px;
   border-radius: 50%;
   flex: none;
+  /* Presence dot default = offline/unknown. Without a background the base
+   * dot was transparent, which is why the agent offline marker never
+   * showed; state classes below override it. */
+  background: var(--color-label-secondary);
 }
 .dot-online {
   background: var(--color-success);
 }
 .dot-busy {
   background: var(--color-warning);
+}
+.dot-offline {
+  background: var(--color-label-secondary);
+}
+.dot-error {
+  background: var(--color-warning);
+}
+/* Wake-up in flight: a ring spinner in the presence dot's place so an
+ * offline row that is starting reads as busy, not frozen. */
+.dot-spinner {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--color-separator);
+  border-top-color: var(--color-tint);
+  animation: dot-spin 0.8s linear infinite;
+}
+@keyframes dot-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .badge {

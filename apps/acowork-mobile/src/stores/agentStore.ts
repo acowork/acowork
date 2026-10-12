@@ -11,8 +11,14 @@
  */
 
 import { create } from 'zustand'
-import { fetchLastMessage, fetchSessions } from '../lib/api'
+import { fetchLastMessage, fetchSessions, startAgent as startAgentApi } from '../lib/api'
 import type { AgentSummary, SessionInfo, UserSummary } from '../lib/types'
+
+/** Wake-up confirmation: the Runtime's `alive` verdict lands a moment after
+ *  `/start` returns (over MQTT), so poll the directory until it flips or a
+ *  bounded budget runs out. Cheap (directory-only) and self-terminating. */
+const START_POLL_MS = 1_500
+const START_POLL_LIMIT = 8
 
 /** Injected by `lib/api.ts` wiring at boot; keeps the store HTTP-free. */
 export interface DirectorySource {
@@ -40,6 +46,10 @@ interface AgentStore {
    */
   sessionPage: Record<string, number>
   sessionsHasMore: Record<string, boolean>
+  /** Ids of agents whose wake-up (`/start`) is in flight — the row shows a
+   *  spinner and re-taps are deduped until it lands. Owned HERE because the
+   *  agent list lives here and the row renders from this store. */
+  startingAgentIds: Set<string>
 
   /** Pull agents + contacts; failure is reported, never swallowed silently. */
   refreshDirectory(): Promise<boolean>
@@ -54,6 +64,15 @@ interface AgentStore {
    * connection must not open 30 sockets at once.
    */
   refreshInbox(): Promise<boolean>
+
+  /**
+   * Wake a stopped agent (tap an offline row). No-op unless the row is
+   * currently `offline` and not already starting — so a double tap cannot
+   * fire two `/start` calls. Marks the row spinner, issues the start, then
+   * polls the directory until the agent reports online (or the budget runs
+   * out). Never navigates: the user re-taps once it is up.
+   */
+  startAgent(agentId: string): Promise<void>
 
   setAgents: (list: AgentSummary[]) => void
   setUsers: (list: UserSummary[]) => void
@@ -76,6 +95,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   directoryLoading: false,
   sessionPage: {},
   sessionsHasMore: {},
+  startingAgentIds: new Set<string>(),
 
   refreshDirectory: async () => {
     if (!directory) return false
@@ -135,6 +155,40 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       await Promise.all(ids.slice(i, i + BATCH).map((id) => get().refreshSessions(id)))
     }
     return ok
+  },
+
+  startAgent: async (agentId) => {
+    const s = get()
+    // Dedup gate + a guard against starting something not known offline.
+    if (s.startingAgentIds.has(agentId)) return
+    if (s.agentList.find((a) => a.id === agentId)?.status !== 'offline') return
+    set((st) => ({ startingAgentIds: new Set(st.startingAgentIds).add(agentId) }))
+    try {
+      await startAgentApi(agentId)
+      let online = false
+      for (let i = 0; i < START_POLL_LIMIT; i++) {
+        await new Promise((r) => setTimeout(r, START_POLL_MS))
+        await get().refreshDirectory()
+        const info = get().agentList.find((a) => a.id === agentId)
+        if (info && info.status !== 'offline') {
+          online = true
+          break
+        }
+      }
+      // Sessions only became listable once the Runtime was up (the offline
+      // load returned nothing). Load them now so the row's title/preview
+      // appears immediately instead of only after a leave-and-return.
+      if (online) await get().refreshSessions(agentId)
+    } catch {
+      /* start rejected (permission / node down): leave it offline, the
+         spinner clears, and the row can be tapped again */
+    } finally {
+      set((st) => {
+        const next = new Set(st.startingAgentIds)
+        next.delete(agentId)
+        return { startingAgentIds: next }
+      })
+    }
   },
 
   setSessions: (agentId, items) =>

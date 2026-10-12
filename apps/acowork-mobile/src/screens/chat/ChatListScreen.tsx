@@ -72,6 +72,7 @@ export function ChatListScreen() {
   const sessionsByAgent = useAgentStore((s) => s.agents)
   const refreshInbox = useAgentStore((s) => s.refreshInbox)
   const loading = useAgentStore((s) => s.directoryLoading)
+  const startingAgentIds = useAgentStore((s) => s.startingAgentIds)
   const openSession = useChatStore((s) => s.openSession)
   const push = useNavStore((s) => s.push)
   const baseUrl = useAuthStore((s) => s.baseUrl)
@@ -118,8 +119,24 @@ export function ChatListScreen() {
   }, [users, chatByPeer, q])
 
   const openAgent = async (agentId: string, sessionId: string | null) => {
+    // Offline → wake it in place, do NOT open a chat against a stopped
+    // Runtime (that was the blank screen). Re-tap once the row goes online.
+    const info = useAgentStore.getState().agentList.find((a) => a.id === agentId)
+    if (info?.status === 'offline') {
+      void useAgentStore.getState().startAgent(agentId)
+      return
+    }
     useChatStore.getState().selectAgent(agentId)
-    if (sessionId) await openSession(agentId, sessionId)
+    // Load this agent's sessions on open. A just-started agent's cached list
+    // is empty (the offline-time load returned nothing), so trusting the
+    // click-time `recent` landed the first open on a null session → blank;
+    // the second tap only worked because returning to the list had reloaded
+    // them. `refreshSessions` re-reads page 1 and updates the store slot.
+    await useAgentStore.getState().refreshSessions(agentId)
+    const list = useAgentStore.getState().agents[agentId]?.sessions ?? []
+    const newest = list.slice().sort((x, y) => (y.updated_at ?? 0) - (x.updated_at ?? 0))[0]
+    const target = sessionId ?? newest?.session_id ?? null
+    if (target) await openSession(agentId, target)
     push('chat/detail')
   }
 
@@ -157,14 +174,31 @@ export function ChatListScreen() {
               label={
                 <span className="row-title">
                   {a.name}
-                  {a.status === 'offline' ? <span className="dot" aria-label="离线" /> : null}
+                  {startingAgentIds.has(a.id) ? (
+                    <span className="dot-spinner" aria-label="正在启动" title="正在启动" />
+                  ) : (
+                    (() => {
+                      // Presence from the directory's `alive`/`lifecycle`.
+                      // A plain offline-only dot used to render transparent
+                      // and never surfaced online; now all three states show.
+                      const cls =
+                        a.status === 'offline'
+                          ? 'dot dot-offline'
+                          : a.status === 'error'
+                            ? 'dot dot-error'
+                            : 'dot dot-online'
+                      const text =
+                        a.status === 'offline' ? '离线' : a.status === 'error' ? '异常' : '在线'
+                      return <span className={cls} aria-label={text} title={text} />
+                    })()
+                  )}
                   {recent && hasUnread(a.id, recent.session_id, recent.message_count) ? (
                     <span className="dot dot-unread" aria-label="有新消息" />
                   ) : null}
                 </span>
               }
               value={formatListTime(recent?.updated_at)}
-              hint={recent?.last_message || recent?.title || '暂无会话'}
+              hint={startingAgentIds.has(a.id) ? '正在启动…' : recent?.last_message || recent?.title || '暂无会话'}
             />
           ))}
           {agents.length === 0 && !loading ? <ListRow label="暂无 Agent" hint="在桌面端安装后出现在这里" /> : null}
