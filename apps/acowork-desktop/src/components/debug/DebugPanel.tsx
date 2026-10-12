@@ -457,7 +457,7 @@ export function SnapshotNode({
 
                 {/* Section content (lazy-loaded or inline-editing) */}
                 {isExpanded && (
-                  <OverlayScrollbar maxHeight={192} containerClassName="flex-none mx-2 mb-1.5 w-[calc(100%-1rem)] rounded border-[0.5px] border-zinc-300 bg-zinc-50 p-2 text-text-secondary dark:border-zinc-600 dark:bg-zinc-900/40">
+                  <OverlayScrollbar maxHeight={192} containerClassName="flex-none mx-2 mb-1.5 w-[calc(100%-1rem)] rounded border-[0.5px] border-zinc-300 bg-zinc-50 text-text-secondary dark:border-zinc-600 dark:bg-zinc-900/40" className="p-2">
                     {sectionKey === "messages" ? (
                       <MessagesView content={cachedContent?.content} />
                     ) : editingSection &&
