@@ -115,6 +115,8 @@ fn is_valid_scope_id(id: &str) -> bool {
 /// Kept deliberately tiny: what a client needs *before* it can log in —
 /// liveness/readiness, the bootstrap probe, the login and refresh calls,
 /// the first-login call (a freshly-created account has no password yet),
+/// the pairing-redeem call (a scanned phone holds only a one-time QR token,
+/// not a pair — see 方案③),
 /// and logout (a client with an expired access token must still be able to
 /// drop a dead session). The legacy Gateway token file is never exposed.
 fn is_public_path(path: &str) -> bool {
@@ -127,6 +129,7 @@ fn is_public_path(path: &str) -> bool {
             | "/api/auth/refresh"
             | "/api/auth/logout"
             | "/api/auth/first-login"
+            | "/api/auth/pair/redeem"
     ) {
         return true;
     }

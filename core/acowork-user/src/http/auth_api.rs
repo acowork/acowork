@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use acowork_core::account::AccountView;
 
-use crate::auth::service::{AuthError, AuthService, TokenPair};
+use crate::auth::service::{AuthError, AuthService, TokenPair, PAIRING_TTL_SECS};
 use crate::auth::issuer::now_unix;
 use crate::auth::context::AuthContext;
 use crate::error::ApiError;
@@ -40,6 +40,8 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/change-password", post(change_password))
         .route("/api/auth/first-login", post(first_login))
+        .route("/api/auth/pair/create", post(pair_create))
+        .route("/api/auth/pair/redeem", post(pair_redeem))
         .route("/api/auth/me", get(me))
 }
 
@@ -66,6 +68,13 @@ pub struct ChangePasswordRequest {
 pub struct FirstLoginRequest {
     pub invite_token: String,
     pub new_password: String,
+}
+
+/// 方案③：移动端扫码兑换的入参。`pairing_token` 是桌面出码时回显的一次性
+/// 短期随机串（不含账号/密码），兑换即得一套新 token。
+#[derive(Debug, Deserialize)]
+pub struct PairRedeemRequest {
+    pub pairing_token: String,
 }
 
 /// The account system is only reachable in `multi_user` mode.
@@ -171,6 +180,37 @@ async fn first_login(
     let auth = service(&state)?;
     let pair = blocking(move || auth.first_login(&req.invite_token, &req.new_password, now_unix()))
         .await?;
+    Ok(Json(pair))
+}
+
+/// `POST /api/auth/pair/create` — 桌面出码（方案③）。
+///
+/// 需已登录身份（非公开）：取 token 的真实 `user_id`，为其签发一张 60 秒
+/// 有效、兑换即烧掉的一次性配对票据。票据只存哈希，明文仅本次回显供编码进
+/// 二维码。纯内存操作，不走 blocking。
+async fn pair_create(
+    State(state): State<AppState>,
+    Extension(auth_ctx): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let auth = service(&state)?;
+    let token = auth.create_pairing(&auth_ctx.user_id, now_unix());
+    Ok(Json(serde_json::json!({
+        "pairing_token": token,
+        "expires_in": PAIRING_TTL_SECS,
+    })))
+}
+
+/// `POST /api/auth/pair/redeem` — 移动端扫码兑换（方案③）。
+///
+/// 公开端点（在 user context 与 gateway auth_middleware 两处 `is_public_path`
+/// 均放行），调用方尚无 token pair。凭一次性配对票据换取一套全新 token（按
+/// 出码用户当前角色现签）。票据过期/未知/已兑换均 401，不可区分。
+async fn pair_redeem(
+    State(state): State<AppState>,
+    Json(req): Json<PairRedeemRequest>,
+) -> Result<Json<TokenPair>, ApiError> {
+    let auth = service(&state)?;
+    let pair = blocking(move || auth.redeem_pairing(&req.pairing_token, now_unix())).await?;
     Ok(Json(pair))
 }
 

@@ -2,13 +2,14 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { KeyRound, LogOut } from "lucide-react";
+import { KeyRound, LogOut, Smartphone } from "lucide-react";
 import { useAuthStore } from "../../stores/authStore";
 import { ChangePasswordModal } from "../account/ChangePasswordModal";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { UserAvatar, BUILTIN_ICONS, BUILTIN_ICON_IDS } from "../common/UserAvatar";
 import { AuthedImage } from "../common/AuthedImage";
 import { fetchSelfProfile, updateSelfProfile } from "../../lib/selfProfile";
+import { createPairingQr, NoLanAddressError, type PairingQr } from "../../lib/pairing";
 import type { BackendUserProfile, AvatarAssetEntry } from "../../lib/types";
 import {
   fetchUserAvatarConfig,
@@ -585,6 +586,99 @@ export function ProfileTab() {
         )}
         </ExpandableRow>
       </ListBox>
+
+      {/* ── Connect phone (QR pairing, 方案③) ── only when signed in ── */}
+      {loggedIn && <PairingCard />}
     </div>
+  );
+}
+
+// ── Pairing QR card ───────────────────────────────────────────────────
+// Self-contained: owns the generate / countdown / refresh cycle so the main
+// ProfileTab render stays focused on the profile form. Rendered only for a
+// signed-in account (pairing is bound to the bearer identity server-side).
+function PairingCard() {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [qr, setQr] = useState<PairingQr | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<"no-lan" | "failed" | null>(null);
+  const [now, setNow] = useState(Date.now());
+
+  // Tick once a second while a code is on screen, so the countdown and the
+  // expiry state advance without a re-render driven from outside.
+  useEffect(() => {
+    if (!qr) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [qr]);
+
+  const secsLeft = qr ? Math.max(0, Math.ceil((qr.expiresAt - now) / 1000)) : 0;
+  const expired = qr != null && secsLeft <= 0;
+
+  const generate = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setQr(await createPairingQr());
+      setNow(Date.now());
+    } catch (err) {
+      setQr(null);
+      if (err instanceof NoLanAddressError) {
+        setError("no-lan");
+      } else {
+        setError("failed");
+        log.warn("[PairingCard] generate failed:", err);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  return (
+    <ListBox dividers={false}>
+      <ExpandableRow
+        open={open}
+        onToggle={() => setOpen((v) => !v)}
+        title={t("settings.pairingTitle")}
+        ariaLabel={t("settings.pairingTitle")}
+        bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
+      >
+        <p className="text-xs text-text-tertiary">{t("settings.pairingHelp")}</p>
+        <div className="mt-3 flex flex-col items-center gap-3">
+          {qr && !expired ? (
+            <>
+              <img
+                src={qr.dataUrl}
+                alt={t("settings.pairingTitle")}
+                className="h-52 w-52 rounded bg-white p-2"
+              />
+              <p className="text-xs text-text-secondary">
+                {t("settings.pairingExpires", { secs: secsLeft })}
+              </p>
+              <p className="break-all text-center text-[10px] text-text-tertiary">
+                {t("settings.pairingAddress", { url: qr.baseUrl })}
+              </p>
+            </>
+          ) : qr && expired ? (
+            <p className="text-xs text-red-500">{t("settings.pairingExpired")}</p>
+          ) : error === "no-lan" ? (
+            <p className="text-center text-xs text-red-500">{t("settings.pairingNoLan")}</p>
+          ) : error === "failed" ? (
+            <p className="text-xs text-red-500">{t("settings.pairingFailed")}</p>
+          ) : null}
+
+          <button
+            type="button"
+            onClick={() => void generate()}
+            disabled={busy}
+            className="flex items-center justify-center gap-1.5 rounded btn-outline px-3 py-1.5 text-xs disabled:opacity-50"
+          >
+            <Smartphone size={14} />
+            {qr ? t("settings.pairingRefresh") : t("settings.pairingGenerate")}
+          </button>
+        </div>
+      </ExpandableRow>
+    </ListBox>
   );
 }

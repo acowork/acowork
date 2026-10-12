@@ -16,6 +16,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.12.1",
     "@tauri-apps/plugin-store": "^2",
+    "jsqr": "^1.4.0",
     "lucide-react": "^0.469",
     "react": "^19",
     "react-dom": "^19",

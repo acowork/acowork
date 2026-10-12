@@ -67,9 +67,34 @@ export function setAuthBridge(a: AuthBridge): void {
   auth = a
 }
 
+/**
+ * HTTP request timeouts. A WiFi/network switch makes a fetch to the old
+ * Gateway IP hang at the OS TCP-connect layer (~20-30s) before it finally
+ * errors, which is far too long to leave the user staring at a stale screen
+ * before the reconnect UI appears. The Gateway is a same-LAN self-hosted
+ * service, so a healthy request lands in <100ms and these short ceilings
+ * never false-trigger:
+ *   - PROBE: boot / connect / login / retry path — fail fast so `disconnected`
+ *     shows within seconds of a network switch.
+ *   - REQUEST: authenticated business calls once `ready` (a slightly longer
+ *     leash for real payload work).
+ */
+const PROBE_TIMEOUT_MS = 5_000
+const REQUEST_TIMEOUT_MS = 10_000
+
+/** AbortSignal with a timeout, degrading to no signal when unsupported. */
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  return typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
+    ? AbortSignal.timeout(ms)
+    : undefined
+}
+
 /** Public for the onboarding screens (they probe before any bridge exists). */
 export async function probeStatus(baseUrl: string): Promise<GatewayStatus> {
-  const res = await fetch(`${trim(baseUrl)}/api/status`, { headers: { Accept: 'application/json' } })
+  const res = await fetch(`${trim(baseUrl)}/api/status`, {
+    headers: { Accept: 'application/json' },
+    signal: timeoutSignal(PROBE_TIMEOUT_MS),
+  })
   if (!res.ok) throw new GatewayError(res.status, await res.text().catch(() => ''))
   return (await res.json()) as GatewayStatus
 }
@@ -79,6 +104,7 @@ export async function loginRequest(baseUrl: string, username: string, password: 
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
+    signal: timeoutSignal(PROBE_TIMEOUT_MS),
   })
   if (!res.ok) throw new GatewayError(res.status, await res.text().catch(() => ''))
   return (await res.json()) as TokenPair
@@ -89,6 +115,7 @@ export async function refreshRequest(baseUrl: string, refreshToken: string): Pro
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token: refreshToken }),
+    signal: timeoutSignal(REQUEST_TIMEOUT_MS),
   })
   if (!res.ok) throw new GatewayError(res.status, await res.text().catch(() => ''))
   return (await res.json()) as TokenPair
@@ -99,7 +126,24 @@ export async function logoutRequest(baseUrl: string, refreshToken: string): Prom
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ refresh_token: refreshToken }),
+    signal: timeoutSignal(REQUEST_TIMEOUT_MS),
   }).catch(() => undefined) // best-effort: a dead token is not an error here
+}
+
+/**
+ * 方案③：凭桌面二维码里的一次性配对票据换取一套新 token。公开端点（调用方
+ * 尚无 token pair），仿 loginRequest：直接 POST、不走 401 旋转阶梯。票据过期/
+ * 已兑换会得到 401 GatewayError，由调用方回退到登录/重新扫码。
+ */
+export async function redeemPairing(baseUrl: string, pairingToken: string): Promise<TokenPair> {
+  const res = await fetch(`${trim(baseUrl)}/api/auth/pair/redeem`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pairing_token: pairingToken }),
+    signal: timeoutSignal(PROBE_TIMEOUT_MS),
+  })
+  if (!res.ok) throw new GatewayError(res.status, await res.text().catch(() => ''))
+  return (await res.json()) as TokenPair
 }
 
 function trim(u: string): string {
@@ -121,6 +165,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: timeoutSignal(REQUEST_TIMEOUT_MS),
     })
   }
 

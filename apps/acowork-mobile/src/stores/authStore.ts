@@ -28,6 +28,7 @@ import {
   logoutRequest,
   probeStatus,
   refreshRequest,
+  redeemPairing,
   setAuthBridge,
   fetchMe,
 } from '../lib/api'
@@ -86,6 +87,8 @@ interface AuthStore {
   /** Connect screen: probe a URL, branch on auth_mode/requires_setup. */
   probe(url: string): Promise<boolean>
   login(username: string, password: string): Promise<boolean>
+  /** 方案③：扫码兑换配对票据 -> 落 token -> ready（含地址）。 */
+  pairLogin(baseUrl: string, pairingToken: string): Promise<boolean>
   logout(): Promise<void>
   /** Retry after `disconnected` — re-probes the saved URL. */
   retryConnection(): Promise<void>
@@ -207,6 +210,36 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
           : e instanceof GatewayError && e.status === 422
             ? '账号未启用或需要首次登录，请在桌面端处理'
             : '无法连接网关，请检查网络或稍后重试'
+      set({ busy: false, loginError: msg })
+      return false
+    }
+  },
+
+  pairLogin: async (baseUrl, pairingToken) => {
+    const clean = baseUrl.trim().replace(/\/+$/, '')
+    if (!/^https?:\/\//.test(clean)) {
+      set({ loginError: '网关地址无效'
+      })
+      return false
+    }
+    set({ busy: true, loginError: '' })
+    try {
+      // 先落地址再兑换：redeemPairing 直接打 clean，后续 fetchMe 则走 bridge 的 baseUrl。
+      lsSet(LS.url, clean)
+      set({ baseUrl: clean })
+      const pair = await redeemPairing(clean, pairingToken)
+      get()._setTokens(pair)
+      // 与 boot/probe 一致地拉 status；兑换成功即说明网关可用且已鉴权，requires_setup
+      // 不应发生，但仍保守探测。me 失败不阻断进入 ready（与 login 同构）。
+      const st = await probeStatus(clean).catch(() => null)
+      const me = await fetchMe().catch((e) => { console.log('[AUTH] pairLogin() fetchMe error (non-fatal)', e); return null })
+      set({ busy: false, status: st, me, phase: 'ready' })
+      return true
+    } catch (e) {
+      const msg =
+        e instanceof GatewayError && e.status === 401
+          ? '二维码无效或已过期，请在桌面端重新生成'
+          : '无法连接网关，请确认手机与电脑在同一网络'
       set({ busy: false, loginError: msg })
       return false
     }

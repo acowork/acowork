@@ -108,6 +108,7 @@ pub(crate) fn is_public_path(path: &str) -> bool {
             | "/api/auth/refresh"
             | "/api/auth/logout"
             | "/api/auth/first-login"
+            | "/api/auth/pair/redeem"
     )
 }
 

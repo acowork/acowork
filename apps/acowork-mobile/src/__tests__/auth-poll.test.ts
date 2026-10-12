@@ -124,6 +124,26 @@ describe('authStore.boot', () => {
     await useAuthStore.getState().boot()
     expect(useAuthStore.getState().phase).toBe('disconnected')
   })
+
+  // A network switch used to leave the probe fetch hanging at the OS TCP layer
+  // for ~20-30s before the reconnect UI appeared. The probe must now carry an
+  // explicit timeout signal so `disconnected` fires within seconds.
+  it('wires a timeout signal into the boot probe fetch', async () => {
+    localStorage.setItem('acowork.gatewayUrl', 'http://g:19876')
+    fetchMock.mockResolvedValue(jsonRes({ version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, auth_mode: 'multi_user', registration_open: false, requires_setup: false }))
+    const useAuthStore = await freshAuth()
+    await useAuthStore.getState().boot()
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('a probe that times out (aborted) → disconnected', async () => {
+    localStorage.setItem('acowork.gatewayUrl', 'http://g:19876')
+    fetchMock.mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+    const useAuthStore = await freshAuth()
+    await useAuthStore.getState().boot()
+    expect(useAuthStore.getState().phase).toBe('disconnected')
+  })
 })
 
 describe('401 ladder', () => {

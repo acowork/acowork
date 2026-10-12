@@ -38,6 +38,11 @@ pub const INVITE_TTL_SECS: i64 = 24 * 3600;
 /// access TTL, so a real thief is still locked out on their *next* attempt.
 /// Widening this trades reuse-detection sharpness for replay tolerance.
 pub const REFRESH_REUSE_GRACE_SECS: i64 = 10;
+/// 二维码配对票据时效（秒）—— 桌面出码、移动端扫码一次性兑换（方案③，
+/// 见 docs/design「配对登录」）。刻意与 refresh（30 天）解耦：票据泄露的
+/// 利用窗口只有几十秒，且兑换即烧掉（一次性）；二维码里不含账号/密码，
+/// 也不含任何长效凭证，只是一个短期随机串。参照 WhatsApp/微信登录二维码模型。
+pub const PAIRING_TTL_SECS: i64 = 60;
 
 /// Password policy (ADR-076 §决策 6, `[multi_user].password_policy`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +218,16 @@ impl std::fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
+/// 一次待兑换的配对票据（方案③）。与 invite 同构：服务端只存 sha256 哈希
+/// （明文仅在生成当次回显给桌面编码进二维码，绝不落盘），按哈希查兑。
+/// 仅存内存——配对本就是一次性短时动作，进程重启即全部失效。
+struct PairingRecord {
+    /// 出码的登录用户（兑换时按此身份现签新 pair，仿 refresh）。
+    user_id: String,
+    /// 过期时刻（unix 秒）。懒惰回收：每次 create/redeem 顺带清理过期条目。
+    expires_at: i64,
+}
+
 /// The account system's runtime handle (ADR-076 §决策 3).
 pub struct AuthService {
     data_dir: PathBuf,
@@ -224,6 +239,8 @@ pub struct AuthService {
     /// M1 switch is "drop `issuer`, load this from the public-key file".
     verifier: TokenVerifier,
     revoked: Mutex<RevokedFamilies>,
+    /// 在途配对票据（方案③）：sha256(token) -> record。仅内存（见 PairingRecord）。
+    pairings: Mutex<HashMap<String, PairingRecord>>,
     policy: PasswordPolicy,
     bootstrap_admin: Option<BootstrapAdmin>,
 }
@@ -249,6 +266,7 @@ impl AuthService {
             revoked: Mutex::new(RevokedFamilies::load(
                 &auth_dir.join("revoked_families.txt"),
             )),
+            pairings: Mutex::new(HashMap::new()),
             policy,
             bootstrap_admin,
         })
@@ -499,6 +517,41 @@ impl AuthService {
             refresh_token: self.issuer.sign_refresh(user_id, &family, now),
             token_type: "Bearer",
             expires_in: ACCESS_TTL_SECS,
+        }
+    }
+
+    /// 配对表加锁（毒化恢复同 [`Self::revoked`]：临界区无 panic 路径）。
+    fn pairing_lock(&self) -> MutexGuard<'_, HashMap<String, PairingRecord>> {
+        self.pairings.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 桌面侧签发一次性配对票据（方案③，需已登录身份）。返回明文 token
+    /// （仅这一次可见，供编码进二维码），服务端只存 sha256 哈希 + 过期时刻。
+    /// 复用 invite 的 128-bit 随机与 [`invite_hash`]，杜绝枚举。每次调用顺带
+    /// 清理过期条目（懒惰回收，无后台任务）。纯内存操作，无磁盘 IO。
+    pub fn create_pairing(&self, user_id: &str, now: i64) -> String {
+        let token = random_hex16();
+        let record = PairingRecord { user_id: user_id.to_string(), expires_at: now + PAIRING_TTL_SECS };
+        let mut guard = self.pairing_lock();
+        guard.retain(|_, r| r.expires_at > now);
+        guard.insert(invite_hash(&token), record);
+        token
+    }
+
+    /// 移动端兑换配对票据 -> 一套全新 token（按 user 当前角色现签，仿 refresh）。
+    /// 一次性：`remove` 无论成败都摘走条目（兑换即烧掉），第二次拿同一 token 即
+    /// 落进 None 分支。过期条目已被 retain 清掉，同样拒绝。账号被禁用/软删
+    /// 则拒签（同 login/refresh 的 `is_login_capable` 门）。三种失败不可区分。
+    pub fn redeem_pairing(&self, token: &str, now: i64) -> Result<TokenPair, AuthError> {
+        let record = {
+            let mut guard = self.pairing_lock();
+            guard.retain(|_, r| r.expires_at > now);
+            guard.remove(&invite_hash(token)).ok_or(AuthError::InvalidCredentials)?
+        };
+        let list = self.load_accounts().map_err(AuthError::Store)?;
+        match list.find(&record.user_id) {
+            Some(a) if a.is_login_capable() => Ok(self.mint(&record.user_id, a.role, now)),
+            _ => Err(AuthError::InvalidCredentials),
         }
     }
 
@@ -1124,6 +1177,51 @@ mod tests {
 
         let stored = svc.account(&uid).unwrap();
         assert!(stored.last_login_at.is_some());
+    }
+
+    #[test]
+    fn pairing_roundtrip_mints_pair_for_the_issuing_user() {
+        let (svc, uid) = service_with_user("pair-ok", "alice", "s3cret123");
+        let now = 1_700_000_000;
+        let token = svc.create_pairing(&uid, now);
+        let pair = svc.redeem_pairing(&token, now).unwrap();
+        let principal = svc.verify_access(&pair.access_token, now).unwrap();
+        assert_eq!(principal.user_id, uid);
+        assert_eq!(principal.role, Role::User);
+    }
+
+    #[test]
+    fn pairing_token_is_single_use() {
+        let (svc, uid) = service_with_user("pair-replay", "alice", "s3cret123");
+        let now = 1_700_000_000;
+        let token = svc.create_pairing(&uid, now);
+        assert!(svc.redeem_pairing(&token, now).is_ok());
+        // 兑换即烧掉：同一 token 第二次必须被拒。
+        assert_eq!(
+            svc.redeem_pairing(&token, now).unwrap_err(),
+            AuthError::InvalidCredentials
+        );
+    }
+
+    #[test]
+    fn pairing_token_expires() {
+        let (svc, uid) = service_with_user("pair-expiry", "alice", "s3cret123");
+        let now = 1_700_000_000;
+        let token = svc.create_pairing(&uid, now);
+        // 超过 PAIRING_TTL_SECS 即失效（retain 懒惰回收清掉）。
+        assert_eq!(
+            svc.redeem_pairing(&token, now + PAIRING_TTL_SECS + 1).unwrap_err(),
+            AuthError::InvalidCredentials
+        );
+    }
+
+    #[test]
+    fn pairing_token_unknown_is_rejected() {
+        let (svc, _uid) = service_with_user("pair-unknown", "alice", "s3cret123");
+        assert_eq!(
+            svc.redeem_pairing("deadbeef", 1_700_000_000).unwrap_err(),
+            AuthError::InvalidCredentials
+        );
     }
 
     #[test]

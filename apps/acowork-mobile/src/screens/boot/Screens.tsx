@@ -9,6 +9,9 @@
 
 import { useState } from 'react'
 import { useAuthStore } from '../../stores/authStore'
+import { ScanModal } from './ScanModal'
+// Shared brand wordmark (repo-root assets) — same file the Desktop splash uses.
+import brandMark from '../../../../../assets/brand-mark.svg'
 
 function Shell({ children }: { children: React.ReactNode }) {
   return <div className="app"><div className="boot-screen">{children}</div></div>
@@ -19,6 +22,7 @@ export function ConnectScreen() {
   const busy = useAuthStore((s) => s.busy)
   const [url, setUrl] = useState('')
   const [err, setErr] = useState('')
+  const [scanning, setScanning] = useState(false)
 
   const submit = async () => {
     setErr('')
@@ -36,10 +40,13 @@ export function ConnectScreen() {
 
   return (
     <Shell>
-      <div className="boot-logo">A</div>
+      <img className="boot-logo" src={brandMark} alt="ACowork" />
       <div className="boot-title">连接 ACowork</div>
-      <div className="boot-sub">输入桌面端共享的网关地址。移动端不运行本地网关。</div>
+      <div className="boot-sub">扫描桌面端二维码，一步完成「连接网关 + 登录」。也可手动输入网关地址。</div>
       <div className="boot-form">
+        <button type="button" className="boot-primary" onClick={() => setScanning(true)}>
+          扫码连接并登录
+        </button>
         <input
           className={`boot-input${err ? ' is-error' : ''}`}
           placeholder="http://192.168.1.23:19876"
@@ -50,11 +57,12 @@ export function ConnectScreen() {
           spellCheck={false}
         />
         {err ? <div className="boot-error">{err}</div> : null}
-        <button type="button" className="boot-primary" onClick={() => void submit()} disabled={busy}>
-          {busy ? '检测中…' : '连接'}
+        <button type="button" className="boot-secondary" onClick={() => void submit()} disabled={busy}>
+          {busy ? '检测中…' : '手动连接'}
         </button>
-        <div className="boot-hint">v1 不支持扫码配对与注册：没有账号请在桌面端创建。</div>
+        <div className="boot-hint">扫码需桌面端个人资料页的配对二维码；没有账号请在桌面端创建。</div>
       </div>
+      {scanning ? <ScanModal onClose={() => setScanning(false)} /> : null}
     </Shell>
   )
 }
@@ -67,6 +75,7 @@ export function LoginScreen() {
   const changeAddress = useAuthStore((s) => s.changeAddress)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [scanning, setScanning] = useState(false)
 
   const submit = () => {
     if (!username || !password) return
@@ -98,11 +107,15 @@ export function LoginScreen() {
         <button type="button" className="boot-primary" onClick={submit} disabled={busy || !username || !password}>
           {busy ? '登录中…' : '登录'}
         </button>
+        <button type="button" className="boot-secondary" onClick={() => setScanning(true)}>
+          扫码登录
+        </button>
         <button type="button" className="boot-secondary" onClick={changeAddress}>
           更换网关地址
         </button>
         <div className="boot-hint">账号由桌面端管理；忘记密码请在桌面端重置。</div>
       </div>
+      {scanning ? <ScanModal onClose={() => setScanning(false)} /> : null}
     </Shell>
   )
 }
@@ -151,7 +164,7 @@ export function RestrictedScreen() {
 export function BootingScreen() {
   return (
     <Shell>
-      <div className="boot-logo">A</div>
+      <img className="boot-logo" src={brandMark} alt="ACowork" />
       <div className="boot-sub">加载中…</div>
     </Shell>
   )
