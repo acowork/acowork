@@ -679,8 +679,15 @@ fn parse_response(resp: AnthropicResponse) -> ChatResponse {
             }
             // Extended-thinking block — surface as reasoning_content so the
             // loop can show a `thought` turn instead of silently dropping it.
+            // Newer Claude models return the reasoning as an opaque `signature`
+            // and leave `thinking` empty or whitespace-only; such blocks must
+            // not become `Some("")`/`Some(" ")`, which would either short-circuit
+            // the think-tag fallback in `persist_think_to_conversation` or
+            // persist a blank thought record the UI has to filter.
             "thinking" => {
-                if let Some(thinking) = block.thinking {
+                if let Some(thinking) = block.thinking
+                    && !thinking.trim().is_empty()
+                {
                     reasoning_parts.push(thinking);
                 }
             }
@@ -1774,6 +1781,74 @@ mod tests {
         assert_eq!(
             chat_resp.reasoning_content.as_deref(),
             Some("weighing options")
+        );
+    }
+
+    #[test]
+    fn test_parse_response_drops_blank_thinking_blocks() {
+        // Newer Claude models return reasoning as an opaque `signature` and
+        // leave `thinking` empty/whitespace. Such blocks must not surface as
+        // `Some("")`/`Some(" ")` — that persists a blank thought record the UI
+        // renders as an empty ThinkBlock, and short-circuits the think-tag
+        // fallback in `persist_think_to_conversation`.
+        let resp = AnthropicResponse {
+            content: vec![
+                AnthropicContentBlock {
+                    block_type: "thinking".to_string(),
+                    text: None,
+                    thinking: Some(String::new()),
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+                AnthropicContentBlock {
+                    block_type: "thinking".to_string(),
+                    text: None,
+                    thinking: Some("  \n ".to_string()),
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+                AnthropicContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some("answer".to_string()),
+                    thinking: None,
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+            ],
+            usage: None,
+            stop_reason: Some("end_turn".to_string()),
+        };
+        assert_eq!(parse_response(resp).reasoning_content, None);
+
+        // Mixed real + blank blocks keep only the real content.
+        let mixed = AnthropicResponse {
+            content: vec![
+                AnthropicContentBlock {
+                    block_type: "thinking".to_string(),
+                    text: None,
+                    thinking: Some("  ".to_string()),
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+                AnthropicContentBlock {
+                    block_type: "thinking".to_string(),
+                    text: None,
+                    thinking: Some("real reasoning".to_string()),
+                    id: None,
+                    name: None,
+                    input: None,
+                },
+            ],
+            usage: None,
+            stop_reason: Some("end_turn".to_string()),
+        };
+        assert_eq!(
+            parse_response(mixed).reasoning_content.as_deref(),
+            Some("real reasoning")
         );
     }
 
