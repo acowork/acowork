@@ -331,6 +331,11 @@ function getUserSenderInfo(): { senderDisplayName?: string } {
 // ---------------------------------------------------------------------------
 
 /** State for a single conversation session within an agent. */
+export interface QueuedMessage {
+  content: string;
+  attachedItems: AttachedItem[];
+}
+
 interface SessionChatState {
   messages: ChatMessage[];
   tokenUsage: TokenUsage | null;
@@ -408,7 +413,7 @@ interface SessionChatState {
   /** Per-session todo list (from todo_write tool) */
   todos: TodoItem[];
   /** Per-session queued messages (typed during streaming, sent when agent becomes idle) */
-  queuedMessages: string[];
+  queuedMessages: QueuedMessage[];
   /** Per-session selected model */
   model: string | null;
   /** Per-session selected provider */
@@ -1082,7 +1087,7 @@ interface ChatStore {
   /** Clear all attached chat context for a session */
   clearAttachedContext: (agentId: string, sessionId: string) => void;
   /** Add a message to the per-session queue (typed during streaming) */
-  addQueuedMessage: (agentId: string, sessionId: string, message: string) => void;
+  addQueuedMessage: (agentId: string, sessionId: string, message: QueuedMessage) => void;
   /** Remove a single attachment entry from the in-memory message list.
    *
    *  Each ADR-046 attachment (file_upload / image_upload / attached_*)
@@ -1098,7 +1103,7 @@ interface ChatStore {
   /** Remove a message from the per-session queue by index */
   removeQueuedMessage: (agentId: string, sessionId: string, index: number) => void;
   /** Replace the entire per-session queue (e.g. after sending all) */
-  setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => void;
+  setQueuedMessages: (agentId: string, sessionId: string, messages: QueuedMessage[]) => void;
   /** Dismiss the server-side error banner. */
   clearServerError: (agentId: string, sessionId: string) => void;
   /** ADR-047: Pull session state (status/ratio/todos/context_usage) from backend.
@@ -2891,7 +2896,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => updateSessionState(state, agentId, sessionId, { attachedContext: [] }));
   },
 
-  addQueuedMessage: (agentId: string, sessionId: string, message: string) => {
+  addQueuedMessage: (agentId: string, sessionId: string, message: QueuedMessage) => {
     set((state) => {
       const ss = getSessionState(state, agentId, sessionId);
       return updateSessionState(state, agentId, sessionId, {
@@ -2918,7 +2923,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => {
+  setQueuedMessages: (agentId: string, sessionId: string, messages: QueuedMessage[]) => {
     set((state) => updateSessionState(state, agentId, sessionId, { queuedMessages: messages }));
   },
 
