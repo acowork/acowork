@@ -222,6 +222,8 @@ can_view = is_admin ∨ can_use ∨ visibility.is_published()
 | `get_agent_detail` | `rec.is_none_or(\|r\| …)` | a missing record counted as **visible** (the opposite of the list) → listed, then 404 on click |
 
 The same rule implemented with two opposite defaults in two places is the classic shape of this class of drift; `can_view` exists so it cannot happen again.
+
+**Third drift fix (the agent list bypassed the node cascade, 2026-10)**: `list_agents` once evaluated `can_view` on the **agent's own row only**, bypassing the `Node → Agent` view cascade defined in §4. The consequence: a `shared` agent hosted on a node the caller **cannot view** still appeared in `GET /api/agents`, yet opening it was 403/404'd at the node tier (detail/use go through the cascade), and client-side per-node grouping found no visible node to file it under. The fix: agent-list reads **must reuse `acl::evaluate(Op::View, Resource::Agent(instance_id))`** — the same decision source as detail/use — so an agent is listed only when both its own row and its hosting node's row pass the view tier; `auth=None` (Local mode) stays a full no-op. "Every listed agent has a viewable node" thus becomes a structural guarantee, and the mobile/desktop per-node grouping needs **no fallback bucket**.
 - Entries with no historical `visibility` read as `Private` (fail-closed by default).
 
 ### D7: Ownerless Resources, Transfer and Cleanup (fail-closed)

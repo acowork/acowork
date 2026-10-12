@@ -163,6 +163,16 @@
   background: var(--color-bg-grouped);
 }
 
+/* Node group header in the inbox: name + an online dot. Renders inside
+ * .list-section-title, so undo its uppercase (node names are user-authored
+ * hostnames) and lay the dot inline (mirrors .row-title). */
+.node-group-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: none;
+}
+
 .list-section {
   margin: 0;
   background: var(--color-bg-elevated);

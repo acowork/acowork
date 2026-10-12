@@ -338,7 +338,7 @@ sequenceDiagram
 | Listener | 地址 | 用途 |
 |---|---|---|
 | 远程 HTTP | `127.0.0.1:19877` | 与主 HTTP `:19876` 同构 Router + **RemoteOrigin guard**（§7.2），额外挂 `/mqtt` WS 桥接路由 |
-| 远程 MQTT | `127.0.0.1:19874` | rumqttd 第二 v4 listener，**严格 auth handler**（§7.2），仅 relay-client 可达 |
+| 远程 MQTT | `127.0.0.1:19874` | rumqttd 第二 v4 listener，**严格 auth handler**（§7.2）；只能经 `/mqtt` WS 桥到达——relay 形态走本 listener `:19877`，LAN 形态走主监听器 `:19876`（同一座桥、同一 CONNECT 鉴权） |
 
 **回滚设计**：`relay.enabled=false` 即完全恢复现状；远程接入是纯增量路径，不影响 localhost / LAN 直连的任何行为。
 

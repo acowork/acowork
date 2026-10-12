@@ -28,6 +28,7 @@ import type {
   GatewayStatus,
   LiveStatus,
   MessagesPage,
+  NodeRow,
   SessionDetail,
   SessionInfo,
   SessionSnapshot,
@@ -196,6 +197,16 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 
 export async function fetchAgents(): Promise<AgentRow[]> {
   return req<AgentRow[]>('GET', '/api/agents')
+}
+
+/**
+ * `GET /api/nodes` — the node topology for the inbox's per-node grouping.
+ * The server already applies the ADR-087 `can_view` filter and prunes machine
+ * metadata for non-managers, so the client renders this verbatim and never
+ * derives visibility itself (ADR-087 D8 single source of truth).
+ */
+export async function fetchNodes(): Promise<NodeRow[]> {
+  return req<NodeRow[]>('GET', '/api/nodes')
 }
 
 /**

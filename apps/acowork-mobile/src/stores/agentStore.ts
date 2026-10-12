@@ -12,7 +12,7 @@
 
 import { create } from 'zustand'
 import { fetchLastMessage, fetchSessions, startAgent as startAgentApi } from '../lib/api'
-import type { AgentSummary, SessionInfo, UserSummary } from '../lib/types'
+import type { AgentSummary, NodeRow, SessionInfo, UserSummary } from '../lib/types'
 
 /** Wake-up confirmation: the Runtime's `alive` verdict lands a moment after
  *  `/start` returns (over MQTT), so poll the directory until it flips or a
@@ -24,6 +24,7 @@ const START_POLL_LIMIT = 8
 export interface DirectorySource {
   loadAgents(): Promise<AgentSummary[]>
   loadUsers(): Promise<UserSummary[]>
+  loadNodes(): Promise<NodeRow[]>
 }
 
 let directory: DirectorySource | null = null
@@ -36,6 +37,10 @@ interface AgentStore {
   agents: Record<string, { info: AgentSummary; sessions: SessionInfo[] }>
   agentList: AgentSummary[]
   users: UserSummary[]
+  /** Node topology for the inbox's per-node grouping. The server already
+   *  filtered by can_view (ADR-087); the inbox renders ONLINE nodes only and
+   *  hides an agent whose node is not in that set (no fallback bucket). */
+  nodes: NodeRow[]
   /** True while the first directory load is in flight (list skeleton). */
   directoryLoading: boolean
   /**
@@ -74,8 +79,23 @@ interface AgentStore {
    */
   startAgent(agentId: string): Promise<void>
 
+  /**
+   * Apply one pushed presence verdict (v1.2 §8.1). `status` is already mapped
+   * to the directory's vocabulary at the transport boundary, so the store
+   * never sees a wire field name.
+   *
+   * A verdict for an unlisted agent is ignored rather than invented — the
+   * status topic carries no name, role or avatar to render a row from.
+   */
+  applyPresence(agentId: string, status: NonNullable<AgentSummary['status']>): void
+
   setAgents: (list: AgentSummary[]) => void
   setUsers: (list: UserSummary[]) => void
+  setNodes: (list: NodeRow[]) => void
+  /** Pull the node topology. Failure keeps the previous snapshot — a
+   *  transient blip must not collapse the grouped inbox into an empty list
+   *  (mirrors the Desktop's `fetchNodes` resilience). */
+  fetchNodes(): Promise<void>
   /** Prepend/merge a page of session history into the owning agent's slot. */
   mergeSessions: (agentId: string, items: SessionInfo[]) => void
   /** Replace an agent's session list with a freshly loaded page 1. */
@@ -92,6 +112,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   agents: {},
   agentList: [],
   users: [],
+  nodes: [],
   directoryLoading: false,
   sessionPage: {},
   sessionsHasMore: {},
@@ -147,6 +168,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   refreshInbox: async () => {
     const ok = await get().refreshDirectory()
+    // Node topology refresh rides on the inbox load: entering the list
+    // re-reads /api/nodes, so a node that was offline and has come back
+    // reappears on the next visit (the no-MQTT realtime substitute).
+    void get().fetchNodes()
     const ids = get().agentList.map((a) => a.id)
     // 4 at a time: enough to feel instant on LTE, polite enough that a
     // large gateway cannot starve the phone's socket budget.
@@ -193,7 +218,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   setSessions: (agentId, items) =>
     set((s) => {
-      const slot = s.agents[agentId] ?? { info: { id: agentId, name: agentId }, sessions: [] }
+      const slot = s.agents[agentId] ?? { info: { id: agentId, name: agentId, node_id: '' }, sessions: [] }
       // Keep a preview already fetched this session: the server cannot give
       // it back, and dropping it would blank the inbox row on every refresh.
       const previews = new Map(slot.sessions.map((x) => [x.session_id, x.last_message]))
@@ -234,11 +259,36 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       return { agentList: list, agents }
     }),
 
+  applyPresence: (agentId, status) =>
+    set((s) => {
+      const slot = s.agents[agentId]
+      if (!slot || slot.info.status === status) return s
+      const info = { ...slot.info, status }
+      // A directory refresh can still overwrite this with a verdict polled
+      // before the transition — that is bounded (the next poll, and the
+      // status topic's own heartbeat, both re-assert it within seconds).
+      return {
+        agentList: s.agentList.map((a) => (a.id === agentId ? info : a)),
+        agents: { ...s.agents, [agentId]: { ...slot, info } },
+      }
+    }),
+
   setUsers: (list) => set({ users: list }),
+
+  setNodes: (list) => set({ nodes: list }),
+
+  fetchNodes: async () => {
+    if (!directory) return
+    try {
+      get().setNodes(await directory.loadNodes())
+    } catch {
+      /* keep the previous snapshot — a blip must not collapse the grouped inbox */
+    }
+  },
 
   mergeSessions: (agentId, items) =>
     set((s) => {
-      const slot = s.agents[agentId] ?? { info: { id: agentId, name: agentId }, sessions: [] }
+      const slot = s.agents[agentId] ?? { info: { id: agentId, name: agentId, node_id: '' }, sessions: [] }
       const known = new Set(slot.sessions.map((x) => x.session_id))
       return {
         agents: {
@@ -253,7 +303,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     set((s) => ({
       agents: {
         ...s.agents,
-        [agentId]: { ...(s.agents[agentId] ?? { info: { id: agentId, name: agentId } }), sessions: remaining },
+        [agentId]: { ...(s.agents[agentId] ?? { info: { id: agentId, name: agentId, node_id: '' } }), sessions: remaining },
       },
     }))
     return remaining

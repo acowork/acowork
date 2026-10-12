@@ -1,7 +1,7 @@
 # Mobile App
 
-> Version: v1.2 | Updated: 2026-10-04
-> Status: design confirmed (v1.1 added Startup & Connection §7, Realtime Event Stream §8, edge states §7.5; v1.2 revises §8 into a dual-channel model — relay deployments use precise MQTT-over-WSS subscriptions, polling becomes the local/LAN channel); engineering in development
+> Version: v1.3 | Updated: 2026-10-12
+> Status: design confirmed (v1.1 added Startup & Connection §7, Realtime Event Stream §8, edge states §7.5; v1.2 revises §8 into a dual-channel model — relay deployments use precise MQTT-over-WSS subscriptions, polling becomes the local/LAN channel; v1.3 mounts the same WS bridge on the MAIN LAN listener so both shapes have equal rights, and adds the global presence connection); engineering in development
 
 ---
 
@@ -355,7 +355,7 @@ Cold start
 
 | Element | Rule |
 |---------|------|
-| Address input | Single-line URL; `http://host:port` (LAN) and `https://<gw-id>.<relay-domain>` (relay device domain — the same value Desktop uses as its Gateway URL); pasted values trimmed. **The scheme also selects the realtime channel** (§8.0): https → MQTT-over-WSS primary, http → polling |
+| Address input | Single-line URL; `http://host:port` (LAN) and `https://<gw-id>.<relay-domain>` (relay device domain — the same value Desktop uses as its Gateway URL); pasted values trimmed. **The scheme picks the protocol and port of the realtime channel** (§8.0): https → `wss://{authority}/mqtt`, http → `ws://{authority}/mqtt`; both are the MQTT-over-WS primary |
 | LAN discovery | **No mDNS/auto-scan in v1.** On multi-NIC machines the advertised address often is not the reachable one (container bridge / WSL / VPN adapters broadcast wrong IPs), and scanning adds a needless permission surface on mobile. v1 substitutes "Desktop shows its LAN IP + manual entry" (Settings → Gateway); pairing codes in v1.1 remove even this manual step |
 | Validation | `GET /api/status` must succeed before saving; failures show the concrete cause (DNS / timeout / not an ACowork Gateway) and are **not persisted** |
 | Version display | After a successful probe show the Gateway version so users confirm the right instance |
@@ -399,12 +399,13 @@ persisted via tauri-plugin-store (native) / localStorage (browser dev)
 
 ## 8. Realtime Event Stream (v1: dual channel)
 
-> **Decision (revised in v1.2)**: the realtime channel is chosen by **deployment
-> topology**; the event-handling policy is unified across channels — under a relay
-> deployment use **MQTT-over-WSS precise subscriptions** (the same channel and the
-> same rights Desktop has); under local/LAN deployments use **foreground-session
-> polling**. Whatever the channel, a "content changed" signal triggers the **same
-> full HTTP reload**, and only final results are rendered.
+> **Decision (revised in v1.2, revised again in v1.3)**: the realtime channel is
+> chosen by **connection health**; the event-handling policy is unified across
+> channels — **both the relay and the LAN shape subscribe precisely over
+> MQTT-over-WS** (the same channel and the same rights Desktop has), and
+> **foreground-session polling is the degraded channel** (while the WS is not up,
+> was refused, or is down). Whatever the channel, a "content changed" signal
+> triggers the **same full HTTP reload**, and only final results are rendered.
 >
 > **Revision record**: v1.1 decided "no MQTT in v1, polling everywhere" on the
 > premise that "a mobile WebView cannot reach MQTT". That premise holds only for
@@ -414,34 +415,44 @@ persisted via tauri-plugin-store (native) / localStorage (browser dev)
 > listener natively accepts the `user:{name}:mobile:{id}` shape
 > (`core/acowork-gateway/src/mqtt/broker.rs::remote_client_shape`) — Mobile uses the
 > same user token, the same remote listener and the same ACL as Desktop. There is
-> no "Mobile can't subscribe MQTT" constraint.
+> no "Mobile can't subscribe MQTT" constraint. v1.2 therefore promoted the relay
+> shape to WS but left the LAN shape on polling, on the grounds that "the main
+> listener has no bridge". v1.3 builds that bridge: the same WS↔TCP byte pipe is
+> now mounted on the MAIN LAN listener
+> (`core/acowork-gateway/src/relay/remote_listener.rs::lan_mqtt_bridge`), so the LAN
+> shape has the same rights as relay. The bridge changes no authentication: the
+> CONNECT inside it is still verified by the strict listener against a user access
+> token, a Gateway without the account system refuses it (fail closed) and the
+> client falls back to polling by itself.
 
 ### 8.0 Channel selection
 
 ```
 Connect-screen probe (§7.2)
   │
-  ├─ https://… baseUrl (relay device domain) ─→ [WS primary] wss://{host}/mqtt
-  │        │ connect failure / reconnect limit (3) exceeded
-  │        └──────────────────────────────────→ [polling fallback] (§8.3) + "realtime degraded" status line
+  ├─ http(s):// baseUrl ──────────────────→ [WS primary] {ws|wss}://{host}/mqtt
+  │        │ connect failure / CONNACK refused / reconnect limit exceeded
+  │        └──────────────────────────────→ [polling fallback] (§8.3) + "realtime degraded" status line
   │
-  └─ http://… baseUrl (LAN / port-forward) ───→ [polling] (broker is TCP-only; WebViews have no TCP)
+  └─ no bridge reachable (historical shape: main listener without `/mqtt`) → [polling]
 ```
 
 | Rule | Value |
 |------|-------|
-| Test | URL scheme: `https` → relay shape (same rule as Desktop's `relay_mqtt_wss_url`: `wss://{authority}/mqtt`); `http` → polling |
+| Test | The scheme only decides the WS **protocol and port** (`https` → `wss://{authority}/mqtt`, `http` → `ws://{authority}/mqtt`, the same derivation as Desktop's `relay_mqtt_wss_url`). Both shapes have a bridge, so what selects the channel is now "is the WS healthy" |
 | Seam | `src/lib/realtime.ts` exposes `startWatching/stopWatching`; the upper layer (chatStore) is channel-agnostic. The polling loop becomes an internal fallback of `realtime.ts`, no longer a direct chatStore responsibility |
 | Exclusivity | The two channels never drive reloads simultaneously; while WS is healthy polling is off (battery + traffic), and polling takes over the moment WS drops |
+| Refusal degrades | A Gateway without the account system fails the CONNECT closed (a close, no CONNACK); the client treats it as a reconnect-backoff case and polling carries freshness meanwhile — the LAN shape therefore loses nothing when accounts are off |
 
-### 8.1 MQTT-over-WSS (relay primary channel)
+### 8.1 MQTT-over-WS (primary channel, relay and LAN alike)
 
 | Item | Rule |
 |------|------|
-| Endpoint | `wss://{relay device domain}/mqtt`, derived from the saved baseUrl — no new configuration surface. The WebSocket handshake must offer the `mqtt` subprotocol (the relay bridge echoes it per the rumqttc convention; verified live) |
-| client_id | `user:{sub}:mobile:{device_uuid}`. `device_uuid` is generated on first launch and persisted (same store as tokens); `{sub}` = the access token's `sub` claim (the **user_id UUID**, not the login name) — the broker cross-checks and drops impersonation with a close, no CONNACK |
+| Endpoint | `wss://{relay device domain}/mqtt` (relay) or `ws://{host}:{port}/mqtt` (LAN main listener), both derived from the saved baseUrl — no new configuration surface. The WebSocket handshake must offer the `mqtt` subprotocol (both bridges echo it per the rumqttc convention; verified live) |
+| client_id | `user:{sub}:mobile:{device_uuid}`. `device_uuid` is generated on first launch and persisted (same store as tokens); `{sub}` = the access token's `sub` claim (the **user_id UUID**, not the login name) — the broker cross-checks and drops impersonation with a close, no CONNACK. **The session channel and the presence channel are two connections and their client ids MUST differ**: MQTT 3.1.1 keys a session by client id, so a duplicate CONNECT takes the other socket over. The presence channel appends `-presence` to the device segment (`remote_client_shape` forbids a fourth colon, so `:presence` is not an option) |
 | CONNECT auth | username=`{sub}` (informational; the broker decides on client_id + password), password=**current access token**. MQTT 3.1.1 never re-authenticates a live connection: after a token rotation (15 min) the new password rides the next reconnect — Desktop's `MqttCredentials::refresher` semantics: every reconnect reads the freshest token from authStore, triggering the single-flight refresh first if it is near expiry |
 | Subscription set (**foreground session only**) | `acowork/agents/{id}/sessions/{sid}/state` (retained: status + message_count — the pushed equivalent of the polling snapshot)<br>`…/messages/done`, `…/messages/error`, `…/messages/stopped`<br>`…/messages/tool_approval_needed` (retained QoS1, carries tool details)<br>`…/messages/ask_question` (retained QoS1, `question_json`) |
+| Presence subscription (**global second connection**) | `acowork/agents/+/status` (QoS1) — one wildcard filter covers the whole agent fleet. The payload is `DataEnvelope{agent_status = 9}` (`AgentStatus`: online / instance_id / state / detail), mapped onto **the same vocabulary the HTTP directory uses** (`alive` / `lifecycle`), so a push and a poll can never disagree about what the dot means (`src/lib/presence.ts`). The topic is Retained with a heartbeat plus an LWT (`online=false`), so subscribing replays every agent's last verdict and a transition that happened while the device was unreachable is never lost. Lifecycle: opened on login (phase `ready`), closed on logout/expiry. **It has no polling fallback by design** — the directory poll already carries presence; if the bridge is unreachable the list simply keeps the last polled verdict |
 | **Never subscribed** | `messages/chunk`, `tool_call`, `tool_result`, `reasoning_*` — every incremental/process event. "Final results only" is honored at the subscription layer, not by receiving-and-discarding |
 | Payload | protobuf `SessionMessage` (`core/acowork-core/proto/mqtt_payload.proto`). The WebView uses a hand-written minimal wire decoder reading only the needed fields (oneof discriminator + a few string/uint fields); **no protobuf runtime dependency** |
 | Exits | leave the screen / switch session / background → UNSUBSCRIBE the old set (the connection may stay open); session expired → DISCONNECT |
@@ -503,11 +514,11 @@ Enter chat detail / after sending
 |------|-----------------|
 | Conversation list (§2.3) | once at startup, pull-to-refresh, resume-to-foreground, after session create/delete |
 | Unread badge | v1 = local "did `message_count` change since this session was last opened" (available from the session meta endpoint). **No push means no true unread** — the badge honestly degrades to "new activity", never a number |
-| Agent online status | once at startup + refresh on resume (`/api/agents` carries status) |
+| Agent online status | pushed by the presence connection (§8.1): online/offline/error flip within milliseconds; the directory poll (once at startup + resume + pull-to-refresh) stays the baseline and the race corrector — a late-arriving poll can repaint a row the push just lit as offline, and the next heartbeat/verdict resets it |
 
 ### 8.6 Channel capability matrix (recorded honestly so "polling-variant semantics" never calcifies into the global truth)
 
-| Capability | WS channel (relay) | Polling channel (local/LAN, fallback) |
+| Capability | WS channel (relay and LAN) | Polling channel (fallback / no bridge) |
 |-----------|--------------------|--------------------------------------|
 | Status line | `state` push | 2 s snapshot |
 | Approval card | full details (tool / risk / reason / timeout) | generic card: "The Agent requests running a tool — details on Desktop" |
@@ -518,6 +529,7 @@ Enter chat detail / after sending
 ### 8.7 Known gaps (not v1 blockers; evaluate before public-internet exposure)
 
 - **Per-user subscription authorization**: the remote ACL is currently the `sessions/+/messages/#` wildcard ([ADR-076 §5.5](../../adr/en/ADR-076-multi-user-account-system.md)) — subscribing to another user's session events is protocol-feasible today. Mobile's subscription discipline (foreground readable session only) is client behavior, not authorization. Desktop is in the same water at the same depth; topic-level authorization is a backend item, scheduled as a v1.1 cross-team item.
+- **The presence wildcard is unauthorized in the same way**: `agents/+/status` has no topic ACL on the strict listener either, so ANY valid user token sees the lifecycle verdict of every agent on that Gateway (online/offline/failed, including the startup-failure reason). That matches what Desktop already sees locally; filtering agent presence by ownership is part of the same topic-level authorization item.
 - **Traffic-storm defense**: the broad-subscription defense rests on the client discipline "subscribe to the foreground session only"; relay-side per-connection rate limiting (24 §5.3) backstops misbehavior.
 
 ## 9. Projects and Documents

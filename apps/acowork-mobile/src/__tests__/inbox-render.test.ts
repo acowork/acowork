@@ -139,7 +139,10 @@ describe('time labels', () => {
   it('emits a day separator only when the day actually changed', () => {
     const now = Date.now()
     expect(daySeparator(now, now)).toBeNull()
-    expect(daySeparator(now, now - 86_400_000)).toBe('昨天')
-    expect(daySeparator(null, now)).toBe('今天')
+    // The label carries the clock as well since 5b1f2f41 (WeChat puts the time
+    // on the separator), so assert the day word, not the whole string — the
+    // exact clock depends on the runner's locale.
+    expect(daySeparator(now, now - 86_400_000)).toMatch(/^昨天 /)
+    expect(daySeparator(null, now)).toMatch(/^今天 /)
   })
 })

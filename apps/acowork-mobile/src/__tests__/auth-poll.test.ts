@@ -227,7 +227,7 @@ function fakeTransport(over: Partial<ChatTransport> = {}): ChatTransport {
 }
 
 beforeEach(() => {
-  useAgentStore.setState({ agents: { a1: { info: { id: 'a1', name: 'A' }, sessions: [{ session_id: 's1', title: 'S', can_write: true }] } }, agentList: [{ id: 'a1', name: 'A' }], users: [] })
+  useAgentStore.setState({ agents: { a1: { info: { id: 'a1', name: 'A', node_id: 'n1' }, sessions: [{ session_id: 's1', title: 'S', can_write: true }] } }, agentList: [{ id: 'a1', name: 'A', node_id: 'n1' }], users: [] })
   useChatStore.setState({ agentStates: {}, selectedAgentId: null})
 })
 

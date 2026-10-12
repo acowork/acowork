@@ -222,6 +222,8 @@ can_view = is_admin ∨ can_use ∨ visibility.is_published()
 
 同一语义在两处用相反的默认值实现，是这类漂移的典型形态；`can_view` 的存在意义就是让它不再可能发生。
 
+**第三处漂移修复（agent 列表未走节点级联，2026-10）**：`list_agents` 曾只对 **agent 自身行** 求 `can_view`，绕过了 §4 定义的 `Node → Agent` view 级联。后果：一个 `shared` agent 挂在调用者**看不见的节点**上时，仍会出现在 `GET /api/agents` 里，但点开它会被节点档 403/404（详情/use 走的是级联），且客户端按节点分组时找不到对应的可见节点。修复：agent 列表读取**必须复用 `acl::evaluate(Op::View, Resource::Agent(instance_id))`**——与详情/use 同一裁决源——agent 行与其 hosting node 行都通过 view 档才列出；`auth=None`（Local 模式）仍整层 no-op。由此「列出的每个 agent 都有可见节点」成为结构性保证，移动端/桌面端按节点分组**无需任何兜底桶**。
+
 ### D7：无主资源、转移与清理（fail-closed）
 
 | 情形 | 规则 |

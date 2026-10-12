@@ -7,8 +7,10 @@
 
 import type { CSSProperties, ReactNode } from 'react'
 
-/** The grouped-list container — the single most-used iOS surface. */
-export function ListSection({ title, children }: { title?: string; children: ReactNode }) {
+/** The grouped-list container — the single most-used iOS surface.
+ *  `title` is a ReactNode so a section header can carry markup (the inbox's
+ *  per-node group titles render an online dot beside the node name). */
+export function ListSection({ title, children }: { title?: ReactNode; children: ReactNode }) {
   return (
     <>
       {title ? <div className="list-section-title">{title}</div> : null}

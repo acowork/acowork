@@ -1,7 +1,7 @@
 # Mobile App（移动应用）
 
-> 版本：v1.2 | 更新日期：2026-10-04
-> 状态：设计已确认（v1.1 补齐启动与连接 §7、实时事件流 §8、边界态 §7.5；v1.2 修订 §8 为双通道模型——relay 形态走 MQTT-over-WSS 精确订阅，轮询降级为 local/LAN 通道）；工程开发中
+> 版本：v1.3 | 更新日期：2026-10-12
+> 状态：设计已确认（v1.1 补齐启动与连接 §7、实时事件流 §8、边界态 §7.5；v1.2 修订 §8 为双通道模型——relay 形态走 MQTT-over-WSS 精确订阅，轮询降级为 local/LAN 通道；v1.3 把同一条 WS 桥也挂到主 LAN 监听器，两形态同权，并新增全局 presence 连接）；工程开发中
 
 ---
 
@@ -354,7 +354,7 @@ function isReadOnly(canWrite: boolean | undefined): boolean {
 
 | 元素 | 规则 |
 |------|------|
-| 地址输入 | 单行 URL，允许 `http://host:port`（局域网）与 `https://<gw-id>.<relay域>`（relay 设备域，与 Desktop 的 Gateway URL 同一个值）；粘贴自动 trim。**scheme 同时决定实时通道**（§8.0）：https → MQTT-over-WSS 主通道，http → 轮询 |
+| 地址输入 | 单行 URL，允许 `http://host:port`（局域网）与 `https://<gw-id>.<relay域>`（relay 设备域，与 Desktop 的 Gateway URL 同一个值）；粘贴自动 trim。**scheme 决定实时通道的协议与端口**（§8.0）：https → `wss://{authority}/mqtt`，http → `ws://{authority}/mqtt`，两者都是 MQTT-over-WS 主通道 |
 | 局域网发现 | **不做 mDNS/自动扫描**（v1）。原因：① 多 NIC 机器上广告地址与实际可达地址不一致（容器 bridge / WSL / VPN 网卡会广播错误 IP）；② 扫描类 UX 在移动网络权限下引入不必要的权限面。v1 用"桌面端显示本机局域网 IP + 手动输入"替代（设置 → 网关，v1.1 加配对码即消除此手工步骤） |
 | 校验 | 保存前必须 `GET /api/status` 探测成功；失败时显示具体原因（DNS 失败 / 超时 / 非 ACowork Gateway），**不落库** |
 | 版本提示 | 探测成功后显示 Gateway 版本号，让用户确认连的是预期实例 |
@@ -398,9 +398,10 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 
 ## 8. 实时事件流（v1：双通道）
 
-> **决策（v1.2 修订）**：实时通道由**部署拓扑**决定，事件处理策略由产品决策统一——
-> relay 形态用 **MQTT-over-WSS 精确订阅**（与 Desktop 同权同通道），local/LAN 形态用
-> **前台会话轮询**。两个通道送达的"内容变了"信号走**同一条 HTTP 全量重载**，只显最终结果。
+> **决策（v1.2 修订，v1.3 再修）**：实时通道由**连接健康度**决定，事件处理策略由产品决策统一——
+> relay 与 LAN **两种形态都走 MQTT-over-WS 精确订阅**（与 Desktop 同权同通道），
+> **前台会话轮询是降级通道**（WS 未建立 / 被拒 / 断开期间）。两个通道送达的"内容变了"信号走
+> **同一条 HTTP 全量重载**，只显最终结果。
 >
 > **修订记录**：v1.1 曾决策"v1 不接入 MQTT、一律轮询"，其前提"移动 WebView 拿不到
 > MQTT"只对 local/LAN 拓扑成立。relay 部署下 `wss://<gw-id>.<relay域>/mqtt` 经云端
@@ -408,33 +409,40 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 > 严格监听器原生接受 `user:{name}:mobile:{id}` 形状（[ADR-076 §决策3](../../adr/zh/ADR-076-multi-user-account-system.md)、
 > `core/acowork-gateway/src/mqtt/broker.rs::remote_client_shape`）——mobile 与 Desktop
 > 使用同一用户 token、同一远程 listener、同一 ACL，不存在"mobile 不能订 MQTT"。
+> v1.2 因此把 relay 形态升到 WS，但把 LAN 形态留在轮询上——理由是"主监听器没有桥"。
+> v1.3 补上这座桥：同一条 WS↔TCP 字节管道也挂在**主 LAN 监听器**上
+> （`core/acowork-gateway/src/relay/remote_listener.rs::lan_mqtt_bridge`），LAN 形态
+> 自此与 relay 同权；桥本身不改任何鉴权，CONNECT 仍由严格监听器校验用户 access token，
+> 未启用账号体系的 Gateway 一律拒绝（fail closed），客户端自动退回轮询。
 
 ### 8.0 通道选择
 
 ```
 连接屏探测（§7.2）
   │
-  ├─ baseUrl 为 https://…（relay 设备域）──→ [WS 主通道] wss://{host}/mqtt
-  │        │ 连接失败 / 掉线重连超限（3 次）
-  │        └──────────────────────────────→ [轮询降级通道]（§8.3）+ 状态行"实时已降级"
+  ├─ baseUrl 有 http(s):// 前缀 ──→ [WS 主通道] {ws|wss}://{host}/mqtt
+  │        │ 连接失败 / CONNACK 被拒 / 掉线重连超限
+  │        └──────────────────────→ [轮询降级通道]（§8.3）+ 状态行"实时已降级"
   │
-  └─ baseUrl 为 http://…（LAN / 端口转发）─→ [轮询通道]（broker 只有 TCP，WebView 无 TCP）
+  └─ 无桥可用（历史形态：主监听器未挂 `/mqtt`）─→ [轮询通道]
 ```
 
 | 规则 | 值 |
 |------|----|
-| 判据 | URL scheme：`https` → relay 形态（与 Desktop `relay_mqtt_wss_url` 同一规则：`wss://{authority}/mqtt`）；`http` → 轮询 |
+| 判据 | scheme 只决定 WS 的**协议与端口**（`https` → `wss://{authority}/mqtt`，`http` → `ws://{authority}/mqtt`，与 Desktop `relay_mqtt_wss_url` 同一派生规则）；两种形态都有桥，通道选择的判据变成"WS 是否健康" |
 | 收口 | `src/lib/realtime.ts` 暴露 `startWatching/stopWatching`，上层（chatStore）对通道无感；轮询循环是 `realtime.ts` 的内部降级实现，不再是 chatStore 的直接职责 |
 | 并存 | 两通道不同时驱动重载；WS 活着时轮询停摆（省电省流量），断开即接管 |
+| 被拒即降级 | 未启用账号体系的 Gateway 在 CONNECT 处 fail closed（无 CONNACK 的 close）；客户端按重连退避处理，期间由轮询承担新鲜度——LAN 形态因此不会因缺账号体系而失去功能 |
 
-### 8.1 MQTT-over-WSS（relay 主通道）
+### 8.1 MQTT-over-WS（主通道，relay 与 LAN 两形态）
 
 | 项 | 规则 |
 |----|------|
-| 端点 | `wss://{relay设备域}/mqtt`，由已保存 baseUrl 派生，不新增配置项。WebSocket 握手必须携带 `mqtt` 子协议（relay 桥按 rumqttc 约定回显，实测验证） |
-| client_id | `user:{sub}:mobile:{device_uuid}`。`device_uuid` 首启生成并持久化（与 token 同一存储）；`{sub}` = access token 的 `sub` 声明（**user_id UUID**，非登录名）——broker 交叉验证，冒充他人身份直接断连（无 CONNACK 的 close） |
+| 端点 | `wss://{relay设备域}/mqtt`（relay）或 `ws://{host}:{port}/mqtt`（LAN 主监听器），均由已保存 baseUrl 派生，不新增配置项。WebSocket 握手必须携带 `mqtt` 子协议（两条桥按 rumqttc 约定回显，实测验证） |
+| client_id | `user:{sub}:mobile:{device_uuid}`。`device_uuid` 首启生成并持久化（与 token 同一存储）；`{sub}` = access token 的 `sub` 声明（**user_id UUID**，非登录名）——broker 交叉验证，冒充他人身份直接断连（无 CONNACK 的 close）。**会话通道与 presence 通道是两条连接，client_id 必须不同**：MQTT 3.1.1 按 client_id 认会话，重复 CONNECT 会接管（踢掉）另一条；presence 在设备段加 `-presence` 后缀（`remote_client_shape` 禁止第四段冒号，故不能用 `:presence`） |
 | CONNECT 认证 | username=`{sub}`（信息性字段，broker 以 client_id+password 为准），password=**当前 access token**。MQTT 3.1.1 不在活连接内重认证：token 旋转（15min）后由重连携带新密码——对齐 Desktop `MqttCredentials::refresher` 语义：每次重连前向 authStore 取最新 token，过期则先触发单飞刷新 |
 | 订阅集（**只订当前前台会话**） | `acowork/agents/{id}/sessions/{sid}/state`（retained：status + message_count，等价轮询快照的推送版）<br>`…/messages/done`、`…/messages/error`、`…/messages/stopped`<br>`…/messages/tool_approval_needed`（retained QoS1，含工具详情）<br>`…/messages/ask_question`（retained QoS1，`question_json`） |
+| presence 订阅（**全局第二条连接**） | `acowork/agents/+/status`（QoS1）——一条通配过滤器覆盖整个 agent fleet。payload 是 `DataEnvelope{agent_status = 9}`（`AgentStatus`：online / instance_id / state / detail），映射与 HTTP 目录的 `alive`/`lifecycle` **同一词表**，两者不会读出两个互斥结论（`src/lib/presence.ts`）。该话题 Retained + 心跳 + LWT（`online=false`），因此刚订阅即回放每个 agent 的最近判定，断线期间的迁移不会丢。生命周期：登录（phase=ready）建、登出/过期关；**它没有降级轮询**（目录轮询本就带 presence），桥不可用时列表停在最后一次轮询结果 |
 | **不订** | `messages/chunk`、`tool_call`、`tool_result`、`reasoning_*` 等一切增量/过程事件——"只显最终结果"在订阅面就兑现，不是收到再丢 |
 | payload | protobuf `SessionMessage`（`core/acowork-core/proto/mqtt_payload.proto`）。WebView 侧用手写最小 wire decoder 只解所需字段（oneof 判别号 + 少量 string/uint 字段），**不引入 protobuf 运行时依赖** |
 | 出口 | 离开会话页 / 切换会话 / App 退后台 → UNSUBSCRIBE 旧集（连接可留着复用）；登录失效 → DISCONNECT |
@@ -494,11 +502,11 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 |------|---------|
 | 会话流列表（§2.3） | 启动后一次、下拉刷新、回前台、会话增删操作后 |
 | 未读角标 | v1 = "自上次打开该会话后 `message_count` 是否变化"的本地计数（会话 meta 端点可得），**没有推送就没有真未读**——角标语义如实降级为"有新消息"，不显示数字 |
-| Agent 在线状态 | 启动一次 + 回前台刷新（`/api/agents` 自带 status） |
+| Agent 在线状态 | presence 连接推送（§8.1）为主：秒级翻转在线/离线/异常；目录轮询（启动一次 + 回前台 + 下拉刷新）仍是底稿与竞态纠偏——一次晚到的 poll 可能把推送刚点亮的行改回离线，下一条心跳/判定即复位 |
 
 ### 8.6 通道差异矩阵（如实记录，防止"轮询版语义"固化成全局真相）
 
-| 能力 | WS 通道（relay） | 轮询通道（local/LAN、降级） |
+| 能力 | WS 通道（relay 与 LAN） | 轮询通道（降级 / 无桥） |
 |------|-----------------|---------------------------|
 | 状态行 | `state` 推送 | 2s 快照 |
 | 审批卡 | 完整详情（工具名/风险/理由/超时） | 通用卡："Agent 请求执行工具，请在桌面端查看细节" |
@@ -509,6 +517,7 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 ### 8.7 已知缺口（不阻塞 v1，上线外网前须评估）
 
 - **per-user 订阅授权**：远程 ACL 目前是 `sessions/+/messages/#` 通配（[ADR-076 §5.5](../../adr/zh/ADR-076-multi-user-account-system.md)），订到他人会话事件在协议上可行。mobile 的订阅纪律（只订前台可读会话）是客户端行为，不是授权。Desktop 同水同深，非 mobile 特有；补 topic-level 授权是后端事项，列入 v1.1 协同项。
+- **presence 通配同样无授权**：`agents/+/status` 在严格监听器上同样没有 topic ACL，因此任何一个有效用户 token 能看到该 Gateway 上全量 agent 的生命周期判定（在线/离线/失败 + 启动失败理由）。这与 Desktop 本地可见面平水；若要把 agent 存在性按所有权过滤，属同一项 topic-level 授权工作。
 - **流量风暴防线**：宽订阅防线在"客户端只订前台会话"这一纪律上；中继侧连接级限流（24 §5.3）承担异常行为兜底。
 
 ## 9. 项目与文档

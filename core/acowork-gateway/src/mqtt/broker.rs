@@ -625,6 +625,18 @@ mod tests {
         assert_eq!(remote_client_shape("user:alice:desktop:mac-1"), Some("alice"));
         assert_eq!(remote_client_shape("user:alice:mobile:phone-1"), Some("alice"));
         assert_eq!(remote_client_shape("user:大鱼:desktop:mac-1"), Some("大鱼"));
+        // Mobile opens a SECOND connection for agent presence (design doc 25
+        // §8.1): the device segment gets a `-presence` suffix, so this exact
+        // id must keep CONNECTing. A `:presence` suffix would NOT — the shape
+        // allows exactly three colon-separated identity segments, which is why
+        // the suffix is a hyphen. Coupled to
+        // `apps/acowork-mobile/src/main.tsx`.
+        assert_eq!(
+            remote_client_shape(
+                "user:alice:mobile:3f9a2b1c-6d4e-4f70-8a1b-2c5d9e0f1a2b-presence"
+            ),
+            Some("alice")
+        );
     }
 
     #[test]

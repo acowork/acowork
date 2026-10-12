@@ -341,21 +341,31 @@ pub async fn list_agents(
         .installed_agents
         .values()
         .filter_map(|info| {
-            // ADR-087 D5: a private agent is invisible to callers outside
-            // its sharing circle. `can_view` is the single source of
-            // truth and is FAIL-CLOSED on a missing row (D7: ownerless
-            // ⇒ admin-only), so an agent with no `agent_owners.json`
-            // entry is hidden from every non-admin account instead of
-            // leaking. The previous `is_some_and(Private)` guard only
-            // filtered rows that EXISTED, which let every unrecorded
-            // agent show up for everyone.
+            // ADR-087 D5 + §4: the list must honor the SAME Node->Agent
+            // view cascade every detail/use route enforces. The single
+            // source of truth is `acl::evaluate`. Filtering here on the
+            // agent's own row alone (the past `can_view(rec)` shortcut)
+            // leaked agents whose hosting node the caller cannot view:
+            // those rows appeared in the list yet 404/403 the moment
+            // they were opened, and the mobile/desktop per-node grouping
+            // had no node to file them under. Routing the read through
+            // `evaluate` means the list and the detail can never drift,
+            // and an agent is listed only when it AND its node are
+            // viewable. FAIL-CLOSED on a missing row (D7: ownerless =>
+            // admin-only) is preserved by `evaluate`'s own `ceiling`.
             // `auth == None` means Local mode (ADR-087 D8: the whole
             // authorization layer is a no-op) or a machine actor with no
             // `AuthContext` (permission module invariant 4). Neither is
             // subject to visibility filtering.
             let rec = agent_owner_rec(&state, &info.instance_id);
             if let Some(c) = auth.as_ref()
-                && !ownership::can_view(rec.as_ref(), &c.0.user_id, c.0.is_admin())
+                && crate::http::acl::evaluate(
+                    &state,
+                    &c.0,
+                    crate::http::acl::Op::View,
+                    &crate::http::acl::Resource::Agent(info.instance_id.clone()),
+                )
+                .is_some()
             {
                 return None;
             }
@@ -2847,6 +2857,129 @@ mod tests {
         assert!(
             list.iter().any(|a| a.instance_id == inst),
             "admin must see ownerless agents so they can be claimed"
+        );
+    }
+
+    /// AppState with instance installed, BOTH ownership stores wired,
+    /// and the agent's owner row carrying `node_id` (Shared visibility)
+    /// so the only thing that can hide it is its hosting node. The ACL
+    /// resolves the `Agent -> Node` parent through the agent row's
+    /// denormalized `node_id` — so that is the field these tests set.
+    async fn state_with_shared_agent_on_node(inst: &str, node_id: &str) -> AppState {
+        let mut state = test_state();
+        let dir = std::env::temp_dir().join(format!("acowork-test-agent-node-{}", inst));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        state.agent_owners = Some(ownership::new_shared_agent_owners(&dir));
+        state.node_owners = Some(ownership::new_shared_node_owners(&dir));
+        state
+            .gateway_state
+            .write()
+            .await
+            .add_installed(AgentInfo {
+                instance_id: inst.to_string(),
+                agent_id: "com.foo.bar".to_string(),
+                version: "1.0.0".to_string(),
+                name: "Foo Bar".to_string(),
+                install_path: format!("/tmp/pkg/{}", inst),
+                manifest: test_manifest("com.foo.bar"),
+                node_id: node_id.to_string(),
+            });
+        ownership::lock(&state.agent_owners.clone().unwrap()).put(
+            inst,
+            OwnerRecord {
+                owner_user_id: Some("alice".into()),
+                guests: vec![],
+                // Shared → viewable on its OWN row by every signed-in
+                // account. A leak here is exactly what the cascade fixes.
+                visibility: Visibility::Shared,
+                created_at: chrono::Utc::now(),
+                node_id: Some(node_id.into()),
+            },
+        );
+        state
+    }
+
+    fn put_node(state: &AppState, node_id: &str, visibility: Visibility) {
+        ownership::lock(&state.node_owners.clone().unwrap()).put(
+            node_id,
+            OwnerRecord {
+                owner_user_id: Some("alice".into()),
+                guests: vec![],
+                visibility,
+                created_at: chrono::Utc::now(),
+                node_id: None,
+            },
+        );
+    }
+
+    /// The reported leak, closed: a Shared agent on a node the caller
+    /// cannot view must NOT be listed. The list previously filtered on
+    /// the agent's own row alone, so this row appeared for everyone yet
+    /// 403'd the moment it was opened (the node cascade denied it), and
+    /// per-node grouping had no node header to file it under.
+    #[tokio::test]
+    async fn list_agents_hides_agent_whose_node_is_not_viewable() {
+        let inst = "ffffffff-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_shared_agent_on_node(inst, "gpu-1").await;
+        put_node(&state, "gpu-1", Visibility::Private);
+        let ctx = Extension(AuthContext {
+            user_id: "carol".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let Json(list) = list_agents(
+            State(state),
+            Some(ctx),
+            Query(AgentListQuery { agent_id: None, node_id: None }),
+        )
+        .await;
+        assert!(
+            list.iter().all(|a| a.instance_id != inst),
+            "a shared agent on a node the caller cannot view must not be listed (Node->Agent cascade)"
+        );
+    }
+
+    /// The allowed side of the same cascade: a Shared agent on a PUBLIC
+    /// node passes both tiers, so it stays listed for every account.
+    #[tokio::test]
+    async fn list_agents_shows_agent_when_its_node_is_public() {
+        let inst = "11111111-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_shared_agent_on_node(inst, "gpu-2").await;
+        put_node(&state, "gpu-2", Visibility::Public);
+        let ctx = Extension(AuthContext {
+            user_id: "carol".to_string(),
+            role: acowork_core::account::Role::User,
+            as_user: None,
+        });
+        let Json(list) = list_agents(
+            State(state),
+            Some(ctx),
+            Query(AgentListQuery { agent_id: None, node_id: None }),
+        )
+        .await;
+        assert!(
+            list.iter().any(|a| a.instance_id == inst),
+            "a shared agent on a public node is viewable at both tiers — it must stay listed"
+        );
+    }
+
+    /// Local mode (auth == None) is a no-op: the cascade must not filter
+    /// anything, so the same ownerless setup that hides from a stranger
+    /// still lists in single-user mode.
+    #[tokio::test]
+    async fn list_agents_local_mode_skips_the_cascade() {
+        let inst = "22222222-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
+        let state = state_with_installed(inst).await;
+        let Json(list) = list_agents(
+            State(state),
+            None,
+            Query(AgentListQuery { agent_id: None, node_id: None }),
+        )
+        .await;
+        assert!(
+            list.iter().any(|a| a.instance_id == inst),
+            "Local mode (no AuthContext) lists everything — authorization is a no-op"
         );
     }
 

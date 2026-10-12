@@ -27,6 +27,7 @@ import { formatListTime } from '../../lib/time'
 import { ListSection, ListRow } from '../../components/ui'
 import { AuthImage } from '../../components/AuthImage'
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from '../../lib/builtinIcons'
+import type { NodeRow } from '../../lib/types'
 
 /** Pick a stable builtin icon ID for a given seed (same as Desktop). */
 function pickIconId(seed: string): string | null {
@@ -66,9 +67,22 @@ function UserAvatarEl({ name, avatar, builtinAvatar, baseUrl }: { name: string; 
   return fallbackEl
 }
 
+/** Group header for one online node: just its name + an online dot. The
+ *  inbox only renders visible-online nodes (ADR-087 Node->Agent cascade;
+ *  no fallback bucket), so the dot is always online here. */
+function NodeTitle({ node }: { node: NodeRow }) {
+  return (
+    <span className="node-group-title">
+      <span className="dot dot-online" aria-label="在线" />
+      {node.node_name ?? node.node_id}
+    </span>
+  )
+}
+
 export function ChatListScreen() {
   const agents = useAgentStore((s) => s.agentList)
   const users = useAgentStore((s) => s.users)
+  const nodes = useAgentStore((s) => s.nodes)
   const sessionsByAgent = useAgentStore((s) => s.agents)
   const refreshInbox = useAgentStore((s) => s.refreshInbox)
   const loading = useAgentStore((s) => s.directoryLoading)
@@ -92,6 +106,16 @@ export function ChatListScreen() {
   const match = (name: string, sub?: string | null) =>
     !q || name.toLowerCase().includes(q) || (sub ?? '').toLowerCase().includes(q)
 
+  // Visible-online nodes only. The server already dropped nodes this account
+  // cannot view (ADR-087); `online` drops the offline ones. An agent whose
+  // node is not in this map is hidden — no fallback bucket, because after the
+  // backend's Node->Agent cascade fix a listed agent always has a viewable,
+  // and here online, node.
+  const onlineById = useMemo(
+    () => new Map(nodes.filter((n) => n.online).map((n) => [n.node_id, n])),
+    [nodes],
+  )
+
   const agentRows = useMemo(() => {
     return agents
       .map((a) => {
@@ -106,8 +130,24 @@ export function ChatListScreen() {
         return { a, recent }
       })
       .filter(({ a, recent }) => match(a.name, recent?.last_message ?? recent?.title))
+      .filter(({ a }) => onlineById.has(a.node_id))
       .sort((x, y) => (y.recent?.updated_at ?? 0) - (x.recent?.updated_at ?? 0))
-  }, [agents, sessionsByAgent, q])
+  }, [agents, sessionsByAgent, q, onlineById])
+
+  // Bucket the (already recency-sorted) rows under their node, so within-group
+  // order stays by recency; groups themselves sort by their newest member.
+  const onlineGroups = useMemo(() => {
+    const buckets = new Map<string, typeof agentRows>()
+    for (const row of agentRows) {
+      const arr = buckets.get(row.a.node_id)
+      if (arr) arr.push(row)
+      else buckets.set(row.a.node_id, [row])
+    }
+    const newest = (rows: typeof agentRows) => Math.max(0, ...rows.map((r) => r.recent?.updated_at ?? 0))
+    return [...buckets.entries()]
+      .map(([nodeId, rows]) => ({ node: onlineById.get(nodeId)!, rows }))
+      .sort((x, y) => newest(y.rows) - newest(x.rows))
+  }, [agentRows, onlineById])
 
   const chatByPeer = useMemo(() => new Map(chats.map((c) => [c.peer_user_id, c])), [chats])
 
@@ -165,44 +205,50 @@ export function ChatListScreen() {
 
       <div className="scroll">
         {loading && agents.length === 0 ? <div className="empty-state">载入中…</div> : null}
-        <ListSection title="Agent">
-          {agentRows.map(({ a, recent }) => (
-            <ListRow
-              key={a.id}
-              avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
-              onClick={() => void openAgent(a.id, recent?.session_id ?? null)}
-              label={
-                <span className="row-title">
-                  {a.name}
-                  {startingAgentIds.has(a.id) ? (
-                    <span className="dot-spinner" aria-label="正在启动" title="正在启动" />
-                  ) : (
-                    (() => {
-                      // Presence from the directory's `alive`/`lifecycle`.
-                      // A plain offline-only dot used to render transparent
-                      // and never surfaced online; now all three states show.
-                      const cls =
-                        a.status === 'offline'
-                          ? 'dot dot-offline'
-                          : a.status === 'error'
-                            ? 'dot dot-error'
-                            : 'dot dot-online'
-                      const text =
-                        a.status === 'offline' ? '离线' : a.status === 'error' ? '异常' : '在线'
-                      return <span className={cls} aria-label={text} title={text} />
-                    })()
-                  )}
-                  {recent && hasUnread(a.id, recent.session_id, recent.message_count) ? (
-                    <span className="dot dot-unread" aria-label="有新消息" />
-                  ) : null}
-                </span>
-              }
-              value={formatListTime(recent?.updated_at)}
-              hint={startingAgentIds.has(a.id) ? '正在启动…' : recent?.last_message || recent?.title || '暂无会话'}
-            />
-          ))}
-          {agents.length === 0 && !loading ? <ListRow label="暂无 Agent" hint="在桌面端安装后出现在这里" /> : null}
-        </ListSection>
+        {onlineGroups.map((g) => (
+          <ListSection key={g.node.node_id} title={<NodeTitle node={g.node} />}>
+            {g.rows.map(({ a, recent }) => (
+              <ListRow
+                key={a.id}
+                avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
+                onClick={() => void openAgent(a.id, recent?.session_id ?? null)}
+                label={
+                  <span className="row-title">
+                    {a.name}
+                    {startingAgentIds.has(a.id) ? (
+                      <span className="dot-spinner" aria-label="正在启动" title="正在启动" />
+                    ) : (
+                      (() => {
+                        // Presence from the directory's `alive`/`lifecycle`.
+                        // A plain offline-only dot used to render transparent
+                        // and never surfaced online; now all three states show.
+                        const cls =
+                          a.status === 'offline'
+                            ? 'dot dot-offline'
+                            : a.status === 'error'
+                              ? 'dot dot-error'
+                              : 'dot dot-online'
+                        const text =
+                          a.status === 'offline' ? '离线' : a.status === 'error' ? '异常' : '在线'
+                        return <span className={cls} aria-label={text} title={text} />
+                      })()
+                    )}
+                    {recent && hasUnread(a.id, recent.session_id, recent.message_count) ? (
+                      <span className="dot dot-unread" aria-label="有新消息" />
+                    ) : null}
+                  </span>
+                }
+                value={formatListTime(recent?.updated_at)}
+                hint={startingAgentIds.has(a.id) ? '正在启动…' : recent?.last_message || recent?.title || '暂无会话'}
+              />
+            ))}
+          </ListSection>
+        ))}
+        {onlineGroups.length === 0 && !loading ? (
+          <ListSection>
+            <ListRow label="暂无 Agent" hint="在桌面端安装后出现在这里" />
+          </ListSection>
+        ) : null}
 
         <ListSection title="联系人">
           {userRows.map(({ u, chat }) => (

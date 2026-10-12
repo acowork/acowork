@@ -31,6 +31,10 @@ export interface SessionInfo {
 export interface AgentSummary {
   id: string
   name: string
+  /** Hosting node (ADR-055 §6.5). The inbox groups agents by this; an agent
+   *  whose node is not in the visible-online set is hidden (no fallback
+   *  bucket — ADR-087 §4 Node->Agent cascade guarantees listed ⇒ viewable). */
+  node_id: string
   role?: string | null
   /** Builtin icon ID (e.g. "icon-05"). */
   icon?: string | null
@@ -132,6 +136,7 @@ export interface DirectoryEntry {
 export interface AgentRow {
   instance_id: string
   agent_id: string
+  node_id: string
   name: string
   display_name?: string | null
   role?: string | null
@@ -139,6 +144,18 @@ export interface AgentRow {
   builtin_avatar?: string | null
   alive: boolean
   lifecycle: string
+}
+
+/** `GET /api/nodes` row — the node topology. The server already filters by
+ *  `can_view` (ADR-087), so whatever arrives is viewable by this caller.
+ *  Machine metadata (hostname/os/arch) is pruned for non-managers and is
+ *  deliberately NOT modelled here — the inbox only needs identity + liveness. */
+export interface NodeRow {
+  node_id: string
+  online: boolean
+  /** Display name (renameable slug, ADR-075). Absent until the node reports
+   *  its first info snapshot, or pruned from view — fall back to `node_id`. */
+  node_name?: string | null
 }
 
 /** `GET .../sessions` row — `SessionSummary`. `can_write` is authoritative. */

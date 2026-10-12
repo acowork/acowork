@@ -1,7 +1,8 @@
 /**
- * Hand-written minimal protobuf WIRE reader for the two envelopes the mobile
- * realtime channel consumes (v1.2 §8.1): `DataEnvelope{session_state=18 |
- * session_message=15}` from `core/acowork-core/proto/mqtt_payload.proto`.
+ * Hand-written minimal protobuf WIRE reader for the envelopes the mobile
+ * realtime and presence channels consume (v1.2 §8.1): `DataEnvelope{
+ * session_state=18 | session_message=15 | agent_status=9}` from
+ * `core/acowork-core/proto/mqtt_payload.proto`.
  *
  * Deliberately NOT a protobuf runtime: we read a fixed handful of fields by
  * number, so a ~60-line wire reader replaces a dependency. Unknown fields are
@@ -116,6 +117,57 @@ export function decodeEnvelope(buf: Uint8Array): RealtimeEvent {
     if (f.no === 18) return decodeSessionState(f.val as Uint8Array)
   }
   return { kind: 'ignore' }
+}
+
+/* ---------------- agent presence (DataEnvelope{agent_status = 9}) ----------------
+ *
+ * `acowork/agents/{instance_id}/status` carries `AgentStatus`
+ * (mqtt_payload.proto:431): `agent_id=1, online=2, instance_id=4, node_id=5,
+ * state=6, detail=7`. Presence gets its own reader rather than joining
+ * `RealtimeEvent`: that union is consumed by chatStore's session-event switch
+ * and has nothing to do with agent lifecycle, and the two channels have
+ * different lifetimes (per-session vs. global).
+ */
+
+/** AGENT_LIFECYCLE_STATE_FAILED (ADR-085). */
+const ST_FAILED = 5
+
+export interface PresenceUpdate {
+  /** ADR-073 instance identity — the id the directory lists agents by. */
+  instanceId: string
+  online: boolean
+  /** Raw `AgentLifecycleState` number; the enum grows by append only. */
+  state: number
+  /** Startup failure reason (meaningful only when `state === 5`). */
+  detail: string
+  /** The same three-way mapping the HTTP directory produces in `main.tsx`,
+   *  so a push and a poll cannot disagree about what the dot means. */
+  status: 'offline' | 'error' | 'idle'
+}
+
+export function decodePresence(buf: Uint8Array): PresenceUpdate | null {
+  let inner: Uint8Array | null = null
+  for (const f of readFields(buf)) {
+    // Require the length-delimited wire type: field 9 is only this message
+    // inside the envelope, and a stray scalar must not read as one.
+    if (f.no === 9 && f.wt === 2) {
+      inner = f.val as Uint8Array
+      break
+    }
+  }
+  if (!inner) return null
+  let instanceId = '', online = false, state = 0, detail = ''
+  for (const f of readFields(inner)) {
+    if (f.no === 2) online = n(f.val) !== 0
+    if (f.no === 4) instanceId = s(f.val)
+    if (f.no === 6) state = n(f.val)
+    if (f.no === 7) detail = s(f.val)
+  }
+  // proto3 emits no bytes for defaults, so "absent" already meant false/0.
+  // ADR-085 invariant 6: `online == false` IS offline, and UNSPECIFIED (0)
+  // gates like offline — only FAILED is a different verdict than "up".
+  const status = !online ? 'offline' : state === ST_FAILED ? 'error' : 'idle'
+  return { instanceId, online, state, detail, status }
 }
 
 /* ---- tiny encoder, tests only (hand-built golden vectors otherwise) ---- */

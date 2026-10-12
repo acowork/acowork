@@ -892,10 +892,12 @@ impl Gateway {
             };
             // Design doc 24 §7.2 (M3): the strict remote MQTT listener —
             // always hosted alongside the main server (loopback-only;
-            // the only path to it is the `/mqtt` bridge on the remote
-            // HTTP listener). Its auth handler re-reads the user
-            // verifier from GatewayState per CONNECT, so it follows the
-            // user-service lifecycle without any wiring here.
+            // the only paths to it are the `/mqtt` WebSocket bridges on the
+            // remote HTTP listener and on the MAIN LAN listener, which is
+            // how a node-local mobile WebView reaches the broker). Its auth
+            // handler re-reads the user verifier from GatewayState per
+            // CONNECT, so it follows the user-service lifecycle without any
+            // wiring here.
             let remote_mqtt = crate::mqtt::RemoteMqttListener {
                 host: "127.0.0.1".to_string(),
                 port: self.config.relay.remote_mqtt_port,

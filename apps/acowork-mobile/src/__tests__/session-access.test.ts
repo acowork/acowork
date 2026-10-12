@@ -58,7 +58,7 @@ describe('chatStore.openSession — atomic three-step migration', () => {
   it('sends open_session and reloads history for a writable session', async () => {
     const t = fakeTransport()
     setChatTransport(t)
-    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent' }])
+    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent', node_id: 'n1' }])
     useAgentStore.getState().mergeSessions('a1', [
       session({ session_id: 's1', title: 'One', can_write: true }),
       session({ session_id: 's2', title: 'Two', can_write: true }),
@@ -74,7 +74,7 @@ describe('chatStore.openSession — atomic three-step migration', () => {
   it('does NOT send open_session for a read-only session', async () => {
     const t = fakeTransport()
     setChatTransport(t)
-    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent' }])
+    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent', node_id: 'n1' }])
     useAgentStore.getState().mergeSessions('a1', [session({ session_id: 'ro', can_write: false })])
 
     const ok = await useChatStore.getState().openSession('a1', 'ro')
@@ -95,7 +95,7 @@ describe('chatStore.openSession — atomic three-step migration', () => {
       }),
     })
     setChatTransport(t)
-    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent' }])
+    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent', node_id: 'n1' }])
     useAgentStore.getState().mergeSessions('a1', [
       session({ session_id: 's1', can_write: true }),
       session({ session_id: 's2', can_write: true }),
@@ -115,7 +115,7 @@ describe('createSession defaults to private', () => {
     const created = session({ session_id: 'n1', visibility: 'private', can_write: true })
     const t = fakeTransport({ createSession: vi.fn(async () => created) })
     setChatTransport(t)
-    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent' }])
+    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent', node_id: 'n1' }])
 
     const id = await useChatStore.getState().createSession('a1')
     expect(id).toBe('n1')
@@ -126,7 +126,7 @@ describe('createSession defaults to private', () => {
 describe('deleteSession', () => {
   it('clears the active id when the open session is deleted', async () => {
     setChatTransport(fakeTransport())
-    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent' }])
+    useAgentStore.getState().setAgents([{ id: 'a1', name: 'Agent', node_id: 'n1' }])
     useAgentStore.getState().mergeSessions('a1', [
       session({ session_id: 's1', can_write: true }),
       session({ session_id: 's2', can_write: true }),

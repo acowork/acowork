@@ -4,11 +4,13 @@ import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { setChatTransport } from './stores/chatStore'
 import { setDirectorySource, useAgentStore } from './stores/agentStore'
-import { httpChatTransport, fetchAgents, fetchDirectory, tokenClaims } from './lib/api'
+import { httpChatTransport, fetchAgents, fetchNodes, fetchDirectory, tokenClaims } from './lib/api'
 import { setRealtimeDeps } from './lib/realtime'
+import { setPresenceDeps, startPresence, stopPresence } from './lib/presence'
+import type { ConnectOpts } from './lib/mqtt-wire'
 import { useAuthStore } from './stores/authStore'
 import { useSettingsStore } from './stores/settingsStore'
-import type { AgentSummary, UserSummary } from './lib/types'
+import type { AgentSummary, NodeRow, UserSummary } from './lib/types'
 import './styles/tokens.css'
 import './styles/app.css'
 import './styles/mobile.css'
@@ -20,28 +22,48 @@ import './styles/mobile.css'
 // the object itself and nothing else.
 setChatTransport(httpChatTransport)
 
-/* Realtime channel selection (v1.2 §8.0): an https base URL is the relay
- * shape — the Gateway's strict MQTT-over-WSS bridge rides the same public
- * entry (`wss://<gw-id>.relay/mqtt`), so the phone subscribes precisely.
- * A plain http URL (LAN) has no exposed bridge: polling fallback. */
+/* Realtime channel selection (v1.2 §8.0): both shapes now expose the
+ * MQTT-over-WS bridge at `/mqtt` — the relay one rides the public https entry
+ * (`wss://<gw-id>.relay/mqtt`), the LAN one is the Gateway's main listener.
+ * A Gateway without the account system fails the CONNECT closed, and both
+ * engines then fall back to polling on their own. */
+function mqttWsUrl(): string | null {
+  const u = useAuthStore.getState().baseUrl
+  if (u.startsWith('https://')) return `wss://${u.slice('https://'.length)}/mqtt`
+  if (u.startsWith('http://')) return `ws://${u.slice('http://'.length)}/mqtt`
+  return null
+}
+
+/** MQTT 3.1.1 cannot re-authenticate, so every (re)connect must carry a live
+ *  token — ask for a rotation before it expires (Desktop refresher semantics,
+ *  §8.1). `clientId` is a callback because the two channels must not share
+ *  one: a duplicate CONNECT takes the other socket's session over. */
+async function mqttConnectOpts(clientId: (sub: string, device: string) => string): Promise<ConnectOpts | null> {
+  const auth = useAuthStore.getState()
+  if (!auth.accessToken) return null
+  const claims = tokenClaims(auth.accessToken)
+  const nearExpiry = claims.exp !== undefined && claims.exp * 1000 - Date.now() < 60_000
+  const token = nearExpiry ? await auth._refresh() : auth.accessToken
+  if (!token) return null
+  const sub = tokenClaims(token).sub ?? 'mobile'
+  return { clientId: clientId(sub, deviceId()), username: sub, password: token }
+}
+
+const sessionClientId = (sub: string, device: string): string => `user:${sub}:mobile:${device}`
+
 setRealtimeDeps({
-  wsUrl: () => {
-    const u = useAuthStore.getState().baseUrl
-    return u.startsWith('https://') ? `wss://${u.slice('https://'.length)}/mqtt` : null
-  },
-  connectOpts: async () => {
-    const auth = useAuthStore.getState()
-    if (!auth.accessToken) return null
-    // MQTT 3.1.1 cannot re-authenticate, so every (re)connect must carry a
-    // live token — ask for a rotation before it expires (Desktop refresher
-    // semantics, §8.1).
-    const claims = tokenClaims(auth.accessToken)
-    const nearExpiry = claims.exp !== undefined && claims.exp * 1000 - Date.now() < 60_000
-    const token = nearExpiry ? await auth._refresh() : auth.accessToken
-    if (!token) return null
-    const sub = tokenClaims(token).sub ?? 'mobile'
-    return { clientId: `user:${sub}:mobile:${deviceId()}`, username: sub, password: token }
-  },
+  wsUrl: mqttWsUrl,
+  connectOpts: () => mqttConnectOpts(sessionClientId),
+})
+
+/* Presence rides its own connection (§8.1): the session channel dies with the
+ * chat screen while the list needs verdicts all the time. The `-presence`
+ * suffix stays inside the device segment — the Gateway's
+ * `remote_client_shape` rejects a fourth colon in a client id. */
+setPresenceDeps({
+  wsUrl: mqttWsUrl,
+  connectOpts: () => mqttConnectOpts((sub, device) => `${sessionClientId(sub, device)}-presence`),
+  onUpdate: (agentId, update) => useAgentStore.getState().applyPresence(agentId, update.status),
 })
 
 function deviceId(): string {
@@ -66,6 +88,7 @@ setDirectorySource({
     return rows.map((r) => ({
       id: r.instance_id,
       name: r.display_name ?? r.name,
+      node_id: r.node_id,
       role: r.role ?? null,
       icon: r.builtin_avatar ?? null,
       avatar: r.avatar ?? null,
@@ -75,6 +98,12 @@ setDirectorySource({
   loadUsers: async (): Promise<UserSummary[]> => {
     const rows = await fetchDirectory()
     return rows.map((u) => ({ id: u.user_id, display_name: u.display_name, avatar: u.avatar ?? null, builtin_avatar: u.builtin_avatar ?? null }))
+  },
+  loadNodes: async (): Promise<NodeRow[]> => {
+    const rows = await fetchNodes()
+    // Server already filtered by can_view; keep the wire shape (identity +
+    // liveness is all the inbox needs). Pass through node_id/online/node_name.
+    return rows.map((n) => ({ node_id: n.node_id, online: n.online, node_name: n.node_name ?? null }))
   },
 })
 
@@ -88,9 +117,17 @@ if (import.meta.hot) import.meta.hot.dispose(() => stopThemeWatch())
 void useAuthStore.getState().boot()
 // DIAG: log every phase change to WebView console (visible via remote debug / logcat)
 useAuthStore.subscribe((s, prev) => { if (s.phase !== prev.phase) console.log('[AUTH] PHASE', prev.phase, '→', s.phase) })
-// Directory + previews refresh whenever we reach `ready`.
+// Directory + previews refresh whenever we reach `ready`; presence lives with
+// the session too — its credentials are the access token, so a logout or an
+// expired session must close the socket instead of being refused forever.
 useAuthStore.subscribe((s, prev) => {
-  if (s.phase === "ready" && prev.phase !== "ready") void useAgentStore.getState().refreshInbox()
+  if (s.phase === prev.phase) return
+  if (s.phase === "ready") {
+    void useAgentStore.getState().refreshInbox()
+    startPresence()
+  } else if (prev.phase === "ready") {
+    stopPresence()
+  }
 })
 
 const el = document.getElementById('root')
