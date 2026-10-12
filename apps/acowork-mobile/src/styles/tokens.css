@@ -20,7 +20,7 @@
    * --color-label-secondary): #8e8e93 is too faint at tabbar scale, but
    * pushing the shared secondary label darker would over-weight list hints
    * and row values, which read fine as-is. */
-  --color-tabbar-inactive: #7a7a7a;
+  --color-tabbar-inactive: #5a5a5a;
   /* WeChat Discover-style multicolor feature glyphs (settings rows). */
   --color-icon-blue: #576b95;
   --color-icon-green: #07c160;

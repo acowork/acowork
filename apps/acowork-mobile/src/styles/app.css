@@ -425,6 +425,9 @@
 }
 .tabbar-label {
   font-size: var(--tabbar-label);
+  /* Medium weight: an 11px regular-weight label reads faint even at a good
+   * gray. 500 thickens the strokes so inactive tabs match WeChat's legibility. */
+  font-weight: var(--weight-medium);
   line-height: 1;
 }
 
