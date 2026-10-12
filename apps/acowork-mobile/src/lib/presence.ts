@@ -21,8 +21,8 @@
  * which is exactly the pre-phase-2 behaviour.
  */
 import {
-  decodePacket, encodeConnect, encodeDisconnect, encodePingreq, encodePuback,
-  encodeSubscribe, PKT, type ConnectOpts,
+  encodeConnect, encodeDisconnect, encodePingreq, encodePuback,
+  encodeSubscribe, PacketFramer, PKT, type ConnectOpts, type Decoded,
 } from './mqtt-wire'
 import { decodePresence, type PresenceUpdate } from './proto-wire'
 import type { WebSocketLike } from './realtime'
@@ -65,6 +65,10 @@ let connectTimer: ReturnType<typeof setTimeout> | null = null
 let lastRx = 0
 let retries = 0
 let packetId = 1
+/** The bridge is a byte pipe: one frame can carry several status publishes
+ *  (a wildcard subscribe replays the whole fleet). Reassemble before decoding,
+ *  or a dropped tail means a missing PUBACK and rumqttd kills the session. */
+const framer = new PacketFramer()
 
 export function presenceConnected(): boolean {
   return alive
@@ -113,6 +117,7 @@ async function open(): Promise<void> {
   if (!started) return // logged out while the credential lookup was in flight
   if (!opts) { slowRetry(); return }
   closeSocket()
+  framer.reset() // a fresh TCP stream cannot continue a half-read packet
   const s = deps.makeWs
     ? deps.makeWs(url)
     : (new WebSocket(url, ['mqtt']) as unknown as WebSocketLike)
@@ -127,15 +132,14 @@ async function open(): Promise<void> {
     if (sock !== s) return
     lastRx = Date.now()
     const bytes = ev.data instanceof Uint8Array ? ev.data : new Uint8Array(ev.data)
-    handlePacket(bytes, s)
+    for (const d of framer.feed(bytes)) handlePacket(d, s)
   }
   s.onerror = () => { if (sock === s) onDown() }
   s.onclose = () => { if (sock === s) onDown() }
 }
 
-function handlePacket(bytes: Uint8Array, s: WebSocketLike): void {
-  const d = decodePacket(bytes)
-  if (!d || !deps) return
+function handlePacket(d: Decoded, s: WebSocketLike): void {
+  if (!deps) return
   if (d.type === PKT.CONNACK) {
     if (d.code === 0) s.send(encodeSubscribe([PRESENCE_TOPIC], [1], packetId++))
     else onDown() // rejected (stale token / fail-closed verifier): retry later

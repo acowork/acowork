@@ -136,7 +136,11 @@ class FakeSocket implements WebSocketLike {
 
 const connack = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 0])
 const connackBad = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 4])
-const subackOk = Uint8Array.from([PKT.SUBACK << 4, 9, 0, 1, 1, 1, 1, 1, 1, 1])
+// Six topics are subscribed (state + five turn-end signals), so the remaining
+// length is 2 packetId bytes + 6 return codes = 8. It used to say 9: a frame
+// whose declared length exceeds its bytes is an INCOMPLETE packet, and the
+// stream framer (correctly) waits for the missing byte instead of decoding it.
+const subackOk = Uint8Array.from([PKT.SUBACK << 4, 8, 0, 1, 1, 1, 1, 1, 1, 1])
 const statePublish = (status: string, count: number, qos1 = false): Uint8Array => {
   const topic = new TextEncoder().encode('acowork/agents/a1/sessions/s1/state')
   const payload = envState([...wStr(3, status), ...wVarint(4, count)])

@@ -20,8 +20,8 @@ import {
   type RealtimeEvent,
 } from './proto-wire'
 import {
-  decodePacket, encodeConnect, encodeDisconnect, encodePingreq, encodePuback,
-  encodeSubscribe, PKT, type ConnectOpts,
+  encodeConnect, encodeDisconnect, encodePingreq, encodePuback,
+  encodeSubscribe, PacketFramer, PKT, type ConnectOpts, type Decoded,
 } from './mqtt-wire'
 
 export const POLL_INTERVAL_MS = 2000
@@ -81,6 +81,11 @@ let retries = 0
 let consecutiveFails = 0
 let packetId = 1
 let connectTimer: ReturnType<typeof setTimeout> | null = null
+/** The bridge is a byte pipe, not a packet pipe: the broker can coalesce a
+ *  retained `state` publish and a `messages/done` publish into one frame. Each
+ *  dropped tail is a missing PUBACK, and rumqttd answers an out-of-order ack
+ *  by disconnecting — so reassemble the stream before decoding. */
+const framer = new PacketFramer()
 
 export function pollNetworkState(): { online: boolean; fails: number } {
   return { online: consecutiveFails === 0, fails: consecutiveFails }
@@ -201,6 +206,7 @@ async function openWs(url: string): Promise<void> {
   const opts = await deps.connectOpts?.()
   if (!opts) { startPollingOnly(); return } // no session yet — polling carries us
   closeWs()
+  framer.reset() // a fresh TCP stream cannot continue a half-read packet
   // The relay bridge echoes the `mqtt` subprotocol (remote_listener.rs
   // §7.2); offering it keeps the browser handshake identical to rumqttc's.
   const sock = deps.makeWs
@@ -219,15 +225,14 @@ async function openWs(url: string): Promise<void> {
     if (ws !== sock) return
     lastRx = Date.now()
     const bytes = ev.data instanceof Uint8Array ? ev.data : new Uint8Array(ev.data)
-    handlePacket(bytes, sock)
+    for (const d of framer.feed(bytes)) handlePacket(d, sock)
   }
   sock.onerror = () => { if (ws === sock) onWsDown() }
   sock.onclose = () => { if (ws === sock) onWsDown() }
 }
 
-function handlePacket(bytes: Uint8Array, sock: WebSocketLike): void {
-  const d = decodePacket(bytes)
-  if (!d || !active) return
+function handlePacket(d: Decoded, sock: WebSocketLike): void {
+  if (!active) return
   if (d.type === PKT.CONNACK) {
     if (d.code === 0) {
       const t = topics(active.agentId, active.sessionId)

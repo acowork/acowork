@@ -7,8 +7,11 @@
  * no auth extension, no will. QoS 1 flows are handled by the spec-mandated
  * PUBACK round-trip so retained QoS1 events are not redelivered forever.
  *
- * Over WebSocket each control packet rides exactly one binary frame
- * (MQTT-over-WS spec), so no stream reassembly is needed.
+ * A WebSocket frame is NOT an MQTT packet. Both bridges are raw byte pipes
+ * (`core/acowork-gateway/src/relay/remote_listener.rs`), so whatever the broker
+ * coalesces into one TCP write arrives as one frame, and one big publish can
+ * arrive split across frames. Inbound frames therefore go through
+ * [PacketFramer], which reassembles the stream and hands back whole packets.
  */
 
 export const PKT = {
@@ -113,8 +116,10 @@ export type Decoded =
   | { type: typeof PKT.PUBACK; packetId: number }
   | { type: typeof PKT.PINGRESP }
 
-/** Decode one whole WS frame (= one control packet). Returns null on
- *  malformed input — a broken frame must not take the session down. */
+/** Decode exactly one complete control packet. Returns null on malformed
+ *  input — a broken packet must not take the session down. Anything reading a
+ *  byte stream must go through [PacketFramer] instead: this function has no way
+ *  to see that a frame carries more than the packet it declares. */
 export function decodePacket(frame: Uint8Array): Decoded | null {
   try {
     const fixed = frame[0] ?? 0
@@ -159,5 +164,75 @@ export function decodePacket(frame: Uint8Array): Decoded | null {
     }
   } catch {
     return null
+  }
+}
+
+/* ---------------- stream reassembly ---------------- */
+
+/** Defensive ceiling: a header claiming more than this is a broken stream, and
+ *  the only sane answer is to drop the buffer (the normal failure path will
+ *  tear the socket down). */
+const MAX_PACKET_BYTES = 4 * 1024 * 1024
+
+/**
+ * Reassembles the MQTT byte stream out of WebSocket frames.
+ *
+ * Why this exists: handing a coalesced frame straight to `decodePacket`
+ * silently discards everything after the first packet. The lost packet is
+ * usually a QoS 1 PUBLISH, so its PUBACK is never sent; rumqttd then sees the
+ * NEXT ack as out-of-order and drops the connection (real device: the presence
+ * wildcard was killed and re-subscribed every 5 s, matching the Runtime's
+ * status heartbeat). Feed each frame here and process what comes back in order.
+ */
+export class PacketFramer {
+  // Annotated, not inferred: the literal `new Uint8Array(0)` pins the generic
+  // to `ArrayBuffer`, which then rejects the `ArrayBufferLike` views `cat()`
+  // and `subarray()` hand back.
+  private buf: Uint8Array = new Uint8Array(0)
+
+  /** Consume one incoming frame; returns every packet that is now complete. */
+  feed(frame: Uint8Array): Decoded[] {
+    if (frame.length > 0) this.buf = cat(this.buf, frame)
+    const out: Decoded[] = []
+    for (;;) {
+      const bytes = this.take()
+      if (!bytes) break
+      const d = decodePacket(bytes)
+      if (d) out.push(d) // an unparseable packet is skipped, never fatal
+    }
+    return out
+  }
+
+  /** Drop all buffered bytes. One instance per socket, reset on each new
+   *  connection: a fresh TCP stream cannot continue a half-read packet. */
+  reset(): void {
+    this.buf = new Uint8Array(0)
+  }
+
+  /** Cut the first complete packet off the buffer, or return null while it is
+   *  still incomplete (the bytes stay buffered for the next frame). */
+  private take(): Uint8Array | null {
+    const b = this.buf
+    if (b.length < 2) return null
+    let p = 1
+    let mult = 1
+    let rl = 0
+    for (;;) {
+      const x = b[p]
+      if (x === undefined) return null // remaining-length varint still in flight
+      p += 1
+      rl += (x & 0x7f) * mult
+      if ((x & 0x80) === 0) break
+      mult *= 128
+      if (p > 4) { this.reset(); return null } // a 5th varint byte is illegal
+    }
+    // Checked after the loop as well: a legal 4-byte varint can still claim
+    // 256 MB, and buffering that forever is a memory leak, not a packet.
+    if (rl > MAX_PACKET_BYTES) { this.reset(); return null }
+    const total = p + rl
+    if (b.length < total) return null
+    const packet = b.slice(0, total)
+    this.buf = b.subarray(total)
+    return packet
   }
 }

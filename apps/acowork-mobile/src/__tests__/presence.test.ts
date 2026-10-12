@@ -70,12 +70,19 @@ const connackBad = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 5])
 const subackGranted = Uint8Array.from([PKT.SUBACK << 4, 3, 0, 1, 1])
 const subackRefused = Uint8Array.from([PKT.SUBACK << 4, 3, 0, 1, 0x80])
 
-function statusPublish(agentId: string, inner: number[], qos1 = true): Uint8Array {
+function statusPublish(agentId: string, inner: number[], qos1 = true, pkid = 3): Uint8Array {
   const topic = new TextEncoder().encode(`acowork/agents/${agentId}/status`)
   const payload = envPresence(inner)
-  const head = qos1 ? [0, 3] : []
+  const head = qos1 ? [(pkid >> 8) & 0xff, pkid & 0xff] : []
   const body = Uint8Array.from([0, topic.length, ...topic, ...head, ...payload])
   return Uint8Array.from([(PKT.PUBLISH << 4) | (qos1 ? 0x02 : 0), body.length, ...body])
+}
+
+const catBytes = (...parts: Uint8Array[]) => {
+  const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0))
+  let o = 0
+  for (const p of parts) { out.set(p, o); o += p.length }
+  return out
 }
 
 let sockets: FakeSocket[] = []
@@ -133,6 +140,47 @@ describe('presence channel', () => {
     const puback = sock.sent.find((b) => (b[0] ?? 0) >> 4 === PKT.PUBACK)
     expect(puback).toBeDefined()
     expect(((puback![2] ?? 0) * 256 + (puback![3] ?? 0))).toBe(3)
+  })
+
+  it('acks EVERY publish when the byte pipe coalesces several into one frame', async () => {
+    // Device failure this pins: the wildcard subscribe replays the whole fleet,
+    // rumqttd writes the burst in one TCP send, the bridge delivers it as ONE
+    // WebSocket frame. Decoding only the first packet left pkid 2 un-acked, so
+    // the next ack looked out-of-order and the broker dropped the connection —
+    // a reconnect plus full replay every 5 s, forever.
+    startPresence()
+    await flush()
+    const sock = sockets[0]!
+    sock.emitOpen()
+    sock.emit(connackOk)
+    sock.emit(subackGranted)
+    sock.emit(catBytes(
+      statusPublish('i-1', [...wVarint(2, 1)], true, 2),
+      statusPublish('i-2', [...wVarint(2, 1)], true, 3),
+    ))
+    const acks = sock.sent
+      .filter((b) => (b[0] ?? 0) >> 4 === PKT.PUBACK)
+      .map((b) => (b[2] ?? 0) * 256 + (b[3] ?? 0))
+    expect(acks).toEqual([2, 3]) // in the order the broker sent them
+    expect(onUpdate).toHaveBeenCalledTimes(2)
+    expect(onUpdate).toHaveBeenNthCalledWith(2, 'i-2', expect.objectContaining({ status: 'idle' }))
+  })
+
+  it('reassembles a publish split across two frames', async () => {
+    // The mirror case: one packet bigger than the broker's write, so its tail
+    // arrives in the next frame. Neither half may be treated as a packet.
+    startPresence()
+    await flush()
+    const sock = sockets[0]!
+    sock.emitOpen()
+    sock.emit(connackOk)
+    sock.emit(subackGranted)
+    const full = statusPublish('i-1', [...wVarint(2, 1), ...wStr(4, 'i-1')])
+    const cut = Math.floor(full.length / 2)
+    sock.emit(full.slice(0, cut))
+    expect(onUpdate).not.toHaveBeenCalled()
+    sock.emit(full.slice(cut))
+    expect(onUpdate).toHaveBeenCalledWith('i-1', expect.objectContaining({ status: 'idle' }))
   })
 
   it('a refused SUBACK never reports a live channel', async () => {
