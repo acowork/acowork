@@ -274,10 +274,42 @@ struct NativeUsage {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    /// Responses-style counterparts of the two fields above. Kept as separate
+    /// fields (not serde `alias`) so a payload carrying both names parses.
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<NativePromptTokenDetails>,
+    /// Responses-style usage details sometimes returned by OpenAI-compatible
+    /// endpoints even when they expose the Chat Completions API.
+    #[serde(default)]
+    input_tokens_details: Option<NativePromptTokenDetails>,
     #[serde(default)]
     completion_tokens_details: Option<NativeCompletionTokenDetails>,
+}
+
+impl NativeUsage {
+    fn prompt(&self) -> u64 {
+        self.prompt_tokens.or(self.input_tokens).unwrap_or(0)
+    }
+
+    fn completion(&self) -> u64 {
+        self.completion_tokens.or(self.output_tokens).unwrap_or(0)
+    }
+
+    fn cached_tokens(&self) -> u64 {
+        self.prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+            .or_else(|| {
+                self.input_tokens_details
+                    .as_ref()
+                    .and_then(|details| details.cached_tokens)
+            })
+            .unwrap_or(0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -523,13 +555,9 @@ fn parse_response(
         .collect::<Vec<_>>();
 
     let usage_info = usage.map(|u| {
-        let prompt = u.prompt_tokens.unwrap_or(0);
-        let completion = u.completion_tokens.unwrap_or(0);
-        let cache_read = u
-            .prompt_tokens_details
-            .as_ref()
-            .and_then(|d| d.cached_tokens)
-            .unwrap_or(0);
+        let prompt = u.prompt();
+        let completion = u.completion();
+        let cache_read = u.cached_tokens();
         let reasoning = u
             .completion_tokens_details
             .as_ref()
@@ -1257,13 +1285,9 @@ fn parse_sse_line(line: &str) -> (Vec<StreamEvent>, Option<UsageInfo>, Option<St
     // If the chunk includes usage info (requested via stream_options.include_usage),
     // extract it for the caller to include in the final Finished event.
     if let Some(usage) = chunk.usage {
-        let prompt = usage.prompt_tokens.unwrap_or(0);
-        let completion = usage.completion_tokens.unwrap_or(0);
-        let cache_read = usage
-            .prompt_tokens_details
-            .as_ref()
-            .and_then(|d| d.cached_tokens)
-            .unwrap_or(0);
+        let prompt = usage.prompt();
+        let completion = usage.completion();
+        let cache_read = usage.cached_tokens();
         let reasoning = usage
             .completion_tokens_details
             .as_ref()
@@ -1510,13 +1534,44 @@ mod tests {
             Some(NativeUsage {
                 prompt_tokens: Some(10),
                 completion_tokens: Some(5),
+                input_tokens: None,
+                output_tokens: None,
                 prompt_tokens_details: None,
+                input_tokens_details: None,
                 completion_tokens_details: None,
             }),
             None,
         );
         assert!(resp.tool_calls.is_some());
         assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);
+    }
+
+    #[test]
+    fn test_parse_response_reads_responses_style_cached_tokens() {
+        let msg = NativeResponseMessage {
+            content: Some("ok".to_string()),
+            reasoning_content: None,
+            tool_calls: None,
+        };
+        let usage: NativeUsage = serde_json::from_value(serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 5,
+            "input_tokens_details": { "cached_tokens": 80 }
+        }))
+        .unwrap();
+
+        let response = parse_response(msg, Some(usage), None);
+        assert_eq!(response.usage.unwrap().cache_read_tokens, 80);
+    }
+
+    #[test]
+    fn test_parse_sse_reads_responses_style_cached_tokens() {
+        let (_, usage, _) = parse_sse_line(
+            r#"data: {"choices":[],"usage":{"input_tokens":100,"output_tokens":5,"input_tokens_details":{"cached_tokens":80}}}"#,
+        );
+        let usage = usage.expect("final usage chunk");
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.cache_read_tokens, 80);
     }
 
     #[test]
