@@ -211,6 +211,7 @@ export function ChatListScreen() {
               <ListRow
                 key={a.id}
                 avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
+                avatarUnread={!!(recent && hasUnread(a.id, recent.session_id, recent.message_count))}
                 onClick={() => void openAgent(a.id, recent?.session_id ?? null)}
                 label={
                   <span className="row-title">
@@ -233,9 +234,6 @@ export function ChatListScreen() {
                         return <span className={cls} aria-label={text} title={text} />
                       })()
                     )}
-                    {recent && hasUnread(a.id, recent.session_id, recent.message_count) ? (
-                      <span className="dot dot-unread" aria-label="有新消息" />
-                    ) : null}
                   </span>
                 }
                 value={formatListTime(recent?.updated_at)}

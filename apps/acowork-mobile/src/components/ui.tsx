@@ -33,6 +33,7 @@ export function ListRow({
   badge,
   avatar,
   avatarClass,
+  avatarUnread,
   icon,
   iconColor,
 }: {
@@ -45,10 +46,12 @@ export function ListRow({
   hint?: string
   /** Count bubble. Only ever a NUMBER the server actually reported. */
   badge?: number
-  /** Avatar element (image or initials block) rendered 48px left. */
+  /** Avatar element (image or initials block) rendered 48px left.
+   *  `avatarUnread` overlays the standard IM red dot on the avatar's
+   *  top-right corner (the honest signal for an agent session, §8.5). */
   avatar?: ReactNode
-  /** Extra class on the avatar container (e.g. color variant). */
   avatarClass?: string
+  avatarUnread?: boolean
   /** Leading icon element (24px) for settings-style rows. */
   icon?: ReactNode
   /** Optional glyph color (a `--color-icon-*` token) — WeChat Discover-style
@@ -63,7 +66,12 @@ export function ListRow({
       type={onClick ? 'button' : undefined}
       role={onClick ? 'button' : undefined}
     >
-      {avatar ? <div className={`list-row-avatar${avatarClass ? ' ' + avatarClass : ''}`}>{avatar}</div> : null}
+      {avatar ? (
+        <div className="list-row-avatar-wrap">
+          <div className={`list-row-avatar${avatarClass ? ' ' + avatarClass : ''}`}>{avatar}</div>
+          {avatarUnread ? <span className="avatar-unread" aria-label="有新消息" /> : null}
+        </div>
+      ) : null}
       {icon && !avatar ? (
         <div
           className="list-row-icon"
