@@ -21,6 +21,9 @@
 //!   access tokens (§7.2). The route is added AFTER the main router's
 //!   layers, so the HTTP bearer gate does not apply — MQTT carries its
 //!   own CONNECT authentication, enforced by the strict broker handler.
+//!   The same bridge is also mounted on the MAIN listener for LAN
+//!   clients ([`lan_mqtt_bridge`], which additionally re-checks the
+//!   peer-IP allowlist the outer layer would otherwise have applied).
 //!
 //! Everything else — including the auth middleware semantics — is
 //! byte-for-byte the main router, so a route added later is remotely
@@ -175,6 +178,55 @@ async fn bridge_mqtt(ws: WebSocket, target: SocketAddr) {
     tracing::debug!(target = %target, "mqtt bridge: connection closed");
 }
 
+// ── LAN MQTT-over-WebSocket bridge ──────────────────────────────────
+
+/// Peer-IP gate for the LAN bridge: an empty allowlist allows every peer
+/// (same rule as [`crate::security::IpAllowlist::allows`]), otherwise the
+/// peer must match one entry.
+///
+/// Kept out of the handler so the deny path is unit-testable — the
+/// allowlist admits loopback unconditionally, so a loopback test
+/// connection can never exercise it.
+fn lan_bridge_allowed(allowlist: &crate::security::IpAllowlist, peer: SocketAddr) -> bool {
+    allowlist.is_empty() || allowlist.allows_socket(peer)
+}
+
+/// `GET /mqtt` mounted on the MAIN (LAN) listener.
+///
+/// The same byte pipe to the same strict listener, reachable from a device on
+/// the local network: a mobile WebView cannot open a raw TCP socket and the
+/// embedded broker binds loopback, so without this bridge a LAN client has no
+/// MQTT path at all and must poll.
+///
+/// Authentication is unchanged — the CONNECT packet inside the tunnel carries
+/// `user:{name}:mobile:{id}` plus a user access token and is verified by the
+/// strict broker handler (`mqtt::check_remote_connect_auth`), which FAILS
+/// CLOSED while the user service has not published its verifier. A Gateway
+/// running without the account system therefore simply refuses the bridge and
+/// the client stays on HTTP polling.
+///
+/// Like the relay route this is added AFTER `build_router`, so it does not
+/// pass the HTTP bearer gate (MQTT authenticates itself). That also puts it
+/// outside the peer-IP allowlist layer, which is therefore enforced here.
+pub(crate) async fn lan_mqtt_bridge(
+    ws: WebSocketUpgrade,
+    peer: SocketAddr,
+    target_port: u16,
+    allowlist: crate::security::IpAllowlist,
+) -> Response {
+    if !lan_bridge_allowed(&allowlist, peer) {
+        tracing::warn!(
+            peer = %peer.ip(),
+            "blocked by security.allowed_node_ips (LAN MQTT bridge)"
+        );
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let target = SocketAddr::from(([127, 0, 0, 1], target_port));
+    ws.protocols(["mqtt"])
+        .on_upgrade(move |socket| bridge_mqtt(socket, target))
+        .into_response()
+}
+
 // ── Listener lifecycle ──────────────────────────────────────────────
 
 /// Start the remote-origin HTTP listener on `127.0.0.1:http_port`.
@@ -325,6 +377,23 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn lan_bridge_gate_denies_only_peers_outside_a_non_empty_allowlist() {
+        use crate::security::{AllowlistEntry, IpAllowlist};
+        let outside: std::net::Ipv4Addr = "203.0.113.9".parse().unwrap();
+        let inside: std::net::Ipv4Addr = "198.51.100.7".parse().unwrap();
+        let allowlist = IpAllowlist::new(
+            AllowlistEntry::parse("198.51.100.0/24")
+                .into_iter()
+                .collect(),
+        );
+        // No policy configured (empty) — every peer reaches the bridge.
+        assert!(lan_bridge_allowed(&IpAllowlist::default(), SocketAddr::from((outside, 1))));
+        // A configured list gates the bridge like every other route.
+        assert!(lan_bridge_allowed(&allowlist, SocketAddr::from((inside, 1))));
+        assert!(!lan_bridge_allowed(&allowlist, SocketAddr::from((outside, 1))));
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +451,36 @@ mod e2e_tests {
         } else {
             None
         }
+    }
+
+    /// Minimal MQTT 3.1.1 SUBSCRIBE packet: one filter, QoS 1.
+    fn mqtt_subscribe(topic: &str, packet_id: u16) -> Vec<u8> {
+        let mut body = packet_id.to_be_bytes().to_vec();
+        body.extend_from_slice(&(topic.len() as u16).to_be_bytes());
+        body.extend_from_slice(topic.as_bytes());
+        body.push(1);
+        let mut len = body.len();
+        let mut pkt = vec![0x82u8]; // SUBSCRIBE requires the 0b0010 flags
+        loop {
+            let mut byte = (len % 128) as u8;
+            len /= 128;
+            if len > 0 {
+                byte |= 0x80;
+            }
+            pkt.push(byte);
+            if len == 0 {
+                break;
+            }
+        }
+        pkt.extend_from_slice(&body);
+        pkt
+    }
+
+    /// MQTT SUBACK return codes, or None if the frame is not a SUBACK.
+    /// Assumes a one-byte remaining length (true for these tiny packets):
+    /// `[type, remlen, pid_hi, pid_lo, code…]`.
+    fn suback_codes(frame: &[u8]) -> Option<Vec<u8>> {
+        (frame.len() >= 5 && frame[0] == 0x90).then(|| frame[4..].to_vec())
     }
 
     /// Wait until a TCP port accepts connections (bounded).
@@ -592,5 +691,116 @@ mod e2e_tests {
             }
         }
         assert!(saw_error, "broker must refuse the rogue node CONNECT");
+    }
+
+    /// The MAIN-listener `/mqtt` bridge (mobile presence over LAN). Mounted
+    /// exactly as `http::server::start_http_server` mounts it — after the
+    /// router's layers, served with `ConnectInfo` for the peer gate — and
+    /// verified end to end: a user access token CONNECTs, and the wildcard
+    /// presence filter the mobile list subscribes to is GRANTED (a `0x80`
+    /// SUBACK code would mean the whole phase-2 design fails closed on ACLs).
+    #[tokio::test]
+    async fn lan_mqtt_bridge_connects_and_grants_presence_subscribe() {
+        const TEST_LAN_HTTP: u16 = 27980;
+        let strict_port = TEST_REMOTE_MQTT + 20;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut gw = crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
+        gw.user_verifier = Some(crate::http::test_support::verifier());
+        let gateway_state = Arc::new(tokio::sync::RwLock::new(gw));
+
+        let _broker = crate::mqtt::start_broker_with_auth(
+            "127.0.0.1",
+            TEST_MAIN_MQTT + 20,
+            None,
+            Some(crate::mqtt::RemoteMqttListener {
+                host: "127.0.0.1".to_string(),
+                port: strict_port,
+                auth: crate::mqtt::RemoteMqttAuth {
+                    gateway_state: gateway_state.clone(),
+                },
+            }),
+        )
+        .expect("broker with strict listener starts");
+        wait_listening(strict_port).await;
+
+        let allowlist = crate::security::IpAllowlist::default();
+        let app = axum::Router::new().route(
+            "/mqtt",
+            get(
+                move |ws: WebSocketUpgrade, peer: axum::extract::ConnectInfo<SocketAddr>| {
+                    lan_mqtt_bridge(ws, peer.0, strict_port, allowlist.clone())
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", TEST_LAN_HTTP))
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+        wait_listening(TEST_LAN_HTTP).await;
+
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        let token = crate::http::test_support::access_token("alice", "user");
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
+            "ws://127.0.0.1:{TEST_LAN_HTTP}/mqtt"
+        ))
+        .await
+        .expect("WS upgrade on the LAN /mqtt route");
+
+        ws.send(Message::Binary(
+            mqtt_connect("user:alice:mobile:phone-1", "alice", &token).into(),
+        ))
+        .await
+        .unwrap();
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("CONNACK within 5s")
+            .expect("stream open")
+            .expect("ws read ok");
+        let Message::Binary(connack) = frame else {
+            panic!("expected binary CONNACK, got {frame:?}");
+        };
+        assert_eq!(
+            connack_return_code(&connack),
+            Some(0),
+            "a valid access token must CONNECT over the LAN bridge (got {connack:?})"
+        );
+
+        ws.send(Message::Binary(
+            mqtt_subscribe("acowork/agents/+/status", 7).into(),
+        ))
+        .await
+        .unwrap();
+        let mut codes: Option<Vec<u8>> = None;
+        for _ in 0..5 {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .expect("SUBACK within 5s")
+                .expect("stream open")
+                .expect("ws read ok");
+            let parsed = match frame {
+                Message::Binary(data) => suback_codes(&data),
+                _ => None,
+            };
+            if let Some(c) = parsed {
+                codes = Some(c);
+                break;
+            }
+        }
+        let codes = codes.expect("a SUBACK for the presence filter");
+        assert_eq!(
+            codes.first().copied(),
+            Some(1),
+            "presence subscription must be granted at QoS 1, not refused (0x80)"
+        );
+
+        server.abort();
     }
 }

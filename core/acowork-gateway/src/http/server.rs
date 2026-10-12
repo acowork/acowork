@@ -3,11 +3,14 @@
 //! Starts the Axum HTTP server alongside the gRPC server in Gateway::run().
 //! Handles port conflict auto-increment and pidfile writing.
 
+use std::net::SocketAddr;
 use std::net::TcpListener as StdTcpListener;
 use std::path::Path;
 use std::sync::Arc;
 
 use axum;
+use axum::extract::{ws::WebSocketUpgrade, ConnectInfo};
+use axum::routing::get;
 use tokio::sync::RwLock;
 
 use crate::config::HttpConfig;
@@ -256,6 +259,36 @@ pub(crate) async fn start_http_server(
     // Build router — PM routes are reverse-proxied to the standalone
     // acowork-pm process (ADR-064); no in-process PM handle needed.
     let app = routes::build_router(app_state);
+
+    // LAN MQTT-over-WebSocket bridge: the same `/mqtt` pipe the remote surface
+    // uses, mounted on the MAIN listener. A mobile WebView cannot open a raw
+    // TCP socket and the embedded broker binds loopback, so this is the only
+    // MQTT path a LAN device has — without it the phone can only poll.
+    // Registered exactly like the relay route: AFTER `build_router`, so the
+    // bearer gate does not wrap it (MQTT authenticates at CONNECT against the
+    // strict listener) and the peer-IP allowlist is re-checked inside the
+    // handler. See `relay::remote_listener::lan_mqtt_bridge`.
+    let app = match remote_listener.map(|r| r.mqtt_port) {
+        Some(mqtt_port) => {
+            let allowlist = app_state_for_remote.ip_allowlist.clone();
+            tracing::info!(
+                mqtt_port,
+                "LAN MQTT-over-WebSocket bridge mounted at /mqtt (strict-listener CONNECT auth)"
+            );
+            app.route(
+                "/mqtt",
+                get(move |ws: WebSocketUpgrade, ConnectInfo(peer): ConnectInfo<SocketAddr>| {
+                    crate::relay::remote_listener::lan_mqtt_bridge(
+                        ws,
+                        peer,
+                        mqtt_port,
+                        allowlist.clone(),
+                    )
+                }),
+            )
+        }
+        None => app,
+    };
 
     // Design doc 24 §7.2 (M3): remote-origin loopback listener, running
     // the SAME router (plus the `/mqtt` bridge and the origin guard).
