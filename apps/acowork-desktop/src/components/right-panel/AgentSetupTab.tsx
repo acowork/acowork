@@ -46,16 +46,18 @@ const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
 // ── Write-through persistence config (ADR-052 follow-up) ──────────────
 //
 // Setup panel writes through to the runtime per-field on change. No more
-// batched "Apply" step — see `saveField` below. A single 500ms debounce
+// batched "Apply" step — see `saveField` below. A single 1000ms debounce
 // applies to every wired field:
 //
 //   - Visual feedback (`setProfile`) is synchronous — users see the
 //     change instantly, regardless of debounce.
-//   - 500ms is the lower bound of "noticeable delay" — short enough that
-//     the saving indicator's transition (`Saving N change(s)...` →
-//     `All changes saved`) feels responsive; long enough that rapid input
-//     ("1" → "12" → "123", slider drag, double-click Switch) collapses
-//     into a single PUT.
+//   - 1000ms is long enough that typing a multi-digit number collapses
+//     into a single PUT. At 500ms a user who pauses between digits
+//     ("1" → "16" → "160" → "1600" → "16000" in max output tokens)
+//     persisted every intermediate value; the runtime's on-disk config
+//     then churned once per digit. The write is cheap, so the only cost
+//     of the wider window is that `Saving N change(s)...` lingers a
+//     beat longer after the last keystroke.
 //   - Single value keeps the mental model simple — adding a new wired
 //     field doesn't require picking a debounce bucket.
 //
@@ -86,7 +88,7 @@ const WIRE_FIELD: Record<WiredField, string> = {
   sessionLanguage: "session_language",
 };
 
-const FIELD_DEBOUNCE_MS = 500;
+const FIELD_DEBOUNCE_MS = 1000;
 
 const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   shellApprovalThreshold: FIELD_DEBOUNCE_MS,
