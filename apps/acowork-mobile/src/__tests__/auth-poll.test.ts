@@ -209,12 +209,38 @@ describe('401 ladder', () => {
 
 import { useChatStore, setChatTransport, isActiveStatus, POLL_INTERVAL_MS, type ChatTransport } from '../stores/chatStore'
 import { useAgentStore } from '../stores/agentStore'
-import type { SessionInfo } from '../lib/types'
+import type { MessagesWindow, SessionInfo } from '../lib/types'
+
+/** A full AgentViewState for setState seeds — every field explicit. */
+const baseView = {
+  activeSessionId: 's1',
+  messages: [] as ChatMessage[],
+  loading: false,
+  loaded: true,
+  status: null,
+  loadedCount: null as number | null,
+  messageOffset: null as number | null,
+  messageLimit: null as number | null,
+  messageTotal: null as number | null,
+  isLoadingMore: false,
+  pendingSend: null,
+  channel: null,
+  question: null,
+  approvalDetail: null,
+}
+
+const windowOf = (messages: ChatMessage[], over: Partial<MessagesWindow> = {}): MessagesWindow => ({
+  messages,
+  offset: 0,
+  limit: messages.length,
+  total: messages.length,
+  ...over,
+})
 
 function fakeTransport(over: Partial<ChatTransport> = {}): ChatTransport {
   return {
     openSession: vi.fn(async () => {}),
-    fetchMessages: vi.fn(async () => []),
+    fetchMessages: vi.fn(async (): Promise<MessagesWindow> => windowOf([])),
     fetchSessions: vi.fn(async () => ({ items: [], hasMore: false })),
     createSession: vi.fn(async () => ({ session_id: 'new', title: 'new' }) as SessionInfo),
     deleteSession: vi.fn(async () => {}),
@@ -240,11 +266,11 @@ describe('poll loop', () => {
     let status: LiveStatus | null = { status: 'thinking' }
     const t = fakeTransport({
       fetchSnapshot: vi.fn(async () => ({ status, messageCount: null })),
-      fetchMessages: vi.fn(async (): Promise<ChatMessage[]> => [{ id: 'm1', role: 'assistant', content: 'final', created_at: 1, kind: 'text' }]),
+      fetchMessages: vi.fn(async (): Promise<MessagesWindow> => windowOf([{ id: 'm1', role: 'assistant', content: 'final', created_at: 1, kind: 'text' }])),
     })
     setChatTransport(t)
     await useChatStore.getState().openSession('a1', 's1')
-    useChatStore.setState({ agentStates: { a1: { activeSessionId: 's1', messages: [], loading: false, loaded: true, status: { status: 'thinking' }, loadedCount: null, pendingSend: null, channel: null, question: null, approvalDetail: null } } })
+    useChatStore.setState({ agentStates: { a1: { ...baseView, status: { status: 'thinking' } } } })
 
     status = { status: 'idle' }
     useChatStore.getState().startWatching('a1', 's1')
@@ -258,11 +284,33 @@ describe('poll loop', () => {
   it('stays quiet while active (no reload mid-turn)', async () => {
     const t = fakeTransport({ fetchSnapshot: vi.fn(async () => ({ status: { status: 'tool_executing' } as never, messageCount: null })) })
     setChatTransport(t)
-    useChatStore.setState({ agentStates: { a1: { activeSessionId: 's1', messages: [], loading: false, loaded: true, status: null, loadedCount: null, pendingSend: null, channel: null, question: null, approvalDetail: null } } })
+    useChatStore.setState({ agentStates: { a1: { ...baseView } } })
     useChatStore.getState().startWatching('a1', 's1')
     await new Promise((r) => setTimeout(r, 50))
     expect(t.fetchMessages).not.toHaveBeenCalled()
     expect(isActiveStatus(useChatStore.getState().agentStates.a1?.status ?? null)).toBe(true)
+  })
+
+  it('a growing raw-entry count does NOT slide the window while the turn is active', async () => {
+    // The "history shrinks to one explore block" regression: mid-turn the
+    // JSONL count changes on every tick (thought/tool lines), and a tail
+    // reload each tick would replace the view with a window of pure process
+    // entries. Reload must wait for the active → idle settle.
+    let count = 500
+    const t = fakeTransport({
+      fetchSnapshot: vi.fn(async () => ({ status: { status: 'thinking' } as never, messageCount: count })),
+      fetchMessages: vi.fn(async (): Promise<MessagesWindow> => windowOf([{ id: 'x', role: 'assistant', content: 'tail', created_at: 9, kind: 'text' }])),
+    })
+    setChatTransport(t)
+    useChatStore.setState({
+      agentStates: { a1: { ...baseView, messages: [{ id: 'u1', role: 'user', content: 'old', created_at: 1, kind: 'text' }], loadedCount: 400 } },
+    })
+    useChatStore.getState().startWatching('a1', 's1')
+    await new Promise((r) => setTimeout(r, 50))
+    count = 600
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS + 100))
+    expect(t.fetchMessages).not.toHaveBeenCalled()
+    expect(useChatStore.getState().agentStates.a1?.messages.map((m) => m.content)).toEqual(['old'])
   })
 
   it('fast reply: idle → idle with a changed message_count still reloads', async () => {
@@ -272,15 +320,13 @@ describe('poll loop', () => {
     let count = 1
     const t = fakeTransport({
       fetchSnapshot: vi.fn(async () => ({ status: { status: 'idle' } as never, messageCount: count })),
-      fetchMessages: vi.fn(async (): Promise<ChatMessage[]> => [
+      fetchMessages: vi.fn(async (): Promise<MessagesWindow> => windowOf([
         { id: 'u1', role: 'user', content: 'ping', created_at: 1, kind: 'text' },
         { id: 'a1', role: 'assistant', content: 'pong', created_at: 2, kind: 'text' },
-      ]),
+      ])),
     })
     setChatTransport(t)
-    useChatStore.setState({
-      agentStates: { a1: { activeSessionId: 's1', messages: [], loading: false, loaded: true, status: null, loadedCount: 1, pendingSend: null, channel: null, question: null, approvalDetail: null } },
-    })
+    useChatStore.setState({ agentStates: { a1: { ...baseView, loadedCount: 1 } } })
     useChatStore.getState().startWatching('a1', 's1')
     await new Promise((r) => setTimeout(r, 50))
     expect(t.fetchMessages).not.toHaveBeenCalled() // first tick: count matches baseline
@@ -301,11 +347,11 @@ describe('poll loop', () => {
     const stable = { status: 'idle' } as LiveStatus
     const t = fakeTransport({
       fetchSnapshot: vi.fn(async () => ({ status: { status: 'idle' } as LiveStatus, messageCount: 2 })),
-      fetchMessages: vi.fn(async (): Promise<ChatMessage[]> => []),
+      fetchMessages: vi.fn(async (): Promise<MessagesWindow> => windowOf([])),
     })
     setChatTransport(t)
     useChatStore.setState({
-      agentStates: { a1: { activeSessionId: 's1', messages: [], loading: false, loaded: true, status: stable, loadedCount: 2, pendingSend: null, channel: null, question: null, approvalDetail: null } },
+      agentStates: { a1: { ...baseView, status: stable, loadedCount: 2 } },
     })
     useChatStore.getState().startWatching('a1', 's1')
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS * 2 + 100))
@@ -339,7 +385,7 @@ describe('poll loop', () => {
 
   it('openSession clears the previous session status', async () => {
     setChatTransport(fakeTransport())
-    useChatStore.setState({ agentStates: { a1: { activeSessionId: 's0', messages: [], loading: false, loaded: true, status: { status: 'thinking' }, loadedCount: null, pendingSend: { content: 'x', state: 'sending' }, channel: null, question: null, approvalDetail: null } } })
+    useChatStore.setState({ agentStates: { a1: { ...baseView, activeSessionId: 's0', status: { status: 'thinking' }, pendingSend: { content: 'x', state: 'sending' } } } })
     await useChatStore.getState().openSession('a1', 's1')
     const v = useChatStore.getState().agentStates.a1!
     expect(v.status).toBeNull()

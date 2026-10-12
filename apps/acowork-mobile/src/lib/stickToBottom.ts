@@ -29,6 +29,11 @@ import { useCallback, useEffect, useRef } from 'react'
 /** Distance from the bottom that still counts as "at the bottom". */
 export const STICK_PX = 80
 
+/** Distance from the TOP that counts as "the user wants earlier history".
+ *  The screen's onNearTop hook fires on any scroll event landing inside
+ *  this band (the store's loadEarlier guards re-entrancy). */
+export const TOP_TRIGGER_PX = 120
+
 export function isNearBottom(el: {
   scrollHeight: number
   scrollTop: number
@@ -51,15 +56,25 @@ export class FollowController {
   pinned = true
   private el: ScrollEl | null = null
   private lastKey: string | null | undefined = undefined
+  private onNearTop: (() => void) | undefined = undefined
   private onScroll = () => {
-    if (this.el) this.pinned = isNearBottom(this.el)
+    if (!this.el) return
+    this.pinned = isNearBottom(this.el)
+    // Top-edge pagination trigger: fires on USER scrolls into the band; a
+    // programmatic jump to the bottom lands far from the top, so the
+    // mount-time scroll-to-bottom cannot spuriously trip it.
+    if (this.el.scrollTop <= TOP_TRIGGER_PX) this.onNearTop?.()
   }
 
   /** Callback-ref binding: attach the currently mounted container (null detaches). */
-  bind(el: ScrollEl | null): void {
-    if (this.el === el) return
+  bind(el: ScrollEl | null, onNearTop?: () => void): void {
+    if (this.el === el) {
+      this.onNearTop = onNearTop
+      return
+    }
     if (this.el) this.el.removeEventListener('scroll', this.onScroll)
     this.el = el
+    this.onNearTop = onNearTop
     if (el) {
       el.addEventListener('scroll', this.onScroll, { passive: true })
       // Adopt whatever position a (re)mounted container sits at.
@@ -92,18 +107,22 @@ export class FollowController {
 export function useStickToBottom(
   deps: readonly unknown[],
   forceKey?: string | null,
+  onNearTop?: () => void,
 ): {
   ref: (el: HTMLDivElement | null) => void
   stickNow: () => void
 } {
   const ctrl = useRef<FollowController | null>(null)
   if (!ctrl.current) ctrl.current = new FollowController()
+  // Keep the latest callback without re-creating the ref binding.
+  const topRef = useRef(onNearTop)
+  topRef.current = onNearTop
 
   // Callback ref, not a ref object: screens swap the scroll container across
   // early-return branches, and the listener must always sit on the element
   // that is actually mounted.
   const ref = useCallback((el: HTMLDivElement | null) => {
-    ctrl.current!.bind(el)
+    ctrl.current!.bind(el, () => topRef.current?.())
   }, [])
 
   useEffect(() => {

@@ -17,7 +17,7 @@
 import { create } from 'zustand'
 import { useAgentStore } from './agentStore'
 import { markSeen } from '../lib/unread'
-import type { ChatMessage, LiveStatus, SessionInfo, SessionSnapshot } from '../lib/types'
+import type { ChatMessage, LiveStatus, MessagesWindow, SessionInfo, SessionSnapshot } from '../lib/types'
 import {
   startWatching, stopWatching, setRealtimeDeps, pollNetworkState, POLL_INTERVAL_MS,
 } from '../lib/realtime'
@@ -39,6 +39,15 @@ export interface AgentViewState {
   /** Server `message_count` at the moment the current `messages` were
    *  loaded; null until the first snapshot primes it. Drives reloads. */
   loadedCount: number | null
+  /** ADR-050 window cursor (RAW entry math, ported from the Desktop chat
+   *  store): the cache covers raw entries [messageOffset,
+   *  messageOffset + messageLimit) of messageTotal. Null until the first
+   *  window lands. `messageOffset > 0` is "there is earlier history". */
+  messageOffset: number | null
+  messageLimit: number | null
+  messageTotal: number | null
+  /** True while a "load earlier" page is in flight (edge-trigger guard). */
+  isLoadingMore: boolean
   /** True while a send is in flight or failed; carries the draft for retry. */
   pendingSend: { content: string; state: 'sending' | 'failed' } | null
   /** Which realtime channel is currently feeding this view (§8.0). */
@@ -91,6 +100,14 @@ interface ChatStore {
   /** Send (or retry the failed draft). `retry` reuses the pending content. */
   sendMessage: (agentId: string, sessionId: string, content?: string) => Promise<boolean>
 
+  /**
+   * ADR-050 scroll-up pagination (the Desktop `loadBefore` equivalent):
+   * fetch the page of raw entries immediately BEFORE the cached window and
+   * merge it in. No-op when there is no cursor, no earlier history, or a
+   * page is already in flight.
+   */
+  loadEarlier: (agentId: string) => Promise<void>
+
   /** Approve/deny the tool the session is waiting on (generic v1 card). */
   decideApproval: (agentId: string, sessionId: string, requestId: string, approved: boolean) => Promise<void>
 
@@ -98,23 +115,33 @@ interface ChatStore {
   answerQuestion: (agentId: string, sessionId: string, requestId: string, answer: string) => Promise<boolean>
 }
 
-const emptyView = (): AgentViewState => ({
+/** Exported for window-model tests (see chat-window.test.ts) — same shape. */
+export const emptyView = (): AgentViewState => ({
   activeSessionId: null,
   messages: [],
   loading: false,
   loaded: false,
   status: null,
   loadedCount: null,
+  messageOffset: null,
+  messageLimit: null,
+  messageTotal: null,
+  isLoadingMore: false,
   pendingSend: null,
   channel: null,
   question: null,
   approvalDetail: null,
 })
 
+/** Page size for the scroll-up window fetches (matches the initial tail load). */
+const WINDOW_LIMIT = 100
+
 /** Injected by `lib/api.ts`; kept out of the store so tests stay pure. */
 export interface ChatTransport {
   openSession(agentId: string, sessionId: string): Promise<void>
-  fetchMessages(agentId: string, sessionId: string): Promise<ChatMessage[]>
+  /** ADR-050: no `opts.offset` = tail window (`tail=true`); with it = the
+   *  forward page [offset, offset+limit). Returns the server-echoed cursor. */
+  fetchMessages(agentId: string, sessionId: string, opts?: { offset?: number; limit?: number }): Promise<MessagesWindow>
   fetchSessions(agentId: string, page: number): Promise<{ items: SessionInfo[]; hasMore: boolean }>
   createSession(agentId: string, title?: string): Promise<SessionInfo>
   deleteSession(agentId: string, sessionId: string): Promise<void>
@@ -175,8 +202,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     try {
       // Step 2: tell the Runtime, skipped for read-only sessions.
       if (!readOnly) await transport.openSession(agentId, sessionId)
-      // Step 3: reload history.
-      const messages = await transport.fetchMessages(agentId, sessionId)
+      // Step 3: reload history — a fresh tail window, cursor and all (the
+      // previous session's cached pages are gone with the old view anyway).
+      const w = await transport.fetchMessages(agentId, sessionId)
       // Looking at it is reading it: the dot for THIS session goes away, and
       // the baseline is the count the list carried, not the count now.
       markSeen(agentId, sessionId, target?.message_count)
@@ -187,7 +215,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // pending draft belong to THIS session's view, not the old one.
           // `loadedCount: null` re-arms the freshness baseline — the first
           // tick after this load primes it from the server's count.
-          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), messages, loading: false, loaded: true, loadedCount: null },
+          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), messages: w.messages, messageOffset: w.offset, messageLimit: w.limit, messageTotal: w.total, loading: false, loaded: true, loadedCount: null },
         },
       }))
       return true
@@ -276,9 +304,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       },
     }))
     try {
-      await transport.send(agentId, sessionId, text)
+      // The server persists the user entry under this exact id, so the
+      // window merge (mergeMessageWindow) collapses the optimistic bubble
+      // into the authoritative copy instead of doubling it.
+      const mid = await transport.send(agentId, sessionId, text)
       // Optimistic bubble: the authoritative copy arrives with the idle
-      // reload and replaces the whole list; this keeps the echo instant.
+      // reload and merges over this entry; this keeps the echo instant.
       set((s) => {
         const v = s.agentStates[agentId] ?? emptyView()
         return {
@@ -289,7 +320,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               pendingSend: null,
               messages: [
                 ...v.messages,
-                { id: `local-${Date.now()}`, role: 'user', content: text, created_at: Date.now(), kind: 'text' },
+                { id: mid, role: 'user', content: text, created_at: Date.now(), kind: 'text' },
               ],
             },
           },
@@ -339,6 +370,35 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return false
     }
   },
+
+  loadEarlier: async (agentId) => {
+    if (!transport) return
+    const view = get().agentStates[agentId]
+    const sid = view?.activeSessionId
+    if (!view || !sid || view.isLoadingMore) return
+    // No cursor yet, or the cached window already reaches the oldest entry:
+    // there is nothing earlier to fetch.
+    if (view.messageOffset === null || view.messageOffset <= 0) return
+    const offset = Math.max(0, view.messageOffset - WINDOW_LIMIT)
+    set((s) => ({
+      agentStates: { ...s.agentStates, [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), isLoadingMore: true } },
+    }))
+    try {
+      const w = await transport.fetchMessages(agentId, sid, { offset, limit: WINDOW_LIMIT })
+      set((s) => {
+        const cur = s.agentStates[agentId]
+        // The session may have moved on while the page was in flight.
+        if (!cur || cur.activeSessionId !== sid) return {}
+        return { agentStates: { ...s.agentStates, [agentId]: { ...cur, ...applyWindow(cur, w) } } }
+      })
+    } catch {
+      /* the next top-edge scroll retries */
+    } finally {
+      set((s) => ({
+        agentStates: { ...s.agentStates, [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), isLoadingMore: false } },
+      }))
+    }
+  },
 }))
 
 /* ---------------- realtime handler internals (v1.2 §8) ---------------- */
@@ -365,6 +425,55 @@ function sameStatus(a: LiveStatus | null, b: LiveStatus | null): boolean {
 }
 
 /**
+ * Ported from the Desktop chat store (ADR-050): reconcile a server window
+ * with the local cache. Server entries win on id collision (an optimistic
+ * bubble carrying the server id collapses into the authoritative copy);
+ * cache entries outside the window are preserved (earlier pages already
+ * loaded); the result is sorted by timestamp — Array.sort is stable, so
+ * rows sharing a millisecond keep server-before-cache order.
+ */
+export function mergeMessageWindow(cache: ChatMessage[], server: ChatMessage[]): ChatMessage[] {
+  const byId = new Map<string, ChatMessage>()
+  for (const m of server) byId.set(m.id, m)
+  for (const m of cache) if (!byId.has(m.id)) byId.set(m.id, m)
+  return [...byId.values()].sort((a, b) => a.created_at - b.created_at)
+}
+
+/**
+ * Merge a fetched window into the view, or adopt it verbatim when the
+ * cache cannot be reconciled (empty, or NOT contiguous with the cached
+ * range). The Desktop store warns why this matters: unioning cursor math
+ * over a sparse cache fabricates a `[0, total)` cursor, sets hasOlder
+ * false, and permanently hides the missing head. Never merge across a
+ * gap — replace, and let scroll-up re-page from the honest cursor.
+ */
+export function applyWindow(
+  view: AgentViewState,
+  w: MessagesWindow,
+): Pick<AgentViewState, 'messages' | 'messageOffset' | 'messageLimit' | 'messageTotal'> {
+  const prevStart = view.messageOffset
+  const prevLimit = view.messageLimit
+  if (view.messages.length === 0 || prevStart === null || prevLimit === null) {
+    return { messages: w.messages, messageOffset: w.offset, messageLimit: w.limit, messageTotal: w.total }
+  }
+  const prevEnd = prevStart + prevLimit
+  const contiguous = w.offset <= prevEnd && prevStart <= w.offset + w.limit
+  if (!contiguous) {
+    return { messages: w.messages, messageOffset: w.offset, messageLimit: w.limit, messageTotal: w.total }
+  }
+  const offset = Math.min(prevStart, w.offset)
+  const end = Math.max(prevEnd, w.offset + w.limit)
+  return {
+    messages: mergeMessageWindow(view.messages, w.messages),
+    messageOffset: offset,
+    messageLimit: end - offset,
+    // The count only ever grows (append-only JSONL); a page response may
+    // lag a concurrent tick's total, so keep the larger observation.
+    messageTotal: Math.max(view.messageTotal ?? 0, w.total),
+  }
+}
+
+/**
  * Apply one snapshot (from either channel). The §8 reload rule:
  * the history is reloaded whenever the authoritative `message_count`
  * differs from the count the current view was loaded at, or when the
@@ -388,15 +497,26 @@ async function applySnapshot(
   const countChanged =
     snap.messageCount !== null && view.loadedCount !== null && snap.messageCount !== view.loadedCount
   const erroredNew = status?.status === 'errored' && view.status?.status !== 'errored'
-  if ((was && !now) || countChanged || erroredNew) {
+  // Reload lands only on a QUIET observation (not active). Mid-turn the
+  // raw-entry count changes on every tick, and each tail reload would
+  // replace the view with the newest 100 RAW entries — inside a long tool
+  // turn that window is a run of thought/tool lines and pushes every
+  // older text bubble out of the window ("history shrinks to one explore
+  // block"). While active the UI shows the status line (§8), so waiting
+  // for the active→idle settle loses nothing but a stale mid-turn tail.
+  const shouldReload = !now && (was || countChanged || erroredNew)
+  if (shouldReload) {
     try {
-      const messages = await transport.fetchMessages(agentId, sessionId)
-      set((s) => ({
-        agentStates: {
-          ...s.agentStates,
-          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), status, messages, loadedCount: snap.messageCount },
-        },
-      }))
+      const w = await transport.fetchMessages(agentId, sessionId)
+      set((s) => {
+        const cur = s.agentStates[agentId] ?? emptyView()
+        return {
+          agentStates: {
+            ...s.agentStates,
+            [agentId]: { ...cur, ...applyWindow(cur, w), status, loadedCount: snap.messageCount },
+          },
+        }
+      })
     } catch {
       /* a failed reload retries on the next observation */
     }
@@ -438,16 +558,19 @@ async function handleEvent(
     case 'stopped':
     case 'error': {
       try {
-        const [messages, snap] = await Promise.all([
+        const [w, snap] = await Promise.all([
           transport.fetchMessages(agentId, sessionId),
           transport.fetchSnapshot(agentId, sessionId),
         ])
-        set((s) => ({
-          agentStates: {
-            ...s.agentStates,
-            [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), messages, loadedCount: snap.messageCount, status: snap.status },
-          },
-        }))
+        set((s) => {
+          const cur = s.agentStates[agentId] ?? emptyView()
+          return {
+            agentStates: {
+              ...s.agentStates,
+              [agentId]: { ...cur, ...applyWindow(cur, w), loadedCount: snap.messageCount, status: snap.status },
+            },
+          }
+        })
       } catch {
         /* the count rule on the next observation retries */
       }

@@ -188,6 +188,19 @@ export interface MessagesPage {
   count: number
 }
 
+/**
+ * One mapped page of history in the ADR-050 window model (same contract
+ * the Desktop chat store runs on): `offset`/`limit`/`total` are RAW JSONL
+ * entry counts (each tool_call / tool_result / thought line included) and
+ * must never be derived from the filtered bubble list.
+ */
+export interface MessagesWindow {
+  messages: ChatMessage[]
+  offset: number
+  limit: number
+  total: number
+}
+
 /** One conversation JSONL entry. Roles beyond user/assistant exist and are */
 /* filtered or folded by `mapConversationEntries`.                          */
 export interface ConversationEntry {

@@ -11,3 +11,6 @@ src-tauri/gen
 
 # local build output (124 MB debug APK; never commit)
 build-artifacts/
+
+# transient build scratch (JVM hsperfdata etc.; never commit)
+.buildtmp/

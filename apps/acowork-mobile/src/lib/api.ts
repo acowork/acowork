@@ -28,6 +28,7 @@ import type {
   GatewayStatus,
   LiveStatus,
   MessagesPage,
+  MessagesWindow,
   NodeRow,
   SessionDetail,
   SessionInfo,
@@ -325,11 +326,30 @@ export function mapConversationEntries(entries: ConversationEntry[]): ChatMessag
   return out
 }
 
-export async function fetchMessages(agentId: string, sessionId: string): Promise<ChatMessage[]> {
-  // tail=true, limit=100: the initial window is the most recent entries —
-  // older pages arrive by explicit "load earlier" (v1.1 §4.3).
-  const r = await req<MessagesPage>('GET', `/api/agents/${agentId}/sessions/${sessionId}/messages?tail=true&limit=100`)
-  return mapConversationEntries(r.messages ?? [])
+/**
+ * One page of conversation history, in the ADR-050 window model (same
+ * contract the Desktop chat store runs on). See `MessagesWindow` in
+ * `lib/types.ts` — offset/limit/total are raw-entry counts.
+ */
+export async function fetchMessages(
+  agentId: string,
+  sessionId: string,
+  opts?: { offset?: number; limit?: number },
+): Promise<MessagesWindow> {
+  // ADR-050: `tail=true` anchors the window to the LAST `limit` raw entries
+  // (initial load — the caller does not know `total` yet). A page fetch
+  // passes an explicit forward offset instead: entries [offset, offset+limit).
+  const params = new URLSearchParams()
+  params.set('limit', String(opts?.limit ?? 100))
+  if (opts?.offset === undefined) params.set('tail', 'true')
+  else params.set('offset', String(opts.offset))
+  const r = await req<MessagesPage>('GET', `/api/agents/${agentId}/sessions/${sessionId}/messages?${params}`)
+  return {
+    messages: mapConversationEntries(r.messages ?? []),
+    offset: r.offset ?? 0,
+    limit: r.limit ?? 0,
+    total: r.total ?? 0,
+  }
 }
 
 export async function fetchSessionDetail(agentId: string, sessionId: string): Promise<SessionDetail> {
@@ -467,8 +487,8 @@ export const httpChatTransport: ChatTransport = {
     await req('POST', `/api/agents/${agentId}/sessions/${sessionId}/open`)
   },
 
-  async fetchMessages(agentId, sessionId) {
-    return fetchMessages(agentId, sessionId)
+  async fetchMessages(agentId, sessionId, opts) {
+    return fetchMessages(agentId, sessionId, opts)
   },
 
   async fetchSessions(agentId, page) {

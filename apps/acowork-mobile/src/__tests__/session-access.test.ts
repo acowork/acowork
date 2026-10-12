@@ -11,7 +11,7 @@ function session(over: Partial<SessionInfo> & { session_id: string }): SessionIn
 function fakeTransport(over: Partial<ChatTransport> = {}): ChatTransport {
   return {
     openSession: vi.fn(async () => {}),
-    fetchMessages: vi.fn(async () => []),
+    fetchMessages: vi.fn(async () => ({ messages: [], offset: 0, limit: 0, total: 0 })),
     fetchSessions: vi.fn(async () => ({ items: [], hasMore: false })),
     createSession: vi.fn(async () => session({ session_id: 'new' })),
     deleteSession: vi.fn(async () => {}),
@@ -91,7 +91,7 @@ describe('chatStore.openSession — atomic three-step migration', () => {
     const t = fakeTransport({
       fetchMessages: vi.fn(async (_a: string, sid: string) => {
         if (sid === 's2') throw new Error('boom')
-        return []
+        return { messages: [], offset: 0, limit: 0, total: 0 }
       }),
     })
     setChatTransport(t)

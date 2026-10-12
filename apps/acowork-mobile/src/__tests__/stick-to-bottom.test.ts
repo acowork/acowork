@@ -124,6 +124,20 @@ describe('FollowController', () => {
     c.refresh('s1') // same key: no force — the adoption stands
     expect(el2.scrollTop).toBe(0)
   })
+
+  it('fires onNearTop when a user scroll lands in the top band (pagination trigger)', () => {
+    const c = new FollowController()
+    const el = new FakeEl()
+    let nearTop = 0
+    c.bind(el, () => { nearTop++ })
+    c.refresh('s1') // initial jump to the bottom (programmatic, no event)
+    el.userScrollTo(el.bottom) // bottom: silent
+    expect(nearTop).toBe(0)
+    el.userScrollTo(0) // into the top band: fires
+    expect(nearTop).toBe(1)
+    el.userScrollTo(el.bottom) // back down: silent again
+    expect(nearTop).toBe(1)
+  })
 })
 
 describe('isNearBottom', () => {

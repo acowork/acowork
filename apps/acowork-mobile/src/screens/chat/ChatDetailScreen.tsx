@@ -105,6 +105,7 @@ export function ChatDetailScreen() {
   const startWatching = useChatStore((s) => s.startWatching)
   const stopWatching = useChatStore((s) => s.stopWatching)
   const sendMessage = useChatStore((s) => s.sendMessage)
+  const loadEarlier = useChatStore((s) => s.loadEarlier)
   const decideApproval = useChatStore((s) => s.decideApproval)
   const answerQuestion = useChatStore((s) => s.answerQuestion)
   const pop = useNavStore((s) => s.pop)
@@ -154,9 +155,15 @@ export function ChatDetailScreen() {
   // Follow rule: a refresh only scrolls to the bottom while the user is
   // already at it. A session switch (forceKey) re-pins, and so does a send
   // (`stickNow` below) — scrolling up must survive the 2 s snapshot poll.
+  // Scrolling into the top band pages in earlier history (ADR-050
+  // loadEarlier, the Desktop loadBefore equivalent); the store guards
+  // re-entrancy and stops at offset 0.
   const { ref: scrollRef, stickNow } = useStickToBottom(
     [state?.messages.length, state?.status],
     activeId,
+    () => {
+      if (agentId) void loadEarlier(agentId)
+    },
   )
 
   // §8 watch lifetime: exactly the foreground session, exactly while on screen.
@@ -241,6 +248,7 @@ export function ChatDetailScreen() {
         ) : null}
 
         <div className="scroll scroll-chat" ref={scrollRef}>
+          {state?.isLoadingMore ? <div className="time-sep">载入更早消息…</div> : null}
           {state?.loading ? <div className="empty-state">载入中…</div> : null}
           {state?.loaded && state.messages.length === 0 && !isActiveStatus(state.status) ? (
             <div className="empty-state">还没有消息</div>
