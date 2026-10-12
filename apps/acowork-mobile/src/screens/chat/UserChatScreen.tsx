@@ -14,7 +14,7 @@
  * app returns to the foreground (§11.3).
  */
 
-import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useState, type ReactNode } from 'react'
 import { useNavStore } from '../../stores/navStore'
 import { useUserChatStore, startUserChatPoll, stopUserChatPoll } from '../../stores/userChatStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -23,6 +23,7 @@ import { Bubble, toMs } from '../../components/Bubble'
 import { AuthImage } from '../../components/AuthImage'
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from '../../lib/builtinIcons'
 import { daySeparator, timeGapSeparator } from '../../lib/time'
+import { useStickToBottom } from '../../lib/stickToBottom'
 import { Banner, ListRow } from '../../components/ui'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
 import type { ChatMessage } from '../../lib/types'
@@ -49,7 +50,6 @@ export function UserChatScreen() {
   const peerUser = useAgentStore((s) => (peer ? s.users.find((u) => u.id === peer) : undefined))
 
   const [draft, setDraft] = useState('')
-  const scrollRef = useRef<HTMLDivElement>(null)
 
   // A human message and an agent message render through the same bubble, so
   // the wire shape is lifted to the shared one here, not in the store.
@@ -61,19 +61,20 @@ export function UserChatScreen() {
     kind: 'text',
   }))
 
+  // Follow rule: the 5 s poll must not hijack the viewport — it only
+  // scrolls while the user is at the bottom. Switching peer re-pins; so
+  // does sending (`stickNow`).
+  const { ref: scrollRef, stickNow } = useStickToBottom([messages.length], peer)
+
   useEffect(() => {
     startUserChatPoll()
     return stopUserChatPoll
   }, [])
 
-  useEffect(() => {
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages.length])
-
   const submit = async () => {
     const text = draft.trim()
     if (!text || sending) return
+    stickNow()
     if (await send(text)) setDraft('')
   }
 

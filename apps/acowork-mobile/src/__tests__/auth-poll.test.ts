@@ -292,6 +292,29 @@ describe('poll loop', () => {
     expect(useChatStore.getState().agentStates.a1?.loadedCount).toBe(3)
   })
 
+  it('a no-change tick keeps the stored status reference (no scroll hijack)', async () => {
+    // Every HTTP tick parses a FRESH {status:'idle'} object. The screens
+    // key their follow-scroll effect on the stored identity, so cloning
+    // equal content re-fired it on a 2 s timer — the "list snaps back to
+    // bottom under a scroll-up" bug. Equal content must keep the reference
+    // and publish nothing.
+    const stable = { status: 'idle' } as LiveStatus
+    const t = fakeTransport({
+      fetchSnapshot: vi.fn(async () => ({ status: { status: 'idle' } as LiveStatus, messageCount: 2 })),
+      fetchMessages: vi.fn(async (): Promise<ChatMessage[]> => []),
+    })
+    setChatTransport(t)
+    useChatStore.setState({
+      agentStates: { a1: { activeSessionId: 's1', messages: [], loading: false, loaded: true, status: stable, loadedCount: 2, pendingSend: null, channel: null, question: null, approvalDetail: null } },
+    })
+    useChatStore.getState().startWatching('a1', 's1')
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS * 2 + 100))
+    const v = useChatStore.getState().agentStates.a1!
+    expect(v.status).toBe(stable) // identity preserved across equal ticks
+    expect(v.loadedCount).toBe(2)
+    expect(t.fetchMessages).not.toHaveBeenCalled() // and no spurious reload
+  })
+
   it('sendMessage: success appends optimistic bubble, failure keeps the draft', async () => {
     const okT = fakeTransport()
     setChatTransport(okT)

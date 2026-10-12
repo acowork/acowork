@@ -347,6 +347,24 @@ type Get = () => ChatStore
 type Set = (fn: (s: ChatStore) => Partial<ChatStore>) => void
 
 /**
+ * Content equality for the poll loop's status (the serde tagged union).
+ * Every HTTP tick parses a fresh object, and screens key their follow
+ * effects on the stored reference — replacing the old one with a
+ * content-equal clone re-fired them on a 2 s timer (the "list snaps back
+ * to bottom" bug). `detail` is small and both sides came from the same
+ * server serializer, so a serialization compare is stable and exhaustive.
+ */
+function sameStatus(a: LiveStatus | null, b: LiveStatus | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  if (a.status !== b.status) return false
+  const da = (a as { detail?: unknown }).detail
+  const db = (b as { detail?: unknown }).detail
+  if (da === db) return true
+  return JSON.stringify(da ?? null) === JSON.stringify(db ?? null)
+}
+
+/**
  * Apply one snapshot (from either channel). The §8 reload rule:
  * the history is reloaded whenever the authoritative `message_count`
  * differs from the count the current view was loaded at, or when the
@@ -362,7 +380,9 @@ async function applySnapshot(
   if (!transport) return
   const view = get().agentStates[agentId]
   if (!view || view.activeSessionId !== sessionId) return
-  const status = snap.status
+  // Unchanged content keeps the stored reference, so downstream effects
+  // that key on identity do not see a no-op tick as a change.
+  const status = sameStatus(view.status, snap.status) ? view.status : snap.status
   const was = isActiveStatus(view.status)
   const now = isActiveStatus(status)
   const countChanged =
@@ -383,13 +403,18 @@ async function applySnapshot(
   } else {
     // Prime the count baseline on the first snapshot after a history load, so
     // the next change is detectable without trusting a transition.
+    const loadedCount = view.loadedCount === null ? snap.messageCount : view.loadedCount
+    // A no-change tick must not publish a new view object at all: rewrites
+    // with identical content are what turned the poll into scroll hijacks
+    // and needless re-renders.
+    if (status === view.status && loadedCount === view.loadedCount) return
     set((s) => ({
       agentStates: {
         ...s.agentStates,
         [agentId]: {
           ...(s.agentStates[agentId] ?? emptyView()),
           status,
-          loadedCount: view.loadedCount === null ? snap.messageCount : view.loadedCount,
+          loadedCount,
         },
       },
     }))

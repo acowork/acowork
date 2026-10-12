@@ -21,7 +21,7 @@
  *    when the session returns to idle — no streaming, ever, in v1.
  */
 
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Clock } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { isActiveStatus, useChatStore } from '../../stores/chatStore'
@@ -30,6 +30,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { useSessionReadOnly } from '../../lib/session-write-access'
 import { setSessionVisibility } from '../../lib/api'
 import { useForegroundRefresh } from '../../lib/foreground'
+import { useStickToBottom } from '../../lib/stickToBottom'
 import { Banner, ListRow, Sheet } from '../../components/ui'
 import { Bubble } from '../../components/Bubble'
 import { ExploreBlock } from '../../components/ExploreBlock'
@@ -150,7 +151,13 @@ export function ChatDetailScreen() {
   const [manageId, setManageId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const active = sessions.find((s) => s.session_id === activeId)
-  const scrollRef = useRef<HTMLDivElement>(null)
+  // Follow rule: a refresh only scrolls to the bottom while the user is
+  // already at it. A session switch (forceKey) re-pins, and so does a send
+  // (`stickNow` below) — scrolling up must survive the 2 s snapshot poll.
+  const { ref: scrollRef, stickNow } = useStickToBottom(
+    [state?.messages.length, state?.status],
+    activeId,
+  )
 
   // §8 watch lifetime: exactly the foreground session, exactly while on screen.
   useEffect(() => {
@@ -171,11 +178,6 @@ export function ChatDetailScreen() {
     }, [agentId, activeId, openSession]),
   )
 
-  useEffect(() => {
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [state?.messages.length, state?.status])
-
   const onBack = useCallback(() => {
     stopWatching()
     if (!pop()) return
@@ -184,6 +186,7 @@ export function ChatDetailScreen() {
   const send = async () => {
     const text = draft.trim()
     if (!text || !agentId || !activeId || readOnly) return
+    stickNow()
     const ok = await sendMessage(agentId, activeId, text)
     if (ok) setDraft('')
   }
@@ -200,6 +203,7 @@ export function ChatDetailScreen() {
   const sendFirst = async () => {
     const text = draft.trim()
     if (!text || !agentId) return
+    stickNow()
     const sid = await createSession(agentId)
     if (!sid) return
     const ok = await sendMessage(agentId, sid, text)
