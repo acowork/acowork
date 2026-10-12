@@ -3088,15 +3088,15 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
                 per-button fold because its text-vs-icon delta is what
                 progressive collapse is for. */}
             <div data-toolbar-cluster="right" className="flex shrink-0 items-center gap-1">
+              {/* Context usage icon — shown when session is active */}
+              {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
+
               {/* ADR-076 §决策 4: per-session read visibility (owner only).
                   Icon-only, so it rides with the other icon-only right-cluster
                   controls and stays out of the collapsible text row. */}
               {selectedAgentId && currentSessionId && (
                 <SessionVisibilityToggle agentId={selectedAgentId} sessionId={currentSessionId} />
               )}
-
-              {/* Context usage icon — shown when session is active */}
-              {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
 
               {/* File upload button — single entry point for documents and images.
                   Placed adjacent to send so attachments sit with the action that
