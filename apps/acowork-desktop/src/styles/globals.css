@@ -1605,63 +1605,6 @@ input[type="radio"]:checked {
   background: #52525b;
 }
 
-.btn-outline {
-  border: 1px solid #d4d4d8;
-  color: #71717a;
-  background: transparent;
-}
-
-.btn-outline:hover {
-  background: #fafafa;
-}
-
-.dark .btn-outline {
-  border-color: #52525b;
-  color: #a1a1aa;
-}
-
-.dark .btn-outline:hover {
-  background: #27272a;
-}
-
-/* ── Segmented/option button — e.g. Font Size / Content Width / Avatar Type ── */
-.btn-option {
-  border-radius: var(--radius-sm);
-  border: 1px solid #d4d4d8;
-  padding: var(--ui-btn-py) 0.75rem;
-  font-size: 0.857em;
-  /* 12px @ default base — em so the option label tracks --ui-font-size */
-  font-weight: 500;
-  color: #71717a;
-  background: transparent;
-  transition: all 0.15s ease;
-}
-
-.btn-option:hover {
-  background: #fafafa;
-}
-
-.dark .btn-option {
-  border-color: #3f3f46;
-  color: #a1a1aa;
-}
-
-.dark .btn-option:hover {
-  background: #27272a;
-}
-
-.btn-option-active {
-  border-color: var(--color-accent);
-  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-  color: var(--color-accent);
-}
-
-.dark .btn-option-active {
-  border-color: var(--color-accent);
-  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
-  color: var(--color-accent);
-}
-
 /* ── Solid accent-colored button — for confirm/primary actions in dialogs ── */
 .btn-accent {
   background-color: var(--color-accent);

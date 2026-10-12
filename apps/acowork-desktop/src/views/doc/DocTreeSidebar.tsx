@@ -29,7 +29,7 @@ import { useDocHealthStore } from "../../stores/doc/healthStore";
 import { useToast } from "../../components/common/ToastProvider";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { cn } from "../../lib/utils";
-import { listRowHover } from "../../lib/ui-styles";
+import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { DOC_ROOT_DIR_ID } from "../../lib/doc-types";
 import type { DirMeta, DocMeta } from "../../lib/doc-types";
@@ -539,7 +539,9 @@ function DocRow({
         className={cn(
           cn("group flex items-center gap-1 rounded-md py-1 pr-1 text-text-secondary", listRowHover),
           selected &&
-            "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/15 dark:bg-[var(--color-accent)]/20",
+            // 选中态只吃背景色，字不跟着变 accent —— 文字 + 背景双高亮太刺眼
+            // （`listRowSelected` 的约定：只染底色，label 保留自身前景色）。
+            listRowSelected,
         )}
         style={{ paddingLeft: depth * 14 + 20 }}
       >

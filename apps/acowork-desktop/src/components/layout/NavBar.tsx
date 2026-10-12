@@ -5,6 +5,7 @@ import { OutlineSettingsIcon, FilledSettingsIcon } from "../common/SettingsIcon"
 import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
 import { AccountMenu } from "../account/AccountMenu";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useUserChatStore } from "../../stores/userChatStore";
 import { useTranslation } from "../../i18n/useTranslation";
 
 interface NavBarProps {
@@ -169,6 +170,13 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
   const { t } = useTranslation();
   const { theme, osTheme } = useSettingsStore();
   const isDark = theme === "dark" || (theme === "system" && osTheme === "dark");
+  // ADR-076 §决策 8: the nav dot is driven by the inbox unread total. It can
+  // only stay live now that the poll runs from the session instead of from
+  // whichever pane happens to be mounted. Selector returns a number, so the
+  // re-render is reference-stable.
+  const unreadInbox = useUserChatStore(
+    (s) => s.chats.reduce((n, c) => n + c.unread_count, 0),
+  );
 
   return (
     <nav
@@ -188,6 +196,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           onClick={() => onViewChange(view)}
           tooltip={t(i18nKey)}
           tooltipPosition="right"
+          badge={view === "chat" ? unreadInbox : undefined}
         >
           {currentView === view ? (
             view === "chat" ? (

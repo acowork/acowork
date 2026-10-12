@@ -1807,7 +1807,7 @@ adapter.blocks = foldMessages([...messages[], ...liveBuffer.streams()])
 
 **The contiguity guarantee**:
 - When `record_complete` arrives, if `atTail` and there is no gap, it is appended directly to `messages[]`
-- If there is a gap (such as MQTT QoS packet loss), the HTTP alignment when `session_state -> idle` is the fallback
+- If there is a gap (MQTT QoS packet loss, a role that is not in the event stream, etc.), a **count-divergence** trigger drives the HTTP alignment fallback — see §16.5
 - The id deduplication in `mergeMessageWindow` guarantees that when the HTTP refresh returns there is no duplication (the server version overrides the optimistic version)
 
 ### 16.3 The change inventory
@@ -1827,3 +1827,37 @@ The liveBuffer in the original ADR-050 §3.3 contained 4 fields (thinkingStream 
 After the correction liveBuffer retains only 2 fields (thinkingStream / assistantStream), and the core principle becomes:
 
 > **`messages[]` is the sole container for all confirmed messages** (HTTP history + record_complete written directly). `liveBuffer` only stores "the streaming previews that are not yet finished". The UI always obtains contiguous data from `foldMessages([...messages[], ...liveBuffer.streams()])`.
+
+This simplifies the data flow: record_complete no longer needs the three-step liveBuffer -> pendingRecordComplete -> HTTP refresh -> dedup, it goes straight to `messages[]` in one step. The HTTP refresh is triggered only on count divergence (see §16.5 for the fallback).
+
+### 16.5 Correcting the fallback trigger: from lifecycle-driven to data-driven
+
+**Background**: §16.2/§16.4 originally described the fallback as "the HTTP alignment when `session_state -> idle`". In the implementation that fallback existed only inside ADR-035's lost-stream recovery branch — it re-fetched solely when this client's own `activeStream` still held unfrozen content at idle (meaning its own `record_complete` was lost). After `scheduleRefresh` was deleted, no other compensating path remained.
+
+**The defect this exposed**: a user message sent from a remote device (the phone app) was invisible on the desktop, while assistant messages and explore blocks rendered normally. The chain:
+
+1. The `user` role **deliberately** stays out of the event stream — the sender renders it optimistically, and emitting the event had historically caused duplicate bubbles. The Runtime persists the frontend-generated id (`append_message_with_id`) with a comment stating the purpose: "so the frontend can deduplicate by ID when polling". The design therefore presupposes **a re-fetch + id-dedupe path exists**.
+2. ADR-050 removed that presupposition when it deleted `scheduleRefresh`; the id has had no consumer since.
+3. The sender still has `scheduleSendReconciliation` fetching for itself, so it sees its own message; the receiver's four paths (pagination, scrolling, session open, send reconciliation) cover none of the remotely appended records.
+4. The idle alignment was keyed on "local stream state is anomalous". A remote message produces no local stream state, so the gate never opened.
+
+**Root cause**: the fallback's trigger was coupled to the **agent lifecycle** ("a turn ended") while the semantics it needs to express are **data** ("my view has diverged from the transcript"). The former is only a proxy for the latter, and a proxy silently stops covering sources it was never told about. That is what produced this defect, and also why nobody noticed after `scheduleRefresh` was deleted.
+
+**Correction**: the trigger is now count divergence. The retained `session_state` snapshot already carries the authoritative `message_count` (`build_session_state_snapshot`, passed through verbatim by the desktop Rust side); the client previously read and ignored it. The rule collapses to one condition:
+
+> server total > what the local window claims to cover, and the local window believes it is at the tail → re-fetch the tail page.
+
+Properties:
+
+- **Data-driven**, not coupled to the lifecycle. Remote-origin user records, lost `record_complete` events, reconnect gaps, and any future record source are all covered by the same condition, with no case per source.
+- **Subsumes the existing special case**: ADR-035's lost-stream recovery becomes an instance of this rule (a lost event necessarily leaves the local count short, which is divergence). Its bespoke re-fetch is deleted; only the `releaseAdapterSession` cleanup remains. Deletion over addition is the signal that the abstraction was chosen correctly.
+- **Cannot duplicate bubbles by construction**: the re-fetch goes through `loadSessionMessages` → `mergeMessageWindow` id deduplication, and `clearOptimisticEntries` drops the optimistic entries the server has confirmed. That is exactly what `message_id` was persisted for.
+- **Self-terminating**: once the re-fetch lands, `messageTotal` converges on the server value and the divergence clears; combined with per-session single-flight, one divergence costs one request.
+- **Does not interrupt reading**: the gate reuses the at-tail expression from the `record_complete` handler (`isAtTail(...) && !messagesStale`), so a reader parked mid-history is never yanked to the tail — their `scrollToBottom` already loads the newest page.
+- **Not gated on visibility**: background session caches are maintained live by `record_complete` too, and `ensureLatestInCache`'s `tailCovered` test reads the **local** `messageTotal`, so a diverged background session would look tail-covered on open and never heal. Realigning here keeps the local count honest.
+
+**The invariant**: every persisted record eventually becomes visible to every client. Given the two existing facts — the event stream is role-incomplete by design, and MQTT delivery is best-effort — that invariant can only be carried by a data-driven reconciliation. Any event-only design needs one, so it is load-bearing structure, not a latency optimisation.
+
+**Latency**: on the order of 500ms. The chain is `append_message_with_id` → `notify_state_change()` (no throttling) → `spawn_state_change_relay`'s **500ms coalesce window** (it keeps the newest snapshot in the window) → QoS 1 + retain `session_state` → the client realigns and re-fetches. A user record appears on the desktop roughly half a second after it is persisted, independently of when the current turn finishes (confirmed empirically: remote sends come back within a second). Coalescing only merges multiple records into a single push; it does not affect count correctness, because `message_count` in the snapshot is a persistent running total.
+
+Sub-second delivery works because `session_state` is triggered by `notify_state_change()` — called by any record append — and not by a status transition. If one reads `session_state` as "only pushed on idle / status change", one will misdiagnose the latency source and wrongly tie the fix to the lifecycle, which is precisely the root cause here.

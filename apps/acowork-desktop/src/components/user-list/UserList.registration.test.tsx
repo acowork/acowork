@@ -52,7 +52,7 @@ function account(role: Role, user_id?: string, display_name?: string): UserAccou
   };
 }
 
-function signIn(role: Role, registrationOpen: boolean) {
+async function signIn(role: Role, registrationOpen: boolean) {
   useAuthStore.setState({
     mode: "multi_user",
     status: "logged_in",
@@ -61,6 +61,11 @@ function signIn(role: Role, registrationOpen: boolean) {
     viewAsUserId: null,
     registrationOpen,
   });
+  // Signing in arms the session-owned inbox poll, which refreshes once
+  // immediately (that is what keeps the nav unread dot live). Let that land
+  // *before* a test seeds `chats`/`activePeerId` on the store, otherwise the
+  // bootstrap response overwrites the fixture.
+  await new Promise((r) => setTimeout(r, 0));
 }
 
 describe("UserList invite affordance (ADR-076 §决策 6)", () => {
@@ -84,7 +89,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     // Admin sees both themselves and a peer — the fetchAccounts mock returns
     // an empty list, so install the second account on the store directly.
     const peer = account("user", "u-peer", "Charlie");
-    signIn("admin", false);
+    await signIn("admin", false);
     // The fetch mock is the global default from beforeEach (empty list).
     // Use a per-test override that lists both the admin and the peer.
     vi.stubGlobal(
@@ -128,7 +133,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     // does nothing visible — the user reports "点 Nicholas 用户右键菜单,
     // 发消息给用户, 没任何反应" while the store did the work underneath.
     const peer = account("user", "u-peer", "Charlie");
-    signIn("admin", false);
+    await signIn("admin", false);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -166,7 +171,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     // themselves in the sidebar, with no way to start a 1:1 thread.
     // /api/users/directory (ADR-076 ��决策 8) is the non-admin endpoint.
     const peer = account("user", "u-peer", "Charlie");
-    signIn("user", false);
+    await signIn("user", false);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -212,7 +217,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     // any non-empty preview string flip every row to "管理员". The fix
     // parents the role fallback so it only fires when `??` falls through.
     const peer = account("user", "u-peer", "Charlie");
-    signIn("admin", false);
+    await signIn("admin", false);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -246,7 +251,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     // Pre-fix, the ternary sat outside the `??`, so any truthy preview
     // selected "admin" regardless of the actual role.
     const peer = account("user", "u-peer-2", "Dana");
-    signIn("admin", false);
+    await signIn("admin", false);
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -291,7 +296,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
     // directory endpoint carries the avatar fields at all — pinned on the
     // Rust side by `user_directory_is_readable_by_any_account_but_bounded`).
     const peer = account("user", "u-peer", "Charlie");
-    signIn("admin", false);
+    await signIn("admin", false);
     // First answer: no avatar. After the signal: the user set one.
     let call = 0;
     const fetchMock = vi.fn(async () => {

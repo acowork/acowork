@@ -1,4 +1,4 @@
-<h1 align="center">ACowork — Collaborate with your colleagues and AI agents</h1>
+<h1 align="center">ACowork — AI Agents Collaboration Platform</h1>
 
 <p align="center">
   <img src="assets/brand-mark.svg" alt="ACowork" width="360">
@@ -46,7 +46,7 @@
 ## What is ACowork?
 
 ACowork is a **multi-user, distributed, AI-native collaboration platform**. It brings together people, AI
-agents, projects, and documents into one runtime — so a team can plan work, write specs, review code, and ship
+agents, computers, projects, and documents into one runtime — so a team can plan work, write specs, review code, and ship
 features alongside their agents the same way they would alongside a human teammate.
 
 - **Multi-user by default.** Real accounts, roles, sessions, and per-user audit trails. No more single-actor demo mode.
@@ -368,6 +368,6 @@ Apache-2.0 — see [`LICENSE`](./LICENSE) for details.
 ---
 
 <p align="center">
-  <b>ACowork — Collaborate with your colleagues and agents</b><br>
+  <b>ACowork — AI Agents Collaboration Platform</b><br>
   <i>An all-in-one platform for humans and AI agents.</i>
 </p>

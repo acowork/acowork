@@ -106,7 +106,8 @@
     "extensions": "拡張機能",
     "harness": "Harness",
     "settings": "Settings",
-    "ariaLabelMainNavigation": "メインナビゲーション"
+    "ariaLabelMainNavigation": "メインナビゲーション",
+    "unreadMessages": "未読のメッセージ"
   },
   "account": {
     "loginTitle": "ログイン",
@@ -580,6 +581,7 @@
     "mcpToggleDesc": "このAgentのMCPサーバーを切り替えます。Harness > MCPタブでさらにサーバーを追加できます。",
     "mcpToggleError": "MCPサーバーの更新に失敗しました：{{error}}",
     "savingChanges": "{{count}} 件の变更を保存中...",
+    "changesNotSaved": "{{count}} 件の変更は未保存です...",
     "allChangesSaved": "すべての変更が保存されました",
     "resetToDefaults": "デフォルトに戻す",
     "resetAgentSetup": "Agent設定をリセット",

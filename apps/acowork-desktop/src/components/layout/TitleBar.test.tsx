@@ -32,8 +32,8 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
-// GatewayStatusChip probes URL history via fetch + Tauri invoke when a
-// drop happens; stub both so the mounting tests stay hermetic.
+// The gateway menu probes URL history via fetch + Tauri invoke when it
+// opens; stub both so the mounting tests stay hermetic.
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async () => ({})),
 }));
@@ -105,14 +105,68 @@ describe("TitleBar view toggles", () => {
 });
 
 /**
- * The Gateway outage chip is mounted by TitleBar (it replaced the
- * full-width GatewayBanner strip). Worth pinning here because the
- * wiring is invisible in either file alone: TitleBar only renders it
- * because it is imported, and it only appears because AppLayout gated
- * the whole post-boot tree on `gatewayReady`. A dropped import would
- * silently leave the app with no outage indicator at all.
+ * The Gateway outage signal is mounted by TitleBar. Worth pinning here
+ * because the wiring is invisible in either file alone: TitleBar only
+ * renders it because it imports GatewaySwitcherMenu, and it only appears
+ * because AppLayout gates the whole post-boot tree on `gatewayReady`. A
+ * dropped import would silently leave the app with no outage indicator
+ * at all.
+ *
+ * The trigger moved from a second button next to the wordmark into the
+ * gateway switcher's own trigger (one control, two shapes) — so these
+ * assertions are now scoped by `aria-label`, which is the one thing the
+ * two shapes do not share.
  */
-describe("TitleBar Gateway outage chip", () => {
+/**
+ * The title bar's shape, not its behaviour.
+ *
+ * This regressed for real: the gateway merge briefly split the app
+ * toggles and the window controls into two sibling groups so the toggles
+ * could render on macOS, and `justify-between` over three children put
+ * those three toggles dead centre of the window. It reads as correct in
+ * a diff and catastrophic on screen, and no button-level assertion can
+ * see it — every button was still there, still wired, just in the wrong
+ * place. Hence a structural assertion on the child count.
+ */
+describe("TitleBar layout shape", () => {
+  beforeEach(() => {
+    useSearchStore.setState({ open: false });
+    useLayoutStore.setState({ rightPanelCollapsed: true });
+    useGatewayStore.setState({ status: "connected", gatewayUnreachable: false, candidates: [] });
+  });
+
+  it("has exactly two children: title left, one right-aligned cluster", () => {
+    const { container } = render(<TitleBar />);
+    const bar = container.firstElementChild as HTMLElement;
+    // `justify-between` means child N sits in slot N: 1 = far left,
+    // 2 = far right, 3 = dead centre. The bar may only ever have two.
+    expect(bar.className).toContain("justify-between");
+    expect(bar.children).toHaveLength(2);
+    // Slot 1 is the wordmark, slot 2 is everything clickable.
+    expect(bar.children[0].textContent).toContain("ACowork");
+    expect(bar.children[1].querySelectorAll("button").length).toBeGreaterThan(0);
+  });
+
+  it("keeps app toggles and OS chrome in ONE cluster, toggle-side first", () => {
+    const { container } = render(<TitleBar />);
+    const right = container.firstElementChild!.children[1];
+    const buttons = Array.from(right.querySelectorAll("button"));
+    const labels = buttons.map((b) => b.getAttribute("aria-label") ?? "");
+    // Order matters: which Gateway am I on is more fundamental than the
+    // search index that belongs to it, and OS window chrome reads last.
+    const idx = (re: RegExp) => labels.findIndex((l) => re.test(l));
+    const gw = idx(/Gateway|网关|閘道|ゲートウェイ|게이트웨이/);
+    const search = idx(/Ctrl\+Shift\+F|全局搜索|全域搜尋|グローバル検索|전역 검색/);
+    const panel = idx(/Right Panel|右侧面板|右側面板|右パネル|오른쪽/);
+    const chrome = idx(/^$/); // window buttons carry no aria-label
+    expect(gw).toBeGreaterThanOrEqual(0);
+    expect(gw).toBeLessThan(search);
+    expect(search).toBeLessThan(panel);
+    expect(panel).toBeLessThan(chrome);
+  });
+});
+
+describe("TitleBar Gateway outage pill", () => {
   beforeEach(() => {
     useSearchStore.setState({ open: false });
     useLayoutStore.setState({ rightPanelCollapsed: true });
@@ -120,17 +174,16 @@ describe("TitleBar Gateway outage chip", () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("down"))));
   });
 
-  it("mounts the chip on a steady-state gateway drop", () => {
+  it("mounts the pill on a steady-state gateway drop", () => {
     render(<TitleBar />);
     expect(screen.getByRole("button", { expanded: false, name: /Gateway Status/ })).toBeTruthy();
   });
 
-  it("renders no chip while the gateway is healthy", () => {
+  it("renders no pill while the gateway is healthy", () => {
     act(() => useGatewayStore.setState({ status: "connected", gatewayUnreachable: false }));
     const { container } = render(<TitleBar />);
-    // Scoped to the chip by name, not to `aria-expanded` in general: the
-    // title bar also hosts the gateway switcher's own disclosure button,
-    // which stays mounted whether or not the Gateway is reachable.
+    // Scoped to the pill by name, not to `aria-expanded` in general: the
+    // title bar also hosts the search / right-panel toggles.
     expect(
       container.querySelector('[aria-label="Gateway Status"]'),
     ).toBeNull();

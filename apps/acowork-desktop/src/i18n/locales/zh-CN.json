@@ -106,7 +106,8 @@
     "extensions": "扩展",
     "harness": "Harness",
     "settings": "设置",
-    "ariaLabelMainNavigation": "主导航"
+    "ariaLabelMainNavigation": "主导航",
+    "unreadMessages": "有未读消息"
   },
   "account": {
     "loginTitle": "登录",
@@ -622,6 +623,7 @@
     "mcpToggleDesc": "切换此 Agent 的 MCP 服务器。在 Harness > MCP 标签页添加更多服务器。",
     "mcpToggleError": "MCP 服务器更新失败：{{error}}",
     "savingChanges": "正在保存 {{count}} 项更改...",
+    "changesNotSaved": "{{count}} 项更改尚未保存...",
     "allChangesSaved": "所有更改已保存",
     "resetToDefaults": "恢复默认",
     "resetAgentSetup": "重置 Agent 设置",

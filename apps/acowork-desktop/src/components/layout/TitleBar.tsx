@@ -5,7 +5,6 @@ import { useSearchStore } from "../../stores/searchStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
-import { GatewayStatusChip } from "./GatewayStatusChip";
 import { GatewaySwitcherMenu } from "./GatewaySwitcherMenu";
 
 /**
@@ -100,70 +99,88 @@ export function TitleBar() {
         <span className="text-xs font-medium text-text-secondary ">
           ACowork
         </span>
-        {/* Steady-state Gateway outage indicator. Lives here (not in a
-            full-width banner) because a drop after a sleep/wake network
-            switch persists until the user acts — a title-bar chip keeps
-            it visible on every view without stealing content height. */}
-        <GatewayStatusChip />
       </div>
 
-      {/* Right: view toggles + window controls (Windows/Linux only).
-          Two groups, not one: `gap-1` between window buttons vs `mr-2`
-          before them, so the app-level toggles read as a separate cluster
-          from the OS chrome instead of a 4th/5th window button.
-          Gateway switcher sits left of search: which Gateway this app is
-          pointed at is the more fundamental of the two — the search index
-          belongs to that Gateway — so it reads first. */}
-      {!isMacOS && (
-        <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
-          <GatewaySwitcherMenu />
-          <Tooltip content={t("titleBar.globalSearch")} position="bottom">
+      {/* Right: one cluster — app toggles + window controls.
+          The toggles are RIGHT-ALIGNED, never centred. This bar is
+          `justify-between` over its children, so a third child is not
+          free: it becomes the middle slot. An earlier revision of the
+          gateway merge split the toggles and the window buttons into two
+          sibling groups to get the toggles onto macOS, and that put the
+          three toggles dead centre of the title bar — a louder mistake
+          than the one it was fixing. Two children is the count this
+          layout can carry: title left, everything else right.
+
+          A right-aligned cluster also survives the outage pill, which
+          grows the first toggle from 32px to ~140px. Centred, every
+          outage would shove the whole row sideways; right-aligned, only
+          the cluster's left edge moves, and the row stays anchored to
+          the window controls the eye already tracks.
+
+          The toggles are OUTSIDE the `!isMacOS` guard on purpose — only
+          the window controls (which macOS draws natively as traffic
+          lights) are platform-conditional. The Gateway button carries
+          the outage pill, so hiding it on macOS would leave an outage
+          signal with no way to act on it, while Windows had both. */}
+      <div
+        className="flex items-center gap-1"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <GatewaySwitcherMenu />
+        <Tooltip content={t("titleBar.globalSearch")} position="bottom">
+          <button
+            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
+            onClick={openSearch}
+            aria-label={t("titleBar.globalSearch")}
+          >
+            <Search className="h-3.5 w-3.5" />
+          </button>
+        </Tooltip>
+        <Tooltip
+          content={rightPanelCollapsed ? t("titleBar.expandRightPanel") : t("titleBar.collapseRightPanel")}
+          position="bottom"
+        >
+          <button
+            // `mr-2` is the ONLY thing separating the app toggles from the
+            // OS chrome — it must stay on the last toggle, not on the
+            // window-controls group, or the two clusters fuse back into
+            // one row of undifferentiated buttons.
+            className="mr-2 flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
+            onClick={() => setRightPanelCollapsed((prev) => !prev)}
+            aria-pressed={!rightPanelCollapsed}
+            aria-label={rightPanelCollapsed ? t("titleBar.expandRightPanel") : t("titleBar.collapseRightPanel")}
+          >
+            {rightPanelCollapsed ? (
+              <RightPanelIcon className="h-3.5 w-3.5" open={false} />
+            ) : (
+              <RightPanelIcon className="h-3.5 w-3.5" open={true} />
+            )}
+          </button>
+        </Tooltip>
+
+        {!isMacOS && (
+          <>
             <button
               className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
-              onClick={openSearch}
-              aria-label={t("titleBar.globalSearch")}
+              onClick={handleMinimize}
             >
-              <Search className="h-3.5 w-3.5" />
+              <Minus className="h-3.5 w-3.5" />
             </button>
-          </Tooltip>
-          <Tooltip
-            content={rightPanelCollapsed ? t("titleBar.expandRightPanel") : t("titleBar.collapseRightPanel")}
-            position="bottom"
-          >
             <button
-              className="mr-2 flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
-              onClick={() => setRightPanelCollapsed((prev) => !prev)}
-              aria-pressed={!rightPanelCollapsed}
-              aria-label={rightPanelCollapsed ? t("titleBar.expandRightPanel") : t("titleBar.collapseRightPanel")}
+              className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
+              onClick={handleMaximize}
             >
-              {rightPanelCollapsed ? (
-                <RightPanelIcon className="h-3.5 w-3.5" open={false} />
-              ) : (
-                <RightPanelIcon className="h-3.5 w-3.5" open={true} />
-              )}
+              <Square className="h-3 w-3" />
             </button>
-          </Tooltip>
-
-          <button
-            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
-            onClick={handleMinimize}
-          >
-            <Minus className="h-3.5 w-3.5" />
-          </button>
-          <button
-            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
-            onClick={handleMaximize}
-          >
-            <Square className="h-3 w-3" />
-          </button>
-          <button
-            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-red-500 hover:text-white  dark:hover:bg-red-600"
-            onClick={handleClose}
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
+            <button
+              className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-red-500 hover:text-white  dark:hover:bg-red-600"
+              onClick={handleClose}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

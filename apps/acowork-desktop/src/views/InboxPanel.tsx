@@ -44,13 +44,13 @@ export function InboxPanel() {
   const fileInput = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // Polling is shared & ref-counted, so mounting multiple inbox consumers
-  // (or mounting again after a tab switch) is safe.
+  // The poll is owned by the store (keyed on the session, not on this pane —
+  // see [userChatStore](../stores/userChatStore.ts)). What this component
+  // *does* own is the read receipt, because "the user saw these messages" is
+  // knowledge only the renderer has.
   useEffect(() => {
-    const store = useUserChatStore.getState();
-    void store.refreshChats();
-    return store.startPolling();
-  }, []);
+    void useUserChatStore.getState().markThreadRead();
+  }, [messages, activePeerId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });

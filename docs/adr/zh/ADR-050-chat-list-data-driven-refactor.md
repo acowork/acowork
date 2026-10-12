@@ -1751,7 +1751,7 @@ adapter.blocks = foldMessages([...messages[], ...liveBuffer.streams()])
 
 **连续性保证**：
 - `record_complete` 到达时，如果 `atTail` 且无 gap，直接追加到 `messages[]`
-- 如果有 gap（MQTT QoS 丢包等），`session_state -> idle` 时的 HTTP 对齐兜底
+- 如果有 gap（MQTT QoS 丢包、角色不在事件流内等），由**计数分歧**触发 HTTP 对齐兜底，见 §16.5
 - `mergeMessageWindow` 的 id 去重保证 HTTP 刷新返回时不会重复（server 版本覆盖乐观版本）
 
 ### 16.3 改动清单
@@ -1772,4 +1772,36 @@ adapter.blocks = foldMessages([...messages[], ...liveBuffer.streams()])
 
 > **`messages[]` 是所有已确认消息的唯一容器**（HTTP 历史 + record_complete 直接写入）。`liveBuffer` 只存"尚未完成的流式预览"。UI 永远从 `foldMessages([...messages[], ...liveBuffer.streams()])` 得到连续的数据。
 
-这简化了数据流：record_complete 不再需要 liveBuffer -> pendingRecordComplete -> HTTP 刷新 -> dedup 的三步走，而是一步直达 `messages[]`。HTTP 刷新仅在 gap 检测和 idle 对齐时触发（兜底机制不变）。
+这简化了数据流：record_complete 不再需要 liveBuffer -> pendingRecordComplete -> HTTP 刷新 -> dedup 的三步走，而是一步直达 `messages[]`。HTTP 刷新仅在计数分歧时触发（兜底机制见 §16.5）。
+
+### 16.5 兜底触发条件的修正：从生命周期驱动改为数据驱动
+
+**背景**：§16.2/§16.4 原先把兜底描述为"`session_state -> idle` 时的 HTTP 对齐"。实现里这条兜底一度只存在于 ADR-035 的丢流恢复分支——即仅当本客户端自己的 `activeStream` 在 idle 时仍有未冻结内容（说明自己的 `record_complete` 丢了）才重拉。`scheduleRefresh` 被删除后，再没有其他补偿路径。
+
+**暴露的缺陷**：远端设备（手机 APP）发出的 user 消息在桌面端不可见，而 assistant 消息与 explore 块正常。链条是：
+
+1. `user` 角色**有意**不进事件流——发送端乐观渲染，且历史上曾因补发事件导致气泡重复。Runtime 把前端生成的 id 落盘（`append_message_with_id`），注释写明目的是"so the frontend can deduplicate by ID when polling"，即这套设计的前提是**存在一条重拉 + id 去重的路径**。
+2. ADR-050 删除 `scheduleRefresh` 时把该前提拆掉了，那个 id 从此没有消费者。
+3. 发送端仍有 `scheduleSendReconciliation` 自己拉，所以自己看得见；接收端四条路径（分页、滚动、打开会话、发送对账）全部不覆盖远端追加的记录。
+4. idle 对齐挂在"本地流式状态异常"上，远端消息不产生本地流式状态，门永远不开。
+
+**根因**：兜底的触发条件耦合在 **agent 生命周期**（"一轮结束了"）上，而它要表达的语义是**数据**（"我的视图与转录分歧了"）。前者只是后者的代理信号，会静默漏掉代理没被告知的来源——这正是本次缺陷的成因，也是 `scheduleRefresh` 被删后无人察觉的原因。
+
+**修正**：触发条件改为计数分歧。retained `session_state` 快照本就携带权威 `message_count`（`build_session_state_snapshot`，桌面端 Rust 侧原样透传），客户端此前读入后忽略。规则收敛为一条：
+
+> 服务端总数 > 本地窗口声称的覆盖范围，且本地认为自己在尾部 → 重拉尾部页。
+
+性质：
+
+- **数据驱动**，不耦合生命周期。远端 user 记录、丢失的 `record_complete`、重连缺口、以及将来任何新的记录来源，都由同一条规则覆盖，无需按来源加 case。
+- **收编既有特例**：ADR-035 的丢流恢复成为本规则的一个实例（丢事件必然导致本地计数偏短，即分歧），其 bespoke 重拉已删除，只保留 `releaseAdapterSession` 清理。删除优于新增，是抽象选对的信号。
+- **按构造不会重复气泡**：重拉走 `loadSessionMessages` → `mergeMessageWindow` 的 id 去重，并由 `clearOptimisticEntries` 摘掉已被服务端确认的乐观条目。`message_id` 当初就是为此落盘的。
+- **自终止**：重拉落地后 `messageTotal` 收敛为服务端值，分歧消失；配合 per-session 单飞，同一分歧只发一次请求。
+- **不打断阅读**：门控沿用 `record_complete` handler 的 at-tail 表达式（`isAtTail(...) && !messagesStale`），停在历史中部的读者不会被拽到尾部——其 `scrollToBottom` 本就会加载最新页。
+- **不按可见性门控**：后台会话的缓存同样由 `record_complete` 实时维护，而 `ensureLatestInCache` 的 `tailCovered` 判据读的是**本地** `messageTotal`，分歧的后台会话在打开时会看起来"已覆盖尾部"从而永不愈合。此处对齐让本地计数保持诚实。
+
+**时延**：约 500ms 量级。链路是 `append_message_with_id` → `notify_state_change()`（无节流）→ `spawn_state_change_relay` 的 **500ms coalesce 窗口**（取窗口内最新快照）→ QoS 1 + retain 的 `session_state` → 客户端对齐规则重拉。user 记录落盘后约半秒即出现在桌面端，与本轮回答何时结束无关（实测确认：远端发送后秒回）。coalesce 只影响多条记录合并为一次推送，不影响计数正确性——快照里的 `message_count` 是持久累计值。
+
+之所以能做到秒级，是因为 `session_state` 的触发源是 `notify_state_change()`（任何记录落盘都会调用），而非状态转换。若曾把 `session_state` 理解为"只在 idle/状态变化时推送"，就会误判延迟来源并错把修复绑到生命周期上——那正是本次根因。
+
+**不变量**：每条已持久化的记录，最终对每个客户端可见。在"事件流按设计角色不完整"与"MQTT 尽力投递"两个既有事实下，该不变量只能由数据驱动的对齐承载——任何纯事件方案都需要它，因此它是承重结构，不是延迟优化。

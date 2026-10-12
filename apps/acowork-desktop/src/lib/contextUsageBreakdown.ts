@@ -39,7 +39,6 @@ const CATEGORY_ORDER: ContextUsageCategoryKey[] = [
   "connectors",
   "skills",
 ];
-
 const TOOL_SECTION_KEYS = new Set(["tool_definitions", "tools"]);
 const SKILL_SECTION_KEYS = new Set(["skill_instructions", "skills"]);
 const MESSAGE_SECTION_KEYS = new Set(["messages", "message_history", "todo_context"]);
@@ -47,6 +46,7 @@ const CONNECTOR_SECTION_KEYS = new Set([
   "connectors",
   "connector",
   "connector_context",
+  "connector_tool_definitions",
 ]);
 
 function categoryForSection(key: string): ContextUsageCategoryKey {

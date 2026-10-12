@@ -1126,10 +1126,11 @@ require_mixed_case = false
 
 **已实现（Phase 6 Desktop 聊天 UI，本次）**：
 - 新增 `src/views/MessagesView.tsx`：用户聊天视图（左会话列表 + 右会话线程 + 输入框）；`Enter` 发送 / `Shift+Enter` 换行；发送失败把草稿**放回**输入框（不吞用户输入）；会话标题优先用 `GET /chats` 的 `peer_display_name`，新建会话（还没有列表行）回退到 `UserList` 传进来的标签，最后才是裸 id
-- 新增 `src/stores/userChatStore.ts`：`chats` / `activePeerId` / `messages` + `send`（**用 Gateway 的回显**，绝不本地铸造 `ts` / `from`）/ `openChat`（含已读回执；回执失败不影响读消息）/ `startPolling`（**引用计数**的单一 interval：nav 红点与打开中的视图共用一个轮询，不会双倍请求；`release` 幂等以对抗 React 18 双调用 effect）/ `reset`
+- 新增 `src/stores/userChatStore.ts`：`chats` / `activePeerId` / `messages` + `send`（**用 Gateway 的回显**，绝不本地铸造 `ts` / `from`）/ `openChat`（只加载线程，**不再**发已读回执）/ `markThreadRead`（由**渲染线程的组件**调用；按"最新消息 ts"去重，所以 5 s 轮询不会变成 5 s 一次 POST）/ `reset`；轮询是 **store 自己拥有的单一 interval**，由 `authStore` 订阅驱动（`syncPolling`→登录即启动、登出即停），**不挂在任何组件上**
+- **修订（轮询宿主，2026-10）**：上面这条原写作 `startPolling`（引用计数，由"当前挂载的收件箱视图"调用）。全屏 `MessagesView` 被改成嵌在聊天窗格里的条件组件 `InboxPanel` 时，`useEffect` 跟着 JSX 一起搬家，宿主语义从"登录即在"静默变成"`currentView === "chat"` **且** `selectedAgentId === null` 才在"——选中任一 agent 会话就停掉全部轮询，另一台设备发来的消息永远不到达（`unread` 因此长期挂在服务端）。引用计数对"零个宿主"无感，所以没有任何信号暴露这次退化。**结论：数据同步循环的生命周期不得寄生在渲染树上**，因为渲染树正是重构会移动的东西；改由 store 订阅会话状态。已读回执**保留**在渲染者一侧（"用户看见了"只有渲染者知道），二者分离是刻意的：若将来再被孤立，后果只是角标滞后，而非数据静默丢失。测试：`src/stores/userChatStore.test.ts`（"polls with zero components mounted and dies with the session" / "opens a thread and loads it WITHOUT acking"）
 - 新增 `src/lib/user-chat-api.ts`：4 条路由的薄封装。**刻意不传 token**——这些路径不在 `/api/auth/*`，由全局拦截器注入 + 401 刷新，在这里再抄一份 token 流转只会更弱；`auth-api.ts` 的 `readError` 改为导出以复用（`{error}` / `{detail}` 解码只留一处）
 - 新增 `src/components/common/MessagesIcon.tsx`：nav 图标的 outline / filled 变体。**刻意不复用 `ChatIcon`**：两个 nav 目标在同一根 40px 竖条里，24px 下必须能分辨
-- 新增 nav 未读红点：由 `userChatStore` 的未读合计驱动，`NavBar` 在 `multi_user` 下挂轮询——消息在用户正看 agent 会话时到达也看得见。`local` 模式下该 nav 项**不渲染**（路由本就不存在，避免"显示然后 404"）
+- 新增 nav 未读红点：由 `userChatStore` 的未读合计驱动，红点挂在常驻的 `NavBar`（`NavButton` 的 `badge` prop，40px 图标上只显点不显数字）；轮询由会话状态驱动而非由 `NavBar` 挂载（见上条修订）——消息在用户正看 agent 会话、或停在任意其它视图时到达也看得见。`local` 模式下该红点天然不出现（`chats` 恒为空，路由本就不存在，避免"显示然后 404"）
 - 修改 `src/stores/layoutStore.ts` + `src/components/layout/AppLayout.tsx`：新增 `requestNavView(view)` 的 seq 契约（沿用 `workspaceSearchFocusSeq` 的 consume-once 范式）。`currentView` 是 `AppLayout` 的私有 state，侧栏要"跳到收件箱"只能走这个通道
 - 修改 `src/components/user-list/UserList.tsx`：右键菜单新增"发消息给该用户"（自己、已禁用账号不显示），打开线程并切到 `users` 视图
 - 修改 `src/lib/types.ts`：`NavView` 增 `"users"`；新增 `UserChatSummary` / `UserChatMessage` / `UserChatMessagesPage` / `UserDirectoryEntry`（对齐 `ChatSummary` / `ChatMessage`）

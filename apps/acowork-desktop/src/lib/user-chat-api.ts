@@ -44,10 +44,13 @@ async function decode<T>(resp: Response): Promise<T> {
 
 /** Conversations for `userId`, most recently active first. */
 export async function listChats(userId: string): Promise<UserChatSummary[]> {
-  const data = await decode<{ chats: UserChatSummary[] }>(
+  const data = await decode<{ chats?: UserChatSummary[] }>(
     await fetch(base(userId)),
   );
-  return data.chats;
+  // A 200 whose body is not the expected shape must not write `undefined`
+  // into the store — `decode` only checks the status, and the type is a
+  // compile-time claim the wire does not owe us.
+  return Array.isArray(data.chats) ? data.chats : [];
 }
 
 /**
@@ -61,9 +64,10 @@ export async function listMessages(
   limit = CHAT_PAGE_SIZE,
 ): Promise<UserChatMessagesPage> {
   const query = `?offset=${offset}&limit=${limit}`;
-  return decode<UserChatMessagesPage>(
+  const page = await decode<UserChatMessagesPage>(
     await fetch(`${base(userId, chatId)}/messages${query}`),
   );
+  return { ...page, messages: Array.isArray(page.messages) ? page.messages : [] };
 }
 
 /** Send as `userId`. The Gateway takes `from` from the token, not from us. */

@@ -764,11 +764,18 @@ pub fn persist_think_to_conversation(
 ) {
     let think_meta = build_think_metadata(response);
     if let Some(ref reasoning) = response.reasoning_content {
-        if !reasoning.is_empty() {
+        // Trim-guard: a whitespace-only reasoning (streamed blank deltas)
+        // must not persist as a thought record — it renders as an empty
+        // ThinkBlock in the chat UI.
+        if !reasoning.trim().is_empty() {
             conversation.append_message("thought", reasoning, think_meta);
         }
     } else if let Some(think_content) = extract_think_block(&response.content) {
-        conversation.append_message("thought", &think_content, think_meta);
+        // `extract_think_block` trims, so an empty think-tag pair surfaces
+        // as `Some("")` — must not persist a blank thought record either.
+        if !think_content.is_empty() {
+            conversation.append_message("thought", &think_content, think_meta);
+        }
     }
 }
 
@@ -1033,5 +1040,77 @@ mod tests {
         // happens to end on a colon is not flagged, to keep noise low.
         let long = format!("{}收尾说明：", "步骤说明 ".repeat(80));
         assert!(!is_suspiciously_truncated_text(&long));
+    }
+
+    #[test]
+    fn persist_think_skips_whitespace_only_reasoning() {
+        use crate::conversation::{generate_session_id, ConversationSession, SessionConfig};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let session_id = generate_session_id();
+        let (conversation, _cfg_rx, _state_rx) = ConversationSession::new(
+            temp_dir.path(),
+            &session_id,
+            SessionConfig {
+                agent_id: "com.test.agent".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+
+        // Whitespace-only reasoning (signature-only Claude thinking blocks
+        // reaching the accumulate path) must NOT persist a thought record.
+        let blank = ChatResponse {
+            content: "answer".to_string(),
+            reasoning_content: Some("  \n ".to_string()),
+            ..Default::default()
+        };
+        persist_think_to_conversation(&conversation, &blank);
+
+        // Real reasoning must still persist.
+        let real = ChatResponse {
+            content: "answer".to_string(),
+            reasoning_content: Some("weighing options".to_string()),
+            ..Default::default()
+        };
+        persist_think_to_conversation(&conversation, &real);
+
+        // Empty think-tag pair in content (no reasoning_content) must NOT
+        // persist either — extract_think_block returns Some("").
+        let open = "<\u{74}hink>".to_string();
+        let close = "</\u{74}hink>".to_string();
+        let empty_tag = ChatResponse {
+            content: format!("{open}{close}answer"),
+            ..Default::default()
+        };
+        persist_think_to_conversation(&conversation, &empty_tag);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async { conversation.close().await.unwrap() });
+
+        let raw = std::fs::read_to_string(
+            temp_dir
+                .path()
+                .join("conversations")
+                .join(format!("{session_id}.jsonl")),
+        )
+        .unwrap();
+        let roles: Vec<String> = raw
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter_map(|v| v.get("role").and_then(|r| r.as_str()).map(str::to_string))
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["thought".to_string()],
+            "blank reasoning must not persist; real reasoning must"
+        );
     }
 }

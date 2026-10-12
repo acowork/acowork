@@ -25,6 +25,7 @@ import type { AvatarAssetEntry, AvatarConfigResponse } from "../../lib/types";
 import { log } from "../../lib/logger";
 import { useToast } from "../common/ToastProvider";
 import { ListBox, ExpandableRow } from "../common/list";
+import { flushPendingWrites } from "./agentSetupPendingWrites";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -46,16 +47,18 @@ const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
 // ── Write-through persistence config (ADR-052 follow-up) ──────────────
 //
 // Setup panel writes through to the runtime per-field on change. No more
-// batched "Apply" step — see `saveField` below. A single 500ms debounce
+// batched "Apply" step — see `saveField` below. A single 1000ms debounce
 // applies to every wired field:
 //
 //   - Visual feedback (`setProfile`) is synchronous — users see the
 //     change instantly, regardless of debounce.
-//   - 500ms is the lower bound of "noticeable delay" — short enough that
-//     the saving indicator's transition (`Saving N change(s)...` →
-//     `All changes saved`) feels responsive; long enough that rapid input
-//     ("1" → "12" → "123", slider drag, double-click Switch) collapses
-//     into a single PUT.
+//   - 1000ms is long enough that typing a multi-digit number collapses
+//     into a single PUT. At 500ms a user who pauses between digits
+//     ("1" → "16" → "160" → "1600" → "16000" in max output tokens)
+//     persisted every intermediate value; the runtime's on-disk config
+//     then churned once per digit. The write is cheap, so the only cost
+//     of the wider window is that `Saving N change(s)...` lingers a
+//     beat longer after the last keystroke.
 //   - Single value keeps the mental model simple — adding a new wired
 //     field doesn't require picking a debounce bucket.
 //
@@ -86,7 +89,7 @@ const WIRE_FIELD: Record<WiredField, string> = {
   sessionLanguage: "session_language",
 };
 
-const FIELD_DEBOUNCE_MS = 500;
+const FIELD_DEBOUNCE_MS = 1000;
 
 const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   shellApprovalThreshold: FIELD_DEBOUNCE_MS,
@@ -116,26 +119,22 @@ export function AgentSetupTab() {
   const [_configLoading, setConfigLoading] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
 
-  // ADR-052 follow-up: Setup panel is now write-through. Each input
-  // change optimistically updates `profile` via `setProfile`, and a
-  // debounced PUT sends the change to the runtime. Per-field debounce
-  // windows are configured in `DEBOUNCE_BY_FIELD` (see file top).
-  //   - `savingFields` lets the status line render an in-flight indicator.
-  //   - `debounceTimersRef` holds pending timers keyed by field name, so
-  //     rapid keystrokes ("1" → "12" → "123") collapse to one PUT.
+  // Track edits from the instant they change through the debounce window and PUT.
+  const [pendingFields, setPendingFields] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [savingFields, setSavingFields] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   const debounceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
-
-  // Pre-edit values keyed by field, captured on the first keystroke of an
-  // in-flight debounce chain and cleared once the PUT settles. A refused
-  // write restores from here — the refresh event cannot, because its
-  // merge deliberately skips fields the server omits (null / absent,
-  // e.g. an unset temperature), which is exactly where an optimistic
-  // value would otherwise survive a "rollback".
+  const pendingValuesRef = useRef<
+    Map<string, { agentId: string; field: WiredField; value: unknown; version: number }>
+  >(new Map());
+  const fieldVersionsRef = useRef<Map<string, number>>(new Map());
+  const inFlightCountsRef = useRef<Map<string, number>>(new Map());
+  const writeChainsRef = useRef<Map<string, Promise<void>>>(new Map());
   const prevValuesRef = useRef<Map<string, unknown>>(new Map());
 
   // Avatar picker state (ADR-017)
@@ -395,58 +394,54 @@ export function AgentSetupTab() {
   //     server actually returned (typeof-guard, see above).
 
   const putField = useCallback(
-    async (field: WiredField, value: unknown) => {
-      if (!selectedAgentId) return;
-      const body: Record<string, unknown> = { [WIRE_FIELD[field]]: value };
-      const rollback = () => {
-        if (!prevValuesRef.current.has(field)) return;
-        const prev = prevValuesRef.current.get(field);
-        prevValuesRef.current.delete(field);
-        setProfile(selectedAgentId, { [field]: prev } as Partial<AgentProfileSettings>);
-      };
+    async (
+      agentId: string,
+      field: WiredField,
+      value: unknown,
+      version: number,
+    ) => {
+      const key = `${agentId}:${field}`;
+      inFlightCountsRef.current.set(
+        key,
+        (inFlightCountsRef.current.get(key) ?? 0) + 1,
+      );
+      setSavingFields((prev) => new Set(prev).add(key));
+      let succeeded = false;
       try {
-        setSavingFields((prev) => {
-          if (prev.has(field)) return prev;
-          const next = new Set(prev);
-          next.add(field);
-          return next;
+        const previousWrite = writeChainsRef.current.get(key) ?? Promise.resolve();
+        const write = previousWrite.catch(() => {}).then(async () => {
+          const res = await fetch(
+            `${getGatewayUrl()}/api/agents/${agentId}/config`,
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              // `undefined` -> `null` so the runtime's partial-PUT DTO
+              // sees an explicit clear (`FieldPatch::Clear`) instead of
+              // an absent field (`skip`).
+              body: JSON.stringify({ [WIRE_FIELD[field]]: value ?? null }),
+            },
+          );
+          if (!res.ok) {
+            log.warn("[AgentSetup] Field save failed:", field, res.status);
+            const err = await httpApiError(res);
+            addToast({
+              type: "error",
+              message:
+                err.status === 403
+                  ? err.message
+                  : t("agentSetup.saveFailed", {
+                      field: WIRE_FIELD[field],
+                      status: res.status,
+                    }),
+            });
+          } else {
+            succeeded = true;
+          }
         });
-        const res = await fetch(
-          `${getGatewayUrl()}/api/agents/${selectedAgentId}/config`,
-          {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            // `undefined` -> `null` so the runtime's partial-PUT DTO
-            // sees an explicit clear (`FieldPatch::Clear`) instead of
-            // an absent field (`skip`). Without this, picking the
-            // "follow user setting" option in a Dropdown would
-            // silently no-op and the on-disk value would stick.
-            body: JSON.stringify({
-              ...body,
-              [WIRE_FIELD[field]]: value ?? null,
-            }),
-          },
-        );
-        if (!res.ok) {
-          log.warn("[AgentSetup] Field save failed:", field, res.status);
-          // Surface the failure instead of silently accepting the
-          // optimistic local update — otherwise the panel lies about the
-          // persisted value (the "shows 30 min but actually 5 min" trap).
-          const err = await httpApiError(res);
-          addToast({
-            type: "error",
-            message:
-              err.status === 403
-                ? err.message
-                : t("agentSetup.saveFailed", {
-                    field: WIRE_FIELD[field],
-                    status: res.status,
-                  }),
-          });
-          rollback();
-        } else {
-          // Persisted — the captured pre-edit value is no longer needed.
-          prevValuesRef.current.delete(field);
+        writeChainsRef.current.set(key, write);
+        await write;
+        if (writeChainsRef.current.get(key) === write) {
+          writeChainsRef.current.delete(key);
         }
       } catch (err) {
         log.warn("[AgentSetup] Field save error:", field, err);
@@ -457,59 +452,108 @@ export function AgentSetupTab() {
             status: "network",
           }),
         });
-        rollback();
       } finally {
-        setSavingFields((prev) => {
-          if (!prev.has(field)) return prev;
-          const next = new Set(prev);
-          next.delete(field);
-          return next;
-        });
+        const inFlight = (inFlightCountsRef.current.get(key) ?? 1) - 1;
+        if (inFlight > 0) inFlightCountsRef.current.set(key, inFlight);
+        else inFlightCountsRef.current.delete(key);
+
+        if (fieldVersionsRef.current.get(key) === version) {
+          if (succeeded) {
+            prevValuesRef.current.delete(key);
+          } else if (!pendingValuesRef.current.has(key)) {
+            if (prevValuesRef.current.has(key)) {
+              useAgentStore.getState().setProfile(agentId, {
+                [field]: prevValuesRef.current.get(key),
+              } as Partial<AgentProfileSettings>);
+            }
+            prevValuesRef.current.delete(key);
+          }
+        }
+        if (inFlight === 0 && !pendingValuesRef.current.has(key)) {
+          setSavingFields((prev) => {
+            if (!prev.has(key)) return prev;
+            const next = new Set(prev);
+            next.delete(key);
+            return next;
+          });
+        }
       }
     },
-    [selectedAgentId, t, addToast, setProfile],
+    [t, addToast],
   );
 
   const saveField = useCallback(
     (field: WiredField, value: unknown) => {
       if (!selectedAgentId) return;
-      // Step 1: optimistic local update. Remember the value from before
-      // the edit chain (only the first keystroke captures it) so a
-      // refused PUT can restore it — see `rollback` in `putField`.
-      if (!prevValuesRef.current.has(field)) {
-        prevValuesRef.current.set(field, getProfile(selectedAgentId)[field]);
+      const agentId = selectedAgentId;
+      const key = `${agentId}:${field}`;
+      if (!prevValuesRef.current.has(key)) {
+        prevValuesRef.current.set(key, getProfile(agentId)[field]);
       }
-      setProfile(selectedAgentId, { [field]: value } as Partial<AgentProfileSettings>);
+      const version = (fieldVersionsRef.current.get(key) ?? 0) + 1;
+      fieldVersionsRef.current.set(key, version);
+      setProfile(agentId, { [field]: value } as Partial<AgentProfileSettings>);
+      pendingValuesRef.current.set(key, { agentId, field, value, version });
+      setPendingFields((prev) => new Set(prev).add(key));
 
-      // Step 2: schedule PUT, debounced per field type.
-      const debounceMs = DEBOUNCE_BY_FIELD[field];
-      const existing = debounceTimersRef.current.get(field);
+      const existing = debounceTimersRef.current.get(key);
       if (existing) clearTimeout(existing);
-
-      if (debounceMs <= 0) {
-        debounceTimersRef.current.delete(field);
-        void putField(field, value);
-        return;
-      }
       const timer = setTimeout(() => {
-        debounceTimersRef.current.delete(field);
-        void putField(field, value);
-      }, debounceMs);
-      debounceTimersRef.current.set(field, timer);
+        debounceTimersRef.current.delete(key);
+        const pending = pendingValuesRef.current.get(key);
+        pendingValuesRef.current.delete(key);
+        setPendingFields((prev) => {
+          if (!prev.has(key)) return prev;
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+        if (pending) {
+          void putField(
+            pending.agentId,
+            pending.field,
+            pending.value,
+            pending.version,
+          );
+        }
+      }, DEBOUNCE_BY_FIELD[field]);
+      debounceTimersRef.current.set(key, timer);
     },
     [selectedAgentId, setProfile, getProfile, putField],
   );
 
-  // Flush any pending debounced PUTs when the agent changes or the
-  // panel unmounts. Otherwise a fast user who switches tabs mid-typing
-  // would silently lose the last `debounceMs`-worth of edits.
+  // Flush pending writes when the setup tab unmounts or the selected
+  // agent changes; never cancel an optimistic edit without persisting it.
   useEffect(() => {
     return () => {
-      const timers = debounceTimersRef.current;
-      timers.forEach((timer) => clearTimeout(timer));
-      timers.clear();
+      if (!selectedAgentId) return;
+      const flushedKeys = flushPendingWrites(
+        selectedAgentId,
+        debounceTimersRef.current,
+        pendingValuesRef.current,
+        (pending) => {
+          void putField(
+            pending.agentId,
+            pending.field,
+            pending.value,
+            pending.version,
+          );
+        },
+      );
+      setPendingFields((prev) => {
+        const next = new Set(prev);
+        flushedKeys.forEach((key) => next.delete(key));
+        return next;
+      });
+      setSavingFields((prev) => {
+        const next = new Set(prev);
+        for (const key of next) {
+          if (key.startsWith(`${selectedAgentId}:`)) next.delete(key);
+        }
+        return next;
+      });
     };
-  }, [selectedAgentId]);
+  }, [selectedAgentId, putField]);
 
   // Sync the new temperature into the chat store so the RightPanel
   // status tab shows the updated value right away, without waiting for
@@ -707,7 +751,7 @@ export function AgentSetupTab() {
                   if (!avatarPopupOpen) computeAvatarPopupPos();
                   setAvatarPopupOpen((v) => !v);
                 }}
-                className="relative block rounded-full ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+                className="relative block rounded-lg ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
               >
                 <AgentAvatar
                   agentId={selectedAgentId}
@@ -824,7 +868,7 @@ export function AgentSetupTab() {
                                 src={BUILTIN_ICONS[iconId] ?? ""}
                                 alt={iconId}
                                 draggable={false}
-                                className="h-12 w-12 rounded-full object-cover"
+                                className="h-12 w-12 rounded-lg object-cover"
                               />
                             </button>
                           );
@@ -1199,9 +1243,11 @@ export function AgentSetupTab() {
           className="flex-1 text-10 tabular-nums text-text-tertiary "
           aria-live="polite"
         >
-          {savingFields.size > 0
-            ? t("agentSetup.savingChanges", { count: savingFields.size })
-            : t("agentSetup.allChangesSaved")}
+          {pendingFields.size > 0
+            ? t("agentSetup.changesNotSaved", { count: pendingFields.size })
+            : savingFields.size > 0
+              ? t("agentSetup.savingChanges", { count: savingFields.size })
+              : t("agentSetup.allChangesSaved")}
         </span>
         <button
           onClick={() => setShowResetConfirm(true)}
@@ -1219,14 +1265,36 @@ export function AgentSetupTab() {
         destructive
         onConfirm={async () => {
           setShowResetConfirm(false);
-          // Cancel any in-flight debounced PUTs so they don't overwrite
-          // the clear with the pre-reset value.
-          const timers = debounceTimersRef.current;
-          timers.forEach((timer) => clearTimeout(timer));
-          timers.clear();
+          if (!selectedAgentId) return;
+          // Discard pending debounced edits and invalidate their requests
+          // before sending the reset, so stale values cannot be retried.
+          const prefix = `${selectedAgentId}:`;
+          for (const [key, timer] of debounceTimersRef.current) {
+            if (key.startsWith(prefix)) {
+              clearTimeout(timer);
+              debounceTimersRef.current.delete(key);
+            }
+          }
+          for (const key of pendingValuesRef.current.keys()) {
+            if (key.startsWith(prefix)) pendingValuesRef.current.delete(key);
+          }
+          setPendingFields((prev) => new Set(
+            [...prev].filter((key) => !key.startsWith(prefix)),
+          ));
+          for (const field of Object.keys(WIRE_FIELD) as WiredField[]) {
+            const key = `${selectedAgentId}:${field}`;
+            fieldVersionsRef.current.set(key, (fieldVersionsRef.current.get(key) ?? 0) + 1);
+            prevValuesRef.current.delete(key);
+          }
+          // Finish any PUT already in flight before the reset request, so
+          // an older write cannot land after the clear.
+          await Promise.all(
+            [...writeChainsRef.current]
+              .filter(([key]) => key.startsWith(prefix))
+              .map(([, write]) => write.catch(() => {})),
+          );
           // Clear local state first so the UI updates immediately.
           resetProfile(selectedAgentId);
-          if (!selectedAgentId) return;
           // Push all wired fields as JSON-null → runtime maps null to
           // `FieldPatch::Clear` for each, which drops the on-disk
           // entry (`skip_serializing_if = Option::is_none`). Next

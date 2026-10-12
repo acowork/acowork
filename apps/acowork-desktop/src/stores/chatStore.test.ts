@@ -639,6 +639,29 @@ describe("toWireAttachedItems: clientId serialization", () => {
   });
 });
 
+describe("queued messages preserve attachments", () => {
+  beforeEach(() => clearTestState());
+  afterEach(() => clearTestState());
+
+  it("stores text and upload metadata together per session", () => {
+    const queued = {
+      content: "analyze this",
+      attachedItems: [{
+        type: "image_upload" as const,
+        documentId: "doc-1",
+        filename: "diagram.png",
+        format: "png",
+        sizeBytes: 128,
+      }],
+    };
+
+    useChatStore.getState().addQueuedMessage(AGENT, SESSION, queued);
+
+    expect(useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!.queuedMessages)
+      .toEqual([queued]);
+  });
+});
+
 // ── thought timing regression tests ───────────────────────────────────────
 
 const AGENT = "com.test.Agent";

@@ -106,7 +106,8 @@
     "extensions": "확장",
     "harness": "Harness",
     "settings": "Settings",
-    "ariaLabelMainNavigation": "기본 탐색"
+    "ariaLabelMainNavigation": "기본 탐색",
+    "unreadMessages": "읽지 않은 메시지"
   },
   "account": {
     "loginTitle": "로그인",
@@ -580,6 +581,7 @@
     "applyToRuntime": "런타임에 적용",
     "applying": "적용 중...",
     "savingChanges": "{{count}}개 변경 사항 저장 중...",
+    "changesNotSaved": "{{count}}개 변경 사항 저장 전...",
     "allChangesSaved": "모든 변경 사항 저장됨",
     "resetToDefaults": "기본값으로 초기화",
     "resetAgentSetup": "Agent 설정 초기화",

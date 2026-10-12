@@ -14,7 +14,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { render, screen, act } from "@testing-library/react";
 import { UserList } from "./UserList";
@@ -60,9 +60,13 @@ const DIVIDER = "row-divider-b";
  */
 it("no row draws a divider through a bare after:border-b utility", () => {
   const root = resolve(__dirname, "..", "..", "..");
-  const files = execSync(`git ls-files "src/**/*.tsx"`, { encoding: "utf8", cwd: root })
+  const files = execSync(`git ls-files --cached --others --exclude-standard "src/**/*.tsx"`, { encoding: "utf8", cwd: root })
     .split(String.fromCharCode(10))
     .filter(Boolean)
+    // `git ls-files` without --cached also lists index entries whose file
+    // is gone from the working tree; a deleted-but-unstaged component
+    // would then blow up the scan with ENOENT instead of a clean verdict.
+    .filter((f) => existsSync(resolve(root, f)))
     // This file legitimately mentions `after:border-b` in assertions.
     .filter((f) => !/\.test\.tsx?$/.test(f));
   const offenders: string[] = [];

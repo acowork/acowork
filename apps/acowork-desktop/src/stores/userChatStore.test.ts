@@ -19,7 +19,12 @@ vi.mock("../lib/logger", () => ({
 }));
 
 import { useAuthStore } from "./authStore";
-import { chatIdOf, useUserChatStore } from "./userChatStore";
+import {
+  POLL_MS,
+  chatIdOf,
+  syncPollLoop,
+  useUserChatStore,
+} from "./userChatStore";
 import type { UserAccount } from "../lib/types";
 
 /** Deliberately the *larger* id, so a flipped pair would be caught. */
@@ -99,6 +104,13 @@ function summary(unread: number) {
 beforeEach(() => {
   localStorage.clear();
   useUserChatStore.getState().reset();
+  // Installing the absorbing stub *before* the auth flip matters: signing in
+  // arms the session-owned poll loop, which refreshes immediately. Without
+  // this the bootstrap call would land on the previous test's fetch spy and
+  // could leave a stale `error` in the state a test then asserts against.
+  globalThis.fetch = vi.fn(
+    async () => json({ chats: [], messages: [], total: 0, offset: 0, limit: 50 }),
+  ) as unknown as typeof fetch;
   useAuthStore.setState({
     mode: "multi_user",
     status: "logged_in",
@@ -125,7 +137,7 @@ describe("useUserChatStore", () => {
     expect(String(spy.mock.calls[0][0])).toBe(`http://gw.test/api/users/${SELF}/chats`);
   });
 
-  it("opens a thread, posts the read receipt and clears the badge", async () => {
+  it("opens a thread and loads it WITHOUT acking — opening is not reading", async () => {
     const spy = stubFetch([
       {
         suffix: "/messages",
@@ -149,12 +161,12 @@ describe("useUserChatStore", () => {
     const state = useUserChatStore.getState();
     expect(state.activePeerId).toBe(PEER);
     expect(state.messages.map((m) => m.body)).toEqual(["hi"]);
-    expect(state.chats[0].unread_count).toBe(0);
-
-    const readCall = spy.mock.calls.find(([, init]) => init?.method === "POST");
-    expect(String(readCall?.[0])).toBe(
-      `http://gw.test/api/users/${SELF}/chats/${CHAT}/read`,
-    );
+    // The receipt is the renderer's call (`markThreadRead`), so merely
+    // opening must leave the badge alone.
+    expect(state.chats[0].unread_count).toBe(3);
+    expect(
+      spy.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(0);
   });
 
   it("keeps the Gateway's echo of a sent message and refetches the list", async () => {
@@ -383,31 +395,186 @@ describe("useUserChatStore", () => {
   });
 });
 
-describe("startPolling", () => {
+describe("session-owned poll loop", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("shares a single loop across callers and stops with the last release", async () => {
+  it("polls with zero components mounted and dies with the session", async () => {
+    // The `beforeEach` auth flip armed a *real* interval; disarm it and
+    // re-arm under fake timers, so the assertions below drive the loop the
+    // same way a running app does — by changing the session, never by
+    // mounting a view.
+    vi.useRealTimers();
+    useAuthStore.setState({ mode: "local", account: null });
     vi.useFakeTimers();
+
     const spy = stubFetch([
       { suffix: "/chats", make: () => json({ chats: [summary(1)] }) },
     ]);
-    const store = useUserChatStore.getState();
 
-    // The nav badge and the open inbox both want updates.
-    const releaseBadge = store.startPolling();
-    const releaseView = store.startPolling();
+    useAuthStore.setState({
+      mode: "multi_user",
+      status: "logged_in",
+      account: self,
+      accessToken: "at",
+    });
+    // Arming refreshes immediately rather than making the user wait out a
+    // full interval.
+    const armed = spy.mock.calls.length;
+    expect(armed).toBeGreaterThan(0);
 
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(spy).toHaveBeenCalledTimes(1); // one interval, not two
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(spy.mock.calls.length).toBe(armed + 1);
 
-    releaseBadge();
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(spy).toHaveBeenCalledTimes(2); // the view still holds it
+    // Sign out. Nothing here is a component unmount — this is the whole
+    // point: the loop's lifetime is the session's lifetime.
+    useAuthStore.setState({ mode: "local", account: null });
+    const stopped = spy.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(POLL_MS * 3);
+    expect(spy.mock.calls.length).toBe(stopped);
+  });
 
-    releaseView();
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(spy).toHaveBeenCalledTimes(2); // nothing left to poll for
+  it("polls the open thread too, and only that", async () => {
+    vi.useRealTimers();
+    useAuthStore.setState({ mode: "local", account: null });
+    vi.useFakeTimers();
+
+    const spy = stubFetch([
+      { suffix: "/chats", make: () => json({ chats: [summary(1)] }) },
+      {
+        suffix: "/messages",
+        method: "GET",
+        make: () =>
+          json({
+            chat_id: CHAT,
+            messages: [{ ts: 10, from: PEER, kind: "text", body: "hi" }],
+            total: 1,
+            offset: 0,
+            limit: 50,
+          }),
+      },
+    ]);
+
+    useAuthStore.setState({
+      mode: "multi_user",
+      status: "logged_in",
+      account: self,
+      accessToken: "at",
+    });
+    await useUserChatStore.getState().openChat(PEER);
+    spy.mockClear();
+
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    const urls = spy.mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => u.includes("/chats"))).toBe(true);
+    // The regression this replaces: an agent session being selected used to
+    // unmount the inbox, so this GET never happened and the message from
+    // another device simply never arrived.
+    expect(urls.some((u) => u.includes(`/chats/${CHAT}/messages`))).toBe(true);
+  });
+
+  it("is idempotent across repeated auth churn", () => {
+    vi.useRealTimers();
+    for (let i = 0; i < 4; i += 1) {
+      useAuthStore.setState({ mode: "multi_user", account: self, status: "logged_in", accessToken: "at" });
+      useAuthStore.setState({ mode: "local", account: null });
+    }
+    // No leaked interval: re-arming a stopped loop is the only way one exists.
+    useAuthStore.setState({ mode: "multi_user", account: self, status: "logged_in", accessToken: "at" });
+    syncPollLoop();
+    expect(() => syncPollLoop()).not.toThrow();
+    useAuthStore.setState({ mode: "local", account: null });
+  });
+});
+
+describe("markThreadRead", () => {
+  /** Load a one-message thread the way the renderer would see it. */
+  async function showThread(unread: number, readStatus = 204) {
+    const spy = stubFetch([
+      {
+        suffix: "/messages",
+        method: "GET",
+        make: () =>
+          json({
+            chat_id: CHAT,
+            messages: [{ ts: 10, from: PEER, kind: "text", body: "hi" }],
+            total: 1,
+            offset: 0,
+            limit: 50,
+          }),
+      },
+      { suffix: "/read", method: "POST", make: () => json(readStatus === 204 ? null : { error: "boom" }, readStatus) },
+      { suffix: "/chats", make: () => json({ chats: [summary(unread)] }) },
+    ]);
+    await useUserChatStore.getState().refreshChats();
+    await useUserChatStore.getState().openChat(PEER);
+    return spy;
+  }
+
+  it("acks what the renderer showed and clears the badge", async () => {
+    const spy = await showThread(1);
+    spy.mockClear();
+
+    await useUserChatStore.getState().markThreadRead();
+
+    expect(String(spy.mock.calls[0][0])).toBe(
+      `http://gw.test/api/users/${SELF}/chats/${CHAT}/read`,
+    );
+    expect(useUserChatStore.getState().chats[0].unread_count).toBe(0);
+  });
+
+  it("costs no request while the newest message is unchanged", async () => {
+    // The poll re-sets `messages` every 5 s even when nothing arrived; the
+    // receipt must not turn that into a POST every 5 s.
+    const spy = await showThread(2);
+    await useUserChatStore.getState().markThreadRead();
+    spy.mockClear();
+
+    await useUserChatStore.getState().markThreadRead();
+    await useUserChatStore.getState().markThreadRead();
+
+    expect(spy.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+  });
+
+  it("acks again when a newer message arrives", async () => {
+    const spy = await showThread(1);
+    await useUserChatStore.getState().markThreadRead();
+    useUserChatStore.setState({
+      messages: [
+        { ts: 10, from: PEER, kind: "text", body: "hi" },
+        { ts: 11, from: PEER, kind: "text", body: "there" },
+      ],
+    });
+    spy.mockClear();
+
+    await useUserChatStore.getState().markThreadRead();
+
+    expect(spy.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  });
+
+  it("retries a receipt the Gateway refused", async () => {
+    const spy = await showThread(1, 500);
+
+    await useUserChatStore.getState().markThreadRead();
+    const posts = () =>
+      spy.mock.calls.filter(([, init]) => init?.method === "POST").length;
+    expect(posts()).toBe(1);
+
+    spy.mockClear();
+    await useUserChatStore.getState().markThreadRead();
+    // A refused receipt must not be remembered as done, or the badge would
+    // stay cleared locally while the server still counts it. The failure is
+    // deliberately not surfaced as `error`: a background receipt is not the
+    // user's problem, and a banner here would blank a thread that loaded fine.
+    expect(posts()).toBe(1);
+    expect(useUserChatStore.getState().error).toBeNull();
+  });
+
+  it("does nothing when no thread is open", async () => {
+    const spy = stubFetch([{ suffix: "/read", method: "POST", make: () => json(null, 204) }]);
+    await useUserChatStore.getState().markThreadRead();
+    expect(spy).not.toHaveBeenCalled();
   });
 });

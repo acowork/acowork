@@ -301,7 +301,7 @@ export function ProfileTab() {
                 if (!avatarPopupOpen) computeAvatarPopupPos();
                 setAvatarPopupOpen((v) => !v);
               }}
-              className="relative block rounded-full ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+              className="relative block rounded-lg ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
             >
               <UserAvatar
                 size={64}
@@ -417,7 +417,7 @@ export function ProfileTab() {
                               src={BUILTIN_ICONS[iconId] ?? ""}
                               alt={iconId}
                               draggable={false}
-                              className="h-12 w-12 rounded-full object-cover"
+                              className="h-12 w-12 rounded-lg object-cover"
                             />
                           </button>
                         );
@@ -439,13 +439,24 @@ export function ProfileTab() {
               now right-click only and the profile page is the left-click
               target. `ml-auto` parks them on the row's trailing edge, well
               clear of the avatar + name. Hidden when there is no account to
-              act on (AUTH_MODE=local / not logged in). */}
+              act on (AUTH_MODE=local / not logged in).
+
+              The two buttons share the app's row-trailing-action grammar
+              (`inline-flex … gap-1 rounded btn-solid px-2 py-1 text-11
+              font-medium` — the same string as every Refresh / Check /
+              Add-Server button in settings + harness). They used to be
+              the app's only `btn-outline` users, which rendered them as
+              bordered ghost buttons against every other secondary action's
+              solid fill. `btn-solid` is also the neutral tone on purpose:
+              logout is a routing action here (AccountMenu.tsx renders it
+              neutral too), not a destructive one — 注销 / delete is what
+              carries danger, and that stays red. */}
           {loggedIn && (
             <div className="ml-auto flex flex-col gap-1.5">
               <button
                 type="button"
                 onClick={() => setChangePasswordOpen(true)}
-                className="flex items-center justify-center gap-1.5 rounded btn-outline px-2.5 py-1 text-xs"
+                className="inline-flex shrink-0 items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
               >
                 <KeyRound size={12} />
                 {t("account.changePassword")}
@@ -453,7 +464,7 @@ export function ProfileTab() {
               <button
                 type="button"
                 onClick={() => void useAuthStore.getState().logout()}
-                className="flex items-center justify-center gap-1.5 rounded btn-outline px-2.5 py-1 text-xs"
+                className="inline-flex shrink-0 items-center gap-1 rounded btn-solid px-2 py-1 text-11 font-medium"
               >
                 <LogOut size={12} />
                 {t("account.logout")}

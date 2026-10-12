@@ -567,7 +567,8 @@ export function AppLayout() {
   // effect runs `status` should already be `connected`. This single probe
   // is only a safety net for edge cases (remote-gateway mode, an older
   // Rust binary that skipped the probe, store state reset) and cannot
-  // flicker the indicator - <GatewayStatusChip /> only renders for `error`.
+  // flicker the indicator - the title-bar gateway button only changes
+  // shape for `error`-class steady-state outages.
   useEffect(() => {
     checkHealth();
     // eslint-disable-next-line react-hooks/exhaustive-deps

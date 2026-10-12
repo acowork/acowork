@@ -24,7 +24,7 @@ describe("computeContextUsageBreakdown", () => {
   it("maps debug sections into the five usage categories and normalizes to the billed total", () => {
     const result = computeContextUsageBreakdown(
       [
-        // MCP tools are already included by the backend in tool_definitions.
+        // Runtime built-in and MCP tools are exposed as separate categories.
         mockSection("system_prompt", 3_270),
         mockSection("identity_context", 250),
         mockSection("workspace_context", 100),
@@ -76,20 +76,20 @@ describe("computeContextUsageBreakdown", () => {
     });
   });
 
-  it("does not create a separate MCP category from an unmodeled MCP section", () => {
+  it("maps MCP tool definitions to the connectors category", () => {
     const result = computeContextUsageBreakdown(
       [
         mockSection("tool_definitions", 40),
-        mockSection("mcp", 60),
+        mockSection("connector_tool_definitions", 60),
       ],
       100,
     );
 
     expect(percentagesByKey(result)).toEqual({
-      system: 60,
+      system: 0,
       tools: 40,
       messages: 0,
-      connectors: 0,
+      connectors: 60,
       skills: 0,
     });
   });

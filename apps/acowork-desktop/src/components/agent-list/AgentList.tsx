@@ -581,7 +581,7 @@ export function AgentList({ width }: AgentListProps) {
       <div
         key={id}
         className={cn(
-          "relative flex cursor-pointer items-center rounded-md px-3 py-1.5 transition-colors duration-150",
+          "relative flex cursor-pointer items-center rounded-md px-3 py-2 transition-colors duration-150",
           isCollapsed ? "gap-0" : "gap-3",
           selectedAgentId === id
             ? "bg-[var(--color-accent)]/90 text-white"

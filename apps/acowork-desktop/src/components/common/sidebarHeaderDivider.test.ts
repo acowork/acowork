@@ -15,19 +15,23 @@
  */
 import { describe, it, expect } from "vitest";
 import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 const ROOT = resolve(__dirname, "..", "..", "..");
 
 describe("sidebar list-header band", () => {
   it("draws a border-b on every --ui-list-header-h band", () => {
-    const files = execSync(`git ls-files "src/**/*.tsx"`, {
+    const files = execSync(`git ls-files --cached --others --exclude-standard "src/**/*.tsx"`, {
       encoding: "utf8",
       cwd: ROOT,
     })
       .split("\n")
-      .filter((f) => f && !/\.test\.tsx?$/.test(f));
+      .filter((f) => f && !/\.test\.tsx?$/.test(f))
+      // `git ls-files` without --cached also lists index entries whose file
+      // is gone from the working tree; a deleted-but-unstaged component
+      // would then blow up the scan with ENOENT instead of a clean verdict.
+      .filter((f) => existsSync(resolve(ROOT, f)));
 
     const missing: string[] = [];
     let checked = 0;

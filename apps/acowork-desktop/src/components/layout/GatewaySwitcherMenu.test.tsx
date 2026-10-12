@@ -1,5 +1,7 @@
 /**
- * GatewaySwitcherMenu — the title-bar "minimized Settings ▸ Gateway".
+ * GatewaySwitcherMenu — the title-bar "minimized Settings ▸ Gateway", and
+ * (since it absorbed the old GatewayStatusChip) the app's only Gateway
+ * outage affordance.
  *
  * What this pins (each was a real way to get it wrong):
  *   1. The mode listbox is a FILTER, not a config editor. Selecting
@@ -7,13 +9,19 @@
  *      rebuilds MQTT, which would switch the connection out from under
  *      the user with no address chosen.
  *   2. Picking a row switches through `applyGatewayUrl` + `checkHealth`
- *      (the outage chip's entry point), NOT `setGatewayUrl`. `setGatewayUrl`
+ *      (the old chip's entry point), NOT `setGatewayUrl`. `setGatewayUrl`
  *      alone skips the relay→remote correction and the auth re-validation.
  *   3. The list is `gatewayUrlHistory` (URLs that actually connected) with
  *      the current URL forced to the front — a first-run install has a URL
  *      but no history, and the panel must not be empty then.
  *   4. Probing is per-row and local; the panel must not write into
- *      `gatewayStore.candidates`, which the outage chip owns.
+ *      `gatewayStore.candidates`, which the boot-time chooser owns.
+ *
+ * The outage block (formerly the chip) pins the parts that were easy to
+ * break while merging: the trigger changing shape without unmounting,
+ * visibility following `gatewayUnreachable` rather than `status ===
+ * "error"` (the classifier stays silent on a black-holed path), and the
+ * pill carrying no auto-dismiss.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -45,7 +53,12 @@ describe("GatewaySwitcherMenu", () => {
       gatewayUrl: "http://192.168.1.10:19876",
       gatewayUrlHistory: ["http://192.168.1.10:19876", "http://192.168.1.20:19876"],
     });
-    useGatewayStore.setState({ status: "connected", localState: "running", candidates: [] });
+    useGatewayStore.setState({
+      status: "connected",
+      localState: "running",
+      gatewayUnreachable: false,
+      candidates: [],
+    });
   });
 
   it("lists the current URL first, then recorded history", () => {
@@ -185,5 +198,112 @@ describe("GatewaySwitcherMenu", () => {
       fireEvent.keyDown(document, { key: "Escape" });
     });
     expect(screen.queryByRole("button", { name: /192\.168\.1\.20/ })).toBeNull();
+  });
+});
+
+/**
+ * Outage half of the merged trigger — everything here used to be pinned by
+ * GatewayStatusChip.test.tsx, which was deleted with the component. The
+ * behaviours are load-bearing, not cosmetic:
+ *   - the pill is the ONLY thing telling the user the app is cut off, so
+ *     it must not depend on the death classifier, which never fires on a
+ *     black-holed route;
+ *   - and it must never auto-dismiss, because a sleep/wake drop is still
+ *     broken until the user acts.
+ */
+describe("GatewaySwitcherMenu outage trigger", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    probeMock.mockImplementation(async () => []);
+    useSettingsStore.setState({
+      gatewayMode: "remote",
+      gatewayUrl: "http://192.168.1.10:19876",
+      gatewayUrlHistory: ["http://192.168.1.10:19876", "http://192.168.1.20:19876"],
+    });
+    useGatewayStore.setState({
+      status: "disconnected",
+      localState: "idle",
+      gatewayUnreachable: true,
+      candidates: [],
+    });
+  });
+
+  const pill = () => screen.getByRole("button", { expanded: false });
+
+  it("turns the trigger into a breathing amber pill on a drop", () => {
+    render(<GatewaySwitcherMenu />);
+    const btn = pill();
+    // No auto-dismiss anywhere — a sleep/wake drop is still broken until
+    // the user picks an address, so the pill must stay lit.
+    expect(btn.className).not.toMatch(/animate-\[.*fade/);
+    // Solid amber fill + pulsing icon: the fill carries the attention,
+    // the pulse marks the outage as live and unattended.
+    expect(btn.className).toContain("bg-amber-500");
+    expect(btn.querySelector(".animate-pulse")).toBeTruthy();
+  });
+
+  it("follows gatewayUnreachable, NOT the death classifier's status", () => {
+    // A classifier verdict alone must NOT raise the pill — the 5s budget
+    // lives in the connectivity module.
+    useGatewayStore.setState({ status: "error", gatewayUnreachable: false });
+    const { container, rerender } = render(<GatewaySwitcherMenu />);
+    expect(container.querySelector('[aria-label="Gateway Status"]')).toBeNull();
+    // ...and the inverse: unreachable raises it even though the
+    // classifier never wrote `error` — a black-holed path, exactly the
+    // outage that used to stay hidden for minutes.
+    act(() => useGatewayStore.setState({ status: "connecting", gatewayUnreachable: true }));
+    rerender(<GatewaySwitcherMenu />);
+    expect(screen.getByRole("button", { expanded: false })).toBeTruthy();
+  });
+
+  it("drops back to the plain glyph once recovery clears the signal", () => {
+    const { rerender } = render(<GatewaySwitcherMenu />);
+    expect(pill()).toBeTruthy();
+    act(() => useGatewayStore.setState({ gatewayUnreachable: false }));
+    rerender(<GatewaySwitcherMenu />);
+    expect(screen.queryByRole("button", { expanded: false, name: /Gateway Status/ })).toBeNull();
+    // Back to the ordinary switcher, still functional.
+    expect(openBtn()).toBeTruthy();
+  });
+
+  it("the pill opens the SAME popover the healthy glyph opens", async () => {
+    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
+      for (const url of urls) opts?.onSettled?.({ url, ok: url.endsWith(".20:19876"), latencyMs: 2 } as never);
+      return [];
+    });
+    render(<GatewaySwitcherMenu />);
+    fireEvent.click(pill());
+    // One list, not two: the old chip rendered its own candidate block
+    // above the menu's address list, offering the same URLs twice in two
+    // differently-decorated lists. The address list IS the candidate list.
+    const reachable = await screen.findByRole("button", { name: /192\.168\.1\.20/ });
+    expect((reachable as HTMLButtonElement).disabled).toBe(false);
+    // The outage reason is the one thing the list can't offer — it shows
+    // twice on purpose (pill + popover heading), matching the old chip's
+    // own "pill says it, popover repeats it" arrangement.
+    expect(screen.getAllByText(/unreachable|不可达|到達できません|연결할 수 없음/)).toHaveLength(2);
+    // Retry is available and is NOT the mode listbox.
+    fireEvent.click(screen.getByRole("button", { name: /Retry|重试|再試行|재시도/ }));
+    expect(probeMock.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("start button appears for a down local gateway, retry alone otherwise", () => {
+    render(<GatewaySwitcherMenu />);
+    fireEvent.click(pill());
+    // Remote outage: nothing to start, only retry.
+    expect(screen.queryByRole("button", { name: /Start Gateway|启动网关|啟動閘道/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Retry|重试|再試行|재시도/ })).toBeTruthy();
+  });
+
+  it("offers Start (not just Retry) when the local gateway is the one down", () => {
+    useSettingsStore.setState({ gatewayMode: "local" });
+    render(<GatewaySwitcherMenu />);
+    fireEvent.click(pill());
+    expect(screen.getByRole("button", { name: /Start Gateway|启动网关|啟動閘道/ })).toBeTruthy();
+    // A gateway already booting must not offer to boot again.
+    act(() => useGatewayStore.setState({ localState: "starting" }));
+    fireEvent.click(screen.getByRole("button", { name: /Retry|重试|再試行|재시도/ }));
+    expect(screen.queryByRole("button", { name: /Start Gateway|启动网关|啟動閘道/ })).toBeNull();
   });
 });

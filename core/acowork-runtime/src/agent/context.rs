@@ -1511,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_section_sizes_aggregates_optional_sections_and_mcp_tools() {
+    fn compute_section_sizes_separates_builtin_and_mcp_tools() {
         let mut history = HistoryManager::new(10_000);
         history.append(ChatMessage::user("hi"));
 
@@ -1572,13 +1572,13 @@ mod tests {
             prompt_file.len() as u64
         );
 
-        let tool_defs_size = lookup(&sections, "tool_definitions");
-        let only_builtin = serde_json::to_string(&vec![builtin_tool.clone()])
-            .unwrap()
-            .len() as u64;
-        assert!(
-            tool_defs_size > only_builtin,
-            "tool_definitions must include MCP tools; only_builtin={only_builtin}, total={tool_defs_size}"
+        assert_eq!(
+            lookup(&sections, "tool_definitions"),
+            serde_json::to_string(&vec![builtin_tool]).unwrap().len() as u64
+        );
+        assert_eq!(
+            lookup(&sections, "connector_tool_definitions"),
+            serde_json::to_string(&vec![mcp_tool]).unwrap().len() as u64
         );
 
         assert!(lookup(&sections, "messages") > 0);
@@ -1819,26 +1819,24 @@ pub fn compute_section_sizes(
         });
     }
 
-    // 3.5 Tool definitions (passed separately in ChatRequest.tools)
-    //
-    // Merge built-in tools (held on ContextBuilder) with MCP tools (held
-    // on AgentCore, plumbed through by the caller). MCP tools are
-    // typically a few KB — undercounting them would skew the `tools`
-    // category percentage in the input-box popup, so we serialize the
-    // union and account for both.
-    let mut all_defs: Vec<serde_json::Value> = builder
-        .tool_definitions()
-        .map(|defs| defs.to_vec())
-        .unwrap_or_default();
-    if !mcp_tools.is_empty() {
-        all_defs.extend(mcp_tools.iter().cloned());
-    }
-    if !all_defs.is_empty() {
-        let size = serde_json::to_string(&all_defs)
+    // 3.5 Tool definitions (passed separately in ChatRequest.tools).
+    // Keep MCP definitions separate so the usage popup can distinguish
+    // connector-provided tools from Runtime built-ins.
+    if let Some(defs) = builder.tool_definitions().filter(|defs| !defs.is_empty()) {
+        let size = serde_json::to_string(defs)
             .map(|s| s.len())
             .unwrap_or(0) as u64;
         out.push(ContextUsageSection {
             key: "tool_definitions".to_string(),
+            size_bytes: size,
+        });
+    }
+    if !mcp_tools.is_empty() {
+        let size = serde_json::to_string(mcp_tools)
+            .map(|s| s.len())
+            .unwrap_or(0) as u64;
+        out.push(ContextUsageSection {
+            key: "connector_tool_definitions".to_string(),
             size_bytes: size,
         });
     }

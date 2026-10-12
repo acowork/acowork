@@ -904,13 +904,11 @@ pub struct ContextUsageInfo {
 ///
 /// Section keys (`system_prompt`, `identity_context`, `workspace_context`,
 /// `retrieved_memory`, `skill_instructions`, `environment`,
-/// `workspace_prompt_file`, `tool_definitions`, `messages`,
-/// `ambiguous_confirmation_hint`, `abstention_prompt`)
+/// `workspace_prompt_file`, `tool_definitions`, `connector_tool_definitions`,
+/// `messages`, `ambiguous_confirmation_hint`, `abstention_prompt`)
 /// match the keys surfaced by `compute_section_sizes` in
-/// `acowork-runtime/src/agent/context.rs` (ADR-067). Note: `todo_context`
-/// is intentionally absent — ADR-060 v2 removed the standalone todo block
-/// from the system prompt, so todo state lives only inside the `messages`
-/// tool results and is counted there.
+/// `acowork-runtime/src/agent/context.rs` (ADR-067). `tool_definitions` are
+/// Runtime built-ins; `connector_tool_definitions` are MCP tools.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextUsageSection {
     /// Section key, e.g. `"system_prompt"`, `"messages"`. Stable across

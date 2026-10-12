@@ -8,9 +8,26 @@
  * `min__max` pair and an unread count. Merging them would branch ~3900
  * lines on "is this an agent or a person".
  *
- * Transport is plain HTTP + a poll while the view is mounted (there is no
- * MQTT topic for user chat — ADR-076 §决策 8 puts the whole feature on the
- * Gateway's HTTP surface).
+ * Transport is plain HTTP + a poll (there is no MQTT topic for user chat —
+ * ADR-076 §决策 8 puts the whole feature on the Gateway's HTTP surface).
+ *
+ * The poll is owned by **this module**, not by a component: it runs exactly
+ * while a `multi_user` session is signed in, driven by an [authStore](authStore.ts)
+ * subscription. That is a deliberate correction, not a convenience. The loop
+ * used to be mounted by whichever view rendered the inbox (`NavBar`, then a
+ * full-screen `MessagesView`, then `InboxPanel`); each refactor moved the
+ * `useEffect` along with the JSX and nobody noticed that the host's lifetime
+ * had quietly changed from "while signed in" to "while this pane happens to
+ * be the rendered one". `InboxPanel` is gated on `currentView === "chat"` *and*
+ * `selectedAgentId === null`, so opening an agent session stopped the poll
+ * entirely — a message sent from another device then never arrived. A data
+ * loop must not live in the render tree, because the render tree is exactly
+ * what refactors move.
+ *
+ * Read marking is the opposite case and stays with the renderer: only the
+ * component that paints the messages knows the user saw them. See
+ * `markThreadRead`. If a future refactor ever orphans *that*, the damage is a
+ * lagging badge, never silent data loss — which is the whole point of the split.
  */
 
 import { create } from "zustand";
@@ -66,11 +83,13 @@ interface UserChatState {
    */
   send: (body: string, attachmentIds?: string[]) => Promise<boolean>;
   /**
-   * Ref-counted poll loop: starts on the first caller (the nav badge, the
-   * open inbox) and stops when the last one releases. Returns the release
-   * function — call it from the effect cleanup.
+   * Ack the open thread as read. Called by whoever *renders* it, on every
+   * change to the visible message list — see the module doc for why this is
+   * the renderer's job while the poll is not. Idempotent per message: a
+   * thread already acked through its newest message costs no request, so a
+   * 5 s poll does not become a 5 s POST storm.
    */
-  startPolling: () => () => void;
+  markThreadRead: () => Promise<void>;
   reset: () => void;
 }
 
@@ -79,11 +98,45 @@ export function chatIdOf(a: string, b: string): string {
   return [a, b].sort().join("__");
 }
 
-/** Poll cadence. One interval exists at a time, however many callers. */
+/** Poll cadence. Exactly one loop exists, keyed on the session, not on a view. */
 export const POLL_MS = 5000;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let pollRefs = 0;
+
+/**
+ * Newest message `ts` already acked per peer. Guards `markThreadRead` against
+ * re-POSTing for a thread that has not changed since the last look.
+ */
+const ackedThrough = new Map<string, number>();
+
+/**
+ * Start, stop or leave the poll loop so that it matches the session.
+ *
+ * Idempotent and cheap: it only touches the timer when the "should the poll
+ * run" predicate actually flips. Exported for tests, which drive it by moving
+ * `authStore` through login/logout rather than by mounting anything.
+ */
+export function syncPollLoop(): void {
+  const shouldRun = selfId() != null;
+  if (shouldRun === (pollTimer != null)) return;
+
+  if (shouldRun) {
+    pollTimer = setInterval(() => {
+      const current = useUserChatStore.getState();
+      void current.refreshChats();
+      if (current.activePeerId) void current.reloadMessages();
+    }, POLL_MS);
+    // A sign-in should show the inbox immediately; making the user wait out
+    // the first full interval is how "it only updates when I poke it" feels.
+    void useUserChatStore.getState().refreshChats();
+  } else {
+    if (pollTimer != null) clearInterval(pollTimer);
+    pollTimer = null;
+    // `reset` also drops the per-peer ack memory: a new session must not
+    // inherit "already read" for a thread it has never shown.
+    useUserChatStore.getState().reset();
+  }
+}
 
 /** The signed-in user's id, or null when the account system is off. */
 function selfId(): string | null {
@@ -134,20 +187,12 @@ export const useUserChatStore = create<UserChatState>((set, get) => ({
       pendingAttachments: [],
       error: null,
     });
+    // No read receipt here on purpose. Opening a thread does not mean the
+    // user read it — the renderer that paints these messages acks them via
+    // `markThreadRead`, which also covers every message that arrives later
+    // while the thread stays open (the old `openChat`-only ack is why a
+    // badge sat at 1 forever while the poll happily delivered the message).
     await get().reloadMessages();
-
-    // Read receipt. A failure here must not blank the thread — the badge
-    // just stays until the next poll.
-    try {
-      await markChatRead(self, chatIdOf(peerId, self));
-      set((s) => ({
-        chats: s.chats.map((c) =>
-          c.peer_user_id === peerId ? { ...c, unread_count: 0 } : c,
-        ),
-      }));
-    } catch {
-      /* badge stays */
-    }
   },
 
   closeChat: () =>
@@ -239,29 +284,44 @@ export const useUserChatStore = create<UserChatState>((set, get) => ({
     }
   },
 
-  reset: () => set({ ...EMPTY }),
+  reset: () => {
+    ackedThrough.clear();
+    set({ ...EMPTY });
+  },
 
-  startPolling: () => {
-    pollRefs += 1;
-    if (pollTimer == null) {
-      pollTimer = setInterval(() => {
-        const current = get();
-        void current.refreshChats();
-        if (current.activePeerId) void current.reloadMessages();
-      }, POLL_MS);
+  markThreadRead: async () => {
+    const self = selfId();
+    const peerId = get().activePeerId;
+    if (!self || !peerId) return;
+    const messages = get().messages;
+    if (messages.length === 0) return;
+
+    // Ack once per message. The poll re-sets `messages` every tick even when
+    // nothing arrived, so without this the visible thread would POST every
+    // 5 s for the rest of the session.
+    const newest = messages.reduce((n, m) => (m.ts > n ? m.ts : n), 0);
+    if (ackedThrough.get(peerId) === newest) return;
+
+    // Clear the badge with the paint that made the messages visible, then
+    // tell the Gateway. A failed receipt leaves the optimistic zero in place
+    // until the next `refreshChats` re-reads the server's count — the badge
+    // may briefly come back, which beats a dot that never clears.
+    set((s) => ({
+      chats: s.chats.map((c) =>
+        c.peer_user_id === peerId ? { ...c, unread_count: 0 } : c,
+      ),
+    }));
+    ackedThrough.set(peerId, newest);
+    try {
+      await markChatRead(self, chatIdOf(peerId, self));
+    } catch {
+      ackedThrough.delete(peerId); // let the next look retry
     }
-
-    let released = false;
-    return () => {
-      // Guard the double-release a React 18 double-invoked effect would cause.
-      if (released) return;
-      released = true;
-      pollRefs -= 1;
-      if (pollRefs <= 0 && pollTimer != null) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-        pollRefs = 0;
-      }
-    };
   },
 }));
+
+// The poll's host is the session, so the subscription lives here rather than
+// in any component. The immediate call covers a session that was already
+// restored before this module was first imported.
+useAuthStore.subscribe(syncPollLoop);
+syncPollLoop();

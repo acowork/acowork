@@ -133,24 +133,13 @@ function App() {
     return unsub;
   }, []);
 
-  // Steady-state drop (laptop woke from sleep / switched Wi-Fi) →
-  // probe the rest of URL history so the GatewayStatusChip can offer
-  // reachable candidates.
-  //
-  // We probe on EVERY `connected → *` transition into a non-connected
-  // state (the "we were fine, now we're not" family). The banner owns
-  // its own re-probe on retry so we don't double-fire. We skip
-  // `connecting` because that's the user mid-edit. To stay robust
-  // against the case where /health stays "ok" while the network is
-  // actually dead (caching, intermediate proxy) we also probe on the
-  // chip's own trigger — see GatewayStatusChip.
-  //
-  // The banner component drives its own probe lifecycle (on mount +
-  // on retry click), which is the simpler and more reliable hook than
-  // trying to enumerate every transition. The subscriber here exists
-  // for one specific case: the banner mounts AFTER a transition has
-  // already happened, so we need the candidate set up before the
-  // banner's first paint.
+  // NOTE: a steady-state drop (laptop woke from sleep / switched Wi-Fi)
+  // used to fire a background candidate probe from here, so the title-bar
+  // outage chip could list reachable addresses before the user clicked it.
+  // That chip is gone: the outage now surfaces on the gateway switcher
+  // button itself, and that menu probes the history when opened. Nothing
+  // is lost — the probe runs when the user asks for it instead of eagerly
+  // burning the network on a state they may never look at.
 
   // Gateway boot is the first stage of EVERY topology — a fresh install
   // included. It used to be gated on `onboardingDone`, which broke the

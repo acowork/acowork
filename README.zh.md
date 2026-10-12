@@ -1,4 +1,4 @@
-<h1 align="center">ACowork — AI与人的协作平台</h1>
+<h1 align="center">ACowork — AI agents协作平台</h1>
 
 <p align="center">
   <img src="assets/brand-mark.svg" alt="ACowork" width="360">
@@ -357,6 +357,6 @@ Apache-2.0 —— 详见 [`LICENSE`](./LICENSE)。
 ---
 
 <p align="center">
-  <b>ACowork — 和你的AI智能体伙伴一起协作</b><br>
+  <b>ACowork — AI agents协作平台</b><br>
   <i>一个为人与AI智能体协作打造的一站式平台。</i>
 </p>

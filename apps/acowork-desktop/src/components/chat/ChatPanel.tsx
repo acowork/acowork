@@ -1459,15 +1459,38 @@ export function ChatPanel() {
   };
 
   // Stop button dual-action:
-  //   input has content → send to queue (no stop, message waits for next loop)
-  //   input empty       → stop current loop
-  const handleStop = async () => {
+  //   input/attachments present → queue the complete message
+  //   input empty             → send queued messages + stop, or just stop
+  const queueCurrentInput = () => {
     const content = session.inputValue.trim();
-    if (content && selectedAgentId && currentSessionId) {
-      // Add to queue — message waits in the queue box above the input area.
-      useChatStore.getState().addQueuedMessage(selectedAgentId, currentSessionId, content);
-      session.setInputValue("");
-    } else if (queuedMessages.length > 0 && selectedAgentId && currentSessionId) {
+    const pending = session.pendingAttachedItems;
+    const hasUploading = pending.some((p) => p.status === "uploading");
+    const attachedItems = pending
+      .filter((p) => p.status === "success" && p.item !== undefined)
+      .map((p) => p.item!);
+    if (
+      hasUploading
+      || (!content && attachedItems.length === 0)
+      || !selectedAgentId
+      || !currentSessionId
+    ) return false;
+
+    useChatStore.getState().addQueuedMessage(selectedAgentId, currentSessionId, {
+      content,
+      attachedItems,
+    });
+    session.setInputValue("");
+    session.setPendingAttachedItems((prev) => prev.filter((p) => p.status !== "success"));
+    return true;
+  };
+
+  const handleStop = async () => {
+    const hasDraft = session.inputValue.trim().length > 0 || session.pendingAttachedItems.length > 0;
+    if (hasDraft) {
+      if (session.pendingAttachedItems.some((p) => p.status === "uploading")) return;
+      if (queueCurrentInput()) return;
+    }
+    if (queuedMessages.length > 0 && selectedAgentId && currentSessionId) {
       // Click with queued messages: send all queued + stop current loop.
       const msgs = [...queuedMessages];
       useChatStore.getState().setQueuedMessages(selectedAgentId, currentSessionId, []);
@@ -1482,7 +1505,7 @@ export function ChatPanel() {
       }
 
       for (const msg of msgs) {
-        void sendMessage(msg, selectedAgentId, activeSkill?.name).then(() => {
+        void sendMessage(msg.content, selectedAgentId, activeSkill?.name, msg.attachedItems).then(() => {
           clearActiveSkill();
         });
       }
@@ -1516,7 +1539,18 @@ export function ChatPanel() {
   };
 
   const handleEditQueued = (index: number) => {
-    session.setInputValue(queuedMessages[index]);
+    const queued = queuedMessages[index];
+    session.setInputValue(queued.content);
+    if (queued.attachedItems.length > 0) {
+      session.setPendingAttachedItems((prev) => [
+        ...prev,
+        ...queued.attachedItems.map((item) => ({
+          tempId: `queued-${crypto.randomUUID()}`,
+          status: "success" as const,
+          item,
+        })),
+      ]);
+    }
     if (selectedAgentId && currentSessionId) {
       useChatStore.getState().removeQueuedMessage(selectedAgentId, currentSessionId, index);
     }
@@ -2178,7 +2212,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
       const msgs = [...queuedMessages];
       useChatStore.getState().setQueuedMessages(selectedAgentId, currentSessionId, []);
       for (const msg of msgs) {
-        void sendMessage(msg, selectedAgentId);
+        void sendMessage(msg.content, selectedAgentId, activeSkill?.name, msg.attachedItems);
       }
     }
   }, [sending]);
@@ -2797,8 +2831,8 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
                   className={`group flex items-start gap-1.5 px-2.5 py-1.5 border-b border-border-divider last:border-b-0 ${listRowHover}`}
                 >
                   <span className="shrink-0 text-10 mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
-                  <span className="flex-1 min-w-0 text-xs text-text-secondary  truncate leading-relaxed">
-                    {msg}
+                  <span className="flex-1 min-w-0 text-xs text-text-secondary truncate leading-relaxed">
+                    {msg.content || msg.attachedItems.map((item) => item.type === "file_upload" || item.type === "image_upload" ? item.filename : item.name).join(", ")}
                   </span>
                   <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
@@ -2971,17 +3005,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
                 handleSend();
                 return;
               }
-              // Sending: queue the input so it waits for the next loop iteration.
-              // Empty input → no-op (do not enqueue an empty string).
-              const content = session.inputValue.trim();
-              if (content && selectedAgentId && currentSessionId) {
-                useChatStore.getState().addQueuedMessage(
-                  selectedAgentId,
-                  currentSessionId,
-                  content,
-                );
-                session.setInputValue("");
-              }
+              queueCurrentInput();
             }}
             onCompositionEnd={() => {
               lastCompositionEndRef.current = Date.now();
@@ -3064,15 +3088,15 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
                 per-button fold because its text-vs-icon delta is what
                 progressive collapse is for. */}
             <div data-toolbar-cluster="right" className="flex shrink-0 items-center gap-1">
+              {/* Context usage icon — shown when session is active */}
+              {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
+
               {/* ADR-076 §决策 4: per-session read visibility (owner only).
                   Icon-only, so it rides with the other icon-only right-cluster
                   controls and stays out of the collapsible text row. */}
               {selectedAgentId && currentSessionId && (
                 <SessionVisibilityToggle agentId={selectedAgentId} sessionId={currentSessionId} />
               )}
-
-              {/* Context usage icon — shown when session is active */}
-              {selectedAgentId && currentSessionId && <ContextUsageIcon agentId={selectedAgentId} sessionId={currentSessionId} />}
 
               {/* File upload button — single entry point for documents and images.
                   Placed adjacent to send so attachments sit with the action that

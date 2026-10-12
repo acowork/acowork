@@ -331,6 +331,11 @@ function getUserSenderInfo(): { senderDisplayName?: string } {
 // ---------------------------------------------------------------------------
 
 /** State for a single conversation session within an agent. */
+export interface QueuedMessage {
+  content: string;
+  attachedItems: AttachedItem[];
+}
+
 interface SessionChatState {
   messages: ChatMessage[];
   tokenUsage: TokenUsage | null;
@@ -408,7 +413,7 @@ interface SessionChatState {
   /** Per-session todo list (from todo_write tool) */
   todos: TodoItem[];
   /** Per-session queued messages (typed during streaming, sent when agent becomes idle) */
-  queuedMessages: string[];
+  queuedMessages: QueuedMessage[];
   /** Per-session selected model */
   model: string | null;
   /** Per-session selected provider */
@@ -580,6 +585,77 @@ const inflightOpens = new Map<string, Promise<void>>();
 // early on `isLoadingMore`) keeps every caller honest: each one waits
 // for the reload it asked about.
 const inflightLatest = new Map<string, Promise<void>>();
+
+// ── Single-flight transcript realignment (ADR-050 §16.3) ──────────────
+const inflightRealign = new Map<string, Promise<unknown>>();
+
+/**
+ * Re-fetch the tail page when the authoritative record count says our view
+ * has diverged from the transcript.
+ *
+ * WHY THIS EXISTS: the live event path is deliberately role-incomplete —
+ * `user` records are never pushed (the sender renders them optimistically,
+ * and the Runtime persists them under the frontend-generated id precisely
+ * so a re-fetch can dedupe by id; see `append_message_with_id` in
+ * core/acowork-runtime/src/agent/loop_.rs).  MQTT delivery is also
+ * best-effort, so a `record_complete` can be lost (ADR-035).  The invariant
+ * "every persisted record eventually reaches every client" therefore cannot
+ * rest on the event path alone — it needs a reconciliation keyed on DATA.
+ * The retained `session_state` snapshot already carries the authoritative
+ * `message_count`, so divergence is detectable without new plumbing.
+ *
+ * The rule is deliberately NOT keyed on the agent lifecycle: "a turn ended"
+ * is only a proxy for "records appeared", and a proxy silently stops
+ * covering sources it was never told about.  Keying on the count covers
+ * remote-origin user records, lost events, reconnect gaps, and any future
+ * record source with one condition instead of a case per source.
+ *
+ * Safe by construction against the duplicate-bubble regression this design
+ * guards: `loadSessionMessages` merges through `mergeMessageWindow`, which
+ * dedupes by message id, so the sender's optimistic entry collapses into
+ * the server copy instead of doubling.
+ *
+ * Not gated on visibility: background caches are maintained live by
+ * `record_complete`, and `ensureLatestInCache` short-circuits on the LOCAL
+ * `messageTotal` — so a diverged background session would look tail-covered
+ * on open and never heal.  Realigning here keeps the local count honest.
+ */
+function realignOnDivergence(
+  agentId: string,
+  sessionId: string,
+  serverTotal: number,
+): void {
+  if (!Number.isFinite(serverTotal) || serverTotal <= 0) return;
+  const key = `${agentId}:${sessionId}`;
+  if (inflightRealign.has(key)) return;
+  const ss = useChatStore.getState().agentStates[agentId]?.sessionStates[sessionId];
+  if (!ss) return;
+  // A load is already in flight for this session (pagination / open /
+  // jump-to-tail).  `loadSessionMessages` aborts the previous controller,
+  // so firing now would throw away the page that load was fetching.
+  if (ss.isLoadingMore || ss.isLoadingSession) return;
+  // Same at-tail expression as the `record_complete` handler: a reader
+  // parked mid-history is never yanked to the tail — their `scrollToBottom`
+  // already loads the newest page.  A stale cache's cursor is untrustworthy.
+  const atTail =
+    isAtTail(ss.messageOffset, ss.messageLimit, ss.messageTotal) && !ss.messagesStale;
+  if (!atTail) return;
+  // No divergence.  A transiently HIGHER local total is normal: the
+  // optimistic send bumps it before the record is persisted.
+  if (serverTotal <= ss.messageTotal) return;
+
+  log.info(
+    `[ChatStore] transcript diverged (server=${serverTotal} local=${ss.messageTotal}), ` +
+      `realigning tail for ${sessionId}`,
+  );
+  const promise = useChatStore
+    .getState()
+    .loadSessionMessages(agentId, sessionId)
+    .finally(() => {
+      inflightRealign.delete(key);
+    });
+  inflightRealign.set(key, promise);
+}
 
 // ── Spinner ownership ────────────────────────────────────────────────
 // `isLoadingSession` is owned by the load that raised it (`loadOwnerSeq`).
@@ -1011,7 +1087,7 @@ interface ChatStore {
   /** Clear all attached chat context for a session */
   clearAttachedContext: (agentId: string, sessionId: string) => void;
   /** Add a message to the per-session queue (typed during streaming) */
-  addQueuedMessage: (agentId: string, sessionId: string, message: string) => void;
+  addQueuedMessage: (agentId: string, sessionId: string, message: QueuedMessage) => void;
   /** Remove a single attachment entry from the in-memory message list.
    *
    *  Each ADR-046 attachment (file_upload / image_upload / attached_*)
@@ -1027,7 +1103,7 @@ interface ChatStore {
   /** Remove a message from the per-session queue by index */
   removeQueuedMessage: (agentId: string, sessionId: string, index: number) => void;
   /** Replace the entire per-session queue (e.g. after sending all) */
-  setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => void;
+  setQueuedMessages: (agentId: string, sessionId: string, messages: QueuedMessage[]) => void;
   /** Dismiss the server-side error banner. */
   clearServerError: (agentId: string, sessionId: string) => void;
   /** ADR-047: Pull session state (status/ratio/todos/context_usage) from backend.
@@ -2820,7 +2896,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => updateSessionState(state, agentId, sessionId, { attachedContext: [] }));
   },
 
-  addQueuedMessage: (agentId: string, sessionId: string, message: string) => {
+  addQueuedMessage: (agentId: string, sessionId: string, message: QueuedMessage) => {
     set((state) => {
       const ss = getSessionState(state, agentId, sessionId);
       return updateSessionState(state, agentId, sessionId, {
@@ -2847,7 +2923,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     });
   },
 
-  setQueuedMessages: (agentId: string, sessionId: string, messages: string[]) => {
+  setQueuedMessages: (agentId: string, sessionId: string, messages: QueuedMessage[]) => {
     set((state) => updateSessionState(state, agentId, sessionId, { queuedMessages: messages }));
   },
 
@@ -3460,21 +3536,21 @@ export function handleMessageEvent(
       const usage = data.usage as TokenUsage | undefined;
 
       // ADR-025: The done event marks that the backend has finished
-      // processing the run.  Do NOT start a separate incremental poll
-      // here — that was the root cause of the missing-segments bug.
+      // processing the run.  Do NOT start a fire-and-forget transcript
+      // re-fetch here — that was the root cause of the missing-segments
+      // bug, and the race still applies to any tail fetch:
       //
-      // Starting a fire-and-forget poll here caused a race: it
-      // increments loadSequence, aborts an in-flight doPoll, and its
-      // own response may arrive before the backend has flushed the last
-      // JSONL lines.  When streaming is null in that response, ALL
-      // streaming placeholders are dropped — but their JSONL
-      // replacements haven't arrived yet, so the last few
-      // toolcall/thought/assistant segments vanish.
+      // it increments loadSequence, aborts an in-flight load, and its own
+      // response may arrive before the backend has flushed the last JSONL
+      // lines.  The old incremental poll then saw `streaming: null` and
+      // dropped ALL streaming placeholders — but their JSONL replacements
+      // hadn't arrived yet, so the last few toolcall/thought/assistant
+      // segments vanished.
       //
-      // Instead, session_state → idle does a single definitive
-      // final incremental poll before stopping the poll cycle.  Idle
-      // guarantees the backend has flushed everything, so the final
-      // poll always gets complete data.
+      // Transcript reconciliation is owned by `realignOnDivergence`
+      // (ADR-050 §16.3), which is keyed on the authoritative
+      // `message_count` in the session_state snapshot rather than on this
+      // event, and merges by message id instead of replacing the window.
       set((state) => {
         const ss = getSessionState(state, agentId, sid!);
         return {
@@ -4000,27 +4076,28 @@ export function handleMessageEvent(
             // live in chatAdapterStore now.  The adapter also owns the
             // activeStream tracker, so the "record_complete lost" recovery
             // path delegates to `releaseAdapterSession` to drop the stale
-            // tracker before the HTTP realignment fires.
+            // tracker; the HTTP realignment itself is owned by
+            // `realignOnDivergence` below (see the ADR-035 note there).
             if (prev.sessionStatus?.status !== "idle" && status.status === "idle") {
               sessionPatch.pendingApproval = {};
               sessionPatch.pendingQuestions = [];
 
-              // ADR-035 C2/O2: if activeStream still has unfrozen content
-              // at idle, record_complete was lost (QoS edge case). Trigger
-              // HTTP full realignment to recover.  The tracker itself now
-              // lives in chatAdapterStore; we delegate cleanup to the
-              // adapter and then run the realignment from chatStore.
+              // ADR-035 C2/O2: if activeStream still has unfrozen content at
+              // idle, record_complete was lost (QoS edge case).  Drop the
+              // stale tracker so it cannot re-inject half-frozen text.  The
+              // bespoke tail re-fetch this branch used to fire is gone: a
+              // lost record_complete leaves the local count short of the
+              // server's, which is exactly the divergence
+              // `realignOnDivergence` detects — one data-keyed rule instead
+              // of a second lifecycle-keyed one.
               const adapter = getChatAdapterSession(agentId, sid);
               if (adapter.isThinking || adapter.isAssistantReplying) {
                 log.warn(
                   `[ChatStore] ADR-035 C2: adapter still streaming at idle ` +
                   `(isThinking=${adapter.isThinking}, isAssistantReplying=${adapter.isAssistantReplying}) ` +
-                  ` - record_complete likely lost, triggering HTTP realignment`,
+                  ` - record_complete likely lost, releasing tracker`,
                 );
                 releaseAdapterSession(agentId, sid);
-                queueMicrotask(() => {
-                  get().loadSessionMessages(agentId, sid);
-                });
               }
             }
 
@@ -4036,6 +4113,14 @@ export function handleMessageEvent(
             }
             return { agentStates };
           });
+
+          // ADR-050 §16.3: data-driven transcript realignment.  Runs after
+          // the reducer so the divergence test reads the patch we just
+          // applied, and outside it because a fetch is a side effect.
+          const serverTotal = data.message_count;
+          if (typeof serverTotal === "number") {
+            realignOnDivergence(agentId, sid, serverTotal);
+          }
         }
       }
       break;
