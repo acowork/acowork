@@ -843,6 +843,7 @@
     "mcpToggleDesc": "Toggle MCP servers for this agent. Add more in Harness > MCP tab.",
     "mcpToggleError": "Failed to update MCP servers: {{error}}",
     "savingChanges": "Saving {{count}} change(s)...",
+    "changesNotSaved": "{{count}} change(s) not saved yet...",
     "allChangesSaved": "All changes saved",
     "resetToDefaults": "Reset",
     "resetAgentSetup": "Reset Agent Setup",

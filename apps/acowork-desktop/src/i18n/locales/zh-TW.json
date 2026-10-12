@@ -571,6 +571,7 @@
     "mcpToggleDesc": "切換此 Agent 的 MCP 伺服器。在 Harness > MCP 標籤頁新增更多伺服器。",
     "mcpToggleError": "MCP 伺服器更新失敗：{{error}}",
     "savingChanges": "正在儲存 {{count}} 項變更...",
+    "changesNotSaved": "{{count}} 項變更尚未儲存...",
     "allChangesSaved": "所有變更已儲存",
     "resetToDefaults": "恢復預設",
     "resetAgentSetup": "重設 Agent 設定",
