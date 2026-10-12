@@ -618,7 +618,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                         <img src={brandMark} alt={t("splashScreen.altLogo")} width="360" />
                     </h1>
                     <p className="text-sm font-medium uppercase tracking-[0.25em] text-text-tertiary ">
-                        Collaborate with your AI colleagues
+                        Collaborate with your colleagues and AI agents
                     </p>
                 </div>
 

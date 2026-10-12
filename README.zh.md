@@ -1,4 +1,4 @@
-<h1 align="center">ACowork.AI — AI与人的协作平台</h1>
+<h1 align="center">ACowork — AI与人的协作平台</h1>
 
 <p align="center">
   <img src="assets/brand-mark.svg" alt="ACowork" width="360">
@@ -43,9 +43,9 @@
 
 ---
 
-## ACowork.AI 是什么？
+## ACowork 是什么？
 
-ACowork.AI 是一个**多用户、分布式、AI 原生的协作平台**。它把团队成员、AI agent、项目与文档统一装进同一个
+ACowork 是一个**多用户、分布式、AI 原生的协作平台**。它把团队成员、AI agent、项目与文档统一装进同一个
 运行时——规划工作、撰写文档、评审代码、交付功能，都可以像和人类队友协作一样和 Agent 并肩完成。
 
 - **多用户优先**。真实的账号、角色、会话与按用户的审计轨迹，不再是单 actor 的 demo 形态。
@@ -129,7 +129,7 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 ### 系统架构
 
 <p align="center">
-  <img src="./assets/architecture.svg" alt="ACowork.AI 系统架构" width="100%" />
+  <img src="./assets/architecture.svg" alt="ACowork 系统架构" width="100%" />
 </p>
 
 ---
@@ -330,7 +330,7 @@ tools = ["rag_query", "read_file", "write_file"]
 
 ## 🧪 参考与致谢
 
-ACowork.AI 的设计深受以下开源项目启发：
+ACowork 的设计深受以下开源项目启发：
 
 - [ZeroClaw 🦀](https://github.com/zeroclaw-labs/zeroclaw) — Trait 驱动运行时、安全装饰器、流式解析
 - [Grafeo](https://github.com/GrafeoDB/grafeo) — HNSW 向量索引、BM25 全文检索、混合搜索
@@ -357,6 +357,6 @@ Apache-2.0 —— 详见 [`LICENSE`](./LICENSE)。
 ---
 
 <p align="center">
-  <b>ACowork.AI — AI与人的协作平台</b><br>
-  <i>像组建团队一样构建和协作 AI 伙伴。</i>
+  <b>ACowork — 和你的AI智能体伙伴一起协作</b><br>
+  <i>一个为人与AI智能体协作打造的一站式平台。</i>
 </p>

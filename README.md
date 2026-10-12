@@ -1,4 +1,4 @@
-<h1 align="center">ACowork.AI — Collaborate with your colleagues and agents</h1>
+<h1 align="center">ACowork — Collaborate with your colleagues and AI agents</h1>
 
 <p align="center">
   <img src="assets/brand-mark.svg" alt="ACowork" width="360">
@@ -43,9 +43,9 @@
 
 ---
 
-## What is ACowork.AI?
+## What is ACowork?
 
-ACowork.AI is a **multi-user, distributed, AI-native collaboration platform**. It brings together people, AI
+ACowork is a **multi-user, distributed, AI-native collaboration platform**. It brings together people, AI
 agents, projects, and documents into one runtime — so a team can plan work, write specs, review code, and ship
 features alongside their agents the same way they would alongside a human teammate.
 
@@ -134,7 +134,7 @@ through the same REST + MCP surface that humans use:
 ### System Architecture
 
 <p align="center">
-  <img src="./assets/architecture.svg" alt="ACowork.AI System Architecture" width="100%" />
+  <img src="./assets/architecture.svg" alt="ACowork System Architecture" width="100%" />
 </p>
 
 ---
@@ -341,7 +341,7 @@ not writing imperative code. The whole pipeline from authoring to publishing is 
 
 ## 🧪 References & Acknowledgments
 
-ACowork.AI's design draws inspiration from:
+ACowork's design draws inspiration from:
 
 - [ZeroClaw 🦀](https://github.com/zeroclaw-labs/zeroclaw) — trait-driven runtime, security decorators, streaming parser
 - [Grafeo](https://github.com/GrafeoDB/grafeo) — HNSW vector index, BM25 full-text search, hybrid search
@@ -368,6 +368,6 @@ Apache-2.0 — see [`LICENSE`](./LICENSE) for details.
 ---
 
 <p align="center">
-  <b>ACowork.AI — Collaborate with your colleagues and agents</b><br>
-  <i>Build and collaborate with AI agents like team members.</i>
+  <b>ACowork — Collaborate with your colleagues and agents</b><br>
+  <i>An all-in-one platform for humans and AI agents.</i>
 </p>
