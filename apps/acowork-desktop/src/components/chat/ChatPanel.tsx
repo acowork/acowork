@@ -26,6 +26,7 @@ import { blockIndexOfRawMessage } from "./messageFolder";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { useLiveStream, getChatAdapterSession, releaseAdapterSession } from "./chatAdapterStore";
 import { useChatListAdapter } from "./chatListAdapter";
 import { useScrollController } from "./useScrollController";
@@ -2391,7 +2392,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
         {selectedAgentId && <SessionTabBar agentId={selectedAgentId} />}
         {/* Messages area with drawer overlay */}
         <div
-          className="relative flex-1 overflow-hidden"
+          className="relative flex flex-1 flex-col overflow-hidden"
           onWheel={(e) => {
             // Any wheel over the message area means the user is driving (or
             // about to drive) the viewport, so whatever is on screen is now a
@@ -2432,15 +2433,10 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
               className="pointer-events-none absolute inset-x-0 top-0 z-10 h-2 bg-linear-to-b from-black/3 to-transparent dark:from-black/40"
             />
           )}
-          <div
-            ref={messagesContainerRef}
-            onPointerDown={() => {
-              // Touch/pen scrolling and scrollbar dragging never produce a
-              // `wheel` event, so they claim viewport ownership here (see the
-              // onWheel handler above for why this matters).
-              scrollController.noteViewportInteraction();
-            }}
-            onScroll={() => {
+          <OverlayScrollbar
+            viewportRef={messagesContainerRef}
+            onViewportPointerDown={() => scrollController.noteViewportInteraction()}
+            onViewportScroll={() => {
                               setChatScrolledFromTop((messagesContainerRef.current?.scrollTop ?? 0) > CHAT_TOP_SHADOW_THRESHOLD_PX);
                               lastScrollTopRef.current = (messagesContainerRef.current?.scrollTop ?? 0);
                               lastScrollHeightRef.current = (messagesContainerRef.current?.scrollHeight ?? 0);
@@ -2452,7 +2448,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
                               lastMessageOffsetRef.current = adapter.messageOffset;
                               scrollController.handleScroll();
                             }}
-            className="relative h-full overflow-y-auto px-4 py-3 select-text cursor-text"
+            className="relative h-full px-4 py-3 select-text cursor-text"
             role="log"
             aria-label={t("chatPanel.ariaLabelChatMessages")}
           >
@@ -2703,7 +2699,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
                 />
               </div>
             )}
-          </div>
+          </OverlayScrollbar>
           {/* Scroll-to-top button - visible when scrolled down > 1 screen.
               Default opacity is reduced so the button does not visually crowd
               the chat content; it goes fully opaque on hover/focus for clear

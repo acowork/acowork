@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
 import { ToolsTab } from "./ToolsTab";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
@@ -482,7 +483,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                connected                    → state + snapshots + prompts
                                               + compression history */}
       {activeTab === "debug" && (
-        <div data-tab-scroll className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-right-panel">
+        <OverlayScrollbar dataTabScroll className="min-h-0 flex flex-1 flex-col bg-right-panel">
           {/* ADR-063 §3.7 — package prompt override editor. Always
               visible at the TOP of the Debug tab, BEFORE the
               "no agent running" placeholder, the action block, and
@@ -790,12 +791,12 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               )}
             </div>
           )}
-        </div>
+        </OverlayScrollbar>
       )}
 
       {/* ── Status tab content ───────────────────────────────────── */}
       {activeTab === "status" && (
-        <div data-tab-scroll className="flex-1 overflow-y-auto bg-right-panel p-3">
+        <OverlayScrollbar dataTabScroll className="flex-1 bg-right-panel p-3">
           {/* Session Status — level-1 collapsible card matching the
               Tools-tab "Builtin Tools" grammar: the clickable header
               row (chevron + title) toggles the whole stats body, which
@@ -1087,7 +1088,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               )}
             </ExpandableRow>
           </ListBox>
-        </div>
+        </OverlayScrollbar>
       )}
 
       {/* ── Memory tab content — CSS visibility preserves component state across tab switches ── */}

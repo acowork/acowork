@@ -14,6 +14,7 @@ import {
     useContextMenu,
     type ContextMenuItem,
 } from "../../common/ContextMenu";
+import { OverlayScrollbar } from "../../common/OverlayScrollbar";
 
 const EMPTY_ARRAY: string[] = [];
 
@@ -502,14 +503,13 @@ export function FileTree({
     }
 
     return (
-        <div
-            ref={scrollRef}
-            data-tab-scroll
-            className="file-tree-scroller flex-1 min-h-0 overflow-auto"
-            /* Right-click on the empty area (scrollbar gutter / padding /
-             * below-the-last-row space) opens the workspace-root menu.
-             * Row hits stop here because FileTreeNode calls
-             * `e.stopPropagation()` from its own `useContextMenu.openAt`. */
+        <OverlayScrollbar
+            viewportRef={scrollRef}
+            dataTabScroll
+            className="file-tree-scroller flex-1 min-h-0 overflow-x-auto"
+            containerClassName="flex-1"
+            /* Right-click on the empty area (padding / below-the-last-row
+             * space) opens the workspace-root menu. */
             onContextMenu={handleScrollerContextMenu}
         >
             <div
@@ -575,6 +575,6 @@ export function FileTree({
                 selectionAtOpen={ctxMenu.selectionAtOpen}
                 onClose={ctxMenu.close}
             />
-        </div>
+        </OverlayScrollbar>
     );
 }

@@ -26,6 +26,7 @@ import { log } from "../../lib/logger";
 import { useToast } from "../common/ToastProvider";
 import { ListBox, ExpandableRow } from "../common/list";
 import { flushPendingWrites } from "./agentSetupPendingWrites";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -714,7 +715,7 @@ export function AgentSetupTab() {
   const ratioPct = Math.round((profile.compressionRatioThreshold ?? 0.9) * 100);
 
   return (
-    <div data-tab-scroll className="flex-1 overflow-y-auto bg-right-panel p-3" style={{ scrollbarWidth: 'none' }}>
+    <OverlayScrollbar dataTabScroll className="flex-1 bg-right-panel p-3">
       {/* ADR-087: view-only caller — say so up front instead of letting
           each write fail one toast at a time. `can_manage === false` is
           server-computed; `undefined` (Local mode / pre-087 Gateway)
@@ -1344,7 +1345,7 @@ export function AgentSetupTab() {
         }}
         onCancel={() => setShowResetConfirm(false)}
       />
-    </div>
+    </OverlayScrollbar>
   );
 }
 

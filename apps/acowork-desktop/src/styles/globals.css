@@ -761,6 +761,21 @@ body {
   height: var(--ui-scrollbar-size);
 }
 
+::-webkit-scrollbar-button,
+::-webkit-scrollbar-button:single-button,
+::-webkit-scrollbar-button:double-button,
+::-webkit-scrollbar-button:vertical:decrement,
+::-webkit-scrollbar-button:vertical:increment,
+::-webkit-scrollbar-button:horizontal:decrement,
+::-webkit-scrollbar-button:horizontal:increment {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  background: none !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+}
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
@@ -2138,4 +2153,46 @@ input[type="radio"]:checked {
   height: 0;
   pointer-events: none;
   color: var(--color-zinc-400, #a1a1aa);
+}
+
+/* Overlay scrollbar used by the Agent sidebar: native scrolling remains in the
+   viewport, while the narrow thumb floats above the content without a gutter. */
+.overlay-scrollbar-viewport {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.overlay-scrollbar-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.overlay-scrollbar-track {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 8px;
+  box-sizing: border-box;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+.overlay-scrollbar:hover .overlay-scrollbar-track,
+.overlay-scrollbar:focus-within .overlay-scrollbar-track,
+.overlay-scrollbar-thumb:active {
+  opacity: 1;
+}
+.overlay-scrollbar-thumb {
+  width: 100%;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--ui-scrollbar-thumb) 68%, transparent);
+  pointer-events: auto;
+  touch-action: none;
+  cursor: grab;
+  transition: background-color 120ms ease;
+}
+.overlay-scrollbar-thumb:hover,
+.overlay-scrollbar-thumb:active {
+  background: color-mix(in srgb, var(--ui-scrollbar-thumb-hover) 82%, transparent);
+}
+.overlay-scrollbar-thumb:active {
+  cursor: grabbing;
 }

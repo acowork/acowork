@@ -9,6 +9,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { Switch } from "../common/Switch";
 import { ListBox, ListRow, ExpandableRow, Badge, EmptyState } from "../common/list";
 import type { McpServerView, AgentMcpToolItem } from "../../lib/types";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 const EMPTY_ARRAY: string[] = [];
 // Stable empty-object reference for Zustand selectors (see line ~178 below).
@@ -484,7 +485,7 @@ export function ToolsTab() {
   }
 
   return (
-    <div data-tab-scroll className="flex-1 overflow-y-auto bg-right-panel p-3">
+    <OverlayScrollbar dataTabScroll className="flex-1 bg-right-panel p-3">
       {/* ── Builtin Tools card ─────────────────────────────────────
           Level-1 collapsible card in the same language as the
           Debug-panel "Context Snapshots" list: chevron on the left,
@@ -502,27 +503,29 @@ export function ToolsTab() {
             {builtinToolsAll.length === 0 ? (
               <EmptyState message={t("agentSetup.noBuiltinTools")} />
             ) : (
-              <ListBox variant="plain" maxHeight={192}>
-                {builtinToolsAll.map((entry) => (
-                  <ListRow
-                    key={entry.name}
-                    surface="inset"
-                    trailing={
-                      <Switch
-                        checked={entry.enabled}
-                        onChange={() => toggleBuiltinTool(entry.name)}
-                        disabled={builtinSaving || !selectedAgentId}
-                        size="sm"
-                        aria-label={entry.name}
-                      />
-                    }
-                  >
-                    <span className="truncate text-11 font-medium text-text-secondary ">
-                      {entry.name}
-                    </span>
-                  </ListRow>
-                ))}
-              </ListBox>
+              <OverlayScrollbar maxHeight={192} containerClassName="flex-none w-full">
+                <ListBox variant="plain">
+                  {builtinToolsAll.map((entry) => (
+                    <ListRow
+                      key={entry.name}
+                      surface="inset"
+                      trailing={
+                        <Switch
+                          checked={entry.enabled}
+                          onChange={() => toggleBuiltinTool(entry.name)}
+                          disabled={builtinSaving || !selectedAgentId}
+                          size="sm"
+                          aria-label={entry.name}
+                        />
+                      }
+                    >
+                      <span className="truncate text-11 font-medium text-text-secondary ">
+                        {entry.name}
+                      </span>
+                    </ListRow>
+                  ))}
+                </ListBox>
+              </OverlayScrollbar>
             )}
           </ExpandableRow>
         </ListBox>
@@ -615,6 +618,6 @@ export function ToolsTab() {
           </div>
         )}
       </div>
-    </div>
+    </OverlayScrollbar>
   );
 }

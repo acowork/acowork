@@ -3,6 +3,7 @@ import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X, Square }
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { useTranslation } from "../../i18n/useTranslation";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 interface ExploreBlockProps {
   items: ChatMessage[];
@@ -403,10 +404,14 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
 
       {/* Expanded content: full ThinkBlock + paired ToolCall rendering */}
       {expanded && (
-        <div
+        <OverlayScrollbar
           ref={contentRef}
-          className="ml-2 mt-1 overflow-y-auto rounded-md border-l-2 border-zinc-300 bg-zinc-100/60 pl-3 pr-2 py-2 dark:border-zinc-600 dark:bg-zinc-800/30"
-          style={{ maxHeight: "240px" }}
+          maxHeight={240}
+          containerClassName="flex-none max-h-60 ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-zinc-100/60 dark:border-zinc-600 dark:bg-zinc-800/30"
+          className="pl-3 pr-2 py-2 overscroll-contain"
+          onViewportWheel={(event) => {
+            if (event.deltaY !== 0) event.stopPropagation();
+          }}
         >
           <div className="flex flex-col gap-0.5">
             {pairedItems.map((paired, idx) => (
@@ -430,7 +435,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
               />
             )}
           </div>
-        </div>
+        </OverlayScrollbar>
       )}
     </div>
   );
