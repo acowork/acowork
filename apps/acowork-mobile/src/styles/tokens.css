@@ -7,8 +7,25 @@
   --color-bg-elevated: #ffffff;
   --color-bg-grouped: #ededed;
   --color-separator: #c6c6c8;
-  --color-label: #000000;
+  /* List-row hairline only. WeChat's list separators are far fainter than
+   * the iOS default #c6c6c8; kept separate from --color-separator so the
+   * switch track / grabber / tabbar border keep their needed weight. */
+  --color-list-sep: #e5e5e5;
+  /* Softened from pure #000000 — a full-black foreground on the light bg
+   * reads as over-contrasted next to WeChat. #191919 is WeChat's own
+   * primary text: still far above AA, but easier on the eyes. */
+  --color-label: #191919;
   --color-label-secondary: #8e8e93;
+  /* TabBar inactive glyph+label. Deliberately its own token (not a darker
+   * --color-label-secondary): #8e8e93 is too faint at tabbar scale, but
+   * pushing the shared secondary label darker would over-weight list hints
+   * and row values, which read fine as-is. */
+  --color-tabbar-inactive: #7a7a7a;
+  /* WeChat Discover-style multicolor feature glyphs (settings rows). */
+  --color-icon-blue: #576b95;
+  --color-icon-green: #07c160;
+  --color-icon-orange: #fa9d3b;
+  --color-icon-teal: #12b5a5;
   --color-tint: #007aff;
   --color-destructive: #ff3b30;
   --color-success: #34c759;
@@ -95,11 +112,20 @@
   --color-bg-elevated: #1a1a1a;
   --color-bg-grouped: #111111;
   --color-separator: #2c2c2e;
+  /* Dark list separator unchanged — the dark hairline already reads faint. */
+  --color-list-sep: #2c2c2e;
   /* Softened from pure #ffffff — a full-white foreground on the near-black
    * bg glares. ~90% white matches WeChat's dark-mode text and reads easier
    * while keeping contrast well above AA on #111. */
   --color-label: #e5e5e5;
   --color-label-secondary: #8f8f8f;
+  /* Dark tabbar inactive matches the existing secondary gray — the light
+   * #7a7a7a would be too dark against the near-black bar. */
+  --color-tabbar-inactive: #8f8f8f;
+  /* Brighten the feature glyphs on the dark bg — the muted light-mode
+   * blue/teal would sink into #1a1a1a. */
+  --color-icon-blue: #7a9cff;
+  --color-icon-teal: #3fd0c0;
   --color-tint: #07c160;
   --color-destructive: #fa5151;
   --color-bubble-peer: #2a2a2a;

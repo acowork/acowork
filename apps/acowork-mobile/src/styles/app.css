@@ -199,7 +199,7 @@
   left: var(--list-sep-indent);
   right: 0;
   height: 0.5px;
-  background: var(--color-separator);
+  background: var(--color-list-sep);
 }
 
 .list-row.is-disabled {
@@ -281,7 +281,8 @@
 .list-row-avatar--c6 { background: #ed8936; }
 .list-row-avatar--c7 { background: #667eea; }
 
-/* Icon for settings rows (WeChat style) */
+/* Icon for settings rows (WeChat style). `--row-icon-color` lets a row tint
+ * its glyph (Discover-style multicolor); unset it falls back to the dim gray. */
 .list-row-icon {
   width: var(--settings-icon-size);
   height: var(--settings-icon-size);
@@ -289,7 +290,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-dim);
+  color: var(--row-icon-color, var(--color-text-dim));
 }
 
 /* Settings rows have smaller separator indent (icon-width not avatar-width) */
@@ -403,7 +404,7 @@
   align-items: center;
   justify-content: center;
   gap: 3px;
-  color: var(--color-label-secondary);
+  color: var(--color-tabbar-inactive);
 }
 
 .tabbar-item.is-active {
@@ -609,16 +610,11 @@
   text-align: center;
 }
 .boot-logo {
-  width: 72px;
-  height: 72px;
-  border-radius: 20px;
-  background: var(--color-tint);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 30px;
-  font-weight: 700;
+  /* Shared brand wordmark (assets/brand-mark.svg, 396x96). Rendered as an
+   * <img>, so it keeps the SVG's own colors — no tint square. */
+  width: 200px;
+  height: auto;
+  display: block;
 }
 .boot-title {
   font-size: 22px;

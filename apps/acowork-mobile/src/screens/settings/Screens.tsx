@@ -58,10 +58,10 @@ export function SettingsRootScreen() {
       </header>
       <div className="scroll">
         <div className="list-section list-section--settings">
-          <ListRow arrow icon={<User size={22} />} onClick={() => push('settings/profile')} label="个人资料" hint="账号、头像、角色" value={me?.display_name} />
-          <ListRow arrow icon={<Cog size={22} />} onClick={() => push('settings/general')} label="通用" hint="语言、通知、默认行为" />
-          <ListRow arrow icon={<Palette size={22} />} onClick={() => push('settings/appearance')} label="外观" hint="主题、高亮色" />
-          <ListRow arrow icon={<Server size={22} />} onClick={() => push('settings/gateway')} label="网关" hint="连接地址、状态" />
+          <ListRow arrow icon={<User size={22} />} iconColor="var(--color-icon-blue)" onClick={() => push('settings/profile')} label="个人资料" hint="账号、头像、角色" value={me?.display_name} />
+          <ListRow arrow icon={<Cog size={22} />} iconColor="var(--color-icon-teal)" onClick={() => push('settings/general')} label="通用" hint="语言、通知、默认行为" />
+          <ListRow arrow icon={<Palette size={22} />} iconColor="var(--color-icon-orange)" onClick={() => push('settings/appearance')} label="外观" hint="主题、高亮色" />
+          <ListRow arrow icon={<Server size={22} />} iconColor="var(--color-icon-green)" onClick={() => push('settings/gateway')} label="网关" hint="连接地址、状态" />
         </div>
 
         <div className="list-section-title">仅桌面端</div>

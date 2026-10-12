@@ -5,7 +5,7 @@
  * no speculative variants (ADR-086 §被否决方案 C).
  */
 
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 
 /** The grouped-list container — the single most-used iOS surface. */
 export function ListSection({ title, children }: { title?: string; children: ReactNode }) {
@@ -32,6 +32,7 @@ export function ListRow({
   avatar,
   avatarClass,
   icon,
+  iconColor,
 }: {
   label: ReactNode
   value?: ReactNode
@@ -48,6 +49,9 @@ export function ListRow({
   avatarClass?: string
   /** Leading icon element (24px) for settings-style rows. */
   icon?: ReactNode
+  /** Optional glyph color (a `--color-icon-*` token) — WeChat Discover-style
+   *  multicolor. Falls back to the dim gray when omitted (e.g. disabled rows). */
+  iconColor?: string
 }) {
   const Tag = onClick ? 'button' : 'div'
   return (
@@ -58,7 +62,14 @@ export function ListRow({
       role={onClick ? 'button' : undefined}
     >
       {avatar ? <div className={`list-row-avatar${avatarClass ? ' ' + avatarClass : ''}`}>{avatar}</div> : null}
-      {icon && !avatar ? <div className="list-row-icon">{icon}</div> : null}
+      {icon && !avatar ? (
+        <div
+          className="list-row-icon"
+          style={iconColor ? ({ '--row-icon-color': iconColor } as CSSProperties) : undefined}
+        >
+          {icon}
+        </div>
+      ) : null}
       <div className="list-row-main">
         <div className="list-row-label">{label}</div>
         {hint ? <div className="list-row-hint">{hint}</div> : null}
