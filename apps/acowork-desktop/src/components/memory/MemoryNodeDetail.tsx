@@ -11,6 +11,7 @@ import {
 } from "../common/ContextMenu";
 import { copySelectionOrFallback, copyText } from "../../lib/clipboard";
 import { Badge } from "../common/list";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 interface MemoryNodeDetailProps {
   node: MemoryNodeResponse;
@@ -201,7 +202,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       </div>
 
       {/* Content */}
-      <div data-tab-scroll className="flex-1 overflow-y-auto p-3">
+      <OverlayScrollbar dataTabScroll className="flex-1 p-3">
         {/* Full content */}
         <div className="mb-3">
           <h3 className="mb-1 text-11 font-medium text-text-tertiary ">{t("memoryNodeDetail.content")}</h3>
@@ -259,7 +260,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
             {node.decay_score.toFixed(3)}
           </p>
         </div>
-      </div>
+      </OverlayScrollbar>
 
       {/* Actions footer */}
       <div className="border-t border-border-divider p-3">

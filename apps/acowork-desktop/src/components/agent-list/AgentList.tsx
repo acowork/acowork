@@ -23,6 +23,7 @@ import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { fetchNodes } from "../../lib/gateway-api";
 import { partitionAgentsByNode, nodeDisplayName } from "./partitionAgentsByNode";
 import { UserList, type UserListHandle } from "../user-list/UserList";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { useAuthStore } from "../../stores/authStore";
 import {
   ContextMenu,
@@ -810,7 +811,7 @@ export function AgentList({ width }: AgentListProps) {
       </div>
 
       {/* Agent list */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden" role="list" aria-label={t("agentList.ariaLabelAgentList")}>
+      <OverlayScrollbar role="list" aria-label={t("agentList.ariaLabelAgentList")}>
 
         {loading && agentsList.length === 0 && (
           <div className="flex items-center justify-center py-8">
@@ -881,7 +882,7 @@ export function AgentList({ width }: AgentListProps) {
 
         {/* ADR-076 §决策 7: account group, below the agent groups. */}
         <UserList ref={userListRef} />
-      </div>
+      </OverlayScrollbar>
 
       <div ref={addMenuRef} className="relative p-1.5">
         <button

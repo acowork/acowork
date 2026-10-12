@@ -17,6 +17,7 @@ import { Loader2, ChevronLeft, ChevronRight } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useNodeTypeLabel, useSubTypeLabel } from "./nodeTypeI18n";
 import { ListBox, ListRow, Badge, EmptyState } from "../common/list";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 interface MemoryNodeListProps {
   nodes: MemoryNodeResponse[];
@@ -111,7 +112,7 @@ export function MemoryNodeList({
         />
       ) : (
         <>
-          <div data-tab-scroll className="min-h-0 flex-1 overflow-y-auto">
+          <OverlayScrollbar dataTabScroll className="min-h-0 flex-1">
             <ListBox variant="plain">
               {nodes.map((node) => {
                   const isSelected = node.node_id === selectedNodeId;
@@ -194,7 +195,7 @@ export function MemoryNodeList({
                   );
                 })}
               </ListBox>
-            </div>
+            </OverlayScrollbar>
           {pager}
         </>
       )}

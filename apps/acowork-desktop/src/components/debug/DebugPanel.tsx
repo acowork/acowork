@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
 import { ExpandableRow } from "../common/list";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { redistributeTokensByBytes } from "../../lib/contextUsageBreakdown";
 import {
@@ -129,66 +130,52 @@ function MessagesView({ content }: { content?: string }) {
     const parsed = JSON.parse(content);
     if (Array.isArray(parsed)) messages = parsed;
   } catch {
-    // Not valid JSON — fall back to plain text (e.g. error payload).
     return (
-      <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap text-10 leading-relaxed text-text-secondary ">
+      <pre className="whitespace-pre-wrap text-10 leading-relaxed text-text-secondary">
         {content.slice(0, 4000)}
         {content.length > 4000 && <span className="text-text-tertiary">... (truncated)</span>}
       </pre>
     );
   }
   return (
-    <div className="max-h-64 space-y-1 overflow-y-auto pr-1">
-      {messages.length === 0 && (
-        <div className="text-10 text-text-tertiary">(empty conversation)</div>
-      )}
-      {messages.map((m, i) => {
-        const role = m.role ?? "unknown";
-        return (
-          <div
-            key={i}
-            className="rounded border-[0.5px] border-zinc-300 bg-zinc-50 px-1.5 py-0.5 dark:border-zinc-600 dark:bg-zinc-800/60"
-          >
-            <div className="flex flex-wrap items-center gap-1.5 text-9">
-              <span
-                className={cn(
+    <div className="space-y-1 pr-1">
+        {messages.length === 0 && (
+          <div className="text-10 text-text-tertiary">(empty conversation)</div>
+        )}
+        {messages.map((m, i) => {
+          const role = m.role ?? "unknown";
+          return (
+            <div
+              key={i}
+              className="rounded border-[0.5px] border-zinc-300 bg-zinc-50 px-1.5 py-0.5 dark:border-zinc-600 dark:bg-zinc-800/60"
+            >
+              <div className="flex flex-wrap items-center gap-1.5 text-9">
+                <span className={cn(
                   "rounded px-1 py-px font-medium uppercase",
-                  ROLE_BADGE_CLASSES[role] ?? "bg-zinc-200 text-text-secondary dark:bg-zinc-700 "
-                )}
-              >
-                {role}
-              </span>
-              {m.name && <span className="font-mono text-text-tertiary">{m.name}</span>}
-              <span className="ml-auto font-mono text-text-tertiary">#{i}</span>
+                  ROLE_BADGE_CLASSES[role] ?? "bg-zinc-200 text-text-secondary dark:bg-zinc-700",
+                )}>{role}</span>
+                {m.name && <span className="font-mono text-text-tertiary">{m.name}</span>}
+                <span className="ml-auto font-mono text-text-tertiary">#{i}</span>
+              </div>
+              {m.reasoning_content && (
+                <details className="text-9 text-text-tertiary">
+                  <summary className="cursor-pointer">reasoning_content</summary>
+                  <pre className="mt-0.5 whitespace-pre-wrap text-10 text-text-tertiary">{m.reasoning_content}</pre>
+                </details>
+              )}
+              <pre className="whitespace-pre-wrap text-10 leading-snug text-text-secondary">{m.content ?? ""}</pre>
+              {m.tool_calls && m.tool_calls.length > 0 && (
+                <details className="text-9 text-text-tertiary">
+                  <summary className="cursor-pointer">tool_calls ({m.tool_calls.length})</summary>
+                  <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap text-10 text-text-tertiary">{JSON.stringify(m.tool_calls, null, 2).slice(0, 2000)}</pre>
+                </details>
+              )}
             </div>
-            {m.reasoning_content && (
-              <details className="text-9 text-text-tertiary">
-                <summary className="cursor-pointer">reasoning_content</summary>
-                <pre className="mt-0.5 whitespace-pre-wrap text-10 text-text-tertiary ">
-                  {m.reasoning_content}
-                </pre>
-              </details>
-            )}
-            <pre className="whitespace-pre-wrap text-10 leading-snug text-text-secondary ">
-              {m.content ?? ""}
-            </pre>
-            {m.tool_calls && m.tool_calls.length > 0 && (
-              <details className="text-9 text-text-tertiary">
-                <summary className="cursor-pointer">
-                  tool_calls ({m.tool_calls.length})
-                </summary>
-                <pre className="mt-0.5 overflow-x-auto whitespace-pre-wrap text-10 text-text-tertiary ">
-                  {JSON.stringify(m.tool_calls, null, 2).slice(0, 2000)}
-                </pre>
-              </details>
-            )}
-          </div>
-        );
-      })}
+          );
+        })}
     </div>
   );
 }
-
 
 // ── Sub-components ─────────────────────────────────────────────────────
 
@@ -470,9 +457,7 @@ export function SnapshotNode({
 
                 {/* Section content (lazy-loaded or inline-editing) */}
                 {isExpanded && (
-                  <div className="mx-2 mb-1.5 rounded border-[0.5px] border-zinc-300 bg-zinc-50 p-2 text-text-secondary dark:border-zinc-600 dark:bg-zinc-900/40 ">
-                    {/* ADR-054 step 4: messages render as a conversation
-                        list, not raw JSON text. */}
+                  <OverlayScrollbar maxHeight={192} containerClassName="flex-none mx-2 mb-1.5 w-[calc(100%-1rem)] rounded border-[0.5px] border-zinc-300 bg-zinc-50 p-2 text-text-secondary dark:border-zinc-600 dark:bg-zinc-900/40">
                     {sectionKey === "messages" ? (
                       <MessagesView content={cachedContent?.content} />
                     ) : editingSection &&
@@ -482,41 +467,20 @@ export function SnapshotNode({
                         <textarea
                           value={editingSection.current}
                           onChange={(e) => onEditChange(e.target.value)}
-                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-panel-block px-2 py-1 font-mono text-10 leading-relaxed text-text-secondary outline-none dark:border-[var(--color-accent)]/50 "
+                          className="max-h-48 min-h-40 w-full resize-y rounded border-[0.5px] border-[var(--color-accent)]/30 bg-panel-block px-2 py-1 font-mono text-10 leading-relaxed text-text-secondary outline-none dark:border-[var(--color-accent)]/50"
                           autoFocus
                         />
                         <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => onSaveEdit(sectionKey, editingSection.current)}
-                            className="flex items-center gap-0.5 rounded bg-[var(--color-accent)] px-2 py-0.5 text-10 text-white transition-opacity hover:opacity-90"
-                          >
-                            <Check className="h-2.5 w-2.5" />
-                            Apply
+                          <button onClick={() => onSaveEdit(sectionKey, editingSection.current)} className="flex items-center gap-0.5 rounded bg-[var(--color-accent)] px-2 py-0.5 text-10 text-white transition-opacity hover:opacity-90">
+                            <Check className="h-2.5 w-2.5" />Apply
                           </button>
-                          <button
-                            onClick={onCancelEdit}
-                            className="flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
-                          >
-                            <X className="h-2.5 w-2.5" />
-                            Cancel
+                          <button onClick={onCancelEdit} className="flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700">
+                            <X className="h-2.5 w-2.5" />Cancel
                           </button>
                           <Tooltip content={t("debugPanel.copyContent")} variant="plain">
-                            <button
-                              onClick={() => handleCopy(editingSection.current)}
-                              className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
-                            >
-                            {copied ? (
-                              <>
-                                <Check className="h-2.5 w-2.5" />
-                                Copied
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="h-2.5 w-2.5" />
-                                Copy
-                              </>
-                            )}
-                          </button>
+                            <button onClick={() => handleCopy(editingSection.current)} className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700">
+                              {copied ? <><Check className="h-2.5 w-2.5" />Copied</> : <><Copy className="h-2.5 w-2.5" />Copy</>}
+                            </button>
                           </Tooltip>
                         </div>
                       </div>
@@ -526,20 +490,17 @@ export function SnapshotNode({
                           <span>{cachedContent.token_count} tokens</span>
                           <span className="font-mono">{cachedContent.hash.slice(0, 8)}</span>
                         </div>
-                        <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap text-10 leading-relaxed text-text-secondary ">
+                        <div className="whitespace-pre-wrap text-10 leading-relaxed text-text-secondary">
                           {cachedContent.content.slice(0, 2000)}
-                          {cachedContent.content.length > 2000 && (
-                            <span className="text-text-tertiary">... (truncated)</span>
-                          )}
-                        </pre>
+                          {cachedContent.content.length > 2000 && <span className="text-text-tertiary">... (truncated)</span>}
+                        </div>
                       </>
                     ) : (
                       <div className="flex items-center gap-1.5 text-10 text-text-tertiary">
-                        <Loader className="h-2.5 w-2.5 animate-spin" />
-                        Loading section...
+                        <Loader className="h-2.5 w-2.5 animate-spin" />Loading section...
                       </div>
                     )}
-                  </div>
+                  </OverlayScrollbar>
                 )}
               </div>
             );
