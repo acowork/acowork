@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
@@ -9,6 +10,7 @@ import { useToast } from "../common/ToastProvider";
 import { FolderOpen, FolderPlus, Trash2, Shield, ShieldOff, Home, Check } from "lucide-react";
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { cn } from "../../lib/utils";
+import { computeDropdownPlacement } from "../../lib/dropdownPosition";
 import { menuItemHover, menuItemSelected } from "../../lib/ui-styles";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
@@ -54,6 +56,8 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showRemotePicker, setShowRemotePicker] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
 
   // Current workspace ID for the active session (defaults to agent home)
   const currentWsId = activeSessionId
@@ -78,13 +82,84 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const target = e.target as Node;
+      // The menu is portalled to document.body, so it is NOT a descendant
+      // of the trigger wrapper — testing only `ref` would close the menu on
+      // the very first mousedown inside it.
+      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
+
+  // ── Dropdown placement ────────────────────────────────────────────
+  // The menu used to be `absolute left-0` inside the trigger's `.relative`
+  // wrapper. That is fine while the anchor sits in a wide column, but the
+  // workspace panel is user-resizable and can be dragged narrower than the
+  // menu's fixed `w-80` — the menu was then cropped, because the whole
+  // right panel sits inside `CAPSULE_PANE_CN` (`overflow-hidden`), so the
+  // overflow was clipped by the pane, not merely hidden.
+  //
+  // Fix mirrors ProfileTab / AgentSetupTab: portal the menu to
+  // `document.body` with `position: fixed`, then place it by measurement.
+  // Anchor on the trigger's RIGHT edge and pull left when the menu would
+  // cross it — i.e. the menu's right edge stays flush with the trigger's
+  // right edge and it grows leftward, out of the narrow panel.
+  //
+  // ponytail: recomputed on resize + capture-phase scroll only, so the
+  // ceiling is "a panel drag moves the trigger but the user must reopen
+  // the menu". Upgrade path: observe `ref.current` with a
+  // ResizeObserver if live-tracking during a drag is ever needed.
+  const computeMenuPos = useCallback(() => {
+    const anchorEl = ref.current;
+    const menuEl = menuRef.current;
+    if (!anchorEl || !menuEl) return;
+    const r = anchorEl.getBoundingClientRect();
+    // offsetWidth/Height, not getBoundingClientRect on the menu: the
+    // placement is inline `left/top`, so there is no transform to cancel.
+    const placement = computeDropdownPlacement({
+      anchor: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+      menuWidth: menuEl.offsetWidth,
+      menuHeight: menuEl.offsetHeight,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      direction: dropDirection,
+    });
+    setMenuPos({ top: placement.top, left: placement.left });
+  }, [dropDirection]);
+
+  // Measure synchronously before paint: the menu must never be visible at
+  // its un-measured (0,0) position, otherwise it flashes in the corner.
+  useLayoutEffect(() => {
+    if (open) computeMenuPos();
+    else setMenuPos(null);
+  }, [open, computeMenuPos]);
+
+  // Re-measure when the menu's own size changes. The list fills in
+  // asynchronously ("Loading..." -> rows), and with `dropDirection="up"`
+  // (the chat toolbar) the height feeds straight into `top` — without this
+  // the menu would sit at the height it had while still loading.
+  useLayoutEffect(() => {
+    const menuEl = menuRef.current;
+    if (!open || !menuEl || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => computeMenuPos());
+    ro.observe(menuEl);
+    return () => ro.disconnect();
+  }, [open, computeMenuPos]);
+
+  useEffect(() => {
+    if (!open) return;
+    computeMenuPos();
+    window.addEventListener("resize", computeMenuPos);
+    // Capture-phase: catches the workspace panel's own scroll containers,
+    // not just the window, so the menu stays glued to the trigger.
+    window.addEventListener("scroll", computeMenuPos, true);
+    return () => {
+      window.removeEventListener("resize", computeMenuPos);
+      window.removeEventListener("scroll", computeMenuPos, true);
+    };
+  }, [open, computeMenuPos]);
 
   const handleSelect = async (dir: WorkspaceDir) => {
     if (!selectedAgentId || !activeSessionId) return;
@@ -206,12 +281,31 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
         btnId="ws"
         disabled={readOnly}
       >
-        {/* Dropdown menu */}
-        {open && (
-          <div className={cn(
-            "absolute left-0 w-80 max-w-[calc(100vw-2rem)] rounded-md border border-border-outer bg-modal-surface shadow-lg",
-            dropDirection === "down" ? "top-full mt-1" : "bottom-full mb-1",
-          )} style={{ zIndex: 100 }}>
+        {/* Dropdown menu — portalled to document.body.
+            The right panel sits inside `CAPSULE_PANE_CN` (`overflow-hidden`),
+            so the old `absolute left-0 w-80` menu was *clipped by the pane*
+            whenever the user dragged the panel narrower than 320px — not
+            merely hidden. `position: fixed` + measured coords (menuPos,
+            see computeMenuPos) lifts it above every clip; right-anchoring
+            lets it grow leftward, out of the panel, instead of being cut.
+            The portal target is document.body, so keeping this JSX inside
+            the trigger's children has no effect on where it paints. */}
+        {open && createPortal(
+          <div
+            ref={menuRef}
+            className={cn(
+              "w-80 max-w-[calc(100vw-2rem)] rounded-md border border-border-outer bg-modal-surface shadow-lg",
+              // Stay hidden until the layout effect has measured us,
+              // otherwise the first frame paints at (0,0).
+              menuPos ? "visible" : "invisible",
+            )}
+            style={{
+              position: "fixed",
+              top: menuPos?.top ?? 0,
+              left: menuPos?.left ?? 0,
+              zIndex: 100,
+            }}
+          >
             {/* Menu title */}
             <div className="px-3 pt-2.5 pb-1">
               <h2 className="text-sm font-normal text-text-secondary ">
@@ -393,7 +487,8 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
               <FolderPlus className="h-3.5 w-3.5" />
               {t("workspace.addWorkspace")}
             </button>
-          </div>
+          </div>,
+          document.body,
         )}
       </ToolbarDropdownTrigger>
 
