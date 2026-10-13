@@ -137,6 +137,35 @@ describe("UserList rows carry the agent-list hairline", () => {
     expect(screen.getByTestId("user-row-u-self").className).not.toContain(DIVIDER);
   });
 
+  it("leads the group header with a users glyph, matching the node band", async () => {
+    // The node band in AgentList leads with a 12px Monitor icon (a machine,
+    // not an agent); this band is the sibling case and must carry the same
+    // weight of glyph or the two bands read as different kinds of label.
+    // Asserted on the rendered header, not the source: this suite already
+    // renders UserList for the divider/band checks.
+    await act(async () => {
+      render(<UserList />);
+    });
+
+    const header = screen.getByTestId("user-group-header");
+    const glyph = header.querySelector("svg.lucide-users");
+    expect(glyph).not.toBeNull();
+    // ...and after the chevron, which is the collapse toggle. Ordering is
+    // read off the DOM index rather than compareDocumentPosition: the glyph
+    // and the chevron are siblings inside a flex row, but the button also
+    // holds text nodes, so the bitmask carries DOCUMENT_POSITION_CONTAINED
+    // and would not compare equal to a single flag.
+    const chevron = header.querySelector("svg.lucide-chevron-right");
+    expect(chevron).not.toBeNull();
+    const order = [...header.querySelectorAll("svg")].map((el) =>
+      el.classList.contains("lucide-users") ? "users" : "chevron",
+    );
+    expect(order).toEqual(["chevron", "users"]);
+    // Decorative: the band's own aria-label already names it, so a hidden
+    // glyph must not be announced twice.
+    expect(glyph!.getAttribute("aria-hidden")).toBe("true");
+  });
+
   it("raises the group header on the same fill as the node header", async () => {
     // The Users band must match the Agents node band (NodeGroupHeader) and
     // the right-panel card title bars: one `panel-block` fill. Both themes

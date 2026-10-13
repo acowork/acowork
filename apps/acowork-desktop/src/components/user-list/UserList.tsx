@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useState, type MouseEvent, forwardRef, useImperativeHandle } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { ChevronRight, Eye, KeyRound, MessageSquare, ShieldCheck, ShieldOff, UserX, X } from "lucide-react";
+import { ChevronRight, Eye, KeyRound, MessageSquare, ShieldCheck, ShieldOff, Users, UserX, X } from "lucide-react";
 import { useAuthStore } from "../../stores/authStore";
 import { useUserChatStore } from "../../stores/userChatStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -312,6 +312,11 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
               !collapsed && "rotate-90",
             )}
           />
+          {/* ponytail: 12px Users glyph, mirroring the node band's Monitor
+              icon (AgentList.tsx NodeGroupHeader) — same role in the same
+              sidebar, so the two bands must read as a family. Decorative:
+              the label beside it already names the group. */}
+          <Users className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
           <span className="truncate">{t("userList.title")}</span>
           <span className="ml-auto text-xs font-normal opacity-60">{rows.length}</span>
         </button>
