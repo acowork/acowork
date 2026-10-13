@@ -661,6 +661,8 @@ pub fn run() {
             // to the signed-in user (token minted internally, invisible).
             commands::gateway::create_local_node,
             commands::gateway::local_node_status,
+            commands::gateway::inspect_local_node_process,
+            commands::gateway::stop_local_node_process,
             commands::gateway::stop_local_gateway,
             commands::gateway::get_local_gateway_status,
             // ADR-059: latest Gateway bootstrap snapshot (MQTT cache + HTTP

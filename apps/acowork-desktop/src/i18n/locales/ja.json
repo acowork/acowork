@@ -14,6 +14,8 @@
       "modeLocal": "ローカル",
       "modeRemote": "リモート",
       "modeRelay": "リレー",
+      "nodeSwitchConfirm": "ローカルのデフォルト Node ポート（19900）で acowork-node プロセスを検出しました。モード切替前に停止しますか？",
+      "nodeSwitchFailed": "ローカル Node を安全に停止できませんでした。モードは変更されていません。",
       "localHint": "推奨：Desktop App が Gateway を自動起動します。既に起動している場合はそのまま接続します",
       "remoteHint": "手動で起動した Gateway（このマシンまたは別のマシン）に接続します",
       "relayHint": "クラウドリレー経由で LAN のゲートウェイに接続します。リレーが割り当てたデバイスドメイン（https://<gw-id>.<リレードメイン>）を入力してください。ゲートウェイ側でリレーの有効化とアカウントログインが必要です。",

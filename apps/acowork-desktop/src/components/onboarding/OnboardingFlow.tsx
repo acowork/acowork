@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { useSettingsStore } from "../../stores/settingsStore";
+import { useSettingsStore, requestGatewayModeChange } from "../../stores/settingsStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useAuthStore } from "../../stores/authStore";
@@ -235,7 +235,6 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
   const { t } = useTranslation();
   const { status, localState, checkHealth, startLocalGateway } = useGatewayStore();
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
-  const setGatewayMode = useSettingsStore((s) => s.setGatewayMode);
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
   const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
   const [urlDraft, setUrlDraft] = useState(gatewayUrl);
@@ -259,7 +258,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
   }, [gatewayMode, checkHealth]);
 
   const handleModeChange = (mode: GatewayMode) => {
-    setGatewayMode(mode);
+    void requestGatewayModeChange(mode);
     setStartError(null);
   };
 

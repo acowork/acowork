@@ -1028,6 +1028,123 @@ async fn is_gateway_reachable(base_url: &str) -> bool {
     }
 }
 
+/// Inspect the default Node proxy port and return only listeners whose
+/// executable is `acowork-node`. Other processes on the port are never killed.
+#[tauri::command]
+pub fn inspect_local_node_process() -> Result<Vec<u32>, String> {
+    node_pids_listening_on(acowork_core::node::NODE_PROXY_PORT)
+}
+
+/// Stop Node listeners after frontend confirmation. Re-resolve and validate
+/// immediately before termination so a changed port owner is not killed.
+#[tauri::command]
+pub fn stop_local_node_process() -> Result<Vec<u32>, String> {
+    let pids = inspect_local_node_process()?;
+    for pid in &pids {
+        #[cfg(target_os = "windows")]
+        let result = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+        #[cfg(not(target_os = "windows"))]
+        let result = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+        match result {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                return Err(format!("failed to stop acowork-node pid {pid}: {}", String::from_utf8_lossy(&output.stderr).trim()));
+            }
+            Err(error) => return Err(format!("failed to stop acowork-node pid {pid}: {error}")),
+        }
+    }
+    Ok(pids)
+}
+
+/// Resolve listeners on the Node proxy port and retain only `acowork-node`.
+fn node_pids_listening_on(port: u16) -> Result<Vec<u32>, String> {
+    #[cfg(target_os = "windows")]
+    let pids = {
+        let output = std::process::Command::new("netstat")
+            .args(["-ano"])
+            .output()
+            .map_err(|e| format!("netstat failed while checking Node port {port}: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("netstat failed while checking Node port {port}"));
+        }
+        parse_netstat_listeners(&String::from_utf8_lossy(&output.stdout), port)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let pids = {
+        let output = std::process::Command::new("lsof")
+            .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+            .output()
+            .map_err(|e| format!("lsof failed while checking Node port {port}: {e}"))?;
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect::<Vec<_>>()
+    };
+
+    let mut nodes = Vec::new();
+    for pid in pids {
+        #[cfg(target_os = "windows")]
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output();
+        #[cfg(not(target_os = "windows"))]
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output();
+        let output = output.map_err(|e| format!("failed to inspect process {pid}: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("failed to inspect process {pid}"));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let name = stdout
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .split(',')
+            .next()
+            .unwrap_or_default()
+            .trim_matches('"')
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or_default();
+        if name.eq_ignore_ascii_case("acowork-node")
+            || name.eq_ignore_ascii_case("acowork-node.exe")
+        {
+            nodes.push(pid);
+        } else {
+            return Err(format!(
+                "port {port} is occupied by PID {pid} ({name}), not acowork-node; refusing to stop it"
+            ));
+        }
+    }
+    nodes.sort_unstable();
+    nodes.dedup();
+    Ok(nodes)
+}
+
+/// Parse `netstat -ano` output, matching the local-address port exactly.
+fn parse_netstat_listeners(output: &str, port: u16) -> Vec<u32> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 5 || fields[0] != "TCP" || fields[3] != "LISTENING" {
+                return None;
+            }
+            let local_port = fields[1].rsplit_once(':')?.1.parse::<u16>().ok()?;
+            if local_port != port {
+                return None;
+            }
+            fields[4].parse().ok()
+        })
+        .collect()
+}
+
 /// Check if a child process output indicates it is alive.
 fn child_output_is_alive(child: &std::process::Child) -> bool {
     // Child::id() returns the PID assigned at spawn; if the process
@@ -1211,7 +1328,7 @@ pub async fn debug_mqtt_start(
 
 #[cfg(test)]
 mod local_node_identity_tests {
-    use super::read_local_node_identity;
+    use super::{parse_netstat_listeners, read_local_node_identity};
     use std::path::PathBuf;
 
     /// Create an isolated temp dir for one case; the dir name doubles as
@@ -1225,6 +1342,12 @@ mod local_node_identity_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn netstat_listener_parse_matches_exact_port_and_state() {
+        let output = "  TCP    0.0.0.0:19900   0.0.0.0:0   LISTENING   1234\n  TCP    0.0.0.0:119900  0.0.0.0:0   LISTENING   5678\n  TCP    127.0.0.1:19900 127.0.0.1:1 ESTABLISHED 9999\n  TCP    [::]:19900      [::]:0      LISTENING   42\n";
+        assert_eq!(parse_netstat_listeners(output, 19900), vec![1234, 42]);
     }
 
     #[test]

@@ -14,6 +14,8 @@
       "modeLocal": "本地",
       "modeRemote": "遠端",
       "modeRelay": "中繼",
+      "nodeSwitchConfirm": "偵測到本機預設 Node 連接埠（19900）有 acowork-node 程序。切換模式前停止該 Node？",
+      "nodeSwitchFailed": "無法安全停止本機 Node，模式未切換。",
       "localHint": "推薦：Desktop 會自動啟動 Gateway；若已在執行則直接連線",
       "remoteHint": "連線到手動啟動的 Gateway（本機或其他機器皆可）",
       "relayHint": "透過雲端中繼存取內網閘道。位址填中繼分配的裝置網域（https://<gw-id>.<中繼網域>），需先在閘道上啟用中繼並登入帳號。",

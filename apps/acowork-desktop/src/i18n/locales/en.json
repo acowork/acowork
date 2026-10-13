@@ -303,6 +303,8 @@
       "modeLocal": "Local",
       "modeRemote": "Remote",
       "modeRelay": "Relay",
+      "nodeSwitchConfirm": "An acowork-node process is listening on the default Node port (19900). Stop it before switching modes?",
+      "nodeSwitchFailed": "Could not safely stop the local Node. The mode was not changed.",
       "localHint": "Recommended — Desktop starts the Gateway for you, or connects to one that is already running",
       "remoteHint": "Connect to a Gateway you started manually — on this machine or another",
       "relayHint": "Reach your LAN Gateway through the cloud relay. Enter the relay device domain (https://<gw-id>.<relay-domain>). The Gateway must have the relay tunnel enabled; an account login is required.",

@@ -14,6 +14,8 @@
       "modeLocal": "本地",
       "modeRemote": "远程",
       "modeRelay": "中继",
+      "nodeSwitchConfirm": "检测到本机默认 Node 端口（19900）有 acowork-node 进程。切换模式前停止该 Node？",
+      "nodeSwitchFailed": "无法安全停止本机 Node，模式未切换。",
       "localHint": "推荐：Desktop 会自动启动 Gateway；若已在运行则直接连接",
       "remoteHint": "连接手动启动的 Gateway（本机或其他机器均可）",
       "relayHint": "通过云端中继访问内网网关。地址填中继分配的设备域名（https://<gw-id>.<中继域名>），需先在网关上启用中继并登录账号。",

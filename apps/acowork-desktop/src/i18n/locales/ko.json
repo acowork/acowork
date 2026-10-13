@@ -14,6 +14,8 @@
       "modeLocal": "로컬",
       "modeRemote": "원격",
       "modeRelay": "릴레이",
+      "nodeSwitchConfirm": "기본 로컬 Node 포트(19900)에서 acowork-node 프로세스를 감지했습니다. 모드를 전환하기 전에 중지할까요?",
+      "nodeSwitchFailed": "로컬 Node를 안전하게 중지하지 못했습니다. 모드는 변경되지 않았습니다.",
       "localHint": "권장: Desktop App이 Gateway를 자동으로 시작합니다. 이미 실행 중이면 바로 연결합니다",
       "remoteHint": "수동으로 시작한 Gateway(이 컴퓨터 또는 다른 컴퓨터)에 연결합니다",
       "relayHint": "클라우드 릴레이를 통해 LAN의 게이트웨이에 접속합니다. 릴레이가 할당한 장치 도메인(https://<gw-id>.<릴레이 도메인>)을 입력하세요. 게이트웨이에서 릴레이 활성화 및 계정 로그인이 필요합니다.",

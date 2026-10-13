@@ -8,6 +8,7 @@ import type { AgentListResponse, GatewayConfig, GatewayMode, NodeInfo } from "..
 import { fetchNodes } from "../../lib/gateway-api";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
+import { requestGatewayModeChange } from "../../stores/settingsStore";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { RadioGroup } from "../common/RadioGroup";
 import { Switch } from "../common/Switch";
@@ -72,7 +73,6 @@ export function GatewayTab() {
   const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
   const gatewayUrlHistory = useSettingsStore((s) => s.gatewayUrlHistory);
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
-  const setGatewayMode = useSettingsStore((s) => s.setGatewayMode);
   const autoStartLocalNode = useSettingsStore((s) => s.autoStartLocalNode);
   const setAutoStartLocalNode = useSettingsStore((s) => s.setAutoStartLocalNode);
   const [testing, setTesting] = useState(false);
@@ -137,8 +137,8 @@ export function GatewayTab() {
   }, [gatewayUrl, status]);
 
   const handleModeChange = useCallback((mode: GatewayMode) => {
-    setGatewayMode(mode);
-  }, [setGatewayMode]);
+    void requestGatewayModeChange(mode);
+  }, []);
 
   // Relay mode's Gateway URL is the relay's TLS device domain (design doc 24
   // §8.0) — `relay_mqtt_wss_url` accepts only `https` and the strict remote

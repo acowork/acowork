@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { useSettingsStore } from "../../stores/settingsStore";
+import { useSettingsStore, requestGatewayModeChange } from "../../stores/settingsStore";
 import { useAuthStore } from "../../stores/authStore";
 import { initMqttListener } from "../../stores/chatStore";
 import { initWorkspaceFsListener } from "../../lib/workspaceFsEvents";
@@ -273,7 +273,6 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
     const candidates = useGatewayStore((s) => s.candidates);
     const clearCandidates = useGatewayStore((s) => s.clearCandidates);
     const gatewayMode = useSettingsStore((s) => s.gatewayMode);
-    const setGatewayMode = useSettingsStore((s) => s.setGatewayMode);
     /**
      * Whether the candidate chooser has been offered in this boot
      * session. Gates the 5s fallback timer so we don't reprobe on every
@@ -670,7 +669,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                     size="small"
                                     className="w-auto justify-self-start"
                                     value={gatewayMode}
-                                    onChange={(v) => setGatewayMode(v as GatewayMode)}
+                                    onChange={(v) => void requestGatewayModeChange(v as GatewayMode)}
                                     options={[
                                         { value: "local", label: t("splashScreen.modeLocal") },
                                         { value: "remote", label: t("splashScreen.modeRemote") },

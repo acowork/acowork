@@ -19,6 +19,25 @@ import {
   type LogLevel,
 } from "../lib/logger";
 import { log } from "../lib/logger";
+import i18n from "../i18n";
+
+/** Check for the default-port Node before committing a Gateway mode switch. */
+export async function requestGatewayModeChange(mode: GatewayMode): Promise<void> {
+  if (mode === useSettingsStore.getState().gatewayMode) return;
+  try {
+    const nodePids = await invoke<number[]>("inspect_local_node_process");
+    if (nodePids.length > 0) {
+      const confirmed = window.confirm(i18n.t("onboarding.gateway.nodeSwitchConfirm"));
+      if (!confirmed) return;
+      await invoke("stop_local_node_process");
+    }
+    useSettingsStore.getState().setGatewayMode(mode);
+  } catch (error) {
+    log.warn("Failed to handle local Node during Gateway mode switch:", error);
+    window.alert(`${i18n.t("onboarding.gateway.nodeSwitchFailed")}\n${String(error)}`);
+  }
+}
+
 import { useAuthStore } from "./authStore";
 import {
   DEFAULT_ACCENT_PRESET,
