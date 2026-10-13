@@ -14,7 +14,7 @@ import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -1151,6 +1151,14 @@ function NodeGroupHeader({
             !collapsed && "rotate-90",
           )}
         />
+        {/* ponytail: 12px Monitor = "this row is a machine, not an agent".
+            Purely decorative next to the dot — if a second machine glyph is
+            ever needed (e.g. remote vs local), split by node kind. */}
+        <Monitor className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
+        {/* Online dot trails the name: the row now leads with "a machine
+            called X", and the status reads as a trailing badge rather than
+            a second leading glyph competing with the monitor icon. */}
+        <span className="truncate">{nodeName}</span>
         <span
           className={cn(
             "h-1.5 w-1.5 shrink-0 rounded-full",
@@ -1158,7 +1166,6 @@ function NodeGroupHeader({
           )}
           aria-hidden
         />
-        <span className="truncate">{nodeName}</span>
       </button>
       {/* ADR-087: node permissions entry — hidden unless the caller may
           manage this node (owner / guest / admin; Local mode counts). */}

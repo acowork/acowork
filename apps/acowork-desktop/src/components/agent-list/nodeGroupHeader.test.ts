@@ -50,6 +50,25 @@ describe("NodeGroupHeader", () => {
     expect(header).toMatch(/flex-1[^"]*"[\s\S]{0,80}onClick=\{onToggle\}|onToggle[\s\S]{0,200}flex-1/);
   });
 
+  it("marks the row as a machine with a monitor glyph", () => {
+    // The node band is the only place in the sidebar that labels a
+    // *device* rather than an agent/user. The Monitor icon leads so
+    // "device" reads before the host name; without it the band is just a
+    // divider line and the rows under it look like agents.
+    const header = src.slice(src.indexOf("function NodeGroupHeader"));
+    expect(header).toContain("<Monitor className=");
+    // Anchor on the rendered name span: `{nodeName}` alone also matches the
+    // aria-label on the toggle button, which sits earlier and would flip
+    // every ordering assertion below.
+    const icon = header.indexOf("<Monitor");
+    const name = header.indexOf('<span className="truncate">{nodeName}');
+    expect(icon).toBeLessThan(name);
+    // The status dot is a trailing badge — after the name, so the row leads
+    // with the glyph + identifier and status does not compete for the lead
+    // position with the monitor icon.
+    expect(header.indexOf("bg-emerald-500")).toBeGreaterThan(name);
+  });
+
   it("sits on the same fill as the right-panel card title bars", () => {
     // The node band is raised off `nav-surface` with the one token that
     // also drives ListBox's card (right-panel Agent Status / Session
