@@ -1,8 +1,10 @@
-import { useEffect, useRef, useLayoutEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useLayoutEffect, useState } from "react";
 import Panzoom, { PanzoomObject } from "@panzoom/panzoom";
 import { ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
 import { log } from "../../lib/logger";
 import { hashStr, isPlausibleMermaid, renderMermaid } from "../../lib/mermaid";
+import { tokensFor } from "../../lib/mermaidTheme";
+import { useSettingsStore } from "../../stores/settingsStore";
 
 const SCALE_MIN = 0.2;
 const SCALE_MAX = 8;
@@ -31,6 +33,15 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
   /** The div that wraps the SVG. Panzoom is bound to this. */
   const panzoomTargetRef = useRef<HTMLDivElement>(null);
   const lastLoggedFailRef = useRef<number | null>(null);
+
+  // ---- Theme-driven palette ----
+  // Mermaid bakes colors into the SVG at render time, so a diagram keeps
+  // whatever palette it was drawn with. Resolving the palette here (rather
+  // than at module load) is what makes a live theme switch repaint the
+  // chart instead of leaving light-mode edges on a dark background.
+  const theme = useSettingsStore((s) => s.theme);
+  const osTheme = useSettingsStore((s) => s.osTheme);
+  const tokens = useMemo(() => tokensFor(theme, osTheme), [theme, osTheme]);
 
   // ---- Pan & zoom ----
   const panzoomRef = useRef<PanzoomObject | null>(null);
@@ -98,13 +109,17 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
 
   // Debounced mermaid render
   useEffect(() => {
+    // Declared OUTSIDE the timer callback so cleanup can actually flip it.
+    // Theme is a dependency (see below), so a theme switch re-runs this
+    // effect; without this, an in-flight render from the previous theme
+    // would resolve after the new one and overwrite it with stale colors.
+    let cancelled = false;
     const timer = setTimeout(() => {
       if (!isPlausibleMermaid(chart)) return;
-      let cancelled = false;
       const failHash = hashStr(chart);
       (async () => {
         try {
-          const svg = await renderMermaid(chart);
+          const svg = await renderMermaid(chart, tokens);
           if (!cancelled) {
             setSvgContent(svg);
             setRenderFailed(false);
@@ -122,8 +137,14 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
         }
       })();
     }, 200);
-    return () => { clearTimeout(timer); };
-  }, [chart]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // `tokens` is memoized on (theme, osTheme), so this re-runs on theme
+    // switch and nothing else — mermaid bakes colors into the SVG at render
+    // time, so a re-render is the only way to repaint a live diagram.
+  }, [chart, tokens]);
 
   // Measure SVG, set content area height, create panzoom, fit to container
   useLayoutEffect(() => {

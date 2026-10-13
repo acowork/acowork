@@ -1,59 +1,25 @@
 import mermaid from "mermaid";
+import { LIGHT_TOKENS, type MermaidTokens } from "./mermaidTheme";
 
-/** (Re-)initialize mermaid global config. Safe to call multiple times. */
-export function ensureInit() {
+/**
+ * (Re-)initialize mermaid global config. Internal to this module: callers
+ * must use `renderMermaid()` so initialization and rendering remain atomic
+ * with respect to the shared Mermaid singleton.
+ *
+ * `tokens` carries the palette — it is a parameter, not a constant, because
+ * mermaid bakes colors into the SVG at render time. Re-rendering with the
+ * active theme's tokens is the only way a dark-mode diagram stops shipping
+ * light-mode edges. See `mermaidTheme.ts` for the palettes themselves.
+ *
+ * Defaults to LIGHT_TOKENS so any caller that omits it keeps the historical
+ * behavior rather than silently rendering an unstyled chart.
+ */
+function ensureInit(tokens: MermaidTokens = LIGHT_TOKENS) {
   mermaid.initialize({
     startOnLoad: false,
-    theme: "base",
-    themeVariables: {
-      background: "#ffffff",
-      primaryColor: "#f8fafc",
-      primaryBorderColor: "#cbd5e1",
-      primaryTextColor: "#334155",
-      lineColor: "#94a3b8",
-      secondaryColor: "#f0fdf5",
-      tertiaryColor: "#fdfaf5",
-      clusterBkg: "#f8fafc",
-      clusterBorder: "#d1d5db",
-      edgeLabelBackground: "#ffffff",
-      nodeBorder: "#cbd5e1",
-      nodeTextColor: "#334155",
-      fontSize: "12px",
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif',
-      nodeBorderRadius: 12,
-    },
-    themeCSS: [
-      ".node.default > rect,",
-      ".node.default > .label-container,",
-      ".node > rect,",
-      ".node > .label-container {",
-      "  rx: 12px !important;",
-      "  ry: 12px !important;",
-      "}",
-      ".node.default > rect,",
-      ".node > rect {",
-      "  fill: #f8fafc !important;",
-      "  stroke: #cbd5e1 !important;",
-      "}",
-      ".cluster > g > .node.default > rect,",
-      ".cluster > g > .node > rect {",
-      "  fill: #f0fdf5 !important;",
-      "  stroke: #a7c2b4 !important;",
-      "}",
-      ".cluster > g > .cluster > g > .node.default > rect,",
-      ".cluster > g > .cluster > g > .node > rect {",
-      "  fill: #fdfaf5 !important;",
-      "  stroke: #c4b8a8 !important;",
-      "}",
-      ".cluster > g > .cluster > g > .cluster > g > .node.default > rect,",
-      ".cluster > g > .cluster > g > .cluster > g > .node > rect {",
-      "  fill: #f8f6fc !important;",
-      "  stroke: #bdb8c8 !important;",
-      "}",
-      ".label-container {",
-      "  border-radius: 12px !important;",
-      "}",
-    ].join("\n"),
+    theme: tokens.theme,
+    themeVariables: tokens.themeVariables,
+    themeCSS: tokens.themeCSS,
     // useMaxWidth: false → mermaid outputs SVG with explicit width/height
     // attrs (the viewBox pixel size), NOT width="100%" + max-width.
     // We need real pixel dimensions so we can measure the rendered
@@ -130,12 +96,32 @@ export function isPlausibleMermaid(code: string): boolean {
 }
 
 let renderSeq = 0;
+/** Mermaid's config and diagram parser/renderer are module-global singletons.
+ *  Keep initialize + render in one FIFO critical section: changing the config
+ *  between another render's initialize and config snapshot can bake the wrong
+ *  palette into its SVG. */
+let renderQueue: Promise<void> = Promise.resolve();
 
 /** Render mermaid chart → SVG string. Throws on invalid diagram.
- *  Global counter keeps render IDs unique across concurrent diagrams. */
-export async function renderMermaid(chart: string): Promise<string> {
-  ensureInit();
-  renderSeq += 1;
-  const { svg } = await mermaid.render(`md-${renderSeq}-${hashStr(chart)}`, chart);
-  return svg;
+ *  IDs stay unique across queued requests; initialize + render are serialized
+ *  because Mermaid owns one module-global config and renderer state.
+ *
+ *  Pass the active theme's tokens (`tokensFor(theme, osTheme)`) so the baked
+ *  palette matches the UI. Omitting them falls back to LIGHT_TOKENS. */
+export function renderMermaid(
+  chart: string,
+  tokens: MermaidTokens = LIGHT_TOKENS,
+): Promise<string> {
+  const render = renderQueue.then(async () => {
+    ensureInit(tokens);
+    renderSeq += 1;
+    const { svg } = await mermaid.render(`md-${renderSeq}-${hashStr(chart)}`, chart);
+    return svg;
+  });
+
+  // Recover the queue after either fulfillment or rejection; the caller still
+  // receives `render` and observes the original error, but one invalid chart
+  // must not permanently prevent every subsequent diagram from rendering.
+  renderQueue = render.then(() => undefined, () => undefined);
+  return render;
 }

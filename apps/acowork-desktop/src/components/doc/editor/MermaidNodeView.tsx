@@ -14,7 +14,7 @@
  * - readOnly 时不出「编辑代码」入口；点击守卫 editor.isEditable。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   NodeViewContent,
   NodeViewWrapper,
@@ -23,6 +23,8 @@ import {
 import { Pencil, Eye } from "lucide-react";
 import { useTranslation } from "../../../i18n/useTranslation";
 import { isPlausibleMermaid, renderMermaid } from "../../../lib/mermaid";
+import { tokensFor } from "../../../lib/mermaidTheme";
+import { useSettingsStore } from "../../../stores/settingsStore";
 import { log } from "../../../lib/logger";
 
 const RENDER_DEBOUNCE_MS = 200;
@@ -42,13 +44,18 @@ export function MermaidNodeView({ node, editor }: NodeViewProps) {
   // 用派生值保证下次重渲染时只读态强制回渲染态，编辑态不会卡死。
   const isEditing = editable && editing;
 
+  // 主题调色板：mermaid 在渲染期把颜色烘焙进 SVG，切换主题必须重渲染。
+  const theme = useSettingsStore((s) => s.theme);
+  const osTheme = useSettingsStore((s) => s.osTheme);
+  const tokens = useMemo(() => tokensFor(theme, osTheme), [theme, osTheme]);
+
   // 渲染态（非编辑时）debounce 渲染 mermaid。
   useEffect(() => {
     if (isEditing || !isMermaid || !isPlausibleMermaid(code)) return;
     const token = ++renderToken.current;
     const timer = setTimeout(async () => {
       try {
-        const out = await renderMermaid(code);
+        const out = await renderMermaid(code, tokens);
         if (token !== renderToken.current) return;
         setSvg(out);
         setFailed(false);
@@ -60,7 +67,7 @@ export function MermaidNodeView({ node, editor }: NodeViewProps) {
       }
     }, RENDER_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [code, isEditing, isMermaid]);
+  }, [code, isEditing, isMermaid, tokens]);
 
   // 非 mermaid 代码块：默认渲染（不涉及 mermaid）。
   if (!isMermaid) {
