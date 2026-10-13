@@ -7,6 +7,8 @@ import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
 import { useGatewayStore, stopGatewayDeathWatch } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
+import { useAuthStore } from "./authStore";
+import { setChatPushChannel, useUserChatStore } from "./userChatStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { releaseAdapterSession, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
 import { getGatewayUrl } from "../lib/config";
@@ -1147,6 +1149,9 @@ let _bootstrapUnlisten: (() => void) | null = null;
 // Inventory-change fanout handle — see the `inventory-changed` listener
 // below. Paired with `bootstrap-state` for cleanup symmetry.
 let _inventoryUnlisten: (() => void) | null = null;
+// User-chat wake-up fanout handle — see the `user-chat-changed` listener
+// below (design doc 25 §8).
+let _userChatUnlisten: (() => void) | null = null;
 
 /// Reentrancy guard for `initMqttListener`.
 ///
@@ -1256,6 +1261,17 @@ function applyConnectionTransition(
       ? { inventoryVersion: state.inventoryVersion + 1 }
       : {}),
   });
+
+  // The inbox rides the same bridge. Two consequences, both keyed on this
+  // edge and nowhere else (design doc 25 §8.0): while the connection is up the
+  // doorbell replaces the user-chat fallback poll, so the timer stands down —
+  // and when it comes back up, the doorbells that fired while we were
+  // unsubscribed are gone for good (non-retained), so the inbox re-reads once
+  // to converge, exactly like `inventoryVersion` above. ADR-092 decision 6 puts
+  // that catch-up re-read *inside* `setChatPushChannel`'s `down → up` edge, so
+  // this line is the only call — no separate `wake()` that could double-fire or
+  // drift out of sync with the channel state.
+  setChatPushChannel(nextEffective === "connected");
 }
 
 /**
@@ -1461,6 +1477,22 @@ async function doInitMqttListener(): Promise<void> {
     useChatStore.setState((s) => ({ inventoryVersion: s.inventoryVersion + 1 }));
   });
 
+  // User-chat wake-up fanout (design doc 25 §8). `acowork-user` publishes an
+  // empty doorbell on `acowork/users/{user_id}/chat/changed` after every send
+  // and every read; the Rust client subscribes the `+` filter (the account can
+  // change without a reconnect, so the subscription table stays static) and
+  // forwards it with the account segment taken from the topic. The "is this
+  // mine" test therefore belongs here, next to the only copy of the signed-in
+  // id — a signal for another account must not start a re-read of this inbox.
+  _userChatUnlisten = await listen<{ user_id: string }>(
+    "user-chat-changed",
+    (event) => {
+      const me = useAuthStore.getState().account?.user_id;
+      if (!me || event.payload.user_id !== me) return;
+      void useUserChatStore.getState().wake();
+    },
+  );
+
   // Pull the *current* status from the Rust side so we don't miss the
   // initial state.  The source of truth is `DesktopMqttClient::session_state`
   // (a watch channel updated synchronously by the poll task).
@@ -1521,6 +1553,13 @@ export function disposeMqttListener(): void {
     _inventoryUnlisten();
     _inventoryUnlisten = null;
   }
+  if (_userChatUnlisten) {
+    _userChatUnlisten();
+    _userChatUnlisten = null;
+  }
+  // No bridge, so the inbox's fallback timer has to carry freshness again —
+  // and a listener torn down here must not leave a stale `true` behind.
+  setChatPushChannel(false);
   useChatStore.setState({
     mqttConnected: false,
     lastMqttError: null,

@@ -318,16 +318,39 @@ acowork/sidecar/
 - **Owner**: The Sidecar process itself (or the Gateway internal component proxying it).
 - **HTTP fallback**: `GET /api/sidecar/{kind}`.
 
-### 3.4 User-Level (Reserved, Enabled in Multi-User Phase)
+### 3.4 User-Level (Per-Account Wake-Up Surface)
 
 ```
 acowork/users/{user_id}/
-└── notifications/                    # Personal-level notifications (user preference delivery, specific agent alerts, etc.)
+├── chat/changed                      # [QoS 1, non-retained, EMPTY payload] this account's inbox deserves a re-read
+└── notifications/                    # (still reserved) personal-level notifications (user preference delivery, specific agent alerts, etc.)
     └── inbox/                        # Inbox-style notifications
         └── {notification_id}/update
 ```
 
-- Not enabled in current phase; in multi-user phase, ACL restricts to the user themselves.
+- **`chat/changed` is the only user-level topic in use** (ADR-076 §Decision 8, design doc 25 §8.8). Owner = `acowork-user`,
+  publisher `core/acowork-user/src/mqtt_publisher.rs::notify_chat_changed`; the topic string exists **only in the shared
+  contract** `acowork_core::mqtt_proto::user_chat_changed_topic` — it is a wire contract between the user service and two
+  clients, and a one-sided rename would silently stop chat push instead of failing a build.
+  Two triggers only: `POST /api/users/{uid}/chats/{chat}/messages` once the row lands (**rung on both accounts — sender and
+  recipient**) and `POST …/read` after the read cursor moves (only the reader).
+- **The payload must stay empty**: the embedded broker has no subscription-level ACL (§10), so any authenticated account can
+  subscribe `acowork/users/#`. A `chat_id` *is* the pair of user ids, so naming one in a payload publishes the social graph.
+  The signal says "re-read"; the content always comes back over HTTP.
+- **Non-retained is deliberate**: retention would replay the last doorbell to a client that already caught up during its own
+  `phase=ready` reload. The price is that a signal published before the subscribe took effect is gone for good, so every
+  subscriber must re-read proactively on the connected edge (both clients do).
+- **Subscribers**: Desktop — the Tauri Rust side subscribes the wildcard `acowork/users/+/chat/changed`
+  (`ALL_TOPIC_FILTERS` is a compile-time table re-subscribed on every CONNACK, while the account can change hands without a
+  reconnect), forwards it as the Tauri event `user-chat-changed`, and the **frontend filters by the signed-in `user_id`**;
+  Mobile — the `src/lib/presence.ts` background connection, sharing **one** SUBSCRIBE packet with presence and matching the
+  **exact** topic. Both clients react with the same reload rule (design doc 25 §8.8: tail increment, never move the viewport).
+- ⚠️ **MQTT user authentication and topic ACL remain deferred** (the old ADR-077 topic, §10): the above is a publish/subscribe
+  contract, not an authorization model. Keying the topic by account id only makes "a client reads its own mailbox" client
+  discipline; user isolation still lives entirely in the HTTP-side owner checks.
+- There is a **service-level** neighbour: `acowork/user/profiles/changed` (note the singular `user`; payload = profile-list
+  version, owner = `acowork-user`, subscriber = Gateway, ADR-084 §Decision 4b). It is **not** under the `acowork/users/`
+  subtree — do not read the two as one tree.
 
 ### 3.5 Design Principles (Refined)
 
@@ -697,7 +720,9 @@ When Runtime abnormally disconnects (including `kill -9`, crash, network loss), 
 | **Gateway Publisher** | `gateway:publisher` | (Only PUBLISHes `acowork/global/#` Retained; does not SUBSCRIBE business topics) |
 | **Gateway Subscriber** | `gateway:subscriber` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready` |
 | **Runtime** | `agent:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#` |
-| **Desktop (Tauri Rust) — always subscribed** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#` (optional, for Settings page) |
+| **Desktop (Tauri Rust) — always subscribed** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#` (optional, for Settings page)<br/>`acowork/users/+/chat/changed` (§3.4 — the filter table is compile-time and re-subscribed on every CONNACK, so the frontend does the `user_id` filter) |
+| **Mobile (WebView) — session channel** | `user:{sub}:mobile:{device_uuid}` | the foreground session only (design doc 25 §8.1) |
+| **Mobile (WebView) — background channel** | `user:{sub}:mobile:{device_uuid}-presence` | `acowork/agents/+/status`<br/>`acowork/users/{me}/chat/changed` (**one SUBSCRIBE packet** with presence, matched on the exact topic; §3.4) |
 | **Desktop (Tauri Rust) — dynamically when entering specific session** | Same | `acowork/agents/{id}/sessions/{sid}/meta`<br/>`acowork/agents/{id}/sessions/{sid}/config`<br/>`acowork/agents/{id}/sessions/{sid}/messages/#` |
 | **Desktop (Tauri Rust) — PUBLISH (control commands)** | Same | `acowork/agents/{id}/sessions/control/#` (sid in payload) |
 
@@ -797,6 +822,7 @@ Need to wait for explicit success/failure from the other side?
 | Memory node change | Runtime | KB | `agents/{id}/memory/nodes/{nid}/update` | `GET /api/agents/{id}/memory/nodes/{nid}` |
 | Memory graph full | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/memory/graph` (Gateway reverse proxy) |
 | File content | Runtime | variable | ❌ | ✅ `GET /api/files/{id}` (Gateway reverse proxy) |
+| User↔user chat content | `acowork-user` (SQLite) | KB | ❌ only the empty doorbell `acowork/users/{uid}/chat/changed` (QoS 1, not R) — it carries no thread or peer identity | ✅ `GET /api/users/{uid}/chats`, `GET /api/users/{uid}/chats/{chat}/messages` (ADR-076 § Decision 8) |
 
 > **(R)** = Retained flag.
 
@@ -930,7 +956,7 @@ client.publish(
 | Client | Client ID | Purpose |
 |--------|-----------|---------|
 | Gateway Publisher | `gateway:publisher` | Uniquely identifies Gateway's MQTT client (only PUBLISHes `acowork/global/#` Retained) |
-| User Service | `user:service` | Publisher of the standalone `acowork-user` process (only PUBLISHes `acowork/user/profiles/changed`); CONNECT password = the Gateway publisher token (injected by the user supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
+| User Service | `user:service` | Publisher of the standalone `acowork-user` process (PUBLISHes `acowork/user/profiles/changed` and `acowork/users/{uid}/chat/changed`, both QoS 1 non-retained doorbells); CONNECT password = the Gateway publisher token (injected by the user supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
 | Doc Service | `doc:service` | Publisher of the standalone `acowork-doc` process (only PUBLISHes `acowork/doc/tree/changed`); CONNECT password = the Gateway publisher token (injected by the doc supervisor via `--mqtt-password`, ADR-084 § Decision 4b) |
 | Runtime | `agent:{agent_id}` | Business entity, one per Runtime; from Phase 5a onward, CONNECT password = host Node's node_token (see §8.7) |
 | Desktop | `user:{user_id}:desktop:{pid}` | Distinguishes in multi-user scenarios (`{pid}` = process PID, for multiple desktop instances per user); from Phase 5a onward, CONNECT password = `http_token` (see §8.7) |

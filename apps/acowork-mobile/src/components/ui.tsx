@@ -9,7 +9,8 @@ import type { CSSProperties, ReactNode } from 'react'
 
 /** The grouped-list container — the single most-used iOS surface.
  *  `title` is a ReactNode so a section header can carry markup (the inbox's
- *  per-node group titles render an online dot beside the node name). */
+ *  group titles render a leading glyph beside the name, plus a status dot
+ *  for a node). */
 export function ListSection({ title, children }: { title?: ReactNode; children: ReactNode }) {
   return (
     <>
@@ -47,8 +48,12 @@ export function ListRow({
   /** Count bubble. Only ever a NUMBER the server actually reported. */
   badge?: number
   /** Avatar element (image or initials block) rendered 48px left.
-   *  `avatarUnread` overlays the standard IM red dot on the avatar's
-   *  top-right corner (the honest signal for an agent session, §8.5). */
+   *  Unread always lands on this avatar's top-right corner — the position
+   *  every IM trains people to look at: a server `badge` renders as a red
+   *  number bubble, the client-inferred "there is something new" for an
+   *  agent session as a plain red dot (`avatarUnread`, §8.5 — never a number
+   *  there, because the count is inferred). A row WITHOUT an avatar has no
+   *  corner to sit on and keeps the bubble in the trail. */
   avatar?: ReactNode
   avatarClass?: string
   avatarUnread?: boolean
@@ -69,7 +74,15 @@ export function ListRow({
       {avatar ? (
         <div className="list-row-avatar-wrap">
           <div className={`list-row-avatar${avatarClass ? ' ' + avatarClass : ''}`}>{avatar}</div>
-          {avatarUnread ? <span className="avatar-unread" aria-label="有新消息" /> : null}
+          {/* The count outranks the dot: a row that knows how many is not
+              served a vaguer signal. They are mutually exclusive in practice
+              (agent rows dot, contact rows count) — the order is the fallback,
+              not a stack. */}
+          {badge && badge > 0 ? (
+            <span className="avatar-unread-count">{badge > 99 ? '99+' : badge}</span>
+          ) : avatarUnread ? (
+            <span className="avatar-unread" aria-label="有新消息" />
+          ) : null}
         </div>
       ) : null}
       {icon && !avatar ? (
@@ -85,7 +98,9 @@ export function ListRow({
         {hint ? <div className="list-row-hint">{hint}</div> : null}
       </div>
       <div className="list-row-trail">
-        {badge && badge > 0 ? <span className="badge-count">{badge > 99 ? '99+' : badge}</span> : null}
+        {badge && badge > 0 && !avatar ? (
+          <span className="badge-count">{badge > 99 ? '99+' : badge}</span>
+        ) : null}
         {value !== undefined ? <div className="list-row-value">{value}</div> : null}
         {arrow ? <span className="chevron" aria-hidden /> : null}
       </div>

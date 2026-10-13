@@ -175,6 +175,8 @@
     "empty": "暫無會話",
     "pick": "選擇左側會話開始閱讀",
     "noMessages": "暫無訊息",
+    "newMessages_one": "{{count}} 則新訊息",
+    "newMessages_other": "{{count}} 則新訊息",
     "placeholder": "輸入訊息…",
     "send": "傳送",
     "you": "我",

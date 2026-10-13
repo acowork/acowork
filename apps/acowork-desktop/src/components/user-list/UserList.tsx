@@ -501,12 +501,34 @@ function UserRow({
           "row-divider-b",
       )}
     >
-      <UserAvatar
-        displayName={account.display_name}
-        avatarUrl={account.avatar ?? null}
-        builtinAvatarId={account.builtin_avatar ?? null}
-        size={40}
-      />
+      {/* Unread lives on the avatar's top-right corner, in red — the position
+          every IM trains people to look at, and the same corner the agent rows
+          already use for their status dot ([AgentList.tsx](../agent-list/AgentList.tsx)).
+          It is deliberately NOT the global accent: accent is this app's
+          "selected" colour, so an accent bubble said "you are here" about a
+          thread the user has not read. On the selected row the bubble keeps a
+          light ring so it does not smear into the accent fill. */}
+      <div className="relative shrink-0">
+        <UserAvatar
+          displayName={account.display_name}
+          avatarUrl={account.avatar ?? null}
+          builtinAvatarId={account.builtin_avatar ?? null}
+          size={40}
+        />
+        {unread > 0 && (
+          <span
+            className={cn(
+              // Height == line-height: the bubble is borderless (the agent
+              // rows' corner dot is too), so any gap would sit off-centre.
+              "absolute -right-1.5 -top-1.5 h-[17px] min-w-[17px] rounded-full px-1 text-center text-10 font-medium leading-[17px]",
+              "bg-[var(--color-destructive)] text-white",
+              active && "ring-2 ring-white/70",
+            )}
+          >
+            {unread > 99 ? "99+" : unread}
+          </span>
+        )}
+      </div>
 
       <div className="min-w-0 flex-1 overflow-hidden">
         <div className="flex items-center justify-between gap-2">
@@ -521,16 +543,6 @@ function UserRow({
           >
             {account.display_name}
           </span>
-          {unread > 0 && (
-            <span
-              className={cn(
-                "shrink-0 rounded-full px-1.5 text-10 font-medium",
-                active ? "bg-white/20 text-white" : "bg-[var(--color-accent)] text-white",
-              )}
-            >
-              {unread > 99 ? "99+" : unread}
-            </span>
-          )}
         </div>
         <div className="flex items-center gap-1.5">
           <span

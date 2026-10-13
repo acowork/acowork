@@ -63,8 +63,12 @@ log = "0.4"
 tracing-subscriber = { version = "0.3", features = ["fmt", "ansi", "env-filter"] }
 tracing-appender = "0.2"
 
-# Async trait
-async-trait = "0.1"
+# Async trait. Floor is 0.1.92, not 0.1: earlier releases inject a bare
+# `#[must_use]` into every `#[async_trait]` method, and the boxed future it
+# returns is already `must_use`, so clippy 1.99's `double_must_use` fires on
+# every annotated trait in the workspace and `cargo clippy -- -D warnings`
+# cannot pass. Cargo.lock is not committed, so the floor is what carries the fix.
+async-trait = "0.1.92"
 
 # Cryptography
 chacha20poly1305 = "0.10"

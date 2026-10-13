@@ -110,6 +110,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 82 | [ADR-089](./ADR-089-lsp-relay-reachability-vs-exposure.md) | LSP Relay Reachability vs. Exposure — Desktop Accesses the Relay Through a Gateway Reverse Proxy | Proposed (pending architecture review) | [zh](../zh/ADR-089-lsp-relay-reachability-vs-exposure.md) |
 | 83 | [ADR-090](./ADR-090-mcp-lsp-install-ownership-node.md) | MCP Install Moves to the Agent's First Enable — Gateway Keeps the Global Registry and Key Vault | Accepted (implemented 2026-10-10; the LSP half was split out into ADR-091) | [zh](../zh/ADR-090-mcp-lsp-install-ownership-node.md) |
 | 84 | [ADR-091](./ADR-091-lsp-server-registry-node.md) | LSP Server Registry Moves Down to the Node — preset ∪ custom Merge, Persistent Install State | Accepted (implemented 2026-10-10, P0–P7) | [zh](../zh/ADR-091-lsp-server-registry-node.md) |
+| 85 | [ADR-092](./ADR-092-user-message-identity-and-bounded-reads.md) | Stable Identity and Bounded Reads for User Messages — Restructuring the user chat Storage and Refresh Model | Accepted | [zh](../zh/ADR-092-user-message-identity-and-bounded-reads.md) |
 
 ---
 

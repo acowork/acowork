@@ -365,6 +365,32 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
             return;
         }
 
+        // ── User chat wake-up signal (design doc 25 §8) ──
+        //
+        // `acowork-user` publishes an EMPTY, non-retained doorbell on
+        // `acowork/users/{user_id}/chat/changed` after every send and every
+        // read. It never says WHICH thread changed — that is the point, the
+        // broker has no subscription ACL and a `chat_id` in the payload would
+        // be a public social graph — so the reaction downstream is always an
+        // HTTP re-read of the inbox.
+        //
+        // Forwarded with the account segment taken from the topic; the webview
+        // owns the "is this my account" test, because `connect_mqtt`'s
+        // `user_id` is the MQTT client id, not the signed-in account, and this
+        // table is static across an account switch (see ALL_TOPIC_FILTERS).
+        //
+        // Its own branch rather than falling through to the `DataEnvelope`
+        // decode: the payload is zero bytes, and the empty-payload path below
+        // is reserved for cleared retained session events.
+        if let Some(chat_user) = parse_user_chat_changed_topic(&msg.topic) {
+            tracing::debug!("[MQTT] user chat wake-up signal received for {chat_user}");
+            let _ = app_handle.emit(
+                "user-chat-changed",
+                serde_json::json!({ "user_id": chat_user }),
+            );
+            return;
+        }
+
         // Try to decode as DataEnvelope protobuf
         let envelope = match DataEnvelope::decode(&msg.payload[..]) {
             Ok(e) => e,
@@ -1692,6 +1718,21 @@ fn extract_instance_id_from_topic(topic: &str) -> Option<String> {
     None
 }
 
+/// Extract the ACCOUNT segment from a user chat wake-up topic.
+///
+/// Recognised shape: `acowork/users/{user_id}/chat/changed` — the contract
+/// built by [`acowork_core::mqtt_proto::user_chat_changed_topic`], asserted
+/// against it in the tests below. Returns `None` for anything else.
+fn parse_user_chat_changed_topic(topic: &str) -> Option<&str> {
+    let user_id = topic
+        .strip_prefix("acowork/users/")?
+        .strip_suffix("/chat/changed")?;
+    if user_id.is_empty() || user_id.contains('/') {
+        return None;
+    }
+    Some(user_id)
+}
+
 /// Parse the plain-text agent status payload published by the Runtime
 /// Decode a `DataEnvelope<AgentStatus>` published by the Runtime on
 /// `acowork/agents/{instance_id}/status` (retained message).
@@ -1921,6 +1962,42 @@ mod tests {
             parse_agent_status_envelope("acowork/agents/x/status", &bytes).is_none(),
             "wrong payload variant must NOT be misreported as AgentStatus"
         );
+    }
+
+    /// The chat doorbell topic is a wire contract with `acowork-user`'s
+    /// publisher and with the subscription filter in `mqtt_client.rs`. A
+    /// rename on either side must fail here, not silently stop chat push.
+    #[test]
+    fn chat_changed_topic_parses_the_shared_contract() {
+        let topic = acowork_core::mqtt_proto::user_chat_changed_topic(
+            "22063a06-0d2f-4f0e-9b1a-7d5f1c2e3a4b",
+        );
+        assert_eq!(
+            parse_user_chat_changed_topic(&topic),
+            Some("22063a06-0d2f-4f0e-9b1a-7d5f1c2e3a4b"),
+            "the parser must read back exactly what the constructor wrote"
+        );
+    }
+
+    /// Everything that is not the doorbell must fall through to the
+    /// `DataEnvelope` decode instead of being forwarded as a chat signal —
+    /// in particular the session topics that also arrive with an empty
+    /// payload (cleared retained events).
+    #[test]
+    fn chat_changed_topic_rejects_other_shapes() {
+        for topic in [
+            "acowork/users//chat/changed",
+            "acowork/users/a/chat",
+            "acowork/users/a/b/chat/changed",
+            "acowork/agents/x/sessions/y/messages/ask_question",
+            "acowork/user/profiles/changed",
+        ] {
+            assert_eq!(
+                parse_user_chat_changed_topic(topic),
+                None,
+                "{topic} is not a chat doorbell"
+            );
+        }
     }
 }
 

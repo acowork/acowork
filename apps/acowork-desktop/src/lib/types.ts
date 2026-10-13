@@ -1913,6 +1913,14 @@ export interface ChatAttachment {
 
 /** One line of `messages.jsonl` — matches `acowork_gateway::chat::ChatMessage`. */
 export interface UserChatMessage {
+  /**
+   * Server-assigned, thread-monotonic sequence number (ADR-092 decision 1),
+   * 1-based and gapless except where a corrupt line was skipped. It is the
+   * stable identity `planPage` diffs on and `ackedThrough` keys by. Absent on
+   * a Gateway that predates ADR-092 — the client then falls back to the
+   * `total`-delta rule (see `planPage`).
+   */
+  seq?: number;
   /** Unix seconds, assigned by the Gateway. */
   ts: number;
   /** Author user id — always the verified sender, never client-supplied. */
@@ -1929,7 +1937,14 @@ export interface UserChatMessagesPage {
   chat_id: string;
   /** Chronological within the page, oldest first. */
   messages: UserChatMessage[];
-  total: number;
+  /**
+   * Total messages in the thread, the base for the tail-append delta
+   * (`userChatStore.planPage`). Null when the Gateway did not say — an older
+   * build, or a body that is not the shape we claim: the client must then
+   * replace the window instead of guessing a delta. `listMessages` normalizes
+   * the missing field to null rather than letting `undefined` reach the store.
+   */
+  total: number | null;
   offset: number;
   limit: number;
 }

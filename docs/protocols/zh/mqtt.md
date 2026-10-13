@@ -346,18 +346,33 @@ acowork/sidecar/
 - **Owner**：Sidecar 进程本身（或代理它的 Gateway 内部组件）。
 - **HTTP 备份**：`GET /api/sidecar/{kind}`。
 
-### 3.4 用户级（预留，多用户阶段启用）
+### 3.4 用户级（per-account 唤醒面）
 
 ```
 acowork/users/{user_id}/
-└── notifications/                    # 个人级通知（用户偏好触达、特定 agent 提醒等）
+├── chat/changed                      # [QoS 1, non-retained, 空载荷] 该账号的收件箱该重读了
+└── notifications/                    # （仍为预留）个人级通知（用户偏好触达、特定 agent 提醒等）
     └── inbox/                        # 收件箱式通知
         └── {notification_id}/update
 ```
 
-- 当前阶段不启用。⚠️ **MQTT 用户身份验证已暂缓**（原 ADR-077 课题）：多用户隔离目前完全靠
-  HTTP 侧的 owner 校验，MQTT 事件面**没有** per-user topic ACL（rumqttd 0.20 无该能力，见
-  §10）。所以本主题与 ACL 一起留待后续。
+- **`chat/changed` 是当前唯一在用的用户级主题**（ADR-076 §决策 8、设计文档 25 §8.8）。Owner = `acowork-user`，
+  发布器 `core/acowork-user/src/mqtt_publisher.rs::notify_chat_changed`；主题串**只存在于共享契约**
+  `acowork_core::mqtt_proto::user_chat_changed_topic`（服务端与两个客户端之间的线合同——一边重命名会**静默**关掉聊天推送，不会编译报错）。
+  触发点只有两处：`POST /api/users/{uid}/chats/{chat}/messages` 落库后（**同时敲给发件人与收件人两个账号**）
+  与 `POST …/read` 移动读游标后（只敲给读取者）。
+- **载荷必须为空**：内嵌 broker 没有订阅级 ACL（§10），任何已认证账号都能订 `acowork/users/#`。`chat_id` 就是两个
+  user_id 拼接，所以载荷里写 `chat_id` = 把社交图谱发布出去。信号只说"该重读"，内容一律回 HTTP 取。
+- **non-retained 是刻意的**：retain 会把最后一条门铃回放给一个已经靠自己的 `phase=ready` 重读补齐过的客户端。
+  代价是非 retained 信号在订阅生效前发出的部分**永久消失**，所以订阅者必须在 connected 边沿主动重读一次（两端均已实现）。
+- **订阅者**：Desktop——Tauri Rust 侧订通配 `acowork/users/+/chat/changed`（`ALL_TOPIC_FILTERS` 是编译期表、每次 CONNACK 重订，
+  而账号会在不重连的前提下换手），转发为 Tauri 事件 `user-chat-changed`，**前端按当前登录 `user_id` 过滤**；
+  Mobile——`src/lib/presence.ts` 的后台连接，与 presence 共用**同一个** SUBSCRIBE 包，按**精确主题**匹配。
+  两端对门铃的反应都是同一条重载规则（设计文档 25 §8.8：尾部增量，不得位移视口）。
+- ⚠️ **MQTT 用户身份验证与 topic ACL 仍暂缓**（原 ADR-077 课题，见 §10）：以上只是发布/订阅契约，不是授权模型。
+  按账号的主题名只能保证"客户端只看自己的信箱"是行为纪律；用户隔离目前完全靠 HTTP 侧的 owner 校验。
+- 另有一条**服务级**近邻主题：`acowork/user/profiles/changed`（注意是单数 `user`，payload = profile 列表版本号，
+  Owner = `acowork-user`，订阅者 = Gateway，ADR-084 §决策 4b）。它**不在** `acowork/users/` 子树下，不要混着读。
 
 ### 3.5 设计原则（精炼）
 
@@ -744,7 +759,9 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | **Gateway Publisher** | `gateway:publisher` | （仅 PUBLISH `acowork/global/#` Retained，不 SUBSCRIBE 业务主题） |
 | **Gateway Subscriber** | `gateway:subscriber` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready` |
 | **Runtime** | `agent:{agent_id}` | `acowork/global/#`<br/>`acowork/agents/{id}/sessions/control/#`（**仅剩** `intent` + `active_heartbeat` 两条非用户动作；其余控制命令已删除，用户操作走 HTTP） |
-| **Desktop (Tauri Rust) — 始终订阅** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#`（可选，Settings 页用） |
+| **Desktop (Tauri Rust) — 始终订阅** | `user:{user_id}:desktop:{pid}` | `acowork/agents/+/status`<br/>`acowork/agents/+/ready`<br/>`acowork/agents/+/meta`<br/>`acowork/agents/+/config`<br/>`acowork/agents/+/sessions/created`<br/>`acowork/agents/+/sessions/deleted`<br/>`acowork/global/#`（可选，Settings 页用）<br/>`acowork/users/+/chat/changed`（§3.4；通配是因为过滤器表是编译期的，前端按登录 `user_id` 过滤） |
+| **Mobile (WebView) — 会话通道** | `user:{sub}:mobile:{device_uuid}` | 只订当前前台会话（设计文档 25 §8.1） |
+| **Mobile (WebView) — 后台通道** | `user:{sub}:mobile:{device_uuid}-presence` | `acowork/agents/+/status`<br/>`acowork/users/{me}/chat/changed`（**同一个 SUBSCRIBE 包**，按精确主题匹配；§3.4） |
 | **Desktop (Tauri Rust) — 进入具体 session 时动态订阅** | 同上 | `acowork/agents/{id}/sessions/{sid}/meta`<br/>`acowork/agents/{id}/sessions/{sid}/config`<br/>`acowork/agents/{id}/sessions/{sid}/messages/#` |
 | **Desktop (Tauri Rust) — PUBLISH** | 同上 | `acowork/agents/{id}/sessions/control/active_heartbeat`（**仅存在性心跳**，非用户动作；其余控制命令已全部删除，用户操作改走 HTTP） |
 
@@ -846,6 +863,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | Memory node 变更 | Runtime | KB | `agents/{id}/memory/nodes/{nid}/update` | `GET /api/agents/{id}/memory/nodes/{nid}` |
 | Memory graph 全量 | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/memory/graph`（Gateway 反向代理） |
 | 文件内容 | Runtime | 任意 | ❌ | ✅ `GET /api/files/{id}`（Gateway 反向代理） |
+| 用户↔用户聊天内容 | `acowork-user`（SQLite） | KB | ❌ 仅空门铃 `acowork/users/{uid}/chat/changed` (QoS 1, 非 R)——不携带会话/对端身份 | ✅ `GET /api/users/{uid}/chats`、`GET /api/users/{uid}/chats/{chat}/messages`（ADR-076 §决策 8） |
 
 > **(R)** = Retained 标志位。
 
@@ -979,7 +997,7 @@ client.publish(
 | 客户端 | Client ID | 用途 |
 |--------|-----------|------|
 | Gateway Publisher | `gateway:publisher` | 唯一标识 Gateway 的 MQTT 客户端（仅发 `acowork/global/#` Retained） |
-| 用户服务 | `user:service` | `acowork-user` 独立进程的 publisher（仅发 `acowork/user/profiles/changed`）；CONNECT 密码 = Gateway publisher token（由 user supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
+| 用户服务 | `user:service` | `acowork-user` 独立进程的 publisher（发 `acowork/user/profiles/changed` 与 `acowork/users/{uid}/chat/changed`，两者都是 QoS 1 non-retained 门铃）；CONNECT 密码 = Gateway publisher token（由 user supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
 | 文档服务 | `doc:service` | `acowork-doc` 独立进程的 publisher（仅发 `acowork/doc/tree/changed`）；CONNECT 密码 = Gateway publisher token（由 doc supervisor 经 `--mqtt-password` 注入，ADR-084 §决策 4b） |
 | Runtime | `agent:{agent_id}` | 业务主体，每个 Runtime 一个；Phase 5a 起 CONNECT 密码 = 宿主 Node 的 node_token（见 §8.7） |
 | Desktop | `user:{user_id}:desktop:{pid}` | 多用户场景区分（`{pid}` = 进程 PID，用于同 user 多 desktop 实例）；Phase 5a 起 CONNECT 密码 = `http_token`（见 §8.7） |

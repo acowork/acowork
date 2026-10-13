@@ -667,7 +667,7 @@ function PairingCard() {
               <p className="text-xs text-text-secondary">
                 {t("settings.pairingExpires", { secs: secsLeft })}
               </p>
-              <p className="break-all text-center text-[10px] text-text-tertiary">
+              <p className="break-all text-center text-10 text-text-tertiary">
                 {t("settings.pairingAddress", { url: qr.baseUrl })}
               </p>
             </>
@@ -683,7 +683,7 @@ function PairingCard() {
             type="button"
             onClick={() => void generate()}
             disabled={busy}
-            className="flex items-center justify-center gap-1.5 rounded btn-outline px-3 py-1.5 text-xs disabled:opacity-50"
+            className="flex items-center justify-center gap-1.5 rounded btn-solid px-3 py-1.5 text-xs font-medium disabled:opacity-50"
           >
             <Smartphone size={14} />
             {qr ? t("settings.pairingRefresh") : t("settings.pairingGenerate")}

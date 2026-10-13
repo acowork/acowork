@@ -10,6 +10,12 @@
  * Visuals mirror `ChatPanel`'s send + upload composer (textarea + paperclip
  * + send) but skip the model / reasoning / workspace / skill toolbar —
  * user↔user chat has no session config.
+ *
+ * The viewport is the panel's one hard rule: a thread re-read (a
+ * `user-chat-changed` signal, a fallback poll tick) must never move it. The
+ * follow decision lives in [lib/stickToBottom](../lib/stickToBottom.ts) and the
+ * delta decision in `planPage` (store); this file only binds the two and draws
+ * the "N new messages" pill for arrivals the reader was not looking at.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -19,6 +25,7 @@ import { useAuthStore } from "../stores/authStore";
 import { chatIdOf, useUserChatStore } from "../stores/userChatStore";
 import { useTranslation } from "../i18n/useTranslation";
 import { formatAttachmentSize } from "../lib/user-chat-api";
+import { useStickToBottom } from "../lib/stickToBottom";
 import { toolbarButton } from "../lib/ui-styles";
 import { MessageRow } from "./MessageAttachments";
 
@@ -36,38 +43,49 @@ export function InboxPanel() {
   const error = useUserChatStore((s) => s.error);
   const pendingAttachments = useUserChatStore((s) => s.pendingAttachments);
   const uploading = useUserChatStore((s) => s.uploading);
+  const unseen = useUserChatStore((s) => s.unseenCount);
   const removePendingAttachment = useUserChatStore(
     (s) => s.removePendingAttachment,
   );
 
   const [draft, setDraft] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Follow rule: an arriving message must not hijack the viewport — it only
+  // scrolls while the reader is at the bottom. Switching peer re-pins; so does
+  // sending (`stickNow`). Scrolling back down is a scroll, not a render, so the
+  // controller reports the flip and the receipt happens there
+  // (`onBecamePinned`).
+  const { ref: scrollRef, stickNow, isPinned } = useStickToBottom(
+    [messages.length, activePeerId],
+    activePeerId,
+    () => void useUserChatStore.getState().markThreadRead(),
+  );
 
   // The poll is owned by the store (keyed on the session, not on this pane —
   // see [userChatStore](../stores/userChatStore.ts)). What this component
-  // *does* own is the read receipt, because "the user saw these messages" is
-  // knowledge only the renderer has.
+  // *does* own is the read receipt, because only the renderer knows where the
+  // user is looking: acking while they read history would clear a badge for
+  // text they never saw.
   useEffect(() => {
-    void useUserChatStore.getState().markThreadRead();
-  }, [messages, activePeerId]);
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, activePeerId]);
+    if (isPinned()) void useUserChatStore.getState().markThreadRead();
+  }, [messages, activePeerId, unseen, isPinned]);
 
   const submit = useCallback(async () => {
     const body = draft.trim();
     const pending = useUserChatStore.getState().pendingAttachments;
     if (!body && pending.length === 0) return;
     setDraft("");
+    // Sending is the one act that re-claims the follow even if the reader was
+    // parked in history — they need to see their own message go out.
+    stickNow();
     // Attachments are consumed by `send`, so a failure must restore the text
     // *and* leave the files queued — hence the id list is passed explicitly.
     const ok = await useUserChatStore
       .getState()
       .send(body, pending.map((a) => a.id));
     if (!ok) setDraft(body);
-  }, [draft]);
+  }, [draft, stickNow]);
 
   const pickFiles = useCallback((files: FileList | null) => {
     if (!files) return;
@@ -104,7 +122,10 @@ export function InboxPanel() {
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
+      <div
+        ref={scrollRef}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-2"
+      >
         {messages.length === 0 && !loadingMessages && (
           <p className="py-2 text-11 text-text-tertiary">
             {t("messages.noMessages")}
@@ -135,7 +156,36 @@ export function InboxPanel() {
             />
           );
         })}
-        <div ref={bottomRef} />
+        {/* Unread arrivals while the reader was scrolled up: counted, never
+            scrolled to. Tapping is the explicit act that re-claims the follow
+            — the same convention as the peer IM apps. `sticky` inside the
+            scroll container rather than an absolute overlay: it only ever
+            grows the content below the reader, so it cannot shift what they
+            are looking at — which is the whole rule this panel is built on.
+
+            Red, and only red: this pill is the third surface of the same
+            "you have unread" signal that the NavBar tile dot
+            ([NavButton](../components/common/NavButton.tsx)) and the
+            UserList row bubble
+            ([UserList](../components/user-list/UserList.tsx)) already carry,
+            both of which are `--color-destructive`. Using the global accent
+            here read as "you are here" (the app's selected colour) rather
+            than "something landed you have not looked at", which is the
+            opposite of what the pill means. Pinned by
+            `InboxPanel.newMessagesPill.test.tsx`. */}
+        {unseen > 0 ? (
+          <button
+            type="button"
+            onClick={() => {
+              stickNow();
+              void useUserChatStore.getState().markThreadRead();
+            }}
+            data-testid="inbox-new-messages-pill"
+            className="sticky bottom-2 z-[2] mx-auto mt-1 w-fit shrink-0 whitespace-nowrap rounded-full bg-[var(--color-destructive)] px-3 py-1.5 text-11 font-medium text-white shadow-md transition-opacity hover:opacity-90"
+          >
+            {t("messages.newMessages", { count: unseen })}
+          </button>
+        ) : null}
       </div>
 
       <div className="shrink-0">

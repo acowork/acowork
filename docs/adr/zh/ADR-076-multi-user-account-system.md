@@ -734,6 +734,32 @@ GET    /api/users/{self}/chats/{other_user_id}/files/{aid} → 下载附件
 - ❌ admin 不能 POST 消息冒充他人（消息 `from` 字段强制 = token.sub）
 - ❌ admin 不能修改 unread_count（只能读）
 
+#### §决策 8 v2：唤醒信号（空载荷门铃）与"不得位移"的刷新策略
+
+聊天迁进 `acowork-user` 之后，需要显式落字的才轮到**读侧新鲜度模型**：用户↔用户聊天没有 agent 会话那样"进行中的回合"可轮询，一条消息何时出现完全由对端决定，而写侧进程（`acowork-user`）与读侧进程（Desktop / Mobile）之间没有共享内存。原 §决策 8 只写了存储与 API，本节补上"变化如何被知晓、知晓后怎么刷新"。
+
+**1. 唤醒主题**：`acowork/users/{user_id}/chat/changed`，QoS 1、**non-retained**、**空载荷**。
+- 主题串的唯一定义在共享契约 `acowork_core::mqtt_proto::user_chat_changed_topic`，不允许发布方 / 订阅方各自拼接：它是跨三个二进制的线合同，一边改名会**静默**关掉聊天推送而不会编译报错。
+- 触发点两处，且只有两处：`POST …/messages` 落库后**同时敲给发件人与收件人两个账号**；`POST …/read` 移动读游标后只敲给读取者。
+- 发布是 fire-and-forget：业务写操作绝不能因为 broker 不可用而失败（同 ADR-084 §决策 4b 的 profiles 信号纪律）。
+
+**2. 载荷必须为空**——这是隐私决策不是偷懒：内嵌 broker 只有 CONNECT 级鉴权，没有 topic ACL（见 §5.5 技术债），`acowork/users/#` 任何已认证账号都订得到。`chat_id` 就是两个 user_id 的拼接，把它写进门铃等于把社交图谱发布出去。门铃只表达"该重读了"，**内容一律走带鉴权的 HTTP**（`GET …/chats` / `GET …/messages`），HTTP 响应是唯一真相。
+代价被明确接受：信号不指名哪条线程，所以一次唤醒要重读列表 + 当前线程；换来的是"任何人订阅到任何门铃都读不到内容"。
+
+**3. non-retained 的取舍**：retain 会把最后一条门铃回放给一个已经靠自己的 `phase=ready` 重读补齐过的客户端（重复但无害）；不保留则订阅生效前发布的信号**永久消失**。选 non-retained，并把"每个订阅者在 connected 边沿主动重读一次"定为唯一纠偏点。
+
+**4. 刷新策略（两端共用，不得漂移）**：页恒为"最新 N 条正序"，用服务端 `total` 与本地已知计数求差 `d = total − knownTotal`：`d=0` 什么都不做；`0<d≤页长` 只追加尾部 `page.slice(页长-d)`；其余（`d<0`、`d>页长`、`total` 缺失）整窗替换。
+这条规则的存在理由正是原 §决策 8 没有覆盖的场景：**用户可能停在长历史的任意位置**（顶部翻旧账、中间读到一半），而门铃是秒级到达的。数组头部引用不变 ⇒ 已渲染气泡不重挂 ⇒ 视口零位移；`d=0` 连 setState 都不做。
+两条同批落字的细则：① `total` 缺失必须归一化为 `null` 再进规则——带 `undefined`/NaN 参与比较会走穿所有分支，退化成"整页再追加一次"，每来一个信号历史翻一倍；② 整窗替换时的未读数取服务端报告的差值，且**首屏不计入**（原本窗口为空 → 0），否则一进线程就闪一下"50 条新消息"。已读回执只在"贴底"翻转时发出，由滚动事件驱动（一次 render 不等于用户移动了）。切线程时已知计数必须随线程清零，绝不带旧值进新线程。
+
+> **修订（ADR-092）**：本条 total-delta 启发式已被 seq 后缀差规则取代（ADR-092 决策 2）；本小节第 3 条"connected 边沿主动重读一次"的执行机制已折叠进 push/poll 边沿状态机（ADR-092 决策 6）。存储读写路径的配套重构见 ADR-092 决策 1/3/4/5。"不得位移"与"HTTP 唯一真相"纪律不变。
+
+**5. push 与 poll 互斥**：5s 兜底轮询只在唤醒通道不可用时武装（桥未建立 / 该过滤器被拒 / 未启用账号体系的 Gateway fail-closed），通道起来即完全停摆；通道状态只在翻转时上报，否则每次重连都会把定时器停一下再武装。这与设计文档 25 §8.0 的通道选择是同一条原则。另一个陷阱：**只有会话变更能重置 store**——MQTT 连上不是登出，把两者归为一支会清空用户正在看的线程。
+
+**6. 订阅形态**：Desktop 订**通配** `acowork/users/+/chat/changed`（订阅表是编译期的 `ALL_TOPIC_FILTERS`、每次 CONNACK 重订，而账号会在不重连的前提下换手），所以"这条是不是我的"必须在 webview 侧做；Mobile 的后台连接订**精确主题**，与 presence 共用**一个** SUBSCRIBE 包（分两次往返会留下"presence 订上了、门铃静默失联"且无人记录的半醒状态）。
+
+验证：Rust 侧 `core/acowork-user/src/mqtt_publisher.rs` / `http/chat_api.rs`（`topic_matches_the_shared_contract`、`send_wakes_both_mailboxes_and_read_wakes_only_the_reader`）；客户端两侧 vitest（清单见设计文档 25 §8.8 末尾）。
+
 ### 决策 10：PM / Doc 反代身份注入 — `X-Actor` 从硬编码 `human` 改为真实 `user_id`
 
 **现状**（单一用户假设下引入的常量，[pm_proxy.rs](core/acowork-gateway/src/http/pm_proxy.rs#L145)，[doc_proxy.rs](core/acowork-gateway/src/http/doc_proxy.rs#L145) 同构）：

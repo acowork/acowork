@@ -443,6 +443,8 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 | CONNECT 认证 | username=`{sub}`（信息性字段，broker 以 client_id+password 为准），password=**当前 access token**。MQTT 3.1.1 不在活连接内重认证：token 旋转（15min）后由重连携带新密码——对齐 Desktop `MqttCredentials::refresher` 语义：每次重连前向 authStore 取最新 token，过期则先触发单飞刷新 |
 | 订阅集（**只订当前前台会话**） | `acowork/agents/{id}/sessions/{sid}/state`（retained：status + message_count，等价轮询快照的推送版）<br>`…/messages/done`、`…/messages/error`、`…/messages/stopped`<br>`…/messages/tool_approval_needed`（retained QoS1，含工具详情）<br>`…/messages/ask_question`（retained QoS1，`question_json`） |
 | presence 订阅（**全局第二条连接**） | `acowork/agents/+/status`（QoS1）——一条通配过滤器覆盖整个 agent fleet。payload 是 `DataEnvelope{agent_status = 9}`（`AgentStatus`：online / instance_id / state / detail），映射与 HTTP 目录的 `alive`/`lifecycle` **同一词表**，两者不会读出两个互斥结论（`src/lib/presence.ts`）。该话题 Retained + 心跳 + LWT（`online=false`），因此刚订阅即回放每个 agent 的最近判定，断线期间的迁移不会丢。生命周期：登录（phase=ready）建、登出/过期关；**它没有降级轮询**（目录轮询本就带 presence），桥不可用时列表停在最后一次轮询结果 |
+| 用户聊天唤醒订阅（**同一条后台连接、同一个 SUBSCRIBE 包**） | `acowork/users/{me}/chat/changed`（QoS1，**空载荷**，non-retained）——`acowork-user` 在每次 send / read 落库后敲的门铃（[ADR-076 §决策 8](../../adr/zh/ADR-076-multi-user-account-system.md)）。门铃刻意不说明"哪条会话、和谁"，因为内嵌 broker 没有订阅级 ACL，载荷一旦写清就是把社交图谱发布出去。反应只有一条：回 HTTP 重读（§8.8）。两个过滤器共用**一个** SUBSCRIBE 包——packet id 空间按连接计，两次往返会留下"presence 订上了、门铃静默失联"且无人记录的状态。`chatTopic()` 每次 CONNECT 重新派生，账号换手不需要拆连接 |
+| 后台通道按**过滤器**分别授权 | SUBACK 返回码逐个对齐过滤器顺序，`0x80` 是 MQTT 3.1.1 唯一的失败码。"presence granted + chat `0x80`"是合法组合（未启用账号体系的 Gateway 只拒 mailbox）：presence 半边成功即连接算活着，chat 半边失败即上报 `onChatChannel(false)`，store 据此武装 5s 兜底轮询（§8.8），而不是让线程静默停在旧数据。状态**只在翻转时上报**——每次重连都重复上报会把兜底定时器反复停掉再武装 |
 | **不订** | `messages/chunk`、`tool_call`、`tool_result`、`reasoning_*` 等一切增量/过程事件——"只显最终结果"在订阅面就兑现，不是收到再丢 |
 | payload | protobuf `SessionMessage`（`core/acowork-core/proto/mqtt_payload.proto`）。WebView 侧用手写最小 wire decoder 只解所需字段（oneof 判别号 + 少量 string/uint 字段），**不引入 protobuf 运行时依赖** |
 | 出口 | 离开会话页 / 切换会话 / App 退后台 → UNSUBSCRIBE 旧集（连接可留着复用）；登录失效 → DISCONNECT |
@@ -519,6 +521,28 @@ refresh_token         ── 仅用于 POST /api/auth/refresh ───┤
 - **per-user 订阅授权**：远程 ACL 目前是 `sessions/+/messages/#` 通配（[ADR-076 §5.5](../../adr/zh/ADR-076-multi-user-account-system.md)），订到他人会话事件在协议上可行。mobile 的订阅纪律（只订前台可读会话）是客户端行为，不是授权。Desktop 同水同深，非 mobile 特有；补 topic-level 授权是后端事项，列入 v1.1 协同项。
 - **presence 通配同样无授权**：`agents/+/status` 在严格监听器上同样没有 topic ACL，因此任何一个有效用户 token 能看到该 Gateway 上全量 agent 的生命周期判定（在线/离线/失败 + 启动失败理由）。这与 Desktop 本地可见面平水；若要把 agent 存在性按所有权过滤，属同一项 topic-level 授权工作。
 - **流量风暴防线**：宽订阅防线在"客户端只订前台会话"这一纪律上；中继侧连接级限流（24 §5.3）承担异常行为兜底。
+- **聊天门铃同样没有订阅级授权**：`acowork/users/{uid}/chat/changed` 按账号命名，但 broker 无 topic ACL，所以任何有效 token 都能订阅他人账号的门铃。载荷为空，内容不泄露，泄露的是"该账号正在活跃"这一存在性事实。客户端按 `user_id` 过滤是行为纪律，不是授权；补 topic-level 授权与上两条同批。
+
+### 8.8 用户↔用户聊天：唤醒与不位移刷新（Desktop 同规则）
+
+用户聊天不是 agent 会话：没有"进行中的回合"可轮询，内容何时出现完全由对端决定，所以新鲜度只能靠唤醒 + 重读。
+规则两端共用（Desktop `src/stores/userChatStore.ts`、Mobile `src/stores/userChatStore.ts`）——**两端在同一份服务端数据上必须读出同一个窗口，任何一端单独改动都是缺陷**。
+
+| 规则 | 值 | 为什么 |
+|------|----|--------|
+| 信号 | `acowork/users/{me}/chat/changed`，**空载荷**、QoS1、non-retained | 载荷一旦说明"哪条会话/哪个人"，就是把社交图谱发布到无 ACL 的 broker（§8.7）。门铃只说"该重读" |
+| 反应 | 一律 HTTP 重读 `GET /api/users/{me}/chats` + 当前线程 `GET …/messages` | HTTP 响应是唯一真相；MQTT 不承载内容，因此信号丢失不需要补投机制 |
+| 合并 | 一次在途重读期间到达的信号折叠成"随后再来一轮"，不并发堆叠 | 一条消息触发两个门铃（消息 + 读游标）是常态 |
+| 边沿补拉 | MQTT connected 边沿主动重读一次 | 非 retained 的信号在订阅生效前发出的就永久消失，边沿补拉是唯一纠偏点 |
+| **刷新策略（核心）** | 页恒为"最新 N 条正序"，用服务端 `total` 与本地已知计数求差 `d`：`d=0` 不动；`0<d≤页长` 只追加 `page.slice(页长-d)` 的尾部；其余（`d<0`、`d>页长`、`total` 缺失）整窗替换 | 用户可能停在顶部/中间/任意位置读长历史，秒级信号不能每次都把视口抽走。数组头部引用不变 ⇒ React 不重挂已渲染气泡 ⇒ 零位移 |
+| 计数缺失 | `total` 缺失必须归一化为 `null` 再进规则，绝不带 `undefined`/NaN 参与比较 | NaN 走穿所有分支会退化成"整页再追加一次"，每来一个信号历史就翻一倍 |
+| 新消息浮标 | 整窗替换时未读数按服务端报告的差值计，`d=0` 不动；**首屏加载不计入**（窗口原本为空 → 0） | 刚打开线程时那 50 条不是"错过的消息"，否则浮标一进线程就闪一下"N 条新消息" |
+| 已读回执 | 只在"贴底"翻转时清未读，且由滚动事件（不是 render）驱动 | 用户滚回底部这个动作本身就是"读完了"的信号；render 不等同于位移 |
+| 兜底轮询 | 仅当唤醒通道不可用（桥未连上 / chat 过滤器被拒）时武装 5s（`POLL_MS`）；通道起来即完全停摆 | push 与 poll 不得同时驱动重载（§8.0 同一原则）；Desktop 的定时器归会话所有，Mobile 的归"线程在屏 && 通道 down" |
+| 登录/登出 | 只有**会话变更**才重置 store；MQTT 连上不是登出 | 把"桥起来了"当作会话变更会清空用户正在看的线程 |
+| 切线程 | 已知计数随线程清零，绝不带旧值进新线程 | `total` 是每线程的量：带着上一条线程的计数进新线程，首屏必然被误判成负差值 → 整窗反复替换 |
+
+验证：`apps/acowork-desktop/src/stores/userChatStore.test.ts`（planPage / 信号重载 / 合并 / push-poll 互斥）、`apps/acowork-desktop/src/lib/stickToBottom.test.ts`（贴底门控）、`apps/acowork-desktop/src/stores/chatStore.userChatPush.test.ts`（Tauri 事件扇出 + 账号过滤）、`apps/acowork-mobile/src/__tests__/user-chat-push.test.ts`、`apps/acowork-mobile/src/__tests__/stick-to-bottom.test.ts`、`apps/acowork-mobile/src/__tests__/presence.test.ts`。
 
 ## 9. 项目与文档
 

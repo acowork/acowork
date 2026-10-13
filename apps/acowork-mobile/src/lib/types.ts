@@ -266,6 +266,12 @@ export interface UserChatSummary {
 
 /** `ChatMessage` from the user service. `from` is server-forced, never client-supplied. */
 export interface UserChatMessage {
+  /**
+   * Server-assigned, thread-monotonic sequence number (ADR-092 decision 1).
+   * `planPage` diffs on it. Absent on a Gateway that predates ADR-092 — the
+   * client then falls back to the `total`-delta rule (see `planPage`).
+   */
+  seq?: number
   /** Unix seconds. */
   ts: number
   from: string

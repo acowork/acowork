@@ -432,18 +432,51 @@ export function userChatId(a: string, b: string): string {
   return [a, b].sort()[0] === a ? `${a}__${b}` : `${b}__${a}`
 }
 
+/**
+ * The per-account wake-up topic — the client-side twin of
+ * `acowork_core::mqtt_proto::user_chat_changed_topic`, keyed by account id only
+ * (never the thread, so a subscription cannot name who I talk to).
+ *
+ * It carries an EMPTY payload: the embedded broker has no subscription-level
+ * ACL, so anything naming the peer or the `chat_id` would be readable by every
+ * other account — `chat_id` is literally the two account ids joined, i.e. the
+ * social graph. The topic is a doorbell; the HTTP read below is the truth.
+ */
+export function userChatChangedTopic(me: string): string {
+  return `acowork/users/${me}/chat/changed`
+}
+
 export async function fetchUserChats(me: string): Promise<UserChatSummary[]> {
   const r = await req<{ chats: UserChatSummary[] }>('GET', `/api/users/${me}/chats`)
   return r.chats ?? []
 }
 
-/** One page of a 1:1 chat; `offset` counts BACK from the newest message. */
-export async function fetchUserMessages(me: string, chatId: string, limit = 50): Promise<UserChatMessage[]> {
-  const r = await req<{ messages: UserChatMessage[] }>(
+/**
+ * One page of a 1:1 chat; `offset` counts BACK from the newest message, so
+ * the page is always the newest `limit` items in chronological order.
+ *
+ * `total` is the thread's full message count and is the reason this returns
+ * the envelope instead of the array: the wake-up signal is empty by design
+ * (no `chat_id`, no body — the embedded broker has no subscription ACL), so
+ * the difference between the server's count and what we hold is the ONLY way
+ * a client learns that something arrived and how much of it. That is what
+ * lets a refresh append a tail instead of replacing the window the user is
+ * reading.
+ *
+ * `null` means the server gave no count (older build): the caller must fall
+ * back to replacing the whole window rather than guessing a delta.
+ */
+export async function fetchUserMessages(
+  me: string,
+  chatId: string,
+  limit = 50,
+): Promise<{ messages: UserChatMessage[]; total: number | null }> {
+  const r = await req<{ messages: UserChatMessage[] | null; total?: number }>(
     'GET',
     `/api/users/${me}/chats/${chatId}/messages?offset=0&limit=${limit}`,
   )
-  return r.messages ?? []
+  const messages = r.messages ?? []
+  return { messages, total: typeof r.total === 'number' ? r.total : null }
 }
 
 /** Returns the stored message so the caller can append it without a refetch. */

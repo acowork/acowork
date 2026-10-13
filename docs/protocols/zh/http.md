@@ -529,8 +529,8 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 
 ### 4.15 用户间聊天（ADR-076 §决策 8/9，仅 `AUTH_MODE=multi_user`）
 
-> **实现**：[`core/acowork-gateway/src/http/chat_api.rs`](../../../core/acowork-gateway/src/http/chat_api.rs)（路由）
-> + [`core/acowork-gateway/src/chat.rs`](../../../core/acowork-gateway/src/chat.rs)（持久化）
+> **实现**（ADR-084 后用户域已迁出 Gateway）：[`core/acowork-user/src/http/chat_api.rs`](../../../core/acowork-user/src/http/chat_api.rs)（路由）
+> + [`core/acowork-user/src/chat.rs`](../../../core/acowork-user/src/chat.rs)（持久化）。Gateway 只保留反代 + 鉴权闸门。
 
 | 方法 | 路径 | 用途 | 权限 |
 |---|---|---|---|
@@ -549,6 +549,12 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 - `GET /api/users/directory` 是"普通用户怎么找到收件人"的答案（见 runbook §4.6 的隐私边界）。
 - 附件上限：`image/*` 25 MiB，其他 100 MiB，超限 `413`。下载 `Content-Type` 取自存储时记录的
   mime（不信任客户端声明），`Content-Disposition: attachment; filename*=UTF-8''…` 支持 CJK 文件名。
+- **`GET …/messages` 的响应带 `total`**（该会话的消息总数，不只是本页长度）。客户端的"尾部增量"刷新
+  规则完全依赖它（ADR-076 §决策 8 v2、设计文档 25 §8.8）：`total` 与本地已知计数相等 → 不动；多出的部分
+  不超过一页 → 只追加尾部；**拿不到 `total` 时必须整窗替换，不得猜增量**。
+- **两个写方法成功后都会敲 MQTT 空门铃** `acowork/users/{uid}/chat/changed`：`POST …/messages` 敲给发件
+  人与收件人两个账号，`POST …/read` 只敲给读取者（见 [mqtt.md §3.4](./mqtt.md)）。业务写绝不因 broker 不
+  可用而失败（fire-and-forget），所以客户端同时保留 5s 兜底轮询。
 
 ---
 
