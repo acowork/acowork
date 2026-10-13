@@ -120,9 +120,18 @@ impl EmbeddingModel {
             tracing::info!(
                 attempt,
                 path = %onnx_path.display(),
+                "Creating ONNX environment..."
+            );
+            let env = ort::init().build().map_err(|e| {
+                ModelError::Session(format!("Failed to build ort Environment: {e}"))
+            })?;
+
+            tracing::info!(
+                attempt,
+                path = %onnx_path.display(),
                 "Creating ONNX session builder..."
             );
-            let mut builder = Session::builder().map_err(|e| {
+            let mut builder = Session::builder(&env).map_err(|e| {
                 ModelError::Session(format!("Failed to create session builder: {e}"))
             })?;
 

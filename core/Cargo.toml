@@ -229,7 +229,11 @@ yamux = "0.14"
 # fails with a misleading "Mutex poisoned". `GetApi` is backward compatible,
 # so a newer runtime still serves the API-19 table. Raise this only together
 # with the minimum in `ORT_VERSION_LEGACY` (dev/setup_ort.sh).
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "api-19"] }
+# ponytail: pinned to rc.14 because the RC.13→RC.14 release introduced a
+# breaking change to `Session::builder` (now requires `&Environment`).
+# Upgrade path: bump when `ort` reaches a stable 2.0.x release, or when
+# we adapt the call site to the next RC's signature.
+ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "api-19"] }
 
 # Tokenizer (HuggingFace)
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
