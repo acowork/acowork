@@ -774,6 +774,8 @@ pub fn run() {
                     state: Some(EffectState::Active),
                     radius: Some(12.0),
                     color: Some((128, 128, 128, 30).into()),
+                    // macOS 27+ Liquid Glass only; irrelevant for Windows Acrylic.
+                    interactive: false,
                 };
                 let _ = main_window.set_effects(effects);
             }
