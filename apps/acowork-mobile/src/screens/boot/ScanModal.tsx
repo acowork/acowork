@@ -150,7 +150,10 @@ export function ScanModal({ onClose }: { onClose: () => void }) {
       <div
         style={{
           marginTop: 'auto',
-          padding: '24px 20px calc(28px + env(safe-area-inset-bottom))',
+          // `--safe-bottom` is the resolved clearance (lib/safeArea.ts):
+          // raw `env()` is 0 on notch-less Android, which buries the cancel
+          // button under the navigation bar.
+          padding: '24px 20px calc(28px + var(--safe-bottom))',
           background: 'linear-gradient(transparent, rgba(0,0,0,0.75))',
         }}
       >

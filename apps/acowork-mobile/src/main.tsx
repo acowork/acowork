@@ -7,6 +7,7 @@ import { setDirectorySource, useAgentStore } from './stores/agentStore'
 import { httpChatTransport, fetchAgents, fetchNodes, fetchDirectory, tokenClaims } from './lib/api'
 import { setRealtimeDeps } from './lib/realtime'
 import { setPresenceDeps, startPresence, stopPresence } from './lib/presence'
+import { startSafeAreaSync } from './lib/safeArea'
 import type { ConnectOpts } from './lib/mqtt-wire'
 import { useAuthStore } from './stores/authStore'
 import { useSettingsStore } from './stores/settingsStore'
@@ -111,7 +112,14 @@ setDirectorySource({
 // dark-theme phone reads as a broken app, and the CSS cannot resolve
 // 跟随系统 + an explicit override by itself (see lib/theme.ts).
 const stopThemeWatch = useSettingsStore.getState().start()
-if (import.meta.hot) import.meta.hot.dispose(() => stopThemeWatch())
+// Same reason, same lifecycle: the status-bar clearance has to be on `:root`
+// before the first navbar paints, or the back button lands under the clock
+// on notch-less Android (see lib/safeArea.ts).
+const stopSafeAreaWatch = startSafeAreaSync()
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => stopThemeWatch())
+  import.meta.hot.dispose(() => stopSafeAreaWatch())
+}
 
 // Cold start: decide the boot phase from persisted state (§7.1).
 void useAuthStore.getState().boot()

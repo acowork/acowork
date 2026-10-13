@@ -28,6 +28,12 @@ serde_json = "1"
 # crate deliberately carries no acowork-core / rumqttc / lifecycle deps.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
+# `system_bar_insets` reads the status-bar clearance straight off the Android
+# view (see the comment in src/lib.rs for why the WebView cannot report it).
+# Version pinned to what `tauri` itself depends on so the JNI types unify.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 

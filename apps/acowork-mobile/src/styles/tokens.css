@@ -61,6 +61,11 @@
   --settings-row-h: 52px;
   --settings-icon-size: 22px;
 
+  /* Safe-area clearance. `env()` alone is NOT enough on Android: the WebView
+   * derives it from the display cutout only, so a notch-less phone reports
+   * 0px while the activity is edge-to-edge and the navbar sits under the
+   * status bar. lib/safeArea.ts resolves the real value and overrides these
+   * two properties inline on :root, which outranks this rule. */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 
