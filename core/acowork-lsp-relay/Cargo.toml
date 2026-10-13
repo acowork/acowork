@@ -11,6 +11,14 @@ description = "LSP protocol relay — standalone process managed by Gateway supe
 name = "acowork-lsp-relay"
 path = "src/main.rs"
 
+# Test fixture for the process pool (`tests/pool_process.rs`), not a product
+# binary. It exists because the pool tests used to spawn the POSIX `cat`,
+# which is absent on Windows — see src/bin/mock_lsp.rs. Same two-bin shape as
+# acowork-sign: callers select the binary explicitly (`--bin acowork-lsp-relay`).
+[[bin]]
+name = "mock_lsp"
+path = "src/bin/mock_lsp.rs"
+
 [dependencies]
 acowork-core.workspace = true
 axum.workspace = true
