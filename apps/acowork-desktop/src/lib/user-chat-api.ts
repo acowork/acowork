@@ -56,6 +56,13 @@ export async function listChats(userId: string): Promise<UserChatSummary[]> {
 /**
  * One page of history, returned oldest-first within the page. `offset`
  * counts **back** from the newest message (0 = latest page).
+ *
+ * `total` is normalized to null when the body does not carry it: it is the
+ * delta base of `userChatStore.planPage`, and `undefined` there is not a
+ * harmless gap — `NaN` comparisons fall through every branch of the rule and
+ * end in "append the whole page on top of the window", i.e. a duplicated
+ * transcript on every wake-up signal. The mobile client applies the same
+ * normalization; the two must not drift.
  */
 export async function listMessages(
   userId: string,
@@ -67,7 +74,11 @@ export async function listMessages(
   const page = await decode<UserChatMessagesPage>(
     await fetch(`${base(userId, chatId)}/messages${query}`),
   );
-  return { ...page, messages: Array.isArray(page.messages) ? page.messages : [] };
+  return {
+    ...page,
+    messages: Array.isArray(page.messages) ? page.messages : [],
+    total: typeof page.total === "number" ? page.total : null,
+  };
 }
 
 /** Send as `userId`. The Gateway takes `from` from the token, not from us. */

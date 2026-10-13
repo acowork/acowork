@@ -57,9 +57,17 @@ export class FollowController {
   private el: ScrollEl | null = null
   private lastKey: string | null | undefined = undefined
   private onNearTop: (() => void) | undefined = undefined
+  /** Fired on the unpinned -> pinned flip only. The unread badge has to go
+   *  away when the reader scrolls down to meet their messages, and that is a
+   *  scroll, not a render: without this the screen cannot see it. */
+  private onBecamePinned: (() => void) | undefined = undefined
   private onScroll = () => {
     if (!this.el) return
+    const was = this.pinned
     this.pinned = isNearBottom(this.el)
+    // The auto-scroll a `refresh()` performs while already pinned has `was`
+    // true, so it never re-fires — this only reports a user-driven arrival.
+    if (this.pinned && !was) this.onBecamePinned?.()
     // Top-edge pagination trigger: fires on USER scrolls into the band; a
     // programmatic jump to the bottom lands far from the top, so the
     // mount-time scroll-to-bottom cannot spuriously trip it.
@@ -67,14 +75,16 @@ export class FollowController {
   }
 
   /** Callback-ref binding: attach the currently mounted container (null detaches). */
-  bind(el: ScrollEl | null, onNearTop?: () => void): void {
+  bind(el: ScrollEl | null, onNearTop?: () => void, onBecamePinned?: () => void): void {
     if (this.el === el) {
       this.onNearTop = onNearTop
+      this.onBecamePinned = onBecamePinned
       return
     }
     if (this.el) this.el.removeEventListener('scroll', this.onScroll)
     this.el = el
     this.onNearTop = onNearTop
+    this.onBecamePinned = onBecamePinned
     if (el) {
       el.addEventListener('scroll', this.onScroll, { passive: true })
       // Adopt whatever position a (re)mounted container sits at.
@@ -108,21 +118,28 @@ export function useStickToBottom(
   deps: readonly unknown[],
   forceKey?: string | null,
   onNearTop?: () => void,
+  onBecamePinned?: () => void,
 ): {
   ref: (el: HTMLDivElement | null) => void
   stickNow: () => void
+  /** Read the follow state without subscribing to it: an arrival effect needs
+   *  to know whether the new bubble landed in view, and a scroll is not a
+   *  render, so making this reactive would re-introduce the hijack. */
+  isPinned: () => boolean
 } {
   const ctrl = useRef<FollowController | null>(null)
   if (!ctrl.current) ctrl.current = new FollowController()
   // Keep the latest callback without re-creating the ref binding.
   const topRef = useRef(onNearTop)
   topRef.current = onNearTop
+  const bottomRef = useRef(onBecamePinned)
+  bottomRef.current = onBecamePinned
 
   // Callback ref, not a ref object: screens swap the scroll container across
   // early-return branches, and the listener must always sit on the element
   // that is actually mounted.
   const ref = useCallback((el: HTMLDivElement | null) => {
-    ctrl.current!.bind(el, () => topRef.current?.())
+    ctrl.current!.bind(el, () => topRef.current?.(), () => bottomRef.current?.())
   }, [])
 
   useEffect(() => {
@@ -135,5 +152,7 @@ export function useStickToBottom(
     ctrl.current!.stickNow()
   }, [])
 
-  return { ref, stickNow }
+  const isPinned = useCallback(() => ctrl.current!.pinned, [])
+
+  return { ref, stickNow, isPinned }
 }

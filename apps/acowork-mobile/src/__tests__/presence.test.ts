@@ -1,8 +1,13 @@
 /**
- * Presence channel tests (v1.2 §8.1): `AgentStatus` envelope decoding and the
- * single global subscription that flips list rows — CONNECT → SUBSCRIBE
- * `acowork/agents/+/status` → PUBLISH routing, the QoS 1 acknowledgement, the
- * fail-closed CONNACK path and the teardown on logout.
+ * Background channel tests (v1.2 §8.1, ADR-085, design doc 25 §8): `AgentStatus`
+ * envelope decoding and the single global subscription that flips list rows —
+ * CONNECT → SUBSCRIBE `acowork/agents/+/status` → PUBLISH routing, the QoS 1
+ * acknowledgement, the fail-closed CONNACK path and the teardown on logout.
+ *
+ * The same socket also carries the user-chat doorbell, so the second describe
+ * pins the half where the payload is EMPTY: one SUBSCRIBE for both filters,
+ * per-filter grant codes, exact-topic routing and the state report that arms or
+ * stands down the store's fallback poll.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { PKT } from '../lib/mqtt-wire'
@@ -69,6 +74,25 @@ const connackOk = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 0])
 const connackBad = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 5])
 const subackGranted = Uint8Array.from([PKT.SUBACK << 4, 3, 0, 1, 1])
 const subackRefused = Uint8Array.from([PKT.SUBACK << 4, 3, 0, 1, 0x80])
+/** Grant codes for the connection that subscribed both filters — index-based,
+ *  so the codes must line up with `[PRESENCE_TOPIC, chatTopic]`. */
+const suback2 = (codes: number[]) =>
+  Uint8Array.from([PKT.SUBACK << 4, 2 + codes.length, 0, 1, ...codes])
+
+/** The last SUBSCRIBE as text. Position alone does not work: a live connection
+ *  also sends PUBACKs between the subscribes. */
+function lastSubscribe(s: FakeSocket): string {
+  const packet = s.sent.filter((b) => (b[0] ?? 0) >> 4 === PKT.SUBSCRIBE).at(-1)
+  if (!packet) throw new Error('no SUBSCRIBE was sent')
+  return new TextDecoder().decode(packet)
+}
+
+/** The doorbell as `acowork-user` sends it: QoS 1, non-retained, NO payload. */
+function chatPublish(topic: string, pkid = 7): Uint8Array {
+  const t = new TextEncoder().encode(topic)
+  const body = Uint8Array.from([0, t.length, ...t, (pkid >> 8) & 0xff, pkid & 0xff])
+  return Uint8Array.from([(PKT.PUBLISH << 4) | 0x02, body.length, ...body])
+}
 
 function statusPublish(agentId: string, inner: number[], qos1 = true, pkid = 3): Uint8Array {
   const topic = new TextEncoder().encode(`acowork/agents/${agentId}/status`)
@@ -87,21 +111,40 @@ const catBytes = (...parts: Uint8Array[]) => {
 
 let sockets: FakeSocket[] = []
 let onUpdate: ReturnType<typeof vi.fn>
+let onChatWake: ReturnType<typeof vi.fn>
+let onChatChannel: ReturnType<typeof vi.fn>
+
+/** The signed-in account's doorbell topic — the shape `lib/api.ts` builds. */
+const ME = 'bbbbbbbb-0000-4000-8000-000000000002'
+const CHAT_TOPIC = `acowork/users/${ME}/chat/changed`
+const CHAT_TOPIC_OTHER = 'acowork/users/cccccccc-0000-4000-8000-000000000003/chat/changed'
 
 beforeEach(() => {
   sockets = []
   onUpdate = vi.fn()
+  onChatWake = vi.fn()
+  onChatChannel = vi.fn()
   setPresenceDeps({
     wsUrl: () => 'ws://192.168.1.7:19876/mqtt',
     connectOpts: async () => ({ clientId: 'user:alice:mobile:dev-1-presence', username: 'alice', password: 'tok' }),
     onUpdate,
+    // No account by default: the presence tests must keep seeing exactly one
+    // filter, and the chat half reads the topic per CONNECT like the real app.
+    chatTopic: () => null,
+    onChatWake,
+    onChatChannel,
     makeWs: () => { const s = new FakeSocket(); sockets.push(s); return s },
   })
 })
 
 afterEach(() => {
   stopPresence()
-  setPresenceDeps({ wsUrl: () => null, connectOpts: async () => null, makeWs: undefined })
+  // `setPresenceDeps` merges, so anything left set would leak into the next
+  // file's expectations (the module holds one global deps object).
+  setPresenceDeps({
+    wsUrl: () => null, connectOpts: async () => null, makeWs: undefined,
+    chatTopic: undefined, onChatWake: undefined, onChatChannel: undefined,
+  })
 })
 
 const flush = () => new Promise((r) => setTimeout(r, 0))
@@ -220,6 +263,139 @@ describe('presence channel', () => {
     await flush()
     expect(sockets.length).toBe(0)
     expect(presenceConnected()).toBe(false)
+  })
+})
+
+/* ---------------- the chat doorbell on the same socket ---------------- */
+
+describe('chat wake-up half of the channel', () => {
+  /** Bring the socket up with an account, subscribed and granted. */
+  async function connected(): Promise<FakeSocket> {
+    startPresence()
+    await flush()
+    const sock = sockets[0]!
+    sock.emitOpen()
+    sock.emit(connackOk)
+    sock.emit(suback2([1, 1]))
+    return sock
+  }
+
+  it('sends both filters in the ONE SUBSCRIBE the CONNACK answers', async () => {
+    setPresenceDeps({ chatTopic: () => CHAT_TOPIC })
+    startPresence()
+    await flush()
+    const sock = sockets[0]!
+    sock.emitOpen()
+    sock.emit(connackOk)
+    // Two round trips would leave a half-awake channel — presence up, mailbox
+    // silently never subscribed — with nothing in the UI to notice.
+    const subs = sock.sent.filter((b) => (b[0] ?? 0) >> 4 === PKT.SUBSCRIBE)
+    expect(subs).toHaveLength(1)
+    const text = lastSubscribe(sock)
+    expect(text).toContain(PRESENCE_TOPIC)
+    expect(text).toContain(CHAT_TOPIC)
+  })
+
+  it('reports the doorbell up, then routes the empty publish to onChatWake', async () => {
+    setPresenceDeps({ chatTopic: () => CHAT_TOPIC })
+    const sock = await connected()
+    expect(onChatChannel).toHaveBeenCalledWith(true)
+
+    sock.emit(chatPublish(CHAT_TOPIC))
+
+    expect(onChatWake).toHaveBeenCalledTimes(1)
+    // QoS 1 means the broker expects an ack; missing it is a redelivery loop.
+    const puback = sock.sent.find((b) => (b[0] ?? 0) >> 4 === PKT.PUBACK)
+    expect(((puback?.[2] ?? 0) * 256 + (puback?.[3] ?? 0))).toBe(7)
+    // Routed BEFORE the presence decoder: an empty payload would otherwise be
+    // dropped as an undecodable envelope, which is a silent no-op, not an error.
+    expect(onUpdate).not.toHaveBeenCalled()
+  })
+
+  it('never wakes the inbox for another account\'s doorbell', async () => {
+    setPresenceDeps({ chatTopic: () => CHAT_TOPIC })
+    const sock = await connected()
+
+    // The broker delivers anything under a matched prefix; the topic is also the
+    // social graph, so reacting to a neighbour's nudge would be both a privacy
+    // leak of attention and a read storm.
+    sock.emit(chatPublish(CHAT_TOPIC_OTHER))
+    sock.emit(chatPublish('acowork/users/' + ME + '/chat/changed/extra'))
+    expect(onChatWake).not.toHaveBeenCalled()
+
+    sock.emit(chatPublish(CHAT_TOPIC))
+    expect(onChatWake).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-derives the topic per CONNECT, so a rotated account cannot be left deaf', async () => {
+    let topic: string | null = CHAT_TOPIC
+    setPresenceDeps({ chatTopic: () => topic })
+    const sock = await connected()
+    sock.emit(chatPublish(CHAT_TOPIC))
+    expect(onChatWake).toHaveBeenCalledTimes(1)
+
+    // Sign in as somebody else without tearing the channel down.
+    topic = CHAT_TOPIC_OTHER
+    sock.emit(connackOk)
+    const text = lastSubscribe(sock)
+    expect(text).toContain(CHAT_TOPIC_OTHER)
+    sock.emit(suback2([1, 1]))
+
+    sock.emit(chatPublish(CHAT_TOPIC)) // the stale topic must be ignored now
+    expect(onChatWake).toHaveBeenCalledTimes(1)
+    sock.emit(chatPublish(CHAT_TOPIC_OTHER, 9))
+    expect(onChatWake).toHaveBeenCalledTimes(2)
+  })
+
+  it('a refused chat filter degrades the channel without killing presence', async () => {
+    setPresenceDeps({ chatTopic: () => CHAT_TOPIC })
+    const sock = await connected()
+    expect(onChatChannel).toHaveBeenCalledTimes(1)
+
+    // The account system was switched off between connections: the mailbox is
+    // refused (0x80) while the fleet filter is still granted. Grant is per
+    // filter, not per packet — treating it as one verdict would either stop the
+    // fleet dots or leave the inbox thinking push works while nothing arrives.
+    sock.emit(connackOk)
+    sock.emit(suback2([1, 0x80]))
+
+    expect(onChatChannel).toHaveBeenLastCalledWith(false)
+    expect(onChatChannel).toHaveBeenCalledTimes(2)
+    expect(presenceConnected()).toBe(true)
+    sock.emit(statusPublish('i-1', [...wVarint(2, 1), ...wStr(4, 'i-1')]))
+    expect(onUpdate).toHaveBeenCalledWith('i-1', expect.objectContaining({ status: 'idle' }))
+  })
+
+  it('reports the channel state once per change, not once per reconnect', async () => {
+    setPresenceDeps({ chatTopic: () => CHAT_TOPIC })
+    const sock = await connected()
+
+    // The store stops its fallback timer on `true`; a flapping report would
+    // stop and re-arm it on every reconnect and the timer would never idle.
+    sock.emit(connackOk)
+    sock.emit(suback2([1, 1]))
+    sock.emit(connackOk)
+    sock.emit(suback2([1, 1]))
+    expect(onChatChannel).toHaveBeenCalledTimes(1)
+
+    sock.emit(subackRefused)
+    expect(onChatChannel).toHaveBeenCalledTimes(2)
+  })
+
+  it('with no account it subscribes the fleet filter alone', async () => {
+    // `chatTopic` is null in the default deps (boot / logged out).
+    startPresence()
+    await flush()
+    const sock = sockets[0]!
+    sock.emitOpen()
+    sock.emit(connackOk)
+    const subs = sock.sent.filter((b) => (b[0] ?? 0) >> 4 === PKT.SUBSCRIBE)
+    expect(subs).toHaveLength(1)
+    expect(lastSubscribe(sock)).not.toContain('acowork/users/')
+
+    sock.emit(subackGranted)
+    expect(presenceConnected()).toBe(true)
+    expect(onChatChannel).not.toHaveBeenCalled()
   })
 })
 

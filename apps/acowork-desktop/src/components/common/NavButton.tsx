@@ -41,10 +41,19 @@ export function NavButton({ active, onClick, tooltip, tooltipPosition = "right",
             >
                 {children}
                 {badge != null && badge > 0 && (
+                    /* Red, and only red: unread is the same signal as the inbox
+                       row bubble and the mobile avatar dot. This app's token is
+                       `--color-destructive` — the `--color-danger` named here
+                       has never existed, which resolved the declaration to
+                       `background-color: <invalid>` and made the dot invisible
+                       while the DOM test kept passing. No ring either:
+                       `--color-bg-primary` is undefined for the same reason,
+                       and the rail is transparent over the window background,
+                       so there is nothing for a ring to match. */
                     <span
                         data-testid="nav-badge"
                         aria-label={t("navBar.unreadMessages")}
-                        className="pointer-events-none absolute right-1 top-1 h-2 w-2 rounded-full bg-[var(--color-danger)] ring-2 ring-[var(--color-bg-primary)]"
+                        className="pointer-events-none absolute right-1 top-1 h-2 w-2 rounded-full bg-[var(--color-destructive)]"
                     />
                 )}
             </button>

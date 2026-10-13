@@ -175,6 +175,8 @@
     "empty": "会話がありません",
     "pick": "左の会話を選んでください",
     "noMessages": "メッセージはまだありません",
+    "newMessages_one": "{{count}} 件の新着メッセージ",
+    "newMessages_other": "{{count}} 件の新着メッセージ",
     "placeholder": "メッセージを入力…",
     "send": "送信",
     "you": "自分",
@@ -1477,7 +1479,8 @@
     "refreshing": "更新中...",
     "node": "ノード",
     "relayUnavailable": "このノードの LSP Relay を利用できません",
-    "noRelayNodes": "LSP Relay が利用可能なノードがありません",
+    "noRelayNodes": "LSP Relay が利用可能なノードがありません"
+,
     "addServer": "LSP サーバーを追加",
     "editServer": "LSP サーバーを編集",
     "deleteServer": "レジストリから削除",

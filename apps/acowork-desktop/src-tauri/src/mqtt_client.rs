@@ -236,6 +236,22 @@ pub const ALL_TOPIC_FILTERS: &[(&str, MqttQoS)] = &[
     // force-refreshes its expanded layers on receipt. A lost event is
     // covered by the 30s poll + reconnect full-sync fallback.
     ("acowork/doc/tree/changed", MqttQoS::AtLeastOnce),
+    // ── User chat wake-up signal (design doc 25 §8, ADR-076 §决策 8) ──
+    // `acowork-user` publishes an EMPTY, non-retained doorbell on
+    // `acowork/users/{user_id}/chat/changed` whenever a thread changes — a
+    // message landed, or a read cleared a badge. Keyed by account alone: the
+    // embedded broker has no subscription ACL, so the payload carries nothing
+    // that could name a peer, and the thread never appears in the topic either
+    // (`chat_id` is literally the two account ids joined).
+    //
+    // A wildcard rather than the signed-in account's own topic: this table is
+    // compile-time and re-subscribed on every ConnAck, while the account can
+    // change without a reconnect, so the filter stays static and the webview
+    // drops signals that belong to someone else (it is the side that knows
+    // `account.user_id`). That leaks nothing new: a Desktop is an
+    // authenticated client that may already list every account id through
+    // `GET /api/users/directory`.
+    ("acowork/users/+/chat/changed", MqttQoS::AtLeastOnce),
 ];
 
 /// Desktop entity handler for the shared [`MqttClient`] (ADR-065 Step 4).

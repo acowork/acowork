@@ -4,9 +4,10 @@ import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { setChatTransport } from './stores/chatStore'
 import { setDirectorySource, useAgentStore } from './stores/agentStore'
-import { httpChatTransport, fetchAgents, fetchNodes, fetchDirectory, tokenClaims } from './lib/api'
+import { httpChatTransport, fetchAgents, fetchNodes, fetchDirectory, tokenClaims, userChatChangedTopic } from './lib/api'
 import { setRealtimeDeps } from './lib/realtime'
 import { setPresenceDeps, startPresence, stopPresence } from './lib/presence'
+import { setChatPushChannel, wakeUserChat } from './stores/userChatStore'
 import { startSafeAreaSync } from './lib/safeArea'
 import type { ConnectOpts } from './lib/mqtt-wire'
 import { useAuthStore } from './stores/authStore'
@@ -60,11 +61,22 @@ setRealtimeDeps({
 /* Presence rides its own connection (§8.1): the session channel dies with the
  * chat screen while the list needs verdicts all the time. The `-presence`
  * suffix stays inside the device segment — the Gateway's
- * `remote_client_shape` rejects a fourth colon in a client id. */
+ * `remote_client_shape` rejects a fourth colon in a client id.
+ *
+ * The same socket also carries my account's chat doorbell (design doc 25 §8), so
+ * a message from another device lands in milliseconds instead of on the next
+ * poll — and when the subscribe is refused, `onChatChannel(false)` re-arms the
+ * store's fallback timer rather than leaving the thread silently stale. */
 setPresenceDeps({
   wsUrl: mqttWsUrl,
   connectOpts: () => mqttConnectOpts((sub, device) => `${sessionClientId(sub, device)}-presence`),
   onUpdate: (agentId, update) => useAgentStore.getState().applyPresence(agentId, update.status),
+  chatTopic: () => {
+    const me = useAuthStore.getState().me?.user_id
+    return me ? userChatChangedTopic(me) : null
+  },
+  onChatWake: () => void wakeUserChat(),
+  onChatChannel: setChatPushChannel,
 })
 
 function deviceId(): string {

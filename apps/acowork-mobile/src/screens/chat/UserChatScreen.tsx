@@ -9,14 +9,17 @@
  * sender; the avatar and name render ONCE per turn and the bubbles stack
  * tightly beneath it (desktop cohesion).
  *
- * Freshness is polling-only: the MQTT bridge carries agent sessions, not
- * user chat. 5s while the thread is open, plus an immediate refresh when the
- * app returns to the foreground (§11.3).
+ * Freshness is push-first: the background channel subscribes
+ * `acowork/users/{me}/chat/changed` and every signal re-reads this thread under
+ * the store's `planPage` rule (design doc 25 §8). A 5 s poll only runs while that
+ * subscribe is unavailable, plus an immediate refresh when the app returns to the
+ * foreground (§11.3). Either way, a refresh never moves the viewport: see
+ * `lib/stickToBottom.ts`.
  */
 
 import { Fragment, useEffect, useState, type ReactNode } from 'react'
 import { useNavStore } from '../../stores/navStore'
-import { useUserChatStore, startUserChatPoll, stopUserChatPoll } from '../../stores/userChatStore'
+import { useUserChatStore, setUserChatThreadOnScreen } from '../../stores/userChatStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { Bubble, toMs } from '../../components/Bubble'
@@ -44,6 +47,8 @@ export function UserChatScreen() {
   const sending = useUserChatStore((s) => s.sending)
   const error = useUserChatStore((s) => s.error)
   const send = useUserChatStore((s) => s.send)
+  const unseen = useUserChatStore((s) => s.unseenCount)
+  const markSeen = useUserChatStore((s) => s.markSeen)
   const pop = useNavStore((s) => s.pop)
   const me = useAuthStore((s) => s.me)
   const baseUrl = useAuthStore((s) => s.baseUrl)
@@ -61,15 +66,28 @@ export function UserChatScreen() {
     kind: 'text',
   }))
 
-  // Follow rule: the 5 s poll must not hijack the viewport — it only
-  // scrolls while the user is at the bottom. Switching peer re-pins; so
-  // does sending (`stickNow`).
-  const { ref: scrollRef, stickNow } = useStickToBottom([messages.length], peer)
+  // Follow rule: an arriving message must not hijack the viewport — it only
+  // scrolls while the user is at the bottom. Switching peer re-pins; so does
+  // sending (`stickNow`). Arriving while pinned means the reader is looking at
+  // the spot it landed, so the badge is cleared on that render; arriving while
+  // unpinned leaves it for the pill, and `onBecamePinned` clears it the moment
+  // they scroll down to meet their messages (a scroll is not a render, so the
+  // controller has to report it).
+  const { ref: scrollRef, stickNow, isPinned } = useStickToBottom(
+    [messages.length],
+    peer,
+    undefined,
+    () => void markSeen(),
+  )
 
   useEffect(() => {
-    startUserChatPoll()
-    return stopUserChatPoll
+    setUserChatThreadOnScreen(true)
+    return () => setUserChatThreadOnScreen(false)
   }, [])
+
+  useEffect(() => {
+    if (unseen > 0 && isPinned()) void markSeen()
+  }, [unseen, messages.length, isPinned, markSeen])
 
   const submit = async () => {
     const text = draft.trim()
@@ -191,6 +209,21 @@ export function UserChatScreen() {
                 })
               })()
             : null}
+          {/* Unread arrivals while the reader was scrolled up: counted, never
+              scrolled to. Tapping is the explicit act that re-claims the
+              follow — the same convention as the peer IM apps. */}
+          {unseen > 0 ? (
+            <button
+              type="button"
+              className="chat-newpill"
+              onClick={() => {
+                stickNow()
+                void markSeen()
+              }}
+            >
+              {unseen} 条新消息
+            </button>
+          ) : null}
         </div>
 
         <div className="composer">

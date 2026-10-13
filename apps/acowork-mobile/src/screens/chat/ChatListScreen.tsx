@@ -16,7 +16,8 @@
  * be a claim this client cannot support.
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Monitor, Users } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useUserChatStore } from '../../stores/userChatStore'
@@ -67,16 +68,42 @@ function UserAvatarEl({ name, avatar, builtinAvatar, baseUrl }: { name: string; 
   return fallbackEl
 }
 
-/** Group header for one online node: just its name + an online dot. The
- *  inbox only renders visible-online nodes (ADR-087 Node->Agent cascade;
- *  no fallback bucket), so the dot is always online here. */
-function NodeTitle({ node }: { node: NodeRow }) {
+/** Group-header skeleton shared by every inbox section: leading glyph, then
+ *  the name, then an optional trailing status dot. One shape for nodes and
+ *  contacts so both read as the same kind of list entry. */
+function GroupTitle({ icon, name, online }: { icon: ReactNode; name: string; online?: boolean }) {
   return (
-    <span className="node-group-title">
-      <span className="dot dot-online" aria-label="在线" />
-      {node.node_name ?? node.node_id}
+    <span className="group-title">
+      {icon}
+      <span className="group-title-name">{name}</span>
+      {online === undefined ? null : (
+        <span
+          className={`dot ${online ? 'dot-online' : 'dot-offline'}`}
+          aria-label={online ? '在线' : '离线'}
+        />
+      )}
     </span>
   )
+}
+
+/** Group header for one node: a computer glyph before the name — a node is a
+ *  machine hosting agents, not a chat peer — and its online dot after the
+ *  name. The dot follows the row rather than the status the inbox filtered
+ *  on, so a node that drops offline between refreshes is never shown as up. */
+function NodeTitle({ node }: { node: NodeRow }) {
+  return (
+    <GroupTitle
+      icon={<Monitor className="group-title-icon" aria-hidden />}
+      name={node.node_name ?? node.node_id}
+      online={node.online}
+    />
+  )
+}
+
+/** Group header for the contacts section. A contact list has no aggregate
+ *  presence (each peer is online or not on its own), so no status dot. */
+function ContactsTitle() {
+  return <GroupTitle icon={<Users className="group-title-icon" aria-hidden />} name="联系人" />
 }
 
 export function ChatListScreen() {
@@ -248,7 +275,7 @@ export function ChatListScreen() {
           </ListSection>
         ) : null}
 
-        <ListSection title="联系人">
+        <ListSection title={<ContactsTitle />}>
           {userRows.map(({ u, chat }) => (
             <ListRow
               key={u.id}

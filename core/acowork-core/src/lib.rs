@@ -27,6 +27,30 @@ pub mod mqtt_proto {
     /// rename would break profile refresh **silently** (Runtimes keep a stale
     /// `last_user_profile`) instead of failing a build.
     pub const USER_PROFILES_CHANGED_TOPIC: &str = "acowork/user/profiles/changed";
+
+    /// Topic of the per-account user-to-user chat wake-up signal, published by
+    /// `acowork-user` when a thread changes (design doc 25 §8, ADR-076 §决策 8).
+    ///
+    /// QoS 1, **non-retained**, **empty payload**: a pure nudge. Every client
+    /// that reacts to it re-reads `GET /api/users/{uid}/chats` (and, if a
+    /// thread is open, its messages) over authenticated HTTP, which owns the
+    /// truth. The topic is keyed by the account id so a client subscribes
+    /// exactly its own mailbox, and the payload deliberately names nothing
+    /// else — the embedded broker has no subscription-level ACL (rumqttd's
+    /// only hook is CONNECT, `core/acowork-gateway/src/mqtt/broker.rs`), so
+    /// any authenticated account can subscribe `acowork/users/#`. A `chat_id`
+    /// in the payload would publish the contact graph: a `chat_id` IS the
+    /// pair of user ids.
+    ///
+    /// Non-retained on purpose: retention would replay the last event to a
+    /// client that already caught up during its own `phase=ready` reload.
+    ///
+    /// Built here rather than in the publisher because the string is a wire
+    /// contract between the user service and two clients; a one-sided rename
+    /// would silently stop chat push instead of failing a build.
+    pub fn user_chat_changed_topic(user_id: &str) -> String {
+        format!("acowork/users/{user_id}/chat/changed")
+    }
 }
 
 pub mod account;

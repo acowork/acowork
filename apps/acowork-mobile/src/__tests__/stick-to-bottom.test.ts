@@ -5,7 +5,7 @@
  * the follow. Driven through a fake container — no renderer needed
  * (render-based tests die on this workspace's double-React vitest issue).
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { FollowController, isNearBottom, STICK_PX, type ScrollEl } from '../lib/stickToBottom'
 
 /**
@@ -137,6 +137,88 @@ describe('FollowController', () => {
     expect(nearTop).toBe(1)
     el.userScrollTo(el.bottom) // back down: silent again
     expect(nearTop).toBe(1)
+  })
+})
+
+/* ---------------- onBecamePinned: the unread badge's only signal ----------------
+ *
+ * The user-chat thread marks itself read when the reader is at the bottom, and
+ * a scroll is not a render — the screen cannot see one without this callback
+ * (design doc 25 §8, `UserChatScreen`). These cases pin that it fires exactly
+ * on the unpinned -> pinned flip: once is enough for the receipt, and a second
+ * firing per programmatic follow would turn every arriving signal into a POST.
+ */
+describe('onBecamePinned', () => {
+  function withCallback(): { c: FollowController; el: FakeEl; hits: () => number } {
+    const c = new FollowController()
+    const el = new FakeEl()
+    let n = 0
+    c.bind(el, undefined, () => { n++ })
+    return { c, el, hits: () => n }
+  }
+
+  it('fires when the reader scrolls down into the bottom band', () => {
+    const { c, el, hits } = withCallback()
+    c.refresh('s1')
+    el.userScrollTo(0)
+    expect(hits()).toBe(0) // going up is not an arrival
+    el.userScrollTo(el.bottom - STICK_PX)
+    expect(hits()).toBe(1)
+  })
+
+  it('does not fire while the reader stays pinned (the follow is silent)', () => {
+    const { c, el, hits } = withCallback()
+    c.refresh('s1')
+    el.grow(200)
+    c.refresh('s1') // the auto-scroll every signal would cause
+    el.userScrollTo(el.bottom) // a scroll that changes nothing
+    el.userScrollTo(el.bottom - 1)
+    expect(hits()).toBe(0)
+  })
+
+  it('fires once per departure and arrival, not once per scroll inside the band', () => {
+    const { c, el, hits } = withCallback()
+    c.refresh('s1')
+    el.userScrollTo(el.bottom) // already pinned: silent
+    expect(hits()).toBe(0)
+    el.userScrollTo(0)
+    el.userScrollTo(el.bottom)
+    expect(hits()).toBe(1)
+    el.userScrollTo(el.bottom - 1)
+    expect(hits()).toBe(1)
+    el.userScrollTo(0)
+    el.userScrollTo(el.bottom)
+    expect(hits()).toBe(2)
+  })
+
+  it('coexists with onNearTop: a scroll-up reports neither, a scroll-down reports one', () => {
+    const c = new FollowController()
+    const el = new FakeEl()
+    let top = 0
+    let pinned = 0
+    c.bind(el, () => { top++ }, () => { pinned++ })
+    c.refresh('s1')
+    el.userScrollTo(0) // top band: pagination, and no arrival
+    expect(top).toBe(1)
+    expect(pinned).toBe(0)
+    el.userScrollTo(el.bottom)
+    expect(pinned).toBe(1)
+  })
+
+  it('is replaced, not stacked, when the same container is re-bound', () => {
+    // The hook re-binds with a fresh closure on every render; stacking would
+    // fire the read receipt once per render of the screen.
+    const c = new FollowController()
+    const el = new FakeEl()
+    const first = vi.fn()
+    const second = vi.fn()
+    c.bind(el, undefined, first)
+    c.bind(el, undefined, second)
+    c.refresh('s1')
+    el.userScrollTo(0)
+    el.userScrollTo(el.bottom)
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledTimes(1)
   })
 })
 

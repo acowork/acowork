@@ -83,6 +83,8 @@
     "empty": "No conversations yet",
     "pick": "Select a conversation to start reading",
     "noMessages": "No messages yet",
+    "newMessages_one": "{{count}} new message",
+    "newMessages_other": "{{count}} new messages",
     "placeholder": "Write a message…",
     "send": "Send",
     "you": "You",

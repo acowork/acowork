@@ -175,6 +175,8 @@
     "empty": "暂无会话",
     "pick": "选择左侧会话开始阅读",
     "noMessages": "暂无消息",
+    "newMessages_one": "{{count}} 条新消息",
+    "newMessages_other": "{{count}} 条新消息",
     "placeholder": "输入消息…",
     "send": "发送",
     "you": "我",

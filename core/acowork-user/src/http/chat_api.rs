@@ -323,6 +323,9 @@ async fn send_message(
         .map_err(|_| ApiError::not_found("recipient account not found"))?;
 
     let dir = data_dir(&state)?;
+    // The closure below consumes both ids; the signals need them afterwards.
+    let signal_me = user_id.clone();
+    let signal_peer = peer.clone();
     let ids = req.attachments;
     // Reported as the caller's mistake before the write, not as a fault after
     // it. The check is repeated inside `append_message` (single caller today).
@@ -338,6 +341,14 @@ async fn send_message(
     }
     let message =
         offload(move || chat::append_message(&dir, &user_id, &peer, &body, &ids, now_unix())).await?;
+    // Wake both mailboxes (design doc 25 §8). The recipient has unread to see;
+    // the sender's OTHER devices have an echo to show — the device that posted
+    // this already holds it, which is why the response is the stored record.
+    // An empty signal by design: no `chat_id`, no body, because the embedded
+    // broker has no subscription ACL. Never fails the write: a down broker
+    // only delays the nudge, and every client re-reads on connect anyway.
+    crate::mqtt_publisher::notify_chat_changed(&signal_me);
+    crate::mqtt_publisher::notify_chat_changed(&signal_peer);
     Ok((StatusCode::CREATED, Json(message)))
 }
 
@@ -548,6 +559,10 @@ async fn mark_read(
     let dir = data_dir(&state)?;
     let me = user_id.clone();
     offload(move || chat::mark_read(&dir, &chat_id, &me).map(|_| ())).await?;
+    // Other devices of THIS account carry the same badge — clearing it here
+    // without a signal leaves a dot lit on the desktop until its next pull.
+    // The peer is not woken: a read receipt is not a message.
+    crate::mqtt_publisher::notify_chat_changed(&user_id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -765,6 +780,7 @@ mod tests {
         let sent = json(resp).await;
         assert_eq!(sent["from"], alice.as_str(), "from is the token identity");
         assert_eq!(sent["body"], "hello bob", "body is trimmed");
+        assert_eq!(sent["seq"], 1, "the send echo carries the assigned seq (ADR-092 decision 1)");
 
         // Bob sees one unread; Alice sees none.
         let resp = router
@@ -823,6 +839,7 @@ mod tests {
         let page = json(resp).await;
         assert_eq!(page["total"], 1);
         assert_eq!(page["messages"][0]["body"], "hello bob");
+        assert_eq!(page["messages"][0]["seq"], 1, "GET pages carry the stable seq");
 
         // The admin "view as user" read scope reaches the same history.
         let resp = router
@@ -843,6 +860,73 @@ mod tests {
         assert_eq!(
             alice_view["chats"][0]["peer_builtin_avatar"], "icon-07",
             "builtin avatar id is propagated alongside custom avatar"
+        );
+    }
+
+    /// A send is a wake-up for BOTH mailboxes; a read for one. And the signal
+    /// never names the thread: a `chat_id` is `min__max` of the two account
+    /// ids, so publishing it would hand the whole contact graph to every
+    /// account able to subscribe `acowork/users/#` (the embedded broker has no
+    /// subscription ACL — its only hook is CONNECT).
+    ///
+    /// Asserted as *contains* over the window rather than an exact slice: the
+    /// test sink is process-wide and cargo runs tests on several threads.
+    #[tokio::test]
+    async fn send_wakes_both_mailboxes_and_read_wakes_only_the_reader() {
+        use acowork_core::mqtt_proto::user_chat_changed_topic;
+
+        let f = fixture().await;
+        let (router, alice, bob) = (&f.router, &f.alice, &f.bob);
+
+        let before = crate::mqtt_publisher::test_signals().len();
+        router
+            .clone()
+            .oneshot(req(
+                "POST",
+                &messages_uri(alice, bob),
+                Some(r#"{"body":"hi"}"#),
+                Some(&f.alice_token),
+            ))
+            .await
+            .unwrap();
+        let after_send = crate::mqtt_publisher::test_signals();
+        let sent = &after_send[before..];
+        assert!(
+            sent.contains(&user_chat_changed_topic(alice)),
+            "the sender's OTHER devices have an echo to show; only the device \
+             that posted the message already holds it"
+        );
+        assert!(
+            sent.contains(&user_chat_changed_topic(bob)),
+            "the recipient is the whole point of the signal"
+        );
+        assert!(
+            after_send.iter().all(|t| !t.contains("__")),
+            "a `chat_id` in a signal topic would publish who talks to whom"
+        );
+
+        // Opening the thread clears the badge on every device of THIS account,
+        // and must not ping the peer: a read receipt is not a message.
+        let before = after_send.len();
+        router
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/users/{bob}/chats/{}/read", chat::chat_id(alice, bob)),
+                None,
+                Some(&f.bob_token),
+            ))
+            .await
+            .unwrap();
+        let after_read = crate::mqtt_publisher::test_signals();
+        let read = &after_read[before..];
+        assert!(
+            read.contains(&user_chat_changed_topic(bob)),
+            "otherwise a desktop keeps a lit dot until its next pull"
+        );
+        assert!(
+            !read.contains(&user_chat_changed_topic(alice)),
+            "Alice has nothing to refresh: her own unread did not change"
         );
     }
 

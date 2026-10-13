@@ -153,6 +153,34 @@
   background: var(--color-bg);
 }
 
+/* "N new messages" chip — the arrival counter for a reader parked higher up
+ * (design doc 25 §8). `position: sticky` INSIDE the scroll container rather
+ * than an absolute overlay: `.screen` is not a positioned ancestor (making it
+ * one would re-anchor the drawer backdrops), and a chip that only ever grows
+ * the content below the reader cannot shift what they are looking at — which
+ * is the whole rule this screen is built around.
+ *
+ * Red, and only red: the chip is one of three surfaces of the same "you have
+ * unread" signal (the tab-bar dot, the row bubble `.badge-count` / `.avatar-unread`
+ * on a list row, and this in-thread chip). They all use `--color-destructive`
+ * — the global accent is the app's "selected" colour and would read as "you
+ * are already here" on a signal that means the opposite. */
+.chat-newpill {
+  position: sticky;
+  bottom: var(--space-2);
+  align-self: center;
+  flex: none;
+  z-index: 2;
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-destructive);
+  color: #fff;
+  font-size: var(--font-sm);
+  line-height: 1.3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
 /* --- Grouped list (iOS inset grouped style) --- */
 
 .list-section-title {
@@ -161,16 +189,35 @@
   color: var(--color-label-secondary);
   text-transform: uppercase;
   background: var(--color-bg-grouped);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
-/* Node group header in the inbox: name + an online dot. Renders inside
- * .list-section-title, so undo its uppercase (node names are user-authored
- * hostnames) and lay the dot inline (mirrors .row-title). */
-.node-group-title {
+/* Group header inside .list-section-title (node / contacts): leading glyph +
+ * name + optional status dot. Undoes the parent's uppercase (node names are
+ * user-authored hostnames) and lets a long name ellipsize instead of pushing
+ * the dot off-screen. */
+.group-title {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
   text-transform: none;
+}
+
+.group-title-icon {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.group-title-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .list-section {
@@ -262,11 +309,14 @@
 }
 
 /* Avatar for chat list items (WeChat style). The wrap is the positioning
- * anchor for the unread dot (which must overflow the avatar's own
- * `overflow: hidden` image clip). */
+ * anchor for the unread dot / count bubble (which must overflow the avatar's
+ * own `overflow: hidden` image clip). `z-index` matters for the bubble: it
+ * overhangs the row gap on purpose, and must paint over the name column
+ * rather than be clipped by it. */
 .list-row-avatar-wrap {
   position: relative;
   flex: none;
+  z-index: 1;
 }
 .avatar-unread {
   position: absolute;
@@ -279,6 +329,29 @@
   border: 1.5px solid var(--color-bg-elevated);
   box-sizing: border-box;
   pointer-events: none;
+}
+/* The same corner, carrying a server-reported count (contact threads). Red is
+ * deliberate and shared with `.avatar-unread`: unread is never painted in the
+ * global accent, which reads as "selected", not as "new". */
+.avatar-unread-count {
+  position: absolute;
+  top: -5px;
+  right: -8px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--color-destructive);
+  color: #fff;
+  font-size: 11px;
+  font-weight: var(--weight-semibold);
+  line-height: 15px; /* 18px box minus the 1.5px border on each side */
+  text-align: center;
+  border: 1.5px solid var(--color-bg-elevated);
+  box-sizing: border-box;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .list-row-avatar {
   width: var(--avatar-size);
@@ -891,9 +964,11 @@
   padding: 4px 6px;
 }
 
-/* Unread: a server-reported count gets a number badge in the row trail; the
- * client-inferred "there is something new" for an agent session is the red
- * avatar dot (`.avatar-unread`, top-right) — never a number (§8.5). */
+/* Unread: a row WITH an avatar carries its signal on the avatar corner — the
+ * red dot `.avatar-unread` for the client-inferred "there is something new" of
+ * an agent session (never a number, §8.5), the red bubble `.avatar-unread-count`
+ * for a server-reported count. This trail form is only the fallback for rows
+ * that have no avatar to hang a corner badge on (e.g. the docs 审阅队列 row). */
 .badge-count {
   min-width: 18px;
   height: 18px;
