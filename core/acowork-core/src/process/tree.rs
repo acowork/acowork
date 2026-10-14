@@ -9,11 +9,13 @@
 //! This module provides the containment primitive used by the
 //! idle-timeout kill path in [`super`]:
 //!
-//! - **Windows**: an unnamed Job Object. `AssignProcessToJobObject`
-//!   captures the child *and its existing descendants*; every process
-//!   the tree creates afterwards joins the job automatically, so
-//!   attaching right after spawn is race-free. `TerminateJobObject`
-//!   kills the whole tree in one call.
+//! - **Windows**: an unnamed Job Object. The child is assigned right
+//!   after spawn; every process the tree creates afterwards joins the
+//!   job automatically (job membership is inherited at creation), so a
+//!   timeout kill via `TerminateJobObject` reaches the whole tree. The
+//!   window between `spawn()` returning and the assignment is the only
+//!   escape route — microseconds, and the caller's direct `child.kill()`
+//!   still covers the leader itself.
 //! - **Unix**: the child is spawned as a process-group leader
 //!   ([`TreeGuard::configure`] must run before spawn); `killpg` then
 //!   signals the entire group.
@@ -125,6 +127,12 @@ impl JobHandle {
         unsafe {
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() {
+                tracing::warn!(
+                    pid,
+                    error = GetLastError(),
+                    "process-tree containment unavailable (CreateJobObjectW failed); \
+                     timeout kill will only reach the direct child"
+                );
                 return None;
             }
             // PROCESS_SET_QUOTA | PROCESS_TERMINATE are the access
@@ -140,11 +148,14 @@ impl JobHandle {
             if assigned == 0 {
                 // Typically ERROR_ACCESS_DENIED: our own process runs
                 // inside a job that disallows nesting (some CI
-                // supervisors). Degrade to the single-process kill.
-                tracing::debug!(
+                // supervisors). Degrade to the single-process kill —
+                // loudly, because the surviving grandchildren can then
+                // stall pipe teardown exactly like the pre-fix bug.
+                tracing::warn!(
                     pid,
                     error = GetLastError(),
-                    "process-tree containment unavailable; falling back to direct-child kill"
+                    "process-tree containment unavailable (AssignProcessToJobObject failed); \
+                     timeout kill will only reach the direct child"
                 );
                 CloseHandle(job);
                 return None;

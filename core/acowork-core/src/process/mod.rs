@@ -1,8 +1,12 @@
 //! Process management utilities with idle-timeout monitoring.
 //!
-//! Provides [`run_with_idle_timeout`] and [`run_command_with_idle_timeout`]
-//! for running child processes that should be killed if they produce no
-//! stdout/stderr output for a configurable duration.
+//! The public entry point is [`run_command_with_idle_timeout`]: it takes a
+//! [`Command`], **guarantees process-tree containment** (see `tree.rs`),
+//! and kills the whole tree if the child produces no stdout/stderr output
+//! for a configurable duration. There is deliberately no public way to run
+//! the monitor over an already-spawned [`Child`] — containment on Unix
+//! must be configured *before* spawn, so an externally-spawned child
+//! cannot be guaranteed contained.
 //!
 //! # Idle timeout vs absolute timeout
 //!
@@ -112,9 +116,16 @@ enum OutputLine {
 
 /// Run an already-spawned [`Child`] process with idle-timeout monitoring.
 ///
-/// The child **must** have its stdout and stderr set to `Stdio::piped()`.
-/// Use [`run_command_with_idle_timeout`] for a convenience wrapper that
-/// configures this automatically.
+/// Crate-internal: the only supported public entry point is
+/// [`run_command_with_idle_timeout`], because process-tree containment
+/// must be *configured before spawn* on Unix (`TreeGuard::configure`).
+/// Any caller that spawns a `Command` itself and hands the `Child` here
+/// would silently get a direct-child-only kill on Unix — the exact
+/// degradation this API is designed to make impossible.
+///
+/// The child **must** have its stdout and stderr set to `Stdio::piped()`
+/// (the `attach` of the [`TreeGuard`] below assumes the wrapper's spawn
+/// configuration).
 ///
 /// # How it works
 ///
@@ -129,7 +140,7 @@ enum OutputLine {
 /// # Panics
 ///
 /// Panics if `child.stdout` or `child.stderr` is `None` (i.e. not piped).
-pub async fn run_with_idle_timeout(
+pub(crate) async fn run_with_idle_timeout(
     mut child: Child,
     idle_timeout: Duration,
 ) -> Result<ProcessOutput, IdleTimeoutError> {
@@ -238,8 +249,17 @@ pub async fn run_with_idle_timeout(
 /// Convenience wrapper: configure a [`Command`] for idle-timeout monitoring
 /// and spawn it.
 ///
+/// This is the **only** public entry point of the module. It guarantees
+/// process-tree containment: on Unix it makes the child a process-group
+/// leader before spawn (so the timeout kill can signal the whole group);
+/// on Windows the child is pulled into a fresh Job Object right after
+/// spawn (so the timeout kill terminates the whole tree). A killed tree
+/// cannot leave grandchildren holding the stdio pipe write handles open —
+/// the failure mode that historically stalled runtime teardown for the
+/// full grandchild lifetime.
+///
 /// Automatically sets `stdout(Stdio::piped())`, `stderr(Stdio::piped())`,
-/// and `kill_on_drop(true)`, then calls [`run_with_idle_timeout`].
+/// and `kill_on_drop(true)`.
 ///
 /// # Example
 ///
