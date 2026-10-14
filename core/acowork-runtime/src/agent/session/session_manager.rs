@@ -2155,69 +2155,24 @@ After installation, ask the user to re-enable the MCP server.",
 
     /// Handle a node LSP relay state change (ADR-055 §6.7, Phase 4).
     ///
-    /// `Some(endpoint)` → wrap `codebase::CodebaseTool` with the
-    /// standard security decorators and register it in every session;
-    /// `None` → unregister the codebase tool (the relay is down or the
-    /// node cleared its retained state).
+    /// Currently a **no-op**: the `codebase` tool is temporarily out of
+    /// the builtin registry (see `tools/builtin/mod.rs`), so a relay
+    /// becoming ready must not push it back into any session or into
+    /// `agent_tools.json`. Any stale persisted `codebase` row is dropped
+    /// by the startup merge instead.
     ///
-    /// Keeps `agent_tools.json` in sync (`ensure_tool_in_config` /
-    /// `remove_tool_from_config`) so the frontend tool panel reflects
-    /// tools that became available after startup.
+    /// ponytail: the MQTT plumbing (`lsps_update_rx` →
+    /// `mqtt_only_loop` → this method) is kept intact so re-enabling
+    /// `codebase` is a local edit: restore the body from git history,
+    /// re-add the `all_builtin_tools` branch, and put `"codebase"` back
+    /// in `CONDITIONALLY_REGISTERED_TOOL_NAMES`. Deleting the whole
+    /// channel would touch `context.rs`, `agent_init.rs`, `cli.rs` and
+    /// `mqtt_only_loop`'s 9-argument signature for zero user-visible gain.
     pub fn handle_lsp_relay_update(&mut self, endpoint: Option<String>) {
-        let Some(resolver) = self.resolver.clone() else {
-            tracing::warn!("SessionManager: no workspace resolver — cannot register codebase tool");
-            return;
-        };
-
-        match endpoint {
-            Some(endpoint) => {
-                let tool: Arc<dyn Tool> = Arc::new(
-                    crate::tools::builtin::codebase::CodebaseTool::new(endpoint.clone()),
-                );
-                // Matches the startup path rate limit (`ToolRegistry::activate`
-                // in agent_init.rs).
-                //
-                // Single source of truth: `agent_tools.json` holds the
-                // user's enable/disable preference for `codebase`. Respect
-                // it — only default to enabled when the tool has never been
-                // persisted (first appearance). This keeps a user's "off"
-                // choice effective across restarts even though the tool is
-                // registered dynamically after boot.
-                let persisted_enabled = crate::agent_config::load_agent_tools_config(
-                    std::path::Path::new(&self.core.config.work_dir),
-                )
-                .ok()
-                .flatten()
-                .and_then(|cfg| {
-                    cfg.tools
-                        .iter()
-                        .find(|e| e.name == "codebase")
-                        .map(|e| e.enabled)
-                })
-                .unwrap_or(true);
-                self.register_dynamic_tool(tool, resolver, 60, persisted_enabled);
-                crate::agent_config::ensure_tool_in_config(
-                    std::path::Path::new(&self.core.config.work_dir),
-                    "codebase",
-                    persisted_enabled,
-                );
-                tracing::info!(
-                    endpoint,
-                    enabled = persisted_enabled,
-                    "SessionManager: codebase tool registered (node LSP relay ready)"
-                );
-            }
-            None => {
-                self.unregister_dynamic_tool("codebase");
-                crate::agent_config::remove_tool_from_config(
-                    std::path::Path::new(&self.core.config.work_dir),
-                    "codebase",
-                );
-                tracing::info!(
-                    "SessionManager: codebase tool unregistered (node LSP relay unavailable)"
-                );
-            }
-        }
+        tracing::debug!(
+            endpoint = endpoint.as_deref().unwrap_or("<none>"),
+            "SessionManager: LSP relay update ignored (codebase tool temporarily unregistered)"
+        );
     }
 
     /// Returns `(name, enabled)` pairs for all dynamically registered
@@ -2225,8 +2180,7 @@ After installation, ask the user to re-enable the MCP server.",
     ///
     /// Used by the `ConfigSnapshot` builder to merge with the persisted
     /// `agent_tools.json` so the frontend tool panel reflects tools that
-    /// were registered after startup (e.g. `codebase` when LSP Relay
-    /// becomes ready).
+    /// were registered after startup.
     pub fn dynamic_builtin_tool_names(&self) -> Vec<(String, bool)> {
         self.dynamic_builtin_tools
             .iter()

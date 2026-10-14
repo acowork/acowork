@@ -16,15 +16,18 @@ pub use traits::{Tool, ToolResult, ToolSpec};
 /// `[[tools]] name = "..."` in the manifest.
 ///
 /// The list is **static and exhaustive**: it intentionally covers tools
-/// the Runtime registers conditionally (`codebase` needs LSP relay,
-/// `rag_query` needs a RAG manifest entry, shell tools need a matching
-/// binary on the host). Wizard-time we cannot know which of those will
-/// actually be live when the agent starts; the Runtime already drops
-/// unresolvable entries from `agent_tools.json` via
-/// `init_tools_config_from_manifest` (only names present in the live
-/// registry survive), so the worst-case effect of the user selecting a
-/// tool that turns out to be unavailable is a silent no-op rather
-/// than a manifest validation failure.
+/// the Runtime registers conditionally (`rag_query` needs a RAG
+/// manifest entry, shell tools need a matching binary on the host).
+/// Wizard-time we cannot know which of those will actually be live when
+/// the agent starts; the Runtime already drops unresolvable entries
+/// from `agent_tools.json` via `init_tools_config_from_manifest` (only
+/// names present in the live registry survive), so the worst-case effect
+/// of the user selecting a tool that turns out to be unavailable is a
+/// silent no-op rather than a manifest validation failure.
+///
+/// `codebase` (LSP-backed) is deliberately absent: it is temporarily
+/// unregistered in the Runtime (see `tools/builtin/mod.rs`), so listing
+/// it would offer the user a checkbox that can never take effect.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BuiltinToolInfo {
     /// Tool name as registered in the Runtime (`Tool::name()`).
@@ -61,7 +64,6 @@ pub const BUILTIN_TOOLS: &[BuiltinToolInfo] = &[
     BuiltinToolInfo { name: "todo_write",      description: "Maintain a structured todo list for the task at hand",      group: Some("Workflow") },
     BuiltinToolInfo { name: "mcp_install",     description: "Install an MCP server into the agent's MCP config",        group: Some("MCP") },
     BuiltinToolInfo { name: "mcp_uninstall",   description: "Remove an MCP server from the agent's MCP config",          group: Some("MCP") },
-    BuiltinToolInfo { name: "codebase",        description: "Navigate the codebase via LSP (requires LSP Relay)",        group: Some("Advanced") },
     BuiltinToolInfo { name: "rag_query",       description: "Query a RAG knowledge base (requires a RAG manifest entry)",group: Some("Advanced") },
     BuiltinToolInfo { name: "bash",            description: "Execute commands via Git Bash (Windows)",                   group: Some("Shell") },
     BuiltinToolInfo { name: "powershell",      description: "Execute commands via PowerShell (Windows)",                 group: Some("Shell") },
@@ -78,5 +80,16 @@ mod tests {
         for t in BUILTIN_TOOLS {
             assert!(seen.insert(t.name), "duplicate builtin tool name: {}", t.name);
         }
+    }
+
+    #[test]
+    fn builtin_tool_catalog_excludes_unregistered_codebase() {
+        // The wizard catalog is what the frontend renders. `codebase` is
+        // temporarily out of the Runtime registry, so offering a checkbox
+        // for it would produce a tool the agent can never call.
+        assert!(
+            !BUILTIN_TOOLS.iter().any(|t| t.name == "codebase"),
+            "codebase must not be offered in the wizard catalog"
+        );
     }
 }

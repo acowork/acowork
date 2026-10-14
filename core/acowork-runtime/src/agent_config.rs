@@ -488,9 +488,11 @@ pub fn save_agent_tools_config(work_dir: &Path, cfg: &AgentToolsConfig) -> Resul
 /// appended with `default_enabled`.
 ///
 /// Used by the `SidecarEndpointUpdate` handler to persist dynamically
-/// registered tools (e.g. `codebase` when LSP Relay becomes ready)
-/// so that the frontend tool panel and `ConfigSnapshot` queries
-/// reflect tools that were not available at startup.
+/// registered tools so that the frontend tool panel and
+/// `ConfigSnapshot` queries reflect tools that were not available at
+/// startup. Currently unreferenced (`codebase`, the only dynamic tool,
+/// is temporarily unregistered) — kept because the dynamic-registration
+/// plumbing in `SessionManager` is intact.
 ///
 /// No-op if `agent_tools.json` does not exist yet (it will be created
 /// at next startup via the normal `agent_init.rs` flow).
@@ -593,7 +595,7 @@ pub fn remove_tool_from_config(work_dir: &Path, tool_name: &str) {
 /// - Tools only in persisted file -> dropped **unless** the name is a
 ///   conditionally-registered builtin tool (see
 ///   [`crate::tools::builtin::CONDITIONALLY_REGISTERED_TOOL_NAMES`]:
-///   `codebase`, `rag_query`). Those are valid tools that
+///   `rag_query`). Those are valid tools that
 ///   may simply not be registered *this boot* (their dependency arrives
 ///   asynchronously after startup), so their persisted `enabled` flag is
 ///   preserved — dropping it would erase the user's preference. Only
@@ -614,10 +616,9 @@ pub fn merge_tools_config(
     let code_set: std::collections::HashSet<&str> =
         code_tool_names.iter().map(|s| s.as_str()).collect();
 
-    // Conditionally-registered builtin tools (`codebase`, `rag_query`)
-    // are valid tools that may simply not be in the code
-    // registry *this boot* (their dependency — LSP relay or
-    // RAG manifest entry — can arrive asynchronously after
+    // Conditionally-registered builtin tools (`rag_query`) are valid
+    // tools that may simply not be in the code registry *this boot*
+    // (its RAG manifest entry can arrive asynchronously after
     // startup). Their persisted entries must survive the merge, or the
     // startup write-back below would erase the user's preference.
     // See [`crate::tools::builtin::CONDITIONALLY_REGISTERED_TOOL_NAMES`].
@@ -2073,19 +2074,19 @@ mod tests {
 
     #[test]
     fn merge_tools_config_preserves_conditionally_registered_tool() {
-        // Regression for the "codebase comes back enabled after restart"
-        // report: `codebase` is conditionally registered — it is absent
-        // from the code registry at boot (the LSP relay arrives
-        // asynchronously after startup). A persisted `enabled=false`
+        // Regression for the "tool comes back enabled after restart"
+        // report: `rag_query` is conditionally registered — it is absent
+        // from the code registry at boot (its manifest `type = "rag"`
+        // entry is resolved after startup). A persisted `enabled=false`
         // must survive the merge + write-back, or the user's choice is
-        // erased and the tool is re-added enabled when the relay comes up.
-        let code = sample_tools(); // does NOT include "codebase"
+        // erased and the tool is re-added enabled when it is registered.
+        let code = sample_tools(); // does NOT include "rag_query"
         let persisted = vec![
             AgentToolEntry::new("memory_recall", true),
-            AgentToolEntry::new("codebase", false), // user explicitly disabled it
+            AgentToolEntry::new("rag_query", false), // user explicitly disabled it
         ];
         let merged = merge_tools_config(&code, &persisted);
-        let entry = merged.iter().find(|e| e.name == "codebase");
+        let entry = merged.iter().find(|e| e.name == "rag_query");
         assert!(
             entry.is_some(),
             "conditionally-registered tool must survive the merge; got: {:?}",
@@ -2093,27 +2094,48 @@ mod tests {
         );
         assert!(
             !entry.unwrap().enabled,
-            "persisted disabled flag must be preserved for codebase"
+            "persisted disabled flag must be preserved for rag_query"
         );
     }
 
     #[test]
     fn merge_tools_config_conditionally_registered_tool_in_code_uses_persisted() {
-        // When `codebase` IS registered this boot (node mode with the
-        // LSP relay already up), it must follow the persisted flag like
-        // any other tool — and must not be duplicated by the conditional
+        // When `rag_query` IS registered this boot (manifest declared a
+        // RAG tool entry), it must follow the persisted flag like any
+        // other tool — and must not be duplicated by the conditional
         // preservation pass.
         let mut code = sample_tools();
-        code.push("codebase".to_string());
+        code.push("rag_query".to_string());
         let persisted = vec![
             AgentToolEntry::new("memory_recall", true),
-            AgentToolEntry::new("codebase", false),
+            AgentToolEntry::new("rag_query", false),
         ];
         let merged = merge_tools_config(&code, &persisted);
         let entries: Vec<&AgentToolEntry> =
-            merged.iter().filter(|e| e.name == "codebase").collect();
-        assert_eq!(entries.len(), 1, "codebase must appear exactly once");
+            merged.iter().filter(|e| e.name == "rag_query").collect();
+        assert_eq!(entries.len(), 1, "rag_query must appear exactly once");
         assert!(!entries[0].enabled, "persisted disabled flag preserved");
+    }
+
+    #[test]
+    fn merge_tools_config_drops_retired_codebase_entry() {
+        // `codebase` is temporarily unregistered (see
+        // `tools::builtin::CONDITIONALLY_REGISTERED_TOOL_NAMES`). A row
+        // left over in an existing `agent_tools.json` is no longer a
+        // conditionally-registered tool, so the merge must drop it and the
+        // startup write-back must clear it — otherwise the Tools panel
+        // would keep rendering a toggle for a tool that cannot be called.
+        let code = sample_tools();
+        let persisted = vec![
+            AgentToolEntry::new("memory_recall", true),
+            AgentToolEntry::new("codebase", true), // stale row from before
+        ];
+        let merged = merge_tools_config(&code, &persisted);
+        assert!(
+            merged.iter().all(|e| e.name != "codebase"),
+            "retired codebase row must be dropped; got: {:?}",
+            merged.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
