@@ -359,7 +359,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                                 onClick={handleConfirm}
                                 disabled={!selectedPath}
                                 className="rounded-md px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                                style={{ backgroundColor: "var(--color-accent)" }}
+                                style={{ backgroundColor: "var(--color-accent-strong)" }}
                             >
                                 {t("workspace.remoteBrowseSelect")}
                             </button>

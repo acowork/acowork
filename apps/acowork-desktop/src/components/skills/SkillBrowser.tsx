@@ -348,7 +348,7 @@ export function SkillBrowser() {
                     ? "cursor-not-allowed bg-zinc-200 text-text-tertiary dark:bg-zinc-700 "
                     : "text-white",
                 )}
-                style={selectedFile && !importing ? { backgroundColor: "var(--color-accent)" } : undefined}
+                style={selectedFile && !importing ? { backgroundColor: "var(--color-accent-strong)" } : undefined}
                 onMouseEnter={(e) => { if (selectedFile && !importing) e.currentTarget.style.filter = "brightness(0.85)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
               >

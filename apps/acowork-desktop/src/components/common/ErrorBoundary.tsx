@@ -57,7 +57,7 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
             <button
               onClick={onRefresh}
               className="flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-white"
-              style={{ backgroundColor: "var(--color-accent)" }}
+              style={{ backgroundColor: "var(--color-accent-strong)" }}
               onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(0.85)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
             >

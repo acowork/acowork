@@ -70,7 +70,7 @@ export function InviteTokenModal({ open, token, username, onClose }: InviteToken
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white"
+            className="rounded-md bg-accent-strong px-3 py-1.5 text-xs font-medium text-white"
           >
             {t("account.done")}
           </button>

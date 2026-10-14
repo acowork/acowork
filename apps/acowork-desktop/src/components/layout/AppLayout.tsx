@@ -1079,7 +1079,7 @@ export function AppLayout() {
                           type="button"
                           onClick={() => window.location.reload()}
                           className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium text-white"
-                          style={{ backgroundColor: "var(--color-accent)" }}
+                          style={{ backgroundColor: "var(--color-accent-strong)" }}
                           onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(0.85)"; }}
                           onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}
                         >

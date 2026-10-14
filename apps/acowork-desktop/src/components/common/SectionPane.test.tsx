@@ -123,10 +123,12 @@ describe("SectionPane", () => {
     //    app-wide "list rows share one tint" rule), so we no longer
     //    pin "no accent on unselected" — instead we pin that the
     //    selected wash is a SOLID /90 (not a tint), which keeps the
-    //    selected row the loudest one on screen.
-    expect(selected.className).toContain("bg-[var(--color-accent)]/90");
+    //    selected row the loudest one on screen. The fill is the
+    //    darkened `--color-accent-strong` variant (white-text surfaces)
+    //    so dark mode contrast survives — see globals.css.
+    expect(selected.className).toContain("bg-accent-strong/90");
     expect(selected.className).toContain("text-white");
-    expect(unselected.className).not.toContain("bg-[var(--color-accent)]/90");
+    expect(unselected.className).not.toContain("bg-accent-strong/90");
 
     // 3. Hairline divider between rows, drawn on every row but the last.
     expect(unselected.className).toContain("row-divider-b");

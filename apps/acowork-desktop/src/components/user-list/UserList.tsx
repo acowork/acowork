@@ -492,7 +492,7 @@ function UserRow({
         "relative flex items-center rounded-md px-3 py-2 transition-colors duration-150",
         "gap-3",
         !isSelf && `cursor-pointer ${listRowHover}`,
-        active && "bg-[var(--color-accent)]/90 text-white hover:bg-[var(--color-accent)]",
+        active && "bg-accent-strong/90 text-white hover:bg-[var(--color-accent)]",
         // Same hairline the agent rows carry, so the two groups read as one
         // list. `isLast` is passed in rather than derived here: the rows are
         // flat (accounts are Gateway-wide, never partitioned by node), so

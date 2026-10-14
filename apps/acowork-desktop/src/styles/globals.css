@@ -2,6 +2,12 @@
 
 @theme {
   --color-accent: #3B82F6;
+  /* Filled-with-white-text variant of --color-accent. Mirrors mobile's
+     two-token split (`--color-tint` foreground / `--color-tint-strong`
+     background, `apps/acowork-mobile/src/lib/theme.ts`). Both modes
+     darken; factor is asymmetric per theme (0.78 light, 0.62 dark) —
+     see :root and .dark for the rationale. */
+  --color-accent-strong: var(--color-accent-strong);
   --color-text: hsl(240 10% 10%);
   /* high-contrast text (light) — mirrors :root token so Tailwind
      emits the `.text-text` utility; :root/.dark overrides the value */
@@ -87,7 +93,7 @@
      outer edge. */
   --color-chat-badge: hsl(240 5.9% 90.6%);
   /* = zinc-200, #e4e4e7 — sender-role label pill */
-  --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
+  --color-chat-user: color-mix(in srgb, var(--color-accent-strong) 90%, transparent);
   /* = accent 50% — user message bubble */
   --color-chat-user-text: hsl(240 100% 100% / 1.0);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
@@ -304,6 +310,13 @@
 
   /* Accent highlight (user-configurable color) */
   --color-accent: #3B82F6;
+  /* Filled-with-white-text variant of --color-accent. Asymmetric per
+     theme: light uses a milder darkening (0.90) so the fill stays
+     "vivid blue" on a white surface — strong darkening reads as a
+     heavy navy box against the page; dark uses 0.62 to gain AA contrast
+     on the near-black surface. Two-token split mirrors mobile's
+     `--color-tint` / `--color-tint-strong`. */
+  --color-accent-strong: color-mix(in srgb, var(--color-accent) 90%, black);
 
   /* Semantic colors */
   --color-agent-running: hsl(142 76% 36%);
@@ -533,6 +546,15 @@
   --color-primary-foreground: hsl(222.2 47.4% 11.2%);
   --color-accent: hsl(222.2 47.4% 11.2%);
   --color-accent-foreground: hsl(210 40% 96.1%);
+  /* Accent fill for surfaces with white text. Raw `--color-accent` is a
+     vivid blue that only reaches ~3.7:1 against white — below WCAG AA's
+     4.5:1 bar — and on a near-black background reads as "lit up".
+     Mixing 62% against black (mobile's `darken()` factor) deepens it to
+     a darker navy (~7.7:1 against white, AAA-pass) while keeping the
+     same hue. Computed live against `--color-accent` so every accent
+     preset inherits; the same factor applies in `:root` so light mode
+     gets the same fill on white backgrounds. */
+  --color-accent-strong: color-mix(in srgb, var(--color-accent) 62%, black);
   --color-muted: hsl(222.2 47.4% 15%);
   --color-muted-foreground: hsl(215.4 16.3% 65%);
 
@@ -574,8 +596,11 @@
      Auto-flips the @theme light value above. Alias of --color-border-outer. */
   --color-chat-badge: hsl(240 5.2% 26.1%);
   /* = zinc-700, #3f3f46 — sender-role label pill */
-  --color-chat-user: color-mix(in srgb, var(--color-accent) 90%, transparent);
-  /* = accent 50% — user message bubble */
+  --color-chat-user: color-mix(in srgb, var(--color-accent-strong) 90%, transparent);
+  /* = deep navy ~50% — user message bubble (dark). Same 90% alpha as
+     light so the bubble keeps its translucent character, but the base
+     is the darkened `--color-accent-strong` so white text reaches ~9:1
+     instead of failing AA on the bright version. */
   --color-chat-user-text: hsl(240 100% 100% / 1.0);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
   /* Editor canvas (dark) — auto-flips the @theme light value. */
@@ -1630,13 +1655,16 @@ input[type="radio"]:checked {
   filter: brightness(0.9);
 }
 
+/* Dark mode solid-accent button — uses the darkened variant so white text
+ * passes WCAG AA on the deep blue instead of glowing on the bright
+ * version. Light variant above is unchanged. */
 .dark .btn-accent {
-  background-color: var(--color-accent);
+  background-color: var(--color-accent-strong);
   color: white;
 }
 
 .dark .btn-accent:hover {
-  filter: brightness(0.85);
+  filter: brightness(0.9);
 }
 
 /* ── Thinking shimmer animation ── */

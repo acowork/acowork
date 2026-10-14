@@ -23,6 +23,7 @@ import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
 import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
 import { LspDocumentTracker } from "./LspDocumentTracker";
+import { WORKSPACE_PREVIEW_EXT_RE } from "./filePreview";
 import {
   ContextMenu,
   useContextMenu,
@@ -68,14 +69,15 @@ function encodeTextToBase64(text: string): string {
 
 /**
  * Files that support BOTH source editing and rendered preview.
- * Keep in sync with the tab context menu's "Open Preview" gate and the
- * preview/source toggle button in the tab bar. Raster images
- * (png/jpg/gif/webp) are intentionally excluded — their "source" is just a
- * base64 blob, so toggling to a source pane adds no value.
+ * Keep in sync with the workspace-panel entry points (file-tree
+ * double-click, search select, right-click "Preview" item) — they share
+ * the same regex via `./filePreview.WORKSPACE_PREVIEW_EXT_RE` so this
+ * rule can't drift out of sync. Raster images (png/jpg/gif/webp) are
+ * intentionally excluded — their "source" is just a base64 blob, so
+ * toggling to a source pane adds no value.
  */
-const PREVIEW_TOGGLE_RE = /\.(md|html?|svg)$/i;
 function supportsPreviewToggle(file: OpenFile): boolean {
-    return file.kind === "file" && PREVIEW_TOGGLE_RE.test(file.fileName);
+    return file.kind === "file" && WORKSPACE_PREVIEW_EXT_RE.test(file.fileName);
 }
 
 export function FileEditorPanel({ width }: { width: number }) {

@@ -591,7 +591,7 @@ export function AgentList({ width }: AgentListProps) {
           "relative flex cursor-pointer items-center rounded-md px-3 py-2 transition-colors duration-150",
           isCollapsed ? "gap-0" : "gap-3",
           selectedAgentId === id
-            ? "bg-[var(--color-accent)]/90 text-white"
+            ? "bg-accent-strong/90 text-white"
             : listRowHover,
           index < total - 1 && "row-divider-b"
         )}
