@@ -118,6 +118,9 @@ pub struct DirectoryEntry {
     pub user_id: String,
     pub username: String,
     pub display_name: String,
+    /// Login role (ADR-076 §决策 5) — the same value the bearer token
+    /// carries, so the IM header can show "管理员" without a second lookup.
+    pub role: Role,
     pub avatar: Option<String>,
     pub builtin_avatar: Option<String>,
 }
@@ -231,6 +234,7 @@ async fn list_directory(
             user_id: a.user_id.clone(),
             username: a.username.clone(),
             display_name: a.display_name.clone(),
+            role: a.role,
             avatar: a.avatar.as_deref().filter(|s| !s.is_empty()).map(str::to_string),
             builtin_avatar: a
                 .builtin_avatar
