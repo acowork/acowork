@@ -384,6 +384,7 @@
   },
   "agentList": {
     "doubleClickToStart": "双击启动",
+    "dotBusy": "该 Agent 正在工作",
     "searchPlaceholder": "搜索 Agent...",
     "stopConfirm": "确定要停止 {{agent}} 吗？当前对话状态将保留。",
     "uninstallConfirm": "确定要卸载 {{agent}} 吗？此操作不可撤销。",

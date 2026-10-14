@@ -81,27 +81,43 @@ describe("NodeGroupHeader", () => {
 });
 
 describe("agent working dot", () => {
-  // Anchor on the JSX comment, not the bare "IM-style" phrase — the same
-  // wording appears in the `activeAgentIds` memo further up, and
-  // indexOf would silently slice that one instead.
-  const dot = src.slice(
-    src.indexOf('IM-style "needs attention" indicator dot'),
-    src.indexOf('IM-style "needs attention" indicator dot') + 2000,
-  );
+  // Bound to the JSX EXPRESSION, not the comment above it: the comment
+  // explains the change and legitimately names colours, and the 2000-char
+  // window the original test used ran past this dot into the node-install
+  // picker, which is a genuinely different emerald (an online node).
+  const start = src.indexOf("{busyAgentIds.has(id) && (");
+  const end = src.indexOf("\n            )}", start);
+  const dot = src.slice(start, end);
+  // Sanity: the anchor must exist, or every assertion below passes vacuously.
+  expect(start).toBeGreaterThan(-1);
 
-  it("uses the same emerald as the node online dot", () => {
+  it("is solid emerald, matching the node online dot", () => {
     // Two dots, one meaning ("something is live"). Matching the node
-    // header's literal is deliberate: a new `bg-emerald-600` variant here
-    // would look like a different state at 8px.
+    // header's literal is deliberate: a different shade here would look like
+    // a different state at 10px.
     expect(dot).toContain("bg-emerald-500");
   });
 
-  it("hides on the selected row", () => {
-    // The selection fill already marks the row; an emerald dot over it
-    // reads as a smudge. Assert the full guard so dropping any single
-    // clause (e.g. the offline carve-out) also fails here.
-    expect(dot).toMatch(
-      /agent\.alive\s*&&\s*activeAgentIds\.has\(id\)\s*&&\s*selectedAgentId\s*!==\s*id/,
-    );
+  it("is agent-scoped, not gated on the selected row", () => {
+    // It USED to be suppressed on the selected row, which meant the agent
+    // the user was watching never showed it. The selection fill already
+    // marks the row; the dot is about the agent being busy, which is
+    // independent of which session is on screen.
+    expect(dot).toMatch(/busyAgentIds\.has\(id\)/);
+    expect(dot).not.toMatch(/selectedAgentId/);
+    expect(dot).not.toMatch(/agent\.alive/);
+  });
+
+  it("is borderless", () => {
+    // A ring around a 10px dot reads as a smudge on the selected row's
+    // accent fill.
+    expect(dot).not.toMatch(/ring-\d/);
+  });
+
+  it("carries a label for hover and screen readers", () => {
+    // Colour alone is not an accessible signal; the node band already sets
+    // this precedent with its `title={statusLabel}` dot.
+    expect(dot).toContain("title={t(\"agentList.dotBusy\")}");
+    expect(dot).toContain("aria-label={t(\"agentList.dotBusy\")}");
   });
 });

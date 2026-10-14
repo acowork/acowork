@@ -34,7 +34,7 @@ export function ListRow({
   badge,
   avatar,
   avatarClass,
-  avatarUnread,
+  avatarBusy,
   icon,
   iconColor,
 }: {
@@ -48,15 +48,21 @@ export function ListRow({
   /** Count bubble. Only ever a NUMBER the server actually reported. */
   badge?: number
   /** Avatar element (image or initials block) rendered 48px left.
-   *  Unread always lands on this avatar's top-right corner — the position
-   *  every IM trains people to look at: a server `badge` renders as a red
-   *  number bubble, the client-inferred "there is something new" for an
-   *  agent session as a plain red dot (`avatarUnread`, §8.5 — never a number
-   *  there, because the count is inferred). A row WITHOUT an avatar has no
-   *  corner to sit on and keeps the bubble in the trail. */
+   *  Status lands on this avatar's top-right corner — the position every IM
+   *  trains people to look at. A server `badge` renders as a red number
+   *  bubble; an agent mid-turn renders as a green working dot (`avatarBusy`).
+   *  There is deliberately NO unread dot for agent sessions: without a push
+   *  channel a client-side "seen" baseline cannot tell a reply from your own
+   *  message, and stacking it beside the working dot made the row flip
+   *  red/green. The Desktop sidebar works the same way (ADR parity).
+   *  A row WITHOUT an avatar has no corner to sit on and keeps the bubble in
+   *  the trail. */
   avatar?: ReactNode
   avatarClass?: string
-  avatarUnread?: boolean
+  /** Agent is mid-turn (directory status `busy`): a green corner dot, the same
+   *  single signal the Desktop sidebar shows. The ONLY corner status on an
+   *  agent row. */
+  avatarBusy?: boolean
   /** Leading icon element (24px) for settings-style rows. */
   icon?: ReactNode
   /** Optional glyph color (a `--color-icon-*` token) — WeChat Discover-style
@@ -74,15 +80,13 @@ export function ListRow({
       {avatar ? (
         <div className="list-row-avatar-wrap">
           <div className={`list-row-avatar${avatarClass ? ' ' + avatarClass : ''}`}>{avatar}</div>
-          {/* The count outranks the dot: a row that knows how many is not
-              served a vaguer signal. They are mutually exclusive in practice
-              (agent rows dot, contact rows count) — the order is the fallback,
-              not a stack. */}
+          {/* The count outranks everything: a row that knows how many is not
+              served a vaguer signal. Agent rows have no `badge` and no
+              unread dot, so the green working dot below stands alone. */}
           {badge && badge > 0 ? (
             <span className="avatar-unread-count">{badge > 99 ? '99+' : badge}</span>
-          ) : avatarUnread ? (
-            <span className="avatar-unread" aria-label="有新消息" />
           ) : null}
+          {avatarBusy ? <span className="avatar-busy" aria-label="正在工作" /> : null}
         </div>
       ) : null}
       {icon && !avatar ? (

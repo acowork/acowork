@@ -503,11 +503,14 @@ function UserRow({
     >
       {/* Unread lives on the avatar's top-right corner, in red — the position
           every IM trains people to look at, and the same corner the agent rows
-          already use for their status dot ([AgentList.tsx](../agent-list/AgentList.tsx)).
+          use for their working dot ([AgentList.tsx](../agent-list/AgentList.tsx)),
+          which is what makes the two groups read as one inbox. It is a count
+          because the server reports it; the agent dot is a bare green signal
+          for the same corner.
           It is deliberately NOT the global accent: accent is this app's
           "selected" colour, so an accent bubble said "you are here" about a
-          thread the user has not read. On the selected row the bubble keeps a
-          light ring so it does not smear into the accent fill. */}
+          thread the user has not read. Borderless, like the agent rows' corner
+          dot — a ring on a small badge reads as a smudge on the accent fill. */}
       <div className="relative shrink-0">
         <UserAvatar
           displayName={account.display_name}
@@ -520,9 +523,8 @@ function UserRow({
             className={cn(
               // Height == line-height: the bubble is borderless (the agent
               // rows' corner dot is too), so any gap would sit off-centre.
-              "absolute -right-1.5 -top-1.5 h-[17px] min-w-[17px] rounded-full px-1 text-center text-10 font-medium leading-[17px]",
+              "absolute -right-1 -top-1 h-[17px] min-w-[17px] rounded-full px-1 text-center text-10 font-medium leading-[17px]",
               "bg-[var(--color-destructive)] text-white",
-              active && "ring-2 ring-white/70",
             )}
           >
             {unread > 99 ? "99+" : unread}

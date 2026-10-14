@@ -10,7 +10,6 @@ import { describe, expect, it } from 'vitest'
 import { renderMarkdown } from '../lib/markdown'
 import { userChatId } from '../lib/api'
 import { formatListTime, daySeparator } from '../lib/time'
-import { hasUnread, markSeen, clearUnread } from '../lib/unread'
 
 /** Flatten the node tree to text, and collect every `href` it produced. */
 function walk(nodes: unknown, texts: string[], hrefs: string[]): void {
@@ -101,28 +100,6 @@ describe('userChatId', () => {
     // The Gateway rejects a non-canonical id with 404, so a wrong sort here
     // is a thread that silently never loads.
     expect(userChatId('9', '10')).toBe('10__9')
-  })
-})
-
-describe('unread dot', () => {
-  it('stays silent for a session this device has never opened', () => {
-    clearUnread()
-    expect(hasUnread('a', 's1', 5)).toBe(false)
-  })
-
-  it('lights up only when the count grew past what was seen', () => {
-    clearUnread()
-    markSeen('a', 's1', 5)
-    expect(hasUnread('a', 's1', 5)).toBe(false)
-    expect(hasUnread('a', 's1', 6)).toBe(true)
-    expect(hasUnread('a', 's1', 4)).toBe(false)
-  })
-
-  it('treats a missing count as no news, not as unread', () => {
-    clearUnread()
-    markSeen('a', 's2', 3)
-    expect(hasUnread('a', 's2', undefined)).toBe(false)
-    expect(hasUnread('a', 's2', 0)).toBe(false)
   })
 })
 

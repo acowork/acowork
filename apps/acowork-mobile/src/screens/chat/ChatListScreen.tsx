@@ -12,8 +12,8 @@
  *
  * Two badges with two different truths (§8.5): a human thread has a
  * server-side read cursor, so its count is a NUMBER. An agent session has
- * none, so it gets a DOT and nothing more — inventing a number there would
- * be a claim this client cannot support.
+ * none, so it gets no count at all — only a green dot while it is working,
+ * which is the single status signal the Desktop sidebar shows too.
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
@@ -23,7 +23,6 @@ import { useChatStore } from '../../stores/chatStore'
 import { useUserChatStore } from '../../stores/userChatStore'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
-import { hasUnread } from '../../lib/unread'
 import { formatListTime } from '../../lib/time'
 import { ListSection, ListRow } from '../../components/ui'
 import { AuthImage } from '../../components/AuthImage'
@@ -238,7 +237,14 @@ export function ChatListScreen() {
               <ListRow
                 key={a.id}
                 avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
-                avatarUnread={!!(recent && hasUnread(a.id, recent.session_id, recent.message_count))}
+                // Working dot: the directory's own `busy` verdict (ADR-014
+                // non-idle session status, pushed over presence). The ONLY
+                // corner status on an agent row — no unread dot, matching the
+                // Desktop sidebar. Deliberately not folded into the presence
+                // dot beside the name: that one is liveness (online/offline/
+                // error) and already carries three states, so overloading it
+                // is what made the old desktop green dot ambiguous.
+                avatarBusy={a.status === 'busy'}
                 onClick={() => void openAgent(a.id, recent?.session_id ?? null)}
                 label={
                   <span className="row-title">

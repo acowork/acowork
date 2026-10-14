@@ -42,24 +42,29 @@ export function AgentList({ width }: AgentListProps) {
     useAgentStore();
   const agentsMap = useAgentStore((s) => s.agents);
 
-  // ADR-014 derived view for the sidebar status dot — an agent shows the
+  // ADR-014 derived view for the sidebar working dot — an agent shows the
   // dot when *any* of its cached sessions is not in `idle` (i.e. streaming,
   // waiting_approval, or paused). This is the IM-style "needs attention"
-  // semantic: dot disappears when everything is idle, regardless of whether
-  // the agent process itself is running.
+  // semantic: the dot disappears when everything is idle, regardless of
+  // whether the agent process itself is running. It is a WORKING signal
+  // only — there is deliberately no read/unread notion here, matching the
+  // mobile agent row, so the two never disagree about what a dot means.
   //
   // Source: `chatStore.agentStates[aid].sessionStates[sid].sessionStatus`,
   // kept up-to-date by `fetchSessions`'s ADR-014 Pull repair and by MQTT
   // `session_status_changed` events. Agents that have never been opened
   // have an empty sessionStates map — they show no dot until the user
-  // opens them, which is the correct IM semantic (red dot = something
-  // the user can act on).
+  // opens them.
+  //
+  // Agent-scoped and INDEPENDENT of which session is on screen: an agent
+  // churning through tools is worth knowing about even while you read it,
+  // and a `waiting_approval` session carries no new message to announce
+  // itself — it would be invisible under a message-count rule.
   const sessionStatesByAgent = useChatStore((s) => s.agentStates);
-  const activeAgentIds = useMemo(() => {
+  const busyAgentIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [agentId, agentState] of Object.entries(sessionStatesByAgent)) {
-      const sessionStates = agentState.sessionStates ?? {};
-      for (const sess of Object.values(sessionStates)) {
+      for (const sess of Object.values(agentState.sessionStates ?? {})) {
         if (isProcessing(sess.sessionStatus)) {
           ids.add(agentId);
           break;
@@ -68,6 +73,7 @@ export function AgentList({ width }: AgentListProps) {
     }
     return ids;
   }, [sessionStatesByAgent]);
+
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
 
   // ADR-073 §4: view mode is decided automatically by `gatewayMode`. In
@@ -618,27 +624,27 @@ export function AgentList({ width }: AgentListProps) {
               size={40}
               className={isCollapsed ? "mx-auto" : ""}
             />
-            {/* IM-style "needs attention" indicator dot — solid emerald,
-                * borderless, matching the node online/offline dot below
-                * (NodeGroupHeader). Shown when the agent is alive AND has
-                * at least one session in a non-idle status (streaming /
-                * waiting_approval / paused), per ADR-014. Disappears
-                * once every session returns to idle. Offline agents
-                * (alive === false) show no dot.
+            {/* Working dot — solid emerald, borderless, in the avatar's
+                * top-right corner (the same corner the UserList rows carry
+                * their unread bubble, so the two lists read as one inbox).
+                * Shown when any of the agent's sessions is in a non-idle
+                * status (streaming / waiting_approval / paused) per ADR-014;
+                * disappears once every session returns to idle.
                 *
                 * Auto-sleep was retired in Sept 2026 — the `sleeping`
                 * carve-out is gone; an agent that is alive IS running.
                 *
-                * Hidden on the selected row: the selection highlight fills
-                * the row, and an emerald dot on top of it reads as a smudge
-                * rather than a status. The row is already fully "marked"
-                * by its background; the dot comes back the moment focus
-                * moves elsewhere. */}
-            {agent.alive && activeAgentIds.has(id) && selectedAgentId !== id && (
-                <span
-                  className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500"
-                />
-              )}
+                * NOT hidden on the selected row. It used to be, which meant
+                * the agent you were watching never showed it; the selection
+                * fill already marks the row. Borderless — a ring around a
+                * 10px dot reads as a smudge on the accent fill. */}
+            {busyAgentIds.has(id) && (
+              <span
+                title={t("agentList.dotBusy")}
+                aria-label={t("agentList.dotBusy")}
+                className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-emerald-500"
+              />
+            )}
           </div>
         </Tooltip>
 

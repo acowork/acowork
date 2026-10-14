@@ -33,7 +33,6 @@ import {
   fetchMe,
 } from '../lib/api'
 import type { AccountMe, GatewayStatus, TokenPair } from '../lib/types'
-import { clearUnread } from '../lib/unread'
 
 export type BootPhase =
   | 'boot'
@@ -251,9 +250,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     lsSet(LS.access, null)
     lsSet(LS.refresh, null)
     lsSet(LS.me, null)
-    // The unread dot is per-device read state; a shared phone must not carry
-    // it to the next account.
-    clearUnread()
     set({ accessToken: null, refreshToken: null, me: null, phase: 'login', status: null })
     // Keep the saved URL: re-login should not require retyping it.
     get().boot()

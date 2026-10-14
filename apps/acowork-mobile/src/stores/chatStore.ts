@@ -16,7 +16,6 @@
 
 import { create } from 'zustand'
 import { useAgentStore } from './agentStore'
-import { markSeen } from '../lib/unread'
 import type { ChatMessage, LiveStatus, MessagesWindow, SessionInfo, SessionSnapshot } from '../lib/types'
 import {
   startWatching, stopWatching, setRealtimeDeps, pollNetworkState, POLL_INTERVAL_MS,
@@ -205,9 +204,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Step 3: reload history — a fresh tail window, cursor and all (the
       // previous session's cached pages are gone with the old view anyway).
       const w = await transport.fetchMessages(agentId, sessionId)
-      // Looking at it is reading it: the dot for THIS session goes away, and
-      // the baseline is the count the list carried, not the count now.
-      markSeen(agentId, sessionId, target?.message_count)
       set((s) => ({
         agentStates: {
           ...s.agentStates,
