@@ -18,6 +18,7 @@
  */
 
 import { Fragment, useEffect, useState, type ReactNode } from 'react'
+import { Send } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
 import { useUserChatStore, setUserChatThreadOnScreen } from '../../stores/userChatStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -242,7 +243,7 @@ export function UserChatScreen() {
             disabled={!draft.trim() || sending || !me}
             onClick={() => void submit()}
           >
-            发送
+            <Send className="composer-send-icon" aria-hidden />
           </button>
         </div>
       </div>

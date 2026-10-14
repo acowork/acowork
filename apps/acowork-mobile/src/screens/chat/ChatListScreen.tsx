@@ -156,7 +156,7 @@ export function ChatListScreen() {
         )
         return { a, recent }
       })
-      .filter(({ a, recent }) => match(a.name, recent?.last_message ?? recent?.title))
+      .filter(({ a }) => match(a.name))
       .filter(({ a }) => onlineById.has(a.node_id))
       .sort((x, y) => (y.recent?.updated_at ?? 0) - (x.recent?.updated_at ?? 0))
   }, [agents, sessionsByAgent, q, onlineById])
@@ -268,7 +268,14 @@ export function ChatListScreen() {
                   </span>
                 }
                 value={formatListTime(recent?.updated_at)}
-                hint={startingAgentIds.has(a.id) ? '正在启动…' : recent?.last_message || recent?.title || '暂无会话'}
+                // Mobile used to show `last_message || title`, i.e. the latest
+                // message preview under each agent. That diverged from the
+                // Desktop sidebar, which shows the *session title* — and
+                // the message preview in this list is largely noisy
+                // (long bodies get truncated, code blocks render as
+                // mojibake). Unify on title for cross-platform consistency.
+                // Empty-title sessions fall through to "暂无会话".
+                hint={startingAgentIds.has(a.id) ? '正在启动…' : recent?.title || '暂无会话'}
               />
             ))}
           </ListSection>

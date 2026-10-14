@@ -247,6 +247,16 @@
   position: relative;
 }
 
+/* Single-line rows (no hint) collapse to the compact height so the row
+ * isn't 30%+ taller than its label. Applied by ListRow when `hint` is
+ * undefined, and explicitly via `data-row="single"` for callers that
+ * pass an empty string and want the same look. */
+.list-row[data-row='single'] {
+  min-height: var(--list-row-h-compact);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .list-row + .list-row::before {
   content: '';
   position: absolute;
@@ -262,6 +272,19 @@
 }
 .list-row.is-destructive .list-row-label {
   color: var(--color-destructive);
+}
+/* Selected row — subtle accent tint so the user's eye lands on the
+ * current pick without a heavy background block. Same opacity range as
+ * the desktop `listRowSelected` (15% light / 20% dark) so the two UIs
+ * read the same way; `color-mix` keeps the tint on whichever accent
+ * the user picked (the desktop picks too). */
+.list-row.is-selected {
+  background: color-mix(in srgb, var(--color-tint) 15%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  .list-row.is-selected {
+    background: color-mix(in srgb, var(--color-tint) 20%, transparent);
+  }
 }
 
 .list-row-main {
@@ -509,12 +532,110 @@
   color: var(--color-label);
 }
 
+/* Send button. Was a flat 16px "发送" text with no border — read as a
+ * raw word, not a control. Desktop uses a 28x28 icon button in the
+ * toolbar cluster; on touch the tap target needs to be 44x44 (Apple HIG)
+ * so the visual 18px icon sits inside a padded box. Filled accent when
+ * active, dim outline when there's nothing to send. */
 .composer-send {
-  color: var(--color-tint);
-  font-weight: 600;
-  font-size: 16px;
   flex: none;
-  padding: 8px 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.08s;
+}
+.composer-send:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.composer-send:disabled {
+  background: transparent;
+  color: var(--color-label-secondary);
+  border-color: var(--color-separator);
+  cursor: not-allowed;
+}
+.composer-send-icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* Settings cog in the composer (mobile-only — opens the 4-item submenu).
+ * Same 44x44 hit box as send, ghost variant so it sits next to the filled
+ * send without competing. */
+.composer-settings {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 1px solid var(--color-separator);
+  background: transparent;
+  color: var(--color-label-secondary);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.composer-settings:hover,
+.composer-settings:active {
+  background: var(--color-bubble-peer);
+  color: var(--color-label);
+}
+
+/* ── Unified button style (ADR parity with Desktop .btn-accent family) ──
+ * Mobile was pure-text in most places (logout-btn, drawer-close, tab
+ * labels). One accent-tinted outline keeps the surface honest — a button
+ * that doesn't look like a button isn't a button. Use .btn-filled for
+ * the primary action of a screen (composer-send already inlines the same
+ * look; this is the variant callers reach for). */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--touch-min);
+  padding: 0 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-accent);
+  background: transparent;
+  color: var(--color-accent);
+  font: inherit;
+  font-size: var(--font-md);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.btn:hover:not(:disabled),
+.btn:active:not(:disabled) {
+  /* 12% accent wash — strong enough to read as "pressed" on both the
+   * iOS-blue and WeChat-green themes without inventing a separate
+   * pressed token. */
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn-filled {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+.btn-filled:hover:not(:disabled),
+.btn-filled:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 88%, #000 0%);
+  /* The wash above drops the saturation slightly. This nudges it back
+   * down so the filled button still pops on the lighter hover bg. */
+  filter: brightness(0.95);
+}
+.btn-sm {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: var(--font-sm);
 }
 
 /* --- TabBar --- */
@@ -652,6 +773,113 @@
 }
 .empty-sub {
   font-size: 13px;
+}
+
+/* --- Composer menu (settings sheet + 4 sub-sheets) ------------------ */
+
+/* The settings sheet is the same Sheet primitive as elsewhere, but the
+ * rows inside it are first-class menu entries — not .list-row with an
+ * arrow. Keeping them visually separate stops the user reading them as
+ * "another list". 44px tap target, leading 22px glyph, trailing `>` and
+ * an optional trailing value text. */
+.menu-section-title {
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  font-size: 13px;
+  color: var(--color-label-secondary);
+  text-transform: uppercase;
+}
+.menu-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--touch-min);
+  padding: 0 var(--space-4);
+  background: var(--color-bg-elevated);
+  cursor: pointer;
+  position: relative;
+}
+.menu-row + .menu-row::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: calc(var(--space-4) + 22px + 12px);
+  right: 0;
+  height: 0.5px;
+  background: var(--color-list-sep);
+}
+.menu-row-icon {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-accent);
+  flex: none;
+}
+.menu-row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-row-trail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-label-secondary);
+  font-size: var(--font-sm);
+  flex: none;
+}
+.menu-row-arrow {
+  color: var(--color-label-secondary);
+}
+
+.menu-sep {
+  /* 0.5px hairline between provider groups inside a flat picker
+   * (model/reasoning menus). Sticks to the same token as the list-row
+   * hairline so the picker matches the table look of the rest of the app. */
+  height: 0.5px;
+  background: var(--color-list-sep);
+  margin: 0;
+}
+
+.cap-icons {
+  /* Capability trail for a model row. Order matches the desktop ModelMenu
+   * (Wrench, Brain, Image) so the user's eye can map across the two UIs. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-label-secondary);
+}
+.cap-icon-reasoning { color: var(--color-icon-purple); }
+.cap-icon-image { color: var(--color-icon-blue); }
+.cap-icon-check { color: var(--color-accent); }
+
+/* Sub-section title inside a settings sheet ("OPEN · 会话", etc.) */
+.menu-subsection {
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  font-size: var(--font-xs);
+  color: var(--color-label-secondary);
+  background: var(--color-bg-grouped);
+}
+/* `menu-subsection` reused for a hint + trailing action row (the
+ * "active skill" notice under 技能选择). The text takes the remaining
+ * width and may wrap to multiple lines on narrow screens; the action
+ * button stays on the right edge, vertically centred, and never wraps
+ * onto its own line. */
+.menu-hint-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.menu-hint-row-text {
+  flex: 1;
+  min-width: 0;
+  /* `font-size: var(--font-xs)` and color are inherited from
+   * `menu-subsection`; no overrides here so a future token change to
+   * the subsection's typography still applies. */
 }
 
 /* --- Controls --- */

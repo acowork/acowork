@@ -308,7 +308,6 @@ function SessionsTab({ agentId, onClose }: { agentId: string; onClose: () => voi
               if (s.session_id !== activeId) void openSession(agentId, s.session_id)
             }}
             label={<span className="row-title">{s.title}</span>}
-            hint={s.last_message ?? undefined}
             value={
               s.session_id === activeId ? (
                 <span className="badge">当前</span>

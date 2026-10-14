@@ -366,7 +366,7 @@ describe('poll loop', () => {
     setChatTransport(okT)
     const ok = await useChatStore.getState().sendMessage('a1', 's1', 'hello')
     expect(ok).toBe(true)
-    expect(okT.send).toHaveBeenCalledWith('a1', 's1', 'hello')
+    expect(okT.send).toHaveBeenCalledWith('a1', 's1', 'hello', '')
     expect(useChatStore.getState().agentStates.a1?.pendingSend).toBeNull()
     expect(useChatStore.getState().agentStates.a1?.messages.at(-1)?.content).toBe('hello')
 
@@ -374,18 +374,38 @@ describe('poll loop', () => {
     setChatTransport(badT)
     const bad = await useChatStore.getState().sendMessage('a1', 's1', 'retry me')
     expect(bad).toBe(false)
-    expect(useChatStore.getState().agentStates.a1?.pendingSend).toEqual({ content: 'retry me', state: 'failed' })
+    expect(useChatStore.getState().agentStates.a1?.pendingSend).toEqual({ content: 'retry me', command: '', state: 'failed' })
 
     // retry without content reuses the failed draft
     setChatTransport(okT)
     const retried = await useChatStore.getState().sendMessage('a1', 's1')
     expect(retried).toBe(true)
-    expect(okT.send).toHaveBeenLastCalledWith('a1', 's1', 'retry me')
+    expect(okT.send).toHaveBeenLastCalledWith('a1', 's1', 'retry me', '')
+  })
+
+  it('sendMessage: retry replays the originally picked skill (command survives the failure)', async () => {
+    // First send carries a skill (the composer skill picker feeds
+    // `command` through). The transport rejects it so the draft is
+    // kept. A retry without args must still send the same skill, so the
+    // agent gets a "skill-anchored" replay, not a bare content replay.
+    const badT = fakeTransport({ send: vi.fn(async () => { throw new Error('net') }) })
+    setChatTransport(badT)
+    const failed = await useChatStore.getState().sendMessage('a1', 's1', 'weekly report please', 'weekly-report')
+    expect(failed).toBe(false)
+    expect(useChatStore.getState().agentStates.a1?.pendingSend).toEqual({
+      content: 'weekly report please', command: 'weekly-report', state: 'failed',
+    })
+
+    const okT = fakeTransport()
+    setChatTransport(okT)
+    const retried = await useChatStore.getState().sendMessage('a1', 's1') // no content, no command
+    expect(retried).toBe(true)
+    expect(okT.send).toHaveBeenLastCalledWith('a1', 's1', 'weekly report please', 'weekly-report')
   })
 
   it('openSession clears the previous session status', async () => {
     setChatTransport(fakeTransport())
-    useChatStore.setState({ agentStates: { a1: { ...baseView, activeSessionId: 's0', status: { status: 'thinking' }, pendingSend: { content: 'x', state: 'sending' } } } })
+    useChatStore.setState({ agentStates: { a1: { ...baseView, activeSessionId: 's0', status: { status: 'thinking' }, pendingSend: { content: 'x', command: '', state: 'sending' } } } })
     await useChatStore.getState().openSession('a1', 's1')
     const v = useChatStore.getState().agentStates.a1!
     expect(v.status).toBeNull()

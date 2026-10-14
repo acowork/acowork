@@ -26,6 +26,7 @@
   --color-icon-green: #07c160;
   --color-icon-orange: #fa9d3b;
   --color-icon-teal: #12b5a5;
+  --color-icon-purple: #9333ea;
   --color-tint: #007aff;
   /* The accent darkened for surfaces that fill with it under white text
    * (user bubble, primary button). Fallback for the default blue accent;
@@ -57,10 +58,20 @@
   --avatar-size: 48px;
   --avatar-radius: 6px;
   --list-row-h: 64px;
+  /* Compact height for single-line rows (no hint). Same 16px label, minus
+   * the 13px hint + 2px row gap + the symmetric vertical padding so the
+   * row still breathes. Single-line rows otherwise look loose next to
+   * two-line rows in the same scroll view.
+   *
+   * ponytail: derived from --list-row-h = 64 = 10 + 16 + 2 + 13 + 10 - 7
+   * (the 7px comes from skipping the hint line and its gap and reclaiming
+   * one line of symmetric padding). Bumping --list-row-h requires a
+   * matching bump here. */
+  --list-row-h-compact: 48px;
   --list-row-pad-x: 16px;
   --list-row-gap: 12px;
   --list-sep-indent: 76px; /* pad + avatar + gap */
-  --settings-row-h: 52px;
+  --settings-row-h: 44px;
   --settings-icon-size: 22px;
 
   /* Safe-area clearance. `env()` alone is NOT enough on Android: the WebView
@@ -133,6 +144,7 @@
    * blue/teal would sink into #1a1a1a. */
   --color-icon-blue: #7a9cff;
   --color-icon-teal: #3fd0c0;
+  --color-icon-purple: #c084fc;
   --color-tint: #07c160;
   /* Same pairing as the light block: the accent darkened for white-text
    * surfaces. Raw #07c160 is only ~2.4:1 against white. */

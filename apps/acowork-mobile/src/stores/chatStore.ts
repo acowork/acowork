@@ -47,8 +47,12 @@ export interface AgentViewState {
   messageTotal: number | null
   /** True while a "load earlier" page is in flight (edge-trigger guard). */
   isLoadingMore: boolean
-  /** True while a send is in flight or failed; carries the draft for retry. */
-  pendingSend: { content: string; state: 'sending' | 'failed' } | null
+  /** True while a send is in flight or failed; carries the draft for retry.
+   *  `command` is the wire-side skill name the user picked at send time
+   *  (see `lib/api.ts sendMessage`); the retry path restores it so a
+   *  "skill-anchored" message replays the same skill, instead of silently
+   *  dropping it. Empty string = no skill (matches the wire default). */
+  pendingSend: { content: string; command: string; state: 'sending' | 'failed' } | null
   /** Which realtime channel is currently feeding this view (§8.0). */
   channel: 'ws' | 'polling' | null
   /** AskQuestion card — WS-channel only (polling cannot see the question). */
@@ -97,7 +101,7 @@ interface ChatStore {
   stopWatching: () => void
 
   /** Send (or retry the failed draft). `retry` reuses the pending content. */
-  sendMessage: (agentId: string, sessionId: string, content?: string) => Promise<boolean>
+  sendMessage: (agentId: string, sessionId: string, content?: string, command?: string) => Promise<boolean>
 
   /**
    * ADR-050 scroll-up pagination (the Desktop `loadBefore` equivalent):
@@ -150,7 +154,7 @@ export interface ChatTransport {
    *  two ticks still lands. */
   fetchSnapshot(agentId: string, sessionId: string): Promise<SessionSnapshot>
   /** Send a user message; resolves with the client message id. */
-  send(agentId: string, sessionId: string, content: string): Promise<string>
+  send(agentId: string, sessionId: string, content: string, command?: string): Promise<string>
   /** v1 approval decision (generic card; tool details ride the WS channel). */
   approval(agentId: string, sessionId: string, requestId: string, approved: boolean): Promise<void>
   /** AskQuestion answer (§8.3): POST .../answer with the card's request id. */
@@ -288,22 +292,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     stopWatching()
   },
 
-  sendMessage: async (agentId, sessionId, content) => {
+  sendMessage: async (agentId, sessionId, content, command) => {
     if (!transport) return false
     const view = get().agentStates[agentId] ?? emptyView()
     const text = (content ?? view.pendingSend?.content ?? '').trim()
     if (!text) return false
+    // Retry path: when `content` is omitted we read the failed draft back
+    // out of `pendingSend`, and we have to read `command` from there too
+    // so the skill the user originally picked rides the retry. Otherwise
+    // a "skill-anchored" message silently drops the skill on retry and
+    // the agent gets a bare content replay.
+    const cmd = command ?? view.pendingSend?.command ?? ''
     set((s) => ({
       agentStates: {
         ...s.agentStates,
-        [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), pendingSend: { content: text, state: 'sending' } },
+        [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), pendingSend: { content: text, command: cmd, state: 'sending' } },
       },
     }))
     try {
       // The server persists the user entry under this exact id, so the
       // window merge (mergeMessageWindow) collapses the optimistic bubble
       // into the authoritative copy instead of doubling it.
-      const mid = await transport.send(agentId, sessionId, text)
+      // `command` rides the wire as the active skill name — see api.ts.
+      const mid = await transport.send(agentId, sessionId, text, cmd)
       // Optimistic bubble: the authoritative copy arrives with the idle
       // reload and merges over this entry; this keeps the echo instant.
       set((s) => {
@@ -330,7 +341,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((s) => ({
         agentStates: {
           ...s.agentStates,
-          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), pendingSend: { content: text, state: 'failed' } },
+          [agentId]: { ...(s.agentStates[agentId] ?? emptyView()), pendingSend: { content: text, command: cmd, state: 'failed' } },
         },
       }))
       return false

@@ -36,6 +36,7 @@ export function ListRow({
   avatarClass,
   icon,
   iconColor,
+  selected,
 }: {
   label: ReactNode
   value?: ReactNode
@@ -61,11 +62,22 @@ export function ListRow({
   /** Optional glyph color (a `--color-icon-*` token) — WeChat Discover-style
    *  multicolor. Falls back to the dim gray when omitted (e.g. disabled rows). */
   iconColor?: string
+  /** Mark the row as the current selection. Pairs with a check icon
+   *  in the trail so the picker matches Desktop's `listRowSelected`
+   *  highlight; a row that is both `selected` and `disabled` is rare,
+   *  but the class is the same as the desktop's "active entry" so the
+   *  styling wins regardless. */
+  selected?: boolean
 }) {
   const Tag = onClick ? 'button' : 'div'
+  // Two-line (label + hint) is the default. Single-line collapses to the
+  // compact height via [data-row='single'] so the row isn't 30%+ taller
+  // than its label. See --list-row-h-compact in tokens.css.
+  const isSingle = !hint
   return (
     <Tag
-      className={`list-row${disabled ? ' is-disabled' : ''}${destructive ? ' is-destructive' : ''}`}
+      className={`list-row${disabled ? ' is-disabled' : ''}${destructive ? ' is-destructive' : ''}${selected ? ' is-selected' : ''}`}
+      data-row={isSingle ? 'single' : undefined}
       onClick={disabled ? undefined : onClick}
       type={onClick ? 'button' : undefined}
       role={onClick ? 'button' : undefined}

@@ -393,12 +393,26 @@ export function tokenClaims(jwt: string): { sub?: string; exp?: number } {
 }
 
 /** Sends a user message; resolves with the client-generated message id so
- *  the store can key the optimistic bubble and its retry. */
-export async function sendMessage(agentId: string, sessionId: string, content: string): Promise<string> {
+ *  the store can key the optimistic bubble and its retry.
+ *
+ *  `command` is the same wire field the desktop chat panel uses for the
+ *  active skill name (SendMessageBody.command is documented as "slash-
+ *  command name only; the Runtime resolves it against the agent's
+ *  SkillRegistry, client-supplied instructions are ignored"). When the
+ *  composer skill picker selects one, mobile passes the skill name here so
+ *  the next user message arrives with `command: "weekly-report"` and the
+ *  runtime injects that skill's instructions. Absent = no skill. */
+export async function sendMessage(
+  agentId: string,
+  sessionId: string,
+  content: string,
+  command?: string,
+): Promise<string> {
   const messageId = newId()
   await req('POST', `/api/agents/${agentId}/sessions/${sessionId}/messages`, {
     content,
     message_id: messageId,
+    command: command ?? '',
   })
   return messageId
 }
@@ -515,6 +529,118 @@ export async function setSessionVisibility(agentId: string, sessionId: string, v
   await req<void>('PUT', `/api/agents/${agentId}/sessions/${sessionId}/visibility`, { visibility })
 }
 
+/* ── Composer settings — model / reasoning / skill (mobile parity) ──────── */
+
+/** One row of `GET /api/providers`. Provider + accounts + configured model IDs.
+ *  Same shape as Desktop's `VaultKeyEntry` (only the fields mobile needs). */
+export interface VaultKeyEntry {
+  provider: string
+  /** Optional human label (e.g. "OpenAI · work"); absent when not set. */
+  alias?: string | null
+  /** Multi-account support — the same provider may have several API keys. */
+  account_id?: string | null
+  /** Provider-level model allow-list (overrides `default_model`). */
+  models?: string[] | null
+  /** Fallback single model when no `models` list is configured. */
+  default_model?: string | null
+  /** Per-model capability overrides; `default_reasoning_effort` drives the
+   *  effort sub-picker's first selection. */
+  model_capabilities?: Record<string, { default_reasoning_effort?: string | null }> | null
+  /** Last 4 chars of the key — shown in the picker so the user can pick
+   *  the right account by preview without exposing the full secret. */
+  key_preview?: string | null
+}
+
+/** One row from `GET /api/models/{provider}`. The model picker renders
+ *  the `id` and uses `reasoning` to decide whether the effort sub-picker
+ *  should appear. */
+export interface ProviderModel {
+  id: string
+  tool_call?: boolean | null
+  reasoning?: boolean | null
+  input_modalities?: string[] | null
+  default_reasoning_effort?: string | null
+}
+
+/** `GET /api/providers` — providers + accounts + configured model IDs. The
+ *  model picker iterates the result, calls `fetchProviderModels` for
+ *  each provider, and intersects with `entry.models` to get the actual
+ *  selectable list. */
+export async function listKeys(): Promise<VaultKeyEntry[]> {
+  const r = await req<{ keys?: VaultKeyEntry[] } | VaultKeyEntry[]>('GET', '/api/providers')
+  return Array.isArray(r) ? r : (r.keys ?? [])
+}
+
+/** `GET /api/models/{provider}` — capabilities for one provider.
+ *  Resolves with `{ models: [] }` on failure so a missing catalog row
+ *  doesn't kill the whole picker (the row simply has no capabilities). */
+export async function fetchProviderModels(provider: string): Promise<{ models: ProviderModel[] }> {
+  try {
+    return await req<{ models: ProviderModel[] }>('GET', `/api/models/${encodeURIComponent(provider)}`)
+  } catch {
+    return { models: [] }
+  }
+}
+
+/** One row from `GET /api/agents/{id}/skills`. The skill picker renders
+ *  the name; description is shown in the row's secondary line. */
+export interface SkillEntry {
+  name: string
+  description?: string | null
+  /** Whether the skill is currently enabled on the agent. */
+  enabled?: boolean | null
+  /** Optional metadata the runtime exposes (e.g. version). */
+  version?: string | null
+}
+
+/** `GET /api/agents/{id}/skills?page=1&size=100` — list skills. Mobile
+ *  only needs the name and enabled flag to power the picker; we still
+ *  surface description in the row for context. */
+export async function fetchSkills(agentId: string): Promise<{ skills: SkillEntry[]; total: number }> {
+  return req<{ skills: SkillEntry[]; total: number }>(
+    'GET',
+    `/api/agents/${encodeURIComponent(agentId)}/skills?page=1&size=100`,
+  )
+}
+
+/** `PUT /api/agents/{id}/sessions/{sid}/config` — partial config update.
+ *  Mobile uses this for the model picker (model/provider/account_id) and
+ *  the reasoning-effort picker (reasoning_effort). Absent fields are
+ *  untouched, so a one-field PATCH is a single round-trip. */
+export async function patchSessionConfig(
+  agentId: string,
+  sessionId: string,
+  patch: {
+    model?: string
+    provider?: string
+    account_id?: string
+    reasoning_effort?: string
+  },
+): Promise<void> {
+  await req<void>('PUT', `/api/agents/${agentId}/sessions/${sessionId}/config`, patch)
+}
+
+/** `GET /api/agents/{id}/sessions/{sid}/config` — full snapshot of the
+ *  session's effective config (backend resolves the persisted → provider
+ *  default → null chain, so the value here is what the runtime will use
+ *  for the next message). Mobile uses this to badge the "current"
+ *  selection in the model / effort pickers so the user sees what they're
+ *  switching from before they tap a row. */
+export interface SessionConfigSnapshot {
+  model?: string | null
+  provider?: string | null
+  account_id?: string | null
+  reasoning_effort?: string | null
+  temperature?: number | null
+  context_window?: number | null
+  title?: string | null
+  workspace_id?: string | null
+}
+
+export async function fetchSessionConfig(agentId: string, sessionId: string): Promise<SessionConfigSnapshot> {
+  return req<SessionConfigSnapshot>('GET', `/api/agents/${agentId}/sessions/${sessionId}/config`)
+}
+
 export const httpChatTransport: ChatTransport = {
   async openSession(agentId, sessionId) {
     await req('POST', `/api/agents/${agentId}/sessions/${sessionId}/open`)
@@ -540,8 +666,8 @@ export const httpChatTransport: ChatTransport = {
     }
   },
 
-  async send(agentId, sessionId, content) {
-    return sendMessage(agentId, sessionId, content)
+  async send(agentId, sessionId, content, command) {
+    return sendMessage(agentId, sessionId, content, command)
   },
 
   async approval(agentId, sessionId, requestId, approved) {
