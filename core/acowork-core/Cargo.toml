@@ -50,3 +50,12 @@ prost-build = { workspace = true }
 protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
+
+# Process-tree containment for the idle-timeout kill path (process/tree.rs):
+# Job Object APIs on Windows; Unix uses the already-present `libc`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
