@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android manifest additions - the committed source of truth.
+
+  WHY THIS FILE EXISTS
+    `tauri android init` regenerates src-tauri/gen/android/ from scratch, and
+    that whole tree is gitignored. Anything the app needs in AndroidManifest.xml
+    that Tauri does not itself generate must therefore be (a) committed
+    somewhere and (b) re-applied after every init - by a script, never by
+    hand. This file is (a); dev/android/build_mobile.ps1 is (b).
+
+    Concretely: the QR pairing scanner (src/screens/boot/ScanModal.tsx) uses
+    WebView getUserMedia. On Android that needs a runtime CAMERA permission,
+    which the WebView will not prompt for on its own - without the declaration
+    the scanner silently degrades to its manual-address fallback. The
+    generated manifest only ever contained INTERNET, so the camera path could
+    never work from a fresh init.
+
+  FORMAT
+    A full replacement manifest is deliberately NOT used: `tauri android init`
+    emits its own (it changes between Tauri versions, and its FileProvider /
+    leanback wiring is theirs, not ours). Only this permission block is ours,
+    and the build script splices it in just after the <manifest> open tag.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<uses-permission android:name="android.permission.CAMERA" />
+<uses-permission android:name="android.permission.VIBRATE" />
+<!-- The pairing QR scanner can be declined at runtime; a device without a
+     camera must still install and use the app via manual address entry. -->
+<uses-feature android:name="android.hardware.camera" android:required="false" />
+<uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+</manifest>
