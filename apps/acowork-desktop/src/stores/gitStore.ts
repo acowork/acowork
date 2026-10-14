@@ -185,6 +185,8 @@ interface GitStore {
     path?: string,
     limit?: number,
     skip?: number,
+    /** ADR-093: global-search runs abort their git fetch on cancel/re-run. */
+    signal?: AbortSignal,
   ) => Promise<GitLogResponse>;
   /** Discard the uncommitted changes of one path (restore to HEAD;
    *  untracked files deleted). Backend: `POST /api/agents/{id}/git/revert`. */
@@ -208,13 +210,14 @@ export const useGitStore = create<GitStore>((set, get) => {
   async function httpGet<T>(
     path: string,
     params: Record<string, string>,
+    signal?: AbortSignal,
   ): Promise<T> {
     const base = getGatewayUrl();
     const qs = new URLSearchParams(params).toString();
     const url = `${base}${path}${qs ? `?${qs}` : ""}`;
     const resp = await with503Retry(
       (sig) => fetch(url, { signal: sig }),
-      { tag: `gitStore.${path}`, logger: log },
+      { tag: `gitStore.${path}`, logger: log, signal },
     );
     if (!resp.ok) {
       // `HttpApiError.message` is already localized — a 403 reads as
@@ -360,7 +363,7 @@ export const useGitStore = create<GitStore>((set, get) => {
       return httpGet<GitDiffResponse>(`/api/agents/${agentId}/git/diff`, q);
     },
 
-    fetchLog: (agentId, workspaceId, path, limit = 50, skip = 0) => {
+    fetchLog: (agentId, workspaceId, path, limit = 50, skip = 0, signal) => {
       const params: Record<string, string> = {
         ...statusParams(workspaceId),
         limit: String(Math.min(limit, 200)),
@@ -371,7 +374,7 @@ export const useGitStore = create<GitStore>((set, get) => {
         skip: String(skip),
       };
       if (path) params.path = path;
-      return httpGet<GitLogResponse>(`/api/agents/${agentId}/git/log`, params);
+      return httpGet<GitLogResponse>(`/api/agents/${agentId}/git/log`, params, signal);
     },
 
     revertFile: (agentId, workspaceId, path, oldPath) => {

@@ -85,6 +85,7 @@ use crate::agent::inbound::{InboundMessage, UserOp};
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
 use crate::http::global_search;
+use crate::http::search_summary;
 
 use crate::mqtt::client::SharedRuntimeMqttClient;
 
@@ -785,6 +786,9 @@ impl RuntimeHttpServer {
             // Scopes: conversation / memory / file / git (doc/project stay
             // in their owner processes — Gateway stays zero-business).
             .route("/search", get(global_search::global_search))
+            // ADR-093: LLM summary over the Desktop's bounded candidate
+            // snapshot. POST is proxied transparently by the Gateway.
+            .route("/search/summary", post(search_summary::search_summary))
             // ADR-081 §4.2 self-heal: purge + rebuild the conversation
             // vector index from the JSONL history (no Gateway route —
             // Runtime-internal admin endpoint, like /memory/rebuild-embeddings).
