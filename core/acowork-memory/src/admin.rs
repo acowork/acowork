@@ -320,4 +320,23 @@ pub trait MemoryAdminService: Send + Sync {
         let _ = scope;
         self.migrate_embedding_dimension_with_progress(embed_fn, new_dim, progress)
     }
+
+    /// How many rows [`Self::migrate_embedding_dimension_scoped`] would
+    /// re-embed for `scope` against a target width of `dim`.
+    ///
+    /// The desktop Memory panel shows this as the banner's promise — "this
+    /// rebuild will process N rows" — so the number a user reads before
+    /// clicking and the `total` the progress bar reports afterwards come
+    /// from one definition instead of two, and cannot disagree. Engines
+    /// that can select rows by stored width (SQLite) count with the exact
+    /// same predicate the scoped migration selects with.
+    ///
+    /// The default reports the node total for every scope: that is what
+    /// the default scoped migration above actually does (it ignores the
+    /// scope and re-embeds everything), so the promise stays honest even
+    /// on engines without width-aware selection.
+    fn rebuild_scope_count(&self, scope: RebuildScope, dim: usize) -> u64 {
+        let _ = (scope, dim);
+        self.get_stats().total_nodes
+    }
 }

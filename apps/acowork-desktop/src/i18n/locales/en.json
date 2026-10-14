@@ -1333,6 +1333,7 @@
     "dimMismatchIndexedDetail": "Indexed nodes: {{indexed}} / {{total}}",
     "staleVectorsTitle": "Some vectors are stored at the wrong width",
     "staleVectorsDetail": "{{stale}} vectors are not {{stored}}-dimensional and are skipped by search",
+    "rebuildRowsDetail": "This rebuild will process {{rebuild}} records",
     "rebuildIndex": "Rebuild Index",
     "rebuildIndexInProgress": "Rebuilding…",
     "rebuildFailed": "Index rebuild failed: {{error}}",

@@ -1903,6 +1903,54 @@ fn admin_embedding_repair_scope_includes_conversation_rows() {
     assert_eq!(hits.len(), 1, "and searchable after the repair");
 }
 
+/// The banner's promised number must be the rebuild's actual row count.
+///
+/// `rebuild_scope_count` is what the desktop shows as "this rebuild will
+/// process N rows" before the click; the progress bar's total afterwards is
+/// the rows the scoped migration selected. Both must come from one
+/// predicate - a banner saying 2 over a rebuild processing 5 is the same
+/// trust breach as the original 5831 incident, just smaller.
+#[test]
+fn rebuild_scope_count_matches_the_scoped_selection() {
+    let store = std::sync::Arc::new(SqliteStore::open_in_memory(DIM).expect("open"));
+    let mut healthy = episode("healthy");
+    healthy.embedding = Some(emb(0.1));
+    store.store_episode(&healthy).unwrap();
+    let mut foreign = episode("foreign");
+    foreign.embedding = Some(vec![0.5, 0.5]);
+    store.store_episode(&foreign).unwrap();
+    store.store_episode(&episode("unembedded")).unwrap();
+    // A conversation row at a foreign width is in the repair set too - the
+    // panel's memory-node counts cannot see it, the scope count must.
+    let index = conversation::ConversationStore::from_store(store.clone()).expect("index");
+    index
+        .index_message("s1", 0, "user", "a foreign-width message", &[0.5, 0.5])
+        .expect("index message");
+
+    let repair = MemoryAdminService::rebuild_scope_count(&*store, RebuildScope::Repair, DIM);
+    let all = MemoryAdminService::rebuild_scope_count(&*store, RebuildScope::All, DIM);
+    assert_eq!(
+        repair, 3,
+        "foreign-width row + unembedded row + foreign-width conversation row"
+    );
+    assert_eq!(all, 4, "the all scope covers every row in the migration label set");
+
+    // Same store, same dim: the scoped migration must select exactly the
+    // count the banner promised.
+    let stats = MemoryAdminService::migrate_embedding_dimension_scoped(
+        &*store,
+        &|_| Some(emb(0.9)),
+        DIM,
+        RebuildScope::Repair,
+        None,
+    )
+    .expect("repair");
+    assert_eq!(
+        stats.total_scanned, repair,
+        "the rebuild processed a different number of rows than the banner promised"
+    );
+}
+
 /// The store may only *claim* a dimension it actually holds everywhere.
 ///
 /// Flipping `embedding_dim` over a half-migrated store is what made the memory

@@ -1110,6 +1110,15 @@ export interface MemoryStatsResponse {
    */
   vectors_of_other_dim?: number;
   /**
+   * Rows a rebuild would process, per scope, counted by the store with the
+   * same predicates the scoped migration selects with. The banner shows
+   * the count matching its own scope so the promised number and the
+   * progress bar's total are one query. Optional: runtimes predating the
+   * field omit it, which suppresses the promise line rather than lying.
+   */
+  rebuild_rows_all?: number;
+  rebuild_rows_repair?: number;
+  /**
    * Embedding dimension of the active embedding provider (model output).
    * 0 if no embedding provider is currently configured. Used together with
    * `stored_dim` to detect a dimension mismatch.

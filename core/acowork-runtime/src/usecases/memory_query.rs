@@ -114,6 +114,17 @@ pub struct MemoryStats {
     /// `acowork_memory::admin::AdminStats::vectors_of_other_dim`; the desktop
     /// Memory panel shows its "Rebuild Index" banner on this being non-zero.
     pub vectors_of_other_dim: u64,
+    /// Rows a rebuild with `scope = "all"` would re-embed (every row in the
+    /// migration label set, conversation index included). The desktop panel
+    /// shows this on the banner so the promised row count equals the
+    /// progress bar's total; 0 on engines that cannot pre-count.
+    pub rebuild_rows_all: u64,
+    /// Rows a rebuild with `scope = "repair"` would re-embed against
+    /// `model_dim` - vectors of a foreign width plus rows with no vector at
+    /// all, over the migration label set. This is the exact number the
+    /// repair rebuild's progress total will report, so the banner cannot
+    /// promise one count and process another.
+    pub rebuild_rows_repair: u64,
     /// Embedding dimension of the active embedding model (0 if none).
     pub model_dim: u64,
     /// On-disk schema version of the underlying store (`PRAGMA user_version`

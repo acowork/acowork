@@ -1079,6 +1079,7 @@
     "dimMismatchIndexedDetail": "已索引節點: {{indexed}} / {{total}}",
     "staleVectorsTitle": "部分向量寬度與索引不符",
     "staleVectorsDetail": "{{stale}} 條向量寬度不是 {{stored}}，檢索時會被跳過",
+    "rebuildRowsDetail": "本次重建將處理 {{rebuild}} 條記錄",
     "rebuildIndex": "重建索引",
     "rebuildIndexInProgress": "重建中…",
     "rebuildFailed": "索引重建失敗：{{error}}",

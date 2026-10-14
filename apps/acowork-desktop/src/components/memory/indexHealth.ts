@@ -37,6 +37,14 @@ export type IndexHealthInput = {
   nodes_with_embedding: number;
   /** Absent on a runtime built before the field existed; reads as "nothing stale". */
   vectors_of_other_dim?: number;
+  /**
+   * Rows the rebuild would process, per scope, counted by the store with
+   * the same predicates the scoped migration selects with. Absent on a
+   * runtime built before the field existed - then the banner keeps its
+   * legacy suffix and promises no number rather than inventing one.
+   */
+  rebuild_rows_all?: number;
+  rebuild_rows_repair?: number;
 };
 
 export type IndexHealthBanner = {
@@ -69,6 +77,16 @@ export function indexHealthBanner(
     indexed: stats.nodes_with_embedding,
     total: stats.total_nodes,
     stale: stats.vectors_of_other_dim ?? 0,
+    rebuild: 0,
+  };
+
+  // The promise line: the exact rows this banner's scope will re-embed,
+  // counted by the backend with the same SQL the rebuild selects with.
+  // A count of 0 (or an older runtime that reports none) shows no promise
+  // instead of a wrong one.
+  const rebuildPromise = (count: number | undefined, fallback?: string) => {
+    vars.rebuild = count ?? 0;
+    return count && count > 0 ? "memoryPanel.rebuildRowsDetail" : fallback;
   };
 
   const dimMismatch =
@@ -78,8 +96,13 @@ export function indexHealthBanner(
       titleKey: "memoryPanel.dimMismatchTitle",
       detailKey: "memoryPanel.dimMismatchDetail",
       vars,
-      // The indexed/total line only means something once there are nodes.
-      extraKey: stats.total_nodes > 0 ? "memoryPanel.dimMismatchIndexedDetail" : undefined,
+      // The indexed/total line only means something once there are nodes;
+      // with a scope count available, the promise line replaces it - the
+      // model-swap rebuild re-embeds every row, indexed/total aside.
+      extraKey: rebuildPromise(
+        stats.rebuild_rows_all,
+        stats.total_nodes > 0 ? "memoryPanel.dimMismatchIndexedDetail" : undefined,
+      ),
       // A model swap changes every vector's meaning; only rows at the new
       // width are trustworthy, and after a swap none are.
       scope: "all",
@@ -94,6 +117,10 @@ export function indexHealthBanner(
       // The store's declared width already matches the model; only the
       // foreign-width rows are invisible to retrieval.
       scope: "repair",
+      // Repair also heals rows with no vector at all - rows the stale count
+      // cannot see - so the promise line is what keeps the banner honest
+      // when the two numbers differ.
+      extraKey: rebuildPromise(stats.rebuild_rows_repair),
     };
   }
 
@@ -106,6 +133,10 @@ export function indexHealthBanner(
       vars,
       // Same reasoning: unembedded rows are the rows missing from retrieval.
       scope: "repair",
+      // The indexed/total pair only counts memory nodes; repair also heals
+      // conversation rows that lost their vector. The promise line carries
+      // the number the progress bar will actually reach.
+      extraKey: rebuildPromise(stats.rebuild_rows_repair),
     };
   }
 

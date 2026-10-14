@@ -87,4 +87,43 @@ describe("indexHealthBanner", () => {
     expect(b?.titleKey).toBe("memoryPanel.staleVectorsTitle");
     expect(b?.scope).toBe("repair");
   });
+
+  // Front/back consistency: the number the banner promises must be the
+  // number the rebuild's progress bar totals. The backend counts each scope
+  // with the same SQL the scoped migration selects with, so the banner just
+  // reports it - including the rows the headline count cannot see.
+  it("promises the repair-scope row count, not the stale headline, when they differ", () => {
+    const b = indexHealthBanner(
+      stats({ vectors_of_other_dim: 2, rebuild_rows_repair: 5 }),
+    );
+    expect(b?.titleKey).toBe("memoryPanel.staleVectorsTitle");
+    expect(b?.extraKey).toBe("memoryPanel.rebuildRowsDetail");
+    expect(b?.vars.rebuild).toBe(5);
+  });
+
+  it("promises the repair-scope count on the missing-embeddings banner", () => {
+    const b = indexHealthBanner(
+      stats({ nodes_with_embedding: 18, total_nodes: 20, rebuild_rows_repair: 2 }),
+    );
+    expect(b?.extraKey).toBe("memoryPanel.rebuildRowsDetail");
+    expect(b?.vars.rebuild).toBe(2);
+  });
+
+  it("promises the full row count on the model-swap banner", () => {
+    const b = indexHealthBanner(
+      stats({ stored_dim: 512, model_dim: 1024, rebuild_rows_all: 5831 }),
+    );
+    expect(b?.extraKey).toBe("memoryPanel.rebuildRowsDetail");
+    expect(b?.vars.rebuild).toBe(5831);
+    expect(b?.scope).toBe("all");
+  });
+
+  // A runtime predating the fields reports no count. The banner keeps its
+  // legacy suffix and shows no promise - inventing a number here would be
+  // the same lie this rule exists to stop.
+  it("promises nothing when the runtime cannot count the scope", () => {
+    const b = indexHealthBanner(stats({ vectors_of_other_dim: 2 }));
+    expect(b?.extraKey).toBeUndefined();
+    expect(b?.vars.rebuild).toBe(0);
+  });
 });

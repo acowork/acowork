@@ -33,6 +33,23 @@ const MAX_UNFILTERED_MEMORY_SCAN: u64 = 10_000;
 /// Hard page-size ceiling, matching the wire contract.
 const MAX_PAGE_SIZE: u32 = 100;
 
+/// The row set an embedding rebuild touches.
+///
+/// Wider than the memory browser's [`labels::ALL`]: a model swap changes
+/// the width of *every* vector in the store, and `vector_search` silently
+/// skips rows of a foreign width, so leaving `ConversationMessage` out
+/// would strand the whole conversation index - it is append-only by line
+/// watermark and never re-embeds an indexed row, so nothing else would
+/// ever heal those vectors. Shared by the scoped migration and the scope
+/// pre-count so the two can never select different row sets.
+const MIGRATION_LABELS: &[&str] = &[
+    labels::EPISODIC,
+    labels::KNOWLEDGE,
+    labels::PROCEDURAL,
+    labels::AUTOBIOGRAPHICAL,
+    crate::conversation::LABEL,
+];
+
 /// One `nodes` row, in the shape the admin surface needs.
 struct AdminRow {
     id: u64,
@@ -359,28 +376,48 @@ impl MemoryAdminService for SqliteStore {
         scope: RebuildScope,
         progress: Option<&dyn Fn(u64, u64)>,
     ) -> AcoworkResult<RebuildStats> {
-        // The migration's row scope is wider than the memory browser's: a model
-        // swap changes the width of *every* vector in the store, and
-        // `vector_search` silently skips rows of a foreign width, so leaving
-        // `ConversationMessage` out would strand the whole conversation index -
-        // it is append-only by line watermark and never re-embeds an indexed
-        // row, so nothing else would ever heal those vectors.
-        let migration_labels = [
-            labels::EPISODIC,
-            labels::KNOWLEDGE,
-            labels::PROCEDURAL,
-            labels::AUTOBIOGRAPHICAL,
-            crate::conversation::LABEL,
-        ];
         let rows = match scope {
-            RebuildScope::All => self.rows_with_labels(&migration_labels)?,
-            RebuildScope::Repair => self.rows_with_foreign_or_missing_vector(&migration_labels, new_dim)?,
+            RebuildScope::All => self.rows_with_labels(MIGRATION_LABELS)?,
+            RebuildScope::Repair => {
+                self.rows_with_foreign_or_missing_vector(MIGRATION_LABELS, new_dim)?
+            }
         };
         self.reembed_rows(&rows, embed_fn, new_dim, progress)
+    }
+
+    /// Exact per-scope counts, built from the same SQL predicates the
+    /// scoped migration selects with — the number the panel promises
+    /// before the click and the `total` the progress bar reports after it
+    /// are literally one query, so they cannot drift apart.
+    fn rebuild_scope_count(&self, scope: RebuildScope, dim: usize) -> u64 {
+        match scope {
+            RebuildScope::All => self.count_rows_with_labels(MIGRATION_LABELS).unwrap_or(0),
+            RebuildScope::Repair => {
+                self.count_rows_foreign_or_missing_vector(MIGRATION_LABELS, dim)
+                    .unwrap_or(0)
+            }
+        }
     }
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────
+
+/// The WHERE fragment that defines the repair scope: rows under `labels`
+/// whose vector is missing or stored at a width other than the
+/// placeholder-bound `dim` - exactly the rows `vector_search` skips.
+///
+/// One fragment, two consumers ([`SqliteStore::rows_with_foreign_or_missing_vector`]
+/// and [`SqliteStore::count_rows_foreign_or_missing_vector`]): the rebuild
+/// and its pre-count are the same SQL by construction, so the number the
+/// panel promises can never disagree with the rows the rebuild processes.
+fn repair_scope_where(labels_len: usize) -> String {
+    let placeholders: Vec<String> = (1..=labels_len).map(|i| format!("?{i}")).collect();
+    format!(
+        "n.label IN ({}) AND (v.node_id IS NULL OR length(v.embedding) <> ?{})",
+        placeholders.join(", "),
+        labels_len + 1,
+    )
+}
 
 impl SqliteStore {
     /// Re-embed `rows` and apply the dimension-declaration gate.
@@ -468,13 +505,11 @@ impl SqliteStore {
         dim: usize,
     ) -> crate::Result<Vec<AdminRow>> {
         let conn = self.lock();
-        let placeholders: Vec<String> = (1..=labels.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "SELECT n.id, n.label, n.status, n.props, n.created_at \
              FROM nodes n LEFT JOIN vectors v ON v.node_id = n.id \
-             WHERE n.label IN ({}) AND (v.node_id IS NULL OR length(v.embedding) <> ?{})",
-            placeholders.join(", "),
-            labels.len() + 1,
+             WHERE {}",
+            repair_scope_where(labels.len()),
         );
         let bytes = dim.saturating_mul(4) as i64;
         let mut stmt = conn.prepare(&sql)?;
@@ -504,6 +539,47 @@ impl SqliteStore {
             });
         }
         Ok(rows)
+    }
+
+    /// Count of [`Self::rows_with_foreign_or_missing_vector`], without
+    /// materializing the rows. Same predicate by construction - both build
+    /// their SQL from [`repair_scope_where`].
+    fn count_rows_foreign_or_missing_vector(
+        &self,
+        labels: &[&str],
+        dim: usize,
+    ) -> crate::Result<u64> {
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT COUNT(*) FROM nodes n LEFT JOIN vectors v ON v.node_id = n.id WHERE {}",
+            repair_scope_where(labels.len()),
+        );
+        let bytes = dim.saturating_mul(4) as i64;
+        let mut stmt = conn.prepare(&sql)?;
+        let mut args: Vec<&dyn rusqlite::types::ToSql> = labels
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        args.push(&bytes);
+        let n: i64 = stmt.query_row(args.as_slice(), |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// Count of [`Self::rows_with_labels`], without materializing the rows.
+    fn count_rows_with_labels(&self, labels: &[&str]) -> crate::Result<u64> {
+        let conn = self.lock();
+        let placeholders: Vec<String> = (1..=labels.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT COUNT(*) FROM nodes WHERE label IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let args: Vec<&dyn rusqlite::types::ToSql> = labels
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let n: i64 = stmt.query_row(args.as_slice(), |r| r.get(0))?;
+        Ok(n as u64)
     }
 
     /// Rows in `vectors` whose blob is not `dim` floats wide.
