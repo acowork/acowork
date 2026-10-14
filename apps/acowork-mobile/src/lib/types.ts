@@ -51,6 +51,10 @@ export interface AgentSummary {
 export interface UserSummary {
   id: string
   display_name: string
+  /** Login role (ADR-076 §决策 5). Optional because Gateway versions predating
+   * the role-on-directory change will not return it — the IM header falls back
+   * to omitting the badge in that case rather than guessing. */
+  role?: 'user' | 'admin' | null
   /** Custom avatar file path. */
   avatar?: string | null
   /** Builtin icon ID (e.g. "icon-05"). */
@@ -129,6 +133,8 @@ export interface DirectoryEntry {
   user_id: string
   username: string
   display_name: string
+  /** Login role (ADR-076 §决策 5). */
+  role: 'user' | 'admin'
   avatar?: string | null
   builtin_avatar?: string | null
 }

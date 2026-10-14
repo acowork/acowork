@@ -366,17 +366,21 @@ export function ChatDetailScreen() {
               const sep = daySeparator(turn.prevTs, turn.firstTs) ?? timeGapSeparator(turn.prevTs, turn.firstTs)
               const avatar = turn.isUser ? userAvatar : agentAvatar
               const name = turn.isUser ? userName : (agent?.name ?? '助手')
-              const role = turn.isUser ? null : (agent?.role ?? null)
+              const role = turn.isUser
+                ? (me?.role === 'admin' ? '管理员' : me?.role === 'user' ? '用户' : null)
+                : (agent?.role ?? null)
               return (
                 <Fragment key={turn.key}>
                   {sep ? <div className="time-sep">{sep}</div> : null}
                   <div className={`msg-group${turn.isUser ? ' msg-group-self' : ' msg-group-peer'}`}>
-                    <div className="msg-avatar">{avatar}</div>
-                    <div className="msg-main">
+                    <div className="msg-header">
+                      <div className="msg-avatar">{avatar}</div>
                       <div className="msg-sender">
                         <span className="msg-sender-name">{name}</span>
                         {role ? <span className="msg-sender-role">{role}</span> : null}
                       </div>
+                    </div>
+                    <div className="msg-stack">
                       {turn.items.map((item) =>
                         item.type === 'explore'
                           ? <ExploreBlock key={`explore-${item.items[0]!.id}`} items={item.items} />
@@ -391,8 +395,10 @@ export function ChatDetailScreen() {
           {/* Failed draft: kept visible with an explicit retry (edge states). */}
           {state?.pendingSend ? (
             <div className="msg-group msg-group-self">
-              <div className="msg-avatar">{userAvatar}</div>
-              <div className="msg-main">
+              <div className="msg-header">
+                <div className="msg-avatar">{userAvatar}</div>
+              </div>
+              <div className="msg-stack">
                 <div
                   className={`bubble bubble-self bubble-raw bubble-failed${state.pendingSend.state === 'sending' ? ' is-sending' : ''}`}
                 >

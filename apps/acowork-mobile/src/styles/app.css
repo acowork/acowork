@@ -1049,11 +1049,12 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  /* Align the dot with the bubble's left edge, not the avatar. The status
-   * line is a direct child of .scroll-chat, so it reserves the avatar
-   * column's footprint (avatar 36 + gap 8 = 44px) and drops its own left
-   * padding to land on the bubble box edge. */
-  margin-left: 44px;
+  /* Direct child of .scroll-chat. In the column layout the bubble's left
+   * edge sits at the start of the chat content area (the avatar now lives
+   * ABOVE the bubble, not in a left column), so no margin is needed to
+   * land the dot on the bubble box edge — `margin-left: 0` would line up
+   * with the agent turn's left edge. The earlier 44px (= avatar 36 + gap 8)
+   * was the IM-row layout's reservation for the avatar column. */
   padding: var(--space-1) 0;
   font-size: 13px;
   color: var(--color-label-secondary);
@@ -1246,21 +1247,39 @@
 
 .msg-group {
   display: flex;
-  align-items: flex-start;
-  /* Compact air between the bubble and its avatar. */
-  gap: 8px;
+  flex-direction: column;
+  /* Anchor header (avatar + sender) and bubble stack to opposite edges so
+   * peer turns read as "left" and self turns as "right" (Discord / Slack
+   * column chat idiom). The horizontal mirror of the IM-row layout felt
+   * visually displaced — avatar at one edge, bubble shifted toward centre
+   * — and made long agent bubbles look stranded. */
   margin: 6px 0;
+  gap: 4px;
 }
 .msg-group-peer {
-  flex-direction: row;
-  /* Mirror the avatar column's footprint (avatar 36 + gap 8) on the empty
-   * side so the bubble reads as horizontally centred rather than shoved
-   * toward the avatar's opposite edge. */
-  padding-right: 44px;
+  align-items: flex-start;
+  /* Anchor the peer turn to the LEFT — avatar and bubble column start at
+   * the screen's left gutter, with a generous right gutter so the bubble
+   * reads as "this side" rather than full-width body text. 32px ≈ 21
+   * Chinese chars/line at 16px — the sweet spot for prose readability,
+   * still leaves code blocks with plenty of room. */
+  padding-right: 32px;
 }
 .msg-group-self {
+  align-items: flex-end;
+  /* Mirror on the right. */
+  padding-left: 32px;
+}
+.msg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.msg-group-peer .msg-header {
+  flex-direction: row;
+}
+.msg-group-self .msg-header {
   flex-direction: row-reverse;
-  padding-left: 44px;
 }
 .msg-avatar {
   flex: none;
@@ -1281,25 +1300,17 @@
   height: 100%;
   object-fit: cover;
 }
-.msg-main {
+.msg-sender {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  min-width: 0;
-  /* avatar (36) + gap (8) reserved so the column can't overflow. */
-  max-width: calc(100% - 44px);
-  gap: 3px;
-}
-.msg-group-self .msg-main {
-  align-items: flex-end;
-}
-.msg-sender {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+  gap: 1px;
   font-size: 12px;
   line-height: 1.2;
   color: var(--color-label-secondary);
+}
+.msg-group-self .msg-sender {
+  align-items: flex-end;
 }
 .msg-sender-name {
   font-weight: 500;
@@ -1307,6 +1318,20 @@
 .msg-sender-role {
   font-size: 11px;
   opacity: 0.75;
+}
+.msg-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  /* Stretch across the full chat-content width so long bubbles (code, lists)
+   * have room to breathe. Short bubbles still shrink-wrap — align-items
+   * controls position, not width, and .bubble has its own max-width. */
+  align-self: stretch;
+}
+.msg-group-self .msg-stack {
+  align-items: flex-end;
 }
 
 /* --- bubbles -------------------------------------------------------- */
@@ -1449,7 +1474,7 @@
 
 .explore-wrap {
   width: 100%;
-  /* Within a turn the shared .msg-main gap handles spacing; no extra margin
+  /* Within a turn the shared .msg-stack gap handles spacing; no extra margin
    * so the explore block hugs the surrounding bubbles (desktop cohesion). */
   margin: 0;
 }
