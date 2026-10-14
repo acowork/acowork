@@ -162,14 +162,20 @@ pub trait MemoryQueryService: Send + Sync {
     /// Get memory store statistics.
     async fn get_stats(&self) -> Result<MemoryStats>;
 
-    /// Re-embed all nodes with a new embedding function/dimension, reporting
-    /// progress.
+    /// Re-embed nodes with a new embedding function/dimension, reporting
+    /// progress, limited to the rows named by `scope`.
     ///
     /// `endpoint` / `model_id` / `dimension` describe the new embedding
     /// model the Gateway has switched to. The implementation builds a
     /// temporary provider and migrates the stored vectors, rebuilding the
     /// HNSW indexes (Bug3: restores the dimension-migration feature that
     /// was lost in the gRPC→MQTT refactor).
+    ///
+    /// `scope` separates the two reasons a rebuild is asked for: `All`
+    /// for a model swap (every vector changes meaning), `Repair` for a
+    /// store whose declared dimension already matches the model but holds
+    /// a few foreign-width or unembedded rows (only those are invisible
+    /// to retrieval, and only those are re-embedded).
     ///
     /// `progress` is called with `(processed, total)` after each node is
     /// re-embedded. The HTTP layer uses this to power a long-running
@@ -181,6 +187,7 @@ pub trait MemoryQueryService: Send + Sync {
         endpoint: &str,
         model_id: &str,
         dimension: usize,
+        scope: acowork_memory::admin::RebuildScope,
         progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<RebuildReport>;
 

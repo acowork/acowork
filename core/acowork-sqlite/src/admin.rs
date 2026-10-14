@@ -17,7 +17,7 @@ use acowork_core::error::{AcoworkError, Result as AcoworkResult};
 use acowork_memory::MemoryAdminService;
 use acowork_memory::admin::{
     AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail, AdminNodeRecord, AdminStats,
-    RebuildStats,
+    RebuildScope, RebuildStats,
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use rusqlite::{OptionalExtension, params};
@@ -341,21 +341,60 @@ impl MemoryAdminService for SqliteStore {
         new_dim: usize,
         progress: Option<&dyn Fn(u64, u64)>,
     ) -> AcoworkResult<RebuildStats> {
-        let mut stats = RebuildStats::default();
-        // The migration's scope is wider than the memory browser's: a model
+        self.migrate_embedding_dimension_scoped(embed_fn, new_dim, RebuildScope::All, progress)
+    }
+
+    /// The scope decides only *which rows are selected*; the re-embed loop and
+    /// the dimension-declaration gate are shared with the full migration, so a
+    /// repair cannot drift from the semantics of a rebuild.
+    ///
+    /// `Repair` selects the rows `vector_search` cannot see - no vector, or a
+    /// vector at a width other than `new_dim` - which is what the memory
+    /// panel's health banner counts. A full scan of a 5000-row store to heal
+    /// two foreign-width rows is 5000 embed calls spent on 2 rows of work.
+    fn migrate_embedding_dimension_scoped(
+        &self,
+        embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
+        new_dim: usize,
+        scope: RebuildScope,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> AcoworkResult<RebuildStats> {
+        // The migration's row scope is wider than the memory browser's: a model
         // swap changes the width of *every* vector in the store, and
         // `vector_search` silently skips rows of a foreign width, so leaving
         // `ConversationMessage` out would strand the whole conversation index -
         // it is append-only by line watermark and never re-embeds an indexed
         // row, so nothing else would ever heal those vectors.
-        let rows = self.rows_with_labels(&[
+        let migration_labels = [
             labels::EPISODIC,
             labels::KNOWLEDGE,
             labels::PROCEDURAL,
             labels::AUTOBIOGRAPHICAL,
             crate::conversation::LABEL,
-        ])?;
+        ];
+        let rows = match scope {
+            RebuildScope::All => self.rows_with_labels(&migration_labels)?,
+            RebuildScope::Repair => self.rows_with_foreign_or_missing_vector(&migration_labels, new_dim)?,
+        };
+        self.reembed_rows(&rows, embed_fn, new_dim, progress)
+    }
+}
 
+// ── Internal helpers ─────────────────────────────────────────────────────
+
+impl SqliteStore {
+    /// Re-embed `rows` and apply the dimension-declaration gate.
+    ///
+    /// Shared by every scope so the work and the safety check are identical
+    /// whatever set of rows was selected.
+    fn reembed_rows(
+        &self,
+        rows: &[AdminRow],
+        embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
+        new_dim: usize,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> AcoworkResult<RebuildStats> {
+        let mut stats = RebuildStats::default();
         let total = rows.len() as u64;
         for row in rows {
             stats.total_scanned += 1;
@@ -419,11 +458,54 @@ impl MemoryAdminService for SqliteStore {
         }
         Ok(stats)
     }
-}
 
-// ── Internal helpers ─────────────────────────────────────────────────────
+    /// Rows under `labels` whose vector is missing or stored at a width other
+    /// than `dim` - the rows `vector_search` skips, and the set the memory
+    /// panel's stale/missing-embedding banners count.
+    fn rows_with_foreign_or_missing_vector(
+        &self,
+        labels: &[&str],
+        dim: usize,
+    ) -> crate::Result<Vec<AdminRow>> {
+        let conn = self.lock();
+        let placeholders: Vec<String> = (1..=labels.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT n.id, n.label, n.status, n.props, n.created_at \
+             FROM nodes n LEFT JOIN vectors v ON v.node_id = n.id \
+             WHERE n.label IN ({}) AND (v.node_id IS NULL OR length(v.embedding) <> ?{})",
+            placeholders.join(", "),
+            labels.len() + 1,
+        );
+        let bytes = dim.saturating_mul(4) as i64;
+        let mut stmt = conn.prepare(&sql)?;
+        let mut args: Vec<&dyn rusqlite::types::ToSql> = labels
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        args.push(&bytes);
+        let mapped = stmt.query_map(args.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            let (id, label, status, props, created_at) = row?;
+            rows.push(AdminRow {
+                id: id as u64,
+                label,
+                status,
+                props: serde_json::from_str(&props)?,
+                created_at,
+            });
+        }
+        Ok(rows)
+    }
 
-impl SqliteStore {
     /// Rows in `vectors` whose blob is not `dim` floats wide.
     ///
     /// The migration uses this to decide whether the store may *claim* the new

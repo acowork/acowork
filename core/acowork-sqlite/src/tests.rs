@@ -1238,7 +1238,7 @@ fn provider_search_episodes_and_hybrid_search() {
 // the eager `rejected_unfiltered` guard, and the record/detail field meaning.
 
 use acowork_memory::MemoryAdminService;
-use acowork_memory::admin::{AdminListNodesParams, RebuildStats};
+use acowork_memory::admin::{AdminListNodesParams, RebuildScope, RebuildStats};
 use serde_json::json;
 
 /// Every filter the panel can send must actually narrow the scan.
@@ -1820,6 +1820,87 @@ fn admin_embedding_migration_covers_conversation_messages() {
         1,
         "the re-embedded message must be visible to search"
     );
+}
+
+/// The `Repair` scope re-embeds exactly the rows retrieval cannot see -
+/// foreign-width or unembedded - and nothing else.
+///
+/// This is the fix for the "banner says 2 rows, rebuild scans 5831" defect:
+/// the panel's stale/missing-vector banner describes a handful of invisible
+/// rows in a store whose declared dimension already matches the model, and a
+/// full re-embed of every row to heal them is two rows of work bought with
+/// thousands of embed calls. Repair selects rows by stored width, so the
+/// progress bar and the cost match the diagnosis.
+#[test]
+fn admin_embedding_repair_scope_touches_only_invisible_rows() {
+    let store = store();
+    // A row already at the target width: correct, must not be re-embedded.
+    let mut healthy = episode("healthy");
+    healthy.embedding = Some(emb(0.1));
+    store.store_episode(&healthy).unwrap();
+    // A foreign-width row: invisible to vector search, must be re-embedded.
+    let mut foreign = episode("foreign");
+    foreign.embedding = Some(vec![0.5, 0.5]);
+    store.store_episode(&foreign).unwrap();
+    // A row with no vector at all: also invisible, also must be re-embedded.
+    store.store_episode(&episode("unembedded")).unwrap();
+
+    let embedded = std::sync::Mutex::new(Vec::<String>::new());
+    let stats = MemoryAdminService::migrate_embedding_dimension_scoped(
+        &store,
+        &|content: &str| {
+            embedded.lock().unwrap().push(content.to_string());
+            Some(emb(0.9))
+        },
+        DIM,
+        RebuildScope::Repair,
+        None,
+    )
+    .expect("repair");
+
+    assert_eq!(
+        stats.total_scanned, 2,
+        "only the foreign-width and unembedded rows are in scope"
+    );
+    assert_eq!(stats.rebuilt, 2);
+    let embedded = embedded.into_inner().unwrap();
+    assert!(
+        !embedded.iter().any(|c| c == "healthy"),
+        "a row already at the target width must not be re-embedded, got {embedded:?}"
+    );
+
+    // All three rows are now visible to search at the target width.
+    let hits = store.vector_search(labels::EPISODIC, &emb(0.9), 10).expect("search");
+    assert_eq!(hits.len(), 3, "the whole store is searchable again");
+}
+
+/// Repair covers conversation rows too - they are part of the same invisible
+/// set, and the conversation index never re-embeds an indexed row on its own.
+#[test]
+fn admin_embedding_repair_scope_includes_conversation_rows() {
+    let store = std::sync::Arc::new(SqliteStore::open_in_memory(DIM).expect("open"));
+    let index = conversation::ConversationStore::from_store(store.clone()).expect("index");
+    index
+        .index_message("s1", 0, "user", "a foreign-width message", &[0.5, 0.5])
+        .expect("index message");
+
+    let stats = MemoryAdminService::migrate_embedding_dimension_scoped(
+        &*store,
+        &|_| Some(emb(0.9)),
+        DIM,
+        RebuildScope::Repair,
+        None,
+    )
+    .expect("repair");
+
+    assert_eq!(
+        stats.rebuilt, 1,
+        "the foreign-width conversation row must be inside the repair scope"
+    );
+    let hits = store
+        .vector_search(conversation::LABEL, &emb(0.9), 10)
+        .expect("search");
+    assert_eq!(hits.len(), 1, "and searchable after the repair");
 }
 
 /// The store may only *claim* a dimension it actually holds everywhere.

@@ -127,6 +127,14 @@ pub struct StartMigrationRequest {
     /// ADR-073: instance IDs to migrate (empty or absent = all running agents)
     #[serde(default)]
     pub instance_ids: Vec<String>,
+    /// Which rows to re-embed (see [`acowork_memory::admin::RebuildScope`]).
+    /// Absent means `All` — the model-swap semantics this endpoint was built
+    /// for. The memory panel's stale/missing-vector banner sends `Repair` so
+    /// a two-row defect costs two embed calls, not a full store scan. The
+    /// Gateway is a transport here: it forwards the scope, it does not
+    /// interpret it.
+    #[serde(default)]
+    pub scope: acowork_memory::admin::RebuildScope,
 }
 
 // ── Route handlers ─────────────────────────────────────────────────────
@@ -1011,6 +1019,7 @@ pub async fn start_migration(
             "endpoint": embed_endpoint.clone(),
             "model_id": embed_model_id.clone(),
             "dimension": embed_dimension,
+            "scope": req.scope,
         });
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
 
@@ -1566,6 +1575,16 @@ mod tests {
             "body must include dimension, got: {}",
             body
         );
+        // Scope pass-through: this request carried no scope (the model-swap
+        // flow's exact payload), and the Runtime must be told the only scope
+        // that predates the field means - a full re-embed. A Gateway that
+        // dropped the field entirely would still work here, so pin the
+        // forwarded value rather than trusting serde's default.
+        assert!(
+            body.contains("\"scope\":\"all\""),
+            "body must forward scope=\"all\" when the request omitted it, got: {}",
+            body
+        );
 
         // ── 5. Bug-UX-2 contract: the spawned background task must have
         //    written the terminal `AgentMigrationState` (done=true,
@@ -1605,6 +1624,27 @@ mod tests {
             "spawned task must parse RebuildReport and store (rebuilt,total,errors,phase,label); got {:?}",
             m.progress
         );
+    }
+
+    /// The scope is a pass-through field: the Gateway does not interpret it,
+    /// it re-serializes what the Desktop asked for into the Runtime body.
+    /// This pins both halves of that contract — `repair` must survive the
+    /// round-trip (otherwise the panel's targeted repair silently becomes a
+    /// full store scan), and an absent scope must serialize as `all` (the
+    /// pre-field wire format every older Desktop sends).
+    ///
+    /// The full forwarding path (URL, headers, terminal state) is covered by
+    /// `test_start_migration_forwards_rebuild_request_to_runtime`.
+    #[test]
+    fn start_migration_scope_round_trips_into_runtime_body() {
+        let req: super::StartMigrationRequest =
+            serde_json::from_str(r#"{"instance_ids":["a"],"scope":"repair"}"#).expect("repair");
+        let body = serde_json::json!({"scope": req.scope});
+        assert_eq!(body["scope"], "repair");
+
+        let req: super::StartMigrationRequest = serde_json::from_str("{}").expect("absent scope");
+        let body = serde_json::json!({"scope": req.scope});
+        assert_eq!(body["scope"], "all", "absent scope must serialize as all");
     }
 
     /// A migration that is still running must not be started a second time.

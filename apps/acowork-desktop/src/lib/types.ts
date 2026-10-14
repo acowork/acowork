@@ -2568,6 +2568,15 @@ export interface MigrationProgressResponse {
   agents: AgentMigrationProgress[];
 }
 
+/**
+ * Which rows a rebuild re-embeds. Mirrors `RebuildScope` in
+ * `acowork_memory::admin` — the Rust wire contract (`"all"` | `"repair"`,
+ * snake_case). Absent on the wire reads as `"all"`: a model swap changes
+ * every vector's meaning, while `"repair"` re-embeds only the rows vector
+ * search cannot see (foreign-width or unembedded).
+ */
+export type RebuildScope = "all" | "repair";
+
 /** Agent entry returned in migration-required response */
 export interface MigrationAgentEntry {
   /** ADR-073: instance identity (UUID) — canonical addressing key. */
