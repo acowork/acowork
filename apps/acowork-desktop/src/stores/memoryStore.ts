@@ -8,6 +8,7 @@ import type {
   DistillResponse,
   DistillerStatus,
   ForgettingStatus,
+  RebuildScope,
 } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import {
@@ -120,15 +121,20 @@ interface MemoryStore {
    */
   fetchForgettingStatus: (agentId: string) => Promise<void>;
   /**
-   * Rebuild the Grafeo HNSW vector index for `agentId` using the currently
-   * active embedding model. Re-embeds every node so that mismatched-dim stores
-   * (or stores that pre-date the embedding provider) become searchable again.
+   * Rebuild the vector index for `agentId` using the currently active
+   * embedding model.
    *
-   * Internally calls `startMigration(activeModelId, [agentId])` on the same
-   * endpoint the Harness tab uses, then polls `pollMigrationProgress()` every
-   * 2s until the agent reports `done` or an error.
+   * `scope` decides what the Runtime re-embeds: `"all"` re-embeds every node
+   * (a model swap — every vector changes meaning), `"repair"` re-embeds only
+   * the rows retrieval cannot see (foreign-width or unembedded). The Memory
+   * panel passes the scope its health banner decided on; omitting it asks for
+   * `"all"`, which is what a caller that does not know the defect should get.
+   *
+   * Internally calls `startMigration(activeModelId, [agentId], scope)` on the
+   * same endpoint the Harness tab uses, then polls `pollMigrationProgress()`
+   * every 2s until the agent reports `done` or an error.
    */
-  rebuildIndex: (agentId: string) => Promise<void>;
+  rebuildIndex: (agentId: string, scope?: RebuildScope) => Promise<void>;
 
   /**
    * Re-attach to a rebuild that is already running for `agentId`.
@@ -383,7 +389,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     }
   },
 
-  rebuildIndex: async (agentId: string) => {
+  rebuildIndex: async (agentId: string, scope?: RebuildScope) => {
     // Guard: cancel any in-flight poll before starting a new rebuild.
     stopRebuildPoll();
     set({ migrationInProgress: true, error: null });
@@ -398,7 +404,10 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
           "No active embedding model is configured. Configure one in the Harness tab first.",
         );
       }
-      const resp = await startMigration(activeModelId, [agentId]);
+      // `scope` decides what the Runtime re-embeds: the panel passes the scope
+      // its health banner chose (a two-row defect must not cost a 5000-row
+      // re-embed); callers that do not know the defect omit it and get "all".
+      const resp = await startMigration(activeModelId, [agentId], scope);
       // Backend `start_migration` (gateway/src/http/embedding_api.rs) returns
       // `{"status":"ok", ...}` on success and `{"status":"error", ...}` on
       // failure. The previous strict whitelist ("migration_started" / "loaded")

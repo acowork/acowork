@@ -34,9 +34,9 @@ export function ListRow({
   badge,
   avatar,
   avatarClass,
-  avatarUnread,
   icon,
   iconColor,
+  selected,
 }: {
   label: ReactNode
   value?: ReactNode
@@ -48,25 +48,36 @@ export function ListRow({
   /** Count bubble. Only ever a NUMBER the server actually reported. */
   badge?: number
   /** Avatar element (image or initials block) rendered 48px left.
-   *  Unread always lands on this avatar's top-right corner — the position
-   *  every IM trains people to look at: a server `badge` renders as a red
-   *  number bubble, the client-inferred "there is something new" for an
-   *  agent session as a plain red dot (`avatarUnread`, §8.5 — never a number
-   *  there, because the count is inferred). A row WITHOUT an avatar has no
-   *  corner to sit on and keeps the bubble in the trail. */
+   *  A server `badge` renders as a red number bubble. Agent presence and
+   *  working status are shown beside the name, not on the avatar.
+   *  There is deliberately NO unread dot for agent sessions: without a push
+   *  channel a client-side "seen" baseline cannot tell a reply from your own
+   *  message. The Desktop sidebar works the same way (ADR parity).
+   *  A row WITHOUT an avatar has no corner to sit on and keeps the bubble in
+   *  the trail. */
   avatar?: ReactNode
   avatarClass?: string
-  avatarUnread?: boolean
   /** Leading icon element (24px) for settings-style rows. */
   icon?: ReactNode
   /** Optional glyph color (a `--color-icon-*` token) — WeChat Discover-style
    *  multicolor. Falls back to the dim gray when omitted (e.g. disabled rows). */
   iconColor?: string
+  /** Mark the row as the current selection. Pairs with a check icon
+   *  in the trail so the picker matches Desktop's `listRowSelected`
+   *  highlight; a row that is both `selected` and `disabled` is rare,
+   *  but the class is the same as the desktop's "active entry" so the
+   *  styling wins regardless. */
+  selected?: boolean
 }) {
   const Tag = onClick ? 'button' : 'div'
+  // Two-line (label + hint) is the default. Single-line collapses to the
+  // compact height via [data-row='single'] so the row isn't 30%+ taller
+  // than its label. See --list-row-h-compact in tokens.css.
+  const isSingle = !hint
   return (
     <Tag
-      className={`list-row${disabled ? ' is-disabled' : ''}${destructive ? ' is-destructive' : ''}`}
+      className={`list-row${disabled ? ' is-disabled' : ''}${destructive ? ' is-destructive' : ''}${selected ? ' is-selected' : ''}`}
+      data-row={isSingle ? 'single' : undefined}
       onClick={disabled ? undefined : onClick}
       type={onClick ? 'button' : undefined}
       role={onClick ? 'button' : undefined}
@@ -74,14 +85,11 @@ export function ListRow({
       {avatar ? (
         <div className="list-row-avatar-wrap">
           <div className={`list-row-avatar${avatarClass ? ' ' + avatarClass : ''}`}>{avatar}</div>
-          {/* The count outranks the dot: a row that knows how many is not
-              served a vaguer signal. They are mutually exclusive in practice
-              (agent rows dot, contact rows count) — the order is the fallback,
-              not a stack. */}
+          {/* The count outranks everything: a row that knows how many is not
+              served a vaguer signal. Agent rows have no `badge` and no
+              unread dot, so the green working dot below stands alone. */}
           {badge && badge > 0 ? (
             <span className="avatar-unread-count">{badge > 99 ? '99+' : badge}</span>
-          ) : avatarUnread ? (
-            <span className="avatar-unread" aria-label="有新消息" />
           ) : null}
         </div>
       ) : null}

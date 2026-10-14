@@ -260,7 +260,7 @@ export function LspIndicator({
                             "mt-2 flex w-full items-center justify-center gap-1.5 rounded px-3 py-1.5 text-11 font-medium transition-colors",
                             installing
                                 ? "bg-zinc-200 text-text-tertiary dark:bg-zinc-700  cursor-not-allowed"
-                                : "bg-[var(--color-accent)] text-white hover:opacity-90",
+                                : "bg-accent-strong text-white hover:opacity-90",
                         )}
                     >
                         {installing ? (

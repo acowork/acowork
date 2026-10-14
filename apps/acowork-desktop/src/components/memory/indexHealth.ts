@@ -14,11 +14,21 @@
  *    silent about it while reporting the store as healthy.
  * 3. Some memory nodes have no vector at all.
  *
+ * Each condition also carries its repair scope. Conditions 2 and 3 mean the
+ * model *did not* change and only the rows retrieval cannot see need work -
+ * re-embedding a 5000-row store to heal 2 rows is the bug this mapping
+ * prevents. Condition 1 is a model swap: every vector changes meaning, so
+ * only a full rebuild is honest.
+ *
  * `nodes_with_embedding` and `total_nodes` must be counted over the same set of
  * nodes, or condition 3 can never fire: conversation messages carry vectors but
  * are not memory nodes, so counting them made the comparison false on every
  * store with chat history.
  */
+
+import type { RebuildScope } from "../../lib/types";
+
+export type { RebuildScope } from "../../lib/types";
 
 export type IndexHealthInput = {
   stored_dim: number;
@@ -27,6 +37,14 @@ export type IndexHealthInput = {
   nodes_with_embedding: number;
   /** Absent on a runtime built before the field existed; reads as "nothing stale". */
   vectors_of_other_dim?: number;
+  /**
+   * Rows the rebuild would process, per scope, counted by the store with
+   * the same predicates the scoped migration selects with. Absent on a
+   * runtime built before the field existed - then the banner keeps its
+   * legacy suffix and promises no number rather than inventing one.
+   */
+  rebuild_rows_all?: number;
+  rebuild_rows_repair?: number;
 };
 
 export type IndexHealthBanner = {
@@ -40,6 +58,12 @@ export type IndexHealthBanner = {
   vars: Record<string, number>;
   /** Appended to the detail line, separated by " · ". */
   extraKey?: string;
+  /**
+   * Scope the rebuild button must request for this banner. Part of the
+   * banner, not a separate decision: the scope is *why* the banner fired,
+   * and splitting them lets the two drift.
+   */
+  scope: RebuildScope;
 };
 
 export function indexHealthBanner(
@@ -53,6 +77,16 @@ export function indexHealthBanner(
     indexed: stats.nodes_with_embedding,
     total: stats.total_nodes,
     stale: stats.vectors_of_other_dim ?? 0,
+    rebuild: 0,
+  };
+
+  // The promise line: the exact rows this banner's scope will re-embed,
+  // counted by the backend with the same SQL the rebuild selects with.
+  // A count of 0 (or an older runtime that reports none) shows no promise
+  // instead of a wrong one.
+  const rebuildPromise = (count: number | undefined, fallback?: string) => {
+    vars.rebuild = count ?? 0;
+    return count && count > 0 ? "memoryPanel.rebuildRowsDetail" : fallback;
   };
 
   const dimMismatch =
@@ -62,8 +96,16 @@ export function indexHealthBanner(
       titleKey: "memoryPanel.dimMismatchTitle",
       detailKey: "memoryPanel.dimMismatchDetail",
       vars,
-      // The indexed/total line only means something once there are nodes.
-      extraKey: stats.total_nodes > 0 ? "memoryPanel.dimMismatchIndexedDetail" : undefined,
+      // The indexed/total line only means something once there are nodes;
+      // with a scope count available, the promise line replaces it - the
+      // model-swap rebuild re-embeds every row, indexed/total aside.
+      extraKey: rebuildPromise(
+        stats.rebuild_rows_all,
+        stats.total_nodes > 0 ? "memoryPanel.dimMismatchIndexedDetail" : undefined,
+      ),
+      // A model swap changes every vector's meaning; only rows at the new
+      // width are trustworthy, and after a swap none are.
+      scope: "all",
     };
   }
 
@@ -72,6 +114,13 @@ export function indexHealthBanner(
       titleKey: "memoryPanel.staleVectorsTitle",
       detailKey: "memoryPanel.staleVectorsDetail",
       vars,
+      // The store's declared width already matches the model; only the
+      // foreign-width rows are invisible to retrieval.
+      scope: "repair",
+      // Repair also heals rows with no vector at all - rows the stale count
+      // cannot see - so the promise line is what keeps the banner honest
+      // when the two numbers differ.
+      extraKey: rebuildPromise(stats.rebuild_rows_repair),
     };
   }
 
@@ -82,6 +131,12 @@ export function indexHealthBanner(
       titleKey: "memoryPanel.missingEmbeddingsTitle",
       detailKey: "memoryPanel.missingEmbeddingsDetail",
       vars,
+      // Same reasoning: unembedded rows are the rows missing from retrieval.
+      scope: "repair",
+      // The indexed/total pair only counts memory nodes; repair also heals
+      // conversation rows that lost their vector. The promise line carries
+      // the number the progress bar will actually reach.
+      extraKey: rebuildPromise(stats.rebuild_rows_repair),
     };
   }
 

@@ -42,24 +42,29 @@ export function AgentList({ width }: AgentListProps) {
     useAgentStore();
   const agentsMap = useAgentStore((s) => s.agents);
 
-  // ADR-014 derived view for the sidebar status dot — an agent shows the
+  // ADR-014 derived view for the sidebar working dot — an agent shows the
   // dot when *any* of its cached sessions is not in `idle` (i.e. streaming,
   // waiting_approval, or paused). This is the IM-style "needs attention"
-  // semantic: dot disappears when everything is idle, regardless of whether
-  // the agent process itself is running.
+  // semantic: the dot disappears when everything is idle, regardless of
+  // whether the agent process itself is running. It is a WORKING signal
+  // only — there is deliberately no read/unread notion here, matching the
+  // mobile agent row, so the two never disagree about what a dot means.
   //
   // Source: `chatStore.agentStates[aid].sessionStates[sid].sessionStatus`,
   // kept up-to-date by `fetchSessions`'s ADR-014 Pull repair and by MQTT
   // `session_status_changed` events. Agents that have never been opened
   // have an empty sessionStates map — they show no dot until the user
-  // opens them, which is the correct IM semantic (red dot = something
-  // the user can act on).
+  // opens them.
+  //
+  // Agent-scoped and INDEPENDENT of which session is on screen: an agent
+  // churning through tools is worth knowing about even while you read it,
+  // and a `waiting_approval` session carries no new message to announce
+  // itself — it would be invisible under a message-count rule.
   const sessionStatesByAgent = useChatStore((s) => s.agentStates);
-  const activeAgentIds = useMemo(() => {
+  const busyAgentIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [agentId, agentState] of Object.entries(sessionStatesByAgent)) {
-      const sessionStates = agentState.sessionStates ?? {};
-      for (const sess of Object.values(sessionStates)) {
+      for (const sess of Object.values(agentState.sessionStates ?? {})) {
         if (isProcessing(sess.sessionStatus)) {
           ids.add(agentId);
           break;
@@ -68,6 +73,7 @@ export function AgentList({ width }: AgentListProps) {
     }
     return ids;
   }, [sessionStatesByAgent]);
+
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
 
   // ADR-073 §4: view mode is decided automatically by `gatewayMode`. In
@@ -585,7 +591,7 @@ export function AgentList({ width }: AgentListProps) {
           "relative flex cursor-pointer items-center rounded-md px-3 py-2 transition-colors duration-150",
           isCollapsed ? "gap-0" : "gap-3",
           selectedAgentId === id
-            ? "bg-[var(--color-accent)]/90 text-white"
+            ? "bg-accent-strong/90 text-white"
             : listRowHover,
           index < total - 1 && "row-divider-b"
         )}
@@ -608,38 +614,15 @@ export function AgentList({ width }: AgentListProps) {
           position="right"
           delayMs={0}
         >
-          <div className="relative inline-flex">
-            <AgentAvatar
-              agentId={id}
-              displayName={agent.display_name ?? agent.name}
-              avatarUrl={agent.avatar}
-              version={agent.version}
-              builtinAvatarId={agent.builtin_avatar}
-              size={40}
-              className={isCollapsed ? "mx-auto" : ""}
-            />
-            {/* IM-style "needs attention" indicator dot — solid emerald,
-                * borderless, matching the node online/offline dot below
-                * (NodeGroupHeader). Shown when the agent is alive AND has
-                * at least one session in a non-idle status (streaming /
-                * waiting_approval / paused), per ADR-014. Disappears
-                * once every session returns to idle. Offline agents
-                * (alive === false) show no dot.
-                *
-                * Auto-sleep was retired in Sept 2026 — the `sleeping`
-                * carve-out is gone; an agent that is alive IS running.
-                *
-                * Hidden on the selected row: the selection highlight fills
-                * the row, and an emerald dot on top of it reads as a smudge
-                * rather than a status. The row is already fully "marked"
-                * by its background; the dot comes back the moment focus
-                * moves elsewhere. */}
-            {agent.alive && activeAgentIds.has(id) && selectedAgentId !== id && (
-                <span
-                  className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500"
-                />
-              )}
-          </div>
+          <AgentAvatar
+            agentId={id}
+            displayName={agent.display_name ?? agent.name}
+            avatarUrl={agent.avatar}
+            version={agent.version}
+            builtinAvatarId={agent.builtin_avatar}
+            size={40}
+            className={isCollapsed ? "mx-auto" : ""}
+          />
         </Tooltip>
 
         {/* Content area — width-collapsed when sidebar is collapsed to preserve item height */}
@@ -653,6 +636,15 @@ export function AgentList({ width }: AgentListProps) {
                     the lone 14px outlier, so the chat column read as a
                     different scale from the rest of the nav. */}
                 <span className={cn("truncate font-medium text-xs", selectedAgentId === id ? "text-white" : agent.alive ? "text-text-secondary " : "text-text-tertiary ")}>{agent.display_name ?? agent.name}</span>
+                <span
+                  title={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}
+                  aria-label={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}
+                  className={cn(
+                    "h-1.5 w-1.5 shrink-0 rounded-full",
+                    agent.alive ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500",
+                    agent.alive && busyAgentIds.has(id) && "dot-breathing",
+                  )}
+                />
               </div>
             </div>
             {/* Bottom row: current session title.
@@ -705,42 +697,12 @@ export function AgentList({ width }: AgentListProps) {
                         : "text-text-tertiary ",
                     )}
                   >
-                    {sessionTitle === null ? (
-                      <span aria-label="agent idle" className="inline-flex items-baseline">
-                        <span className="zzz-n">z</span>
-                        <span className="zzz-n">z</span>
-                        <span className="zzz-n">z</span>
-                        <span className="zzz-n">z</span>
-                        <span className="zzz-n">z</span>
-                      </span>
-                    ) : (sessionTitle || t("sessionTabBar.untitled"))}
+                    {sessionTitle === null ? null : (sessionTitle || t("sessionTabBar.untitled"))}
                   </span>
                 )
               ) : (
-                // Stopped agent — render the idle animation directly
-                // rather than the loading skeleton. A stopped agent will
-                // never have its sessionTitle populated by the backend
-                // (Runtime HTTP server is not listening), so the
-                // `undefined → skeleton` branch would otherwise stay
-                // stuck forever, misleading the user into thinking a
-                // session is still being fetched.
-                <span
-                  aria-label="agent stopped"
-                  className={cn(
-                    "block truncate",
-                    selectedAgentId === id
-                      ? "text-white/70"
-                      : "text-text-tertiary ",
-                  )}
-                >
-                  <span className="inline-flex items-baseline">
-                    <span className="zzz-n">z</span>
-                    <span className="zzz-n">z</span>
-                    <span className="zzz-n">z</span>
-                    <span className="zzz-n">z</span>
-                    <span className="zzz-n">z</span>
-                  </span>
-                </span>
+                // Stopped agents have no session title to fetch or display.
+                <span aria-hidden="true" />
               )}
             </div>
           </div>

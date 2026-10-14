@@ -17,6 +17,7 @@ import type {
   EmbeddingTestResponse,
   CloudEmbeddingTestResponse,
   MigrationProgressResponse,
+  RebuildScope,
   SelectModelMigrationResponse,
   CloudEmbeddingProvidersResponse,
   SelectCloudEmbeddingResponse,
@@ -359,16 +360,23 @@ export async function testEmbeddingModel(
   return resp.json();
 }
 
-/** Start embedding dimension migration for agents (ADR-073: instance-scoped) */
+/** Start embedding dimension migration for agents (ADR-073: instance-scoped).
+ *
+ * `scope` selects which rows the Runtime re-embeds: "all" (default — a model
+ * swap, every vector changes meaning) or "repair" (only rows retrieval cannot
+ * see — foreign-width or unembedded). Omitting it keeps the pre-field wire
+ * format, which the Gateway/Rust layers also read as "all".
+ */
 export async function startMigration(
   modelId: string,
   instanceIds: string[],
+  scope?: RebuildScope,
   gatewayUrl = getGatewayUrl(),
 ): Promise<EmbeddingModelActionResponse> {
   const resp = await fetch(`${gatewayUrl}/api/embedding-models/${modelId}/start-migration`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ instance_ids: instanceIds }),
+    body: JSON.stringify({ instance_ids: instanceIds, ...(scope ? { scope } : {}) }),
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error((data as EmbeddingModelActionResponse).message ?? `Migration start failed: ${resp.status}`);

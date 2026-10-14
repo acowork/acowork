@@ -128,7 +128,7 @@ function OfflinePanel({
         type="button"
         onClick={onRetry}
         disabled={checking}
-        className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-60"
+        className="inline-flex items-center gap-1.5 rounded-md bg-accent-strong px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-60"
       >
         {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <RefreshCw className="h-3.5 w-3.5" aria-hidden />}
         {t("common.retry")}

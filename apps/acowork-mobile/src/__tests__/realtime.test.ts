@@ -86,8 +86,12 @@ const envMsg = (ev: number[]) => Uint8Array.from([...wVarint(1, 1), ...wBytes(15
 
 describe('proto-wire', () => {
   it('decodes DataEnvelope{session_state}', () => {
-    const ev = decodeEnvelope(envState([...wStr(3, 'idle'), ...wVarint(4, 7)]))
+    // Wire-faithful: status is a serde tagged-enum JSON string.
+    const ev = decodeEnvelope(envState([...wStr(3, '{"status":"idle"}'), ...wVarint(4, 7)]))
     expect(ev).toEqual({ kind: 'state', status: 'idle', messageCount: 7 })
+    // Bare enum name tolerated (publisher drift guard).
+    const bare = decodeEnvelope(envState([...wStr(3, 'idle'), ...wVarint(4, 2)]))
+    expect(bare).toEqual({ kind: 'state', status: 'idle', messageCount: 2 })
   })
 
   it('decodes done / error / stopped', () => {
@@ -143,7 +147,8 @@ const connackBad = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 4])
 const subackOk = Uint8Array.from([PKT.SUBACK << 4, 8, 0, 1, 1, 1, 1, 1, 1, 1])
 const statePublish = (status: string, count: number, qos1 = false): Uint8Array => {
   const topic = new TextEncoder().encode('acowork/agents/a1/sessions/s1/state')
-  const payload = envState([...wStr(3, status), ...wVarint(4, count)])
+  // Wire-faithful: SessionState.status is a JSON string (serde tagged enum).
+  const payload = envState([...wStr(3, JSON.stringify({ status })), ...wVarint(4, count)])
   const head = qos1 ? [0, 1] : []
   const body = Uint8Array.from([0, topic.length, ...topic, ...head, ...payload])
   return Uint8Array.from([(PKT.PUBLISH << 4) | (qos1 ? 0x02 : 0), body.length, ...body])
@@ -223,6 +228,36 @@ describe('realtime channel', () => {
     sock.close() // tunnel dies
     expect(channelState()).toBe('polling')
     expect(handlers.onChannel).toHaveBeenLastCalledWith('polling')
+  })
+
+  it('half-open WS (SUBACK ok, no publishes, socket never closes) is caught by the REST backstop', async () => {
+    vi.useFakeTimers()
+    try {
+      snapshot.mockResolvedValueOnce({ status: { status: 'tool_executing' }, messageCount: 9 })
+      wireDeps()
+      startWatching('a1', 's1', handlers)
+      await vi.advanceTimersByTimeAsync(0)
+      const sock = sockets[0]!
+      sock.emitOpen()
+      sock.emit(connack)
+      sock.emit(subackOk)
+      // WS owns freshness: no immediate REST tick on connect.
+      expect(channelState()).toBe('ws')
+      expect(snapshot).not.toHaveBeenCalled()
+      // The socket stays open but the broker stops forwarding `state` — the
+      // exact half-open case that used to freeze the banner for 70s. The slow
+      // backstop must fire and surface the active status.
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(snapshot).toHaveBeenCalled()
+      expect(handlers.onSnapshot).toHaveBeenCalledWith({ status: { status: 'tool_executing' }, messageCount: 9 })
+      // And it must NOT idle-stop while WS is nominally alive.
+      const seen = handlers.onSnapshot.mock.calls.length
+      snapshot.mockResolvedValue({ status: { status: 'idle' }, messageCount: 9 })
+      await vi.advanceTimersByTimeAsync(15_000 * 3)
+      expect(handlers.onSnapshot.mock.calls.length).toBeGreaterThan(seen)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('CONNACK rejection (stale token) never strands the session', async () => {

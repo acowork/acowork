@@ -16,8 +16,7 @@ import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { probeStatus } from '../../lib/api'
-import { ACCENTS, type ThemePref } from '../../lib/theme'
-import { clearUnread } from '../../lib/unread'
+import { ACCENTS, resolveTheme, type ThemePref } from '../../lib/theme'
 import { ListRow, Segmented, Banner } from '../../components/ui'
 import { User, Cog, Palette, Server, Wrench, Puzzle } from 'lucide-react'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
@@ -116,7 +115,6 @@ const LANGUAGE_LABEL: Record<string, string> = { 'zh-CN': '简体中文', en: 'E
 
 export function GeneralScreen() {
   const me = useAuthStore((s) => s.me)
-  const [cleared, setCleared] = useState(0)
   return (
     <SubScreen title="通用">
       {/* The account's language and timezone are real server state, shown
@@ -124,15 +122,6 @@ export function GeneralScreen() {
       <ListRow disabled label="语言" value={LANGUAGE_LABEL[me?.language ?? ''] ?? me?.language ?? '—'} hint="在桌面端个人资料中修改" />
       <ListRow disabled label="时区" value={profileField(me?.timezone) ?? '—'} hint="在桌面端个人资料中修改" />
       <ListRow disabled label="通知" value="关闭" hint="v1 不做后台推送，仅应用内实时" />
-      <ListRow
-        label="清除全部未读标记"
-        hint="清除本机记录的已读位置，不删除任何消息"
-        value={cleared ? '已清除' : undefined}
-        onClick={() => {
-          clearUnread()
-          setCleared((n) => n + 1)
-        }}
-      />
     </SubScreen>
   )
 }
@@ -142,6 +131,10 @@ export function AppearanceScreen() {
   const accent = useSettingsStore((s) => s.accent)
   const setTheme = useSettingsStore((s) => s.setTheme)
   const setAccent = useSettingsStore((s) => s.setAccent)
+  // The swatch must show the shade the app will actually paint with: accents
+  // carry a separate light/dark value, and a raw accent is what the highlight
+  // colour is (the darkened --color-tint-strong is a derived surface colour).
+  const resolved = resolveTheme(theme)
   return (
     <SubScreen title="外观">
       <div className="list-section-title" style={{ padding: 'var(--space-3) var(--space-4) var(--space-2)' }}>
@@ -171,7 +164,7 @@ export function AppearanceScreen() {
             className={`accent-swatch${accent === a.id ? ' is-active' : ''}`}
             onClick={() => setAccent(a.id)}
           >
-            <span className="accent-dot" style={{ background: a.light }} />
+            <span className="accent-dot" style={{ background: resolved === 'dark' ? a.dark : a.light }} />
           </button>
         ))}
       </div>

@@ -147,6 +147,8 @@ fn empty_stats_output(embed_provider_dim: u64) -> StatsOutput {
         stored_dim: 0,
         nodes_with_embedding: 0,
         vectors_of_other_dim: 0,
+        rebuild_rows_all: 0,
+        rebuild_rows_repair: 0,
         model_dim: embed_provider_dim,
         // No store → no schema version either. 0 is the implicit
         // `user_version` value, mirroring SQLite's own default.
@@ -256,6 +258,16 @@ pub(crate) fn get_stats(
         None => return empty_stats_output(embed_provider_dim),
     };
     let stats: AdminStats = svc.get_stats();
+    // Pre-count the rebuild scopes with the same predicates the scoped
+    // migration selects with (see `MemoryAdminService::rebuild_scope_count`).
+    // The repair count is measured against the width the rebuild will
+    // actually target: the active model's dimension, falling back to the
+    // store's own declared dimension when no model is bound.
+    let rebuild_dim = if embed_provider_dim > 0 {
+        embed_provider_dim
+    } else {
+        stats.stored_dim
+    } as usize;
     MemoryStats {
         total_nodes: stats.total_nodes,
         storage_bytes: stats.storage_bytes,
@@ -265,6 +277,11 @@ pub(crate) fn get_stats(
         stored_dim: stats.stored_dim,
         nodes_with_embedding: stats.nodes_with_embedding,
         vectors_of_other_dim: stats.vectors_of_other_dim,
+        rebuild_rows_all: svc.rebuild_scope_count(acowork_memory::admin::RebuildScope::All, rebuild_dim),
+        rebuild_rows_repair: svc.rebuild_scope_count(
+            acowork_memory::admin::RebuildScope::Repair,
+            rebuild_dim,
+        ),
         model_dim: embed_provider_dim,
         schema_version: stats.schema_version,
     }
@@ -369,6 +386,8 @@ mod tests {
         assert_eq!(out.index_health, "no_store");
         assert_eq!(out.stored_dim, 0);
         assert_eq!(out.nodes_with_embedding, 0);
+        assert_eq!(out.rebuild_rows_all, 0);
+        assert_eq!(out.rebuild_rows_repair, 0);
         assert_eq!(out.model_dim, 512);
         assert_eq!(out.schema_version, 0);
     }
@@ -386,6 +405,8 @@ mod tests {
             "index_health",
             "stored_dim",
             "nodes_with_embedding",
+            "rebuild_rows_all",
+            "rebuild_rows_repair",
             "model_dim",
             "schema_version",
         ] {

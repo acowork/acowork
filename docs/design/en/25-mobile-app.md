@@ -114,7 +114,12 @@ Desktop has two separate lists (AgentList and UserList). Mobile merges them into
 └─────────────────────────────────┘
 ```
 
-Each row shows: avatar (with presence dot), name, online status, **most recent conversation summary**, timestamp, unread badge.
+Each row shows: avatar (with a working dot), name, online status, **most recent conversation summary**, timestamp.
+
+The avatar corner dot carries exactly one meaning: **working** (a green dot while `AgentSummary.status === 'busy'`, nothing at all when idle).
+There is no read/unread badge — with no push channel in v1 a per-agent "unread" count has no
+reliable semantics, and a dot that lies is worse than no dot. Only the deterministic working
+signal is kept, matching the desktop sidebar.
 
 **The summary comes from the last message of the most recently active session** — not a fixed Agent-level string. IM semantics demand it: what the user wants to know is "where did we leave off".
 
@@ -510,12 +515,13 @@ Enter chat detail / after sending
 - **No incremental assembly, no typewriter effect.** "Agent is working" is carried by the status indicator (nav subtitle + progress row above the composer); content arrives complete.
 - Pagination stays as the existing endpoints (`offset/limit/tail`), first screen tail=50.
 
-### 8.5 List and unread freshness
+### 8.5 List state freshness
 
 | Data | Refresh moments |
 |------|-----------------|
 | Conversation list (§2.3) | once at startup, pull-to-refresh, resume-to-foreground, after session create/delete |
-| Unread badge | v1 = local "did `message_count` change since this session was last opened" (available from the session meta endpoint). **No push means no true unread** — the badge honestly degrades to "new activity", never a number |
+| Working dot | Follows the agent directory refresh (once at startup + on foreground + pull-to-refresh + after session add/remove). No read/unread count is kept: without push, per-agent "unread" cannot be judged reliably, so v1 drops it outright |
+| (Removed) read/unread badge | v1 did render a local `message_count`-based unread dot; in practice the red/green flip-flop was more distracting than informative and inconsistent with desktop, so the whole thing was removed |
 | Agent online status | pushed by the presence connection (§8.1): online/offline/error flip within milliseconds; the directory poll (once at startup + resume + pull-to-refresh) stays the baseline and the race corrector — a late-arriving poll can repaint a row the push just lit as offline, and the next heartbeat/verdict resets it |
 
 ### 8.6 Channel capability matrix (recorded honestly so "polling-variant semantics" never calcifies into the global truth)
@@ -647,7 +653,7 @@ Mobile OSes make no promise about background execution: a WebView is suspended w
 | Streaming output | Not in v1; status indicator + complete arrival | Consistent with the polling model; the typewriter effect justified the chunk channel, which is cut |
 | AskQuestion | question card over the WS channel; "handle on Desktop" hint over polling | Event-channel availability decides the capability; inventing an HTTP question-polling surface would be worse than honest tiering |
 | Push notifications | Not in v1 | No background channel; vendor push needs its own server + certificates; v2 evaluation |
-| Unread badge | Degraded to "new activity" dot, no counts | No push means no true unread; honest degradation beats fake precision |
+| Read/unread badge | **Not built in v1**; only the working dot remains | No push means no true unread; the cognitive cost of red/green flip-flopping exceeds its information value |
 
 ## 14. Deliverables
 

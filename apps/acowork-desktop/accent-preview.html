@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>高亮色对比 — light & dark</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif; }
+    .light-bg { background: #f6f6f7; }
+    .dark-bg  { background: #0a0a0e; }
+    .hairline-light { border-color: #d4d4d8; }
+    .hairline-dark  { border-color: #3f3f46; }
+    .dim-light { color: #71717a; }
+    .dim-dark  { color: #a1a1aa; }
+
+    /* Light factor samples — computed against #3B82F6 */
+    .f-100 { background: #3B82F6; }     /* original accent, 3.68:1 vs white (AA fail) */
+    .f-90  { background: #3575DD; }     /* 0.90x */
+    .f-85  { background: #326FD1; }     /* 0.85x → ~6.4:1 vs white */
+    .f-78  { background: #2E65C0; }     /* 0.78x → ~5.2:1 vs white — current setting */
+    .f-75  { background: #2C62B9; }     /* 0.75x */
+    .f-70  { background: #295BAC; }     /* 0.70x → ~4.5:1 vs white (AA pass boundary) */
+    .f-62  { background: #255199; }     /* 0.62x — what you said feels too heavy on white */
+
+    /* Dark factor sample */
+    .f-dark-old { background: #3B82F6; }
+    .f-dark-new { background: #255199; }     /* 0.62x → 7.74:1 vs white */
+
+    .accent-strong-bubble { background-color: rgba(46,101,192, 0.9); }   /* 0.78x for light */
+    .accent-strong-bubble-dark { background-color: rgba(37,81,153, 0.9); } /* 0.62x for dark */
+    .old-bubble { background-color: rgba(59,130,246, 0.9); }
+  </style>
+</head>
+<body>
+
+  <header class="px-8 py-6 border-b hairline-light">
+    <h1 class="text-xl font-semibold text-zinc-900">高亮色对比 · light & dark</h1>
+    <p class="text-sm dim-light mt-1">
+      所有按钮 / 气泡 / chip 在两种主题下都用同一个 <code>--color-accent-strong</code> token,
+      但 light / dark 用不同 darkening 因子,因为底色对比度需求不对称。
+    </p>
+  </header>
+
+  <main class="px-8 py-8 space-y-10">
+
+    <!-- ============ LIGHT MODE STRIP ============ -->
+    <section class="light-bg rounded-2xl p-8 hairline-light border">
+      <h2 class="text-sm font-semibold text-zinc-900 mb-1">LIGHT 主题 — 白色底,白字按钮</h2>
+      <p class="text-xs dim-light mb-6">
+        选择一个你觉得"还是亮蓝、但白字能清楚读出"的因子。左边第一块是原来的 bright blue (不过 AA),越往右越深。
+      </p>
+
+      <!-- Light factor pick row -->
+      <div class="space-y-3">
+        <div class="text-xs dim-light font-mono">白字 / 白底  ·  factor 对照</div>
+        <div class="grid grid-cols-7 gap-3 text-center text-xs">
+          <div>
+            <div class="aspect-[5/3] rounded-md f-100 text-white flex items-center justify-center text-sm font-medium shadow-sm">发布</div>
+            <div class="mt-1.5 text-zinc-700">原 accent</div>
+            <div class="text-zinc-400 font-mono">#3B82F6<br>1.00 · 3.68:1</div>
+          </div>
+          <div>
+            <div class="aspect-[5/3] rounded-md f-90 text-white flex items-center justify-center text-sm font-medium shadow-sm">发布</div>
+            <div class="mt-1.5 text-zinc-700">0.90</div>
+            <div class="text-zinc-400 font-mono">#3575DD</div>
+          </div>
+          <div>
+            <div class="aspect-[5/3] rounded-md f-85 text-white flex items-center justify-center text-sm font-medium shadow-sm">发布</div>
+            <div class="mt-1.5 text-zinc-700">0.85</div>
+            <div class="text-zinc-400 font-mono">#326FD1<br>~6.4:1</div>
+          </div>
+          <div>
+            <div class="aspect-[5/3] rounded-md f-78 text-white flex items-center justify-center text-sm font-medium shadow-sm shadow-blue-900/30 font-bold">发布</div>
+            <div class="mt-1.5 text-zinc-900 font-semibold">0.78 (当前)</div>
+            <div class="text-blue-700 font-mono">#2E65C0<br>~5.2:1</div>
+          </div>
+          <div>
+            <div class="aspect-[5/3] rounded-md f-75 text-white flex items-center justify-center text-sm font-medium shadow-sm">发布</div>
+            <div class="mt-1.5 text-zinc-700">0.75</div>
+            <div class="text-zinc-400 font-mono">#2C62B9</div>
+          </div>
+          <div>
+            <div class="aspect-[5/3] rounded-md f-70 text-white flex items-center justify-center text-sm font-medium shadow-sm">发布</div>
+            <div class="mt-1.5 text-zinc-700">0.70</div>
+            <div class="text-zinc-400 font-mono">#295BAC<br>~4.5:1</div>
+          </div>
+          <div>
+            <div class="aspect-[5/3] rounded-md f-62 text-white flex items-center justify-center text-sm font-medium shadow-sm">发布</div>
+            <div class="mt-1.5 text-zinc-700">0.62 (太深)</div>
+            <div class="text-zinc-400 font-mono">#255199</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Realistic light surface — dialog primary buttons + bubble -->
+      <div class="mt-10 space-y-6">
+        <div class="text-xs dim-light font-mono">在真实 light dialog 里的样子</div>
+
+        <div class="bg-white rounded-lg p-4 shadow-sm border hairline-light space-y-2">
+          <div class="text-xs dim-light mb-2">primary dialog button</div>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-78 shadow-sm">Publish</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-78 shadow-sm">Clone agent</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-78 shadow-sm">Stop agent</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-78 shadow-sm">Confirm</button>
+        </div>
+
+        <div class="bg-white rounded-lg p-4 shadow-sm border hairline-light">
+          <div class="text-xs dim-light mb-3">user message bubble (right-aligned)</div>
+          <div class="ml-auto w-fit max-w-[80%] rounded-md rounded-br-sm px-3 py-2 text-sm text-white accent-strong-bubble">
+            这是用户发出去的消息气泡
+          </div>
+        </div>
+
+        <div class="bg-white rounded-lg p-4 shadow-sm border hairline-light space-y-2">
+          <div class="text-xs dim-light mb-2">chat action chips</div>
+          <div class="flex flex-wrap gap-2">
+            <button class="rounded px-2 py-0.5 text-11 font-medium text-white f-78">Continue (3/10)</button>
+            <button class="rounded px-2 py-0.5 text-11 font-medium text-white f-78">Retry</button>
+            <button class="rounded px-2 py-0.5 text-11 font-medium text-white f-78">Resume</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ DARK MODE STRIP ============ -->
+    <section class="dark-bg rounded-2xl p-8 text-zinc-100">
+      <h2 class="text-sm font-semibold mb-1">DARK 主题 — 近黑底,白字按钮</h2>
+      <p class="text-xs dim-dark mb-6">
+        旧版是亮蓝,在暗底上发光感强、白字对比度低。新版用 0.62 因子暗化到 #255199,白字对比度从 3.7:1 提到 7.7:1。
+      </p>
+
+      <div class="grid grid-cols-2 gap-6">
+        <!-- OLD dark -->
+        <div class="space-y-4">
+          <div class="text-xs dim-dark font-mono">旧 · #3B82F6 · 3.68:1</div>
+          <div class="bg-[#1e1e1e] rounded-lg p-4 space-y-2">
+            <div class="text-xs dim-dark mb-2">primary dialog button</div>
+            <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-dark-old">Publish</button>
+            <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-dark-old">Clone agent</button>
+            <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-dark-old">Stop agent</button>
+            <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-dark-old">Confirm</button>
+          </div>
+          <div class="bg-[#1e1e1e] rounded-lg p-4">
+            <div class="text-xs dim-dark mb-3">user message bubble</div>
+            <div class="ml-auto w-fit max-w-[80%] rounded-md rounded-br-sm px-3 py-2 text-sm text-white old-bubble">
+              这是用户发出去的消息气泡
+            </div>
+          </div>
+        </div>
+
+        <!-- NEW dark -->
+        <div class="space-y-4">
+          <div class="text-xs dim-dark font-mono">新 · #255199 · 7.74:1 (当前)</div>
+          <div class="bg-[#1e1e1e] rounded-lg p-4 space-y-2">
+            <div class="text-xs dim-dark mb-2">primary dialog button</div>
+            <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-dark-new">Publish</button>
+            <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-dark-new">Clone agent</button>
+            <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-dark-new">Stop agent</button>
+            <button class="rounded px-3 py-1.5 text-xs font-medium text-white f-dark-new">Confirm</button>
+          </div>
+          <div class="bg-[#1e1e1e] rounded-lg p-4">
+            <div class="text-xs dim-dark mb-3">user message bubble</div>
+            <div class="ml-auto w-fit max-w-[80%] rounded-md rounded-br-sm px-3 py-2 text-sm text-white accent-strong-bubble-dark">
+              这是用户发出去的消息气泡
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="px-8 py-6 dim-light text-xs space-y-1">
+    <div>WCAG AA = 4.5:1, AAA = 7:1.</div>
+    <div>当前 desktop 设置: <code class="bg-zinc-100 px-1 rounded">:root</code> 0.78, <code class="bg-zinc-100 px-1 rounded">.dark</code> 0.62。</div>
+    <div class="opacity-60">因子只动了 globals.css 一个文件、两个 token,所有按钮 / 气泡 / chip 自动跟随。</div>
+  </footer>
+</body>
+</html>

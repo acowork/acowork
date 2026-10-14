@@ -559,7 +559,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
                   <button
                     onClick={() => void handleClaim()}
                     disabled={claiming}
-                    className="self-start rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="self-start rounded-md bg-accent-strong px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {claiming ? t("permissionDialog.claiming") : t("permissionDialog.claimOwner")}
                   </button>
@@ -682,7 +682,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
             <button
               onClick={() => void handleSave()}
               disabled={!dirty || saving}
-              className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-md bg-accent-strong px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {t("common.confirm")}
             </button>

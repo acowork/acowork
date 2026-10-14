@@ -1709,7 +1709,7 @@ async fn update_memory_node(
 /// Request body for `POST /memory/rebuild-embeddings`.
 ///
 /// Carries the new embedding model the Gateway has switched to. The
-/// Runtime builds a temporary provider and re-embeds every stored node,
+/// Runtime builds a temporary provider and re-embeds stored nodes,
 /// rebuilding the HNSW indexes (Bug3 — restores the dimension-migration
 /// feature lost in the gRPC→MQTT refactor).
 #[derive(Debug, Deserialize)]
@@ -1722,6 +1722,11 @@ struct RebuildEmbeddingsBody {
     model_id: String,
     /// Target embedding dimension.
     dimension: usize,
+    /// Which rows to re-embed. Absent on the wire means `All` — the only
+    /// scope that existed before the memory panel grew targeted repair, and
+    /// what a Gateway that predates the field effectively asks for.
+    #[serde(default)]
+    scope: acowork_memory::admin::RebuildScope,
 }
 
 /// Live progress of a background `/memory/rebuild-embeddings` run.
@@ -1754,6 +1759,7 @@ async fn rebuild_embeddings(
         endpoint = %body.endpoint,
         model_id = %body.model_id,
         dimension = body.dimension,
+        ?body.scope,
         "rebuild_embeddings: received start request"
     );
 
@@ -1813,6 +1819,7 @@ async fn rebuild_embeddings(
     let endpoint = body.endpoint.clone();
     let model_id = body.model_id.clone();
     let dimension = body.dimension;
+    let scope = body.scope;
     tokio::spawn(async move {
         let progress: Arc<dyn Fn(u64, u64) + Send + Sync> = Arc::new(move |rebuilt, total| {
             *progress_slot
@@ -1825,7 +1832,7 @@ async fn rebuild_embeddings(
             });
         });
         let report = svc
-            .rebuild_embeddings_with_progress(&endpoint, &model_id, dimension, Some(progress))
+            .rebuild_embeddings_with_progress(&endpoint, &model_id, dimension, scope, Some(progress))
             .await;
         let (rebuilt, total, error) = match report {
             Ok(r) => {
@@ -4318,6 +4325,36 @@ async fn post_rag_query(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wire-compat for `POST /memory/rebuild-embeddings`: the `scope` field
+    /// is an extension, and a body without it (every Gateway built before
+    /// this field existed, plus the model-swap flow that never sends one)
+    /// must read as the only scope those clients could mean - `All`.
+    #[test]
+    fn rebuild_body_scope_absent_reads_as_all() {
+        let body: RebuildEmbeddingsBody =
+            serde_json::from_str(r#"{"endpoint":"e","model_id":"m","dimension":1024}"#)
+                .expect("pre-scope wire format must still deserialize");
+        assert!(matches!(body.scope, acowork_memory::admin::RebuildScope::All));
+
+        let body: RebuildEmbeddingsBody = serde_json::from_str(
+            r#"{"endpoint":"e","model_id":"m","dimension":1024,"scope":"repair"}"#,
+        )
+        .expect("repair scope must deserialize");
+        assert!(matches!(
+            body.scope,
+            acowork_memory::admin::RebuildScope::Repair
+        ));
+
+        // An unknown scope is a caller bug, not a silent downgrade: the
+        // request must fail rather than quietly re-embed the whole store.
+        assert!(
+            serde_json::from_str::<RebuildEmbeddingsBody>(
+                r#"{"dimension":1024,"scope":"everything"}"#
+            )
+            .is_err()
+        );
+    }
 
     /// ADR-085 D4 ("扫描未完成" row): an empty `latest_session` cache
     /// is only a definitive 404 once the SESSIONS_READY stamp landed

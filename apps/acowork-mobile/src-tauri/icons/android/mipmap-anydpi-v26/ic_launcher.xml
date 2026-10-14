@@ -1,5 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive launcher icon.
+
+  The background layer is TRANSPARENT on purpose. `tauri icon` renders the
+  master (a yellow tile with the "A" knocked out of it) into
+  ic_launcher_foreground.png, so the foreground already carries the COMPLETE
+  artwork, background included. An earlier revision tinted the background layer
+  brand yellow on the assumption that the foreground held only a bare "A" -
+  it does not - and stacking two identical yellows filled the knocked-out "A"
+  back in, so the launcher showed a flat yellow square with no mark.
+
+  Keeping the background transparent also means the mark is masked by the
+  launcher (circle / squircle / rounded square) rather than pre-shaped, which is
+  what adaptive icons are for.
+
+  gen_icons_android.py still insets the foreground to FG_SCALE (0.70) so the
+  mark survives the mask and stays inside the 66dp safe zone; that step stays.
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
   <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
-  <background android:drawable="@color/ic_launcher_background"/>
+  <background android:drawable="@android:color/transparent"/>
 </adaptive-icon>

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dark 模式高亮色 — old vs new</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Match the dark page surface used by the desktop app. */
+    html, body { background: #0a0a0e; font-family: ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif; }
+    /* Override the Tailwind CDN's default blue-500 with our actual
+       default accent (#3B82F6) so "OLD" is faithful. */
+    :root { --color-accent: #3B82F6; }
+    .accent-strong-bg { background-color: #255199; }       /* 0.62 * #3B82F6 → deeper navy */
+    .accent-strong-bg\/90 { background-color: #255199; opacity: 0.9; }
+    .accent-strong-bubble { background-color: rgba(37,81,153, 0.9); }    /* 0.62 * #3B82F6 at 90% alpha → deep navy tint */
+    .old-bubble { background-color: rgba(59,130,246, 0.9); }           /* original 0.90 alpha wash */
+    /* Approximate the desktop's "default dark" surface palette so chips/banners read. */
+    .surface-1 { background: #1e1e1e; }
+    .surface-2 { background: #27272a; }
+    .hairline  { border-color: #3f3f46; }
+    .dim-text  { color: #a1a1aa; }
+  </style>
+</head>
+<body class="min-h-screen text-zinc-100">
+  <header class="px-8 py-6 border-b hairline">
+    <h1 class="text-lg font-semibold">Dark 模式高亮色对比</h1>
+    <p class="text-sm dim-text mt-1">
+      左栏 = 旧版（<code>bg-[var(--color-accent)]</code>，<code>#3B82F6</code>），
+      右栏 = 新版（<code>bg-accent-strong</code>，dark 模式调暗至 62%，<code>#255199</code>）。
+      Light 模式不变。
+    </p>
+  </header>
+
+  <main class="px-8 py-8 grid grid-cols-2 gap-8">
+
+    <!-- ============= OLD ============= -->
+    <section class="space-y-6">
+      <div class="text-xs uppercase tracking-wider dim-text font-mono">old · bg-[var(--color-accent)] · #3B82F6</div>
+
+      <!-- Primary buttons, the canonical white-text-on-fill case -->
+      <div class="surface-1 rounded-lg p-4 space-y-2">
+        <div class="text-xs dim-text mb-2">primary button</div>
+        <button class="rounded-md px-3 py-1.5 text-xs font-medium text-white" style="background:#3B82F6">登录</button>
+        <button class="rounded-md px-3 py-1.5 text-xs font-medium text-white opacity-90" style="background:#3B82F6">Claim owner</button>
+        <button class="rounded-md px-3 py-1.5 text-xs font-medium text-white opacity-90 disabled:opacity-50" style="background:#3B82F6" disabled>提交</button>
+      </div>
+
+      <!-- Compact action chips (chat banners, debug buttons, etc.) -->
+      <div class="surface-2 rounded-lg p-4 space-y-2">
+        <div class="text-xs dim-text mb-2">chat action chips</div>
+        <div class="flex flex-wrap gap-2">
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white" style="background:#3B82F6">Continue (3/10)</button>
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white" style="background:#3B82F6">Retry</button>
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white" style="background:#3B82F6">Resume</button>
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white" style="background:#3B82F6">Step</button>
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white" style="background:#3B82F6">Submit</button>
+        </div>
+      </div>
+
+      <!-- Selected row in a list pane -->
+      <div class="surface-1 rounded-lg overflow-hidden hairline border">
+        <div class="text-xs dim-text px-4 pt-3 pb-2">selected row (SectionPane / sidebar)</div>
+        <div class="px-4 py-2.5 text-sm text-white" style="background:#3B82F6; opacity:0.9">已选中的列表行</div>
+        <div class="px-4 py-2.5 text-sm dim-text">未选中的列表行</div>
+        <div class="px-4 py-2.5 text-sm dim-text">再下面一行</div>
+      </div>
+
+      <!-- Floating "Add to Chat" tooltip-style button -->
+      <div class="surface-2 rounded-lg p-6 flex items-start gap-3">
+        <div class="text-xs dim-text">floating action button (FileEditor)</div>
+        <button class="rounded-md px-2 py-1 text-xs font-medium text-white shadow-md" style="background:#3B82F6">+ Add to Chat</button>
+      </div>
+
+      <!-- User message bubble (bg-chat-user with white text) -->
+      <div class="surface-1 rounded-lg p-4">
+        <div class="text-xs dim-text mb-2">user message bubble (chat)</div>
+        <div class="ml-auto w-fit max-w-[80%] rounded-md rounded-br-sm px-3 py-2 text-sm text-white old-bubble">
+          这是用户发出去的消息气泡，左对齐，右对齐跟随用户输入
+        </div>
+      </div>
+
+      <!-- Agent dialog primary buttons (.btn-accent) — Publish / Clone / Stop / etc. -->
+      <div class="surface-2 rounded-lg p-4">
+        <div class="text-xs dim-text mb-2">agent dialog primary buttons (.btn-accent)</div>
+        <div class="flex flex-wrap gap-2">
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white" style="background:#3B82F6">Publish</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white" style="background:#3B82F6">Clone agent</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white" style="background:#3B82F6">Stop</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white" style="background:#3B82F6">Save</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white" style="background:#3B82F6">Confirm</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white" style="background:#3B82F6">Continue</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============= NEW ============= -->
+    <section class="space-y-6">
+      <div class="text-xs uppercase tracking-wider dim-text font-mono">new · bg-accent-strong · #255199 (62%)</div>
+
+      <div class="surface-1 rounded-lg p-4 space-y-2">
+        <div class="text-xs dim-text mb-2">primary button</div>
+        <button class="rounded-md px-3 py-1.5 text-xs font-medium text-white accent-strong-bg">登录</button>
+        <button class="rounded-md px-3 py-1.5 text-xs font-medium text-white accent-strong-bg opacity-90">Claim owner</button>
+        <button class="rounded-md px-3 py-1.5 text-xs font-medium text-white accent-strong-bg opacity-90 disabled:opacity-50" disabled>提交</button>
+      </div>
+
+      <div class="surface-2 rounded-lg p-4 space-y-2">
+        <div class="text-xs dim-text mb-2">chat action chips</div>
+        <div class="flex flex-wrap gap-2">
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white accent-strong-bg">Continue (3/10)</button>
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white accent-strong-bg">Retry</button>
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white accent-strong-bg">Resume</button>
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white accent-strong-bg">Step</button>
+          <button class="rounded px-2 py-0.5 text-11 font-medium text-white accent-strong-bg">Submit</button>
+        </div>
+      </div>
+
+      <div class="surface-1 rounded-lg overflow-hidden hairline border">
+        <div class="text-xs dim-text px-4 pt-3 pb-2">selected row (SectionPane / sidebar)</div>
+        <div class="px-4 py-2.5 text-sm text-white accent-strong-bg opacity-90">已选中的列表行</div>
+        <div class="px-4 py-2.5 text-sm dim-text">未选中的列表行</div>
+        <div class="px-4 py-2.5 text-sm dim-text">再下面一行</div>
+      </div>
+
+      <div class="surface-2 rounded-lg p-6 flex items-start gap-3">
+        <div class="text-xs dim-text">floating action button (FileEditor)</div>
+        <button class="rounded-md px-2 py-1 text-xs font-medium text-white accent-strong-bg shadow-md">+ Add to Chat</button>
+      </div>
+
+      <!-- User message bubble (bg-chat-user with white text) -->
+      <div class="surface-1 rounded-lg p-4">
+        <div class="text-xs dim-text mb-2">user message bubble (chat)</div>
+        <div class="ml-auto w-fit max-w-[80%] rounded-md rounded-br-sm px-3 py-2 text-sm text-white accent-strong-bubble">
+          这是用户发出去的消息气泡，左对齐，右对齐跟随用户输入
+        </div>
+      </div>
+
+      <!-- Agent dialog primary buttons (.btn-accent) — Publish / Clone / Stop / etc. -->
+      <div class="surface-2 rounded-lg p-4">
+        <div class="text-xs dim-text mb-2">agent dialog primary buttons (.btn-accent)</div>
+        <div class="flex flex-wrap gap-2">
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white accent-strong-bg">Publish</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white accent-strong-bg">Clone agent</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white accent-strong-bg">Stop</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white accent-strong-bg">Save</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white accent-strong-bg">Confirm</button>
+          <button class="rounded px-3 py-1.5 text-xs font-medium text-white accent-strong-bg">Continue</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="px-8 py-6 dim-text text-xs">
+    <div>WCAG AA = 4.5:1 against white.</div>
+    <div>old #3B82F6 → 3.68:1 (fail AA) &nbsp;·&nbsp; new #255199 → 7.74:1 (pass AAA).</div>
+    <div class="mt-2 opacity-60">桌面端实际修改：<code>apps/acowork-desktop/src/styles/globals.css</code> 加 <code>--color-accent-strong</code>（light = identity；dark = <code>color-mix(in srgb, var(--color-accent) 62%, black)</code>），再加：
+      <ul class="list-disc ml-5 mt-1 space-y-1">
+        <li>22 处 <code>bg-[var(--color-accent)]</code> → <code>bg-accent-strong</code>（保留 /90 /10 等 opacity）</li>
+        <li>9 处 inline <code>backgroundColor: var(--color-accent)</code> → <code>var(--color-accent-strong)</code></li>
+        <li>1 处 <code>SectionPane</code> 测试断言同步更新</li>
+        <li>.btn-accent（17 个文件用：Publish / Clone / Stop / Save / Confirm 等所有 dialog 主按钮）— 改 <code>.dark .btn-accent</code> 背景为 <code>var(--color-accent-strong)</code>，hover 也调亮 (0.85 → 0.9) 跟 light 行为一致</li>
+        <li><code>--color-chat-user</code>（用户消息气泡，3 个文件用）— 改 dark 为 <code>color-mix(in srgb, var(--color-accent-strong) 90%, transparent)</code></li>
+      </ul>
+    </div>
+  </footer>
+</body>
+</html>

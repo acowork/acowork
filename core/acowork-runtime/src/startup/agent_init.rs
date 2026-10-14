@@ -888,9 +888,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // ── Step 4: Build tool registry + activate by manifest ──────────
 
-    // ADR-040: LSP relay endpoint - always unavailable in MQTT-only mode.
-    let lsp_relay_endpoint: Option<String> = None;
-
     let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(
         emb_provider.clone(),
     ));
@@ -903,7 +900,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Some(memory_session.clone()),
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),
-        lsp_relay_endpoint,
         mqtt_client_slot.clone(),
     ) {
         registry.register(tool);

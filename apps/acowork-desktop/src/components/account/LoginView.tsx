@@ -150,7 +150,7 @@ export function LoginView() {
         <button
           type="submit"
           disabled={!canSubmit}
-          className="mt-1 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-50"
+          className="mt-1 rounded-md bg-accent-strong px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-50"
         >
           {busy
             ? t(mode === "password" ? "account.loggingIn" : "account.activating")

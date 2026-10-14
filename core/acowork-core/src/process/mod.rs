@@ -1,8 +1,12 @@
 //! Process management utilities with idle-timeout monitoring.
 //!
-//! Provides [`run_with_idle_timeout`] and [`run_command_with_idle_timeout`]
-//! for running child processes that should be killed if they produce no
-//! stdout/stderr output for a configurable duration.
+//! The public entry point is [`run_command_with_idle_timeout`]: it takes a
+//! [`Command`], **guarantees process-tree containment** (see `tree.rs`),
+//! and kills the whole tree if the child produces no stdout/stderr output
+//! for a configurable duration. There is deliberately no public way to run
+//! the monitor over an already-spawned [`Child`] — containment on Unix
+//! must be configured *before* spawn, so an externally-spawned child
+//! cannot be guaranteed contained.
 //!
 //! # Idle timeout vs absolute timeout
 //!
@@ -45,6 +49,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
+
+mod tree;
+use tree::TreeGuard;
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -109,9 +116,16 @@ enum OutputLine {
 
 /// Run an already-spawned [`Child`] process with idle-timeout monitoring.
 ///
-/// The child **must** have its stdout and stderr set to `Stdio::piped()`.
-/// Use [`run_command_with_idle_timeout`] for a convenience wrapper that
-/// configures this automatically.
+/// Crate-internal: the only supported public entry point is
+/// [`run_command_with_idle_timeout`], because process-tree containment
+/// must be *configured before spawn* on Unix (`TreeGuard::configure`).
+/// Any caller that spawns a `Command` itself and hands the `Child` here
+/// would silently get a direct-child-only kill on Unix — the exact
+/// degradation this API is designed to make impossible.
+///
+/// The child **must** have its stdout and stderr set to `Stdio::piped()`
+/// (the `attach` of the [`TreeGuard`] below assumes the wrapper's spawn
+/// configuration).
 ///
 /// # How it works
 ///
@@ -126,10 +140,15 @@ enum OutputLine {
 /// # Panics
 ///
 /// Panics if `child.stdout` or `child.stderr` is `None` (i.e. not piped).
-pub async fn run_with_idle_timeout(
+pub(crate) async fn run_with_idle_timeout(
     mut child: Child,
     idle_timeout: Duration,
 ) -> Result<ProcessOutput, IdleTimeoutError> {
+    // Contain the process tree so the timeout kill reaches descendants
+    // too — surviving grandchildren keep the stdio pipes open and
+    // block runtime teardown (see `process/tree.rs`).
+    let tree = TreeGuard::attach(&child);
+
     let stdout = child
         .stdout
         .take()
@@ -188,6 +207,11 @@ pub async fn run_with_idle_timeout(
                     idle_secs = idle_timeout.as_secs(),
                     "Process idle timeout — killing child process"
                 );
+                // Kill the whole tree first: grandchildren hold inherited
+                // stdio write handles, and leaving them alive blocks
+                // pipe teardown (and, on Windows, the tokio runtime drop
+                // in `#[tokio::test]`) until they exit on their own.
+                tree.kill_tree();
                 let _ = child.kill().await;
                 // Abort reader tasks rather than joining them — the killed
                 // process may have grandchildren still holding stdout/stderr
@@ -225,8 +249,17 @@ pub async fn run_with_idle_timeout(
 /// Convenience wrapper: configure a [`Command`] for idle-timeout monitoring
 /// and spawn it.
 ///
+/// This is the **only** public entry point of the module. It guarantees
+/// process-tree containment: on Unix it makes the child a process-group
+/// leader before spawn (so the timeout kill can signal the whole group);
+/// on Windows the child is pulled into a fresh Job Object right after
+/// spawn (so the timeout kill terminates the whole tree). A killed tree
+/// cannot leave grandchildren holding the stdio pipe write handles open —
+/// the failure mode that historically stalled runtime teardown for the
+/// full grandchild lifetime.
+///
 /// Automatically sets `stdout(Stdio::piped())`, `stderr(Stdio::piped())`,
-/// and `kill_on_drop(true)`, then calls [`run_with_idle_timeout`].
+/// and `kill_on_drop(true)`.
 ///
 /// # Example
 ///
@@ -247,6 +280,11 @@ pub async fn run_command_with_idle_timeout(
     cmd: &mut Command,
     idle_timeout: Duration,
 ) -> Result<ProcessOutput, IdleTimeoutError> {
+    // Unix: make the child a process-group leader BEFORE spawn so the
+    // timeout kill can signal the whole group (Windows containment is
+    // attached post-spawn inside run_with_idle_timeout).
+    TreeGuard::configure(cmd);
+
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.kill_on_drop(true);
@@ -461,6 +499,73 @@ mod tests {
     }
 
     // ── Idle timeout ───────────────────────────────────────────────────
+
+    /// Regression test for process-tree containment (see `process/tree.rs`):
+    /// the idle-timeout kill must reach **grandchildren**, not just the
+    /// direct child. Surviving descendants keep the inherited stdio pipe
+    /// write handles open, which historically blocked the tokio runtime
+    /// teardown in `#[tokio::test]` for the full lifetime of the
+    /// grandchild (~120 s per test on Windows).
+    ///
+    /// Shape: the parent hangs silently (idle timeout fires at ~2 s)
+    /// after launching a grandchild that writes a marker file at ~4 s.
+    /// If containment works, the marker never appears.
+    #[tokio::test]
+    async fn test_idle_timeout_kills_process_tree() {
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let dir = std::env::temp_dir();
+        let marker = dir.join(format!("acowork-tree-kill-marker-{unique}.txt"));
+        let marker_path = marker.to_string_lossy().into_owned();
+
+        #[cfg(windows)]
+        let bat = dir.join(format!("acowork-tree-kill-grandchild-{unique}.bat"));
+
+        #[cfg(windows)]
+        let script = {
+            // The script is handed to `cmd.exe /S /C` as a single argv
+            // string; embedded quotes do not survive std's `\"` escaping
+            // (cmd does not understand backslash escapes), so the
+            // grandchild lives in a bare-path .bat file. Skip if either
+            // path needs quoting.
+            let bat_path = bat.to_string_lossy().into_owned();
+            if bat_path.contains(' ') || marker_path.contains(' ') {
+                eprintln!(
+                    "skipping test_idle_timeout_kills_process_tree: \
+                     temp path contains spaces ({bat_path})"
+                );
+                return;
+            }
+            // Quotes inside the .bat itself are fine — cmd parses the
+            // file directly, not through argv escaping.
+            std::fs::write(
+                &bat,
+                "@echo off\r\nping -n 5 127.0.0.1 > NUL\r\necho alive> \"%~1\"\r\n",
+            )
+            .expect("write grandchild .bat");
+            format!("start /B {bat_path} {marker_path}{}ping -n 121 127.0.0.1 > NUL", SHELL_SEP)
+        };
+        #[cfg(unix)]
+        let script = format!("( sleep 4; touch '{marker_path}' ) & sleep 120");
+
+        let mut cmd = bash_cmd(&script);
+        let result = run_command_with_idle_timeout(&mut cmd, TEST_IDLE).await;
+        assert!(
+            result.is_err(),
+            "expected idle timeout, got Ok({result:?})"
+        );
+
+        // A surviving grandchild would create the marker at ~4 s; the
+        // kill fired at ~2 s. Wait past that point and assert absence.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert!(
+            !marker.exists(),
+            "grandchild survived the idle-timeout kill — process tree not contained"
+        );
+
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(&bat);
+        let _ = std::fs::remove_file(&marker);
+    }
 
     #[tokio::test]
     async fn test_idle_timeout_no_output() {

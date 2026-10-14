@@ -471,7 +471,7 @@ export function SnapshotNode({
                           autoFocus
                         />
                         <div className="flex items-center gap-1">
-                          <button onClick={() => onSaveEdit(sectionKey, editingSection.current)} className="flex items-center gap-0.5 rounded bg-[var(--color-accent)] px-2 py-0.5 text-10 text-white transition-opacity hover:opacity-90">
+                          <button onClick={() => onSaveEdit(sectionKey, editingSection.current)} className="flex items-center gap-0.5 rounded bg-accent-strong px-2 py-0.5 text-10 text-white transition-opacity hover:opacity-90">
                             <Check className="h-2.5 w-2.5" />Apply
                           </button>
                           <button onClick={onCancelEdit} className="flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700">

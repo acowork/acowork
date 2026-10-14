@@ -419,7 +419,7 @@ const handleCompressSummary = () => {
                     type="button"
                     onClick={saveWindow}
                     disabled={readOnly}
-                    className="rounded bg-[var(--color-accent)] px-2 py-1 text-11 font-medium text-white transition-[filter] hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded bg-accent-strong px-2 py-1 text-11 font-medium text-white transition-[filter] hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {t("contextUsage.save")}
                   </button>

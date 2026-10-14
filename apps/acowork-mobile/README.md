@@ -34,19 +34,59 @@ npm run tauri:build  # 打包
 `generate_context!` 编进 `libacowork_mobile_lib.so`，所以 APK 里没有 assets 目录，
 只有 `lib/arm64-v8a/`。
 
-```bash
-npx tauri android init                 # 生成 src-tauri/gen/android（已 gitignore）
-npx tauri android build --apk --debug --target aarch64
+**一条命令（推荐，从干净 clone 到 APK）**：
+
+```powershell
+.\dev\android\build_mobile.ps1              # debug APK
+.\dev\android\build_mobile.ps1 -Install     # 顺带装到已连接的设备
+.\dev\android\build_mobile.ps1 -ReleaseApk  # release APK
 ```
 
-> **图标**：启动器图标来自 `src-tauri/icons/android/`（`tauri android init` 会拷进 gen
-> res）。换品牌图标后用 [`dev/common/gen_icons.ps1`](../../dev/common/gen_icons.ps1)
-> （或 `.sh`）一条命令同时重生成 desktop + mobile 并做归属裁剪（mobile 留 `android/`
-> `ios/`，desktop 删之）。已 checkout `gen/android` 时脚本会把 `icons/android/*` 同步
-> 进 gen res——**别**为此重跑 `tauri android init`，那会冲掉手写签名块。
+脚本自己会搞定工具链（自动找 JDK ≥ 17 与 Android SDK）、首次 `tauri android init`、
+图标、权限和 release 构建配置，然后调用 `tauri android build`。**不需要手改 `gen/`。**
 
-产物：`src-tauri/gen/android/app/build/outputs/apk/arm64/debug/app-arm64-debug.apk`
-（debug 包 ~124 MB，未做 strip/LTO；release 需要先配签名，见下）。
+> **为什么必须有这个脚本**：`tauri android init` 每次都从零重建
+> `src-tauri/gen/android/`，而该目录是 gitignore 的。三样东西活不过 init：
+>
+> 1. **自适应启动器图标**——init 会往 `gen/res/` 塞一整套**它自己的默认图标**
+>    （机器人"两个圆圈套一起"）。这里有两个坑，缺一个都会显示成默认图标：
+>
+>    - init 生成两个**同名**的 Android 模板 drawable：
+>      `drawable-v24/ic_launcher_foreground.xml`（系统默认机器人）和
+>      `drawable/ic_launcher_background.xml`（绿底模板）。`@mipmap/ic_launcher_foreground`
+>      在 API 24+ 会**优先命中 drawable 那份**，压过位图——脚本删掉这两个文件。
+>    - 光有自适应图标壳（`mipmap-anydpi-v26/ic_launcher.xml`）不够，它只是**指向**
+>      `mipmap-*dpi` 那 15 张位图。位图才是真正的画。**只同步外壳会留下 init 的旧位图**，
+>      于是外壳指向机器人图，看起来还是默认图标（背景却被改黄了）。
+>
+>    源在 `src-tauri/icons/android/`（已提交）。脚本每次构建都把整个目录
+>    （外壳 + `values/` + 全部 `mipmap-*dpi` 位图）覆盖进 `gen/res/`。
+> 2. **CAMERA 权限**——配网二维码扫描（`src/screens/boot/ScanModal.tsx`，WebView
+>    `getUserMedia`）需要。声明在
+>    [`dev/android/manifest-permissions.xml`](../../dev/android/manifest-permissions.xml)
+>    （已提交），由脚本写进 manifest。缺了它扫码会静默降级成手输地址。
+> 3. **release 签名块 + `usesCleartextTraffic`**——见下节。
+>
+> 换品牌图标后跑 [`dev/common/gen_icons.ps1`](../../dev/common/gen_icons.ps1)（或
+> `.sh`）重生成 desktop + mobile 全部图标；`build_mobile.ps1` 每次构建都会重新同步，
+> 所以**别**为此重跑 `tauri android init`。
+
+构建前脚本会跑 [`dev/android/check_android_icon.py`](../../dev/android/check_android_icon.py)，
+校验三件事：模板 drawable 已删、自适应图标背景是 transparent、`gen/res` 的 15 张位图与
+`src-tauri/icons/android/` **逐字节一致**。任何一条不符就直接中止构建——位图漂移正是
+"同一份源码、有时编出对图标有时编出默认图标"的成因，宁可停下也不要静默出错包。
+
+手动等价流程（仅在需要绕过脚本时）：
+
+```bash
+npx tauri android init
+npx tauri android build --apk --debug --target aarch64
+# 注意：这样出来的包没有图标壳、也没有 CAMERA 权限，
+#       除非你手工补上上面 1、2 两项。
+```
+
+产物：`src-tauri/gen/android/app/build/outputs/apk/**/app-*-debug.apk`
+（debug 包约 130 MB，未做 strip/LTO；release 需要先配签名，见下）。
 
 ### release 签名
 

@@ -29,6 +29,9 @@ describe("indexHealthBanner", () => {
     expect(b?.vars.stored).toBe(512);
     expect(b?.vars.model).toBe(1024);
     expect(b?.extraKey).toBe("memoryPanel.dimMismatchIndexedDetail");
+    // A model swap changes every vector's meaning - only a full re-embed is
+    // honest, whatever the stale/missing counts happen to be.
+    expect(b?.scope).toBe("all");
   });
 
   it("drops the indexed/total suffix on an empty store", () => {
@@ -46,6 +49,9 @@ describe("indexHealthBanner", () => {
     expect(b?.titleKey).toBe("memoryPanel.staleVectorsTitle");
     expect(b?.vars.stale).toBe(294);
     expect(b?.vars.stored).toBe(1024);
+    // The defect this mapping exists to stop: a banner counting a handful of
+    // invisible rows must not cost a full re-embed of the whole store.
+    expect(b?.scope).toBe("repair");
   });
 
   it("reports nodes that lost their vectors", () => {
@@ -53,6 +59,7 @@ describe("indexHealthBanner", () => {
     expect(b?.titleKey).toBe("memoryPanel.missingEmbeddingsTitle");
     expect(b?.vars.indexed).toBe(18);
     expect(b?.vars.total).toBe(20);
+    expect(b?.scope).toBe("repair");
   });
 
   // The panel and the runtime are built separately, so a live panel can be
@@ -65,5 +72,58 @@ describe("indexHealthBanner", () => {
   it("prefers the mismatch over the stale count, since both mean rebuild", () => {
     const b = indexHealthBanner(stats({ stored_dim: 512, model_dim: 1024, vectors_of_other_dim: 7 }));
     expect(b?.titleKey).toBe("memoryPanel.dimMismatchTitle");
+    // The scope follows the banner that fired, not the other defect waiting
+    // behind it: after a model swap every row is suspect, stale count or not.
+    expect(b?.scope).toBe("all");
+  });
+
+  // The live incident this rule prevents: a store with 5831 vectors, 2 of
+  // them foreign-width, dimensions matching. The banner said "2 rows", the
+  // rebuild button scanned all 5831.
+  it("asks for a repair, not a full scan, when two vectors of thousands are foreign", () => {
+    const b = indexHealthBanner(
+      stats({ total_nodes: 5831, nodes_with_embedding: 5831, vectors_of_other_dim: 2 }),
+    );
+    expect(b?.titleKey).toBe("memoryPanel.staleVectorsTitle");
+    expect(b?.scope).toBe("repair");
+  });
+
+  // Front/back consistency: the number the banner promises must be the
+  // number the rebuild's progress bar totals. The backend counts each scope
+  // with the same SQL the scoped migration selects with, so the banner just
+  // reports it - including the rows the headline count cannot see.
+  it("promises the repair-scope row count, not the stale headline, when they differ", () => {
+    const b = indexHealthBanner(
+      stats({ vectors_of_other_dim: 2, rebuild_rows_repair: 5 }),
+    );
+    expect(b?.titleKey).toBe("memoryPanel.staleVectorsTitle");
+    expect(b?.extraKey).toBe("memoryPanel.rebuildRowsDetail");
+    expect(b?.vars.rebuild).toBe(5);
+  });
+
+  it("promises the repair-scope count on the missing-embeddings banner", () => {
+    const b = indexHealthBanner(
+      stats({ nodes_with_embedding: 18, total_nodes: 20, rebuild_rows_repair: 2 }),
+    );
+    expect(b?.extraKey).toBe("memoryPanel.rebuildRowsDetail");
+    expect(b?.vars.rebuild).toBe(2);
+  });
+
+  it("promises the full row count on the model-swap banner", () => {
+    const b = indexHealthBanner(
+      stats({ stored_dim: 512, model_dim: 1024, rebuild_rows_all: 5831 }),
+    );
+    expect(b?.extraKey).toBe("memoryPanel.rebuildRowsDetail");
+    expect(b?.vars.rebuild).toBe(5831);
+    expect(b?.scope).toBe("all");
+  });
+
+  // A runtime predating the fields reports no count. The banner keeps its
+  // legacy suffix and shows no promise - inventing a number here would be
+  // the same lie this rule exists to stop.
+  it("promises nothing when the runtime cannot count the scope", () => {
+    const b = indexHealthBanner(stats({ vectors_of_other_dim: 2 }));
+    expect(b?.extraKey).toBeUndefined();
+    expect(b?.vars.rebuild).toBe(0);
   });
 });

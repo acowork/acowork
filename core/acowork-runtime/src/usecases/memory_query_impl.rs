@@ -178,6 +178,7 @@ impl MemoryQueryService for MemoryAdminAdapter {
         endpoint: &str,
         model_id: &str,
         dimension: usize,
+        scope: acowork_memory::admin::RebuildScope,
         progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> Result<RebuildReport> {
         let store = self
@@ -230,8 +231,7 @@ impl MemoryQueryService for MemoryAdminAdapter {
             let progress_cb: Option<&dyn Fn(u64, u64)> = progress
                 .as_ref()
                 .map(|cb| &**cb as &dyn Fn(u64, u64));
-            admin
-                .migrate_embedding_dimension_with_progress(&embed_fn, dimension, progress_cb)
+            admin.migrate_embedding_dimension_scoped(&embed_fn, dimension, scope, progress_cb)
                 .map_err(|e| crate::error::RuntimeError::Memory(e.to_string()))
         })
         .await

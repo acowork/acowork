@@ -18,6 +18,7 @@
  */
 
 import { Fragment, useEffect, useState, type ReactNode } from 'react'
+import { Send } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
 import { useUserChatStore, setUserChatThreadOnScreen } from '../../stores/userChatStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -190,15 +191,21 @@ export function UserChatScreen() {
                   const sep = daySeparator(turn.prevTs, turn.firstTs) ?? timeGapSeparator(turn.prevTs, turn.firstTs)
                   const avatar = turn.isUser ? meAvatar : peerAvatar
                   const name = turn.isUser ? myName : peerDisplayName
+                  const role = turn.isUser
+                    ? (me?.role === 'admin' ? '管理员' : me?.role === 'user' ? '用户' : null)
+                    : (peerUser?.role === 'admin' ? '管理员' : peerUser?.role === 'user' ? '用户' : null)
                   return (
                     <Fragment key={turn.items[0]!.id}>
                       {sep ? <div className="time-sep">{sep}</div> : null}
                       <div className={`msg-group${turn.isUser ? ' msg-group-self' : ' msg-group-peer'}`}>
-                        <div className="msg-avatar">{avatar}</div>
-                        <div className="msg-main">
+                        <div className="msg-header">
+                          <div className="msg-avatar">{avatar}</div>
                           <div className="msg-sender">
                             <span className="msg-sender-name">{name}</span>
+                            {role ? <span className="msg-sender-role">{role}</span> : null}
                           </div>
+                        </div>
+                        <div className="msg-stack">
                           {turn.items.map((m) => (
                             <Bubble key={m.id} msg={m} />
                           ))}
@@ -242,7 +249,7 @@ export function UserChatScreen() {
             disabled={!draft.trim() || sending || !me}
             onClick={() => void submit()}
           >
-            发送
+            <Send className="composer-send-icon" aria-hidden />
           </button>
         </div>
       </div>

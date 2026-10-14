@@ -71,6 +71,8 @@ setPresenceDeps({
   wsUrl: mqttWsUrl,
   connectOpts: () => mqttConnectOpts((sub, device) => `${sessionClientId(sub, device)}-presence`),
   onUpdate: (agentId, update) => useAgentStore.getState().applyPresence(agentId, update.status),
+  onSessionState: (agentId, sessionId, status) =>
+    useAgentStore.getState().applySessionState(agentId, sessionId, status),
   chatTopic: () => {
     const me = useAuthStore.getState().me?.user_id
     return me ? userChatChangedTopic(me) : null
@@ -110,7 +112,13 @@ setDirectorySource({
   },
   loadUsers: async (): Promise<UserSummary[]> => {
     const rows = await fetchDirectory()
-    return rows.map((u) => ({ id: u.user_id, display_name: u.display_name, avatar: u.avatar ?? null, builtin_avatar: u.builtin_avatar ?? null }))
+    return rows.map((u) => ({
+      id: u.user_id,
+      display_name: u.display_name,
+      role: u.role,
+      avatar: u.avatar ?? null,
+      builtin_avatar: u.builtin_avatar ?? null,
+    }))
   },
   loadNodes: async (): Promise<NodeRow[]> => {
     const rows = await fetchNodes()

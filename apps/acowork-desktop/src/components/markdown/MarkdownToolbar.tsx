@@ -226,7 +226,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
             <button
               type="button"
               onClick={insertTable}
-              className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white hover:opacity-90"
+              className="rounded bg-accent-strong px-2 py-0.5 text-11 font-medium text-white hover:opacity-90"
             >
               {t("doc.tbTableInsert")}
             </button>

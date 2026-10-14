@@ -18,6 +18,18 @@ import type { AgentSummary, NodeRow, SessionInfo, UserSummary } from '../lib/typ
  *  `/start` returns (over MQTT), so poll the directory until it flips or a
  *  bounded budget runs out. Cheap (directory-only) and self-terminating. */
 const START_POLL_MS = 1_500
+/** Runtime `SessionStatus` variants that mean "the agent is mid-turn" —
+ *  the exact set Desktop's `isProcessing` (ADR-014) treats as non-idle.
+ *  `errored` is deliberately OUT: an error is surfaced in the thread, not
+ *  as a breathing dot claiming work is in flight. */
+const WORKING_STATUSES = new Set([
+  'llm_awaiting_first_chunk',
+  'thinking',
+  'llm_streaming',
+  'tool_executing',
+  'waiting_approval',
+  'paused',
+])
 const START_POLL_LIMIT = 8
 
 /** Injected by `lib/api.ts` wiring at boot; keeps the store HTTP-free. */
@@ -35,6 +47,10 @@ export function setDirectorySource(d: DirectorySource): void {
 
 interface AgentStore {
   agents: Record<string, { info: AgentSummary; sessions: SessionInfo[] }>
+  /** agentId -> sessionIds currently mid-turn, fed by the presence socket's
+   *  `.../sessions/+/state` subscription (parity with Desktop's
+   *  `busyAgentIds`). The inbox's breathing working dot reads this. */
+  busySessions: Record<string, Set<string>>
   agentList: AgentSummary[]
   users: UserSummary[]
   /** Node topology for the inbox's per-node grouping. The server already
@@ -98,6 +114,10 @@ interface AgentStore {
   fetchNodes(): Promise<void>
   /** Prepend/merge a page of session history into the owning agent's slot. */
   mergeSessions: (agentId: string, items: SessionInfo[]) => void
+  /** Fleet session-state push (`acowork/agents/+/sessions/+/state` over the
+   *  presence socket). The inbox's working dot reads `busySessions` — the
+   *  same signal Desktop's sidebar derives `busyAgentIds` from. */
+  applySessionState(agentId: string, sessionId: string, status: string): void
   /** Replace an agent's session list with a freshly loaded page 1. */
   setSessions: (agentId: string, items: SessionInfo[]) => void
   /** Fill the preview text of one session (the server has no such field). */
@@ -110,6 +130,7 @@ interface AgentStore {
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
   agents: {},
+  busySessions: {},
   agentList: [],
   users: [],
   nodes: [],
@@ -248,6 +269,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }
     }),
 
+  applySessionState: (agentId, sessionId, status) =>
+    set((s) => {
+      const working = WORKING_STATUSES.has(status)
+      const cur = s.busySessions[agentId]
+      if (!working) {
+        if (!cur || !cur.has(sessionId)) return s
+        const nextSet = new Set(cur)
+        nextSet.delete(sessionId)
+        const next = { ...s.busySessions }
+        if (nextSet.size === 0) delete next[agentId]
+        else next[agentId] = nextSet
+        return { busySessions: next }
+      }
+      if (cur?.has(sessionId)) return s
+      const nextSet = new Set(cur ?? [])
+      nextSet.add(sessionId)
+      return { busySessions: { ...s.busySessions, [agentId]: nextSet } }
+    }),
+
   setAgents: (list) =>
     set((s) => {
       // Preserve already-fetched session pages when the directory refreshes,
@@ -262,12 +302,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   applyPresence: (agentId, status) =>
     set((s) => {
       const slot = s.agents[agentId]
-      if (!slot || slot.info.status === status) return s
+      // An agent that just went offline cannot be working; drop its stale
+      // session states so a mid-turn socket death cannot breathe forever.
+      const dropBusy = status === 'offline' && s.busySessions[agentId] !== undefined
+      const busyPatch = () => {
+        if (!dropBusy) return {}
+        const next = { ...s.busySessions }
+        delete next[agentId]
+        return { busySessions: next }
+      }
+      if (!slot) return busyPatch()
+      if (slot.info.status === status) return dropBusy ? busyPatch() : s
       const info = { ...slot.info, status }
       // A directory refresh can still overwrite this with a verdict polled
       // before the transition — that is bounded (the next poll, and the
       // status topic's own heartbeat, both re-assert it within seconds).
       return {
+        ...busyPatch(),
         agentList: s.agentList.map((a) => (a.id === agentId ? info : a)),
         agents: { ...s.agents, [agentId]: { ...slot, info } },
       }

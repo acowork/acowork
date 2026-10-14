@@ -2574,7 +2574,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
                   </span>
                   <button
                     onClick={handleContinue}
-                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
+                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-accent-strong px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                   >
                     <Play className="h-3 w-3" />
@@ -2595,7 +2595,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
                   </span>
                   <button
                     onClick={handleContinue}
-                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
+                    className="ml-auto flex w-fit max-w-full items-center gap-1 rounded bg-accent-strong px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                   >
                     <Play className="h-3 w-3" />

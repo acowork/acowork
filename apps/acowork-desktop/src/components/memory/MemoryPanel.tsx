@@ -194,14 +194,19 @@ export function MemoryPanel() {
     void fetchStats(selectedAgentId);
   };
 
-  const handleRebuildIndex = () => {
-    if (!selectedAgentId) return;
-    void rebuildIndex(selectedAgentId);
-  };
-
   // Which index-health problem, if any, to show the banner for. The rule lives
   // in ./indexHealth so it can be tested without rendering the panel.
   const healthBanner = indexHealthBanner(stats);
+
+  const handleRebuildIndex = () => {
+    if (!selectedAgentId) return;
+    // The banner is the only entry point to this button, and the rule that
+    // fired the banner also decides the repair scope — a model swap re-embeds
+    // everything, a foreign-width/missing-vector defect re-embeds only the
+    // rows retrieval cannot see. The scope travels with the banner decision
+    // (see ./indexHealth) so the two can never drift apart.
+    void rebuildIndex(selectedAgentId, healthBanner?.scope ?? "all");
+  };
 
   // While migration is in flight, show the rebuilt/total fraction so the
   // user can see progress. Falls back to plain "重建中…" if the Gateway has

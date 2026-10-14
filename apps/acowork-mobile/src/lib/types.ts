@@ -20,9 +20,10 @@ export interface SessionInfo {
   /** Ids of the last few messages, used to build the IM-style preview. */
   last_message?: string | null
   /**
-   * Server-side truth for "has this session moved?" — the unread dot
-   * compares it against the count the user last saw (§8.5). Absent until a
-   * list load fills it; absence means "no dot", never "definitely read".
+   * Server-side truth for "has this session moved?". Absent until a list load
+   * fills it. No longer drives an unread dot (the list row shows only the
+   * green working dot, like the Desktop sidebar), but it stays the change
+   * detector for tail reloads — see chatStore's `messagesStale`.
    */
   message_count?: number
 }
@@ -50,6 +51,10 @@ export interface AgentSummary {
 export interface UserSummary {
   id: string
   display_name: string
+  /** Login role (ADR-076 §决策 5). Optional because Gateway versions predating
+   * the role-on-directory change will not return it — the IM header falls back
+   * to omitting the badge in that case rather than guessing. */
+  role?: 'user' | 'admin' | null
   /** Custom avatar file path. */
   avatar?: string | null
   /** Builtin icon ID (e.g. "icon-05"). */
@@ -128,6 +133,8 @@ export interface DirectoryEntry {
   user_id: string
   username: string
   display_name: string
+  /** Login role (ADR-076 §决策 5). */
+  role: 'user' | 'admin'
   avatar?: string | null
   builtin_avatar?: string | null
 }

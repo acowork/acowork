@@ -107,7 +107,22 @@ function decodeSessionState(buf: Uint8Array): RealtimeEvent {
     if (f.no === 3) status = s(f.val)
     if (f.no === 4) count = n(f.val)
   }
-  return { kind: 'state', status, messageCount: count }
+  return { kind: 'state', status: unwrapStatus(status), messageCount: count }
+}
+
+/** The wire's `SessionState.status` is a serde tagged-enum JSON string
+ * (`{"status":"tool_executing",...}`), not a bare enum name — Desktop's
+ * Rust layer parses it before emitting, so every consumer here matches
+ * on the inner name. Tolerates a bare string in case the publisher ever
+ * changes. */
+function unwrapStatus(raw: string): string {
+  if (!raw.startsWith('{')) return raw
+  try {
+    const v: unknown = JSON.parse(raw)
+    return v && typeof v === 'object' && typeof (v as { status?: unknown }).status === 'string'
+      ? (v as { status: string }).status
+      : raw
+  } catch { return raw }
 }
 
 /** DataEnvelope{version=1, payload oneof: session_message=15, session_state=18}. */

@@ -369,7 +369,7 @@ export function DocEditor() {
           className={cn(
             "flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors disabled:opacity-40",
             dirty
-              ? "bg-[var(--color-accent)] text-white hover:opacity-90"
+              ? "bg-accent-strong text-white hover:opacity-90"
               : "border border-zinc-200 text-text-tertiary dark:border-zinc-700",
           )}
         >

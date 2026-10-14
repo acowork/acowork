@@ -384,6 +384,9 @@
   },
   "agentList": {
     "doubleClickToStart": "Double-click to start",
+    "dotBusy": "This agent is working",
+    "dotOnline": "Online",
+    "dotOffline": "Offline",
     "searchPlaceholder": "Search agents...",
     "stopConfirm": "Stop {{agent}}? Current conversation state will be preserved.",
     "uninstallConfirm": "Uninstall {{agent}}? This action cannot be undone.",
@@ -1344,6 +1347,7 @@
     "dimMismatchIndexedDetail": "Indexed nodes: {{indexed}} / {{total}}",
     "staleVectorsTitle": "Some vectors are stored at the wrong width",
     "staleVectorsDetail": "{{stale}} vectors are not {{stored}}-dimensional and are skipped by search",
+    "rebuildRowsDetail": "This rebuild will process {{rebuild}} records",
     "rebuildIndex": "Rebuild Index",
     "rebuildIndexInProgress": "Rebuilding…",
     "rebuildFailed": "Index rebuild failed: {{error}}",

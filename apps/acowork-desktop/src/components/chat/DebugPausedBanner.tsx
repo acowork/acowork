@@ -101,7 +101,7 @@ export function DebugPausedBanner() {
           <button
             type="button"
             onClick={handleResume}
-            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
+            className="flex items-center gap-1 rounded bg-accent-strong px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
           >
             <Play className="h-3 w-3" fill="currentColor" />
             <span>{t("debugPausedBanner.resume")}</span>
@@ -110,7 +110,7 @@ export function DebugPausedBanner() {
           <button
             type="button"
             onClick={handleStep}
-            className="flex items-center gap-1 rounded bg-[var(--color-accent)] px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
+            className="flex items-center gap-1 rounded bg-accent-strong px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
           >
             <StepForward className="h-3 w-3" />
             <span>{t("debugPausedBanner.step")}</span>

@@ -707,7 +707,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
             <button
               onClick={() => onApprove("allow", specificApproval)}
               className="rounded-md px-2 py-0.5 text-11 font-medium text-white transition-opacity hover:opacity-90"
-              style={{ backgroundColor: "var(--color-accent)" }}
+              style={{ backgroundColor: "var(--color-accent-strong)" }}
             >
               Allow
             </button>

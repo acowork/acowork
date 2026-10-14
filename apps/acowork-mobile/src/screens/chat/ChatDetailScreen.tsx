@@ -22,13 +22,13 @@
  */
 
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
-import { Clock } from 'lucide-react'
+import { Clock, Send, Settings2, Brain, Briefcase, Sparkles, Cpu, ChevronRight, Wrench, Image as ImageIcon, Check } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { isActiveStatus, useChatStore } from '../../stores/chatStore'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useSessionReadOnly } from '../../lib/session-write-access'
-import { setSessionVisibility } from '../../lib/api'
+import { setSessionVisibility, fetchWorkspaces, attachWorkspace, type WorkspaceEntry, listKeys, fetchProviderModels, fetchSkills, patchSessionConfig, fetchSessionConfig, type VaultKeyEntry, type ProviderModel, type SkillEntry, type SessionConfigSnapshot } from '../../lib/api'
 import { useForegroundRefresh } from '../../lib/foreground'
 import { useStickToBottom } from '../../lib/stickToBottom'
 import { Banner, ListRow, Sheet } from '../../components/ui'
@@ -151,6 +151,41 @@ export function ChatDetailScreen() {
    *  active one, so deleting row A never silently deletes the open row B. */
   const [manageId, setManageId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  /** Composer settings sheet (model / reasoning / workspace / skill).
+   *  `composerMenu` is the parent; one of `modelOpen | effortOpen |
+   *  workspaceOpen | skillOpen` is the sub-sheet. Only one level is open
+   *  at a time — picking a row on the parent swaps it for the sub. */
+  const [composerMenu, setComposerMenu] = useState(false)
+  const [modelOpen, setModelOpen] = useState(false)
+  const [effortOpen, setEffortOpen] = useState(false)
+  const [workspaceOpen, setWorkspaceOpen] = useState(false)
+  const [skillOpen, setSkillOpen] = useState(false)
+  /** Snapshot of the active session's effective config — backs the "current"
+   *  badges on the model / effort / workspace rows so the picker is not a
+   *  mystery box. Refreshed on session change and after every picker write. */
+  const [configSnap, setConfigSnap] = useState<SessionConfigSnapshot | null>(null)
+  // Workspace list, fetched once per agent — the parent menu's
+  // "工作区选择" trail needs to render the *name* of the attached
+  // workspace (`configSnap.workspace_id` is just an id, see api.ts
+  // SessionConfigSnapshot). Keeping the list in the parent avoids
+  // round-tripping the picked name up from the sub-sheet.
+  const [workspaces, setWorkspaces] = useState<WorkspaceEntry[]>([])
+  // Resolves `configSnap.workspace_id` to the human label the user
+  // picked in the vault (`alias` first, then `path`, then the id as a
+  // last resort). Used as the parent menu's "工作区选择" trail text so
+  // the user sees the actual workspace name after attach, not the
+  // bare "已附加".
+  const attachedWorkspaceLabel = (() => {
+    const id = configSnap?.workspace_id
+    if (!id) return null
+    const ws = workspaces.find((w) => w.id === id)
+    return ws?.alias?.trim() || ws?.path || id
+  })()
+  /** The skill selected via the composer skill picker; rides the next
+   *  message's `command` field and is cleared after send (desktop
+   *  parity: clearActiveSkill in chatStore). Held in local state instead
+   *  of the chat store because no other surface of the app needs to know. */
+  const [activeSkill, setActiveSkill] = useState<SkillEntry | null>(null)
   const active = sessions.find((s) => s.session_id === activeId)
   // Follow rule: a refresh only scrolls to the bottom while the user is
   // already at it. A session switch (forceKey) re-pins, and so does a send
@@ -171,6 +206,38 @@ export function ChatDetailScreen() {
     if (agentId && activeId) startWatching(agentId, activeId)
     return () => stopWatching()
   }, [agentId, activeId, startWatching, stopWatching])
+
+  // Pull the session's effective config whenever the active session
+  // changes — the model / effort pickers badge "current" against this
+  // snapshot so the user knows what they're switching from. A failure
+  // (rare, ADR-087 access denied) is silent — the pickers still work,
+  // they just lack the "current" label.
+  useEffect(() => {
+    if (!agentId || !activeId) {
+      setConfigSnap(null)
+      return
+    }
+    let alive = true
+    fetchSessionConfig(agentId, activeId)
+      .then((c) => { if (alive) setConfigSnap(c) })
+      .catch(() => { if (alive) setConfigSnap(null) })
+    return () => { alive = false }
+  }, [agentId, activeId])
+
+  // Workspace list mirrors the per-agent scope of `fetchWorkspaces`
+  // (the server resolves it against the runtime's known workspaces, so
+  // it never crosses agent boundaries). Refreshed on agent switch.
+  useEffect(() => {
+    if (!agentId) {
+      setWorkspaces([])
+      return
+    }
+    let alive = true
+    fetchWorkspaces(agentId)
+      .then((list) => { if (alive) setWorkspaces(list ?? []) })
+      .catch(() => { if (alive) setWorkspaces([]) })
+    return () => { alive = false }
+  }, [agentId])
 
   // §11.3: iOS freezes timers in the background, so the data on screen is
   // simply old on return. Reload rather than waiting for the next tick — and
@@ -194,8 +261,17 @@ export function ChatDetailScreen() {
     const text = draft.trim()
     if (!text || !agentId || !activeId || readOnly) return
     stickNow()
-    const ok = await sendMessage(agentId, activeId, text)
-    if (ok) setDraft('')
+    // The active skill (set via the composer skill picker) rides the next
+    // message as `command`. Clear it after the send so the user has to
+    // re-pick if they want the same skill on the next turn — desktop
+    // parity (clearActiveSkill in chatStore). command="", not undefined,
+    // so the wire field is sent explicitly even when no skill is active.
+    const skillName = activeSkill?.name
+    const ok = await sendMessage(agentId, activeId, text, skillName)
+    if (ok) {
+      setDraft('')
+      setActiveSkill(null)
+    }
   }
 
   const approvalRequestId =
@@ -290,17 +366,21 @@ export function ChatDetailScreen() {
               const sep = daySeparator(turn.prevTs, turn.firstTs) ?? timeGapSeparator(turn.prevTs, turn.firstTs)
               const avatar = turn.isUser ? userAvatar : agentAvatar
               const name = turn.isUser ? userName : (agent?.name ?? '助手')
-              const role = turn.isUser ? null : (agent?.role ?? null)
+              const role = turn.isUser
+                ? (me?.role === 'admin' ? '管理员' : me?.role === 'user' ? '用户' : null)
+                : (agent?.role ?? null)
               return (
                 <Fragment key={turn.key}>
                   {sep ? <div className="time-sep">{sep}</div> : null}
                   <div className={`msg-group${turn.isUser ? ' msg-group-self' : ' msg-group-peer'}`}>
-                    <div className="msg-avatar">{avatar}</div>
-                    <div className="msg-main">
+                    <div className="msg-header">
+                      <div className="msg-avatar">{avatar}</div>
                       <div className="msg-sender">
                         <span className="msg-sender-name">{name}</span>
                         {role ? <span className="msg-sender-role">{role}</span> : null}
                       </div>
+                    </div>
+                    <div className="msg-stack">
                       {turn.items.map((item) =>
                         item.type === 'explore'
                           ? <ExploreBlock key={`explore-${item.items[0]!.id}`} items={item.items} />
@@ -315,8 +395,10 @@ export function ChatDetailScreen() {
           {/* Failed draft: kept visible with an explicit retry (edge states). */}
           {state?.pendingSend ? (
             <div className="msg-group msg-group-self">
-              <div className="msg-avatar">{userAvatar}</div>
-              <div className="msg-main">
+              <div className="msg-header">
+                <div className="msg-avatar">{userAvatar}</div>
+              </div>
+              <div className="msg-stack">
                 <div
                   className={`bubble bubble-self bubble-raw bubble-failed${state.pendingSend.state === 'sending' ? ' is-sending' : ''}`}
                 >
@@ -419,6 +501,21 @@ export function ChatDetailScreen() {
         {/* Read-only sessions render NO composer at all. */}
         {readOnly ? null : (
           <div className="composer">
+            {/* Settings cog sits on the LEFT, mirroring Desktop's
+             *  bottom-of-input toolbar (Model / Reasoning / Workspace
+             *  / Skill are leading cluster). Hidden before the user
+             *  has any session — the "send first message creates a
+             *  session" path has nothing to configure. */}
+            {activeId ? (
+              <button
+                type="button"
+                className="composer-settings"
+                aria-label="会话设置"
+                onClick={() => setComposerMenu(true)}
+              >
+                <Settings2 className="composer-send-icon" aria-hidden />
+              </button>
+            ) : null}
             <textarea
               className="composer-input"
               rows={1}
@@ -434,12 +531,28 @@ export function ChatDetailScreen() {
               disabled={!draft.trim() || state?.pendingSend?.state === 'sending'}
               onClick={() => void (activeId ? send() : sendFirst())}
             >
-              发送
+              <Send className="composer-send-icon" aria-hidden />
             </button>
           </div>
         )}
 
         <Sheet open={switcherOpen} onClose={() => setSwitcherOpen(false)} title={agent?.name}>
+          {/* High-frequency action. Sits at the TOP of the sheet so a tap
+           * on the history button → tap on "新建会话" is the only path,
+           * with no scroll required even when the session list is long.
+           * The hairline below separates the "actions" group from the
+           * "history" group (same iOS grouped-list idiom used elsewhere
+           * in the app). Desktop keeps these two side-by-side at the
+           * top level; mobile folds them into a sub-sheet but the
+           * action is never more than one tap away from the entry. */}
+          <ListRow
+            label="＋ 新建会话"
+            onClick={() => {
+              setSwitcherOpen(false)
+              void createSession(agentId!)
+            }}
+          />
+          <div className="menu-sep" />
           {sessions.map((s) => {
             const isReadOnly = s.can_write === false
             return (
@@ -458,7 +571,6 @@ export function ChatDetailScreen() {
                     </span>
                   }
                   value={s.session_id === activeId ? '✓' : undefined}
-                  hint={s.last_message ?? undefined}
                 />
                 {/* §5.4: delete and visibility live behind a per-row menu,
                     not on the row itself — a mis-tap on a chat list must
@@ -477,13 +589,6 @@ export function ChatDetailScreen() {
               </div>
             )
           })}
-          <ListRow
-            label="＋ 新建会话"
-            onClick={() => {
-              setSwitcherOpen(false)
-              void createSession(agentId!)
-            }}
-          />
           {sessionsHasMore ? (
             <ListRow label="加载更多" onClick={() => void loadMoreSessions(agentId!)} />
           ) : null}
@@ -524,10 +629,515 @@ export function ChatDetailScreen() {
           })()}
         </Sheet>
 
+        {/* Composer settings (cog button → this sheet). Four sub-sheets
+         *  mirror Desktop's bottom-of-input toolbar: Model / Reasoning /
+         *  Workspace / Skill. The trail text on each row reflects the
+         *  current value (`configSnap`) so the menu reads as a status
+         *  surface, not a blank list. Tapping a row opens the matching
+         *  sub-sheet — only one level open at a time. */}
+        <Sheet open={composerMenu} onClose={() => setComposerMenu(false)} title="会话设置">
+          <div className="menu-section-title">输入选项</div>
+          <button
+            type="button"
+            className="menu-row"
+            onClick={() => { setModelOpen(true) }}
+          >
+            <span className="menu-row-icon"><Cpu className="h-4 w-4" /></span>
+            <span className="menu-row-label">模型选择</span>
+            <span className="menu-row-trail">{configSnap?.model ?? '默认'}</span>
+            <span className="menu-row-arrow"><ChevronRight className="h-4 w-4" /></span>
+          </button>
+          <button
+            type="button"
+            className="menu-row"
+            onClick={() => { setEffortOpen(true) }}
+          >
+            <span className="menu-row-icon"><Brain className="h-4 w-4" /></span>
+            <span className="menu-row-label">推理深度</span>
+            <span className="menu-row-trail">{effortLabel(configSnap?.reasoning_effort)}</span>
+            <span className="menu-row-arrow"><ChevronRight className="h-4 w-4" /></span>
+          </button>
+          <button
+            type="button"
+            className="menu-row"
+            onClick={() => { setWorkspaceOpen(true) }}
+          >
+            <span className="menu-row-icon"><Briefcase className="h-4 w-4" /></span>
+            <span className="menu-row-label">工作区选择</span>
+            <span className="menu-row-trail">{attachedWorkspaceLabel ?? '未附加'}</span>
+            <span className="menu-row-arrow"><ChevronRight className="h-4 w-4" /></span>
+          </button>
+          <button
+            type="button"
+            className="menu-row"
+            onClick={() => { setSkillOpen(true) }}
+          >
+            <span className="menu-row-icon"><Sparkles className="h-4 w-4" /></span>
+            <span className="menu-row-label">技能选择</span>
+            <span className="menu-row-trail">{activeSkill ? activeSkill.name : '无'}</span>
+            <span className="menu-row-arrow"><ChevronRight className="h-4 w-4" /></span>
+          </button>
+          {activeSkill ? (
+            <div className="menu-subsection menu-hint-row">
+              <span className="menu-hint-row-text">
+                下条消息将以技能「{activeSkill.name}」发送；发送后自动清除。
+              </span>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => setActiveSkill(null)}
+              >
+                清除
+              </button>
+            </div>
+          ) : null}
+        </Sheet>
+
+        {/* Model picker — real. Loads providers + configured models on
+         *  open, intersecting each provider's `models[]` allowlist with
+         *  `fetchProviderModels` so the user sees exactly what they
+         *  picked in the vault, not the catalog. Tapping a row PATCHes
+         *  the session config and refreshes the parent menu's trail. */}
+        <ComposerModelSheet
+          open={modelOpen}
+          agentId={agentId ?? null}
+          sessionId={activeId}
+          current={configSnap}
+          onClose={() => {
+            setModelOpen(false)
+            // Refresh the parent menu's badge after a write.
+            if (agentId && activeId) void fetchSessionConfig(agentId, activeId).then(setConfigSnap).catch(() => undefined)
+          }}
+        />
+
+        {/* Reasoning effort picker — real. Builds the offered-effort list
+         *  from the current model's `default_reasoning_effort` and the
+         *  universal set (`off | low | medium | high`), then PATCHes the
+         *  chosen value to the session config. */}
+        <ComposerEffortSheet
+          open={effortOpen}
+          agentId={agentId ?? null}
+          sessionId={activeId}
+          current={configSnap}
+          onClose={() => {
+            setEffortOpen(false)
+            if (agentId && activeId) void fetchSessionConfig(agentId, activeId).then(setConfigSnap).catch(() => undefined)
+          }}
+        />
+
+        {/* Workspace picker — wired. Reuses the same fetch + attach pair
+         *  the AgentDrawer "工作区" tab uses; tapping a row attaches that
+         *  workspace to the active session. */}
+        <ComposerWorkspaceSheet
+          open={workspaceOpen}
+          agentId={agentId ?? null}
+          sessionId={activeId}
+          current={configSnap}
+          onClose={() => setWorkspaceOpen(false)}
+        />
+
+        {/* Skill picker — real. Loads the agent's skills on open; tapping
+         *  a row sets the local active-skill flag, which rides the next
+         *  message as the wire `command` field (resolved by the agent's
+         *  SkillRegistry — see lib/api.ts sendMessage). */}
+        <ComposerSkillSheet
+          open={skillOpen}
+          agentId={agentId ?? null}
+          current={activeSkill}
+          onPick={(s) => {
+            setActiveSkill(s)
+            setSkillOpen(false)
+          }}
+          onClear={() => {
+            setActiveSkill(null)
+            setSkillOpen(false)
+          }}
+        />
+
         {agentId ? (
           <AgentDrawer open={drawerOpen} agentId={agentId} onClose={() => setDrawerOpen(false)} />
         ) : null}
       </div>
     </EdgeSwipe>
+  )
+}
+
+/** The workspace sub-sheet inside the composer settings menu. Loads the
+ *  agent's workspace list on open and lets the user attach one to the
+ *  active session. Identical wiring to AgentDrawer's WorkspaceTab — both
+ *  feed off `fetchWorkspaces` + `attachWorkspace` — but the surface is a
+ *  plain Sheet so the user reads it as part of the composer flow, not as
+ *  an agent-settings drawer. */
+function ComposerWorkspaceSheet({
+  open,
+  agentId,
+  sessionId,
+  current,
+  onClose,
+}: {
+  open: boolean
+  agentId: string | null
+  sessionId: string | null
+  /** Picker mirrors the model/effort pattern: the row whose id matches
+   *  `current.workspace_id` is rendered with the same `is-selected` tint
+   *  and a trailing `Check`, so the user sees which workspace the
+   *  session is actually attached to before they pick another. */
+  current: SessionConfigSnapshot | null
+  onClose: () => void
+}) {
+  const [items, setItems] = useState<WorkspaceEntry[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+
+  // Re-fetch every time the sheet opens; the workspace list can grow on
+  // another device (the desktop app) and we want this picker to show the
+  // freshest set when the user opens it. `alive` mirrors ComposerModelSheet
+  // / ComposerSkillSheet so a quick close-then-reopen doesn't fire
+  // setState on a returned-null component.
+  useEffect(() => {
+    if (!open || !agentId) return
+    let alive = true
+    setLoading(true)
+    setError(null)
+    fetchWorkspaces(agentId)
+      .then((list) => { if (alive) setItems(list) })
+      .catch((e) => { if (alive) setError(e instanceof Error ? e.message : '加载失败') })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [open, agentId])
+
+  return (
+    <Sheet open={open} onClose={onClose} title="工作区选择">
+      {note ? <div className="menu-subsection">{note}</div> : null}
+      {loading ? <ListRow label="载入中…" /> : null}
+      {error ? <ListRow label={error} destructive /> : null}
+      {items && items.length === 0 ? (
+        <ListRow label="该 Agent 暂无工作区" hint="在桌面端添加" />
+      ) : null}
+      {items?.map((ws) => {
+        const id = ws.id
+        if (!id) return null
+        const label = ws.alias?.trim() || ws.path || id
+        const access = ws.access === 'read-only' ? '只读' : '读写'
+        const isCurrent = current?.workspace_id === id
+        return (
+          <ListRow
+            key={id}
+            label={label}
+            value={
+              <span className="cap-icons">
+                <span>{access}</span>
+                {isCurrent ? <Check size={14} className="cap-icon-check" /> : null}
+              </span>
+            }
+            selected={isCurrent}
+            onClick={() => {
+              if (!agentId || !sessionId) {
+                setNote('当前会话未打开无法附加工作区')
+                return
+              }
+              attachWorkspace(agentId, sessionId, id)
+                .then(() => {
+                  // Close the sub so the user lands back on the parent
+                  // menu (which re-fetches the snapshot on its onClose
+                  // and updates the trail from "未附加" → "已附加" as the
+                  // visible confirmation that the attach took). Keeping
+                  // `note` for the error path only.
+                  onClose()
+                })
+                .catch((e) => setNote(e instanceof Error ? e.message : '附加失败'))
+            }}
+          />
+        )
+      })}
+    </Sheet>
+  )
+}
+
+/** Human label for the reasoning-effort enum the backend understands.
+ *  Centralised so the menu's "current" trail and the sub-sheet rows
+ *  agree on the same string per value. */
+const EFFORT_LABELS: Record<string, string> = {
+  off: '关闭',
+  low: '低',
+  medium: '中',
+  high: '高',
+  minimal: '最小',
+}
+function effortLabel(v: string | null | undefined): string {
+  if (!v) return '默认'
+  return EFFORT_LABELS[v] ?? v
+}
+
+/** The four canonical effort values, ordered low → high. We always offer
+ *  this set; the model picker can hide the picker entirely when the
+ *  selected model has `reasoning: false` in its capability row, but the
+ *  backend is the source of truth and will silently accept whatever we
+ *  send — so it's safe to surface this list even before we've confirmed
+ *  the model has reasoning. */
+const EFFORT_OPTIONS = ['off', 'low', 'medium', 'high'] as const
+
+/** Model sub-sheet. Intersects each vault key's `models[]` allowlist with
+ *  the per-provider capability catalog so the list is exactly what the
+ *  user would see in Desktop's ModelMenu. Tapping a row PATCHes the
+ *  session config and closes the sheet; the parent re-pulls config on
+ *  close so the "current" trail stays in sync. */
+function ComposerModelSheet({
+  open,
+  agentId,
+  sessionId,
+  current,
+  onClose,
+}: {
+  open: boolean
+  agentId: string | null
+  sessionId: string | null
+  current: SessionConfigSnapshot | null
+  onClose: () => void
+}) {
+  const [keys, setKeys] = useState<VaultKeyEntry[] | null>(null)
+  const [catalog, setCatalog] = useState<Record<string, ProviderModel[]>>({})
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+
+  // Re-load on every open. The vault can grow (the user adds a new key
+  // in desktop); a stale list would silently miss the new provider.
+  useEffect(() => {
+    if (!open || !agentId) return
+    let alive = true
+    setLoading(true)
+    setError(null)
+    listKeys()
+      .then(async (ks) => {
+        if (!alive) return
+        setKeys(ks)
+        // Fire one capability fetch per unique provider; the per-account
+        // catalog is identical so a 3-key provider doesn't trip 3 calls.
+        const providers = [...new Set(ks.map((k) => k.provider))]
+        const results = await Promise.all(providers.map((p) => fetchProviderModels(p)))
+        if (!alive) return
+        const map: Record<string, ProviderModel[]> = {}
+        providers.forEach((p, i) => { map[p] = results[i]?.models ?? [] })
+        setCatalog(map)
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'))
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [open, agentId])
+
+  if (!open) return null
+
+  // Build the displayed list: one row per (provider, account, model)
+  // triple, intersected with the provider capability catalog so we don't
+  // show an id the user hasn't enabled. Then group by provider so the
+  // picker mirrors Desktop's flat ModelMenu (provider as section header,
+  // models stacked under it) instead of repeating the provider on every
+  // row.
+  type Row = { provider: string; accountId: string | null; modelId: string; cap: ProviderModel | null }
+  const rows: Row[] = []
+  keys?.forEach((k) => {
+    const ids = (k.models && k.models.length > 0) ? k.models : (k.default_model ? [k.default_model] : [])
+    const caps = catalog[k.provider] ?? []
+    for (const id of ids) {
+      rows.push({ provider: k.provider, accountId: k.account_id ?? null, modelId: id, cap: caps.find((m) => m.id === id) ?? null })
+    }
+  })
+
+  // Strip the leading "provider/" from a model id only when the tail is
+  // actually longer (e.g. "openai/gpt-4o" → "gpt-4o"). Same rule as
+  // Desktop's ModelMenu (ChatPanel.tsx ~L3610).
+  const displayName = (id: string): string => {
+    const slash = id.indexOf('/')
+    if (slash < 0) return id
+    const prefix = id.slice(0, slash)
+    const tail = id.slice(slash + 1)
+    return tail.length > prefix.length ? tail : id
+  }
+
+  // Group rows by provider. Sort each bucket by display name; sort
+  // buckets by their first row's provider so the order is stable across
+  // re-opens (matches Desktop's locale-compare).
+  const groups = (() => {
+    const m = new Map<string, Row[]>()
+    for (const r of rows) {
+      const bucket = m.get(r.provider)
+      if (bucket) bucket.push(r)
+      else m.set(r.provider, [r])
+    }
+    const cmp = (a: string, b: string) => a.toLowerCase().localeCompare(b.toLowerCase())
+    return Array.from(m.entries())
+      .map(([provider, rs]) => [
+        provider,
+        [...rs].sort((a, b) => cmp(displayName(a.modelId), displayName(b.modelId))),
+      ] as const)
+      .sort(([a], [b]) => cmp(a, b))
+  })()
+
+  return (
+    <Sheet open={open} onClose={onClose} title="模型选择">
+      {loading ? <ListRow label="载入中…" /> : null}
+      {error ? <ListRow label={error} destructive /> : null}
+      {!loading && groups.length === 0 ? (
+        <ListRow
+          label="尚未配置任何模型"
+          hint="在桌面端的设置中配置 API 密钥和模型"
+          value={<span className="badge">桌面端</span>}
+          disabled
+        />
+      ) : null}
+      {groups.map(([provider, pRows], gIdx) => (
+        <div key={provider}>
+          {gIdx > 0 ? <div className="menu-sep" /> : null}
+          <div className="menu-section-title">{provider}</div>
+          {pRows.map((r) => {
+            const isCurrent = current?.model === r.modelId && current?.provider === r.provider
+            return (
+              <ListRow
+                key={`${r.provider}:${r.accountId ?? ''}:${r.modelId}`}
+                label={displayName(r.modelId)}
+                selected={isCurrent}
+                value={
+                  <span className="cap-icons">
+                    {r.cap?.tool_call ? <Wrench size={12} className="cap-icon" /> : null}
+                    {r.cap?.reasoning ? <Brain size={12} className="cap-icon-reasoning" /> : null}
+                    {r.cap?.input_modalities?.includes('image') ? <ImageIcon size={12} className="cap-icon-image" /> : null}
+                    {isCurrent ? <Check size={14} className="cap-icon-check" /> : null}
+                  </span>
+                }
+                disabled={busy !== null}
+                onClick={() => {
+                  if (!agentId || !sessionId) return
+                  setBusy(r.modelId)
+                  patchSessionConfig(agentId, sessionId, {
+                    model: r.modelId,
+                    provider: r.provider,
+                    account_id: r.accountId ?? undefined,
+                  })
+                    .then(() => onClose())
+                    .catch((e) => setError(e instanceof Error ? e.message : '切换失败'))
+                    .finally(() => setBusy(null))
+                }}
+              />
+            )
+          })}
+        </div>
+      ))}
+    </Sheet>
+  )
+}
+
+/** Reasoning-effort sub-sheet. Universal set, current selection badged.
+ *  Writes one field; PATCH semantics leave everything else untouched. */
+function ComposerEffortSheet({
+  open,
+  agentId,
+  sessionId,
+  current,
+  onClose,
+}: {
+  open: boolean
+  agentId: string | null
+  sessionId: string | null
+  current: SessionConfigSnapshot | null
+  onClose: () => void
+}) {
+  const [busy, setBusy] = useState<string | null>(null)
+  // Mirror ComposerModelSheet: surface a PATCH failure as a row, not
+  // silent. Without this the user taps a row, the busy lock drops, and
+  // nothing else happens — they think the tap didn't register.
+  const [error, setError] = useState<string | null>(null)
+  if (!open) return null
+  return (
+    <Sheet open={open} onClose={onClose} title="推理深度">
+      {error ? <ListRow label={error} destructive /> : null}
+      {EFFORT_OPTIONS.map((v) => {
+        const isCurrent = current?.reasoning_effort === v
+        return (
+          <ListRow
+            key={v}
+            label={effortLabel(v)}
+            value={isCurrent ? <Check size={14} className="cap-icon-check" /> : undefined}
+            selected={isCurrent}
+            disabled={busy !== null}
+            onClick={() => {
+              if (!agentId || !sessionId) return
+              setError(null)
+              setBusy(v)
+              patchSessionConfig(agentId, sessionId, { reasoning_effort: v })
+                .then(() => onClose())
+                .catch((e) => setError(e instanceof Error ? e.message : '切换失败'))
+                .finally(() => setBusy(null))
+            }}
+          />
+        )
+      })}
+    </Sheet>
+  )
+}
+
+/** Skill sub-sheet. Renders the agent's skills as a list of rows; tap to
+ *  pick one as the active skill for the next message. The "clear" row at
+ *  the top drops the active skill without picking a new one. */
+function ComposerSkillSheet({
+  open,
+  agentId,
+  current,
+  onPick,
+  onClear,
+}: {
+  open: boolean
+  agentId: string | null
+  current: SkillEntry | null
+  onPick: (s: SkillEntry) => void
+  onClear: () => void
+}) {
+  const [skills, setSkills] = useState<SkillEntry[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!open || !agentId) return
+    let alive = true
+    setLoading(true)
+    setError(null)
+    fetchSkills(agentId)
+      .then((r) => { if (alive) setSkills(r.skills ?? []) })
+      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'))
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [open, agentId])
+
+  if (!open) return null
+  const enabled = skills?.filter((s) => s.enabled !== false) ?? []
+  return (
+    <Sheet open={open} onClose={onClear} title="技能选择">
+      {loading ? <ListRow label="载入中…" /> : null}
+      {error ? <ListRow label={error} destructive /> : null}
+      {current ? (
+        <ListRow
+          label={`清除当前选择「${current.name}」`}
+          onClick={onClear}
+        />
+      ) : null}
+      {!loading && enabled.length === 0 ? (
+        <ListRow
+          label="该 Agent 暂无技能"
+          hint="在桌面端添加技能包"
+          value={<span className="badge">桌面端</span>}
+          disabled
+        />
+      ) : null}
+      {enabled.map((s) => (
+        <ListRow
+          key={s.name}
+          label={s.name}
+          hint={s.description ?? undefined}
+          value={current?.name === s.name ? <span className="badge">当前</span> : undefined}
+          onClick={() => onPick(s)}
+        />
+      ))}
+    </Sheet>
   )
 }

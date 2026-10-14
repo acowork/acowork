@@ -134,7 +134,7 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
           <button
             type="submit"
             disabled={!canSubmit}
-            className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-50"
+            className="rounded-md bg-accent-strong px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-50"
           >
             {busy ? t("account.saving") : t("account.changePassword")}
           </button>

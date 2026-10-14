@@ -168,6 +168,36 @@ pub struct AdminStats {
 }
 
 
+/// Which rows a rebuild re-embeds.
+///
+/// The distinction matters because the two failure modes have different
+/// repair scopes:
+///
+/// - A model swap changes the width *and* the meaning of every vector, so
+///   nothing but a full re-embed can heal the store — vectors from two
+///   models are not comparable even when they share a width.
+/// - A half-applied swap (or a write that raced one) leaves a handful of
+///   rows at a foreign width, or none at all, while the store's declared
+///   dimension already matches the active model. `vector_search` skips
+///   foreign-width rows silently, so those rows — and only those — are
+///   invisible to retrieval; re-embedding the rest is pure cost.
+///
+/// Wire format: `snake_case` strings (`"all"`, `"repair"`). Absent on the
+/// wire reads as `All`, which is what a client predating this field asked
+/// for anyway.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RebuildScope {
+    /// Every row in the store, regardless of its current vector.
+    #[default]
+    All,
+    /// Only rows whose vector is missing or stored at a width other than
+    /// the target dimension — exactly the rows retrieval cannot see.
+    Repair,
+}
+
 /// Statistics returned by embedding dimension migration.
 ///
 /// Mirrors `GrafeoStore::RebuildStats` but without engine-specific types.
@@ -271,5 +301,42 @@ pub trait MemoryAdminService: Send + Sync {
     ) -> Result<RebuildStats> {
         let _ = progress;
         self.migrate_embedding_dimension(embed_fn, new_dim)
+    }
+
+    /// Like [`Self::migrate_embedding_dimension_with_progress`], but limited
+    /// to the rows named by `scope`.
+    ///
+    /// The default implementation ignores the scope and re-embeds everything
+    /// — correct for every scope, just not cheap. Engines that can select
+    /// rows by stored width (SQLite) override it so a repair of a handful of
+    /// foreign-width rows costs a handful of embed calls, not a full scan.
+    fn migrate_embedding_dimension_scoped(
+        &self,
+        embed_fn: &(dyn Fn(&str) -> Option<Vec<f32>> + Send + Sync),
+        new_dim: usize,
+        scope: RebuildScope,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<RebuildStats> {
+        let _ = scope;
+        self.migrate_embedding_dimension_with_progress(embed_fn, new_dim, progress)
+    }
+
+    /// How many rows [`Self::migrate_embedding_dimension_scoped`] would
+    /// re-embed for `scope` against a target width of `dim`.
+    ///
+    /// The desktop Memory panel shows this as the banner's promise — "this
+    /// rebuild will process N rows" — so the number a user reads before
+    /// clicking and the `total` the progress bar reports afterwards come
+    /// from one definition instead of two, and cannot disagree. Engines
+    /// that can select rows by stored width (SQLite) count with the exact
+    /// same predicate the scoped migration selects with.
+    ///
+    /// The default reports the node total for every scope: that is what
+    /// the default scoped migration above actually does (it ignores the
+    /// scope and re-embeds everything), so the promise stays honest even
+    /// on engines without width-aware selection.
+    fn rebuild_scope_count(&self, scope: RebuildScope, dim: usize) -> u64 {
+        let _ = (scope, dim);
+        self.get_stats().total_nodes
     }
 }

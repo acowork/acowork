@@ -412,7 +412,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                                 }}
                                 disabled={deletingId !== null}
                 className="rounded px-2 py-0.5 text-xs text-white disabled:opacity-50 disabled:cursor-not-allowed"
-                style={{ backgroundColor: "var(--color-accent)" }}
+                style={{ backgroundColor: "var(--color-accent-strong)" }}
                               >
                                 {t("workspace.delete")}
                               </button>

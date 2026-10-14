@@ -164,7 +164,7 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
           disabled={!canSubmit}
           onClick={handleSubmit}
           className="rounded px-3 py-0.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          style={{ backgroundColor: "var(--color-accent)" }}
+          style={{ backgroundColor: "var(--color-accent-strong)" }}
         >
           {submitted ? t("askQuestionCard.submitted") : t("askQuestionCard.submit")}
         </button>

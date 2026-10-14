@@ -80,28 +80,46 @@ describe("NodeGroupHeader", () => {
   });
 });
 
-describe("agent working dot", () => {
-  // Anchor on the JSX comment, not the bare "IM-style" phrase — the same
-  // wording appears in the `activeAgentIds` memo further up, and
-  // indexOf would silently slice that one instead.
-  const dot = src.slice(
-    src.indexOf('IM-style "needs attention" indicator dot'),
-    src.indexOf('IM-style "needs attention" indicator dot') + 2000,
-  );
+describe("agent status dot (beside the name)", () => {
+  // Source-scanned like the rest of this file. The dot used to be an
+  // avatar-corner working-only marker; it is now the single 3-state status
+  // dot beside the agent name (gray offline / solid emerald online /
+  // breathing emerald online+working), matching the mobile row. The old
+  // `{busyAgentIds.has(id) && (...)}` anchor is gone by design.
+  const start = src.indexOf('title={busyAgentIds.has(id) && agent.alive');
+  const end = src.indexOf('/>', start);
+  const dot = src.slice(start, end);
+  // Sanity: the anchor must exist, or every assertion below passes vacuously.
+  expect(start).toBeGreaterThan(-1);
 
-  it("uses the same emerald as the node online dot", () => {
+  it("is emerald when online, matching the node online dot", () => {
     // Two dots, one meaning ("something is live"). Matching the node
-    // header's literal is deliberate: a new `bg-emerald-600` variant here
-    // would look like a different state at 8px.
+    // header's literal is deliberate: a different shade would look like a
+    // different state at this size.
     expect(dot).toContain("bg-emerald-500");
+    expect(dot).toContain("agent.alive");
   });
 
-  it("hides on the selected row", () => {
-    // The selection fill already marks the row; an emerald dot over it
-    // reads as a smudge. Assert the full guard so dropping any single
-    // clause (e.g. the offline carve-out) also fails here.
-    expect(dot).toMatch(
-      /agent\.alive\s*&&\s*activeAgentIds\.has\(id\)\s*&&\s*selectedAgentId\s*!==\s*id/,
-    );
+  it("is gray when offline", () => {
+    expect(dot).toContain("bg-zinc-400");
+  });
+
+  it("breathes (fully transparent <-> solid) while online and working", () => {
+    // `animate-pulse` only dipped to 0.5 opacity -- too subtle at 6px.
+    // `dot-breathing` is the dedicated keyframe in globals.css.
+    expect(dot).toContain("dot-breathing");
+    expect(dot).not.toContain("animate-pulse");
+  });
+
+  it("is the same size as the node header dot", () => {
+    expect(dot).toContain("h-1.5 w-1.5");
+  });
+
+  it("carries a label for hover and screen readers", () => {
+    // Colour alone is not an accessible signal; the node band already sets
+    // this precedent with its `title={statusLabel}` dot.
+    expect(dot).toContain('t("agentList.dotBusy")');
+    expect(dot).toContain('t("agentList.dotOnline")');
+    expect(dot).toContain('t("agentList.dotOffline")');
   });
 });

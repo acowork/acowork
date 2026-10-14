@@ -12,8 +12,8 @@
  *
  * Two badges with two different truths (§8.5): a human thread has a
  * server-side read cursor, so its count is a NUMBER. An agent session has
- * none, so it gets a DOT and nothing more — inventing a number there would
- * be a claim this client cannot support.
+ * none, so it gets no count at all — only a green dot while it is working,
+ * which is the single status signal the Desktop sidebar shows too.
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
@@ -23,7 +23,6 @@ import { useChatStore } from '../../stores/chatStore'
 import { useUserChatStore } from '../../stores/userChatStore'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
-import { hasUnread } from '../../lib/unread'
 import { formatListTime } from '../../lib/time'
 import { ListSection, ListRow } from '../../components/ui'
 import { AuthImage } from '../../components/AuthImage'
@@ -78,7 +77,7 @@ function GroupTitle({ icon, name, online }: { icon: ReactNode; name: string; onl
       <span className="group-title-name">{name}</span>
       {online === undefined ? null : (
         <span
-          className={`dot ${online ? 'dot-online' : 'dot-offline'}`}
+          className={`dot dot-sm ${online ? 'dot-online' : 'dot-offline'}`}
           aria-label={online ? '在线' : '离线'}
         />
       )}
@@ -111,6 +110,7 @@ export function ChatListScreen() {
   const users = useAgentStore((s) => s.users)
   const nodes = useAgentStore((s) => s.nodes)
   const sessionsByAgent = useAgentStore((s) => s.agents)
+  const busySessions = useAgentStore((s) => s.busySessions)
   const refreshInbox = useAgentStore((s) => s.refreshInbox)
   const loading = useAgentStore((s) => s.directoryLoading)
   const startingAgentIds = useAgentStore((s) => s.startingAgentIds)
@@ -156,7 +156,7 @@ export function ChatListScreen() {
         )
         return { a, recent }
       })
-      .filter(({ a, recent }) => match(a.name, recent?.last_message ?? recent?.title))
+      .filter(({ a }) => match(a.name))
       .filter(({ a }) => onlineById.has(a.node_id))
       .sort((x, y) => (y.recent?.updated_at ?? 0) - (x.recent?.updated_at ?? 0))
   }, [agents, sessionsByAgent, q, onlineById])
@@ -238,7 +238,6 @@ export function ChatListScreen() {
               <ListRow
                 key={a.id}
                 avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
-                avatarUnread={!!(recent && hasUnread(a.id, recent.session_id, recent.message_count))}
                 onClick={() => void openAgent(a.id, recent?.session_id ?? null)}
                 label={
                   <span className="row-title">
@@ -247,24 +246,36 @@ export function ChatListScreen() {
                       <span className="dot-spinner" aria-label="正在启动" title="正在启动" />
                     ) : (
                       (() => {
-                        // Presence from the directory's `alive`/`lifecycle`.
-                        // A plain offline-only dot used to render transparent
-                        // and never surfaced online; now all three states show.
+                        // Presence from the directory's `alive`/`lifecycle`;
+                        // working from the presence socket's fleet-wide
+                        // `.../sessions/+/state` pushes — the same signal
+                        // Desktop's `busyAgentIds` reads (the directory and
+                        // the AgentStatus wire never carry `busy`).
+                        const working = busySessions[a.id]?.size ? a.status !== 'offline' : false
                         const cls =
                           a.status === 'offline'
                             ? 'dot dot-offline'
                             : a.status === 'error'
                               ? 'dot dot-error'
-                              : 'dot dot-online'
+                              : working
+                                ? 'dot dot-busy'
+                                : 'dot dot-online'
                         const text =
-                          a.status === 'offline' ? '离线' : a.status === 'error' ? '异常' : '在线'
-                        return <span className={cls} aria-label={text} title={text} />
+                          a.status === 'offline' ? '离线' : a.status === 'error' ? '异常' : working ? '正在工作' : '在线'
+                        return <span className={`dot-sm ${cls}`} aria-label={text} title={text} />
                       })()
                     )}
                   </span>
                 }
                 value={formatListTime(recent?.updated_at)}
-                hint={startingAgentIds.has(a.id) ? '正在启动…' : recent?.last_message || recent?.title || '暂无会话'}
+                // Mobile used to show `last_message || title`, i.e. the latest
+                // message preview under each agent. That diverged from the
+                // Desktop sidebar, which shows the *session title* — and
+                // the message preview in this list is largely noisy
+                // (long bodies get truncated, code blocks render as
+                // mojibake). Unify on title for cross-platform consistency.
+                // Empty-title sessions fall through to "暂无会话".
+                hint={startingAgentIds.has(a.id) ? '正在启动…' : recent?.title || '暂无会话'}
               />
             ))}
           </ListSection>

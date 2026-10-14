@@ -21,6 +21,18 @@
 //! | rag_query | rag:query + network:<rag_url> (registered in agent_init.rs) |
 //! | context_abandon | context:write - RETIRED (dead code, not registered) |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
+//! | codebase | (no permission table entry) - TEMPORARILY UNREGISTERED |
+//!
+//! ponytail: the `codebase` tool is temporarily out of the builtin
+//! registry — it is neither registered at startup nor pushed
+//! dynamically by `SessionManager::handle_lsp_relay_update`, and it is
+//! absent from the wizard catalog (`acowork_core::tools::BUILTIN_TOOLS`).
+//! The source stays (`tools/builtin/codebase.rs`) with its unit tests
+//! live. To bring it back: re-add the `if let Some(endpoint)` push in
+//! `all_builtin_tools`, the `Some(_) =>` arm of
+//! `handle_lsp_relay_update`, `"codebase"` in
+//! `CONDITIONALLY_REGISTERED_TOOL_NAMES`, and its `BUILTIN_TOOLS`
+//! entry.
 
 pub mod ask_user_question;
 pub mod codebase;
@@ -46,8 +58,6 @@ pub mod web_fetch;
 /// present in the codebase and fully valid, but only constructed when a
 /// runtime dependency is available at the moment of registration:
 ///
-/// - `codebase` — requires the node LSP relay (arrives asynchronously
-///   over MQTT after boot; see `SessionManager::handle_lsp_relay_update`)
 /// - `rag_query` — requires a manifest `[[tools]]` entry of `type = "rag"`
 ///
 /// At startup (`agent_init.rs`) these tools can be absent from the code
@@ -58,7 +68,13 @@ pub mod web_fetch;
 /// then writing the merge result back to disk) would erase the user's
 /// enable/disable preference. This constant is the single source of
 /// truth for that distinction.
-pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] = &["codebase", "rag_query"];
+///
+/// ponytail: `codebase` was removed from this list together with its
+/// registration (temporarily unregistered — see the module header).
+/// That is deliberate: a persisted `codebase` entry must now be dropped
+/// by the startup merge and written back, so the stale row disappears
+/// from the Tools panel instead of lingering as an unrenderable ghost.
+pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] = &["rag_query"];
 
 // ── Shared limits ──────────────────────────────────────────────────────
 
@@ -114,7 +130,6 @@ pub fn all_builtin_tools(
     memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     mcp_notifier: McpNotifyRef,
     agent_home: String,
-    lsp_relay_endpoint: Option<String>,
     mqtt_slot: crate::http::server::SharedMqttClientSlot,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
@@ -170,13 +185,6 @@ pub fn all_builtin_tools(
         )),
     ];
 
-    // Only register codebase when the LSP Relay is available.
-    // Without the relay, the tool always fails with "LSP Relay not available",
-    // wasting LLM inference tokens on doomed calls.
-    if let Some(endpoint) = lsp_relay_endpoint {
-        tools.push(Arc::new(codebase::CodebaseTool::new(endpoint)));
-    }
-
     // Append platform-specific shell tools
     tools.extend(shell_tools);
     tools
@@ -203,8 +211,7 @@ mod tests {
         u64,    // tool_http_timeout_ms
         Option<Arc<MemorySessionHandle>>,
         McpNotifyRef,
-        String,         // agent_home
-        Option<String>, // lsp_relay_endpoint
+        String, // agent_home
         crate::http::server::SharedMqttClientSlot,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -223,7 +230,6 @@ mod tests {
             memory_session,
             mcp_notifier,
             "/tmp/test-agent".to_string(),
-            None,
             mqtt_slot,
         )
     }
@@ -236,15 +242,33 @@ mod tests {
     }
 
     #[test]
+    fn test_all_builtin_tools_does_not_register_codebase() {
+        // `codebase` is temporarily unregistered (module header): it must
+        // not reach the LLM tool surface. This is the smallest check that
+        // fails if someone re-adds the registration without also restoring
+        // the `codebase` branch in `handle_lsp_relay_update` and the
+        // `BUILTIN_TOOLS` catalog entry.
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
+
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
+
+        let names = tool_names(&tools);
+        assert!(
+            !names.contains(&"codebase".to_string()),
+            "codebase must NOT be registered (temporarily out of the registry); got: {:?}",
+            names
+        );
+    }
+
+    #[test]
     fn test_all_builtin_tools_does_not_register_compression_tools() {
         // Tool compression (ADR-052) has been retired from the LLM-facing
         // tool surface (ADR-061 §10). `context_retrieve` was deleted
         // outright once it turned out to scan every session file instead of
         // the current one; `context_abandon` survives as dead code.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, lsp, mqtt) = make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
 
-        let tools =
-            all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, lsp, mqtt);
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
 
         let names = tool_names(&tools);
         assert!(
@@ -258,10 +282,9 @@ mod tests {
     fn test_all_builtin_tools_default_includes_core_tools() {
         // Regression: platform-tool changes only affect the compression
         // tools; all other core tools are always present.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, lsp, mqtt) = make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
 
-        let tools =
-            all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, lsp, mqtt);
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
 
         let names = tool_names(&tools);
         // Core tools that must always be present (sanity check)

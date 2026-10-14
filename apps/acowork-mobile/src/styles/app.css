@@ -160,9 +160,7 @@
  * the content below the reader cannot shift what they are looking at — which
  * is the whole rule this screen is built around.
  *
- * Red, and only red: the chip is one of three surfaces of the same "you have
- * unread" signal (the tab-bar dot, the row bubble `.badge-count` / `.avatar-unread`
- * on a list row, and this in-thread chip). They all use `--color-destructive`
+ * Red, and only red: unread is always `--color-destructive`
  * — the global accent is the app's "selected" colour and would read as "you
  * are already here" on a signal that means the opposite. */
 .chat-newpill {
@@ -249,6 +247,16 @@
   position: relative;
 }
 
+/* Single-line rows (no hint) collapse to the compact height so the row
+ * isn't 30%+ taller than its label. Applied by ListRow when `hint` is
+ * undefined, and explicitly via `data-row="single"` for callers that
+ * pass an empty string and want the same look. */
+.list-row[data-row='single'] {
+  min-height: var(--list-row-h-compact);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .list-row + .list-row::before {
   content: '';
   position: absolute;
@@ -264,6 +272,19 @@
 }
 .list-row.is-destructive .list-row-label {
   color: var(--color-destructive);
+}
+/* Selected row — subtle accent tint so the user's eye lands on the
+ * current pick without a heavy background block. Same opacity range as
+ * the desktop `listRowSelected` (15% light / 20% dark) so the two UIs
+ * read the same way; `color-mix` keeps the tint on whichever accent
+ * the user picked (the desktop picks too). */
+.list-row.is-selected {
+  background: color-mix(in srgb, var(--color-tint) 15%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  .list-row.is-selected {
+    background: color-mix(in srgb, var(--color-tint) 20%, transparent);
+  }
 }
 
 .list-row-main {
@@ -318,21 +339,9 @@
   flex: none;
   z-index: 1;
 }
-.avatar-unread {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: var(--color-destructive);
-  border: 1.5px solid var(--color-bg-elevated);
-  box-sizing: border-box;
-  pointer-events: none;
-}
 /* The same corner, carrying a server-reported count (contact threads). Red is
- * deliberate and shared with `.avatar-unread`: unread is never painted in the
- * global accent, which reads as "selected", not as "new". */
+ * deliberate: unread is never painted in the global accent, which reads as
+ * "selected", not as "new". */
 .avatar-unread-count {
   position: absolute;
   top: -5px;
@@ -416,11 +425,26 @@
    * showed; state classes below override it. */
   background: var(--color-label-secondary);
 }
+/* Presence dots on the inbox (agent rows + node headers): smaller than the
+ * 8px default so they read against 13-15px names, and unified across agent
+ * and node — Desktop uses 6px for both. User-row dots keep the 8px base. */
+.dot-sm {
+  width: 6px;
+  height: 6px;
+}
 .dot-online {
   background: var(--color-success);
 }
 .dot-busy {
-  background: var(--color-warning);
+  background: var(--color-success);
+  /* Working = breathe between solid and 10% opacity (parity with
+   * Desktop's .dot-breathing). Shares the same 0%/100%-solid shape
+   * so a prefers-reduced-motion freeze stays visible. */
+  animation: dot-breathe 1.8s ease-in-out infinite;
+}
+@keyframes dot-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.1; }
 }
 .dot-offline {
   background: var(--color-label-secondary);
@@ -469,8 +493,11 @@
   white-space: pre-wrap;
 }
 .bubble-self {
-  background: var(--color-bubble-self);
-  color: var(--color-bubble-self-text);
+  /* A tint-strong surface: the accent darkened so white text holds WCAG AA for
+   * every accent in both themes (see lib/theme.ts). Text stays white in both
+   * themes, matching desktop. */
+  background: var(--color-tint-strong);
+  color: #ffffff;
   border-top-right-radius: 2px;
 }
 .bubble-peer {
@@ -505,12 +532,110 @@
   color: var(--color-label);
 }
 
+/* Send button. Was a flat 16px "发送" text with no border — read as a
+ * raw word, not a control. Desktop uses a 28x28 icon button in the
+ * toolbar cluster; on touch the tap target needs to be 44x44 (Apple HIG)
+ * so the visual 18px icon sits inside a padded box. Filled accent when
+ * active, dim outline when there's nothing to send. */
 .composer-send {
-  color: var(--color-tint);
-  font-weight: 600;
-  font-size: 16px;
   flex: none;
-  padding: 8px 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.08s;
+}
+.composer-send:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.composer-send:disabled {
+  background: transparent;
+  color: var(--color-label-secondary);
+  border-color: var(--color-separator);
+  cursor: not-allowed;
+}
+.composer-send-icon {
+  width: 18px;
+  height: 18px;
+}
+
+/* Settings cog in the composer (mobile-only — opens the 4-item submenu).
+ * Same 44x44 hit box as send, ghost variant so it sits next to the filled
+ * send without competing. */
+.composer-settings {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 22px;
+  border: 1px solid var(--color-separator);
+  background: transparent;
+  color: var(--color-label-secondary);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.composer-settings:hover,
+.composer-settings:active {
+  background: var(--color-bubble-peer);
+  color: var(--color-label);
+}
+
+/* ── Unified button style (ADR parity with Desktop .btn-accent family) ──
+ * Mobile was pure-text in most places (logout-btn, drawer-close, tab
+ * labels). One accent-tinted outline keeps the surface honest — a button
+ * that doesn't look like a button isn't a button. Use .btn-filled for
+ * the primary action of a screen (composer-send already inlines the same
+ * look; this is the variant callers reach for). */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--touch-min);
+  padding: 0 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-accent);
+  background: transparent;
+  color: var(--color-accent);
+  font: inherit;
+  font-size: var(--font-md);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.btn:hover:not(:disabled),
+.btn:active:not(:disabled) {
+  /* 12% accent wash — strong enough to read as "pressed" on both the
+   * iOS-blue and WeChat-green themes without inventing a separate
+   * pressed token. */
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn-filled {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+.btn-filled:hover:not(:disabled),
+.btn-filled:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 88%, #000 0%);
+  /* The wash above drops the saturation slightly. This nudges it back
+   * down so the filled button still pops on the lighter hover bg. */
+  filter: brightness(0.95);
+}
+.btn-sm {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: var(--font-sm);
 }
 
 /* --- TabBar --- */
@@ -648,6 +773,113 @@
 }
 .empty-sub {
   font-size: 13px;
+}
+
+/* --- Composer menu (settings sheet + 4 sub-sheets) ------------------ */
+
+/* The settings sheet is the same Sheet primitive as elsewhere, but the
+ * rows inside it are first-class menu entries — not .list-row with an
+ * arrow. Keeping them visually separate stops the user reading them as
+ * "another list". 44px tap target, leading 22px glyph, trailing `>` and
+ * an optional trailing value text. */
+.menu-section-title {
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  font-size: 13px;
+  color: var(--color-label-secondary);
+  text-transform: uppercase;
+}
+.menu-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--touch-min);
+  padding: 0 var(--space-4);
+  background: var(--color-bg-elevated);
+  cursor: pointer;
+  position: relative;
+}
+.menu-row + .menu-row::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: calc(var(--space-4) + 22px + 12px);
+  right: 0;
+  height: 0.5px;
+  background: var(--color-list-sep);
+}
+.menu-row-icon {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-accent);
+  flex: none;
+}
+.menu-row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-row-trail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-label-secondary);
+  font-size: var(--font-sm);
+  flex: none;
+}
+.menu-row-arrow {
+  color: var(--color-label-secondary);
+}
+
+.menu-sep {
+  /* 0.5px hairline between provider groups inside a flat picker
+   * (model/reasoning menus). Sticks to the same token as the list-row
+   * hairline so the picker matches the table look of the rest of the app. */
+  height: 0.5px;
+  background: var(--color-list-sep);
+  margin: 0;
+}
+
+.cap-icons {
+  /* Capability trail for a model row. Order matches the desktop ModelMenu
+   * (Wrench, Brain, Image) so the user's eye can map across the two UIs. */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-label-secondary);
+}
+.cap-icon-reasoning { color: var(--color-icon-purple); }
+.cap-icon-image { color: var(--color-icon-blue); }
+.cap-icon-check { color: var(--color-accent); }
+
+/* Sub-section title inside a settings sheet ("OPEN · 会话", etc.) */
+.menu-subsection {
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  font-size: var(--font-xs);
+  color: var(--color-label-secondary);
+  background: var(--color-bg-grouped);
+}
+/* `menu-subsection` reused for a hint + trailing action row (the
+ * "active skill" notice under 技能选择). The text takes the remaining
+ * width and may wrap to multiple lines on narrow screens; the action
+ * button stays on the right edge, vertically centred, and never wraps
+ * onto its own line. */
+.menu-hint-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.menu-hint-row-text {
+  flex: 1;
+  min-width: 0;
+  /* `font-size: var(--font-xs)` and color are inherited from
+   * `menu-subsection`; no overrides here so a future token change to
+   * the subsection's typography still applies. */
 }
 
 /* --- Controls --- */
@@ -788,7 +1020,9 @@
   height: 48px;
   border-radius: var(--radius-sm);
   border: 0;
-  background: var(--color-tint);
+  /* Also a tint-strong surface: white text on the raw accent was ~2:1 for the
+   * green/orange themes, the same legibility bug the user bubble had. */
+  background: var(--color-tint-strong);
   color: #fff;
   font-size: 16px;
   font-weight: 600;
@@ -815,7 +1049,13 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-3);
+  /* Direct child of .scroll-chat. In the column layout the bubble's left
+   * edge sits at the start of the chat content area (the avatar now lives
+   * ABOVE the bubble, not in a left column), so no margin is needed to
+   * land the dot on the bubble box edge — `margin-left: 0` would line up
+   * with the agent turn's left edge. The earlier 44px (= avatar 36 + gap 8)
+   * was the IM-row layout's reservation for the avatar column. */
+  padding: var(--space-1) 0;
   font-size: 13px;
   color: var(--color-label-secondary);
 }
@@ -964,11 +1204,11 @@
   padding: 4px 6px;
 }
 
-/* Unread: a row WITH an avatar carries its signal on the avatar corner — the
- * red dot `.avatar-unread` for the client-inferred "there is something new" of
- * an agent session (never a number, §8.5), the red bubble `.avatar-unread-count`
- * for a server-reported count. This trail form is only the fallback for rows
- * that have no avatar to hang a corner badge on (e.g. the docs 审阅队列 row). */
+/* Unread: a row WITH an avatar carries its count on the avatar corner as the
+ * red bubble `.avatar-unread-count` (server-reported only). This trail form is
+ * only the fallback for rows that have no avatar to hang a corner badge on
+ * (e.g. the docs 审阅队列 row). Agent rows carry no unread signal at all —
+ * the same name-adjacent presence dot as Desktop. */
 .badge-count {
   min-width: 18px;
   height: 18px;
@@ -1007,21 +1247,39 @@
 
 .msg-group {
   display: flex;
-  align-items: flex-start;
-  /* Compact air between the bubble and its avatar. */
-  gap: 8px;
+  flex-direction: column;
+  /* Anchor header (avatar + sender) and bubble stack to opposite edges so
+   * peer turns read as "left" and self turns as "right" (Discord / Slack
+   * column chat idiom). The horizontal mirror of the IM-row layout felt
+   * visually displaced — avatar at one edge, bubble shifted toward centre
+   * — and made long agent bubbles look stranded. */
   margin: 6px 0;
+  gap: 4px;
 }
 .msg-group-peer {
-  flex-direction: row;
-  /* Mirror the avatar column's footprint (avatar 36 + gap 8) on the empty
-   * side so the bubble reads as horizontally centred rather than shoved
-   * toward the avatar's opposite edge. */
-  padding-right: 44px;
+  align-items: flex-start;
+  /* Anchor the peer turn to the LEFT — avatar and bubble column start at
+   * the screen's left gutter, with a generous right gutter so the bubble
+   * reads as "this side" rather than full-width body text. 32px ≈ 21
+   * Chinese chars/line at 16px — the sweet spot for prose readability,
+   * still leaves code blocks with plenty of room. */
+  padding-right: 32px;
 }
 .msg-group-self {
+  align-items: flex-end;
+  /* Mirror on the right. */
+  padding-left: 32px;
+}
+.msg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.msg-group-peer .msg-header {
+  flex-direction: row;
+}
+.msg-group-self .msg-header {
   flex-direction: row-reverse;
-  padding-left: 44px;
 }
 .msg-avatar {
   flex: none;
@@ -1042,25 +1300,17 @@
   height: 100%;
   object-fit: cover;
 }
-.msg-main {
+.msg-sender {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  min-width: 0;
-  /* avatar (36) + gap (8) reserved so the column can't overflow. */
-  max-width: calc(100% - 44px);
-  gap: 3px;
-}
-.msg-group-self .msg-main {
-  align-items: flex-end;
-}
-.msg-sender {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+  gap: 1px;
   font-size: 12px;
   line-height: 1.2;
   color: var(--color-label-secondary);
+}
+.msg-group-self .msg-sender {
+  align-items: flex-end;
 }
 .msg-sender-name {
   font-weight: 500;
@@ -1068,6 +1318,20 @@
 .msg-sender-role {
   font-size: 11px;
   opacity: 0.75;
+}
+.msg-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  /* Stretch across the full chat-content width so long bubbles (code, lists)
+   * have room to breathe. Short bubbles still shrink-wrap — align-items
+   * controls position, not width, and .bubble has its own max-width. */
+  align-self: stretch;
+}
+.msg-group-self .msg-stack {
+  align-items: flex-end;
 }
 
 /* --- bubbles -------------------------------------------------------- */
@@ -1210,7 +1474,7 @@
 
 .explore-wrap {
   width: 100%;
-  /* Within a turn the shared .msg-main gap handles spacing; no extra margin
+  /* Within a turn the shared .msg-stack gap handles spacing; no extra margin
    * so the explore block hugs the surrounding bubbles (desktop cohesion). */
   margin: 0;
 }
