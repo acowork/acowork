@@ -146,6 +146,14 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/search",
             get(proxy_global_search),
         )
+        // ADR-093: LLM summary over the Desktop's bounded candidate
+        // snapshot. Transparent forward — the Runtime owns the provider
+        // call and citation whitelist; the Gateway parses no body and
+        // never retries POST (design 27 §4.4).
+        .route(
+            "/api/agents/{id}/search/summary",
+            post(proxy_search_summary),
+        )
         // ADR-078: workspace Git Status Bar. Git executes in the Runtime
         // (workspace owner, ADR-009 v2) via the system git CLI with
         // `GIT_OPTIONAL_LOCKS=0`; the Gateway only forwards — no .git
@@ -604,6 +612,29 @@ async fn proxy_global_search(
 ) -> Response {
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, "/search", &query, &headers).await
+}
+
+/// Reverse-proxy `POST /api/agents/{id}/search/summary` to Runtime's
+/// `POST /search/summary` (ADR-093). The JSON candidate body is forwarded
+/// verbatim — the Gateway holds no summary logic and never retries POST
+/// (design 27 §4.4); the Runtime owns the provider call.
+async fn proxy_search_summary(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let payload = if body.is_empty() { None } else { Some(body.to_vec()) };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/search/summary",
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/git/status` to Runtime's

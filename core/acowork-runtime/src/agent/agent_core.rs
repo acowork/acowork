@@ -1509,6 +1509,31 @@ impl AgentCore {
         Arc::new(ProviderLlmAdapter::with_candidates(candidates))
     }
 
+    /// ADR-093: narrow `(Provider, model)` snapshot for the search-summary
+    /// endpoint. Resolves the session's current model/provider pair
+    /// ([`SessionManager::current_model_and_provider`] semantics live in
+    /// the session layer; here we only rebuild the provider instance from
+    /// the resolved id) and falls back to the agent's active provider when
+    /// the id is unknown or absent. Reuses the same provider factory path
+    /// as compaction — no duplicated model-priority rules in HTTP handlers.
+    pub(crate) fn summary_llm_snapshot(
+        &self,
+        provider_id: Option<&str>,
+        model: Option<&str>,
+    ) -> (Arc<dyn acowork_core::providers::traits::Provider>, String) {
+        let provider = match provider_id {
+            Some(pid) if !pid.is_empty() => self
+                .build_compact_provider(pid)
+                .unwrap_or_else(|| self.provider.clone()),
+            _ => self.provider.clone(),
+        };
+        let model = model
+            .filter(|m| !m.is_empty())
+            .unwrap_or("default")
+            .to_string();
+        (provider, model)
+    }
+
     /// Build a standalone `Provider` for a compact/distill target id.
     /// Same construction as `SessionCore::build_provider_for` but without
     /// session retry-UX wiring (the background pipeline has no session to

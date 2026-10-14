@@ -30,7 +30,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { BookOpen, KanbanSquare, MessageSquare, Search } from "lucide-react";
+import { BookOpen, KanbanSquare, MessageSquare, RotateCw, Search } from "lucide-react";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSearchStore } from "../../stores/searchStore";
@@ -52,6 +52,17 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { AgentPickerChip } from "./AgentPickerChip";
 import { PreviewPane } from "./PreviewPane";
+import {
+    runSearchSources,
+    buildSummaryCandidates,
+    requestSearchSummary,
+    parseSummarySegments,
+    SEARCH_SOURCES,
+    SUMMARY_DEADLINE_MS,
+    type SearchSource,
+    type CandidateSet,
+    type SummaryCandidate,
+} from "../../lib/searchRun";
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
 
@@ -141,6 +152,9 @@ export type RowHit =
     | MemoryHit
     | ConversationHit
     | SearchHit;
+
+/** ADR-093 summary state machine (design 27 §4.6). */
+export type SummaryPhase = "idle" | "searching" | "summarizing" | "done" | "error" | "cancelled";
 
 export interface GlobalSearchDialogProps {
     /** Switch the app-level view (projects/docs/chat) when a hit is opened. */
@@ -325,9 +339,33 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     const [conversationLoading, setConversationLoading] = useState(false);
     const [conversationError, setConversationError] = useState<string | null>(null);
 
+    /* ── ADR-093 run/summary state machine (design 27 §4.6) ─────────── */
+    // idle → searching → summarizing → done | error | cancelled.
+    // "searching" covers the six-source fan-out (8 s deadline); the summary
+    // stage (20 s deadline) is a separate phase so cancel/regenerate apply
+    // to it alone.
+    const [phase, setPhase] = useState<SummaryPhase>("idle");
+    const [sourcesDone, setSourcesDone] = useState(0);
+    const [summaryText, setSummaryText] = useState("");
+    const [summaryError, setSummaryError] = useState<string | null>(null);
+    const runCtrlRef = useRef<AbortController | null>(null);
+    const summaryCtrlRef = useRef<AbortController | null>(null);
+    const candidateRef = useRef<CandidateSet | null>(null);
+    const lastSummaryReqRef = useRef<{
+        query: string;
+        candidates: SummaryCandidate[];
+        partial: boolean;
+        timedOutScopes: SearchSource[];
+        failedScopes: SearchSource[];
+    } | null>(null);
+    // Landed rows per source, kept in a ref so citation clicks resolve the
+    // exact row that fed the summary even before React state settles.
+    const rowsRef = useRef<Record<SearchSource, RowHit[]>>({
+        file: [], git: [], doc: [], project: [], memory: [], conversation: [],
+    });
+
     const [focusedIdx, setFocusedIdx] = useState(0);
     const inputRef = useRef<HTMLInputElement>(null);
-    const abortRef = useRef<AbortController | null>(null);
     const seqRef = useRef(0);
 
     const agents = useAgentStore((s) => s.agents);
@@ -379,223 +417,271 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             setConversationHits([]);
             setConversationError(null);
             setFocusedIdx(0);
+            setPhase("idle");
+            setSourcesDone(0);
+            setSummaryText("");
+            setSummaryError(null);
+            candidateRef.current = null;
+            lastSummaryReqRef.current = null;
+            rowsRef.current = { file: [], git: [], doc: [], project: [], memory: [], conversation: [] };
             requestAnimationFrame(() => inputRef.current?.focus());
         } else {
-            abortRef.current?.abort();
+            runCtrlRef.current?.abort();
+            summaryCtrlRef.current?.abort();
             seqRef.current += 1;
         }
     }, [open]);
 
-    /* ── File tab: ripgrep via Runtime (Gateway reverse proxy) ──────── */
-    const searchFiles = useCallback(
+    /* ── ADR-093: one run fans out to all six sources ───────────────── */
+    // Design doc 27 §4.1/§5: each debounced query starts a new generation;
+    // the previous generation's parent AbortController tears down every
+    // in-flight request, and the seq check drops late results. Each source
+    // updates its own tab as it lands — the user browses partial results
+    // while the rest arrive.
+    const runSummaryStage = useCallback(
+        async (gen: number, parentCtrl: AbortController | null) => {
+            const req = lastSummaryReqRef.current;
+            if (!req) return;
+            setPhase("summarizing");
+            setSummaryError(null);
+            const ctrl = new AbortController();
+            summaryCtrlRef.current = ctrl;
+            // 20 s deadline (ADR-093 D4). Manual cancel and deadline are
+            // told apart by `timedOut` so the UI can say which happened.
+            let timedOut = false;
+            const timer = setTimeout(() => {
+                timedOut = true;
+                ctrl.abort();
+            }, SUMMARY_DEADLINE_MS);
+            const parentSignal = parentCtrl?.signal ?? undefined;
+            const onParent = () => ctrl.abort();
+            parentSignal?.addEventListener("abort", onParent);
+            try {
+                const baseUrl = useSettingsStore.getState().gatewayUrl || DEFAULT_GATEWAY_URL;
+                const resp = await requestSearchSummary({
+                    baseUrl,
+                    agentId,
+                    query: req.query,
+                    candidates: req.candidates,
+                    partial: req.partial,
+                    timedOutScopes: req.timedOutScopes,
+                    failedScopes: req.failedScopes,
+                    signal: ctrl.signal,
+                });
+                if (gen !== seqRef.current) return;
+                setSummaryText(resp.summary);
+                setPhase("done");
+            } catch (e: unknown) {
+                if (gen !== seqRef.current) return;
+                if ((e as Error)?.name === "AbortError") {
+                    if (parentSignal?.aborted) return; // superseded by a new run
+                    if (timedOut) {
+                        setPhase("error");
+                        setSummaryError(t("globalSearch.summaryTimeout"));
+                    } else {
+                        setPhase("cancelled");
+                    }
+                } else {
+                    setPhase("error");
+                    setSummaryError(t("globalSearch.summaryError"));
+                    log.error("[GlobalSearch] summary error:", e);
+                }
+            } finally {
+                clearTimeout(timer);
+                parentSignal?.removeEventListener("abort", onParent);
+            }
+        },
+        [agentId, t],
+    );
+
+    const runSearch = useCallback(
         async (q: string) => {
-            if (abortRef.current) abortRef.current.abort();
-            if (!q.trim() || !agentId) {
-                setFileHits([]);
-                setFileTotal(0);
-                setLoading(false);
+            runCtrlRef.current?.abort();
+            summaryCtrlRef.current?.abort();
+            const ctrl = new AbortController();
+            runCtrlRef.current = ctrl;
+            const gen = ++seqRef.current;
+
+            setPhase("searching");
+            setSourcesDone(0);
+            setSummaryText("");
+            setSummaryError(null);
+            candidateRef.current = null;
+            setLoading(true);
+            setDocLoading(true);
+            setProjLoading(true);
+            setMemoryLoading(true);
+            setConversationLoading(true);
+            setError(null);
+            setGitError(null);
+            setDocError(null);
+            setProjError(null);
+            setMemoryError(null);
+            setConversationError(null);
+
+            const baseUrl = useSettingsStore.getState().gatewayUrl || DEFAULT_GATEWAY_URL;
+
+            // Raw payloads the adapters fetch but that onSource applies to
+            // state only after the generation check — a late-resolving
+            // stale adapter must not write `fileTotal`/`commits` behind the
+            // new run's back. onSource runs synchronously after the
+            // adapter's promise settles, so these are safe per-run locals.
+            let runFileTotal: number | undefined;
+            let runGitCommits: GitCommitDto[] | undefined;
+
+            const runtimeSearch = async (
+                scope: "memory" | "conversation",
+                signal: AbortSignal,
+            ): Promise<RowHit[]> => {
+                const params = new URLSearchParams();
+                params.set("q", q);
+                params.set("scopes", scope);
+                params.set("mode", "hybrid");
+                params.set("limit", String(GLOBAL_SOURCE_LIMIT));
+                const resp = await fetch(`${baseUrl}/api/agents/${agentId}/search?${params}`, { signal });
+                if (!resp.ok) throw new Error(`status ${resp.status}`);
+                const data = (await resp.json()) as GlobalSearchResponse;
+                return scope === "memory" ? toMemoryHits(data.hits ?? []) : toConversationHits(data.hits ?? []);
+            };
+
+            const results = await runSearchSources<RowHit[]>({
+                parentSignal: ctrl.signal,
+                adapters: {
+                    file: async (signal) => {
+                        const params = new URLSearchParams();
+                        params.set("q", q);
+                        if (workspaceId) params.set("workspace_id", workspaceId);
+                        if (caseSensitive) params.set("case_sensitive", "true");
+                        if (wholeWord) params.set("whole_word", "true");
+                        params.set("max_results", String(FILE_MAX_RESULTS));
+                        const resp = await fetch(`${baseUrl}/api/agents/${agentId}/workspaces/search?${params}`, { signal });
+                        if (!resp.ok) throw new Error(`status ${resp.status}`);
+                        const data = (await resp.json()) as SearchResponse;
+                        runFileTotal = data.totalMatches;
+                        return toFileHits(agentId, workspaceId, data.matches);
+                    },
+                    git: async (signal) => {
+                        // Repo-wide history (empty path = no `-- <path>`
+                        // filter), CommitPicker-style client-side subject/
+                        // author/hash filter. Global search is not scoped
+                        // to the open file.
+                        const resp = await useGitStore
+                            .getState()
+                            .fetchLog(agentId, workspaceId ?? "", "", GIT_LOG_LIMIT, 0, signal);
+                        runGitCommits = resp.commits;
+                        return toGitHits(filterGitCommits(resp.commits, q));
+                    },
+                    doc: async (signal) => toDocHits(await searchDocs(q, GLOBAL_SOURCE_LIMIT, signal)),
+                    project: async (signal) => toProjectHits(await searchPm(q, GLOBAL_SOURCE_LIMIT, signal)),
+                    memory: (signal) => runtimeSearch("memory", signal),
+                    conversation: (signal) => runtimeSearch("conversation", signal),
+                },
+                onSource: (source, r) => {
+                    if (gen !== seqRef.current) return; // stale generation
+                    const rows = r.data ?? [];
+                    rowsRef.current[source] = rows;
+                    switch (source) {
+                        case "file":
+                            setFileHits(rows as FileHit[]);
+                            setLoading(false);
+                            if (r.status === "ok" && runFileTotal !== undefined) {
+                                setFileTotal(runFileTotal);
+                            }
+                            if (r.status !== "ok") setError(t("globalSearch.errorFileFailed"));
+                            break;
+                        case "git":
+                            if (r.status === "ok") {
+                                setCommits(runGitCommits ?? []);
+                                setGitLoaded(true);
+                            } else {
+                                // Land the spinner either way — the tab
+                                // falls back to the error/no-match rows.
+                                setGitLoaded(true);
+                                setGitError(t("globalSearch.errorGit"));
+                            }
+                            break;
+                        case "doc":
+                            setDocHits(rows as DocHit[]);
+                            setDocLoading(false);
+                            if (r.status !== "ok") setDocError(t("globalSearch.errorDocService"));
+                            break;
+                        case "project":
+                            setProjHits(rows as ProjectHit[]);
+                            setProjLoading(false);
+                            if (r.status !== "ok") setProjError(t("globalSearch.errorProjectService"));
+                            break;
+                        case "memory":
+                            setMemoryHits(rows as MemoryHit[]);
+                            setMemoryLoading(false);
+                            if (r.status !== "ok") setMemoryError(t("globalSearch.errorMemory"));
+                            break;
+                        case "conversation":
+                            setConversationHits(rows as ConversationHit[]);
+                            setConversationLoading(false);
+                            if (r.status !== "ok") setConversationError(t("globalSearch.errorConversation"));
+                            break;
+                    }
+                    setSourcesDone((n) => n + 1);
+                },
+            });
+
+            if (gen !== seqRef.current || ctrl.signal.aborted) return;
+
+            // ── Summary stage (design 27 §4.4): bounded candidates from
+            // the six landed lists. `partial` when any source is missing;
+            // timeouts and errors are listed separately so the model is
+            // told what actually happened (Runtime search_summary.rs).
+            const timedOutScopes = SEARCH_SOURCES.filter((s) => results[s].status === "timeout");
+            const failedScopes = SEARCH_SOURCES.filter((s) => results[s].status === "error");
+            const partial = timedOutScopes.length > 0 || failedScopes.length > 0;
+            // RowHit carries title/snippet — directly the candidate shape.
+            const set = buildSummaryCandidates(rowsRef.current);
+            candidateRef.current = set;
+            if (set.candidates.length === 0) {
+                // Nothing to summarize — keep the lists browsable, no LLM call.
+                setPhase("done");
+                setSummaryText("");
                 return;
             }
-            const controller = new AbortController();
-            abortRef.current = controller;
-            setLoading(true);
-            setError(null);
-            try {
-                const baseUrl = useSettingsStore.getState().gatewayUrl || DEFAULT_GATEWAY_URL;
-                const params = new URLSearchParams();
-                params.set("q", q);
-                if (workspaceId) params.set("workspace_id", workspaceId);
-                if (caseSensitive) params.set("case_sensitive", "true");
-                if (wholeWord) params.set("whole_word", "true");
-                params.set("max_results", String(FILE_MAX_RESULTS));
-                const url = `${baseUrl}/api/agents/${agentId}/workspaces/search?${params.toString()}`;
-
-                const timeoutId = setTimeout(() => controller.abort(), 30_000);
-                const resp = await fetch(url, { signal: controller.signal });
-                clearTimeout(timeoutId);
-                if (!resp.ok) {
-                    setError(`Server error (${resp.status})`);
-                    setFileHits([]);
-                    setFileTotal(0);
-                    return;
-                }
-                const data = (await resp.json()) as SearchResponse;
-                setFileHits(toFileHits(agentId, workspaceId, data.matches));
-                setFileTotal(data.totalMatches);
-            } catch (e: unknown) {
-                if ((e as Error)?.name === "AbortError") {
-                    setError(t("globalSearch.errorFileTimeout"));
-                } else {
-                    log.error("[GlobalSearch] file search error:", e);
-                    setError(t("globalSearch.errorFileFailed"));
-                }
-                setFileHits([]);
-                setFileTotal(0);
-            } finally {
-                setLoading(false);
-            }
+            lastSummaryReqRef.current = {
+                query: q,
+                candidates: set.candidates,
+                partial,
+                timedOutScopes,
+                failedScopes,
+            };
+            await runSummaryStage(gen, ctrl);
         },
-        [agentId, workspaceId, caseSensitive, wholeWord, t],
+        [agentId, workspaceId, caseSensitive, wholeWord, t, runSummaryStage],
     );
 
-    /* ── Doc tab: doc process /search (Gateway reverse proxy) ───────── */
-    const searchDocsTab = useCallback(async (q: string) => {
-        const seq = ++seqRef.current;
-        const controller = new AbortController();
-        abortRef.current = controller;
-        setDocLoading(true);
-        setDocError(null);
-        try {
-            const hits = await searchDocs(q, GLOBAL_SOURCE_LIMIT, controller.signal);
-            if (seq === seqRef.current) setDocHits(toDocHits(hits));
-        } catch (e: unknown) {
-            if ((e as Error)?.name !== "AbortError" && seq === seqRef.current) {
-                setDocError(t("globalSearch.errorDocService"));
-                log.error("[GlobalSearch] doc search error:", e);
-            }
-        } finally {
-            if (seq === seqRef.current) setDocLoading(false);
-        }
-    }, [t]);
-
-    /* ── Project tab: pm process /search (Gateway reverse proxy) ────── */
-    const searchProjectTab = useCallback(async (q: string) => {
-        const seq = ++seqRef.current;
-        const controller = new AbortController();
-        abortRef.current = controller;
-        setProjLoading(true);
-        setProjError(null);
-        try {
-            const hits = await searchPm(q, GLOBAL_SOURCE_LIMIT, controller.signal);
-            if (seq === seqRef.current) setProjHits(toProjectHits(hits));
-        } catch (e: unknown) {
-            if ((e as Error)?.name !== "AbortError" && seq === seqRef.current) {
-                setProjError(t("globalSearch.errorProjectService"));
-                log.error("[GlobalSearch] project search error:", e);
-            }
-        } finally {
-            if (seq === seqRef.current) setProjLoading(false);
-        }
-    }, [t]);
-
-    /* ── Memory tab: Runtime /search?scopes=memory (ADR-081 P1-1) ───── */
-    const searchMemoryTab = useCallback(
-        async (q: string) => {
-            const seq = ++seqRef.current;
-            const controller = new AbortController();
-            abortRef.current = controller;
-            setMemoryLoading(true);
-            setMemoryError(null);
-            try {
-                const baseUrl = useSettingsStore.getState().gatewayUrl || DEFAULT_GATEWAY_URL;
-                const params = new URLSearchParams();
-                params.set("q", q);
-                params.set("scopes", "memory");
-                params.set("mode", "hybrid");
-                params.set("limit", String(GLOBAL_SOURCE_LIMIT));
-                const url = `${baseUrl}/api/agents/${agentId}/search?${params.toString()}`;
-                const timeoutId = setTimeout(() => controller.abort(), 30_000);
-                const resp = await fetch(url, { signal: controller.signal });
-                clearTimeout(timeoutId);
-                if (!resp.ok) throw new Error(`status ${resp.status}`);
-                const data = (await resp.json()) as GlobalSearchResponse;
-                if (seq === seqRef.current) setMemoryHits(toMemoryHits(data.hits ?? []));
-            } catch (e: unknown) {
-                if ((e as Error)?.name !== "AbortError" && seq === seqRef.current) {
-                    setMemoryError(t("globalSearch.errorMemory"));
-                    log.error("[GlobalSearch] memory search error:", e);
-                    setMemoryHits([]);
-                }
-            } finally {
-                if (seq === seqRef.current) setMemoryLoading(false);
-            }
-        },
-        [agentId, t],
-    );
-
-    /* ── Conversation tab: Runtime /search?scopes=conversation (P1-2) ─ */
-    const searchConversationTab = useCallback(
-        async (q: string) => {
-            const seq = ++seqRef.current;
-            const controller = new AbortController();
-            abortRef.current = controller;
-            setConversationLoading(true);
-            setConversationError(null);
-            try {
-                const baseUrl = useSettingsStore.getState().gatewayUrl || DEFAULT_GATEWAY_URL;
-                const params = new URLSearchParams();
-                params.set("q", q);
-                params.set("scopes", "conversation");
-                params.set("mode", "hybrid");
-                params.set("limit", String(GLOBAL_SOURCE_LIMIT));
-                const url = `${baseUrl}/api/agents/${agentId}/search?${params.toString()}`;
-                const timeoutId = setTimeout(() => controller.abort(), 30_000);
-                const resp = await fetch(url, { signal: controller.signal });
-                clearTimeout(timeoutId);
-                if (!resp.ok) throw new Error(`status ${resp.status}`);
-                const data = (await resp.json()) as GlobalSearchResponse;
-                if (seq === seqRef.current) setConversationHits(toConversationHits(data.hits ?? []));
-            } catch (e: unknown) {
-                if ((e as Error)?.name !== "AbortError" && seq === seqRef.current) {
-                    setConversationError(t("globalSearch.errorConversation"));
-                    log.error("[GlobalSearch] conversation search error:", e);
-                    setConversationHits([]);
-                }
-            } finally {
-                if (seq === seqRef.current) setConversationLoading(false);
-            }
-        },
-        [agentId, t],
-    );
-
-    /* ── Git tab: fetch log on demand (no debounce — list is small) ─── */
-    useEffect(() => {
-        if (!open || tab !== "git" || gitLoaded || !agentId) return;
-        let cancelled = false;
-        setGitError(null);
-        void useGitStore
-            .getState()
-            // Repo-wide history (empty path = no `-- <path>` filter), same
-            // as the workspace git banner's CommitPicker. Global search is
-            // not scoped to the open file.
-            .fetchLog(agentId, workspaceId ?? "", "", GIT_LOG_LIMIT, 0)
-            .then((resp) => {
-                if (cancelled) return;
-                setCommits(resp.commits);
-                setGitLoaded(true);
-            })
-            .catch((err: unknown) => {
-                if (cancelled) return;
-                log.error("[GlobalSearch] git log error:", err);
-                setGitError(t("globalSearch.errorGit"));
-                setGitLoaded(true);
-            });
-        return () => {
-            cancelled = true;
-        };
-    }, [open, tab, gitLoaded, agentId, workspaceId, t]);
-
+    /* Display rows for the git tab stay derived (CommitPicker parity). */
     const gitHits = useMemo(() => toGitHits(filterGitCommits(commits, query)), [commits, query]);
 
-    /* ── Debounced search (300ms) on query change ───────────────────── */
+    /* ── Debounced run (300ms) on query change ──────────────────────── */
     useEffect(() => {
-        if (!open || tab === "git") return;
-        if (!query.trim()) {
-            if (tab === "doc") setDocHits([]);
-            if (tab === "project") setProjHits([]);
-            if (tab === "memory") setMemoryHits([]);
-            if (tab === "conversation") setConversationHits([]);
+        if (!open) return;
+        if (!query.trim() || !agentId) {
+            runCtrlRef.current?.abort();
+            summaryCtrlRef.current?.abort();
+            seqRef.current += 1;
+            setPhase("idle");
+            setSourcesDone(0);
+            setSummaryText("");
+            setSummaryError(null);
+            candidateRef.current = null;
+            rowsRef.current = { file: [], git: [], doc: [], project: [], memory: [], conversation: [] };
+            setFileHits([]);
+            setFileTotal(0);
+            setDocHits([]);
+            setProjHits([]);
+            setMemoryHits([]);
+            setConversationHits([]);
             return;
         }
-        const timer = setTimeout(() => {
-            if (tab === "file") void searchFiles(query);
-            else if (tab === "doc") void searchDocsTab(query);
-            else if (tab === "project") void searchProjectTab(query);
-            else if (tab === "memory") void searchMemoryTab(query);
-            else if (tab === "conversation") void searchConversationTab(query);
-        }, 300);
+        const timer = setTimeout(() => void runSearch(query), 300);
         return () => clearTimeout(timer);
-    }, [open, tab, query, searchFiles, searchDocsTab, searchProjectTab, searchMemoryTab, searchConversationTab]);
+    }, [open, query, agentId, runSearch]);
 
     /* ── Reset focus when results change ────────────────────────────── */
     const hits: RowHit[] =
@@ -691,10 +777,12 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         [agentId, onNavigate, closeDialog],
     );
 
-    const activate = useCallback(
-        (idx: number) => {
-            const h = hits[idx];
-            if (!h) return;
+    // Typed dispatcher — one hit, any source. Reused by the list rows
+    // (Enter/double-click) AND the summary citation chips (ADR-093 D3):
+    // a citation resolves to the exact landed row and routes the same open
+    // action as if the user had clicked that row in its own tab.
+    const activateHit = useCallback(
+        (h: RowHit) => {
             if (h.type === "file") openFileHit(h as FileHit);
             else if (h.type === "git") openGitHit();
             else if (h.type === "doc") openDocHit(h as DocHit);
@@ -702,7 +790,29 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             else if (h.type === "conversation") openConversationHit(h as ConversationHit);
             else openMemoryHit(h as MemoryHit);
         },
-        [hits, openFileHit, openGitHit, openDocHit, openProjectHit, openConversationHit, openMemoryHit],
+        [openFileHit, openGitHit, openDocHit, openProjectHit, openConversationHit, openMemoryHit],
+    );
+
+    const activate = useCallback(
+        (idx: number) => {
+            const h = hits[idx];
+            if (h) activateHit(h);
+        },
+        [hits, activateHit],
+    );
+
+    // A summary citation `[[rN]]` → the landed row it stands for → open.
+    const openCitation = useCallback(
+        (id: string) => {
+            const set = candidateRef.current;
+            if (!set) return;
+            const source = set.byId[id];
+            const rowIdx = set.indexOf[id];
+            if (!source || rowIdx === undefined) return;
+            const row = rowsRef.current[source]?.[rowIdx];
+            if (row) activateHit(row);
+        },
+        [activateHit],
     );
 
     const onKeyDown = useCallback(
@@ -799,6 +909,21 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                 </ToggleBtn>
                             </div>
                         )}
+                        {/* ADR-093: re-run — aborts the current generation
+                            (search + summary) and starts a fresh one. */}
+                        {query.trim() && (
+                            <button
+                                type="button"
+                                data-testid="search-rerun"
+                                title={t("globalSearch.rerun")}
+                                aria-label={t("globalSearch.rerun")}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => void runSearch(query)}
+                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-text-secondary dark:hover:bg-zinc-700/50"
+                            >
+                                <RotateCw className="h-3.5 w-3.5" />
+                            </button>
+                        )}
                     </div>
                 </div>
 
@@ -827,6 +952,32 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                         ))}
                     </div>
 
+                    {/* ADR-093 progress strip (design 27 §4.6): stage +
+                        "X/6 sources landed". No fake percentage — sources
+                        arrive out of order, counts are the honest unit. */}
+                    {phase !== "idle" && (
+                        <div
+                            data-testid="search-status-bar"
+                            className="flex h-8 shrink-0 items-center gap-2 border-b border-border-divider px-5 text-11 text-text-tertiary"
+                        >
+                            {phase === "searching" && (
+                                <span className="animate-pulse">
+                                    {t("globalSearch.statusSearching", { done: sourcesDone, total: SEARCH_SOURCES.length })}
+                                </span>
+                            )}
+                            {phase === "summarizing" && (
+                                <>
+                                    <span>{t("globalSearch.statusSearchDone", { total: SEARCH_SOURCES.length })}</span>
+                                    <span aria-hidden>·</span>
+                                    <span className="animate-pulse text-[var(--color-accent)]">{t("globalSearch.statusSummarizing")}</span>
+                                </>
+                            )}
+                            {(phase === "done" || phase === "error" || phase === "cancelled") && (
+                                <span>{t("globalSearch.statusSearchDone", { total: SEARCH_SOURCES.length })}</span>
+                            )}
+                        </div>
+                    )}
+
                     <div className="flex-1 overflow-y-auto">
                         {tab === "file" && loading && <RowInfo>{t("globalSearch.searching")}</RowInfo>}
                         {tab === "file" && error && !loading && <RowInfo>{error}</RowInfo>}
@@ -844,7 +995,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                         {tab === "git" && !gitError && gitLoaded && hits.length === 0 && (
                             <RowInfo>{t("globalSearch.gitNoMatch")}</RowInfo>
                         )}
-                        {tab === "git" && !gitLoaded && !gitError && (
+                        {tab === "git" && !gitError && !gitLoaded && phase !== "idle" && (
                             <RowInfo>{t("globalSearch.loadingGitHistory")}</RowInfo>
                         )}
 
@@ -923,18 +1074,40 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     </div>
                 </div>
 
-                {/* ── Zone 3: preview pane (always rendered for stable layout) ── */}
-                <div
-                    data-testid="preview-pane"
-                    className="flex h-[35vh] max-h-[300px] min-h-[140px] shrink-0 flex-col overflow-hidden"
-                >
-                    <PreviewPane
-                        hit={focusedHit}
-                        tab={tab}
-                        agentId={agentId}
-                        workspaceId={workspaceId}
-                        gitCommit={focusedGit}
-                    />
+                {/* ── Zone 3: summary row (top) + preview row (bottom) ── */}
+                {/* ADR-093 design 27 §4.6: the AI summary gets its own
+                    always-visible row so progress/cancel/regenerate have a
+                    home; the preview keeps its old slot below. Equal split,
+                    each row scrolls independently. */}
+                <div className="flex h-[35vh] max-h-[480px] min-h-[240px] shrink-0 flex-col overflow-hidden">
+                    <div
+                        data-testid="summary-pane"
+                        className="flex min-h-0 flex-1 flex-col overflow-hidden"
+                    >
+                        <SummaryView
+                            phase={phase}
+                            summary={summaryText}
+                            error={summaryError}
+                            allowedIds={
+                                new Set((candidateRef.current?.candidates ?? []).map((c) => c.id))
+                            }
+                            onCancel={() => summaryCtrlRef.current?.abort()}
+                            onRegenerate={() => void runSummaryStage(seqRef.current, runCtrlRef.current)}
+                            onCitation={openCitation}
+                        />
+                    </div>
+                    <div
+                        data-testid="preview-pane"
+                        className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-border-divider"
+                    >
+                        <PreviewPane
+                            hit={focusedHit}
+                            tab={tab}
+                            agentId={agentId}
+                            workspaceId={workspaceId}
+                            gitCommit={focusedGit}
+                        />
+                    </div>
                 </div>
 
                 {/* ── Footer ──────────────────────────────────────────── */}
@@ -1005,6 +1178,99 @@ function GitCommitRowIcon({ focused }: { focused: boolean }) {
 function RowInfo({ children }: { children: React.ReactNode }) {
     return (
         <div className="px-3 py-3 text-center text-xs text-text-tertiary">{children}</div>
+    );
+}
+
+/**
+ * ADR-093 summary row (design 27 §4.6). Owns no fetching — the dialog
+ * drives the state machine; this renders per phase. Citation chips are
+ * accessible buttons carrying `data-citation-id`; the summary text itself
+ * is rendered as plain text segments (LLM output is never interpreted as
+ * HTML/URLs — ADR-093 D3).
+ */
+function SummaryView({
+    phase,
+    summary,
+    error,
+    allowedIds,
+    onCancel,
+    onRegenerate,
+    onCitation,
+}: {
+    phase: SummaryPhase;
+    summary: string;
+    error: string | null;
+    allowedIds: ReadonlySet<string>;
+    onCancel: () => void;
+    onRegenerate: () => void;
+    onCitation: (id: string) => void;
+}) {
+    const { t } = useTranslation();
+
+    const cornerBtn = (label: string, onClick: () => void) => (
+        <button
+            type="button"
+            onClick={onClick}
+            className="absolute right-2 rounded px-2 py-0.5 text-11 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-text-secondary dark:hover:bg-zinc-700/50"
+        >
+            {label}
+        </button>
+    );
+
+    if (phase === "idle") {
+        return <RowInfo>{t("globalSearch.summaryIdleHint")}</RowInfo>;
+    }
+    if (phase === "searching") {
+        return <RowInfo>{t("globalSearch.summaryWaiting")}</RowInfo>;
+    }
+    if (phase === "summarizing") {
+        return (
+            <div className="relative flex h-full items-center justify-center px-3 py-3 text-xs text-text-tertiary">
+                <span className="animate-pulse" data-testid="summary-working">
+                    {t("globalSearch.summaryWorking")}
+                </span>
+                {cornerBtn(t("globalSearch.cancelSummary"), onCancel)}
+            </div>
+        );
+    }
+    if (phase === "error" || phase === "cancelled") {
+        return (
+            <div className="relative flex h-full items-center justify-center px-3 py-3 text-xs text-text-tertiary">
+                <span>{error ?? t("globalSearch.summaryCancelled")}</span>
+                {cornerBtn(t("globalSearch.regenerate"), onRegenerate)}
+            </div>
+        );
+    }
+    // phase === "done"
+    if (!summary) {
+        return <RowInfo>{t("globalSearch.summaryNoCandidates")}</RowInfo>;
+    }
+    const segments = parseSummarySegments(summary, allowedIds);
+    return (
+        <div className="relative h-full">
+            <div
+                data-testid="summary-text"
+                className="h-full overflow-y-auto px-4 py-2.5 text-xs leading-relaxed text-text-secondary"
+            >
+                {segments.map((s, i) =>
+                    s.kind === "text" ? (
+                        <span key={i}>{s.text}</span>
+                    ) : (
+                        <button
+                            key={i}
+                            type="button"
+                            data-citation-id={s.id}
+                            aria-label={t("globalSearch.citationAria", { id: s.id })}
+                            onClick={() => onCitation(s.id)}
+                            className="mx-0.5 rounded-sm bg-[var(--color-accent)]/15 px-1 font-mono text-11 text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent)]/30"
+                        >
+                            {s.id}
+                        </button>
+                    ),
+                )}
+            </div>
+            {cornerBtn(t("globalSearch.regenerate"), onRegenerate)}
+        </div>
     );
 }
 
