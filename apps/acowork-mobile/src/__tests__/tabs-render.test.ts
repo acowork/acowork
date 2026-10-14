@@ -10,7 +10,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest'
 import { flatten, ROOT_ID, type DirLevel, type FlatRow } from '../stores/docStore'
-import { ACCENTS, applyAppearance, loadAccentId, loadThemePref, resolveTheme } from '../lib/theme'
+import { ACCENTS, applyAppearance, darken, ACCENT_STRONG, loadAccentId, loadThemePref, resolveTheme } from '../lib/theme'
 import { mergeTask } from '../stores/pmStore'
 import type { PmTask } from '../lib/api'
 
@@ -115,8 +115,11 @@ describe('appearance', () => {
     expect(document.documentElement.dataset.theme).toBe('dark')
     const pink = ACCENTS.find((a) => a.id === 'pink')!
     expect(document.documentElement.style.getPropertyValue('--color-tint')).toBe(pink.dark)
-    // The bubble colour follows the tint, or a pink app still sends blue.
-    expect(document.documentElement.style.getPropertyValue('--color-bubble-self')).toBe(pink.dark)
+    // Two derived roles from one accent: the highlight colour stays the raw
+    // accent (it must match the settings swatch), while filled surfaces under
+    // white text use the darkened variant.
+    const strong = darken(pink.dark, ACCENT_STRONG)
+    expect(document.documentElement.style.getPropertyValue('--color-tint-strong')).toBe(strong)
   })
 
   it('uses the light accent when the light theme is forced', () => {
@@ -124,6 +127,25 @@ describe('appearance', () => {
     expect(document.documentElement.style.getPropertyValue('--color-tint')).toBe(
       ACCENTS.find((a) => a.id === 'orange')!.light,
     )
+  })
+
+  it('every accent, in both themes, keeps white text on filled accent surfaces at WCAG AA', () => {
+    // The point of darkening is legibility, so assert the ratio itself: a
+    // weakened ACCENT_STRONG or a revert to raw accents fails here.
+    const lum = (hex: string) => {
+      const [r = 0, g = 0, b = 0] = [1, 3, 5]
+        .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+        .map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4))
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+    const vsWhite = (hex: string) => 1.05 / (lum(hex) + 0.05)
+    for (const a of ACCENTS) {
+      for (const shade of [a.light, a.dark]) {
+        const bg = darken(shade, ACCENT_STRONG)
+        // Assert on the ratio so the failure names the accent that regressed.
+        expect(vsWhite(bg), `${a.id} ${shade} -> ${bg} vs #ffffff`).toBeGreaterThanOrEqual(4.5)
+      }
+    }
   })
 
   it('an unknown accent id degrades to the default instead of throwing', () => {

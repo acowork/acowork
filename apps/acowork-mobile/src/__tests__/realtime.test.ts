@@ -230,6 +230,36 @@ describe('realtime channel', () => {
     expect(handlers.onChannel).toHaveBeenLastCalledWith('polling')
   })
 
+  it('half-open WS (SUBACK ok, no publishes, socket never closes) is caught by the REST backstop', async () => {
+    vi.useFakeTimers()
+    try {
+      snapshot.mockResolvedValueOnce({ status: { status: 'tool_executing' }, messageCount: 9 })
+      wireDeps()
+      startWatching('a1', 's1', handlers)
+      await vi.advanceTimersByTimeAsync(0)
+      const sock = sockets[0]!
+      sock.emitOpen()
+      sock.emit(connack)
+      sock.emit(subackOk)
+      // WS owns freshness: no immediate REST tick on connect.
+      expect(channelState()).toBe('ws')
+      expect(snapshot).not.toHaveBeenCalled()
+      // The socket stays open but the broker stops forwarding `state` — the
+      // exact half-open case that used to freeze the banner for 70s. The slow
+      // backstop must fire and surface the active status.
+      await vi.advanceTimersByTimeAsync(15_000)
+      expect(snapshot).toHaveBeenCalled()
+      expect(handlers.onSnapshot).toHaveBeenCalledWith({ status: { status: 'tool_executing' }, messageCount: 9 })
+      // And it must NOT idle-stop while WS is nominally alive.
+      const seen = handlers.onSnapshot.mock.calls.length
+      snapshot.mockResolvedValue({ status: { status: 'idle' }, messageCount: 9 })
+      await vi.advanceTimersByTimeAsync(15_000 * 3)
+      expect(handlers.onSnapshot.mock.calls.length).toBeGreaterThan(seen)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('CONNACK rejection (stale token) never strands the session', async () => {
     wireDeps()
     startWatching('a1', 's1', handlers)

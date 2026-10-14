@@ -27,11 +27,13 @@
   --color-icon-orange: #fa9d3b;
   --color-icon-teal: #12b5a5;
   --color-tint: #007aff;
+  /* The accent darkened for surfaces that fill with it under white text
+   * (user bubble, primary button). Fallback for the default blue accent;
+   * theme.ts overwrites both from the picked accent. */
+  --color-tint-strong: #004c9e;
   --color-destructive: #ff3b30;
   --color-success: #34c759;
   --color-warning: #ff9500;
-  --color-bubble-self: #95ec69;
-  --color-bubble-self-text: #000000;
   --color-bubble-peer: #ffffff;
 
   --space-1: 4px;
@@ -132,10 +134,11 @@
   --color-icon-blue: #7a9cff;
   --color-icon-teal: #3fd0c0;
   --color-tint: #07c160;
+  /* Same pairing as the light block: the accent darkened for white-text
+   * surfaces. Raw #07c160 is only ~2.4:1 against white. */
+  --color-tint-strong: #04783c;
   --color-destructive: #fa5151;
   --color-bubble-peer: #2a2a2a;
-  --color-bubble-self: #3a7a3a;
-  --color-bubble-self-text: #ffffff;
   color-scheme: dark;
 }
 :root[data-theme='light'] {

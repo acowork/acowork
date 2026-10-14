@@ -10,9 +10,15 @@
  * (one rule, §8.3 note). WS events additionally carry card details polling
  * cannot see (`tool_approval_needed`, `ask_question`) → `onEvent`.
  *
- * Channel exclusivity (§8.0): while WS is healthy the poll timer is off;
- * WS drops → polling takes over immediately and WS retries keep running in
- * the background at a slow cadence.
+ * Channel priority (§8.0, revised): WS is the primary freshness channel, but
+ * a slow REST backstop keeps running while WS is "alive". The hand-rolled WS
+ * can go half-open — SUBACK ok, so the fast poll is torn down, yet the broker
+ * silently stops forwarding `state` publishes — and the only recovery was the
+ * 70s ping watchdog, leaving the status banner frozen for up to a minute.
+ * Desktop never hits this because rumqttc auto-reconnects and replays the
+ * retained snapshot; the REST backstop is mobile's equivalent safety net.
+ * WS drops → the backstop is promoted to the fast poll immediately and WS
+ * retries keep running in the background at a slow cadence.
  */
 import type { LiveStatus, SessionSnapshot } from './types'
 import {
@@ -25,6 +31,8 @@ import {
 } from './mqtt-wire'
 
 export const POLL_INTERVAL_MS = 2000
+/** REST cadence while WS owns freshness — a backstop, not the primary path. */
+const WS_BACKSTOP_MS = 15_000
 const WS_RETRY_FAST = [1000, 2000, 4000]
 const WS_RETRY_SLOW_MS = 30_000
 const PING_INTERVAL_MS = 25_000
@@ -141,21 +149,35 @@ export function stopWatching(): void {
 
 /* ---------------- polling engine (moved out of chatStore, §8.0) ---------------- */
 
-function startPollOnly(): void {
-  if (pollTimer !== null) return
+/** True while the timer is the slow WS-backstop cadence. The backstop must
+ *  NOT idle-stop: its whole job is to notice a turn the half-open WS never
+ *  delivers, so it has to survive an idle stretch and catch the next active
+ *  tick. Only the primary (WS-down) poll may idle-stop for battery. */
+let pollBackstop = false
+
+function startPoll(intervalMs: number, backstop: boolean): void {
+  if (pollTimer !== null && pollBackstop === backstop) return
+  stopPoll()
+  pollBackstop = backstop
   // Re-baseline: a loop restarted after a WS loss (or an idle stop) must not
   // inherit the previous cycle's count, or it could stop again immediately.
   quietTicks = 0
   lastCount = null
-  void pollTick()
-  pollTimer = setInterval(() => void pollTick(), POLL_INTERVAL_MS)
+  // The primary (WS-down) poll fires one immediate tick to take over at once;
+  // the backstop only ticks on its slow interval — WS owns freshness, so an
+  // immediate REST GET on every connect would be redundant load.
+  if (!backstop) void pollTick()
+  pollTimer = setInterval(() => void pollTick(), intervalMs)
 }
+function startPollOnly(): void { startPoll(POLL_INTERVAL_MS, /* backstop */ false) }
+function startBackstopPoll(): void { startPoll(WS_BACKSTOP_MS, /* backstop */ true) }
 function startPollingOnly(): void {
   active?.h.onChannel('polling')
   startPollOnly()
 }
 function stopPoll(): void {
   if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null }
+  pollBackstop = false
 }
 
 async function pollTick(): Promise<void> {
@@ -171,7 +193,8 @@ async function pollTick(): Promise<void> {
     const quiet = idle && snap.messageCount === lastCount
     lastCount = snap.messageCount
     quietTicks = quiet ? quietTicks + 1 : 0
-    if (quietTicks >= QUIET_TICKS) stopPoll()
+    // The backstop never idles out — see `pollBackstop`.
+    if (!pollBackstop && quietTicks >= QUIET_TICKS) stopPoll()
   } catch {
     consecutiveFails += 1
     quietTicks = 0
@@ -250,7 +273,10 @@ function handlePacket(d: Decoded, sock: WebSocketLike): void {
     if (d.codes.some((c) => c !== 0x80)) {
       wsAlive = true
       if (connectTimer !== null) { clearTimeout(connectTimer); connectTimer = null }
-      stopPoll() // WS owns the freshness signal now (§8.0 exclusivity)
+      // WS owns the primary freshness signal, but keep a slow REST backstop
+      // alive (§8.0 revised): a half-open WS that stops forwarding `state`
+      // would otherwise freeze the banner until the 70s ping watchdog fires.
+      startBackstopPoll()
       retries = 0
       active.h.onChannel('ws')
       if (pingTimer !== null) clearInterval(pingTimer)

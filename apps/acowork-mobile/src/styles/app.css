@@ -470,8 +470,11 @@
   white-space: pre-wrap;
 }
 .bubble-self {
-  background: var(--color-bubble-self);
-  color: var(--color-bubble-self-text);
+  /* A tint-strong surface: the accent darkened so white text holds WCAG AA for
+   * every accent in both themes (see lib/theme.ts). Text stays white in both
+   * themes, matching desktop. */
+  background: var(--color-tint-strong);
+  color: #ffffff;
   border-top-right-radius: 2px;
 }
 .bubble-peer {
@@ -789,7 +792,9 @@
   height: 48px;
   border-radius: var(--radius-sm);
   border: 0;
-  background: var(--color-tint);
+  /* Also a tint-strong surface: white text on the raw accent was ~2:1 for the
+   * green/orange themes, the same legibility bug the user bubble had. */
+  background: var(--color-tint-strong);
   color: #fff;
   font-size: 16px;
   font-weight: 600;
@@ -816,7 +821,12 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-3);
+  /* Align the dot with the bubble's left edge, not the avatar. The status
+   * line is a direct child of .scroll-chat, so it reserves the avatar
+   * column's footprint (avatar 36 + gap 8 = 44px) and drops its own left
+   * padding to land on the bubble box edge. */
+  margin-left: 44px;
+  padding: var(--space-1) 0;
   font-size: 13px;
   color: var(--color-label-secondary);
 }

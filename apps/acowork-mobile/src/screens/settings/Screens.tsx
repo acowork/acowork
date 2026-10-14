@@ -16,7 +16,7 @@ import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { probeStatus } from '../../lib/api'
-import { ACCENTS, type ThemePref } from '../../lib/theme'
+import { ACCENTS, resolveTheme, type ThemePref } from '../../lib/theme'
 import { ListRow, Segmented, Banner } from '../../components/ui'
 import { User, Cog, Palette, Server, Wrench, Puzzle } from 'lucide-react'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
@@ -131,6 +131,10 @@ export function AppearanceScreen() {
   const accent = useSettingsStore((s) => s.accent)
   const setTheme = useSettingsStore((s) => s.setTheme)
   const setAccent = useSettingsStore((s) => s.setAccent)
+  // The swatch must show the shade the app will actually paint with: accents
+  // carry a separate light/dark value, and a raw accent is what the highlight
+  // colour is (the darkened --color-tint-strong is a derived surface colour).
+  const resolved = resolveTheme(theme)
   return (
     <SubScreen title="外观">
       <div className="list-section-title" style={{ padding: 'var(--space-3) var(--space-4) var(--space-2)' }}>
@@ -160,7 +164,7 @@ export function AppearanceScreen() {
             className={`accent-swatch${accent === a.id ? ' is-active' : ''}`}
             onClick={() => setAccent(a.id)}
           >
-            <span className="accent-dot" style={{ background: a.light }} />
+            <span className="accent-dot" style={{ background: resolved === 'dark' ? a.dark : a.light }} />
           </button>
         ))}
       </div>
