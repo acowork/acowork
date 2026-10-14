@@ -17,6 +17,7 @@ import { cn } from "../../lib/utils";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { log } from "../../lib/logger";
 import { useToast } from "../common/ToastProvider";
+import { isWorkspacePreviewable } from "../editor/filePreview";
 import { GitStatusBar } from "./git/GitStatusBar";
 import { GitStatusPanel } from "./git/GitStatusPanel";
 import { useGitStore } from "../../stores/gitStore";
@@ -498,8 +499,10 @@ export function WorkspaceExplorer() {
 
     const handleSearchSelect = useCallback((relPath: string) => {
         if (!selectedAgentId) return;
-        // Image extensions open in preview (mirrors handleFileDoubleClick)
-        if (/\.(jpg|jpeg|png|gif|webp|svg)$/i.test(relPath)) {
+        // Previewable files (images, SVG, Markdown, HTML) open in preview;
+        // everything else opens in Monaco. Single rule shared with
+        // `handleFileDoubleClick` so both entry points can't drift.
+        if (isWorkspacePreviewable(relPath)) {
             void openPreview(selectedAgentId, currentWorkspaceId, relPath);
         } else {
             void openFile(selectedAgentId, currentWorkspaceId, relPath);
@@ -641,8 +644,12 @@ export function WorkspaceExplorer() {
 
     const handleFileDoubleClick = useCallback((_entry: TreeEntry, relPath: string) => {
         if (!selectedAgentId) return;
-        // Images open in preview; everything else opens in editor (source code)
-        if (/\.(jpg|jpeg|png|gif|webp|svg)$/i.test(relPath)) {
+        // Previewable files (images, SVG, Markdown, HTML) open in preview;
+        // everything else opens in Monaco for source editing. Single rule
+        // shared with `handleSearchSelect` and `FileTreeNode.isPreviewable`
+        // via `isWorkspacePreviewable` so the right-click menu, the search
+        // picker and the double-click handler can't drift apart.
+        if (isWorkspacePreviewable(relPath)) {
             void openPreview(selectedAgentId, currentWorkspaceId, relPath);
         } else {
             void openFile(selectedAgentId, currentWorkspaceId, relPath);

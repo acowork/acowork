@@ -16,6 +16,7 @@ import {
 import { isGatewayLocal } from "../../../lib/config";
 import type { TreeEntry } from "../../../stores/fileTree";
 import { useSessionReadOnly } from "../../../lib/session-write-access";
+import { isWorkspacePreviewable } from "../../editor/filePreview";
 
 // Lazy-load Tauri dialog to avoid import error in browser dev mode
 let _dialogModule: typeof import("@tauri-apps/plugin-dialog") | null = null;
@@ -133,8 +134,11 @@ export const FileTreeNode = memo(function FileTreeNode({
   const fileIcon = isDir ? null : getFileIcon(entry.name);
   const { t } = useTranslation();
   const openPreview = useFileEditorStore((s) => s.openPreview);
-  // Preview is available for Markdown (.md), HTML (.html/.htm), and image files.
-  const isPreviewable = !isDir && /\.(md|html?)$/i.test(entry.name);
+  // Previewable covers images (jpg/png/gif/webp), SVG, Markdown and HTML.
+  // Single source of truth lives in `isWorkspacePreviewable` so the
+  // right-click "Preview" item, the search picker and the double-click
+  // handler all agree on what counts as a previewable file.
+  const isPreviewable = !isDir && isWorkspacePreviewable(entry.name);
 
   // Context menu state — viewport-aware positioning via shared hook
   // (see src/hooks/useContextMenuPosition) so the menu flips above the
