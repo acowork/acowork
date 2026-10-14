@@ -385,6 +385,8 @@
   "agentList": {
     "doubleClickToStart": "Double-click to start",
     "dotBusy": "This agent is working",
+    "dotOnline": "Online",
+    "dotOffline": "Offline",
     "searchPlaceholder": "Search agents...",
     "stopConfirm": "Stop {{agent}}? Current conversation state will be preserved.",
     "uninstallConfirm": "Uninstall {{agent}}? This action cannot be undone.",

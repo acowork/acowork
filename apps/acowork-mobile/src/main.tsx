@@ -71,6 +71,8 @@ setPresenceDeps({
   wsUrl: mqttWsUrl,
   connectOpts: () => mqttConnectOpts((sub, device) => `${sessionClientId(sub, device)}-presence`),
   onUpdate: (agentId, update) => useAgentStore.getState().applyPresence(agentId, update.status),
+  onSessionState: (agentId, sessionId, status) =>
+    useAgentStore.getState().applySessionState(agentId, sessionId, status),
   chatTopic: () => {
     const me = useAuthStore.getState().me?.user_id
     return me ? userChatChangedTopic(me) : null

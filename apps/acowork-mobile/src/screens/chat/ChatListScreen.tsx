@@ -77,7 +77,7 @@ function GroupTitle({ icon, name, online }: { icon: ReactNode; name: string; onl
       <span className="group-title-name">{name}</span>
       {online === undefined ? null : (
         <span
-          className={`dot ${online ? 'dot-online' : 'dot-offline'}`}
+          className={`dot dot-sm ${online ? 'dot-online' : 'dot-offline'}`}
           aria-label={online ? '在线' : '离线'}
         />
       )}
@@ -110,6 +110,7 @@ export function ChatListScreen() {
   const users = useAgentStore((s) => s.users)
   const nodes = useAgentStore((s) => s.nodes)
   const sessionsByAgent = useAgentStore((s) => s.agents)
+  const busySessions = useAgentStore((s) => s.busySessions)
   const refreshInbox = useAgentStore((s) => s.refreshInbox)
   const loading = useAgentStore((s) => s.directoryLoading)
   const startingAgentIds = useAgentStore((s) => s.startingAgentIds)
@@ -237,14 +238,6 @@ export function ChatListScreen() {
               <ListRow
                 key={a.id}
                 avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
-                // Working dot: the directory's own `busy` verdict (ADR-014
-                // non-idle session status, pushed over presence). The ONLY
-                // corner status on an agent row — no unread dot, matching the
-                // Desktop sidebar. Deliberately not folded into the presence
-                // dot beside the name: that one is liveness (online/offline/
-                // error) and already carries three states, so overloading it
-                // is what made the old desktop green dot ambiguous.
-                avatarBusy={a.status === 'busy'}
                 onClick={() => void openAgent(a.id, recent?.session_id ?? null)}
                 label={
                   <span className="row-title">
@@ -253,18 +246,23 @@ export function ChatListScreen() {
                       <span className="dot-spinner" aria-label="正在启动" title="正在启动" />
                     ) : (
                       (() => {
-                        // Presence from the directory's `alive`/`lifecycle`.
-                        // A plain offline-only dot used to render transparent
-                        // and never surfaced online; now all three states show.
+                        // Presence from the directory's `alive`/`lifecycle`;
+                        // working from the presence socket's fleet-wide
+                        // `.../sessions/+/state` pushes — the same signal
+                        // Desktop's `busyAgentIds` reads (the directory and
+                        // the AgentStatus wire never carry `busy`).
+                        const working = busySessions[a.id]?.size ? a.status !== 'offline' : false
                         const cls =
                           a.status === 'offline'
                             ? 'dot dot-offline'
                             : a.status === 'error'
                               ? 'dot dot-error'
-                              : 'dot dot-online'
+                              : working
+                                ? 'dot dot-busy'
+                                : 'dot dot-online'
                         const text =
-                          a.status === 'offline' ? '离线' : a.status === 'error' ? '异常' : '在线'
-                        return <span className={cls} aria-label={text} title={text} />
+                          a.status === 'offline' ? '离线' : a.status === 'error' ? '异常' : working ? '正在工作' : '在线'
+                        return <span className={`dot-sm ${cls}`} aria-label={text} title={text} />
                       })()
                     )}
                   </span>

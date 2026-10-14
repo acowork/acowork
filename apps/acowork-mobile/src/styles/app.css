@@ -316,28 +316,6 @@
   flex: none;
   z-index: 1;
 }
-/* Agent mid-turn: a green corner dot on the avatar — the same position and
- * size the red unread dot used to occupy, and the ONLY corner status an agent
- * row gets. Green = "something is happening", and it is the SAME single signal
- * the Desktop sidebar's working dot carries (ADR-014 non-idle session status),
- * so parity is the point rather than a mobile-only invention.
- *
- * NOT `--color-warning` (`.dot-busy`): that class marks a presence dot in a
- * 3-state liveness scale, where busy-outranks-online is the meaning. Here the
- * dot is the whole status vocabulary — one state, one colour — so it takes the
- * unambiguous success green instead of borrowing a semantic from elsewhere. */
-.avatar-busy {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: var(--color-success);
-  border: 1.5px solid var(--color-bg-elevated);
-  box-sizing: border-box;
-  pointer-events: none;
-}
 /* The same corner, carrying a server-reported count (contact threads). Red is
  * deliberate: unread is never painted in the global accent, which reads as
  * "selected", not as "new". */
@@ -424,11 +402,26 @@
    * showed; state classes below override it. */
   background: var(--color-label-secondary);
 }
+/* Presence dots on the inbox (agent rows + node headers): smaller than the
+ * 8px default so they read against 13-15px names, and unified across agent
+ * and node — Desktop uses 6px for both. User-row dots keep the 8px base. */
+.dot-sm {
+  width: 6px;
+  height: 6px;
+}
 .dot-online {
   background: var(--color-success);
 }
 .dot-busy {
-  background: var(--color-warning);
+  background: var(--color-success);
+  /* Working = breathe between solid and 10% opacity (parity with
+   * Desktop's .dot-breathing). Shares the same 0%/100%-solid shape
+   * so a prefers-reduced-motion freeze stays visible. */
+  animation: dot-breathe 1.8s ease-in-out infinite;
+}
+@keyframes dot-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.1; }
 }
 .dot-offline {
   background: var(--color-label-secondary);
@@ -976,7 +969,7 @@
  * red bubble `.avatar-unread-count` (server-reported only). This trail form is
  * only the fallback for rows that have no avatar to hang a corner badge on
  * (e.g. the docs 审阅队列 row). Agent rows carry no unread signal at all —
- * only the green `.avatar-busy` working dot. */
+ * the same name-adjacent presence dot as Desktop. */
 .badge-count {
   min-width: 18px;
   height: 18px;

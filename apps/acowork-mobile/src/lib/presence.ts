@@ -39,11 +39,16 @@ import {
   encodeConnect, encodeDisconnect, encodePingreq, encodePuback,
   encodeSubscribe, PacketFramer, PKT, type ConnectOpts, type Decoded,
 } from './mqtt-wire'
-import { decodePresence, type PresenceUpdate } from './proto-wire'
+import { decodeEnvelope, decodePresence, type PresenceUpdate } from './proto-wire'
 import type { WebSocketLike } from './realtime'
 
 /** One wildcard filter for the whole fleet (QoS 1: the status topic is QoS 1). */
 export const PRESENCE_TOPIC = 'acowork/agents/+/status'
+/** Fleet-wide session working states (retained QoS1 — a fresh subscribe
+ *  replays every session's current status, same as Desktop's mqtt_client).
+ *  Drives the inbox's breathing working dot: the presence wire above only
+ *  carries lifecycle (offline/error/idle), never `busy`. */
+export const SESSION_STATE_TOPIC = 'acowork/agents/+/sessions/+/state'
 /** Prefix of the per-account chat signals — routes a PUBLISH to the right
  *  consumer without re-deriving the account id. Mirrors
  *  `acowork_core::mqtt_proto::user_chat_changed_topic`. */
@@ -64,6 +69,9 @@ export interface PresenceDeps {
   connectOpts?(): Promise<ConnectOpts | null>
   /** One agent's verdict flipped. Called for every status publish. */
   onUpdate(agentId: string, update: PresenceUpdate): void
+  /** One session's lifecycle status pushed/retained (`.../sessions/{sid}/state`).
+   *  Raw Runtime status string; the store decides busy vs idle. */
+  onSessionState?(agentId: string, sessionId: string, status: string): void
   /**
    * The account's chat signal topic, or null while there is no account (boot,
    * logged out). Read per CONNECT, so a rotation that lands during a reconnect
@@ -103,7 +111,7 @@ let packetId = 1
  *  one this connection is actually listening to. Kept per connection: the
  *  account can change between two CONNECTs, and routing a PUBLISH against a
  *  stale topic would silently drop the wake-up. */
-let subTopics: string[] = [PRESENCE_TOPIC]
+let subTopics: string[] = [PRESENCE_TOPIC, SESSION_STATE_TOPIC]
 let chatSub: string | null = null
 /** Last value handed to `onChatChannel`, so a reconnect does not re-arm a poll
  *  that is already armed (and the reverse). */
@@ -191,7 +199,9 @@ function handlePacket(d: Decoded, s: WebSocketLike): void {
       // to presence only, half-awake, with nothing logging it.
       const chat = deps.chatTopic?.() ?? null
       chatSub = chat
-      subTopics = chat ? [PRESENCE_TOPIC, chat] : [PRESENCE_TOPIC]
+      subTopics = chat
+        ? [PRESENCE_TOPIC, SESSION_STATE_TOPIC, chat]
+        : [PRESENCE_TOPIC, SESSION_STATE_TOPIC]
       s.send(encodeSubscribe(subTopics, subTopics.map(() => 1), packetId++))
     } else onDown() // rejected (stale token / fail-closed verifier): retry later
     return
@@ -200,8 +210,9 @@ function handlePacket(d: Decoded, s: WebSocketLike): void {
     // Grant is per filter, not per packet: a Gateway whose account system is
     // off can hand back 0x80 for the mailbox while still delivering presence.
     const presenceOk = granted(d.codes, PRESENCE_TOPIC)
+    const stateOk = granted(d.codes, SESSION_STATE_TOPIC)
     const chatOk = chatSub !== null && granted(d.codes, chatSub)
-    if (presenceOk || chatOk) {
+    if (presenceOk || stateOk || chatOk) {
       alive = true
       retries = 0
       if (connectTimer !== null) { clearTimeout(connectTimer); connectTimer = null }
@@ -226,6 +237,17 @@ function handlePacket(d: Decoded, s: WebSocketLike): void {
       // never sent, and if one ever were, another account's signal must not
       // refresh this device.
       if (chatSub !== null && p.topic === chatSub) deps.onChatWake?.()
+      return
+    }
+    if (p.topic.startsWith('acowork/agents/') && p.topic.endsWith('/state')) {
+      // `acowork/agents/{instance}/sessions/{sid}/state` — working signal.
+      const ev = decodeEnvelope(p.payload)
+      if (ev.kind === 'state') {
+        const seg = p.topic.split('/')
+        const agentId = seg[2]
+        const sessionId = seg[4]
+        if (agentId && sessionId) deps.onSessionState?.(agentId, sessionId, ev.status)
+      }
       return
     }
     const update = decodePresence(p.payload)

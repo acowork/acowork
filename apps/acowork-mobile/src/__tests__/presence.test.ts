@@ -1,7 +1,8 @@
 /**
  * Background channel tests (v1.2 §8.1, ADR-085, design doc 25 §8): `AgentStatus`
  * envelope decoding and the single global subscription that flips list rows —
- * CONNECT → SUBSCRIBE `acowork/agents/+/status` → PUBLISH routing, the QoS 1
+ * CONNECT → SUBSCRIBE `acowork/agents/+/status` + `acowork/agents/+/sessions/+/state`
+ * → PUBLISH routing, the QoS 1
  * acknowledgement, the fail-closed CONNACK path and the teardown on logout.
  *
  * The same socket also carries the user-chat doorbell, so the second describe
@@ -13,7 +14,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { PKT } from '../lib/mqtt-wire'
 import { decodePresence, wBytes, wStr, wVarint } from '../lib/proto-wire'
 import {
-  PRESENCE_TOPIC, presenceConnected, setPresenceDeps, startPresence, stopPresence,
+  PRESENCE_TOPIC, SESSION_STATE_TOPIC, presenceConnected, setPresenceDeps, startPresence, stopPresence,
 } from '../lib/presence'
 import type { WebSocketLike } from '../lib/realtime'
 import { setDirectorySource, useAgentStore } from '../stores/agentStore'
@@ -94,6 +95,18 @@ function chatPublish(topic: string, pkid = 7): Uint8Array {
   return Uint8Array.from([(PKT.PUBLISH << 4) | 0x02, body.length, ...body])
 }
 
+/** `acowork/agents/{a}/sessions/{s}/state` — DataEnvelope{session_state=18}. */
+function statePublish(agentId: string, sessionId: string, status: string, pkid = 5): Uint8Array {
+  const topic = new TextEncoder().encode(`acowork/agents/${agentId}/sessions/${sessionId}/state`)
+  // Wire-faithful: SessionState.status is a serde tagged-enum JSON string,
+  // not a bare enum name (see proto-wire.unwrapStatus).
+  const inner = [...wStr(3, JSON.stringify({ status }))]
+  const payload = Uint8Array.from([...wVarint(1, 1), ...wBytes(18, inner)])
+  const head = [(pkid >> 8) & 0xff, pkid & 0xff]
+  const body = Uint8Array.from([0, topic.length, ...topic, ...head, ...payload])
+  return Uint8Array.from([(PKT.PUBLISH << 4) | 0x02, body.length, ...body])
+}
+
 function statusPublish(agentId: string, inner: number[], qos1 = true, pkid = 3): Uint8Array {
   const topic = new TextEncoder().encode(`acowork/agents/${agentId}/status`)
   const payload = envPresence(inner)
@@ -111,6 +124,7 @@ const catBytes = (...parts: Uint8Array[]) => {
 
 let sockets: FakeSocket[] = []
 let onUpdate: ReturnType<typeof vi.fn>
+let onSessionState: ReturnType<typeof vi.fn>
 let onChatWake: ReturnType<typeof vi.fn>
 let onChatChannel: ReturnType<typeof vi.fn>
 
@@ -122,12 +136,14 @@ const CHAT_TOPIC_OTHER = 'acowork/users/cccccccc-0000-4000-8000-000000000003/cha
 beforeEach(() => {
   sockets = []
   onUpdate = vi.fn()
+  onSessionState = vi.fn()
   onChatWake = vi.fn()
   onChatChannel = vi.fn()
   setPresenceDeps({
     wsUrl: () => 'ws://192.168.1.7:19876/mqtt',
     connectOpts: async () => ({ clientId: 'user:alice:mobile:dev-1-presence', username: 'alice', password: 'tok' }),
     onUpdate,
+    onSessionState,
     // No account by default: the presence tests must keep seeing exactly one
     // filter, and the chat half reads the topic per CONNECT like the real app.
     chatTopic: () => null,
@@ -144,6 +160,7 @@ afterEach(() => {
   setPresenceDeps({
     wsUrl: () => null, connectOpts: async () => null, makeWs: undefined,
     chatTopic: undefined, onChatWake: undefined, onChatChannel: undefined,
+    onSessionState: undefined,
   })
 })
 
@@ -162,7 +179,10 @@ describe('presence channel', () => {
     expect(presenceConnected()).toBe(true)
     const subText = new TextDecoder().decode(sock.sent[1])
     expect(subText).toContain(PRESENCE_TOPIC)
-    expect(subText).not.toContain('sessions/') // presence never touches session topics
+    // The fleet's session states ride the SAME socket: the inbox's working
+    // dot needs a push source, and the AgentStatus wire never carries
+    // `busy` (parity with Desktop's `.../sessions/+/state` subscription).
+    expect(subText).toContain(SESSION_STATE_TOPIC)
 
     sock.emit(statusPublish('i-1', [...wVarint(2, 1), ...wStr(4, 'i-1'), ...wVarint(6, 4)]))
     expect(onUpdate).toHaveBeenCalledWith('i-1', expect.objectContaining({ status: 'idle' }))
@@ -170,6 +190,12 @@ describe('presence channel', () => {
     // The LWT copy carries no instance_id: the topic path is the identity.
     sock.emit(statusPublish('i-2', []))
     expect(onUpdate).toHaveBeenCalledWith('i-2', expect.objectContaining({ status: 'offline' }))
+
+    // A session-state publish routes to onSessionState, NOT to the presence
+    // decoder (its envelope is field 18, not 9 — decodePresence would null it).
+    sock.emit(statePublish('i-1', 's-1', 'tool_executing'))
+    expect(onSessionState).toHaveBeenCalledWith('i-1', 's-1', 'tool_executing')
+    expect(onUpdate).toHaveBeenCalledTimes(2)
   })
 
   it('acknowledges a QoS 1 publish so the broker stops redelivering', async () => {
@@ -276,7 +302,7 @@ describe('chat wake-up half of the channel', () => {
     const sock = sockets[0]!
     sock.emitOpen()
     sock.emit(connackOk)
-    sock.emit(suback2([1, 1]))
+    sock.emit(suback2([1, 1, 1]))
     return sock
   }
 
@@ -339,7 +365,7 @@ describe('chat wake-up half of the channel', () => {
     sock.emit(connackOk)
     const text = lastSubscribe(sock)
     expect(text).toContain(CHAT_TOPIC_OTHER)
-    sock.emit(suback2([1, 1]))
+    sock.emit(suback2([1, 1, 1]))
 
     sock.emit(chatPublish(CHAT_TOPIC)) // the stale topic must be ignored now
     expect(onChatWake).toHaveBeenCalledTimes(1)
@@ -357,7 +383,7 @@ describe('chat wake-up half of the channel', () => {
     // filter, not per packet — treating it as one verdict would either stop the
     // fleet dots or leave the inbox thinking push works while nothing arrives.
     sock.emit(connackOk)
-    sock.emit(suback2([1, 0x80]))
+    sock.emit(suback2([1, 1, 0x80]))
 
     expect(onChatChannel).toHaveBeenLastCalledWith(false)
     expect(onChatChannel).toHaveBeenCalledTimes(2)
@@ -373,9 +399,9 @@ describe('chat wake-up half of the channel', () => {
     // The store stops its fallback timer on `true`; a flapping report would
     // stop and re-arm it on every reconnect and the timer would never idle.
     sock.emit(connackOk)
-    sock.emit(suback2([1, 1]))
+    sock.emit(suback2([1, 1, 1]))
     sock.emit(connackOk)
-    sock.emit(suback2([1, 1]))
+    sock.emit(suback2([1, 1, 1]))
     expect(onChatChannel).toHaveBeenCalledTimes(1)
 
     sock.emit(subackRefused)
@@ -410,6 +436,33 @@ function seedAgents(list: AgentSummary[]) {
   useAgentStore.setState({ agents: {}, agentList: [], users: [] })
   useAgentStore.getState().setAgents(list)
 }
+
+describe('applySessionState (working dot)', () => {
+  afterEach(() => useAgentStore.setState({ agents: {}, agentList: [], users: [], busySessions: {} }))
+
+  it('marks the agent busy on a non-idle status and clears it on idle', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', 'tool_executing')
+    expect(useAgentStore.getState().busySessions['i-1']?.has('s-1')).toBe(true)
+    useAgentStore.getState().applySessionState('i-1', 's-1', 'idle')
+    expect(useAgentStore.getState().busySessions['i-1']).toBeUndefined()
+  })
+
+  it('keeps the agent busy while any session is mid-turn', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', 'llm_streaming')
+    useAgentStore.getState().applySessionState('i-1', 's-2', 'thinking')
+    useAgentStore.getState().applySessionState('i-1', 's-1', 'idle')
+    const busy = useAgentStore.getState().busySessions['i-1']
+    expect(busy?.has('s-1')).toBe(false)
+    expect(busy?.has('s-2')).toBe(true)
+  })
+
+  it("an offline verdict drops the agent's stale busy sessions", () => {
+    seedAgents([{ id: 'i-1', name: 'Senior', node_id: 'n-1', status: 'idle' }])
+    useAgentStore.getState().applySessionState('i-1', 's-1', 'tool_executing')
+    useAgentStore.getState().applyPresence('i-1', 'offline')
+    expect(useAgentStore.getState().busySessions['i-1']).toBeUndefined()
+  })
+})
 
 describe('applyPresence', () => {
   afterEach(() => useAgentStore.setState({ agents: {}, agentList: [], users: [] }))

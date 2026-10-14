@@ -86,8 +86,12 @@ const envMsg = (ev: number[]) => Uint8Array.from([...wVarint(1, 1), ...wBytes(15
 
 describe('proto-wire', () => {
   it('decodes DataEnvelope{session_state}', () => {
-    const ev = decodeEnvelope(envState([...wStr(3, 'idle'), ...wVarint(4, 7)]))
+    // Wire-faithful: status is a serde tagged-enum JSON string.
+    const ev = decodeEnvelope(envState([...wStr(3, '{"status":"idle"}'), ...wVarint(4, 7)]))
     expect(ev).toEqual({ kind: 'state', status: 'idle', messageCount: 7 })
+    // Bare enum name tolerated (publisher drift guard).
+    const bare = decodeEnvelope(envState([...wStr(3, 'idle'), ...wVarint(4, 2)]))
+    expect(bare).toEqual({ kind: 'state', status: 'idle', messageCount: 2 })
   })
 
   it('decodes done / error / stopped', () => {
@@ -143,7 +147,8 @@ const connackBad = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 4])
 const subackOk = Uint8Array.from([PKT.SUBACK << 4, 8, 0, 1, 1, 1, 1, 1, 1, 1])
 const statePublish = (status: string, count: number, qos1 = false): Uint8Array => {
   const topic = new TextEncoder().encode('acowork/agents/a1/sessions/s1/state')
-  const payload = envState([...wStr(3, status), ...wVarint(4, count)])
+  // Wire-faithful: SessionState.status is a JSON string (serde tagged enum).
+  const payload = envState([...wStr(3, JSON.stringify({ status })), ...wVarint(4, count)])
   const head = qos1 ? [0, 1] : []
   const body = Uint8Array.from([0, topic.length, ...topic, ...head, ...payload])
   return Uint8Array.from([(PKT.PUBLISH << 4) | (qos1 ? 0x02 : 0), body.length, ...body])

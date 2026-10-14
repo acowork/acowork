@@ -80,44 +80,46 @@ describe("NodeGroupHeader", () => {
   });
 });
 
-describe("agent working dot", () => {
-  // Bound to the JSX EXPRESSION, not the comment above it: the comment
-  // explains the change and legitimately names colours, and the 2000-char
-  // window the original test used ran past this dot into the node-install
-  // picker, which is a genuinely different emerald (an online node).
-  const start = src.indexOf("{busyAgentIds.has(id) && (");
-  const end = src.indexOf("\n            )}", start);
+describe("agent status dot (beside the name)", () => {
+  // Source-scanned like the rest of this file. The dot used to be an
+  // avatar-corner working-only marker; it is now the single 3-state status
+  // dot beside the agent name (gray offline / solid emerald online /
+  // breathing emerald online+working), matching the mobile row. The old
+  // `{busyAgentIds.has(id) && (...)}` anchor is gone by design.
+  const start = src.indexOf('title={busyAgentIds.has(id) && agent.alive');
+  const end = src.indexOf('/>', start);
   const dot = src.slice(start, end);
   // Sanity: the anchor must exist, or every assertion below passes vacuously.
   expect(start).toBeGreaterThan(-1);
 
-  it("is solid emerald, matching the node online dot", () => {
+  it("is emerald when online, matching the node online dot", () => {
     // Two dots, one meaning ("something is live"). Matching the node
-    // header's literal is deliberate: a different shade here would look like
-    // a different state at 10px.
+    // header's literal is deliberate: a different shade would look like a
+    // different state at this size.
     expect(dot).toContain("bg-emerald-500");
+    expect(dot).toContain("agent.alive");
   });
 
-  it("is agent-scoped, not gated on the selected row", () => {
-    // It USED to be suppressed on the selected row, which meant the agent
-    // the user was watching never showed it. The selection fill already
-    // marks the row; the dot is about the agent being busy, which is
-    // independent of which session is on screen.
-    expect(dot).toMatch(/busyAgentIds\.has\(id\)/);
-    expect(dot).not.toMatch(/selectedAgentId/);
-    expect(dot).not.toMatch(/agent\.alive/);
+  it("is gray when offline", () => {
+    expect(dot).toContain("bg-zinc-400");
   });
 
-  it("is borderless", () => {
-    // A ring around a 10px dot reads as a smudge on the selected row's
-    // accent fill.
-    expect(dot).not.toMatch(/ring-\d/);
+  it("breathes (fully transparent <-> solid) while online and working", () => {
+    // `animate-pulse` only dipped to 0.5 opacity -- too subtle at 6px.
+    // `dot-breathing` is the dedicated keyframe in globals.css.
+    expect(dot).toContain("dot-breathing");
+    expect(dot).not.toContain("animate-pulse");
+  });
+
+  it("is the same size as the node header dot", () => {
+    expect(dot).toContain("h-1.5 w-1.5");
   });
 
   it("carries a label for hover and screen readers", () => {
     // Colour alone is not an accessible signal; the node band already sets
     // this precedent with its `title={statusLabel}` dot.
-    expect(dot).toContain("title={t(\"agentList.dotBusy\")}");
-    expect(dot).toContain("aria-label={t(\"agentList.dotBusy\")}");
+    expect(dot).toContain('t("agentList.dotBusy")');
+    expect(dot).toContain('t("agentList.dotOnline")');
+    expect(dot).toContain('t("agentList.dotOffline")');
   });
 });
