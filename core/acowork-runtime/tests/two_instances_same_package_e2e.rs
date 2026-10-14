@@ -262,7 +262,12 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
             command: Some(Command::Intent(Intent {
                 from: "cron:cron-agent".into(),
                 action: "route_probe".into(),
-                params_json: r#"{"target":"A"}"#.into(),
+                message_id: String::new(),
+                conversation_id: String::new(),
+                source_agent_session_id: String::new(),
+                source_chat_session_id: String::new(),
+                repo: String::new(),
+params_json: r#"{"target":"A"}"#.into(),
             })),
         };
         gw.publish_control_command(INSTANCE_A, cmd)

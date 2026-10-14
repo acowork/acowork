@@ -997,15 +997,36 @@ message ControlCommand {
 
 // ── System ────────────────────────────────────────────────────────────────
 
-/// Intent command — Gateway pushes an IntentReceived to a Runtime agent.
-/// Used for cron triggers and cross-agent messaging via MQTT.
+/// Intent command — Gateway pushes an Intent to a Runtime agent.
+/// The Gateway is the only publisher on the control topic
+/// (intent-delivery-tech-debt-plan D1/D4/D5); every field below is
+/// Gateway-stamped or Gateway-validated, never client-asserted.
+/// Additive fields 4-8 per design doc 27 §3.2; `params_json` stays an
+/// opaque action-scoped JSON string (schema validation is per-action,
+/// owned by the receiving agent, not this envelope).
 message Intent {
-  /// Source of the intent (e.g. "cron:<agent_id>" for cron triggers).
+  /// Source of the intent: instance id stamped by the Gateway (D4), or
+  /// "cron:<trigger_id>" for cron triggers.
   string from = 1;
   /// Action name (e.g. "hourly_check").
   string action = 2;
   /// Intent parameters as JSON.
   string params_json = 3;
+  /// Stable message identity (design doc 27 §4). Gateway-generated UUID;
+  /// also the mailbox key. Empty only for pre-upgrade senders.
+  string message_id = 4;
+  /// Conversation this request belongs to (§6.5). Empty for
+  /// pre-conversation senders (cron, plain intent_send).
+  string conversation_id = 5;
+  /// Source agent execution session id, when the sender is an agent
+  /// (design 27 §3.2 source_agent_session_id). Empty for cron.
+  string source_agent_session_id = 6;
+  /// Source chat session id (design 27 §3.2). Empty until Phase 2.
+  string source_chat_session_id = 7;
+  /// Source-side authorized repo the target may work in
+  /// (design 27 §3.2). Validated against the sender's workspace by the
+  /// Gateway before delivery (PR-D); empty = none offered.
+  string repo = 8;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

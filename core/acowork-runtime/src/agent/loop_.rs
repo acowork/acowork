@@ -2476,6 +2476,10 @@ mod tests {
                 from: "com.test.agent".to_string(),
                 action: "ping".to_string(),
                 params: serde_json::json!({}),
+                message_id: String::new(),
+                conversation_id: String::new(),
+                source_chat_session_id: String::new(),
+                repo: String::new(),
             })
             .unwrap();
 

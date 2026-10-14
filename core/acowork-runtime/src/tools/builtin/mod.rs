@@ -130,7 +130,7 @@ pub fn all_builtin_tools(
     memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     mcp_notifier: McpNotifyRef,
     agent_home: String,
-    mqtt_slot: crate::http::server::SharedMqttClientSlot,
+    intent_send_config: crate::tools::builtin::intent_send::IntentSendConfig,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
@@ -169,10 +169,7 @@ pub fn all_builtin_tools(
         Arc::new(doc_reader::DocReaderTool::new()),
         Arc::new(glob_search::GlobSearchTool::new(resolver)),
         Arc::new(content_search::ContentSearchTool::new(resolver)),
-        Arc::new(intent_send::IntentSendTool::new(
-            agent_id.to_string(),
-            mqtt_slot.clone(),
-        )),
+        Arc::new(intent_send::IntentSendTool::new(intent_send_config)),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
         Arc::new(todo_write::TodoWriteTool::new()),
         Arc::new(mcp_install::McpInstallTool::new(
@@ -212,7 +209,7 @@ mod tests {
         Option<Arc<MemorySessionHandle>>,
         McpNotifyRef,
         String, // agent_home
-        crate::http::server::SharedMqttClientSlot,
+        crate::tools::builtin::intent_send::IntentSendConfig,
     ) {
         let dir = tempfile::tempdir().unwrap();
         let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(
@@ -220,8 +217,11 @@ mod tests {
         )));
         let memory_session = Some(Arc::new(MemorySessionHandle::new(None)));
         let mcp_notifier: McpNotifyRef = Some(Arc::new(McpConfigNotifier::default()));
-        let mqtt_slot: crate::http::server::SharedMqttClientSlot =
-            Arc::new(tokio::sync::Mutex::new(None));
+        let intent_cfg = crate::tools::builtin::intent_send::IntentSendConfig {
+            instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
+            gateway_host: "127.0.0.1".to_string(),
+            node_token: String::new(),
+        };
 
         (
             resolver,
@@ -230,7 +230,7 @@ mod tests {
             memory_session,
             mcp_notifier,
             "/tmp/test-agent".to_string(),
-            mqtt_slot,
+            intent_cfg,
         )
     }
 
@@ -248,9 +248,9 @@ mod tests {
         // fails if someone re-adds the registration without also restoring
         // the `codebase` branch in `handle_lsp_relay_update` and the
         // `BUILTIN_TOOLS` catalog entry.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, intent_cfg) = make_test_deps();
 
-        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, intent_cfg);
 
         let names = tool_names(&tools);
         assert!(
@@ -266,9 +266,9 @@ mod tests {
         // tool surface (ADR-061 §10). `context_retrieve` was deleted
         // outright once it turned out to scan every session file instead of
         // the current one; `context_abandon` survives as dead code.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, intent_cfg) = make_test_deps();
 
-        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, intent_cfg);
 
         let names = tool_names(&tools);
         assert!(
@@ -282,9 +282,9 @@ mod tests {
     fn test_all_builtin_tools_default_includes_core_tools() {
         // Regression: platform-tool changes only affect the compression
         // tools; all other core tools are always present.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, intent_cfg) = make_test_deps();
 
-        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, intent_cfg);
 
         let names = tool_names(&tools);
         // Core tools that must always be present (sanity check)

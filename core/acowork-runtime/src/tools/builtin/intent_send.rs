@@ -1,41 +1,70 @@
-//! Intent send tool — send Intent to other Agents via Gateway
+//! Intent send tool — deliver an Intent to another Agent via the Gateway
+//! (intent-delivery-tech-debt-plan D1/D3/D6).
 //!
-//! Per design doc (12-tool-system.md):
-//! - Routed to target Agent via Gateway
-//! - Requires intent:send:<target> permission
-//! - Phase 1 uses synchronous Intent routing; Phase 2+ supports async Intent
+//! Before the tech-debt plan this tool published a raw MQTT
+//! `ControlCommand` to the target's control topic — no online check, no
+//! permission check, self-declared `from`, and an `async` parameter that
+//! changed only the reply text. It now POSTs to the Gateway's single
+//! delivery entry (`POST /api/intents`), which:
+//!
+//! - verifies the sender identity against the session (D4 — the node
+//!   token this call carries ties it to the machine hosting the sender),
+//! - checks both manifests' `intent:send` / `intent:receive`
+//!   declarations (D8),
+//! - wake-then-delivers an offline target through its hosting node and
+//!   waits for the retained AgentStatus flip (D1/D2),
+//! - records the delivery fact in the mailbox and returns the real
+//!   outcome (D3).
+//!
+//! Delivery is synchronous by design: the tool result says *delivered*
+//! or *failed with a reason* — there is no fire-and-forget mode to
+//! promise (the old `async` parameter was a lie and is gone, D6).
+//! "Delivered" means the target Runtime accepted the Intent; the
+//! target's *answer* comes back later through the conversation channel
+//! (design doc 27), not as this call's return value.
 
 use acowork_core::agent_instance_id::AgentInstanceId;
-use acowork_core::mqtt_proto::{self, DataEnvelope, data_envelope::Payload};
-use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use acowork_core::defaults::GATEWAY_HTTP_PORT;
+use acowork_core::tools::traits::{Tool, ToolContext, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::mqtt::client::MqttQoS;
+/// Gateway HTTP delivery endpoint config for the tool.
+#[derive(Debug, Clone)]
+pub struct IntentSendConfig {
+    /// This agent's INSTANCE identity (UUID v4) — the `sender` the
+    /// Gateway verifies against the caller's session (D4).
+    pub instance_id: String,
+    /// Gateway HTTP host (same source as the global-resources pull).
+    pub gateway_host: String,
+    /// Node token presented as `X-ACowork-Node-Token` (machine
+    /// identity; empty = unenrolled local mode).
+    pub node_token: String,
+}
 
-/// Intent send tool - send an Intent to another Agent through the Gateway.
-///
-/// ADR-040 / ADR-033: publishes the Intent as an MQTT `ControlCommand`
-/// to the target agent's control topic. The Gateway's broker routes the
-/// message directly — the target agent's `control_handler` dispatches it
-/// as an `IntentReceived` inbound event.
 pub struct IntentSendTool {
-    agent_id: String,
-    mqtt_slot: crate::http::server::SharedMqttClientSlot,
+    config: IntentSendConfig,
+    client: reqwest::Client,
 }
 
 impl IntentSendTool {
-    pub fn new(agent_id: String, mqtt_slot: crate::http::server::SharedMqttClientSlot) -> Self {
+    pub fn new(config: IntentSendConfig) -> Self {
         Self {
-            agent_id,
-            mqtt_slot,
+            config,
+            // Timeout: delivery waits for a cold-start wake (up to the
+            // Gateway's INTENT_DEFAULT) plus slack; the Gateway owns the
+            // real deadline, the client must not cut it short first.
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(90))
+                .build()
+                .expect("reqwest client build"),
         }
     }
 
     fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "intent_send".to_string(),
-            description: "Send an Intent message to another Agent via Gateway routing. The target Agent must declare intent:receive permission.".to_string(),
+            description: "Send an Intent message to another Agent via Gateway routing. The Gateway delivers it (waking the target if it is offline) and returns the real delivery outcome. Both agents must declare the matching intent:send / intent:receive permission. Delivery is not a reply: the target's answer arrives later as a new turn in your session, not in this result.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -51,14 +80,22 @@ impl IntentSendTool {
                         "type": "object",
                         "description": "Intent payload (key-value data for the target Agent)"
                     },
-                    "async": {
-                        "type": "boolean",
-                        "description": "If true, don't wait for response (fire-and-forget). Default: false.",
-                        "default": false
+                    "repo": {
+                        "type": "string",
+                        "description": "Optional git URL of a repository the target is authorized to work in, validated against your own workspace (design doc 27 §3.2)."
                     }
                 },
                 "required": ["target", "action"]
             }),
+        }
+    }
+
+    fn fail(content: impl Into<String>) -> ToolResult {
+        ToolResult {
+            ok: false,
+            content: String::new(),
+            error: Some(content.into()),
+            token_usage: None,
         }
     }
 }
@@ -69,120 +106,120 @@ impl Tool for IntentSendTool {
         Self::spec_value()
     }
 
-    async fn execute(
+    async fn execute(&self, _params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
+        // Routed through execute_with_context (needs the session id).
+        Ok(Self::fail("intent_send requires session context"))
+    }
+
+    async fn execute_with_context(
         &self,
         params: Value,
-        _work_dir: Option<&str>,
+        ctx: &ToolContext,
     ) -> acowork_core::error::Result<ToolResult> {
         let target = match params.get("target").and_then(|v| v.as_str()) {
             Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-            _ => {
-                return Ok(ToolResult {
-                    ok: false,
-                    content: String::new(),
-                    error: Some("Missing required parameter 'target'".to_string()),
-                    token_usage: None,
-                });
-            }
+            _ => return Ok(Self::fail("Missing required parameter 'target'")),
         };
-
         let action = match params.get("action").and_then(|v| v.as_str()) {
             Some(a) if !a.trim().is_empty() => a.trim().to_string(),
-            _ => {
-                return Ok(ToolResult {
-                    ok: false,
-                    content: String::new(),
-                    error: Some("Missing required parameter 'action'".to_string()),
-                    token_usage: None,
-                });
-            }
+            _ => return Ok(Self::fail("Missing required parameter 'action'")),
         };
+
+        // ADR-073: target is the INSTANCE identity (UUID v4), not the
+        // package `agent_id` — a package id cannot address a runtime on
+        // the wire. Reject early so the LLM sees the contract explicitly.
+        if AgentInstanceId::from_string(target.clone()).is_err() {
+            return Ok(Self::fail(format!(
+                "Invalid target '{target}'. Must be the target agent's INSTANCE UUID (ADR-073) — \
+                 find it in the agent list; the package `agent_id` is display-only and \
+                 cannot address a runtime on the wire."
+            )));
+        }
 
         let intent_params = params
             .get("params")
             .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let async_ = params
-            .get("async")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .unwrap_or_else(|| serde_json::json!({}));
+        let repo = params.get("repo").and_then(|v| v.as_str()).map(String::from);
 
-        // ADR-073: target is the INSTANCE identity (UUID v4), not the
-        // package `agent_id`. The MQTT control topic
-        // `acowork/agents/{target}/sessions/control/intent` is bound
-        // to whichever Runtime subscribed with that instance UUID —
-        // a package id would silently misroute (no instance is
-        // subscribed to it). Reject early so the LLM sees the
-        // contract explicitly and falls back to the agent list.
-        if AgentInstanceId::from_string(target.clone()).is_err() {
-            return Ok(ToolResult {
-                ok: false,
-                content: String::new(),
-                error: Some(format!(
-                    "Invalid target '{}'. Must be the target agent's INSTANCE UUID (ADR-073) — \
-                     find it in the agent list; the package `agent_id` is display-only and \
-                     cannot address a runtime on the wire.",
-                    target
-                )),
-                token_usage: None,
-            });
+        let url = format!(
+            "http://{}:{}/api/intents",
+            self.config.gateway_host, GATEWAY_HTTP_PORT
+        );
+        let body = serde_json::json!({
+            "sender": self.config.instance_id,
+            "sender_session_id": ctx.session_id,
+            "target": target,
+            "action": action,
+            "params": intent_params,
+            "repo": repo,
+        });
+
+        let mut req = self.client.post(&url).json(&body);
+        if !self.config.node_token.is_empty() {
+            req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, &self.config.node_token);
         }
 
-        // ADR-040 / ADR-033: publish Intent via MQTT to the target agent's
-        // control topic. The Gateway broker routes the message; the target
-        // agent's control_handler dispatches it as IntentReceived.
-        let slot = self.mqtt_slot.lock().await;
-        match slot.as_ref() {
-            Some(mqtt_shared) => {
-                let mqtt = mqtt_shared.lock().await;
-                let intent = mqtt_proto::Intent {
-                    from: self.agent_id.clone(),
-                    action: action.clone(),
-                    params_json: serde_json::to_string(&intent_params)
-                        .unwrap_or_else(|_| "{}".to_string()),
-                };
-                let control_cmd = mqtt_proto::ControlCommand {
-                    instance_id: target.clone(),
-                    command: Some(mqtt_proto::control_command::Command::Intent(intent)),
-                };
-                let envelope = DataEnvelope {
-                    version: 1,
-                    payload: Some(Payload::ControlCommand(control_cmd)),
-                };
-                let topic = format!("acowork/agents/{}/sessions/control/intent", target);
-                match mqtt
-                    .publish_envelope(&topic, &envelope, MqttQoS::AtLeastOnce, false)
-                    .await
-                {
-                    Ok(()) => {
-                        let mode = if async_ { "async" } else { "sync" };
-                        Ok(ToolResult {
-                            ok: true,
-                            content: format!(
-                                "Intent sent to '{}' action='{}' mode={} via MQTT",
-                                target, action, mode,
-                            ),
-                            error: None,
-                            token_usage: None,
-                        })
-                    }
-                    Err(e) => Ok(ToolResult {
-                        ok: false,
-                        content: String::new(),
-                        error: Some(format!("Failed to publish intent via MQTT: {}", e)),
-                        token_usage: None,
-                    }),
-                }
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(Self::fail(format!(
+                    "Intent delivery request to Gateway failed: {e}"
+                )));
             }
-            None => Ok(ToolResult {
-                ok: false,
-                content: String::new(),
-                error: Some(
-                    "MQTT client not connected. intent_send requires Gateway mode (MQTT transport)."
-                        .to_string(),
+        };
+
+        let status = resp.status();
+        let body: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(Self::fail(format!(
+                    "Intent delivery response is not JSON (HTTP {status}): {e}"
+                )));
+            }
+        };
+        // Gateway-level rejection (identity / permission / validation):
+        // `ApiError` shape `{ "error": ..., "code": ... }` or the
+        // `not_authorized` `{ "code": "not_authorized", "message": ... }`
+        // variant.
+        if !status.is_success() {
+            let detail = body
+                .get("message")
+                .or_else(|| body.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Gateway rejected the intent");
+            return Ok(Self::fail(format!("Intent not accepted (HTTP {status}): {detail}")));
+        }
+
+        // D3: the response carries the real delivery outcome.
+        let message_id = body
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        match body.get("status").and_then(|v| v.as_str()) {
+            Some("delivered") => Ok(ToolResult {
+                ok: true,
+                content: format!(
+                    "Intent delivered to '{target}' action='{action}' (message_id: {message_id}). \
+                     The target accepted it; any reply arrives later as a new turn in this session."
                 ),
+                error: None,
                 token_usage: None,
             }),
+            _ => {
+                let code = body
+                    .get("error_code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("delivery_unavailable");
+                let err = body
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown delivery failure");
+                Ok(Self::fail(format!(
+                    "Intent delivery failed ({code}): {err} (message_id: {message_id})"
+                )))
+            }
         }
     }
 }
@@ -190,13 +227,14 @@ impl Tool for IntentSendTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use acowork_core::tools::traits::ToolContext;
 
     fn test_tool() -> IntentSendTool {
-        IntentSendTool::new(
-            "com.test.agent".to_string(),
-            Arc::new(tokio::sync::Mutex::new(None)),
-        )
+        IntentSendTool::new(IntentSendConfig {
+            instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
+            gateway_host: "127.0.0.1".to_string(),
+            node_token: String::new(),
+        })
     }
 
     #[test]
@@ -205,13 +243,18 @@ mod tests {
         assert_eq!(spec.name, "intent_send");
         assert!(spec.input_schema["properties"]["target"].is_object());
         assert!(spec.input_schema["properties"]["action"].is_object());
+        // D6: the fake `async` parameter is gone from the contract.
+        assert!(spec.input_schema["properties"].get("async").is_none());
     }
 
     #[tokio::test]
     async fn test_intent_send_missing_target() {
         let tool = test_tool();
         let result = tool
-            .execute(serde_json::json!({ "action": "schedule" }), None)
+            .execute_with_context(
+                serde_json::json!({ "action": "schedule" }),
+                &ToolContext::default(),
+            )
             .await
             .unwrap();
         assert!(!result.ok);
@@ -227,9 +270,9 @@ mod tests {
     async fn test_intent_send_missing_action() {
         let tool = test_tool();
         let result = tool
-            .execute(
+            .execute_with_context(
                 serde_json::json!({ "target": "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c" }),
-                None,
+                &ToolContext::default(),
             )
             .await
             .unwrap();
@@ -242,63 +285,53 @@ mod tests {
         );
     }
 
+    /// ADR-073 guard: a package id must be rejected before anything
+    /// reaches the Gateway.
     #[tokio::test]
-    async fn test_intent_send_invalid_target() {
+    async fn test_intent_send_rejects_package_id_target() {
         let tool = test_tool();
-        // ADR-073: a non-UUID (including legacy package ids) must be
-        // rejected with an explicit contract error — silently routing
-        // through would mis-target any Runtime whose instance happens
-        // to equal the bad input.
         let result = tool
-            .execute(
+            .execute_with_context(
                 serde_json::json!({
                     "target": "com.example.calendar",
                     "action": "schedule"
                 }),
-                None,
+                &ToolContext::default(),
             )
             .await
             .unwrap();
         assert!(!result.ok);
-        let err = result.error.unwrap();
-        assert!(
-            err.contains("INSTANCE UUID"),
-            "error should reference ADR-073 instance-UUID contract, got: {}",
-            err
-        );
-        assert!(
-            !err.contains("reverse-domain"),
-            "legacy reverse-domain wording must be retired, got: {}",
-            err
-        );
+        let err = result.error.expect("should have error message");
+        assert!(err.contains("INSTANCE UUID"), "error: {err}");
     }
 
-    /// Without MQTT, a valid intent call returns an error explaining the
-    /// requirement. This replaces the old placeholder that silently returned
-    /// ok: true without actually dispatching anything.
+    /// No Gateway listening: the tool reports the transport failure
+    /// instead of pretending the Intent was sent. Port 0 is invalid for
+    /// a TCP connect, so the request fails without depending on any
+    /// locally bound service.
     #[tokio::test]
-    async fn test_intent_send_requires_mqtt() {
-        let tool = test_tool();
+    async fn test_intent_send_reports_gateway_unreachable() {
+        let tool = IntentSendTool::new(IntentSendConfig {
+            instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
+            gateway_host: "localhost.invalid.acowork.test".to_string(),
+            node_token: String::new(),
+        });
         let result = tool
-            .execute(
+            .execute_with_context(
                 serde_json::json!({
                     "target": "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
                     "action": "schedule",
-                    "params": { "time": "10:00", "title": "Team sync" }
+                    "params": { "time": "10:00" }
                 }),
-                None,
+                &ToolContext::default(),
             )
             .await
             .unwrap();
-        assert!(
-            !result.ok,
-            "intent_send without MQTT should return ok: false"
-        );
+        assert!(!result.ok, "intent_send without Gateway should return ok: false");
         let err = result.error.expect("should have error message");
         assert!(
-            err.contains("MQTT client not connected"),
-            "error should explain MQTT requirement, got: {}",
-            err
+            err.contains("Intent delivery request to Gateway failed"),
+            "error should explain the transport failure, got: {err}"
         );
     }
 }

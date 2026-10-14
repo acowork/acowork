@@ -184,15 +184,27 @@ fn control_action_to_inbound(
             from,
             action,
             params_json,
+            message_id,
+            conversation_id,
+            source_agent_session_id,
+            source_chat_session_id,
+            repo,
         } => {
             let params: serde_json::Value =
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
             Some((
-                String::new(),
+                // Route to the sender-designated session when present
+                // (design 27 §3.2 source_agent_session_id); otherwise the
+                // empty id keeps the system-level path (cron).
+                source_agent_session_id,
                 InboundMessage::IntentMessage {
                     from,
                     action,
                     params,
+                    message_id,
+                    conversation_id,
+                    source_chat_session_id,
+                    repo,
                 },
             ))
         }
@@ -710,22 +722,14 @@ async fn dispatch_inbound(
         },
 
         // ⑦ IntentMessage → session task inbox
-        InboundMessage::IntentMessage {
-            from,
-            action,
-            params,
-        } => {
+        msg @ InboundMessage::IntentMessage { .. } => {
             forward_to_session_inbound(
                 session_manager,
                 lifecycle_publisher,
                 &session_id,
                 "intent",
                 work_dir,
-                InboundMessage::IntentMessage {
-                    from,
-                    action,
-                    params,
-                },
+                msg,
             )
             .await
         }
@@ -1016,19 +1020,27 @@ mod tests {
             from: "cron:agent".into(),
             action: "hourly_check".into(),
             params_json: r#"{"k":1}"#.into(),
+            message_id: "m-1".into(),
+            conversation_id: String::new(),
+            source_agent_session_id: String::new(),
+            source_chat_session_id: String::new(),
+            repo: String::new(),
         })
         .expect("Intent must map");
-        assert_eq!(route, "", "Intent is system-level");
+        assert_eq!(route, "", "cron intent has no target session — system-level");
 
         match msg {
             InboundMessage::IntentMessage {
                 from,
                 action,
                 params,
+                message_id,
+                ..
             } => {
                 assert_eq!(from, "cron:agent");
                 assert_eq!(action, "hourly_check");
                 assert_eq!(params["k"], 1);
+                assert_eq!(message_id, "m-1");
             }
             other => panic!("expected IntentMessage, got {other:?}"),
         }
@@ -1041,6 +1053,11 @@ mod tests {
             from: "cron:x".into(),
             action: "a".into(),
             params_json: "not json".into(),
+            message_id: String::new(),
+            conversation_id: String::new(),
+            source_agent_session_id: String::new(),
+            source_chat_session_id: String::new(),
+            repo: String::new(),
         })
         .expect("Intent must still map");
 

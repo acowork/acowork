@@ -233,6 +233,12 @@ pub struct GatewayState {
     pub cron_scheduler: CronScheduler,
     /// Cron persistence store
     pub cron_store: Option<std::sync::Arc<CronStore>>,
+    /// Intent mailbox — the minimal delivery buffer (tech-debt plan D3).
+    /// Opened at startup next to the cron store; every Gateway-mediated
+    /// Intent delivery records its fact here so `intent_send` can report
+    /// a truthful delivery state and conversation request counts survive
+    /// a restart (design doc 27 §13-13).
+    pub intent_mailbox: Option<std::sync::Arc<crate::intent::mailbox::IntentMailbox>>,
     /// Gateway configuration snapshot (for Config API)
     pub config: Option<crate::config::GatewayConfig>,
     /// Resource cache — versioned provider and MCP lists for AgentHello diff sync.
@@ -384,6 +390,7 @@ impl GatewayState {
             capability_registry: CapabilityRegistry::new(),
             cron_scheduler: CronScheduler::new(),
             cron_store: None,
+            intent_mailbox: None,
             config: None,
             resource_cache: ResourceCache::default(),
             embed_process: None,

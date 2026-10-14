@@ -57,11 +57,18 @@ use prost::Message as ProstMessage;
 /// What is left is the single non-user signal.
 #[derive(Debug)]
 pub enum ControlAction {
-    /// Gateway pushes an IntentReceived (cron trigger, cross-agent messaging).
+    /// Gateway pushed an Intent (cron trigger, cross-agent messaging).
+    /// Envelope fields follow design doc 27 §3.2; every value is
+    /// Gateway-stamped (tech-debt plan D4/D5).
     IntentReceived {
         from: String,
         action: String,
         params_json: String,
+        message_id: String,
+        conversation_id: String,
+        source_agent_session_id: String,
+        source_chat_session_id: String,
+        repo: String,
     },
 }
 
@@ -87,6 +94,11 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             from: intent.from,
             action: intent.action,
             params_json: intent.params_json,
+            message_id: intent.message_id,
+            conversation_id: intent.conversation_id,
+            source_agent_session_id: intent.source_agent_session_id,
+            source_chat_session_id: intent.source_chat_session_id,
+            repo: intent.repo,
         },
     };
 

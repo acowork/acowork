@@ -169,7 +169,12 @@ fn integration_control_message_flow() {
             command: Some(Command::Intent(Intent {
                 from: "cron:cron-agent".into(),
                 action: "e2e_trigger".into(),
-                params_json: r#"{"hello":"e2e"}"#.into(),
+                message_id: String::new(),
+                conversation_id: String::new(),
+                source_agent_session_id: String::new(),
+                source_chat_session_id: String::new(),
+                repo: String::new(),
+params_json: r#"{"hello":"e2e"}"#.into(),
             })),
         };
         gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -258,7 +263,12 @@ fn integration_control_intent_flow() {
             command: Some(Command::Intent(Intent {
                 from: "cron:cron-agent".into(),
                 action: "retry_probe".into(),
-                params_json: String::new(),
+                message_id: String::new(),
+                conversation_id: String::new(),
+                source_agent_session_id: String::new(),
+                source_chat_session_id: String::new(),
+                repo: String::new(),
+params_json: String::new(),
             })),
         };
         gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -291,7 +301,12 @@ fn integration_control_intent_flow() {
                                 command: Some(Command::Intent(Intent {
                                     from: "cron:cron-agent".into(),
                                     action: "retry_probe".into(),
-                                    params_json: String::new(),
+                                    message_id: String::new(),
+                                    conversation_id: String::new(),
+                                    source_agent_session_id: String::new(),
+                                    source_chat_session_id: String::new(),
+                                    repo: String::new(),
+params_json: String::new(),
                                 })),
                             },
                         )
@@ -366,7 +381,12 @@ fn integration_multiple_messages() {
                 command: Some(Command::Intent(Intent {
                     from: "cron:cron-agent".into(),
                     action: content.to_string(),
-                    params_json: format!(r#"{{"seq":{i}}}"#),
+                    message_id: String::new(),
+                    conversation_id: String::new(),
+                    source_agent_session_id: String::new(),
+                    source_chat_session_id: String::new(),
+                    repo: String::new(),
+params_json: format!(r#"{{"seq":{i}}}"#),
                 })),
             };
             gw.publish_control_command(TEST_INSTANCE_ID, cmd)

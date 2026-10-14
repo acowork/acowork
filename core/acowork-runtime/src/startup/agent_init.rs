@@ -893,6 +893,18 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     ));
 
     let mut registry = ToolRegistry::new();
+    // Tech-debt plan D1: intent_send now POSTs to the Gateway delivery
+    // entry — it needs this agent's instance identity, the Gateway host,
+    // and the machine's node token (the same credential the MQTT session
+    // and the global-resources pull use).
+    let intent_send_config = crate::tools::builtin::intent_send::IntentSendConfig {
+        instance_id: config.agent_instance_id.clone(),
+        gateway_host: config
+            .gateway_host
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_string()),
+        node_token: config.mqtt_password.clone().unwrap_or_default(),
+    };
     for tool in builtin::all_builtin_tools(
         &workspace_resolver,
         &config.agent_id,
@@ -900,7 +912,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Some(memory_session.clone()),
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),
-        mqtt_client_slot.clone(),
+        intent_send_config,
     ) {
         registry.register(tool);
     }

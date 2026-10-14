@@ -113,6 +113,9 @@ pub struct GatewayConfig {
     /// MQTT broker configuration (ADR-033).
     #[serde(default)]
     pub mqtt: MqttConfig,
+    /// Intent delivery configuration (intent-delivery-tech-debt-plan).
+    #[serde(default)]
+    pub intent: IntentConfig,
     /// Advertise host: the address other machines should use to reach
     /// services on this Gateway host (embed / LSP / broker endpoints
     /// distributed to Runtime and Desktop via MQTT).
@@ -558,6 +561,18 @@ impl Default for MqttConfig {
 }
 
 fn default_true() -> bool { true }
+
+/// Intent delivery tuning (intent-delivery-tech-debt-plan D8).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IntentConfig {
+    /// Enforce manifest `intent:send` / `intent:receive` declarations
+    /// at delivery time. Default **false** = warn-only gray rollout:
+    /// denials are logged but the Intent is still delivered. Flip to
+    /// true once existing packages declare their permissions (the plan
+    /// makes the flip a separate reviewable step).
+    #[serde(default)]
+    pub enforce_permissions: bool,
+}
 fn default_mqtt_host() -> String { "127.0.0.1".to_string() }
 /// Exposed as `pub(crate)` so the HTTP `/api/status` handler can report
 /// the broker port to the Desktop without duplicating the constant
@@ -814,6 +829,10 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.data_flow.clone())
                 .unwrap_or_default(),
+            intent: file_config
+                .as_ref()
+                .map(|c| c.intent.clone())
+                .unwrap_or_default(),
             mqtt: {
                 let mut mqtt = file_config
                     .as_ref()
@@ -1016,6 +1035,7 @@ impl Default for GatewayConfig {
             embedding_model: None,
             data_flow: DataFlowConfig::default(),
             mqtt: Default::default(),
+            intent: IntentConfig::default(),
             advertise_host: None,
             node_proxy_port: None,
             node_lsp_relay_port: None,

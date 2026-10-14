@@ -328,6 +328,16 @@ impl NodeTokenStore {
             .any(|r| constant_time_eq(r.token.as_bytes(), password.as_bytes()))
     }
 
+    /// Reverse lookup: which enrolled node does this token belong to?
+    /// Used by the Intent delivery API to attribute a sender to the
+    /// machine its call arrived from (tech-debt plan D4).
+    pub fn node_id_for_token(&self, password: &str) -> Option<String> {
+        self.nodes
+            .iter()
+            .find(|(_, r)| constant_time_eq(r.token.as_bytes(), password.as_bytes()))
+            .map(|(id, _)| id.clone())
+    }
+
     /// Number of enrolled nodes — diagnostics.
     pub fn len(&self) -> usize {
         self.nodes.len()

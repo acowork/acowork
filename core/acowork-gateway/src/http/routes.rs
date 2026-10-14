@@ -291,6 +291,10 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::provider_api::provider_routes())
         .merge(crate::http::config_api::config_routes())
         .merge(crate::http::cron_api::cron_routes())
+        // Intent delivery entry point (tech-debt plan D1/D3/D4/D8) —
+        // the Gateway's only Intent ingress; Runtimes POST here instead
+        // of publishing to the control topic.
+        .merge(crate::http::intent_api::intent_routes())
         .merge(crate::http::models_api::models_routes())
         .merge(crate::http::memory_api::memory_routes())
         .merge(crate::http::skills_api::skills_routes())

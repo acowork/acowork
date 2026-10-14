@@ -170,6 +170,13 @@ impl AgentRegistry {
             .unwrap_or(false)
     }
 
+    /// Full online-state entry for one instance (D4 sender attribution:
+    /// the retained AgentStatus carries the host node the Runtime itself
+    /// asserted). `None` = never seen on the status topic.
+    pub fn instance(&self, instance_id: &str) -> Option<&AgentOnlineState> {
+        self.agents.get(instance_id)
+    }
+
     /// Get all online agent IDs.
     pub fn online_agents(&self) -> Vec<String> {
         self.agents

@@ -122,7 +122,13 @@ impl CapabilityRegistry {
 
     /// Look up a capability by action only (find which instances provide it)
     ///
-    /// Used by IntentRouter to discover which agent can handle an action.
+    /// Deprecated (intent-delivery-tech-debt-plan D8): action-based
+    /// discovery was the pre-ADR-073 `IntentRouter` mechanism — Intents
+    /// address an **instance** (ADR-073), not "whoever can do X". The
+    /// router is gone; nothing calls this. Kept for the capability
+    /// overview surface only if a future feature needs reverse lookup;
+    /// do NOT wire it into a new delivery path.
+    #[deprecated(since = "1.0.0", note = "Intent delivery addresses instances, not actions (ADR-073/D8)")]
     pub fn find_by_action(&self, action: &str) -> Vec<&RegisteredCapability> {
         self.capabilities
             .values()
@@ -287,6 +293,7 @@ mod tests {
         assert!(registry.get("inst-calendar-1", "schedule").is_some());
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_find_by_action() {
         let mut registry = CapabilityRegistry::new();
@@ -307,6 +314,7 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_capabilities_for_agent_and_instance() {
         let mut registry = CapabilityRegistry::new();

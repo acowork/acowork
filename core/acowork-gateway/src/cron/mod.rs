@@ -427,16 +427,21 @@ pub fn register_agent_cron_triggers(
 
 /// Run the cron scheduler loop as a background task.
 ///
-/// Checks every minute for entries that should fire, and publishes
-/// IntentReceived messages to the target Agent via MQTT ControlCommand.
+/// Checks every minute for entries that should fire and pushes an
+/// IntentReceived to the target Agent.
 ///
-/// If the target Agent is not running, attempts to start it first
-/// (via the local node control plane), then pushes the Intent.
+/// D2 (tech-debt plan): cron no longer hand-rolls "start then publish".
+/// It reuses the single Gateway delivery entry
+/// ([`crate::intent::delivery::wake_and_deliver`]), so the online fact
+/// is the retained `AgentStatus` (ADR-085) and the cold-start race
+/// (spawn reply OK but Runtime not yet subscribed) is closed for
+/// scheduled triggers exactly as it is for cross-agent Intents.
 pub async fn run_cron_scheduler(
     scheduler: Arc<Mutex<CronScheduler>>,
     mqtt_client: Option<Arc<GatewayMqttClient>>,
     gateway_state: crate::handlers::server::SharedState,
     node_control: Option<crate::mqtt::node_control::NodeControlClient>,
+    agent_registry: crate::mqtt::agent_registry::SharedAgentRegistry,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
     // Skip the first immediate tick
@@ -459,157 +464,54 @@ pub async fn run_cron_scheduler(
 
         for (trigger_id, action, params) in triggers {
             tracing::info!("Cron fired: trigger={} action={}", trigger_id, action);
-
-            // ADR-073: every registry key / MQTT topic / ControlCommand on
-            // this path is addressed by the INSTANCE identity. Resolve the
-            // canonical instance key up-front and fail loudly when the
-            // trigger key does not correspond to any installed instance.
-            let (instance_id, package_id, hosting_node_id) = {
-                let gw = gateway_state.read().await;
-                let inst = match gw.resolve_installed_key(&trigger_id) {
-                    Some(inst) => inst,
-                    None => {
-                        tracing::error!(
-                            "Cron: trigger key '{}' does not resolve to any installed instance \
-                             (expected an instance UUID); skipping trigger action={}",
-                            trigger_id,
-                            action
-                        );
-                        continue;
-                    }
-                };
-                // ADR-055 §6.2: start commands route by node — resolve
-                // the node hosting the instance (fallback `local` for
-                // records that predate node aggregation).
-                let (pkg, hosting) = match gw.installed(&inst) {
-                    Some(i) => (i.agent_id.clone(), i.node_id.clone()),
-                    None => {
-                        tracing::error!(
-                            "Cron: resolved instance '{}' for trigger '{}' has no install record; \
-                             skipping trigger action={}",
-                            inst,
-                            trigger_id,
-                            action
-                        );
-                        continue;
-                    }
-                };
-                (inst, pkg, hosting)
-            };
-
-            // Check if the instance is running; if not, try to start it.
-            let is_running = {
-                let gw = gateway_state.read().await;
-                gw.is_running(&instance_id)
-            };
-
-            if !is_running {
-                tracing::info!(
-                    "Cron: instance {} (agent {}) not running, attempting to start",
-                    instance_id,
-                    package_id
-                );
-                // ADR-055 §6.2: start via the node HOSTING the instance
-                // (a remote instance must not be routed to the local
-                // node — the command would time out unacknowledged).
-                let Some(node_control) = &node_control else {
-                    tracing::error!(
-                        "Cron: node control unavailable, cannot start instance {}",
-                        instance_id
-                    );
-                    continue;
-                };
-                match node_control
-                    .start_agent(
-                        &hosting_node_id,
-                        &instance_id,
-                        &package_id,
-                        false,
-                    )
-                    .await
-                {
-                    Ok(event) => {
-                        match crate::mqtt::node_control::NodeControlClient::check_reply(
-                            &instance_id, &event,
-                        ) {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "Cron: started instance {} for scheduled trigger",
-                                    instance_id
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    "Cron: failed to start instance {}: {}",
-                                    instance_id,
-                                    e
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Cron: failed to start instance {}: {}",
-                            instance_id,
-                            e
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            // ADR-033: Publish IntentReceived via MQTT ControlCommand.
-            // The control topic and the ControlCommand both carry the
-            // INSTANCE identity — the package `agent_id` never addresses
-            // a runtime on the wire.
-            let pushed = if let Some(ref mqtt) = mqtt_client {
-                let intent_cmd = acowork_core::mqtt_proto::Intent {
-                    from: format!("cron:{}", trigger_id),
-                    action: action.clone(),
-                    params_json: serde_json::to_string(&params).unwrap_or_default(),
-                };
-                let control_cmd = acowork_core::mqtt_proto::ControlCommand {
-                    instance_id: instance_id.clone(),
-                    command: Some(
-                        acowork_core::mqtt_proto::control_command::Command::Intent(intent_cmd),
-                    ),
-                };
-                match mqtt.publish_control_command(&instance_id, control_cmd).await {
-                    Ok(()) => {
-                        tracing::info!(
-                            "Cron intent published via MQTT: instance={} trigger={} action={}",
-                            instance_id,
-                            trigger_id,
-                            action
-                        );
-                        true
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Cron: failed to publish intent via MQTT: instance={} action={} error={}",
-                            instance_id,
-                            action,
-                            e
-                        );
-                        false
-                    }
-                }
-            } else {
+            let Some(mqtt) = &mqtt_client else {
                 tracing::warn!(
-                    "Cron trigger skipped: MQTT client not available for instance={} action={}",
-                    instance_id,
-                    action
-                );
-                false
-            };
-
-            if !pushed {
-                tracing::warn!(
-                    "Cron trigger failed to push: instance={} trigger={} action={}",
-                    instance_id,
+                    "Cron trigger skipped: MQTT client not available for trigger={} action={}",
                     trigger_id,
                     action
+                );
+                continue;
+            };
+
+            // ADR-073: the trigger key is the INSTANCE identity; the
+            // delivery entry resolves + validates it against the install
+            // table and fails loudly (observable error) otherwise.
+            let req = crate::intent::delivery::DeliveryRequest {
+                message_id: format!("cron-{}-{}", trigger_id, now.timestamp_millis()),
+                conversation_id: String::new(),
+                from_instance: format!("cron:{}", trigger_id),
+                from_session_id: String::new(),
+                target_instance: trigger_id.clone(),
+                action: action.clone(),
+                params_json: serde_json::to_string(&params).unwrap_or_default(),
+                source_chat_session_id: String::new(),
+                repo: String::new(),
+            };
+
+            let mailbox = {
+                let gw = gateway_state.read().await;
+                gw.intent_mailbox.clone()
+            };
+            let ctx = crate::intent::delivery::DeliveryContext {
+                state: &gateway_state,
+                registry: &agent_registry,
+                node_control: node_control.as_ref(),
+                mqtt: Some(mqtt.as_ref()),
+                mailbox: mailbox.as_deref(),
+            };
+            if let Err(e) = crate::intent::delivery::wake_and_deliver(
+                &ctx,
+                &req,
+                acowork_core::timeout_config::constants::INTENT_DEFAULT,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "Cron trigger delivery failed: instance={} trigger={} action={} error={}",
+                    trigger_id,
+                    trigger_id,
+                    action,
+                    e
                 );
             }
         }

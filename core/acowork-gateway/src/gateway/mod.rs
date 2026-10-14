@@ -480,6 +480,19 @@ impl Gateway {
             }
         }
 
+        // D3 (tech-debt plan): open the Intent mailbox. Persistence is
+        // required, not optional — the conversation request counts must
+        // survive a Gateway restart (design doc 27 §13-13), and every
+        // delivery must leave an observable fact.
+        {
+            let mailbox_path =
+                std::path::Path::new(&self.config.data_dir).join("intent_mailbox.json");
+            let mut gw = shared_state.write().await;
+            gw.intent_mailbox = Some(std::sync::Arc::new(
+                crate::intent::mailbox::IntentMailbox::open(&mailbox_path),
+            ));
+        }
+
         // P0-2 fix: Store config snapshot in GatewayState for Config API
         {
             let mut gw = shared_state.write().await;
@@ -1321,12 +1334,17 @@ impl Gateway {
             let cron_mqtt = mqtt_gw_client.clone();
             let cron_gw_state = shared_state.clone();
             let cron_node_control = node_control_slot.lock().await.clone();
+            // D2: cron delivers through the shared wake-and-deliver
+            // entry, whose online fact is the retained AgentStatus —
+            // it needs the same registry view the dispatch layer feeds.
+            let cron_registry = agent_registry.clone();
             let _cron_handle = tokio::spawn(async move {
                 crate::cron::run_cron_scheduler(
                     cron_scheduler,
                     cron_mqtt,
                     cron_gw_state,
                     cron_node_control,
+                    cron_registry,
                 )
                 .await;
             });
@@ -1756,6 +1774,7 @@ mod tests {
             max_iterations: 20,
             dev_mode: true,
             http: crate::config::HttpConfig::default(),
+            intent: crate::config::IntentConfig::default(),
             default_provider: None,
             default_model: None,
             max_output_tokens_limit: 32768,

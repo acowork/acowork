@@ -89,11 +89,26 @@ pub enum InboundMessage {
         notification_type: String,
         data: serde_json::Value,
     },
-    /// Cross-agent intent message
+    /// Cross-agent intent message.
+    ///
+    /// Envelope fields follow design doc 27 §3.2 (tech-debt plan PR-D):
+    /// `message_id` is the Gateway-stable identity (mailbox key),
+    /// `conversation_id` / `source_chat_session_id` are empty until
+    /// Phase 2, and `repo` is a Gateway-validated source-side authorized
+    /// repo the target may work in. All optional (defaulted) so existing
+    /// serialized forms still deserialize.
     IntentMessage {
         from: String,
         action: String,
         params: serde_json::Value,
+        #[serde(default)]
+        message_id: String,
+        #[serde(default)]
+        conversation_id: String,
+        #[serde(default)]
+        source_chat_session_id: String,
+        #[serde(default)]
+        repo: String,
     },
     /// Stop signal to stop the current agent loop iteration
     Stop { reason: String },
@@ -229,6 +244,7 @@ impl InboundMessage {
                 from,
                 action,
                 params,
+                ..
             } => {
                 let params_str = params.to_string();
                 let header_overhead = from.len() + action.len() + "[intent::] ".len();
@@ -300,6 +316,10 @@ mod tests {
             from: "com.test.agent".to_string(),
             action: "update_identity".to_string(),
             params: serde_json::json!({"key": "value"}),
+            message_id: "m-1".to_string(),
+            conversation_id: String::new(),
+            source_chat_session_id: String::new(),
+            repo: String::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
@@ -307,6 +327,7 @@ mod tests {
             from,
             action,
             params,
+            ..
         } = decoded
         {
             assert_eq!(from, "com.test.agent");
@@ -416,6 +437,10 @@ mod tests {
             from: "com.test.agent".to_string(),
             action: "ping".to_string(),
             params: big_params,
+            message_id: String::new(),
+            conversation_id: String::new(),
+            source_chat_session_id: String::new(),
+            repo: String::new(),
         };
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);

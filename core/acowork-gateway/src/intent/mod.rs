@@ -1,11 +1,13 @@
-//! Intent routing module
+//! Intent module
 //!
-//! Routes Intent messages between Agents and applies privacy filters
-//! to responses before cross-agent forwarding.
+//! Cross-agent Intent delivery. Since the tech-debt plan (D1/D7) the
+//! Gateway owns the only delivery entry: [`delivery::wake_and_deliver`]
+//! plus the [`mailbox`] delivery buffer. The pre-ADR-033 `IntentRouter`
+//! (gRPC-era dead code, never instantiated) was removed with D7.
 
+pub mod delivery;
+pub mod mailbox;
 pub mod privacy;
-pub mod router;
 
-pub use router::{
-    DEFAULT_INTENT_TIMEOUT, DEFAULT_INTENT_TIMEOUT_SECS, IntentError, IntentResult, IntentRouter,
-};
+pub use delivery::{DeliveryContext, DeliveryError, wake_and_deliver};
+pub use mailbox::{IntentMailbox, MailboxEntry};
