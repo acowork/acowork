@@ -219,9 +219,11 @@ impl IntentSessionMap {
 
 /// Inbound Intent's optional `session_config` suggestion (design 27 §4
 /// field table, §13-6: "只是应方允许范围内的建议"). Only `model` and
-/// `provider` are honored today — the two knobs the responder's session
-/// creation path already accepts; unknown keys are ignored (additive
-/// fields land without a wire change).
+/// `provider` are honored — the two knobs the responder's session
+/// creation path already accepts. Skills are deliberately NOT part of
+/// the seed: skills are auto-loaded by the model, not session-seeded,
+/// so an initiator suggestion must never name one. Unknown keys are
+/// ignored (additive fields land without a wire change).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionSeed {
     pub model: Option<String>,

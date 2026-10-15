@@ -148,8 +148,8 @@ graph LR
 |---|------|------------|------|------------|
 | 1 | ~~**应对方崩溃兜底回执缺失**~~ | §7.1 表末行、§13-12 | **已落地**：Gateway 侧 `intent/sweeper.rs` 周期扫描「已投递、超 `[intent] response_timeout_secs`（默认 1h）、未答」的 request，经唯一写入口补确定性 id（`fallback-{request_id}`，§8 幂等去重）的 `failed` 回执行并 push 回发起方；`task:` 与人类发起对话按 relay 语义只落群聊（§5.1/§9-8）。真实 write-back 即时 `mark_answered` 关闭请求 | 单测覆盖选取判据；崩溃窗口（mark 前后）由确定性 id 重试兜住 |
 | 2 | ~~**successor 轮转非崩溃幂等**~~ | §2.1 并发与失败恢复 | **已落地**：`IntentSessionMap::plan_rotation` 先把 successor id 持久化进映射（`pending_successor`），再按预分配 id 建 session，`rekey` 消费计划；崩溃重放返回同一 id，不再产生第二个 successor/孤儿 | 重放幂等 + reload 持久性单测 |
-| 3 | **Handoff 是指针不是蒸馏摘要**：轮转 handoff 只带旧 session id 的一句话指针；§2.1 分级表要求 T2 带"当前目标/关键决定/未决事项"（目标 1,500 tokens） | §2.1 Handoff context 分级 | 代码有 `ponytail:` 注释声明升级路径；不变量（不整份复制 JSONL、执行细节不进 Chat session）未破坏 | 轮转时从旧 session 最后一次 compaction 摘要蒸馏；settings card 落地 token 上限 |
-| 4 | **T1 阈值 / handoff 上限的配置面**：现为部署级环境变量（`ACOWORK_INTENT_IDLE_ROTATE_HOURS`），设计要求 Agent 级配置 + 鉴权 + 审计 + 前端 Session 设置卡片 | §2.1 前端可配置边界 | `ponytail:` 注释已声明 interim 形态 | Agent settings 面板两个配置项 + 变更审计 |
-| 5 | **`session_config` 可选字段未上 wire**：Intent 可携带 model/reasoning/skills 初值 | §4 字段表、§4.2 | 未实现，无消费方依赖，加性字段可后补 | 与 §4.2 授权修改一起做 |
+| 3 | ~~**Handoff 是指针不是蒸馏摘要**~~ | §2.1 Handoff context 分级 | **已落地**（`c38aff31`）：T2 轮转时从旧 session JSONL 的最后一条 compaction 摘要蒸馏（零新增 LLM 调用，`[distilled handoff]` 标记 + token 上限截断）；T1 仍为纯指针，符合分级表 | settings card 已落地 token 上限（`intent_handoff_max_tokens`，默认 1500，clamp 500–4000）；更高质量的 LLM 蒸馏（episode_distill 范式）为独立里程碑 |
+| 4 | ~~**T1 阈值 / handoff 上限的配置面**~~ | §2.1 前端可配置边界 | **已落地**（`c38aff31`）：`AgentConfig.intent_idle_rotate_hours` / `intent_handoff_max_tokens` 贯通 ConfigField → PUT /config → AgentSetupTab Session 卡片（5 locale）；`ACOWORK_INTENT_IDLE_ROTATE_HOURS` 保留为部署级覆盖 | 变更审计沿用既有 config PUT 路径 |
+| 5 | ~~**`session_config` 可选字段未上 wire**~~ | §4 字段表、§4.2 | **已落地**（`c38aff31`）：proto 加性字段 `Intent.session_config_json=12`，Gateway `gate.rs` 形状校验，应方 `SessionSeed` 按自身 provider list 裁剪（§13-6），仅作用于新建 session。**skills 键明确出局**：技能已改为模型自动加载（见 skills 自动加载分支），不再是 session 初值，`SessionSeed` 注释已钉死此边界 | §4.2 授权修改（repo 纯格式校验）已在 `07e5d8dd` 先行落地 |
 | 6 | **信箱 `MAX_ENTRIES` 淘汰**：驱逐老 request 条目后，极晚到的 response 会因 `no recorded request` 被拒 | — | 预算计数器（`conversation_requests`）不受淘汰影响，上限不可绕过成立；6 次预算的对话窗口内实际不会触发 | 可接受为已知上限；触发时记 WARN |
 
