@@ -610,7 +610,7 @@ export function ProfileTab() {
 // signed-in account (pairing is bound to the bearer identity server-side).
 function PairingCard() {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const [qr, setQr] = useState<PairingQr | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<"no-lan" | "failed" | null>(null);
