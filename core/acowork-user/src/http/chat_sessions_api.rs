@@ -48,6 +48,18 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/api/chat-sessions/{session_id}/messages",
             get(list_messages).post(post_message),
         )
+        // System (Gateway-mediated) surface. Loopback-only like every
+        // other route in this process (server.rs binds 127.0.0.1), and
+        // reachable without an injected identity exactly like
+        // `/internal/user-profiles` (ADR-084 §决策 4b): the caller is the
+        // Gateway on this host, which holds no user identity. Idempotency
+        // by `message_id` bounds any replay damage.
+        .route(
+            "/internal/chat-sessions/messages",
+            post(system_append_message),
+        )
+        .route("/internal/chat-sessions/pair", post(system_ensure_pair))
+        .route("/internal/chat-sessions/repo", post(system_set_repo))
 }
 
 // ── Request / response types ──────────────────────────────────────────
@@ -186,6 +198,81 @@ async fn post_message(
     Ok((StatusCode::CREATED, Json(message)))
 }
 
+// ── System endpoints (Gateway-mediated) ───────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SystemAppendRequest {
+    pub session_id: String,
+    /// The full message row. `seq` / `ts` are assigned by the store;
+    /// `from` must be a participant of the session (checked there).
+    pub message: SessionMessage,
+}
+
+/// `POST /internal/chat-sessions/messages` — the system half of the
+/// single write entry: Intent request / response rows are written by the
+/// Gateway's delivery pipeline, never by a chat client (§2.2, §6.5 R2).
+async fn system_append_message(
+    State(state): State<AppState>,
+    Json(req): Json<SystemAppendRequest>,
+) -> Result<(StatusCode, Json<SessionMessage>), ApiError> {
+    let dir = data_dir_any(&state).await;
+    let message = offload(move || {
+        chat_sessions::append_message(&dir, &req.session_id, &req.message, now_unix())
+            .map(|(m, _)| m)
+    })
+    .await?;
+    Ok((StatusCode::CREATED, Json(message)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SystemPairRequest {
+    pub a: String,
+    pub b: String,
+    /// Session kind string (`agent_agent` today; the Gateway judges who
+    /// the participants are, this store does not).
+    #[serde(default = "default_pair_kind")]
+    pub kind: String,
+}
+
+fn default_pair_kind() -> String {
+    "agent_agent".to_string()
+}
+
+/// `POST /internal/chat-sessions/pair` — idempotently ensure the shared
+/// one-to-one Chat session between two participants (design 27 §6.3).
+async fn system_ensure_pair(
+    State(state): State<AppState>,
+    Json(req): Json<SystemPairRequest>,
+) -> Result<Json<ChatSession>, ApiError> {
+    let kind = parse_kind(&req.kind)?;
+    let dir = data_dir_any(&state).await;
+    let session = offload(move || chat_sessions::ensure_pair(&dir, &req.a, &req.b, kind, now_unix()))
+        .await?;
+    Ok(Json(session))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SystemRepoRequest {
+    pub session_id: String,
+    /// `None` / absent clears the binding.
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+/// `POST /internal/chat-sessions/repo` — bind a project group chat to its
+/// repo (design 27 §4.1); the Gateway injects it into delivered Intents.
+async fn system_set_repo(
+    State(state): State<AppState>,
+    Json(req): Json<SystemRepoRequest>,
+) -> Result<Json<ChatSession>, ApiError> {
+    let dir = data_dir_any(&state).await;
+    let session = offload(move || {
+        chat_sessions::set_repo(&dir, &req.session_id, req.repo.as_deref())
+    })
+    .await?;
+    Ok(Json(session))
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn parse_kind(s: &str) -> Result<SessionKind, ApiError> {
@@ -239,6 +326,17 @@ fn data_dir(state: &AppState) -> Result<std::path::PathBuf, ApiError> {
         .ok_or_else(|| {
             ApiError::service_unavailable("the account system is disabled (AUTH_MODE=local)")
         })
+}
+
+/// Data dir for the **system** (Gateway-mediated) endpoints: local mode has
+/// no account system, but chat sessions are still the storage the Gateway
+/// mediates (design 27 §8) — the shared data dir is the same one every
+/// other store uses. The human-facing endpoints keep [`data_dir`].
+async fn data_dir_any(state: &AppState) -> std::path::PathBuf {
+    match state.auth_service.as_ref() {
+        Some(s) => s.data_dir().to_path_buf(),
+        None => state.shared.read().await.data_dir.clone(),
+    }
 }
 
 /// Offload a blocking filesystem step off the reactor (same helper shape as
@@ -473,5 +571,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn system_endpoints_need_no_identity_and_reach_the_store() {
+        let dir = test_support::temp_dir("chatsesssys");
+        let app = router(&dir);
+
+        // Pair session, created by "the Gateway" — no token at all.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/pair",
+                Some(r#"{"a":"agent-2","b":"agent-1"}"#),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json(resp).await;
+        let session_id = v["session_id"].as_str().unwrap().to_string();
+        assert_eq!(v["kind"].as_str().unwrap(), "agent_agent");
+
+        // System append of an intent_request row.
+        let body = format!(
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-1","kind":"intent_request","body":"what is 2+2","to":"agent-2","meta":{{"message_id":"m-1","conversation_id":"c-1"}}}}}}"#
+        );
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/internal/chat-sessions/messages", Some(&body), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(json(resp).await["seq"].as_u64().unwrap(), 1);
+
+        // Idempotent replay returns the same row.
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/internal/chat-sessions/messages", Some(&body), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(json(resp).await["seq"].as_u64().unwrap(), 1);
+
+        // A sender that is not a participant is refused (append_message
+        // participation rule still applies to system writes).
+        let bad = r#"{"session_id":"not-a-uuid","message":{"seq":0,"ts":0,"from":"ghost","kind":"intent_request","body":"x","to":"agent-1","meta":{"message_id":"m-2"}}}"#;
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/internal/chat-sessions/messages", Some(bad), None))
+            .await
+            .unwrap();
+        // session id is not a UUID → 422 before participation even matters
+        assert!(resp.status().is_client_error(), "{}", resp.status());
+
+        // set_repo on the pair session.
+        let resp = app
+            .clone()
+            .oneshot(
+                req(
+                    "POST",
+                    "/internal/chat-sessions/repo",
+                    Some(&format!(
+                        r#"{{"session_id":"{session_id}","repo":"https://example.com/x.git"}}"#
+                    )),
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            json(resp).await["repo"].as_str().unwrap(),
+            "https://example.com/x.git"
+        );
     }
 }

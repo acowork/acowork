@@ -96,20 +96,25 @@ fn header_str<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a 
 /// caller is the Gateway's supervisor *on this host*, not a client, and it
 /// asks by **pulling** (ADR-084 §决策 4b) — so it has no identity to present
 /// and no token it could have minted. Nothing is exposed that a client could
-/// not already read through `GET /api/users` (which the Gateway does
+/// not already read through `GET /api/users`  (which the Gateway does
 /// authenticate), and the service binds loopback only, so the reachable set is
 /// the Gateway and any process already at the OS user's privilege level.
 pub(crate) fn is_public_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/health"
-            | "/internal/user-profiles"
-            | "/api/auth/login"
-            | "/api/auth/refresh"
-            | "/api/auth/logout"
-            | "/api/auth/first-login"
-            | "/api/auth/pair/redeem"
-    )
+    // The `/internal/chat-sessions/*` system surface (design 27 §8) joins
+    // `/internal/user-profiles` for the same reason: the caller is the
+    // Gateway on this host with no user identity to present. Loopback-only
+    // binding is the trust boundary; `message_id` idempotency bounds replay.
+    path.starts_with("/internal/chat-sessions/")
+        || matches!(
+            path,
+            "/health"
+                | "/internal/user-profiles"
+                | "/api/auth/login"
+                | "/api/auth/refresh"
+                | "/api/auth/logout"
+                | "/api/auth/first-login"
+                | "/api/auth/pair/redeem"
+        )
 }
 
 /// Turn the Gateway-injected `X-Auth-*` headers into an [`AuthContext`].

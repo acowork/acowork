@@ -156,6 +156,12 @@ pub struct ChatSession {
     /// for "one project, exactly one group chat".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// Normalised git remote URL bound to this session (design 27 §4.1:
+    /// a project carries 0 or 1 repos). The Gateway injects it into every
+    /// Intent delivered out of a project group chat; nothing else reads
+    /// or enforces it here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
     pub created_at: i64,
     pub last_active_at: i64,
     /// Derived physical-line counter of `messages.jsonl` (same role as
@@ -268,6 +274,7 @@ fn write_new(
         participants: participants.to_vec(),
         title: title.to_string(),
         project_id: project_id.map(str::to_string),
+        repo: None,
         created_at: now,
         last_active_at: now,
         message_count: 0,
@@ -382,6 +389,102 @@ pub fn append_message(
     session.last_active_at = stored.ts;
     save(&dir, &session)?;
     Ok((stored, true))
+}
+
+// ── System paths (Gateway-mediated, design 27 §8) ────────────────────
+
+/// Bind (or clear) the repo of a session (design 27 §4.1). Called by the
+/// Gateway when a project's repo is set; the repo is then injected into
+/// every Intent delivered out of this session.
+pub fn set_repo(data_dir: &Path, session_id: &str, repo: Option<&str>) -> Result<ChatSession, String> {
+    validate_session_id(session_id)?;
+    if let Some(r) = repo
+        && (r.trim().is_empty() || r.len() > 512)
+    {
+        return Err("repo must be a non-empty git URL (<= 512 chars)".to_string());
+    }
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let mut session = load(data_dir, session_id)?;
+    session.repo = repo.map(str::to_string);
+    save(&dir, &session)?;
+    Ok(session)
+}
+
+/// Pair index file: sorted participant-pair key → agent-agent session id.
+fn pairs_index_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("chat-sessions.pairs.json")
+}
+
+/// The pairs index has its own lock (the per-session locks cover session
+/// files only; this map is written outside any single session dir).
+static PAIRS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// Idempotently ensure the one-to-one chat session between two
+/// participants (design 27 §6.3: A–B Intents always land on one shared
+/// agent-agent Chat session, created on first use). The pair key is
+/// order-insensitive; the kind is `agent_agent` only when both ids look
+/// like agent instances is *not* judged here — the caller (Gateway)
+/// decides the kind by who the participants are.
+pub fn ensure_pair(
+    data_dir: &Path,
+    a: &str,
+    b: &str,
+    kind: SessionKind,
+    now: i64,
+) -> Result<ChatSession, String> {
+    if a == b {
+        return Err("a pair session needs two distinct participants".to_string());
+    }
+    if a.is_empty() || b.is_empty() || a.contains('/') || b.contains('/') {
+        return Err("participant id is not a valid identifier".to_string());
+    }
+    let key = if a < b {
+        format!("{a}\u{1f}{b}")
+    } else {
+        format!("{b}\u{1f}{a}")
+    };
+    let _g = lock(&PAIRS_LOCK);
+    let mut index = read_index(data_dir, pairs_index_path(data_dir));
+    if let Some(existing_id) = index.get(&key)
+        && let Ok(s) = load(data_dir, existing_id)
+    {
+        return Ok(s);
+    }
+    let participants: [String; 2] = if a < b {
+        [a.to_string(), b.to_string()]
+    } else {
+        [b.to_string(), a.to_string()]
+    };
+    let s = write_new(data_dir, kind, &participants, "", None, now)?;
+    index.insert(key, s.session_id.clone());
+    write_index(data_dir, &index, pairs_index_path(data_dir))?;
+    Ok(s)
+}
+
+fn read_index(data_dir: &Path, path: PathBuf) -> HashMap<String, String> {
+    let _ = data_dir;
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_index(
+    data_dir: &Path,
+    index: &HashMap<String, String>,
+    path: PathBuf,
+) -> Result<(), String> {
+    let _ = data_dir;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let json = serde_json::to_string(index).map_err(|e| format!("serialize index: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &json).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Scan the log for a message id. Returns the parsed message.
@@ -676,5 +779,35 @@ mod tests {
         assert_eq!(xs.len(), 1);
         assert_eq!(xs[0].session_id, s1.session_id);
         assert_eq!(list_for(&dir, "nobody").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn ensure_pair_is_idempotent_and_order_insensitive() {
+        let dir = temp_dir();
+        let a = ensure_pair(&dir, "agent-b", "agent-a", SessionKind::AgentAgent, 1).unwrap();
+        let b = ensure_pair(&dir, "agent-a", "agent-b", SessionKind::AgentAgent, 2).unwrap();
+        assert_eq!(a.session_id, b.session_id, "one pair, one chat session");
+        assert_eq!(a.participants, vec!["agent-a".to_string(), "agent-b".to_string()]);
+        assert!(ensure_pair(&dir, "x", "x", SessionKind::AgentAgent, 3).is_err());
+    }
+
+    #[test]
+    fn set_repo_roundtrips_and_validates() {
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &["u".into()],
+            "",
+            Some("proj-9"),
+            1,
+        )
+        .unwrap();
+        let s = set_repo(&dir, &s.session_id, Some("https://example.com/r.git")).unwrap();
+        assert_eq!(s.repo.as_deref(), Some("https://example.com/r.git"));
+        assert_eq!(load(&dir, &s.session_id).unwrap().repo.as_deref(), Some("https://example.com/r.git"));
+        let s = set_repo(&dir, &s.session_id, None).unwrap();
+        assert_eq!(s.repo, None);
+        assert!(set_repo(&dir, &s.session_id, Some("  ")).is_err());
     }
 }

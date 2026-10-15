@@ -61,7 +61,15 @@ use crate::http::routes::AppState;
 /// endpoint the Desktop polls most.
 pub fn user_proxy_routes() -> Router<AppState> {
     let mut router = Router::new();
-    for prefix in ["/api/auth", "/api/users", "/api/user"] {
+    for prefix in [
+        "/api/auth",
+        "/api/users",
+        "/api/user",
+        // Design 27: the Chat session store lives in the user service;
+        // the Gateway only forwards (the `/internal/*` system surface is
+        // deliberately NOT proxied — it is Gateway-to-user-service only).
+        "/api/chat-sessions",
+    ] {
         router = router
             .route(prefix, any(user_proxy_handler))
             .route(&format!("{prefix}/{{*rest}}"), any(user_proxy_handler));
