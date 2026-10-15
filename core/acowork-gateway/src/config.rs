@@ -578,10 +578,20 @@ pub struct IntentConfig {
     /// `conversation_limit_exceeded`. Default 6 per design doc 27.
     #[serde(default = "default_max_conversation_requests")]
     pub max_conversation_requests: u32,
+    /// §7.1 / §13-12: how long the Gateway waits for the responder's
+    /// turn-end write-back before the sweeper emits the `failed`
+    /// crash-fallback receipt. Must exceed the longest legitimate turn
+    /// (max_iterations × LLM latency); default 1 hour.
+    #[serde(default = "default_response_timeout_secs")]
+    pub response_timeout_secs: u64,
 }
 
 fn default_max_conversation_requests() -> u32 {
     6
+}
+
+fn default_response_timeout_secs() -> u64 {
+    3600
 }
 
 impl Default for IntentConfig {
@@ -589,6 +599,7 @@ impl Default for IntentConfig {
         Self {
             enforce_permissions: false,
             max_conversation_requests: default_max_conversation_requests(),
+            response_timeout_secs: default_response_timeout_secs(),
         }
     }
 }

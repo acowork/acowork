@@ -256,6 +256,10 @@ pub(crate) async fn start_http_server(
     // same routes from its own copy.
     let app_state_for_remote = app_state.clone();
 
+    // Design 27 §7.1 / plan §10-1: crash-fallback receipt sweeper —
+    // closes delivered requests whose responder never wrote back (§13-12).
+    crate::intent::sweeper::spawn(app_state_for_remote.clone());
+
     // Build router — PM routes are reverse-proxied to the standalone
     // acowork-pm process (ADR-064); no in-process PM handle needed.
     let app = routes::build_router(app_state);

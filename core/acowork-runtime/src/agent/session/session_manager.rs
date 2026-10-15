@@ -613,7 +613,19 @@ impl SessionManager {
                 match rotation {
                     None => return Ok((sid.clone(), None)),
                     Some(reason) => {
-                        let new_sid = self.create_agent_owned_session(None).await?;
+                        // §2.1 crash recovery: allocate + persist the
+                        // successor id *before* creating the session, so a
+                        // crash between the two steps replays to the same
+                        // id — never a second successor, never a new orphan.
+                        let planned = {
+                            self.intent_map
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .plan_rotation(key)?
+                        };
+                        let new_sid = self
+                            .create_agent_owned_session_with_id(None, Some(&planned))
+                            .await?;
                         self.intent_map
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -991,7 +1003,7 @@ impl SessionManager {
         provider: Option<&str>,
         user_id: Option<&str>,
     ) -> Result<String> {
-        self.create_frontend_session_inner(workspace_id, model, provider, user_id)
+        self.create_frontend_session_inner(workspace_id, model, provider, user_id, None)
             .await
     }
 
@@ -1007,13 +1019,31 @@ impl SessionManager {
         &mut self,
         requester_user_id: Option<&str>,
     ) -> Result<String> {
+        self.create_agent_owned_session_with_id(requester_user_id, None)
+            .await
+    }
+
+    /// `create_agent_owned_session` with a pre-allocated session id — used
+    /// by intent rotation replay (§2.1 crash recovery: the id was planned
+    /// and persisted before the session existed).
+    pub async fn create_agent_owned_session_with_id(
+        &mut self,
+        requester_user_id: Option<&str>,
+        preset_session_id: Option<&str>,
+    ) -> Result<String> {
         let agent_user = self
             .last_user_profile
             .as_ref()
             .map(|p| p.user_id.clone())
             .filter(|id| !id.is_empty());
-        self.create_frontend_session_inner(None, None, None, agent_user.as_deref().or(requester_user_id))
-            .await
+        self.create_frontend_session_inner(
+            None,
+            None,
+            None,
+            agent_user.as_deref().or(requester_user_id),
+            preset_session_id,
+        )
+        .await
     }
 
     async fn create_frontend_session_inner(
@@ -1022,8 +1052,16 @@ impl SessionManager {
         model: Option<&str>,
         provider: Option<&str>,
         user_id: Option<&str>,
+        preset_session_id: Option<&str>,
     ) -> Result<String> {
-        let session_id = crate::conversation::generate_session_id();
+        // A pre-assigned id (§2.1 rotation replay) reopens the planned id
+        // instead of generating a new one. `ConversationSession::new`
+        // truncates an existing file — safe here because a planned id can
+        // only exist as a not-yet-used successor (rekey clears the plan
+        // before any turn ever ran on it).
+        let session_id = preset_session_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(crate::conversation::generate_session_id);
         let committed_lines = Self::new_committed_lines();
 
         // Create the JSONL file and index entry

@@ -168,6 +168,7 @@ pub async fn wake_and_deliver(
             kind: req.kind.clone(),
             status: req.status.clone(),
             source_chat_session_id: req.source_chat_session_id.clone(),
+            answered_at: String::new(),
         })
         .map_err(|e| DeliveryError::MailboxFailed(e.to_string()))?;
     }

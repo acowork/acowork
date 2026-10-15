@@ -9,6 +9,7 @@ pub mod chat_client;
 pub mod gate;
 pub mod delivery;
 pub mod mailbox;
+pub mod sweeper;
 pub mod privacy;
 
 pub use delivery::{DeliveryContext, DeliveryError, wake_and_deliver};

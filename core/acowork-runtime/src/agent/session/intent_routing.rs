@@ -39,6 +39,12 @@ pub struct IntentSessionEntry {
     /// happened during the last intent turn. The next arrival rotates to a
     /// successor instead of continuing on this session.
     pub compacted: bool,
+    /// Crash-recovery marker (§2.1 "先幂等创建 successor 再原子切换映射"):
+    /// the id allocated for the next rotation, persisted **before** the
+    /// session is created. A crash between allocation and rekey replays to
+    /// the same id — no second successor, no orphan. Cleared by `rekey`.
+    #[serde(default)]
+    pub pending_successor: Option<String>,
 }
 
 /// Why a mapped session must be rotated (§2.1). Checked at routing time —
@@ -109,9 +115,34 @@ impl IntentSessionMap {
                 created_at: now.clone(),
                 last_active_at: now,
                 compacted: false,
+                pending_successor: None,
             },
         );
         self.flush()
+    }
+
+    /// Allocate (or replay) the successor id for the next rotation of `key`
+    /// (§2.1 crash recovery). Idempotent: once a planned id is persisted,
+    /// every call returns the same id until `rekey` consumes it. Persisted
+    /// before the session file exists, so a crash between "plan" and
+    /// "create" cannot produce a second successor.
+    pub fn plan_rotation(&mut self, key: &str) -> Result<String> {
+        if let Some(id) = self
+            .entries
+            .get(key)
+            .and_then(|e| e.pending_successor.clone())
+        {
+            return Ok(id);
+        }
+        let id = crate::conversation::generate_session_id();
+        match self.entries.get_mut(key) {
+            Some(e) => e.pending_successor = Some(id.clone()),
+            None => return Err(crate::error::RuntimeError::Config(format!(
+                "intent routing entry '{key}' missing — cannot plan a rotation"
+            ))),
+        }
+        self.flush()?;
+        Ok(id)
     }
 
     /// Point a key at a successor session after a rotation (§2.1). Resets the
@@ -248,6 +279,32 @@ mod tests {
         }
         let m2 = IntentSessionMap::load(&dir);
         assert_eq!(m2.get("conv:c1").unwrap().session_id, "s-1");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_rotation_is_idempotent_and_survives_reload_until_rekey() {
+        // §2.1 crash recovery: plan → "crash" (reload) → plan again must
+        // yield the SAME successor id; rekey consumes the plan.
+        let dir = std::env::temp_dir().join(format!("intent-map-{}", uuid::Uuid::new_v4()));
+        let planned = {
+            let mut m = IntentSessionMap::load(&dir);
+            m.insert("conv:c1".into(), "s-1".into()).unwrap();
+            m.plan_rotation("conv:c1").unwrap()
+        };
+        // Replay after a simulated crash (fresh load from the file).
+        let replayed = {
+            let mut m = IntentSessionMap::load(&dir);
+            m.plan_rotation("conv:c1").unwrap()
+        };
+        assert_eq!(planned, replayed, "replay must reuse the planned id");
+        // rekey (successor consumed) clears the plan; the next rotation
+        // allocates a fresh id.
+        let mut m = IntentSessionMap::load(&dir);
+        m.rekey("conv:c1", planned.clone()).unwrap();
+        assert_eq!(m.get("conv:c1").unwrap().pending_successor, None);
+        let next = m.plan_rotation("conv:c1").unwrap();
+        assert_ne!(next, planned);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

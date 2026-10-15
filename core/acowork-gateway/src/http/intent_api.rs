@@ -878,6 +878,13 @@ async fn deliver_response(
     let response_id = uuid::Uuid::new_v4().to_string();
     let status = req.status.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "completed".to_string());
 
+    // §7.1/§13-12: close the request against the fallback sweeper the
+    // moment the real answer is accepted, so a slow chat append or push
+    // never races a `failed` receipt onto the same request.
+    if let Some(mb) = mailbox.as_deref() {
+        let _ = mb.mark_answered(&request_id);
+    }
+
     // Chat row (best-effort like the request path's pair-ensure, but the
     // response IS the durable answer — a failed append on a bound session
     // is reported, delivery still proceeds because the initiator's turn
@@ -918,7 +925,14 @@ async fn deliver_response(
     // dispatch); the PM service reads it to advance the task. Nobody is
     // woken here; a lost chat row means the answer has no surface left,
     // so it is reported as a failure rather than silently dropped.
-    if entry.conversation_id.starts_with("task:") {
+    // Same relay semantics for a human-initiated conversation (group-chat
+    // mention, §5.1: the response renders for the human, wakes no agent —
+    // the initiator is not an installed agent to begin with).
+    let initiator_is_agent = {
+        let gw = state.gateway_state.read().await;
+        gw.resolve_installed_key(&entry.from_instance).is_some()
+    };
+    if entry.conversation_id.starts_with("task:") || !initiator_is_agent {
         let (out_status, error_code, error) = match chat_append_error {
             None => ("delivered".to_string(), None, None),
             Some(e) => ("failed".to_string(), Some("chat_log_unavailable".to_string()), Some(e)),

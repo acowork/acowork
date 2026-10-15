@@ -94,6 +94,7 @@ fn entry(
         kind: "request".into(),
         status: String::new(),
         source_chat_session_id: String::new(),
+    answered_at: String::new(),
     }
 }
 

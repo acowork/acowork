@@ -72,11 +72,22 @@ pub struct MailboxEntry {
     /// chat-less sends (cron, plain agent-to-agent before pairing).
     #[serde(default)]
     pub source_chat_session_id: String,
+    /// RFC 3339 stamp set when this **request** got its answer — either a
+    /// real `response` write-back or the §7.1 crash-fallback receipt.
+    /// Empty = still open; the sweeper (§13-12) acts on open requests
+    /// past the response deadline.
+    #[serde(default)]
+    pub answered_at: String,
 }
 
 impl MailboxEntry {
     pub fn delivered(&self) -> bool {
         !self.delivered_at.is_empty()
+    }
+
+    /// A request is closed once an answer (real or fallback) was emitted.
+    pub fn answered(&self) -> bool {
+        !self.answered_at.is_empty()
     }
 }
 
@@ -169,6 +180,37 @@ impl IntentMailbox {
         Ok(())
     }
 
+    /// Close a request: its answer (real response or §7.1 fallback receipt)
+    /// has been emitted. Idempotent — a second mark is a no-op refresh.
+    pub fn mark_answered(&self, message_id: &str) -> Result<(), MailboxError> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(e) = inner.entries.iter_mut().find(|e| e.message_id == message_id) {
+            e.answered_at = chrono::Utc::now().to_rfc3339();
+            self.save_locked(&inner)?;
+        }
+        Ok(())
+    }
+
+    /// Requests delivered before `older_than` (RFC3339 cutoff) that still
+    /// have no answer — the §7.1 crash-fallback candidates. Response
+    /// entries and undelivered attempts are never returned: an undelivered
+    /// request failed synchronously and its sender already has the error.
+    pub fn stale_unanswered(&self, older_than: &str) -> Vec<MailboxEntry> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .entries
+            .iter()
+            .filter(|e| {
+                e.kind != "response"
+                    && e.delivered()
+                    && !e.answered()
+                    && !e.delivered_at.is_empty()
+                    && e.delivered_at.as_str() < older_than
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Look up one delivery fact by `message_id`.
     pub fn get(&self, message_id: &str) -> Option<MailboxEntry> {
         let inner = self.inner.lock().unwrap();
@@ -216,6 +258,7 @@ mod tests {
             kind: "request".into(),
             status: String::new(),
             source_chat_session_id: String::new(),
+        answered_at: String::new(),
         }
     }
 
@@ -226,6 +269,32 @@ mod tests {
         assert!(!mb.get("m1").unwrap().delivered());
         mb.mark_delivered("m1").unwrap();
         assert!(mb.get("m1").unwrap().delivered());
+    }
+
+    #[test]
+    fn stale_unanswered_selects_only_open_delivered_requests() {
+        let mb = IntentMailbox::in_memory();
+        // Same UTC offset + fixed date-time prefix ⇒ RFC3339 strings
+        // compare lexicographically in chronological order.
+        let cutoff = chrono::Utc::now().to_rfc3339();
+        let past = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        let mut old = entry("m-old", "c1");
+        old.delivered_at = past.clone();
+        let mut fresh = entry("m-fresh", "c1");
+        fresh.delivered_at = "2999-01-01T00:00:00+00:00".into();
+        let undelivered = entry("m-undel", "c1");
+        let mut resp = entry("m-resp", "c1");
+        resp.kind = "response".into();
+        resp.delivered_at = past.clone();
+        for e in [old, fresh, undelivered, resp] {
+            mb.record(e).unwrap();
+        }
+        let stale = mb.stale_unanswered(&cutoff);
+        assert_eq!(stale.len(), 1, "only the old delivered request");
+        assert_eq!(stale[0].message_id, "m-old");
+        // Closing it removes it from the candidate set.
+        mb.mark_answered("m-old").unwrap();
+        assert!(mb.stale_unanswered(&cutoff).is_empty());
     }
 
     #[test]
