@@ -2922,6 +2922,12 @@ async fn put_agent_config(
     //    runs the load-merge-save cycle against `agent_config.json`
     //    and returns the new on-disk state plus the
     //    `RuntimeConfigOverrides` projection for the live broadcast.
+    //
+    //    Note: `skills_auto_load` is intentionally NOT a field here.
+    //    The toggle lives on the `load_skill` built-in tool entry in
+    //    `agent_tools.json` (ADR-094 §4 — `load_skill` is the toggle,
+    //    full stop). Toggling it goes through
+    //    `PUT /agents/{id}/builtin-tools`, not this endpoint.
     let body = crate::usecases::PutAgentConfigBody::from_request_fields(
         req.max_output_tokens,
         req.max_iterations,
@@ -3115,6 +3121,10 @@ struct UpdateAgentConfigRequest {
     /// back to `UserProfile.language`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_language: Option<serde_json::Value>,
+    // Note: `skills_auto_load` was deleted — the toggle now lives on
+    // the `load_skill` entry of `agent_tools.json` (see ADR-094 §4:
+    // `load_skill` is the toggle, full stop). Toggling it goes through
+    // `PUT /agents/{id}/builtin-tools`, not this endpoint.
 }
 
 impl UpdateAgentConfigRequest {
@@ -3301,7 +3311,21 @@ async fn broadcast_runtime_overrides(state: &HttpState, overrides: &RuntimeConfi
 }
 
 /// Push a builtin-tools enabled update into the SessionManager via
-/// [`dispatch_agent_level_config`].
+/// [`dispatch_agent_level_config`], and recompute the Progressive-mode
+/// skills summary and dispatch it. The coupling is by intent:
+/// `load_skill` is the single source of truth for "should the LLM know
+/// what skills exist at session start" — there's no separate
+/// `skills_auto_load` toggle any more.
+///
+/// The summary recompute is **unconditional** (not gated on the diff
+/// actually touching `load_skill`): it is derived from the authoritative
+/// `agent_tools.json` on disk, which is cheap to re-read and idempotent
+/// — a PUT that did not change `load_skill.enabled` recomputes the same
+/// name-sorted summary (`SkillRegistry::build_skill_summary` is
+/// deterministic), so no session's `ContextBuilder` changes and no
+/// prompt cache is invalidated. Gating would require tracking the
+/// previous enabled flag, i.e. a second piece of state that could drift
+/// from the file — the exact failure mode ADR-094 §4 rejects.
 ///
 /// Always sends (even with zero active sessions) so the
 /// `AgentCore` template gets the new flags and sessions opened later
@@ -3318,6 +3342,34 @@ async fn broadcast_builtin_tools_update(
         },
     )
     .await;
+
+    // Keep the `load_skill` tool flag and the skills-summary section of
+    // the system prompt in lockstep — see ADR-094 §4 ("`load_skill` is
+    // the toggle, full stop"). Same priority chain as Phase A startup:
+    // `agent_tools.json::load_skill.enabled` drives `resolve_skill_mode`,
+    // which drives this dispatch. `put_builtin_tools` has already
+    // persisted the new flags, so the on-disk file this reads is the
+    // post-PUT state.
+    match crate::package::prompt_builder::compute_skill_instructions_payload(
+        &state.package_dir,
+        &state.work_dir,
+    ) {
+        Ok(summary) => {
+            dispatch_agent_level_config(
+                state,
+                "skill_instructions_reload",
+                InboundMessage::UpdateSkillInstructions { instructions: summary },
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::warn!(
+                agent_id = %state.agent_id,
+                error = %e,
+                "skill instructions live-coupling skipped after builtin_tools update (on-disk file is authoritative for next boot)"
+            );
+        }
+    }
 }
 
 /// `GET /agents/{id}/tools` - Tools panel (merged: builtin + mcp).

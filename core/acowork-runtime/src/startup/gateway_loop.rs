@@ -527,6 +527,18 @@ async fn dispatch_inbound(
                     .apply_system_prompt(&system_prompt);
                 Ok(())
             }
+            // ADR-094: Progressive-mode skills summary hot-reload.
+            // Same agent-scoped policy as `UpdateSystemPrompt` —
+            // the skills summary is part of the agent template, not
+            // per-session, so the SessionManager owns the broadcast.
+            // `None` clears the section (Manual mode hot-toggle).
+            InboundMessage::UpdateSkillInstructions { instructions } => {
+                session_manager
+                    .lock()
+                    .await
+                    .apply_skill_instructions(instructions.as_deref());
+                Ok(())
+            }
             other => Err(RuntimeError::Config(format!(
                 "system-level dispatch: unsupported variant {:?}",
                 std::mem::discriminant(&other)
@@ -832,6 +844,17 @@ async fn dispatch_inbound(
             Ok(())
         }
 
+        // ADR-094: same defensive uniformity as `UpdateSystemPrompt`
+        // — even a per-session routing key routes through the
+        // SessionManager because the skills summary is agent-scoped.
+        InboundMessage::UpdateSkillInstructions { instructions } => {
+            session_manager
+                .lock()
+                .await
+                .apply_skill_instructions(instructions.as_deref());
+            Ok(())
+        }
+
         // ⑭ ChatMessage → SessionMessage::ChatMessage (from MQTT SendMessage)
         InboundMessage::ChatMessage {
             content,
@@ -848,7 +871,7 @@ async fn dispatch_inbound(
             // `AttachedItem` serde enum. Legacy `document_ids` and
             // `attached_context` from old desktop clients are NOT accepted
             // — there is no compatibility layer per ADR §4.
-            let mut skill_instructions: Option<String> = None;
+            let mut active_skill: Option<String> = None;
             let mut attached_items: Option<Vec<acowork_core::protocol::AttachedItem>> = None;
             let mut content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>> = None;
 
@@ -897,7 +920,7 @@ async fn dispatch_inbound(
                             skill_len = instructions.len(),
                             "ChatMessage: resolved skill command → instructions"
                         );
-                        skill_instructions = Some(instructions);
+                        active_skill = Some(instructions);
                     }
                     None => tracing::warn!(
                         session_id = %session_id,
@@ -915,7 +938,7 @@ async fn dispatch_inbound(
                     SessionMessage::ChatMessage {
                         content,
                         message_id,
-                        skill_instructions,
+                        active_skill,
                         attached_items,
                         content_parts,
                     },

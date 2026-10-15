@@ -65,6 +65,7 @@ pub const BUILTIN_TOOLS: &[BuiltinToolInfo] = &[
     BuiltinToolInfo { name: "mcp_install",     description: "Install an MCP server into the agent's MCP config",        group: Some("MCP") },
     BuiltinToolInfo { name: "mcp_uninstall",   description: "Remove an MCP server from the agent's MCP config",          group: Some("MCP") },
     BuiltinToolInfo { name: "rag_query",       description: "Query a RAG knowledge base (requires a RAG manifest entry)",group: Some("Advanced") },
+    BuiltinToolInfo { name: "load_skill",      description: "Load the full instructions of a named skill on demand",     group: Some("Advanced") },
     BuiltinToolInfo { name: "bash",            description: "Execute commands via Git Bash (Windows)",                   group: Some("Shell") },
     BuiltinToolInfo { name: "powershell",      description: "Execute commands via PowerShell (Windows)",                 group: Some("Shell") },
     BuiltinToolInfo { name: "shell",           description: "Execute commands via the system shell (Linux / macOS)",     group: Some("Shell") },

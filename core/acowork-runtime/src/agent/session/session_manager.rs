@@ -67,6 +67,14 @@ pub struct SessionManagerConfig {
     pub inbound_channel_capacity: usize,
     /// System prompt to use for all sessions
     pub system_prompt: String,
+    /// ADR-094: agent-level Progressive-mode skills summary (name + description
+    /// list). Session-scoped: mounted on each new
+    /// session's `ContextBuilder` (as the `skill_instructions` section) and
+    /// hot-reloaded via `apply_skill_instructions`. `None` in Manual mode or
+    /// when the package has no `skills/`. Distinct from the per-turn skill
+    /// selected via a chat `command` (that one lives on
+    /// `SessionMessage::ChatMessage::active_skill` and is cleared every turn).
+    pub skill_summary: Option<String>,
     /// Per-session token budget
     pub per_session_budget: Budget,
     /// History max tokens per session
@@ -122,6 +130,7 @@ impl Default for SessionManagerConfig {
         Self {
             inbound_channel_capacity: 64,
             system_prompt: String::new(),
+            skill_summary: None,
             per_session_budget: Budget {
                 daily_tokens: None,
                 monthly_tokens: None,
@@ -187,6 +196,16 @@ pub struct RuntimeConfigOverrides {
     /// `format_user_profile_context`). `None` = follow the global
     /// `UserProfile.language` (the existing default behaviour).
     pub session_language: Option<String>,
+
+    // ADR-094 note: `skills_auto_load` was removed from the override
+    // chain. Skill mode (progressive / manual) is now driven by
+    // `agent_tools.json::load_skill.enabled` only — see
+    // `cli::resolve_skill_mode` for the priority chain. The
+    // `RuntimeConfigOverrides` mirror is no longer needed: hot toggling
+    // `load_skill.enabled` goes through the same
+    // `broadcast_builtin_tools_update` → `apply_skill_instructions`
+    // pipeline that gates every other built-in tool, so the two
+    // surfaces (UI switch and tool switch) cannot drift.
 }
 
 impl RuntimeConfigOverrides {
@@ -729,6 +748,17 @@ impl SessionManager {
             session_state,
             inbound_rx,
             self.config.system_prompt.clone(),
+            // ADR-094: seed the new session's agent-level skills summary so
+            // the Progressive-mode list lands on its ContextBuilder (and
+            // therefore its debug snapshot + usage popover) on the first
+            // prompt. Mirrors `system_prompt` and `identity_context` above.
+            // Hot reloads go through
+            // `apply_skill_instructions` -> `SessionMessage::UpdateSkillInstructions`.
+            //
+            // This is the SESSION-LIFETIME slot; the per-turn skill selected
+            // via a chat command is a separate ContextBuilder slot and is not
+            // seeded here.
+            self.config.skill_summary.clone(),
             self.config.chunk_tx.clone(),
             session_id.clone(),
             self.config.identity_context.clone(),
@@ -2075,6 +2105,33 @@ After installation, ask the user to re-enable the MCP server.",
             tracing::warn!(
                 failed_sessions = failed.len(),
                 "apply_system_prompt: some sessions missed the broadcast (likely closed)"
+            );
+        }
+    }
+
+    /// ADR-094: apply a Progressive-mode skills summary update to the
+    /// shared template AND broadcast to every active session. Mirrors
+    /// [`apply_system_prompt`] one-for-one; `None` clears the section
+    /// (Manual mode hot-toggle).
+    ///
+    /// `None` here does NOT mean "no skills configured" — it means
+    /// "clear the section now". If you need to keep the existing
+    /// template and only update something else, do not call this.
+    pub fn apply_skill_instructions(&mut self, instructions: Option<&str>) {
+        tracing::info!(
+            has_skills = instructions.is_some(),
+            "SessionManager: applying skill instructions (template sync + broadcast)"
+        );
+        // Step 1: rewrite the shared template for future sessions.
+        self.config.skill_summary = instructions.map(|s| s.to_string());
+        // Step 2: push to every active session's ContextBuilder.
+        let failed = self.broadcast(SessionMessage::UpdateSkillInstructions {
+            instructions: instructions.map(|s| s.to_string()),
+        });
+        if !failed.is_empty() {
+            tracing::warn!(
+                failed_sessions = failed.len(),
+                "apply_skill_instructions: some sessions missed the broadcast (likely closed)"
             );
         }
     }

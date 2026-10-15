@@ -265,6 +265,11 @@ pub struct AgentConfig {
     /// `UserProfile.language`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_language: Option<String>,
+
+    // ADR-094 note: there is no `skills_auto_load` field on
+    // `AgentConfig` any more. The Progressive/Manual mode decision
+    // is driven entirely by `agent_tools.json::load_skill.enabled`
+    // — see `cli::resolve_skill_mode` for the priority chain.
 }
 
 impl AgentConfig {

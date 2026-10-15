@@ -584,11 +584,19 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         }
     }
 
-    // ── Step 3: Build system prompt ─────────────────────────────────
-    let skill_mode =
-        crate::startup::super_mod::resolve_skill_mode(&loaded.manifest, &config.work_dir);
-    let system_prompt = build_system_prompt_with_mode(&loaded.package_dir, skill_mode)?;
-    tracing::debug!(prompt_len = system_prompt.len(), "System prompt built");
+    // ── Step 3: Load package-level prompt overrides ─────────────────
+    //
+    // ADR-094: the *system prompt* itself is NOT built here any more —
+    // see Step 4.5. Its Progressive-mode skills summary is derived from
+    // `skill_mode`, which is derived from
+    // `agent_tools.json::load_skill.enabled`, and that file is only
+    // resolved (loaded, or seeded from the manifest on first boot) in
+    // Step 4. Building the prompt before Step 4 would resolve the skill
+    // mode against a not-yet-seeded file, so a first boot would enable
+    // the `load_skill` tool while leaving the system prompt without the
+    // "Available Skills" summary — the exact inconsistent state ADR-094
+    // §4 forbids. Only the tool-config-independent package prompt
+    // overrides are loaded here.
 
     // ADR-053: agent-specific compaction prompt (prompts/summary.md, optional).
     // Loaded once here (Phase A) so BOTH Gateway mode (phase_b_init_session)
@@ -901,6 +909,12 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),
         mqtt_client_slot.clone(),
+        // ADR-094: `load_skill` needs the package dir to read
+        // `<package_dir>/skills/<name>/SKILL.md`. `loaded.package_dir`
+        // is the resolved `.agent` package root — distinct from the
+        // session `work_dir` (which holds runtime state, not the
+        // agent's read-only package files).
+        loaded.package_dir.clone(),
     ) {
         registry.register(tool);
     }
@@ -1083,6 +1097,29 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         "agent_tools.json resolved"
     );
 
+    // ── Step 4.5: Build system prompt ───────────────────────────────
+    //
+    // ADR-094: deliberately AFTER the `agent_tools.json` resolution
+    // above. `resolve_skill_mode` reads `load_skill.enabled` from that
+    // file (falling back to the manifest default only when the entry is
+    // absent), so the file must already be seeded/merged before the
+    // mode is resolved. Otherwise a first boot activates the
+    // `load_skill` tool (via the freshly seeded config) while the
+    // system prompt is built in Manual mode — no "Available Skills"
+    // summary, i.e. the one state ADR-094 §4 exists to prevent.
+    let skill_mode =
+        crate::startup::super_mod::resolve_skill_mode(&loaded.manifest, &config.work_dir);
+    tracing::debug!(
+        skill_mode = ?skill_mode,
+        "Skill mode resolved from the persisted agent_tools.json"
+    );
+    let prompt_parts = build_system_prompt_with_mode(&loaded.package_dir, skill_mode)?;
+    tracing::debug!(
+        base_len = prompt_parts.base.len(),
+        has_skills = prompt_parts.skills_summary.is_some(),
+        "System prompt built"
+    );
+
     // ── Step 5: Build tool definitions ──────────────────────────────
     #[allow(unused_imports)]
     use acowork_core::tools::traits::Tool;
@@ -1191,10 +1228,21 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         }
     };
 
-    let mut context_builder = ContextBuilder::new(system_prompt.clone())
+    let mut context_builder = ContextBuilder::new(prompt_parts.base.clone())
         .with_identity(identity_context.clone())
         .with_tools(tool_definitions.clone());
     context_builder = context_builder.with_override_model(resolved_model.clone());
+    // ADR-094: Progressive-mode skills summary lands on its OWN
+    // ContextBuilder section (`skill_instructions`), parallel to
+    // `tool_definitions`. This is what makes `compute_section_sizes`
+    // emit a distinct section entry — visible in both the usage popover
+    // (skills category %) and the Debug panel snapshot. Without this
+    // call, the summary would be lost (it used to be embedded in the
+    // base string, which collapsed everything into the `system_prompt`
+    // section and hid the skills from the UI).
+    if let Some(ref skills) = prompt_parts.skills_summary {
+        context_builder.set_skill_summary(skills.clone());
+    }
 
     tracing::info!(
         provider = %provider.name(),
@@ -1247,7 +1295,13 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         emb_provider,
         active_tools,
         full_tool_specs,
-        system_prompt,
+        system_prompt: prompt_parts.base.clone(),
+        // ADR-094: Progressive-mode skills summary is stored on the
+        // boot context so Phase B (SessionManagerConfig + per-session
+        // ContextBuilder) seeds it. Without this, the summary would
+        // only exist on the boot-time context_builder and be lost when
+        // SessionManager re-builds the system prompt for hot-reload.
+        skills_summary: prompt_parts.skills_summary.clone(),
         compaction_prompt,
         // Per-turn skill command injection: registry loaded in Step 3.5
         // above, injected into AgentCore in Phase B (session_init.rs).

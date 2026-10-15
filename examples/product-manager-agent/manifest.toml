@@ -81,6 +81,10 @@ name = "ask_user_question"
 [[tools]]
 name = "todo_write"
 
+# --- Advanced ---
+[[tools]]
+name = "load_skill"
+
 [llm]
 temperature = 0.7
 max_tokens = 32768

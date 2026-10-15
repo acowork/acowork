@@ -74,6 +74,11 @@ export interface AgentProfileSettings {
    *  Empty string from the dropdown also means "no opinion" and is
    *  cleared on save. */
   sessionLanguage?: string | null;
+  // ADR-094 note: `skillsAutoLoad` was removed from the profile
+  // shape. Skill mode (Progressive / Manual) now lives entirely
+  // on the `load_skill` tool entry in `agent_tools.json` and is
+  // mutated by the Tools panel — there is no second switch on
+  // the Agent Setup panel any more.
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {

@@ -45,6 +45,7 @@ pub mod file_write;
 pub mod glob_search;
 pub mod http_request;
 pub mod intent_send;
+pub mod load_skill;
 pub mod mcp_install;
 pub mod mcp_uninstall;
 pub mod memory_recall;
@@ -97,6 +98,7 @@ pub const CONDITIONALLY_REGISTERED_TOOL_NAMES: &[&str] = &["rag_query"];
 pub const MAX_LINES_PER_CALL: usize = 100;
 
 use acowork_core::tools::traits::Tool;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -122,6 +124,11 @@ use crate::tools::workspace_resolver::SharedResolver;
 /// `#[allow(clippy::too_many_arguments)]` follows the project convention
 /// for thin pass-through facades (cf. `AgentCore::new_with_observer`): the
 /// arguments are independent assembly dependencies for the tool registry.
+///
+/// ADR-094: `package_dir` is the agent's `.agent` package root —
+/// required by the `load_skill` tool to read
+/// `<package_dir>/skills/<name>/SKILL.md`. Distinct from `agent_home`
+/// (which is the `work_dir` runtime state root).
 #[allow(clippy::too_many_arguments)]
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
@@ -131,6 +138,7 @@ pub fn all_builtin_tools(
     mcp_notifier: McpNotifyRef,
     agent_home: String,
     mqtt_slot: crate::http::server::SharedMqttClientSlot,
+    package_dir: PathBuf,
 ) -> Vec<Arc<dyn Tool>> {
     // Register shell tools based on platform detection
     let shell_tools: Vec<Arc<dyn Tool>> = crate::platform::detected_shells()
@@ -175,6 +183,7 @@ pub fn all_builtin_tools(
         )),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
         Arc::new(todo_write::TodoWriteTool::new()),
+        Arc::new(load_skill::LoadSkillTool::new(package_dir)),
         Arc::new(mcp_install::McpInstallTool::new(
             mcp_notifier.clone(),
             agent_home.clone(),
@@ -213,6 +222,7 @@ mod tests {
         McpNotifyRef,
         String, // agent_home
         crate::http::server::SharedMqttClientSlot,
+            PathBuf, // package_dir (ADR-094: `load_skill` reads from here)
     ) {
         let dir = tempfile::tempdir().unwrap();
         let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(
@@ -231,6 +241,10 @@ mod tests {
             mcp_notifier,
             "/tmp/test-agent".to_string(),
             mqtt_slot,
+            // ADR-094: the `load_skill` tool is constructed with a
+            // package dir; in tests we point it at an empty tempdir
+            // (no skills/ subdir) so it returns an empty registry.
+            dir.path().to_path_buf(),
         )
     }
 
@@ -248,9 +262,9 @@ mod tests {
         // fails if someone re-adds the registration without also restoring
         // the `codebase` branch in `handle_lsp_relay_update` and the
         // `BUILTIN_TOOLS` catalog entry.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt, package_dir) = make_test_deps();
 
-        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt, package_dir);
 
         let names = tool_names(&tools);
         assert!(
@@ -266,9 +280,9 @@ mod tests {
         // tool surface (ADR-061 §10). `context_retrieve` was deleted
         // outright once it turned out to scan every session file instead of
         // the current one; `context_abandon` survives as dead code.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt, package_dir) = make_test_deps();
 
-        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt, package_dir);
 
         let names = tool_names(&tools);
         assert!(
@@ -282,9 +296,9 @@ mod tests {
     fn test_all_builtin_tools_default_includes_core_tools() {
         // Regression: platform-tool changes only affect the compression
         // tools; all other core tools are always present.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt) = make_test_deps();
+        let (resolver, agent_id, timeout, mem, mcp, agent_home, mqtt, package_dir) = make_test_deps();
 
-        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt);
+        let tools = all_builtin_tools(&resolver, &agent_id, timeout, mem, mcp, agent_home, mqtt, package_dir);
 
         let names = tool_names(&tools);
         // Core tools that must always be present (sanity check)
@@ -304,6 +318,10 @@ mod tests {
             "todo_write",
             "mcp_install",
             "mcp_uninstall",
+            // ADR-094: load_skill is unconditionally registered
+            // (it's a builtin tool, not a conditionally-registered
+            // one like `rag_query` which needs a manifest RAG entry).
+            "load_skill",
         ] {
             assert!(
                 names.contains(&required.to_string()),
