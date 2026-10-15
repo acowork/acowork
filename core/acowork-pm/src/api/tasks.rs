@@ -6,7 +6,7 @@ use axum::Json;
 
 use crate::types::{
     AttachmentId, CreateTask, MemberKind, ProjectId, ReparentTask, ReviewStatus, Task, TaskFilter,
-    TaskId, UpdateTask,
+    TaskId, TaskStatus, UpdateTask,
 };
 
 use super::ApiState;
@@ -60,10 +60,17 @@ pub async fn create(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
     // ADR-076 §决策 11: REST 面 = 人类操作面 → creator 恒为 User。
+    // Design 27 §5.4: a human creating a task *for an agent* is an act of
+    // assignment — the assignee gets a push dispatch into the project group
+    // chat. (Approval of agent-created tasks dispatches from `review`; the
+    // MCP face creates with `review_status=pending` and no dispatch.)
     let task = state
         .store
         .create_task_as(&pid, input, created_by, MemberKind::User)
         .await?;
+    if task.review_status == ReviewStatus::NotRequired {
+        dispatch_task_via_gateway(&state, &task).await;
+    }
     Ok(Json(task))
 }
 
@@ -107,7 +114,13 @@ pub async fn update(
     Json(input): Json<UpdateTask>,
 ) -> Result<Json<Task>, crate::error::PmError> {
     let tid = tid.parse::<TaskId>()?;
+    let before = state.store.get_task(&tid).await?;
     let task = state.store.update_task(&tid, input).await?;
+    // Design 27 §2.1 T2-a: a manual PATCH into a terminal status ends the
+    // target agent's logical execution context for this task.
+    if let Some(before) = before {
+        close_task_context_if_terminal(&state, &before, &task).await;
+    }
     Ok(Json(task))
 }
 
@@ -125,7 +138,12 @@ pub async fn delete(
     query: axum::extract::Query<DeleteTaskQuery>,
 ) -> Result<axum::http::StatusCode, crate::error::PmError> {
     let tid = tid.parse::<TaskId>()?;
+    // Design 27 §2.1 T2-a: deletion ends the task's logical execution
+    // context like a terminal status would — snapshot the subtree first
+    // (`delete_task` cascades regardless of the flag).
+    let closing = state.store.closing_task_contexts(&tid).await.unwrap_or_default();
     state.store.delete_task(&tid, query.cascade).await?;
+    close_task_contexts(&state, closing).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -173,6 +191,10 @@ pub async fn claim(
         .get("x-actor")
         .and_then(|v| v.to_str().ok())
         .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
+    // Design 27 §5.4: no dispatch here — the claimer is the assignee itself
+    // (it is already awake, doing the claiming). Push dispatch happens at
+    // the moment of *assignment* (`create` with an agent assignee, or
+    // approval of an agent-created task).
     let task = state.store.claim_task(&tid, actor).await?;
     Ok(Json(task))
 }
@@ -229,7 +251,24 @@ pub async fn review(
         .and_then(|v| v.to_str().ok())
         .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
     // review 可由 human 完成（REST 路径默认 X-Actor=human）或 instance 完成（MCP 路径）
+    let before = state.store.get_task(&tid).await?;
     let task = state.store.review_task(&tid, input.approved, reviewer).await?;
+    // Design 27 §5.4 / §2.1 T2-a: approving an agent-created task (still
+    // `pending`, awaiting creation approval) is the human's act of handing
+    // the work over — dispatch it. Anything that lands the task on a
+    // terminal status (result approval → done, any reject → rejected,
+    // creation rejects included) ends the assignee's logical execution
+    // context.
+    if task.status == TaskStatus::Pending {
+        let was_awaiting_approval = before
+            .as_ref()
+            .is_some_and(|b| b.review_status == ReviewStatus::Pending);
+        if input.approved && was_awaiting_approval {
+            dispatch_task_via_gateway(&state, &task).await;
+        }
+    } else if let Some(before) = before {
+        close_task_context_if_terminal(&state, &before, &task).await;
+    }
     Ok(Json(task))
 }
 
@@ -258,3 +297,78 @@ pub async fn list_children(
 /// 待导出辅助：review_status 类型别名（避免 handler 引用未使用项）。
 #[allow(dead_code)]
 pub type _ReviewStatus = ReviewStatus;
+
+// ────────────────────────────────────────────────────────────────────────────
+// Design 27 §5.4 / §2.1 T2-a — group-chat dispatch & context close
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Provisioner from the Gateway config; `None` when PM runs without
+/// `--gateway-url` (single-component dev) — every dispatch/close hook
+/// degrades to a no-op there.
+fn provisioner(state: &ApiState) -> Option<crate::group_chat::GroupChatProvisioner> {
+    state
+        .gateway
+        .as_ref()
+        .map(|(url, token)| crate::group_chat::GroupChatProvisioner::new(url.clone(), token.clone()))
+}
+
+/// Push-dispatch a task as a task-keyed `intent_request` into the project
+/// group chat (§5.4: assignment is dispatch). No-op without a Gateway
+/// config or without an agent assignee; failures are logged inside the
+/// provisioner and never fail the PM mutation.
+pub(crate) async fn dispatch_task_via_gateway(state: &ApiState, task: &Task) {
+    let Some(gateway) = provisioner(state) else { return };
+    let Some(assignee) = task.assignee.as_deref() else { return };
+    if assignee == "human" {
+        return;
+    }
+    let message = if task.description.trim().is_empty() {
+        task.title.clone()
+    } else {
+        format!("{}\n{}", task.title, task.description.trim())
+    };
+    gateway
+        .dispatch_task(
+            task.project_id.as_str(),
+            task.id.as_str(),
+            assignee,
+            &task.created_by,
+            &task.title,
+            &message,
+        )
+        .await;
+}
+
+/// End the assignee agents' logical execution contexts for `tasks`
+/// (§2.1 T2-a). Only agent-assigned tasks have a context to close.
+pub(crate) async fn close_task_contexts(
+    state: &ApiState,
+    tasks: impl IntoIterator<Item = (ProjectId, Task)>,
+) {
+    let Some(gateway) = provisioner(state) else { return };
+    for (pid, task) in tasks {
+        let Some(assignee) = task.assignee.as_deref() else {
+            continue;
+        };
+        if assignee == "human" {
+            continue;
+        }
+        gateway
+            .close_task_context(pid.as_str(), task.id.as_str(), assignee)
+            .await;
+    }
+}
+
+/// PATCH/review convenience: only a *transition into* a terminal status
+/// ends the context (`done` / `rejected` / `cancelled`).
+async fn close_task_context_if_terminal(state: &ApiState, before: &Task, after: &Task) {
+    if before.status == after.status {
+        return;
+    }
+    if matches!(
+        after.status,
+        TaskStatus::Done | TaskStatus::Rejected | TaskStatus::Cancelled
+    ) {
+        close_task_contexts(state, [(after.project_id.clone(), after.clone())]).await;
+    }
+}

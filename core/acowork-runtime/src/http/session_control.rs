@@ -84,6 +84,69 @@ fn not_found(sid: &str) -> ApiError {
     )
 }
 
+/// `POST /intent-context/close` — design 27 §2.1 T2-a: a PM task reached a
+/// terminal state, so its logical execution context ends. The Gateway
+/// (acting for the PM service) resolves the target instance and calls this
+/// with the registry key (`conv:task:{project}:{task}`); the Runtime closes
+/// the mapped execution session and drops the mapping. Idempotent.
+///
+/// Authorization: Gateway-proxied calls carry the hosting node's
+/// `X-ACowork-Node-Token` (stamped by the reverse proxy, the same machine
+/// credential the node HTTP surface checks). When the Runtime has a node
+/// token configured, a mismatch is rejected; in local mode (no token) the
+/// loopback bind is the boundary — the same tiering every other Runtime
+/// surface applies.
+pub(crate) async fn post_close_intent_context(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let expected = state
+        .agent_core
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|c| c.config.mqtt_password.clone()))
+        .filter(|t| !t.is_empty());
+    if let Some(expected) = expected {
+        let provided = headers
+            .get(acowork_core::auth::NODE_TOKEN_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+            return Err(err(
+                StatusCode::UNAUTHORIZED,
+                "intent context close requires the node token",
+            ));
+        }
+    }
+    let key = req
+        .get("key")
+        .and_then(|v| v.as_str())
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "key is required"))?;
+    let sm = session_manager(&state).await?;
+    sm.lock()
+        .await
+        .close_intent_context(key)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "closed", "key": key })))
+}
+
+/// Timing-unsafe comparison would leak token bytes over loopback only in
+/// theory; keep the node-proxy pattern anyway (same shape as
+/// `acowork-node`'s `constant_time_eq`).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Authorize a **read** of `sid`. Returns the meta on success.
 pub(crate) fn authorize_read(
     state: &HttpState,

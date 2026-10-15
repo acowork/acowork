@@ -1006,7 +1006,7 @@ async fn route_intent_inbound(
         }
     }
     let target = match target {
-        Some(t) => t,
+        Some(t) => (t, None),
         None => {
             let key = routing_key(&source_chat_session_id, &conversation_id, &message_id);
             session_manager
@@ -1016,9 +1016,15 @@ async fn route_intent_inbound(
                 .await?
         }
     };
+    // A rotation (§2.1) prepends its pointer handoff to the routed intent —
+    // one injection with the turn it belongs to, no extra plumbing.
+    let content = match target.1 {
+        Some(note) => format!("{}\n\n{}", note, content),
+        None => content,
+    };
 
     session_manager.lock().await.send_to_session(
-        &target,
+        &target.0,
         SessionMessage::Intent {
             content,
             message_id,

@@ -517,7 +517,9 @@ pub struct SessionManager {
     /// Design 27 §3.2/§6.1: intent-context → execution-session routing
     /// table (chat/conv keys). Loaded from the work dir so a restart
     /// keeps follow-up turns on the session that holds the conversation.
-    intent_map: super::intent_routing::IntentSessionMap,
+    /// Shared (`Arc<Mutex<_>>`) with every session task so an intent turn
+    /// can stamp its rotation bookkeeping (§2.1) at turn end.
+    intent_map: Arc<std::sync::Mutex<super::intent_routing::IntentSessionMap>>,
 }
 
 impl SessionManager {
@@ -570,7 +572,7 @@ impl SessionManager {
             latest_session,
             session_configs,
             package_dir,
-            intent_map,
+            intent_map: Arc::new(std::sync::Mutex::new(intent_map)),
         }
     }
 
@@ -583,17 +585,54 @@ impl SessionManager {
         self.resolver = Some(resolver);
     }
 
-    /// Design 27 §6.1: resolve (or create) the execution session that owns
-    /// an intent context for this agent. `key` comes from
+    /// Design 27 §6.1 + §2.1: resolve (or create) the execution session that
+    /// owns an intent context for this agent. `key` comes from
     /// `intent_routing::routing_key`. A mapped session that is still Active
-    /// is reused; a stale mapping (closed / evicted) is replaced by a fresh
-    /// session and the mapping is updated — the conversation lives in the
-    /// Chat session store, so a new execution session loses nothing the
-    /// envelope does not already carry.
-    pub async fn route_intent_session(&mut self, key: &str) -> Result<String> {
-        if let Some(sid) = self.intent_map.get(key).map(|e| e.session_id.clone()) {
-            if self.get_session(&sid).is_some() {
-                return Ok(sid);
+    /// is reused; a rotation is taken when §2.1 says so —
+    /// T2 (the previous turn compacted) or T1 (idle past the threshold) —
+    /// or when the mapping is stale (closed / evicted). The successor starts
+    /// empty with a pointer handoff naming the old session; the conversation
+    /// itself lives in the Chat session store, so nothing is copied.
+    /// Returns `(session_id, handoff_note)` — the caller prepends the note to
+    /// the routed intent when a rotation just happened.
+    pub async fn route_intent_session(&mut self, key: &str) -> Result<(String, Option<String>)> {
+        let (mapped, rotation) = {
+            let map = self
+                .intent_map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let mapped = map.get(key).map(|e| e.session_id.clone());
+            let rotation =
+                mapped.as_ref().and_then(|_| {
+                    map.needs_rotation(key, super::intent_routing::idle_rotate_threshold())
+                });
+            (mapped, rotation)
+        };
+        if let Some(sid) = &mapped {
+            if self.get_session(sid).is_some() {
+                match rotation {
+                    None => return Ok((sid.clone(), None)),
+                    Some(reason) => {
+                        let new_sid = self.create_agent_owned_session(None).await?;
+                        self.intent_map
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .rekey(key, new_sid.clone())
+                            .map_err(|e| {
+                                RuntimeError::Config(format!("intent routing persist failed: {e}"))
+                            })?;
+                        tracing::info!(
+                            key,
+                            old_session = %sid,
+                            new_session = %new_sid,
+                            reason = ?reason,
+                            "Intent session rotated (design 27 §2.1)"
+                        );
+                        return Ok((new_sid, Some(super::intent_routing::rotation_handoff(
+                            reason, sid,
+                        ))));
+                    }
+                }
             }
             tracing::info!(
                 key,
@@ -601,17 +640,39 @@ impl SessionManager {
                 "Intent routing entry points at a non-active session — opening a fresh one"
             );
         }
-        let new_sid = self
-            .create_frontend_session(None, None, None, None)
-            .await?;
+        let new_sid = self.create_agent_owned_session(None).await?;
         self.intent_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(key.to_string(), new_sid.clone())
-            .map_err(|e| {
-                RuntimeError::Config(format!(
-                    "intent routing persist failed: {e}"
-                ))
-            })?;
-        Ok(new_sid)
+            .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
+        Ok((new_sid, None))
+    }
+
+    /// Design 27 §6.2 T2-a: a PM task reaching a terminal state ends its
+    /// logical execution context — close the mapped session, no successor,
+    /// drop the mapping. Idempotent: unknown keys are a no-op.
+    pub async fn close_intent_context(&mut self, key: &str) -> Result<()> {
+        let mapped = self
+            .intent_map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .map(|e| e.session_id.clone());
+        if let Some(sid) = mapped {
+            // `close_session` errors when the session already exited —
+            // idempotent close, log-and-continue.
+            if let Err(e) = self.close_session(&sid).await {
+                tracing::debug!(key, session_id = %sid, error = %e, "intent context session already closed");
+            }
+            self.intent_map
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(key)
+                .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
+            tracing::info!(key, session_id = %sid, "Intent execution context closed (task terminal, design 27 §2.1 T2-a)");
+        }
+        Ok(())
     }
 
     /// Create a new session, spawning it as an independent tokio task.
@@ -783,6 +844,7 @@ impl SessionManager {
             current_work_dir.clone(),
             session_committed_lines,
             self.streaming_lines.clone(),
+            self.intent_map.clone(),
         );
 
         // ADR-014: Create watch channel for session status.
@@ -923,6 +985,38 @@ impl SessionManager {
     /// under `AUTH_MODE=local` (no account system). It is recorded once
     /// on the session meta and never reassigned.
     pub async fn create_frontend_session(
+        &mut self,
+        workspace_id: Option<&str>,
+        model: Option<&str>,
+        provider: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<String> {
+        self.create_frontend_session_inner(workspace_id, model, provider, user_id)
+            .await
+    }
+
+    /// Design 27 §6.1: like `create_frontend_session`, but the session is
+    /// owned by the **agent account** (`last_user_profile` — the account
+    /// bound to this Runtime via `UserProfileUpdate`), not the requesting
+    /// human. An intent execution session is agent-private working state:
+    /// the human surface is the Chat session, and the Session-history list
+    /// must not fill up with background responder sessions. Falls back to
+    /// the caller-provided owner when no profile is cached (and to
+    /// ownerless/local mode when neither exists).
+    pub async fn create_agent_owned_session(
+        &mut self,
+        requester_user_id: Option<&str>,
+    ) -> Result<String> {
+        let agent_user = self
+            .last_user_profile
+            .as_ref()
+            .map(|p| p.user_id.clone())
+            .filter(|id| !id.is_empty());
+        self.create_frontend_session_inner(None, None, None, agent_user.as_deref().or(requester_user_id))
+            .await
+    }
+
+    async fn create_frontend_session_inner(
         &mut self,
         workspace_id: Option<&str>,
         model: Option<&str>,

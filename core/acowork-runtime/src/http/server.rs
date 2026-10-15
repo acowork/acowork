@@ -659,6 +659,10 @@ impl RuntimeHttpServer {
                 post(crate::http::session_control::post_close_session),
             )
             .route(
+                "/intent-context/close",
+                post(crate::http::session_control::post_close_intent_context),
+            )
+            .route(
                 "/sessions/{sid}/visibility",
                 put(crate::http::session_control::put_session_visibility),
             )

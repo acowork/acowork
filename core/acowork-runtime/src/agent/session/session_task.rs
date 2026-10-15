@@ -334,6 +334,10 @@ pub(crate) struct SessionTask {
     identity_context: Option<String>,
     /// LLM protocol type (for image token estimation)
     protocol_type: acowork_core::protocol::ProtocolType,
+    /// Design 27 §2.1: shared intent routing registry. An intent `request`
+    /// turn stamps its rotation bookkeeping (T1 idle clock + T2 compaction
+    /// marker) here at turn end, after the response write-back path runs.
+    intent_map: Arc<std::sync::Mutex<super::intent_routing::IntentSessionMap>>,
 }
 
 // ADR-046: pre-extraction helpers (`extract_document_text`,
@@ -468,6 +472,8 @@ impl SessionTask {
         committed_lines: Arc<std::sync::atomic::AtomicUsize>,
         // Shared streaming lines map, cloned into SessionCore.
         streaming_lines: crate::conversation::StreamingStateMap,
+        // Design 27 §2.1: shared intent routing registry (rotation bookkeeping).
+        intent_map: Arc<std::sync::Mutex<super::intent_routing::IntentSessionMap>>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         // Create per-session SessionCore from the shared AgentCore template.
         let notify_interval_ms = core.config.data_flow.notify_interval_ms;
@@ -565,6 +571,7 @@ impl SessionTask {
             session_id,
             identity_context,
             protocol_type,
+            intent_map,
         };
         (task, agent_inbound_tx)
     }
@@ -624,6 +631,7 @@ impl SessionTask {
             system_prompt,
             identity_context,
             protocol_type,
+            intent_map,
         } = self;
 
         // Build ContextBuilder with identity. Tool definitions are NOT
@@ -1198,6 +1206,22 @@ impl SessionTask {
                     // Take the context back regardless of outcome — the
                     // turn is over and the next one must not inherit it.
                     let ctx = agent_loop.pending_intent.take();
+                    // Design 27 §2.1: stamp the routing registry for the next
+                    // arrival — reset the T1 idle clock and carry the T2
+                    // compaction marker if this turn compacted. Bookkeeping
+                    // only; the rotation itself is taken by the next
+                    // `route_intent_session` (i.e. after this write-back).
+                    if let Some(ref c) = ctx {
+                        let key = super::intent_routing::routing_key(
+                            &c.source_chat_session_id,
+                            &c.conversation_id,
+                            &c.request_id,
+                        );
+                        let compacted = agent_loop.session.is_compacted;
+                        if let Ok(mut map) = intent_map.lock() {
+                            let _ = map.note_turn_end(&key, compacted);
+                        }
+                    }
                     match result {
                         Ok(response) => {
                             if let Some(ref tx) = chunk_tx {

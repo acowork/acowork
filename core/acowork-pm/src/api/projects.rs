@@ -100,7 +100,30 @@ pub async fn update(
     Json(input): Json<UpdateProject>,
 ) -> Result<Json<Project>, crate::error::PmError> {
     let pid = pid.parse::<ProjectId>()?;
+    // Design 27 §2.1 T2-a: completing a project ends every agent task
+    // context under it. `closing_project_contexts` must run before the
+    // mutation (afterwards the status is gone).
+    let closing = if input.status == Some(crate::types::ProjectStatus::Completed) {
+        state.store.get_project(&pid).await.ok().flatten().and_then(|p| {
+            if p.status != crate::types::ProjectStatus::Completed {
+                Some(pid.clone())
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
     let project = state.store.update_project(&pid, input).await?;
+    if let Some(pid) = closing
+        && let Ok(tasks) = state.store.closing_project_contexts(&pid).await
+    {
+        super::tasks::close_task_contexts(
+            &state,
+            tasks.into_iter().map(|t| (pid.clone(), t)),
+        )
+        .await;
+    }
     Ok(Json(project))
 }
 
@@ -118,7 +141,19 @@ pub async fn delete(
     query: axum::extract::Query<DeleteProjectQuery>,
 ) -> Result<axum::http::StatusCode, crate::error::PmError> {
     let pid = pid.parse::<ProjectId>()?;
+    // Design 27 §2.1 T2-a: deleting the project ends all its agent task
+    // contexts (snapshot before the cascade removes the data).
+    let closing = state
+        .store
+        .closing_project_contexts(&pid)
+        .await
+        .unwrap_or_default();
     state.store.delete_project(&pid, query.cascade).await?;
+    super::tasks::close_task_contexts(
+        &state,
+        closing.into_iter().map(|t| (pid.clone(), t)),
+    )
+    .await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

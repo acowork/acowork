@@ -92,4 +92,106 @@ impl GroupChatProvisioner {
         tracing::info!(project_id, session_id = ?sid, "project group chat ensured");
         sid
     }
+
+    /// Dispatch a PM task as a group-chat Intent (design 27 §6.2 / §9):
+    /// the Gateway keys the execution context on
+    /// `task:{project_id}:{task_id}`, writes the `intent_request` row into
+    /// the project group chat, injects the repo server-side, and wakes the
+    /// target agent. Best-effort like provisioning — dispatch failures are
+    /// logged, never surfaced (the agent can still claim/poll the task the
+    /// traditional way; the push is an accelerator).
+    ///
+    /// Returns the Gateway `message_id` on delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_task(
+        &self,
+        project_id: &str,
+        task_id: &str,
+        target_agent: &str,
+        owner: &str,
+        title: &str,
+        message: &str,
+    ) -> Option<String> {
+        let mut req = self.client.post(format!(
+            "{}/api/intents/task-dispatch",
+            self.gateway_url
+        ));
+        if let Some(token) = &self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = match req
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "task_id": task_id,
+                "target_agent": target_agent,
+                "owner": owner,
+                "title": title,
+                "message": message,
+            }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, task_id, "task dispatch unreachable");
+                return None;
+            }
+        };
+        let status = resp.status();
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, task_id, %status, "task dispatch response not JSON");
+                return None;
+            }
+        };
+        if !status.is_success() || body.get("status").and_then(|v| v.as_str()) != Some("delivered") {
+            tracing::warn!(
+                task_id,
+                %status,
+                body = %body,
+                "task dispatch rejected or undelivered by Gateway"
+            );
+            return None;
+        }
+        let mid = body
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        tracing::info!(task_id, target = target_agent, message_id = ?mid, "task dispatched to project group chat");
+        mid
+    }
+
+    /// Design 27 §2.1 T2-a: a task reached a terminal state, so the target
+    /// agent's logical execution context for it ends. Best-effort: the
+    /// Runtime self-heals dead mappings on the next dispatch, so a failed
+    /// close only leaves an idle session until T1 rotation reclaims it.
+    pub async fn close_task_context(&self, project_id: &str, task_id: &str, target_agent: &str) {
+        let mut req = self.client.post(format!(
+            "{}/api/intents/task-close",
+            self.gateway_url
+        ));
+        if let Some(token) = &self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        match req
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "task_id": task_id,
+                "target_agent": target_agent,
+            }))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                tracing::info!(task_id, target = target_agent, "task execution context closed");
+            }
+            Ok(r) => {
+                tracing::warn!(task_id, status = %r.status(), "task context close rejected by Gateway");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, task_id, "task context close unreachable");
+            }
+        }
+    }
 }

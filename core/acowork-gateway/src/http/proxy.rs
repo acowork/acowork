@@ -2701,7 +2701,7 @@ pub(crate) async fn proxy_to_runtime_with_method(
 /// every (re)connect — with an empty credential when it holds none —
 /// and with auth off the Gateway mints the first token on that
 /// request.
-async fn resolve_node_token(state: &AppState, agent_id: &str) -> Option<String> {
+pub(crate) async fn resolve_node_token(state: &AppState, agent_id: &str) -> Option<String> {
     let gw = state.gateway_state.read().await;
     let broker_auth = gw.mqtt_broker_auth.as_ref()?;
     let node_id = gw

@@ -63,6 +63,8 @@ pub fn intent_routes() -> Router<AppState> {
         .route("/api/intents/mentions", post(deliver_mentions))
         .route("/api/intents/chat-history", get(chat_history_read))
         .route("/api/intents/project-group", post(ensure_project_group))
+        .route("/api/intents/task-dispatch", post(dispatch_task))
+        .route("/api/intents/task-close", post(close_task_context))
         .route("/api/intents/{message_id}", get(intent_status))
         .route("/api/intents/{message_id}/response", post(deliver_response))
 }
@@ -110,6 +112,213 @@ struct ProjectGroupRequest {
     #[serde(default)]
     title: String,
     participants: Vec<String>,
+}
+
+/// `POST /api/intents/task-dispatch` — PM task dispatch as a group-chat
+/// Intent (design 27 §6.2 / §9). The task is the execution-context
+/// boundary: `conversation_id = "task:{project}:{task}"`, which the
+/// receiving Runtime keys its logical session map on (one session chain
+/// per task, even inside a shared project group chat). The project group
+/// chat is the durable message surface; the repo binding is injected
+/// server-side from the session (§9-4).
+///
+/// Auth is the internal-service boundary (same as
+/// `/api/intents/project-group`): the PM service acts for the verified
+/// project owner from its own domain data — the Gateway does not
+/// re-validate `owner` against PM, mirroring §9-2's trusted-service rule.
+#[derive(Debug, Deserialize)]
+struct TaskDispatchRequest {
+    project_id: String,
+    task_id: String,
+    /// Target agent instance identity (ADR-073 UUID).
+    target_agent: String,
+    /// Dispatching human identity (project owner) — the chat row's `from`.
+    owner: String,
+    #[serde(default)]
+    title: String,
+    /// Human-readable dispatch text (task title + description today).
+    message: String,
+    /// Project group chat session; ensured idempotently when absent.
+    #[serde(default)]
+    chat_session_id: Option<String>,
+}
+
+async fn dispatch_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<TaskDispatchRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !token_presents_node(&state, &headers) {
+        return Err(ApiError::unauthorized(
+            "task dispatch requires a valid internal-service token",
+        ));
+    }
+    if req.project_id.trim().is_empty()
+        || req.task_id.trim().is_empty()
+        || req.target_agent.trim().is_empty()
+        || req.message.trim().is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "project_id, task_id, target_agent and message are required",
+        ));
+    }
+    let gw = state.gateway_state.read().await;
+    let mailbox = gw.intent_mailbox.clone();
+    let user_port = gw.user_process.as_ref().filter(|p| p.ready).map(|p| p.port);
+    let (mqtt, registry) = (state.mqtt_gateway_client.clone(), state.agent_registry.clone());
+    let node_control = state.node_control.clone();
+    drop(gw);
+    // §9-3: the group chat is the Intent's source surface — task dispatch
+    // has no mailbox-only degradation.
+    let port = user_port.ok_or_else(|| {
+        ApiError::service_unavailable("task dispatch requires the user service")
+    })?;
+
+    // Chat session: use the PM-provided one, else ensure the project group
+    // (idempotent on project_id in the user service).
+    let chat_session_id = match req.chat_session_id.as_deref() {
+        Some(c) if !c.is_empty() => c.to_string(),
+        _ => {
+            let participants = [req.owner.clone(), req.target_agent.clone()];
+            let session = chat_client::ensure_group(
+                port,
+                &req.project_id,
+                if req.title.is_empty() {
+                    "Project group chat"
+                } else {
+                    &req.title
+                },
+                &participants,
+            )
+            .await
+            .map_err(|e| ApiError::unprocessable_entity(&e))?;
+            session.session_id
+        }
+    };
+    let session = chat_client::load_session(port, &chat_session_id)
+        .await
+        .map_err(|e| ApiError::not_found(&format!("chat session not loadable: {e}")))?;
+    let repo = session.repo.unwrap_or_default();
+
+    let target_info = {
+        let gw = state.gateway_state.read().await;
+        gw.resolve_installed_key(&req.target_agent)
+            .and_then(|k| gw.installed(&k).cloned())
+    };
+    let Some(target_info) = target_info else {
+        return Ok(Json(serde_json::json!({
+            "status": "failed", "error_code": "target_not_installed",
+        })));
+    };
+    if intent_enforce_permissions(&state).await
+        && !target_info.manifest.permissions.iter().any(|p| {
+            use acowork_core::Permission;
+            match p {
+                Permission::IntentReceive(None) => true,
+                Permission::IntentReceive(Some(s)) => {
+                    s == &target_info.manifest.agent_id
+                        || s == &target_info.instance_id
+                        || s == &req.owner
+                }
+                _ => false,
+            }
+        })
+    {
+        return Ok(Json(serde_json::json!({
+            "status": "failed", "error_code": "not_authorized",
+        })));
+    }
+
+    let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
+        return Err(ApiError::internal("Gateway MQTT control plane is not available"));
+    };
+    let ctx = DeliveryContext {
+        state: &state.gateway_state,
+        registry,
+        node_control: node_control.as_ref(),
+        mqtt: Some(mqtt),
+        mailbox: mailbox.as_deref(),
+    };
+
+    // §6.2: the task IS the conversation. Follow-up dispatches on the same
+    // task share the conversation (and its §6.5 R4 request budget).
+    let conversation_id = format!("task:{}:{}", req.project_id, req.task_id);
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let max_requests = intent_max_conversation_requests(&state).await;
+    if let Some(mb) = mailbox.as_deref()
+        && mb.conversation_request_count(&conversation_id) >= max_requests
+    {
+        return Ok(Json(serde_json::json!({
+            "message_id": message_id,
+            "status": "failed",
+            "error_code": "conversation_limit_exceeded",
+            "conversation_id": conversation_id,
+        })));
+    }
+
+    // The intent_request chat row (§4: the chat log is the message record).
+    let meta = serde_json::json!({
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "task_id": req.task_id,
+        "project_id": req.project_id,
+        "repo": repo,
+    });
+    if let Err(e) = chat_client::append_message(
+        port,
+        &chat_session_id,
+        &chat_client::AppendMessage {
+            from: req.owner.clone(),
+            to: req.target_agent.clone(),
+            kind: "intent_request".to_string(),
+            body: req.message.clone(),
+            meta,
+        },
+    )
+    .await
+    {
+        return Ok(Json(serde_json::json!({
+            "message_id": message_id,
+            "status": "failed",
+            "error_code": "chat_log_unavailable",
+            "error": e,
+        })));
+    }
+
+    let dreq = delivery::DeliveryRequest {
+        message_id: message_id.clone(),
+        conversation_id: conversation_id.clone(),
+        from_instance: req.owner.clone(),
+        from_session_id: String::new(),
+        target_instance: req.target_agent.clone(),
+        action: "task".to_string(),
+        params_json: serde_json::json!({
+            "message": req.message,
+            "task_id": req.task_id,
+            "project_id": req.project_id,
+        })
+        .to_string(),
+        source_chat_session_id: chat_session_id.clone(),
+        repo,
+        kind: "request".to_string(),
+        in_reply_to: String::new(),
+        status: String::new(),
+    };
+    let outcome =
+        delivery::wake_and_deliver(&ctx, &dreq, acowork_core::timeout_config::constants::INTENT_DEFAULT)
+            .await;
+    let (status, error_code, error) = match outcome {
+        Ok(()) => ("delivered", None, None),
+        Err(e) => ("failed", Some(e.code().to_string()), Some(e.to_string())),
+    };
+    Ok(Json(serde_json::json!({
+        "message_id": message_id,
+        "status": status,
+        "conversation_id": conversation_id,
+        "chat_session_id": chat_session_id,
+        "error_code": error_code,
+        "error": error,
+    })))
 }
 
 /// True when the caller presents a credential of a trusted internal actor:
@@ -486,6 +695,73 @@ async fn deliver_intent(
     }))
 }
 
+/// `POST /api/intents/task-close` — design 27 §2.1 T2-a, PM-facing twin of
+/// `/api/intents/task-dispatch`: a task reached a terminal state
+/// (`Done` / `Rejected` / `Cancelled`), so the target agent's logical
+/// execution context for that task ends. The Gateway does not know the
+/// physical session id (agent-private state, ADR-009) — it forwards the
+/// registry key to the target's Runtime, which closes and unmaps it.
+/// Idempotent; an unreachable Runtime is reported, not retried (the next
+/// dispatch on a dead mapping already self-heals, and T1/T2 rotation
+/// bounds the residue).
+#[derive(Debug, Deserialize)]
+struct TaskCloseRequest {
+    project_id: String,
+    task_id: String,
+    target_agent: String,
+}
+
+async fn close_task_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<TaskCloseRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !token_presents_node(&state, &headers) {
+        return Err(ApiError::unauthorized(
+            "task context close requires a valid internal-service token",
+        ));
+    }
+    if req.project_id.trim().is_empty() || req.task_id.trim().is_empty() || req.target_agent.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "project_id, task_id and target_agent are required",
+        ));
+    }
+    // The key format is the Runtime's routing contract: `routing_key`
+    // yields `conv:task:{project}:{task}` for task-scoped conversations
+    // (the same `task:` prefix `dispatch_task` stamps).
+    let key = format!("conv:task:{}:{}", req.project_id, req.task_id);
+    let endpoint = {
+        let registry = state
+            .runtime_http_registry
+            .as_ref()
+            .ok_or_else(|| ApiError::service_unavailable("runtime registry unavailable"))?;
+        let reg = registry.read().await;
+        reg.get_endpoint(&req.target_agent)
+    };
+    let Some(endpoint) = endpoint else {
+        return Ok(Json(serde_json::json!({
+            "status": "skipped", "reason": "agent_not_running", "key": key,
+        })));
+    };
+    let client = crate::http::proxy::runtime_http_client();
+    let mut request = client.post(format!("{}/intent-context/close", endpoint)).json(&serde_json::json!({ "key": key }));
+    if let Some(token) = crate::http::proxy::resolve_node_token(&state, &req.target_agent).await {
+        request = request.header(acowork_core::auth::NODE_TOKEN_HEADER, token);
+    }
+    match request.send().await {
+        Ok(r) if r.status().is_success() => Ok(Json(serde_json::json!({
+            "status": "closed", "key": key,
+        }))),
+        Ok(r) => Ok(Json(serde_json::json!({
+            "status": "failed", "key": key,
+            "error": format!("runtime answered {}", r.status()),
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "status": "failed", "key": key, "error": e.to_string(),
+        }))),
+    }
+}
+
 /// The plain-text content of an Intent as it appears in the chat log
 /// (design 27 §4: routing facts live in `meta`, the body is the message).
 /// `params.message` is the human-readable form; otherwise the params
@@ -606,13 +882,14 @@ async fn deliver_response(
     // response IS the durable answer — a failed append on a bound session
     // is reported, delivery still proceeds because the initiator's turn
     // result is carried by the push below).
+    let mut chat_append_error: Option<String> = None;
     if let (Some(port), session_id) = (user_port, entry.source_chat_session_id.clone())
         && !session_id.is_empty()
     {
         let meta = serde_json::json!({
             "message_id": response_id,
             "conversation_id": entry.conversation_id,
-            "in_reply_to": request_id,
+            "in_reply_to": request_id.clone(),
             "sender_session_id": req.sender_session_id.clone().unwrap_or_default(),
             "status": status,
         });
@@ -630,7 +907,29 @@ async fn deliver_response(
         .await
         {
             tracing::warn!(error = %e, session_id, "intent_response chat row append failed");
+            chat_append_error = Some(e);
         }
+    }
+
+    // Design 27 §9-8: a PM task response is *relayed*, not pushed — the
+    // initiator is the human owner the dispatch was sent on behalf of.
+    // The `intent_response` chat row above is the durable answer (§9-7:
+    // reply appended to the project group chat, associated with the
+    // dispatch); the PM service reads it to advance the task. Nobody is
+    // woken here; a lost chat row means the answer has no surface left,
+    // so it is reported as a failure rather than silently dropped.
+    if entry.conversation_id.starts_with("task:") {
+        let (out_status, error_code, error) = match chat_append_error {
+            None => ("delivered".to_string(), None, None),
+            Some(e) => ("failed".to_string(), Some("chat_log_unavailable".to_string()), Some(e)),
+        };
+        return Ok(Json(IntentDeliveryResponse {
+            message_id: response_id,
+            status: out_status,
+            conversation_id: entry.conversation_id.clone(),
+            error_code,
+            error,
+        }));
     }
 
     let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {

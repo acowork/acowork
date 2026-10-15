@@ -10,7 +10,8 @@ import {
   useContextMenu,
   type ContextMenuItem,
 } from "../common/ContextMenu";
-import { Plus, Clock, X, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil } from "lucide-react";
+import { Plus, Clock, X, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil, MessagesSquare } from "lucide-react";
+import { ChatHistoryDropdown } from "./ChatHistoryDropdown";
 import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
@@ -369,6 +370,9 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const openSession = useChatStore((s) => s.openSession);
 
   const [listOpen, setListOpen] = useState(false);
+  // Design 27 Phase 3c: Chat history (IM-style sessions) lives next to the
+  // execution Session history — two surfaces, two buttons.
+  const [chatListOpen, setChatListOpen] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);
   // Right-click context menu on session tabs. Payload is the sessionId of
   // the tab the user right-clicked. Outside-click / Escape / portal
@@ -787,6 +791,30 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               activeSessionId={activeSessionId ?? undefined}
               onClose={() => setListOpen(false)}
             />
+          )}
+        </div>
+
+        {/* Chat history dropdown (design 27 Phase 3c) — read-only view of
+            the agent's Chat sessions (project group chats + agent↔agent
+            channels), sibling of the Session history 🕐 above. Same
+            wrapper shape for baseline parity. */}
+        <div className="relative inline-flex">
+          <Tooltip content={t("sessionTabBar.chatHistory")} variant="plain">
+            <button
+              onClick={() => setChatListOpen(!chatListOpen)}
+              className={cn(
+                "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
+                chatListOpen
+                  ? "text-[var(--color-accent)] bg-zinc-200 dark:bg-zinc-700"
+                  : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+              )}
+            >
+              <MessagesSquare className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+
+          {chatListOpen && (
+            <ChatHistoryDropdown agentId={agentId} onClose={() => setChatListOpen(false)} />
           )}
         </div>
       </div>

@@ -173,6 +173,17 @@ pub trait PmStore: Send + Sync {
         att_id: &AttachmentId,
         thumb: bool,
     ) -> Result<Option<(AttachmentMeta, Vec<u8>)>>;
+
+    /// Design 27 §2.1 T2-a: snapshot the tasks whose logical execution
+    /// contexts end with this mutation — the task itself plus its subtree,
+    /// each paired with the project id the Gateway key needs. Called before
+    /// `delete_task` / `delete_project` (afterwards the data is gone).
+    /// Best-effort by contract: the caller only uses the result for
+    /// notifications and ignores errors.
+    async fn closing_task_contexts(&self, task_id: &TaskId) -> Result<Vec<(ProjectId, Task)>>;
+
+    /// Same question for a whole project (`delete_project`).
+    async fn closing_project_contexts(&self, project_id: &ProjectId) -> Result<Vec<Task>>;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1273,7 +1284,29 @@ impl PmStore for TreePmStore {
         Ok(task)
     }
 
-    // ── Dependency graph ───────────────────────────────────────────
+    async fn closing_task_contexts(&self, task_id: &TaskId) -> Result<Vec<(ProjectId, Task)>> {
+        let entry = match self.index.read().by_id.get(task_id) {
+            Some(e) => e.clone(),
+            None => return Ok(Vec::new()),
+        };
+        let mut ids = vec![task_id.clone()];
+        self.collect_subtree_ids(&entry.dir_path, &mut ids).await?;
+        let mut out = Vec::with_capacity(ids.len());
+        for tid in ids {
+            if let Some(t) = self.get_task(&tid).await? {
+                out.push((entry.project_id.clone(), t));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn closing_project_contexts(&self, project_id: &ProjectId) -> Result<Vec<Task>> {
+        let filter = crate::types::TaskFilter {
+            project_id: Some(project_id.clone()),
+            ..Default::default()
+        };
+        self.find_tasks(&filter).await
+    }
 
     async fn compute_blocked_by(&self, task_id: &TaskId) -> Result<Vec<TaskId>> {
         let task = self

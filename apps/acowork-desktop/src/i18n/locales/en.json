@@ -244,6 +244,7 @@
     "rename": "Rename…",
     "newConversation": "New conversation",
     "sessionHistory": "Session history",
+    "chatHistory": "Chat history",
     "clearAll": "Clear all conversations",
     "clearAllConfirmTitle": "Clear all conversations?",
     "clearAllConfirmWarning": "This permanently deletes all {{count}} sessions of this agent, including their message history and stored records. This cannot be undone.",
@@ -255,6 +256,21 @@
     "sidebarSearchPlaceholder": "Search sessions...",
     "sidebarNoSessionsYet": "No sessions yet",
     "untitled": "Untitled"
+  },
+  "chatHistory": {
+    "title": "Chat history",
+    "empty": "No chat sessions yet",
+    "untitled": "Untitled chat",
+    "messages": "messages",
+    "noMessages": "No messages in this chat",
+    "loadEarlier": "Load earlier",
+    "kind": {
+      "user_user": "Direct",
+      "user_group": "Group",
+      "project_group": "Project group",
+      "user_agent": "Agent chat",
+      "agent_agent": "Agent ↔ Agent"
+    }
   },
   "contextUsage": {
     "ariaLabel": "Context usage",

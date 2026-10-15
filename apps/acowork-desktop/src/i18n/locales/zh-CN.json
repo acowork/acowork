@@ -338,6 +338,7 @@
     "rename": "重命名…",
     "newConversation": "新建会话",
     "sessionHistory": "会话历史",
+    "chatHistory": "聊天历史",
     "clearAll": "清空所有会话",
     "clearAllConfirmTitle": "清空所有会话？",
     "clearAllConfirmWarning": "此操作将永久删除该 agent 的全部 {{count}} 个会话，包括消息历史与存储记录，且无法恢复。",
@@ -349,6 +350,21 @@
     "sidebarSearchPlaceholder": "搜索会话...",
     "sidebarNoSessionsYet": "暂无会话",
     "untitled": "未命名"
+  },
+  "chatHistory": {
+    "title": "聊天历史",
+    "empty": "暂无聊天会话",
+    "untitled": "未命名聊天",
+    "messages": "条消息",
+    "noMessages": "该聊天暂无消息",
+    "loadEarlier": "加载更早消息",
+    "kind": {
+      "user_user": "单聊",
+      "user_group": "群聊",
+      "project_group": "项目群聊",
+      "user_agent": "Agent 聊天",
+      "agent_agent": "Agent 互聊"
+    }
   },
   "contextUsage": {
     "ariaLabel": "上下文用量",
