@@ -150,6 +150,7 @@ export function SkillsPanel({ textHidden, readOnly }: { textHidden?: boolean; re
                 {t("skillsPanel.title")}
               </h2>
             </div>
+            <div className="border-t border-border-divider" />
 
             {/* Skills list */}
             <div className="max-h-[420px] overflow-y-auto py-1">

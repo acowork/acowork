@@ -18,7 +18,7 @@ import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Search, Clock } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
@@ -3319,7 +3319,6 @@ function ModelMenu({
   const [showAddDialog, setShowAddDialog] = useState(false);
   /** Set while drilling into a multi-key provider's accounts. */
   const [pending, setPending] = useState<{ name: string; provider: string } | null>(null);
-  const [search, setSearch] = useState("");
   const internalRef = useRef<HTMLDivElement>(null);
   const ref = useMergedRef(internalRef, externalRef);
 
@@ -3362,14 +3361,10 @@ function ModelMenu({
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
 
-  // Above this many rows the list gets a filter box; below it the box is noise.
-  const SEARCH_THRESHOLD = 8;
-
   const closeMenu = () => {
     cancelClose();
     setOpen(false);
     setPending(null);
-    setSearch("");
   };
 
   // Hover-to-open plumbing for the account fly-out. A short delay gives
@@ -3403,20 +3398,15 @@ function ModelMenu({
     direction: "down" | "up";
   } | null>(null);
 
-  const query = search.trim().toLowerCase();
-
   // Models grouped by provider, sorted alphabetically (case-insensitive)
   // by provider first, then by model name within each provider. See
   // `groupModelsByProvider` for why stable ordering is required here.
-  const groups = useMemo(() => groupModelsByProvider(models, query), [models, query]);
+  const groups = useMemo(() => groupModelsByProvider(models, ""), [models]);
 
-  // `pending` now drives a side fly-out, not a panel swap — so the search
-  // box stays scoped to the main model list, and `accounts` / `visibleAccounts`
-  // are only consumed by the fly-out (which shows every account of the
-  // picked model without re-applying the query).
+  // `pending` drives a side fly-out, not a panel swap. The fly-out shows
+  // every account of the picked model without re-applying a query.
   const accounts = pending ? (accountsByProvider[pending.provider] ?? []) : [];
   const visibleAccounts = accounts;
-  const showSearch = models.length > SEARCH_THRESHOLD;
 
   // Fly-out placement effect — runs after `accounts` is in scope so the
   // height estimate is accurate. Anchored to the row's viewport rect so
@@ -3475,7 +3465,6 @@ function ModelMenu({
     const list = accountsByProvider[provider] ?? [];
     if (list.length > 1) {
       setPending({ name, provider });
-      setSearch("");
       return;
     }
     onSelect(name, provider, list[0]?.accountId);
@@ -3542,26 +3531,9 @@ function ModelMenu({
               {t("chatPanel.modelMenuTitle")}
             </h2>
           </div>
-
-          {/* Filter — only worth showing once the list is long */}
-          {showSearch && (
-            <div className="px-3 pb-1.5">
-              <div className="flex items-center gap-1.5 rounded-md border border-input-border bg-input-bg px-2 py-1">
-                <Search size={11} className="shrink-0 text-text-tertiary" />
-                <input
-                  autoFocus
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder={t("chatPanel.modelMenuSearchModel")}
-                  className="w-full bg-transparent text-xs text-text-primary outline-none placeholder:text-text-tertiary"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Divider between the filter box and the model list — same
-              token as the provider-section dividers below. */}
-          {showSearch && <div className="border-t border-border-divider" />}
+          {/* Title / content divider — same token as the provider-section
+              dividers below so the menu reads as one visual surface. */}
+          <div className="border-t border-border-divider" />
 
           {/* Level 1: grouped model list (level 2 — accounts — flies out on
               the right; this panel no longer swaps to show it). */}
@@ -3826,6 +3798,7 @@ function ReasoningEffortMenu({
               {t("chatPanel.reasoningMenuTitle")}
             </h2>
           </div>
+          <div className="border-t border-border-divider" />
 
           {/* Options */}
           <div className="py-1">

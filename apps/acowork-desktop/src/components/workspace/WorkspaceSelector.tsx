@@ -312,6 +312,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
                 {t("workspace.title")}
               </h2>
             </div>
+            <div className="border-t border-border-divider" />
 
             {/* Workspace list */}
             <div className="max-h-[420px] overflow-y-auto py-1">
