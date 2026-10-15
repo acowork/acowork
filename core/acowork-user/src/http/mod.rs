@@ -20,6 +20,7 @@
 pub mod account_api;
 pub mod auth_api;
 pub mod chat_api;
+pub mod chat_sessions_api;
 pub mod profile_api;
 
 use axum::Router;
@@ -38,7 +39,9 @@ pub const GLOBAL_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// together with the identity layer).
 pub fn user_router(state: &AppState) -> Router<AppState> {
     let mut router = if state.is_multi_user() {
-        account_api::account_routes().merge(chat_api::chat_routes())
+        account_api::account_routes()
+            .merge(chat_api::chat_routes())
+            .merge(chat_sessions_api::chat_session_routes())
     } else {
         profile_api::users_routes()
     };

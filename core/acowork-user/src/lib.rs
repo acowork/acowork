@@ -46,6 +46,7 @@
 pub mod account;
 pub mod auth;
 pub mod chat;
+pub mod chat_sessions;
 pub mod cli;
 pub mod config;
 pub mod error;
