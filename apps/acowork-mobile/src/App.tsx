@@ -13,9 +13,9 @@
  */
 
 import { useEffect } from 'react'
-import { useNavStore, TABS, type Route } from './stores/navStore'
+import { useNavStore, TABS } from './stores/navStore'
 import { useAuthStore } from './stores/authStore'
-import { ROUTES } from './routes'
+import { ScreenHost } from './components/ScreenHost'
 import { BootingScreen, ConnectScreen, DisconnectedScreen, LoginScreen, RestrictedScreen } from './screens/boot/Screens'
 import type { ComponentType } from 'react'
 import {
@@ -93,22 +93,20 @@ export function App() {
 function Shell() {
   const stack = useNavStore((s) => s.stacks[s.activeTab])
   const depth = (stack?.length ?? 1) - 1
-  const route = stack?.[stack.length - 1] ?? 'chat/list'
-  const Screen = ROUTES[route]
 
   return (
     <div className="app">
       <OfflineBanner />
       <main id="screen-root" className="screen-root">
-        {Screen ? (
-          <Screen />
-        ) : (
-          <div className="empty-state">
-            <div className="empty-title">未实现</div>
-            <div className="empty-sub">{String(route as Route)}</div>
-          </div>
-        )}
+        <ScreenHost />
       </main>
+      {/* Detail screens expect .screen-root to fill the full viewport
+       * (composer pinned to bottom, etc.). Mounting TabBar inside a
+       * reserved slot at every depth shrank it by ~90px and pushed the
+       * chat detail upward. TabBar is therefore only mounted at the
+       * root depth; transitions run on GPU-promoted layers (see
+       * .screen-layer in app.css) which keeps the slide smooth without
+       * restructuring layout. */}
       {depth === 0 ? <TabBar /> : null}
     </div>
   )

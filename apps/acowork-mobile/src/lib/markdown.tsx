@@ -6,12 +6,13 @@
  * UNTRUSTED — it comes out of an agent's mouth, or a stranger's DM. A
  * `dangerouslySetInnerHTML` path here is an XSS hole with the Gateway's own
  * credentials in reach. This module returns React nodes only, so there is no
- * HTML to escape and no sanitizer to keep correct. It is also ~100 lines and
+ * HTML to escape and no sanitizer to keep correct. It is also ~150 lines and
  * has no dependency.
  *
  * Supported: headings, fenced code, inline code, bold, italic, links
- * (http/https/mailto only), unordered/ordered lists, blockquotes, line
- * breaks. Anything else renders literally, which is the safe default.
+ * (http/https/mailto only), unordered/ordered lists, blockquotes,
+ * GFM tables, line breaks. Anything else renders literally, which is the
+ * safe default.
  */
 
 import type { ReactNode } from 'react'
@@ -28,6 +29,15 @@ const SAFE_URL = /^(https?:|mailto:)/i
  * enough, and Markdown's own emphasis rule agrees on ambiguity.
  */
 const INLINE = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|\[([^\]\n]*)\]\(([^()\s]*)\)/g
+
+/**
+ * GFM table separator — `:---`, `---:`, `:---:`, or plain `---`, joined by
+ * `|` with optional surrounding pipes. Requires at least one `-` per cell
+ * (so a row of dashes alone doesn't trigger) and at least one cell that
+ * contains `-` (so a blank line following a pipe-y sentence doesn't
+ * trigger either).
+ */
+const TABLE_SEP = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/
 
 function inline(text: string, keyBase: string): ReactNode[] {
   const out: ReactNode[] = []
@@ -49,21 +59,64 @@ function inline(text: string, keyBase: string): ReactNode[] {
     else if (italic !== undefined) out.push(<em key={key}>{inline(italic, key)}</em>)
     else if (linkHref !== undefined && SAFE_URL.test(linkHref))
       out.push(
-        <a key={key} className="md-link" href={linkHref} target="_blank" rel="noopener noreferrer">
-          {linkText || linkHref}
+        <a key={key} href={linkHref} className="md-link" target="_blank" rel="noreferrer">
+          {inline(linkText ?? '', key)}
         </a>,
       )
-    else out.push(all) // unsupported link shape / unsafe scheme: literal
+    else out.push(all)
     last = at + all.length
   }
   if (last < text.length) out.push(text.slice(last))
   return out
 }
 
-/**
- * Block pass. Returns one React node per block; paragraphs of several lines
- * join with <br>, which is what a chat log looks like.
- */
+/** GFM table separator recogniser — kept strict so unrelated `-`-heavy prose
+ *  (a horizontal rule under a header, etc.) is not misclassified. */
+function isTableSeparator(line: string | undefined): line is string {
+  return typeof line === 'string' && /\|/.test(line) && TABLE_SEP.test(line)
+}
+
+/** Split a pipe-delimited row into trimmed cell strings, tolerating missing
+ *  leading / trailing pipes (GFM allows both `| a | b |` and `a | b`). */
+function parseCells(line: string): string[] {
+  let s = line.trim()
+  if (s.startsWith('|')) s = s.slice(1)
+  if (s.endsWith('|') && s.length > 1) s = s.slice(0, -1)
+  return s.split('|').map((c) => c.trim())
+}
+
+/** Render one parsed GFM table. The outer `.md-table-wrap` is a horizontal
+ *  scroller — agent tables are often wider than the 390pt iPhone viewport
+ *  and a fixed-width table would either clip or shrink the font size. */
+function renderTable(header: string[], rows: string[][], k: number): ReactNode {
+  return (
+    <div key={`t${k}`} className="md-table-wrap">
+      <table className="md-table">
+        <thead>
+          <tr>
+            {header.map((c, i) => (
+              <th key={i} className="md-th">
+                {inline(c, `t${k}h${i}`)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr key={ri} className="md-tr">
+              {row.map((c, ci) => (
+                <td key={ci} className="md-td">
+                  {inline(c, `t${k}r${ri}c${ci}`)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export function renderMarkdown(src: string): ReactNode[] {
   const lines = src.replace(/\r\n?/g, '\n').split('\n')
   const blocks: ReactNode[] = []
@@ -101,7 +154,13 @@ export function renderMarkdown(src: string): ReactNode[] {
     list = null
   }
 
-  for (const raw of lines) {
+  // Index-based loop so we can peek the next line for GFM table detection.
+  // A `for (const raw of lines)` would force us to either build a mutable
+  // iterator or scan the array twice per line — both uglier than this.
+  let i = 0
+  while (i < lines.length) {
+    const raw = lines[i]!
+
     // Fence toggling first: inside a fence, nothing else is parsed.
     const fenceMark = /^\s*```/.test(raw)
     if (fenceMark) {
@@ -117,31 +176,36 @@ export function renderMarkdown(src: string): ReactNode[] {
         flushList()
         fence = []
       }
+      i++
       continue
     }
     if (fence) {
       fence.push(raw)
+      i++
       continue
     }
 
-    let m: RegExpExecArray | null
     if (!raw.trim()) {
       flushPara()
       flushList()
+      i++
       continue
     }
+    let m: RegExpExecArray | null
     if ((m = /^(#{1,6})\s+(.*)$/.exec(raw))) {
       flushPara()
       flushList()
       const level = Math.min(6, m[1]!.length + 2) // # -> h3: bubbles have no h1
       const Tag = (`h${level}`) as 'h3'
       blocks.push(<Tag key={`h${key++}`} className="md-h">{inline(m[2]!, `h${key}`)}</Tag>)
+      i++
       continue
     }
     if ((m = /^\s*>\s?(.*)$/.exec(raw))) {
       flushPara()
       flushList()
       blocks.push(<blockquote key={`q${key++}`} className="md-quote">{inline(m[1]!, `q${key}`)}</blockquote>)
+      i++
       continue
     }
     if ((m = /^\s*[-*+]\s+(.*)$/.exec(raw))) {
@@ -151,6 +215,7 @@ export function renderMarkdown(src: string): ReactNode[] {
         list = { ordered: false, items: [] }
       }
       list.items.push(m[1]!)
+      i++
       continue
     }
     if ((m = /^\s*\d+[.)]\s+(.*)$/.exec(raw))) {
@@ -160,10 +225,32 @@ export function renderMarkdown(src: string): ReactNode[] {
         list = { ordered: true, items: [] }
       }
       list.items.push(m[1]!)
+      i++
       continue
     }
+
+    // GFM table: header row containing a pipe, followed by a separator
+    // line. We then consume body rows until a blank line (or end of input
+    // or any line lacking a pipe). A stray single-line pipe (e.g. "use
+    // foo | bar") does NOT trigger because it requires a separator
+    // neighbour — that's what makes the false-positive rate low.
+    if (raw.includes('|') && isTableSeparator(lines[i + 1])) {
+      flushPara()
+      flushList()
+      const header = parseCells(raw)
+      i += 2 // skip header + separator
+      const rows: string[][] = []
+      while (i < lines.length && lines[i]!.trim() !== '' && lines[i]!.includes('|')) {
+        rows.push(parseCells(lines[i]!))
+        i++
+      }
+      blocks.push(renderTable(header, rows, key++))
+      continue
+    }
+
     flushList()
     para.push(raw)
+    i++
   }
   if (fence) {
     // Unterminated fence (a truncated reply): render what we have as code.
