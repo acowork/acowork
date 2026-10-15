@@ -1,12 +1,14 @@
-//! Project group chat provisioning (design doc 27 Phase 2).
+//! Gateway client (design doc 27 Phase 2/3).
 //!
-//! "PM 创建项目时幂等创建唯一项目群聊" — the chat store is the user
-//! service's, not PM's. PM calls back into the Gateway
-//! (`POST /api/intents/project-group`, authenticated with the
+//! Thin HTTP client the PM service uses to reach the Gateway's intent
+//! surface: project group chat provisioning (`POST /api/intents/project-group`,
+//! task dispatch (`POST /api/intents/task-dispatch`) and logical-context
+//! close (`POST /api/intents/task-close`), authenticated with the
 //! internal-service token the supervisor injects via
-//! `ACOWORK_PM_GATEWAY_TOKEN`), and the Gateway ensures the session in
-//! the chat domain. Idempotent on `project_id`, so a retry after a crash
-//! is harmless.
+//! `ACOWORK_PM_GATEWAY_TOKEN`. The chat store is the user service's, not
+//! PM's — PM only calls back into the Gateway, which owns the chat domain
+//! writes. Idempotent on `project_id` / task coordinates, so a retry
+//! after a crash is harmless.
 //!
 //! Best-effort by design: a project without its group chat still works
 //! (the chat is the message surface, not a task dependency); failures are
@@ -16,13 +18,13 @@ use std::time::Duration;
 
 /// Talks to the Gateway's project-group endpoint.
 #[derive(Clone)]
-pub struct GroupChatProvisioner {
+pub struct GatewayClient {
     gateway_url: String,
     auth_token: Option<String>,
     client: reqwest::Client,
 }
 
-impl GroupChatProvisioner {
+impl GatewayClient {
     /// `gateway_url` is the Gateway HTTP base (no `/api` suffix).
     pub fn new(gateway_url: String, auth_token: Option<String>) -> Self {
         Self {

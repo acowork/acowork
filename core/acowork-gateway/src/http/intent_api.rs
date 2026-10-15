@@ -52,9 +52,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::gateway::state::AgentInfo;
 use crate::http::routes::{ApiError, AppState};
 use crate::intent::chat_client;
+use crate::intent::gate::{attribute_sender, permission_denial, validate_repo};
 use crate::intent::delivery::{self, DeliveryContext};
 
 pub fn intent_routes() -> Router<AppState> {
@@ -460,8 +460,8 @@ pub struct IntentRequest {
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub source_chat_session_id: Option<String>,
-    /// Source-side authorized repo (design 27 §3.2). Validated against
-    /// the sender's own workspace before delivery (PR-D).
+    /// Source-declared repo (design 27 §4.1). Format-validated here; the
+    /// target-side authorized-directory boundary is the enforcement point.
     #[serde(default)]
     pub repo: Option<String>,
     /// "request" (default) | "response" (§6.5 R2). Responses are
@@ -522,10 +522,10 @@ async fn deliver_intent(
         );
     }
 
-    // --- PR-D: repo boundary (only when sender-declared) -----------------
+    // --- PR-D: repo format check (only when sender-declared) ------------
     let mut repo = match req.repo.as_deref() {
         Some(r) => {
-            validate_repo(&sender_info, r).map_err(|e| ApiError::unprocessable_entity(&e))?;
+            validate_repo(r).map_err(|e| ApiError::unprocessable_entity(&e))?;
             r.to_string()
         }
         None => String::new(),
@@ -1011,18 +1011,18 @@ pub struct MentionRequest {
 /// this endpoint — they are archive-only by construction.
 async fn deliver_mentions(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    auth: Option<axum::extract::Extension<crate::http::auth_middleware::AuthContext>>,
     Json(req): Json<MentionRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Identity: a mention is a user action. In multi-user mode the auth
-    // middleware has already verified the user token and injected
-    // `x-user-id` (the client's own value was stripped); `from_user` must
+    // middleware has verified the user token and inserted the `AuthContext`
+    // extension (ADR-076 §决策 4 — the token-derived identity is read from
+    // the extension, never from a raw request header); `from_user` must
     // equal that verified identity — never a client claim (D4 discipline).
-    let verified_user = headers
-        .get("x-user-id")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    let verified_user = auth
+        .as_ref()
+        .map(|axum::extract::Extension(c)| c.effective_user_id().to_string())
+        .unwrap_or_default();
     if verified_user.is_empty() || verified_user != req.from_user {
         return Err(ApiError::unauthorized(
             "mention sender must match the authenticated user",
@@ -1240,138 +1240,12 @@ async fn verify_sender_identity(
         .map_err(|reason| ApiError::unauthorized(&reason))
 }
 
-/// Pure attribution logic (D4), split out for testing:
-/// `caller_node` = node resolved from the presented node token (None =
-/// no token / unenrolled), `sender_status` = the retained AgentStatus
-/// entry for the claimed sender (None = never seen online).
-pub fn attribute_sender(
-    caller_node: Option<String>,
-    sender_status: Option<&crate::mqtt::agent_registry::AgentOnlineState>,
-) -> Result<(), String> {
-    match caller_node {
-        Some(node_id) => match sender_status {
-            Some(st) if st.node_id == node_id => Ok(()),
-            Some(st) => Err(format!(
-                "intent sender is hosted on node {}, not the caller's node",
-                st.node_id
-            )),
-            None => Err("intent sender is not online — cannot attribute".to_string()),
-        },
-        // Local mode / unenrolled caller: require the sender to be an
-        // online instance (an offline claim can't be session-verified).
-        None => {
-            if sender_status.is_some() {
-                Ok(())
-            } else {
-                Err("intent sender is not online — cannot attribute".to_string())
-            }
-        }
-    }
-}
-
-/// D8 static check against the two manifests. Returns Some(reason) when
-/// the declared permissions do not cover this send.
-pub fn permission_denial(sender: &AgentInfo, target: &AgentInfo) -> Option<String> {
-    use acowork_core::Permission;
-
-    let sender_ok = sender.manifest.permissions.iter().any(|p| match p {
-        Permission::IntentSend(None) => true,
-        Permission::IntentSend(Some(scope)) => {
-            scope == &target.manifest.agent_id || scope == &target.instance_id
-        }
-        _ => false,
-    });
-    if !sender_ok {
-        return Some(format!(
-            "sender manifest lacks intent:send for target {}",
-            target.instance_id
-        ));
-    }
-    let target_ok = target.manifest.permissions.iter().any(|p| match p {
-        Permission::IntentReceive(None) => true,
-        Permission::IntentReceive(Some(scope)) => {
-            scope == &sender.manifest.agent_id || scope == &sender.instance_id
-        }
-        _ => false,
-    });
-    if !target_ok {
-        return Some(format!(
-            "target manifest lacks intent:receive for sender {}",
-            sender.instance_id
-        ));
-    }
-    None
-}
-
 async fn intent_enforce_permissions(state: &AppState) -> bool {
     let gw = state.gateway_state.read().await;
     gw.config
         .as_ref()
         .map(|c| c.intent.enforce_permissions)
         .unwrap_or(false)
-}
-
-/// PR-D repo validation: the repo must be a git URL the sender's own
-/// workspace is actually cloned from (the source side is the only
-/// authority on what it can hand over). Design 27 §3.2: no Gateway-side
-/// repo existence check, no branch field.
-fn validate_repo(sender: &AgentInfo, repo: &str) -> Result<(), String> {
-    if repo.trim().is_empty() || repo.len() > 512 {
-        return Err("repo must be a non-empty git URL (<= 512 chars)".into());
-    }
-    let looks_like_url =
-        repo.starts_with("https://") || repo.starts_with("git@") || repo.starts_with("ssh://");
-    if !looks_like_url {
-        return Err("repo must be an https/ssh git URL".into());
-    }
-    // Boundary: the sender's workspace must be a clone of this repo.
-    // `install_path` is node-local (ADR-055) — reachable here only in
-    // single-machine deployments; in split topologies the Gateway cannot
-    // see the path, and the target-side boundary check at execution time
-    // (design 27 §3.2) is the enforcement point there. An unreachable
-    // workspace therefore passes with a debug note.
-    let ws = std::path::Path::new(&sender.install_path);
-    if ws.join(".git").exists() {
-        match git_remote_url(ws) {
-            Some(r) if normalize_git_url(&r) == normalize_git_url(repo) => Ok(()),
-            Some(r) => Err(format!("repo does not match the sender workspace remote ({r})")),
-            None => Err("sender workspace has no readable origin remote".into()),
-        }
-    } else {
-        tracing::debug!(
-            install_path = %sender.install_path,
-            "repo check skipped: sender workspace not visible from the Gateway (node-local path)"
-        );
-        Ok(())
-    }
-}
-
-fn git_remote_url(dir: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .current_dir(dir)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!url.is_empty()).then_some(url)
-}
-
-fn normalize_git_url(u: &str) -> String {
-    let mut s = u.trim().to_lowercase();
-    if let Some(rest) = s.strip_prefix("https://") {
-        s = rest.to_string();
-    } else if let Some(rest) = s.strip_prefix("ssh://") {
-        s = rest.trim_start_matches("git@").to_string();
-    } else if let Some(rest) = s.strip_prefix("git@") {
-        s = rest.replace(':', "/");
-    }
-    if let Some(rest) = s.strip_suffix(".git") {
-        s = rest.to_string();
-    }
-    s
 }
 
 

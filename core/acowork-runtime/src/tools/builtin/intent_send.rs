@@ -82,7 +82,7 @@ impl IntentSendTool {
                     },
                     "repo": {
                         "type": "string",
-                        "description": "Optional git URL of a repository the target is authorized to work in, validated against your own workspace (design doc 27 §3.2)."
+                        "description": "Optional git URL of a repository the task is about (design doc 27 §4.1). Format-checked by the Gateway; the target works only inside its own authorized directories."
                     },
                     "conversation_id": {
                         "type": "string",

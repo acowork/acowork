@@ -136,3 +136,20 @@ graph LR
 ## 9. 排期起点建议
 
 从 PR-A 开始：先删/重写 `IntentRouter`（D7），它决定了 D1 的投递入口长在哪，避免先建再拆。
+
+---
+
+## 10. Phase 3 落地后的已知缺口（Phase 4 待办）
+
+> 2026-10-15 补记：PR-A..PR-D 与 27 号文档 Phase 1–3 已落地（`53c5921b..e6f40d0d`）。
+> 以下是评审确认的偏差与缺口，按优先级排列；除 #1 外均为设计文档已标注的开放实现问题或已声明的阶段性简化。
+
+| # | 缺口 | 对应设计条款 | 现状 | Phase 4 判据 |
+|---|------|------------|------|------------|
+| 1 | **应对方崩溃兜底回执缺失**：Runtime 崩溃或 turn 无任何结束事件时，没有超时 sweeper 写 `status=failed` 的 response；发起方不轮询，该对话就此无声中断 | §7.1 表末行、§13-12 | 信箱已记录 delivered request 且含 `conversation_id`/`from_instance`，缺一个扫描者 | 定时扫描「已投递、超时、无 response」的 request，经唯一写入口补 `failed` 兜底行并 push 回执 |
+| 2 | **successor 轮转非崩溃幂等**：`route_intent_session` 先建新 session、后 rekey 映射，两步之间崩溃会留下孤儿 session，重试再建一个 | §2.1 并发与失败恢复（"重试不得创建多个 successor"） | 低概率；孤儿是空 session，仅浪费磁盘，不破坏映射正确性 | rekey 先行或携带 predecessor 标记；崩溃恢复测试 |
+| 3 | **Handoff 是指针不是蒸馏摘要**：轮转 handoff 只带旧 session id 的一句话指针；§2.1 分级表要求 T2 带"当前目标/关键决定/未决事项"（目标 1,500 tokens） | §2.1 Handoff context 分级 | 代码有 `ponytail:` 注释声明升级路径；不变量（不整份复制 JSONL、执行细节不进 Chat session）未破坏 | 轮转时从旧 session 最后一次 compaction 摘要蒸馏；settings card 落地 token 上限 |
+| 4 | **T1 阈值 / handoff 上限的配置面**：现为部署级环境变量（`ACOWORK_INTENT_IDLE_ROTATE_HOURS`），设计要求 Agent 级配置 + 鉴权 + 审计 + 前端 Session 设置卡片 | §2.1 前端可配置边界 | `ponytail:` 注释已声明 interim 形态 | Agent settings 面板两个配置项 + 变更审计 |
+| 5 | **`session_config` 可选字段未上 wire**：Intent 可携带 model/reasoning/skills 初值 | §4 字段表、§4.2 | 未实现，无消费方依赖，加性字段可后补 | 与 §4.2 授权修改一起做 |
+| 6 | **信箱 `MAX_ENTRIES` 淘汰**：驱逐老 request 条目后，极晚到的 response 会因 `no recorded request` 被拒 | — | 预算计数器（`conversation_requests`）不受淘汰影响，上限不可绕过成立；6 次预算的对话窗口内实际不会触发 | 可接受为已知上限；触发时记 WARN |
+

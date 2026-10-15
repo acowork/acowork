@@ -21,7 +21,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use acowork_gateway::gateway::state::{AgentInfo, GatewayState};
 use acowork_gateway::handlers::server::SharedState;
-use acowork_gateway::http::intent_api::{attribute_sender, permission_denial};
+use acowork_gateway::intent::gate::{attribute_sender, permission_denial};
 use acowork_gateway::intent::delivery::{self, DeliveryContext, DeliveryRequest};
 use acowork_gateway::intent::mailbox::{IntentMailbox, MailboxEntry};
 use acowork_gateway::mqtt::agent_registry::{new_shared_registry, AgentOnlineState};

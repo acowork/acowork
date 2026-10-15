@@ -148,6 +148,10 @@ impl IntentMailbox {
         }
         inner.entries.push(entry.clone());
         if inner.entries.len() > MAX_ENTRIES {
+            // Known ceiling (plan §10-6): an evicted request entry makes a
+            // very late response unmatchable ("no recorded request"). The
+            // budget map above is never evicted, so the §6.5 R4 cap holds
+            // regardless. Upgrade path: per-conversation pruning.
             let excess = inner.entries.len() - MAX_ENTRIES;
             inner.entries.drain(..excess);
         }

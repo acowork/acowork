@@ -1024,8 +1024,9 @@ message Intent {
   /// Source chat session id (design 27 §3.2). Empty until Phase 2.
   string source_chat_session_id = 7;
   /// Source-side authorized repo the target may work in
-  /// (design 27 §3.2). Validated against the sender's workspace by the
-  /// Gateway before delivery (PR-D); empty = none offered.
+  /// (design 27 §4.1). Format-checked by the Gateway before delivery
+  /// (PR-D); the target-side authorized-directory boundary is the
+  /// enforcement point. Empty = none offered.
   string repo = 8;
   /// Message semantics (design 27 §6.5 R2): "request" (default, empty =
   /// request for pre-upgrade senders) or "response". A response is

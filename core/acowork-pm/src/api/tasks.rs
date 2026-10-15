@@ -305,11 +305,11 @@ pub type _ReviewStatus = ReviewStatus;
 /// Provisioner from the Gateway config; `None` when PM runs without
 /// `--gateway-url` (single-component dev) — every dispatch/close hook
 /// degrades to a no-op there.
-fn provisioner(state: &ApiState) -> Option<crate::group_chat::GroupChatProvisioner> {
+fn provisioner(state: &ApiState) -> Option<crate::gateway_client::GatewayClient> {
     state
         .gateway
         .as_ref()
-        .map(|(url, token)| crate::group_chat::GroupChatProvisioner::new(url.clone(), token.clone()))
+        .map(|(url, token)| crate::gateway_client::GatewayClient::new(url.clone(), token.clone()))
 }
 
 /// Push-dispatch a task as a task-keyed `intent_request` into the project

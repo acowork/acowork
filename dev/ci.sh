@@ -253,9 +253,15 @@ run_user_chat_path_redline() {
     echo "Checking ADR-076 chat-path ownership red line..."
     local root="$SCRIPT_DIR/../core/acowork-user/src"
     local offenders
+    # `chat_sessions.rs` owns the design-27 Chat session store under
+    # `chat-sessions/{id}/` (ADR-084 §决策 1 / design 27 §3.1) — a
+    # different domain from the `users/…/chats/{min__max}` pair tree this
+    # red line guards; its file layout is defined by that file itself, so
+    # its `messages.jsonl` is not a hand-rolled pair path.
     offenders=$(grep -rnE '\.join\("(users|chats|files|conversation\.json|messages\.jsonl)"\)' \
         --include='*.rs' "$root" \
         | grep -vE "^$root/chat\.rs:" \
+        | grep -vE "^$root/chat_sessions\.rs:" \
         || true)
     if [ -n "$offenders" ]; then
         echo "ERROR: chat pairing path constructed outside chat.rs (ADR-076 §决策 8):"

@@ -49,7 +49,7 @@ pub async fn create(
     // ensured idempotently in the chat domain through the Gateway.
     // Best-effort — a missing chat must not fail project creation.
     if let Some((gw_url, token)) = &state.gateway {
-        let provisioner = crate::group_chat::GroupChatProvisioner::new(
+        let provisioner = crate::gateway_client::GatewayClient::new(
             gw_url.clone(),
             token.clone(),
         );
@@ -192,7 +192,7 @@ pub async fn add_member(
     // Design 27 Phase 2: a new project member joins the project group
     // chat too (idempotent — the chat store dedups on re-add).
     if let Some((gw_url, token)) = &state.gateway {
-        let provisioner = crate::group_chat::GroupChatProvisioner::new(
+        let provisioner = crate::gateway_client::GatewayClient::new(
             gw_url.clone(),
             token.clone(),
         );
