@@ -30,6 +30,10 @@ pub struct PmService {
     /// 默认 `Noop`（不校验）；Phase 3（ADR-064）将注入 HTTP 实现（查 Gateway
     /// `/api/agents`）。
     pub agent_dir: Arc<dyn AgentDirectory>,
+    /// Design 27 Phase 2: Gateway base URL + internal-service token for
+    /// project group chat provisioning (`None` = standalone/test mode,
+    /// provisioning skipped).
+    pub gateway: Option<(String, Option<String>)>,
 }
 
 impl PmService {
@@ -38,13 +42,31 @@ impl PmService {
     /// 使用宽松 Agent 目录（不做 assignee 存在性校验）。生产环境建议用
     /// [`PmService::with_agent_directory`] 注入真实目录。
     pub async fn new(config: PmConfig) -> Result<Self> {
-        Self::with_agent_directory(config, Arc::new(NoopAgentDirectory)).await
+        Self::build(config, Arc::new(NoopAgentDirectory), None).await
     }
 
     /// 构造服务实例，并注入 Agent 目录（Gateway 基于其 `installed_agents` 提供）。
     pub async fn with_agent_directory(
         config: PmConfig,
         agent_dir: Arc<dyn AgentDirectory>,
+    ) -> Result<Self> {
+        Self::build(config, agent_dir, None).await
+    }
+
+    /// 构造服务实例，注入 Agent 目录 + Gateway 内部凭证（design 27 Phase 2:
+    /// 项目群聊经 `POST /api/intents/project-group` 幂等创建）。
+    pub async fn with_gateway(
+        config: PmConfig,
+        agent_dir: Arc<dyn AgentDirectory>,
+        gateway: Option<(String, Option<String>)>,
+    ) -> Result<Self> {
+        Self::build(config, agent_dir, gateway).await
+    }
+
+    async fn build(
+        config: PmConfig,
+        agent_dir: Arc<dyn AgentDirectory>,
+        gateway: Option<(String, Option<String>)>,
     ) -> Result<Self> {
         config.validate()?;
 
@@ -59,6 +81,7 @@ impl PmService {
             config,
             store,
             agent_dir,
+            gateway,
         })
     }
 
@@ -74,6 +97,7 @@ impl PmService {
             self.store.clone(),
             self.config.clone(),
             self.agent_dir.clone(),
+            self.gateway.clone(),
         )
         .merge(crate::mcp::mcp_router(self.store.clone(), self.agent_dir.clone()))
     }

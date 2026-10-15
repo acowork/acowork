@@ -48,11 +48,13 @@ pub fn pm_router(
     store: Arc<TreePmStore>,
     config: PmConfig,
     agent_dir: Arc<dyn AgentDirectory>,
+    gateway: Option<(String, Option<String>)>,
 ) -> Router {
     let state = ApiState {
         store,
         config,
         agent_dir,
+        gateway,
     };
 
     Router::new()

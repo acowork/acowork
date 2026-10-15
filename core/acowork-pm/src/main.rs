@@ -112,11 +112,18 @@ async fn main() {
     // `--gateway-url` 提供时注入 `HttpAgentDirectory`（查询 Gateway `/api/agents`
     // 校验 assignee 存在性，启动拉全量 + 周期刷新 + 即时兜底）；缺省时用
     // 宽松目录（`NoopAgentDirectory`，不校验——测试/独立调试场景）。
-    let agent_dir: Arc<dyn acowork_pm::AgentDirectory> = if let Some(gw_url) = cli.gateway_url {
+    let gateway_info: Option<(String, Option<String>)> = cli.gateway_url.clone().map(|u| {
+        (
+            u,
+            std::env::var("ACOWORK_PM_GATEWAY_TOKEN")
+                .ok()
+                .filter(|t| !t.is_empty()),
+        )
+    });
+    let agent_dir: Arc<dyn acowork_pm::AgentDirectory> = if let Some((gw_url, auth_token)) =
+        gateway_info.clone()
+    {
         // Gateway auth 开启时经 env 传入 Bearer token（避免 CLI 参数暴露在进程列表）。
-        let auth_token = std::env::var("ACOWORK_PM_GATEWAY_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty());
         let dir = Arc::new(HttpAgentDirectory::new(
             gw_url,
             auth_token,
@@ -133,7 +140,7 @@ async fn main() {
         Arc::new(acowork_pm::NoopAgentDirectory)
     };
 
-    let service = match PmService::with_agent_directory(config.clone(), agent_dir).await {
+    let service = match PmService::with_gateway(config.clone(), agent_dir, gateway_info).await {
         Ok(svc) => Arc::new(svc),
         Err(e) => {
             tracing::error!(error = %e, "Failed to initialize PM store");

@@ -52,6 +52,7 @@
 pub mod api;
 pub mod config;
 pub mod error;
+pub mod group_chat;
 pub mod health;
 pub mod mcp;
 pub mod server;

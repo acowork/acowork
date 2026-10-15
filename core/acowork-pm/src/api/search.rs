@@ -220,6 +220,7 @@ mod tests {
             store: Arc::new(store),
             config: test_config(),
             agent_dir: Arc::new(NoopAgentDirectory),
+            gateway: None,
         };
         let Json(hits) = search(State(state), Query(SearchParams { q: "".into(), limit: None }))
             .await
@@ -258,6 +259,7 @@ mod tests {
             store: Arc::new(store),
             config: test_config(),
             agent_dir: Arc::new(NoopAgentDirectory),
+            gateway: None,
         };
         let Json(hits) = search(State(state), Query(SearchParams { q: "搜索".into(), limit: None }))
             .await
@@ -275,6 +277,7 @@ mod tests {
             store: Arc::new(store),
             config: test_config(),
             agent_dir: Arc::new(NoopAgentDirectory),
+            gateway: None,
         };
         // 任务 description 命中（"…assignee 加权"）。
         let Json(desc_hits) = search(State(state.clone()), Query(SearchParams { q: "加权".into(), limit: None }))
@@ -299,6 +302,7 @@ mod tests {
             store: Arc::new(store),
             config: test_config(),
             agent_dir: Arc::new(NoopAgentDirectory),
+            gateway: None,
         };
         let Json(hits) = search(State(state), Query(SearchParams { q: "搜索".into(), limit: Some(1) }))
             .await

@@ -45,6 +45,29 @@ pub async fn create(
         .store
         .create_project_as(input, created_by, MemberKind::User)
         .await?;
+    // Design 27 Phase 2: every project gets exactly one group chat,
+    // ensured idempotently in the chat domain through the Gateway.
+    // Best-effort — a missing chat must not fail project creation.
+    if let Some((gw_url, token)) = &state.gateway {
+        let provisioner = crate::group_chat::GroupChatProvisioner::new(
+            gw_url.clone(),
+            token.clone(),
+        );
+        let pid = project.id.as_str().to_string();
+        let title = project.title.clone();
+        // Participants: the owner plus whoever the store recorded as
+        // members (MCP face seeds the creator there; REST face leaves
+        // the list at the owner).
+        let mut participants: Vec<String> =
+            std::iter::once(project.created_by.clone())
+                .chain(project.members.iter().map(|m| m.instance_id.clone()))
+                .collect();
+        participants.sort();
+        participants.dedup();
+        tokio::spawn(async move {
+            provisioner.ensure_group(&pid, &title, &participants).await;
+        });
+    }
     Ok(Json(project))
 }
 
@@ -131,6 +154,26 @@ pub async fn add_member(
         .store
         .add_project_member(&pid, &input.instance_id)
         .await?;
+    // Design 27 Phase 2: a new project member joins the project group
+    // chat too (idempotent — the chat store dedups on re-add).
+    if let Some((gw_url, token)) = &state.gateway {
+        let provisioner = crate::group_chat::GroupChatProvisioner::new(
+            gw_url.clone(),
+            token.clone(),
+        );
+        let pid_str = pid.as_str().to_string();
+        let title = project.title.clone();
+        let participants: Vec<String> = project
+            .members
+            .iter()
+            .map(|m| m.instance_id.clone())
+            .collect();
+        tokio::spawn(async move {
+            provisioner
+                .ensure_group(&pid_str, &title, &participants)
+                .await;
+        });
+    }
     Ok(Json(project))
 }
 

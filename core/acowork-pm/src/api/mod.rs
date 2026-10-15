@@ -47,4 +47,8 @@ pub struct ApiState {
     /// Agent 目录（设计 §9.1）：`POST /projects/:pid/members` 添加成员时按
     /// instance_id 校验 Agent 存在。宽松实现（[`NoopAgentDirectory`]）跳过校验。
     pub agent_dir: Arc<dyn AgentDirectory>,
+    /// Design 27 Phase 2: Gateway base URL + internal-service token for
+    /// project group chat provisioning. `None` (no `--gateway-url`) skips
+    /// it — same degradation rule as the agent directory.
+    pub gateway: Option<(String, Option<String>)>,
 }

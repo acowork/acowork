@@ -53,6 +53,7 @@ impl TestApp {
             store,
             cfg,
             Arc::new(acowork_pm::NoopAgentDirectory),
+            None,
         );
         Self { router, _tmp: tmp }
     }
