@@ -31,6 +31,28 @@ npm run core:build:debug
 npm run tauri dev
 ```
 
+### Mobile App (Tauri v2)
+
+Same core binaries as Desktop (see above). Mobile has no local Gateway process (v1).
+
+```bash
+# Browser dev (Vite :19877 — use desktop browser devtools to simulate touch)
+cd apps/acowork-mobile && npm run dev
+
+# Native shell dev
+cd apps/acowork-mobile && npm run tauri:dev
+```
+
+**Android**: use the build script — it handles `tauri android init`, launcher icons (`src-tauri/icons/android/`), CAMERA permission (配网扫码), and the release signing config. Do not run `tauri android init` directly (it wipes `src-tauri/gen/android/` and resets icons to the template robot).
+
+```powershell
+.\dev\android\build_mobile.ps1              # debug APK
+.\dev\android\build_mobile.ps1 -Install     # also `adb install` to connected device
+.\dev\android\build_mobile.ps1 -ReleaseApk  # release APK
+```
+
+Full details: [apps/acowork-mobile/README.md](apps/acowork-mobile/README.md)
+
 ## Logs
 
 `{HOME_DIR}` = current user home folder.
