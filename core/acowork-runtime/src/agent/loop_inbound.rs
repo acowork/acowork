@@ -58,23 +58,12 @@ pub(super) fn inject_inbound_into_history(
             });
             true
         }
-        InboundMessage::IntentMessage {
-            from,
-            action,
-            params,
-            message_id,
-            conversation_id,
-            source_chat_session_id,
-            repo,
-            kind,
-            in_reply_to,
-            status,
-        } => {
+        InboundMessage::IntentMessage(env) => {
             tracing::info!(
                 "inject_inbound_into_history: intent from {}: {} params={:?}",
-                from,
-                action,
-                params
+                env.from,
+                env.action,
+                env.params
             );
             // Design 27 §3.2: the receiver sees the full envelope — reply
             // coordinates (conversation / source sessions) and the
@@ -82,16 +71,16 @@ pub(super) fn inject_inbound_into_history(
             // renderer with the new-turn path (`session_task`) so the two
             // renderings cannot drift apart.
             let rendered = crate::agent::intent_turn::render_intent_message(
-                &from,
-                &action,
-                &params,
-                &message_id,
-                &conversation_id,
-                &source_chat_session_id,
-                &repo,
-                &kind,
-                &in_reply_to,
-                &status,
+                &env.from,
+                &env.action,
+                &env.params,
+                &env.message_id,
+                &env.conversation_id,
+                &env.source_chat_session_id,
+                &env.repo,
+                &env.kind,
+                &env.in_reply_to,
+                &env.status,
             );
             history.append(ChatMessage::user(rendered));
             true

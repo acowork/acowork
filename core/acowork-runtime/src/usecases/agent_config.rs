@@ -140,6 +140,12 @@ pub enum ConfigField {
     /// `UserProfile.language`). `None` = follow the user's global
     /// language from `UserProfile`.
     SessionLanguage,
+    /// `AgentConfig::intent_idle_rotate_hours` — `Option<u64>`
+    /// (design 27 §2.1 T1 threshold, 1–72 hours, 0 disables).
+    IntentIdleRotateHours,
+    /// `AgentConfig::intent_handoff_max_tokens` — `Option<u64>`
+    /// (design 27 §2.1 T2 handoff cap, 500–4,000 tokens).
+    IntentHandoffMaxTokens,
 }
 
 impl ConfigField {
@@ -166,6 +172,8 @@ impl ConfigField {
             ConfigField::MemoryForgettingDormantThreshold => "memory_forgetting_dormant_threshold",
             ConfigField::MemoryForgettingArchiveDays => "memory_forgetting_archive_days",
             ConfigField::SessionLanguage => "session_language",
+            ConfigField::IntentIdleRotateHours => "intent_idle_rotate_hours",
+            ConfigField::IntentHandoffMaxTokens => "intent_handoff_max_tokens",
         }
     }
 }
@@ -241,6 +249,8 @@ impl PutAgentConfigBody {
         memory_forgetting_dormant_threshold: Option<serde_json::Value>,
         memory_forgetting_archive_days: Option<serde_json::Value>,
         session_language: Option<serde_json::Value>,
+        intent_idle_rotate_hours: Option<serde_json::Value>,
+        intent_handoff_max_tokens: Option<serde_json::Value>,
     ) -> Self {
         let mut patches = Vec::new();
         if let Some(v) = max_output_tokens {
@@ -359,6 +369,18 @@ impl PutAgentConfigBody {
         if let Some(v) = session_language {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::SessionLanguage,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = intent_idle_rotate_hours {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::IntentIdleRotateHours,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = intent_handoff_max_tokens {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::IntentHandoffMaxTokens,
                 op: value_to_patch(&v),
             });
         }

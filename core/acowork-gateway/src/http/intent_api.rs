@@ -54,7 +54,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::routes::{ApiError, AppState};
 use crate::intent::chat_client;
-use crate::intent::gate::{attribute_sender, permission_denial, validate_repo};
+use crate::intent::gate::{
+    attribute_sender, permission_denial, validate_repo, validate_session_config,
+};
 use crate::intent::delivery::{self, DeliveryContext};
 
 pub fn intent_routes() -> Router<AppState> {
@@ -300,6 +302,7 @@ async fn dispatch_task(
         .to_string(),
         source_chat_session_id: chat_session_id.clone(),
         repo,
+        session_config_json: String::new(),
         kind: "request".to_string(),
         in_reply_to: String::new(),
         status: String::new(),
@@ -464,6 +467,12 @@ pub struct IntentRequest {
     /// target-side authorized-directory boundary is the enforcement point.
     #[serde(default)]
     pub repo: Option<String>,
+    /// Initiator's session-config suggestion (design 27 §4: model /
+    /// reasoning / skills 初值). Shape-checked here (small JSON object of
+    /// string values); the responder treats it as a suggestion within its
+    /// own allowed set (§13-6). Absent / null = use target defaults.
+    #[serde(default)]
+    pub session_config: Option<serde_json::Value>,
     /// "request" (default) | "response" (§6.5 R2). Responses are
     /// system-generated — the responder's Runtime posts one at turn
     /// end; `intent_send` never sets this.
@@ -530,6 +539,13 @@ async fn deliver_intent(
         }
         None => String::new(),
     };
+
+    // --- design 27 §4: session_config shape check (only when declared) --
+    if let Some(sc) = req.session_config.as_ref() {
+        validate_session_config(sc).map_err(|e| {
+            ApiError::unprocessable_entity(&format!("session_config_invalid: {e}"))
+        })?;
+    }
 
     // --- §6.5 R4: conversation is created here if absent, then gated ----
     let conversation_id = match req.conversation_id.as_deref() {
@@ -670,6 +686,10 @@ async fn deliver_intent(
         params_json: serde_json::to_string(&serde_json::Value::Object(req.params)).unwrap_or_default(),
         source_chat_session_id,
         repo,
+        session_config_json: req
+            .session_config
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
         kind: "request".to_string(),
         in_reply_to: String::new(),
         status: String::new(),
@@ -975,6 +995,7 @@ async fn deliver_response(
             .unwrap_or_default(),
         source_chat_session_id: entry.source_chat_session_id.clone(),
         repo: String::new(),
+        session_config_json: String::new(),
         kind: "response".to_string(),
         in_reply_to: request_id,
         status,
@@ -1168,6 +1189,7 @@ async fn deliver_mentions(
             params_json: serde_json::json!({ "message": req.text }).to_string(),
             source_chat_session_id: req.chat_session_id.clone(),
             repo: repo.clone(),
+            session_config_json: String::new(),
             kind: "request".to_string(),
             in_reply_to: String::new(),
             status: String::new(),

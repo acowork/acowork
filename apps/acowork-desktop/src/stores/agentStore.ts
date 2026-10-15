@@ -74,6 +74,12 @@ export interface AgentProfileSettings {
    *  Empty string from the dropdown also means "no opinion" and is
    *  cleared on save. */
   sessionLanguage?: string | null;
+  /** Design 27 §2.1: T1 idle-rotation threshold in hours (1–72; 0
+   *  disables T1). Undefined = built-in default (24h). */
+  intentIdleRotateHours?: number;
+  /** Design 27 §2.1: T2 handoff target token cap (500–4,000).
+   *  Undefined = built-in default (1,500). */
+  intentHandoffMaxTokens?: number;
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {
@@ -154,6 +160,20 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
       s.compressionRatioThreshold >= 0.05 &&
       s.compressionRatioThreshold <= 0.95
         ? s.compressionRatioThreshold
+        : undefined,
+    // Intent rotation knobs (design 27 §2.1). `0` is meaningful for
+    // idle hours (disables T1), so the guard is `>= 0`.
+    intentIdleRotateHours:
+      typeof s.intentIdleRotateHours === "number" &&
+      s.intentIdleRotateHours >= 0 &&
+      s.intentIdleRotateHours <= 72
+        ? Math.floor(s.intentIdleRotateHours)
+        : undefined,
+    intentHandoffMaxTokens:
+      typeof s.intentHandoffMaxTokens === "number" &&
+      s.intentHandoffMaxTokens >= 500 &&
+      s.intentHandoffMaxTokens <= 4000
+        ? Math.floor(s.intentHandoffMaxTokens)
         : undefined,
   };
 }

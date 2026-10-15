@@ -68,6 +68,7 @@ fn req(target: &str) -> DeliveryRequest {
         params_json: r#"{"k":1}"#.into(),
         source_chat_session_id: String::new(),
         repo: String::new(),
+        session_config_json: String::new(),
         kind: "request".into(),
         in_reply_to: String::new(),
         status: String::new(),
@@ -633,6 +634,7 @@ fn intent_wire_fields_roundtrip() {
         source_agent_session_id: "s-1".into(),
         source_chat_session_id: "ch-1".into(),
         repo: "https://github.com/o/p".into(),
+        session_config_json: r#"{"model":"m1"}"#.into(),
         kind: "request".into(),
         in_reply_to: String::new(),
         status: String::new(),
@@ -660,4 +662,5 @@ fn intent_wire_fields_roundtrip() {
     assert_eq!(back.source_agent_session_id, "s-1");
     assert_eq!(back.source_chat_session_id, "ch-1");
     assert_eq!(back.repo, "https://github.com/o/p");
+    assert_eq!(back.session_config_json, r#"{"model":"m1"}"#);
 }

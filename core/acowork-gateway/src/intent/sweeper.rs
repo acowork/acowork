@@ -138,6 +138,7 @@ async fn emit_fallback_receipt(
             params_json: serde_json::json!({ "message": FALLBACK_BODY }).to_string(),
             source_chat_session_id: req.source_chat_session_id.clone(),
             repo: String::new(),
+            session_config_json: String::new(),
             kind: "response".to_string(),
             in_reply_to: req.message_id.clone(),
             status: "failed".to_string(),

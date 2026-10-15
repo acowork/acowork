@@ -594,8 +594,17 @@ impl SessionManager {
     /// empty with a pointer handoff naming the old session; the conversation
     /// itself lives in the Chat session store, so nothing is copied.
     /// Returns `(session_id, handoff_note)` — the caller prepends the note to
-    /// the routed intent when a rotation just happened.
-    pub async fn route_intent_session(&mut self, key: &str) -> Result<(String, Option<String>)> {
+    /// the routed intent when a rotation just happened. `seed` is the
+    /// initiator's optional `session_config` suggestion (design 27 §4);
+    /// clamped to this agent's provider list (§13-6) and applied only when
+    /// a session is actually created (fresh mapping or rotation successor) —
+    /// a reused session keeps its own configuration.
+    pub async fn route_intent_session(
+        &mut self,
+        key: &str,
+        seed: Option<super::intent_routing::SessionSeed>,
+    ) -> Result<(String, Option<String>)> {
+        let work_dir = std::path::PathBuf::from(&self.core.config.work_dir);
         let (mapped, rotation) = {
             let map = self
                 .intent_map
@@ -604,10 +613,13 @@ impl SessionManager {
             let mapped = map.get(key).map(|e| e.session_id.clone());
             let rotation =
                 mapped.as_ref().and_then(|_| {
-                    map.needs_rotation(key, super::intent_routing::idle_rotate_threshold())
+                    map.needs_rotation(key, super::intent_routing::idle_rotate_threshold(&work_dir))
                 });
             (mapped, rotation)
         };
+        let seed = seed.and_then(|s| {
+            s.clamp_to_responder(&self.core.global_provider_list.read().unwrap())
+        });
         if let Some(sid) = &mapped {
             if self.get_session(sid).is_some() {
                 match rotation {
@@ -624,7 +636,11 @@ impl SessionManager {
                                 .plan_rotation(key)?
                         };
                         let new_sid = self
-                            .create_agent_owned_session_with_id(None, Some(&planned))
+                            .create_agent_owned_session_with_id(
+                                None,
+                                Some(&planned),
+                                seed.as_ref(),
+                            )
                             .await?;
                         self.intent_map
                             .lock()
@@ -640,8 +656,20 @@ impl SessionManager {
                             reason = ?reason,
                             "Intent session rotated (design 27 §2.1)"
                         );
+                        // §2.1 Handoff grading: T2 carries the old session's
+                        // last persisted compaction summary (already an LLM
+                        // distillation — no second LLM call at rotation);
+                        // T1 stays a pointer (design: no conversation summary).
+                        let summary = (reason == super::intent_routing::RotateReason::T2Compaction)
+                            .then(|| {
+                                crate::conversation::last_compaction_summary(&work_dir, sid)
+                            })
+                            .flatten();
                         return Ok((new_sid, Some(super::intent_routing::rotation_handoff(
-                            reason, sid,
+                            reason,
+                            sid,
+                            summary.as_deref(),
+                            super::intent_routing::handoff_max_tokens(&work_dir),
                         ))));
                     }
                 }
@@ -652,7 +680,9 @@ impl SessionManager {
                 "Intent routing entry points at a non-active session — opening a fresh one"
             );
         }
-        let new_sid = self.create_agent_owned_session(None).await?;
+        let new_sid = self
+            .create_agent_owned_session(None, seed.as_ref())
+            .await?;
         self.intent_map
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1018,8 +1048,9 @@ impl SessionManager {
     pub async fn create_agent_owned_session(
         &mut self,
         requester_user_id: Option<&str>,
+        seed: Option<&super::intent_routing::SessionSeed>,
     ) -> Result<String> {
-        self.create_agent_owned_session_with_id(requester_user_id, None)
+        self.create_agent_owned_session_with_id(requester_user_id, None, seed)
             .await
     }
 
@@ -1030,6 +1061,7 @@ impl SessionManager {
         &mut self,
         requester_user_id: Option<&str>,
         preset_session_id: Option<&str>,
+        seed: Option<&super::intent_routing::SessionSeed>,
     ) -> Result<String> {
         let agent_user = self
             .last_user_profile
@@ -1038,8 +1070,8 @@ impl SessionManager {
             .filter(|id| !id.is_empty());
         self.create_frontend_session_inner(
             None,
-            None,
-            None,
+            seed.and_then(|s| s.model.as_deref()),
+            seed.and_then(|s| s.provider.as_deref()),
             agent_user.as_deref().or(requester_user_id),
             preset_session_id,
         )

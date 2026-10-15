@@ -69,6 +69,10 @@ pub enum ControlAction {
         source_agent_session_id: String,
         source_chat_session_id: String,
         repo: String,
+        /// Initiator's session-config suggestion (design 27 §4; shape
+        /// checked by the Gateway, clamped to the responder's allowed
+        /// set at session creation, §13-6). Empty = none.
+        session_config_json: String,
         /// "request" | "response" (design 27 §6.5 R2). Empty = request.
         kind: String,
         /// For a response: the request's message_id (§4).
@@ -105,6 +109,7 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             source_agent_session_id: intent.source_agent_session_id,
             source_chat_session_id: intent.source_chat_session_id,
             repo: intent.repo,
+            session_config_json: intent.session_config_json,
             kind: intent.kind,
             in_reply_to: intent.in_reply_to,
             status: intent.status,

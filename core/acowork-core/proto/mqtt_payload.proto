@@ -1039,6 +1039,12 @@ message Intent {
   /// For kind == "response": outcome (§7.1) — completed / failed /
   /// aborted / timeout. Empty is treated as completed.
   string status = 11;
+  /// Initiator's optional session-config suggestion (design doc 27 §4:
+  /// model/reasoning/skills 初值). Additive field 12; opaque JSON object
+  /// string, shape-checked by the Gateway. The responder treats it as a
+  /// suggestion within its own allowed set (§13-6) and applies it only
+  /// when creating the execution session. Empty = no suggestion.
+  string session_config_json = 12;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

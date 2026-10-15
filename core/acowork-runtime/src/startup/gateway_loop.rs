@@ -172,7 +172,7 @@ pub(crate) async fn phase_d_run(
 fn control_action_to_inbound(
     action: crate::mqtt::control_handler::ControlAction,
 ) -> Option<(String, crate::agent::inbound::InboundMessage)> {
-    use crate::agent::inbound::InboundMessage;
+    use crate::agent::inbound::{InboundMessage, IntentEnvelope};
     use crate::mqtt::control_handler::ControlAction;
 
     match action {
@@ -189,6 +189,7 @@ fn control_action_to_inbound(
             source_agent_session_id,
             source_chat_session_id,
             repo,
+            session_config_json,
             kind,
             in_reply_to,
             status,
@@ -200,7 +201,7 @@ fn control_action_to_inbound(
                 // (design 27 §3.2 source_agent_session_id); otherwise the
                 // empty id keeps the system-level path (cron).
                 source_agent_session_id,
-                InboundMessage::IntentMessage {
+                InboundMessage::IntentMessage(Box::new(IntentEnvelope {
                     from,
                     action,
                     params,
@@ -208,10 +209,11 @@ fn control_action_to_inbound(
                     conversation_id,
                     source_chat_session_id,
                     repo,
+                    session_config_json,
                     kind,
                     in_reply_to,
                     status,
-                },
+                })),
             ))
         }
     }
@@ -958,13 +960,18 @@ async fn route_intent_inbound(
     designated_session_id: &str,
     msg: crate::agent::inbound::InboundMessage,
 ) -> crate::error::Result<()> {
-    use crate::agent::inbound::InboundMessage;
+    use crate::agent::inbound::{InboundMessage, IntentEnvelope};
     use crate::agent::intent_turn::render_intent_message;
     use crate::agent::session::intent_routing::routing_key;
     use crate::agent::session::SessionMessage;
     use crate::error::RuntimeError;
 
-    let InboundMessage::IntentMessage {
+    let InboundMessage::IntentMessage(env) = msg else {
+        return Err(RuntimeError::Config(
+            "route_intent_inbound called with a non-intent message".to_string(),
+        ));
+    };
+    let IntentEnvelope {
         from,
         action,
         params,
@@ -972,15 +979,11 @@ async fn route_intent_inbound(
         conversation_id,
         source_chat_session_id,
         repo,
+        session_config_json,
         kind,
         in_reply_to,
         status,
-    } = msg
-    else {
-        return Err(RuntimeError::Config(
-            "route_intent_inbound called with a non-intent message".to_string(),
-        ));
-    };
+    } = *env;
 
     let is_response = kind == "response";
     let content = render_intent_message(
@@ -1009,15 +1012,22 @@ async fn route_intent_inbound(
         Some(t) => (t, None),
         None => {
             let key = routing_key(&source_chat_session_id, &conversation_id, &message_id);
+            // The initiator's session-config suggestion (§4) is consumed
+            // here, at execution-session creation only — a reused session
+            // keeps its own config; responses never carry one.
+            let seed = crate::agent::session::intent_routing::SessionSeed::from_json(
+                &session_config_json,
+            );
             session_manager
                 .lock()
                 .await
-                .route_intent_session(&key)
+                .route_intent_session(&key, seed)
                 .await?
         }
     };
-    // A rotation (§2.1) prepends its pointer handoff to the routed intent —
-    // one injection with the turn it belongs to, no extra plumbing.
+    // A rotation (§2.1) prepends its handoff (pointer for T1, distilled
+    // compaction summary for T2) to the routed intent — one injection with
+    // the turn it belongs to, no extra plumbing.
     let content = match target.1 {
         Some(note) => format!("{}\n\n{}", note, content),
         None => content,
@@ -1122,6 +1132,7 @@ mod tests {
             source_agent_session_id: String::new(),
             source_chat_session_id: String::new(),
             repo: String::new(),
+            session_config_json: String::new(),
             kind: String::new(),
             in_reply_to: String::new(),
             status: String::new(),
@@ -1130,17 +1141,11 @@ mod tests {
         assert_eq!(route, "", "cron intent has no target session — system-level");
 
         match msg {
-            InboundMessage::IntentMessage {
-                from,
-                action,
-                params,
-                message_id,
-                ..
-            } => {
-                assert_eq!(from, "cron:agent");
-                assert_eq!(action, "hourly_check");
-                assert_eq!(params["k"], 1);
-                assert_eq!(message_id, "m-1");
+            InboundMessage::IntentMessage(env) => {
+                assert_eq!(env.from, "cron:agent");
+                assert_eq!(env.action, "hourly_check");
+                assert_eq!(env.params["k"], 1);
+                assert_eq!(env.message_id, "m-1");
             }
             other => panic!("expected IntentMessage, got {other:?}"),
         }
@@ -1158,6 +1163,7 @@ mod tests {
             source_agent_session_id: String::new(),
             source_chat_session_id: String::new(),
             repo: String::new(),
+            session_config_json: String::new(),
             kind: String::new(),
             in_reply_to: String::new(),
             status: String::new(),
@@ -1165,7 +1171,7 @@ mod tests {
         .expect("Intent must still map");
 
         match msg {
-            InboundMessage::IntentMessage { params, .. } => assert!(params.is_object()),
+            InboundMessage::IntentMessage(env) => assert!(env.params.is_object()),
             other => panic!("expected IntentMessage, got {other:?}"),
         }
     }

@@ -128,6 +128,10 @@ pub struct DeliveryRequest {
     /// Source-side authorized repo (design 27 §3.2; validated at the
     /// HTTP entry before this request is built — PR-D).
     pub repo: String,
+    /// Initiator's session-config suggestion (design 27 §4, serialized
+    /// from a shape-checked JSON object; empty = none). The responder
+    /// treats it as a suggestion within its allowed set (§13-6).
+    pub session_config_json: String,
     /// "request" (default) | "response" (design 27 §6.5 R2). A response
     /// is system-generated: the Gateway builds it at the responder's
     /// turn end and routes it to the initiator — `intent_send` never
@@ -241,6 +245,7 @@ async fn deliver_inner(
         source_agent_session_id: req.from_session_id.clone(),
         source_chat_session_id: req.source_chat_session_id.clone(),
         repo: req.repo.clone(),
+        session_config_json: req.session_config_json.clone(),
         kind: req.kind.clone(),
         in_reply_to: req.in_reply_to.clone(),
         status: req.status.clone(),
@@ -339,6 +344,7 @@ mod tests {
             action: "a".into(),
             params_json: "{}".into(),
             repo: String::new(),
+            session_config_json: String::new(),
             source_chat_session_id: String::new(),
             kind: "request".into(),
             in_reply_to: String::new(),

@@ -58,23 +58,36 @@ pub enum RotateReason {
     T2Compaction,
 }
 
-/// Idle threshold for T1 rotation. Default 24h; `ACOWORK_INTENT_IDLE_ROTATE_HOURS`
-/// overrides (1–72; `0` disables T1).
-///
-/// ponytail: the design exposes these two knobs (idle hours, handoff token
-/// cap) through the session settings card; that UI is a later milestone, so
-/// the env var is the interim config surface. Upgrade path: read from agent
-/// config once the settings card lands.
-pub fn idle_rotate_threshold() -> Option<std::time::Duration> {
-    let hours: u64 = std::env::var("ACOWORK_INTENT_IDLE_ROTATE_HOURS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(24);
-    if hours == 0 {
-        None
-    } else {
-        Some(std::time::Duration::from_secs(hours.min(72) * 3600))
+/// Idle threshold for T1 rotation. Layer 1 = `AgentConfig::intent_idle_rotate_hours`
+/// (design 27 §2.1 settings-card surface); falls back to the deployment-level
+/// `ACOWORK_INTENT_IDLE_ROTATE_HOURS`, then the design default 24h.
+/// `0` disables T1. Values above the design range (1–72) are clamped.
+pub fn idle_rotate_threshold(work_dir: &Path) -> Option<std::time::Duration> {
+    let hours = agent_config_value(work_dir)
+        .and_then(|c| c.intent_idle_rotate_hours)
+        .or_else(|| {
+            std::env::var("ACOWORK_INTENT_IDLE_ROTATE_HOURS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+        });
+    match hours.unwrap_or(24) {
+        0 => None,
+        h => Some(std::time::Duration::from_secs(h.min(72) * 3600)),
     }
+}
+
+/// T2 handoff token cap (design 27 §2.1: target 1,500, configurable
+/// 500–4,000 via `AgentConfig::intent_handoff_max_tokens`). T1's 500-token
+/// cap is design-fixed and not exposed here.
+pub fn handoff_max_tokens(work_dir: &Path) -> u64 {
+    agent_config_value(work_dir)
+        .and_then(|c| c.intent_handoff_max_tokens)
+        .unwrap_or(1500)
+        .clamp(500, 4000)
+}
+
+fn agent_config_value(work_dir: &Path) -> Option<crate::agent_config::AgentConfig> {
+    crate::agent_config::load_agent_config(work_dir).ok().flatten()
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -204,6 +217,71 @@ impl IntentSessionMap {
     }
 }
 
+/// Inbound Intent's optional `session_config` suggestion (design 27 §4
+/// field table, §13-6: "只是应方允许范围内的建议"). Only `model` and
+/// `provider` are honored today — the two knobs the responder's session
+/// creation path already accepts; unknown keys are ignored (additive
+/// fields land without a wire change).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionSeed {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+}
+
+impl SessionSeed {
+    /// Parse the wire JSON string. Empty / malformed / non-object input
+    /// yields `None` (cron senders and pre-upgrade intents never set it;
+    /// a bad suggestion must not block delivery — it degrades to the
+    /// responder's own defaults).
+    pub fn from_json(raw: &str) -> Option<Self> {
+        if raw.trim().is_empty() {
+            return None;
+        }
+        let obj = serde_json::from_str::<serde_json::Value>(raw).ok()?.as_object()?.clone();
+        let get = |k: &str| {
+            obj.get(k)
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let seed = Self { model: get("model"), provider: get("provider") };
+        if seed.model.is_none() && seed.provider.is_none() {
+            None
+        } else {
+            Some(seed)
+        }
+    }
+
+    /// Clamp the suggestion to the responder's allowed set (§13-6): the
+    /// model must exist in the responder's provider list — under the
+    /// suggested provider when one is given, otherwise under any provider
+    /// that serves it (the provider is then pinned to the hit so the pair
+    /// is never half-suggested). If nothing of the suggestion survives it
+    /// returns `None` → responder defaults.
+    pub fn clamp_to_responder(
+        self,
+        providers: &[acowork_core::protocol::ProviderListItem],
+    ) -> Option<Self> {
+        let model = self.model.as_deref()?;
+        let want_provider = self.provider.as_deref().filter(|p| !p.is_empty());
+        for p in providers {
+            let provider_ok = want_provider.is_none_or(|w| w == p.id);
+            if provider_ok && p.models.iter().any(|m| m.id == model) {
+                return Some(Self {
+                    model: Some(model.to_string()),
+                    provider: Some(p.id.clone()),
+                });
+            }
+        }
+        tracing::warn!(
+            model,
+            provider = want_provider.unwrap_or(""),
+            "Intent session_config suggestion outside the responder's allowed set — using defaults"
+        );
+        None
+    }
+}
+
 /// Derive the routing key from an inbound intent envelope. Preference:
 /// task-scoped conversation (§6.2: one execution session chain per PM task,
 /// even when the task lives in a shared project group chat) > Chat session
@@ -221,28 +299,74 @@ pub fn routing_key(chat_session_id: &str, conversation_id: &str, message_id: &st
     }
 }
 
-/// Pointer handoff note prepended to the first intent routed into a
-/// successor session after a rotation (§2.1).
+/// Handoff note prepended to the first intent routed into a successor
+/// session after a rotation (design 27 §2.1 Handoff grading).
 ///
-/// ponytail: the design's distilled handoff (open items / key decisions,
-/// 500-token T1 / 1,500-token T2 caps) needs an LLM distillation call at
-/// rotation time. The interim form is a pointer only — the old session's
-/// full history (and its compaction summary) stays in Session history, and
-/// the conversation itself lives in the Chat session store, so the
-/// invariant "never copy the old JSONL wholesale" holds. Upgrade path:
-/// distill from the old session's last compaction summary when the
-/// settings card exposes the token caps.
-pub fn rotation_handoff(reason: RotateReason, old_session_id: &str) -> String {
-    match reason {
+/// Grading per the design table:
+/// - **T1 idle**: open items / key decisions only — the Runtime records no
+///   such ledger between turns, and the design allows the T1 handoff to be
+///   empty ("若无未决事项可完全省略，不带对话摘要"), so T1 stays a pointer.
+/// - **T2 compaction**: `summary` carries the old session's LAST persisted
+///   compaction entry (already an LLM distillation of goals / decisions /
+///   open items — reusing it costs no second LLM call and never copies the
+///   JSONL wholesale, the two invariants §2.1 asks for). Truncated to
+///   `cap_tokens` (the Agent-configurable 500–4,000 target). A missing
+///   summary degrades to the pointer form with a WARN, per §2.1's
+///   "Compact Model 不可用" fallback row.
+pub fn rotation_handoff(
+    reason: RotateReason,
+    old_session_id: &str,
+    summary: Option<&str>,
+    cap_tokens: u64,
+) -> String {
+    let pointer = match reason {
         RotateReason::T1Idle => format!(
             "[intent rotation] The previous execution session for this context (session id \"{old}\") was rotated after an idle interval past the T1 threshold; no open items were recorded for carry-over. Its full history stays available under that session id.",
             old = old_session_id
         ),
         RotateReason::T2Compaction => format!(
-            "[intent rotation] The previous execution session for this context (session id \"{old}\") was rotated after an in-turn compaction (T2: long-running task). Its full history and compaction summary stay under that session id.",
+            "[intent rotation] The previous execution session for this context (session id \"{old}\") was rotated after an in-turn compaction (T2: long-running task).",
             old = old_session_id
         ),
+    };
+    match (reason, summary) {
+        (RotateReason::T2Compaction, Some(s)) => {
+            let (body, truncated) = truncate_to_tokens(s, cap_tokens);
+            let body_note = format!(
+                "{pointer}\n[distilled handoff — last compaction summary of the previous session{}]\n{body}",
+                if truncated { ", truncated to the token cap" } else { "" }
+            );
+                if truncated {
+                    tracing::warn!(
+                        cap_tokens,
+                        "Intent T2 handoff truncated to token cap (design 27 §2.1)"
+                    );
+                }
+                body_note
+            }
+        (RotateReason::T2Compaction, None) => {
+            tracing::warn!(
+                old_session = %old_session_id,
+                "Intent T2 rotation without a readable compaction summary — pointer handoff only"
+            );
+            format!("{pointer} Its full history and compaction summary stay under that session id.")
+        }
+        _ => pointer,
     }
+}
+
+/// Cut `text` to roughly `max_tokens` tokens (chars / 3.5, the Runtime's
+/// standard estimate) on a char boundary. Returns `(body, truncated)`.
+fn truncate_to_tokens(text: &str, max_tokens: u64) -> (String, bool) {
+    let budget = (max_tokens as usize).saturating_mul(4); // conservative: 4 bytes/token
+    if text.len() <= budget {
+        return (text.to_string(), false);
+    }
+    let mut end = budget;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
 }
 
 #[cfg(test)]
@@ -354,6 +478,132 @@ mod tests {
         m.remove("conv:c9").unwrap();
         assert!(m.get("conv:c9").is_none());
         assert!(IntentSessionMap::load(&dir).get("conv:c9").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_seed_parses_only_string_model_provider() {
+        assert!(SessionSeed::from_json("").is_none());
+        assert!(SessionSeed::from_json("not json").is_none());
+        assert!(SessionSeed::from_json("[1,2]").is_none(), "non-object");
+        assert!(
+            SessionSeed::from_json(r#"{"temperature": 0.5}"#).is_none(),
+            "recognized keys absent -> responder defaults"
+        );
+        let s = SessionSeed::from_json(r#"{"model":" m1 ","provider":"p1","skills":true}"#).unwrap();
+        assert_eq!(s.model.as_deref(), Some("m1"));
+        assert_eq!(s.provider.as_deref(), Some("p1"));
+        let s2 = SessionSeed::from_json(r#"{"model":"m2"}"#).unwrap();
+        assert_eq!(s2.provider, None);
+    }
+
+    #[test]
+    fn session_seed_clamps_to_responder_allowed_set() {
+        use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry};
+        let caps = ModelCapabilitiesInfo {
+            context_window: 100_000,
+            max_output_tokens: 8192,
+            max_input_tokens: None,
+            supports_tool_calling: true,
+            supports_reasoning: None,
+            supports_attachment: None,
+            supports_temperature: None,
+            cost: None,
+            modalities: None,
+            name: None,
+            family: None,
+            knowledge_cutoff: None,
+            default_reasoning_effort: None,
+            thinking_mode: None,
+        };
+        let entry = |id: &str| ProviderModelEntry {
+            id: id.to_string(),
+            capabilities: caps.clone(),
+            max_output_tokens_limit: 0,
+        };
+        let provider = |id: &str, models: Vec<ProviderModelEntry>| ProviderListItem {
+            id: id.into(),
+            base_url: String::new(),
+            protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+            models,
+            compact_model: None,
+            custom: false,
+        };
+        let list = vec![
+            provider("p1", vec![entry("m1")]),
+            provider("p2", vec![entry("m2")]),
+        ];
+        // Valid model, no provider pinned -> provider resolved from the hit.
+        let s = SessionSeed {
+            model: Some("m2".into()),
+            provider: None,
+        }
+        .clamp_to_responder(&list)
+        .unwrap();
+        assert_eq!((s.model.as_deref(), s.provider.as_deref()), (Some("m2"), Some("p2")));
+        // Provider/model pair mismatch -> suggestion dropped entirely.
+        let bad = SessionSeed {
+            model: Some("m2".into()),
+            provider: Some("p1".into()),
+        }
+        .clamp_to_responder(&list);
+        assert!(bad.is_none());
+        // Unknown model -> None (responder defaults).
+        assert!(SessionSeed {
+            model: Some("nope".into()),
+            provider: None,
+        }
+        .clamp_to_responder(&list)
+        .is_none());
+    }
+
+    #[test]
+    fn t2_handoff_carries_distilled_summary_t1_stays_pointer() {
+        let summary = "Goal: ship X. Decisions: A, B. Open: C.";
+        let t2 = rotation_handoff(RotateReason::T2Compaction, "s-old", Some(summary), 1500);
+        assert!(t2.contains("distilled handoff"), "{t2}");
+        assert!(t2.contains(summary), "summary embedded");
+        assert!(t2.contains("s-old"), "predecessor id kept");
+        // T1: design fixes pointer-only (no conversation summary).
+        let t1 = rotation_handoff(RotateReason::T1Idle, "s-old", Some(summary), 1500);
+        assert!(!t1.contains("distilled handoff"), "T1 never carries a summary");
+        // T2 with no readable summary degrades to the pointer form.
+        let degraded = rotation_handoff(RotateReason::T2Compaction, "s-old", None, 1500);
+        assert!(!degraded.contains("distilled handoff"));
+        assert!(degraded.contains("s-old"));
+    }
+
+    #[test]
+    fn handoff_truncates_to_token_cap_on_char_boundary() {
+        // CJK content: 3 bytes per char — a naive byte cut would panic.
+        let long = "结".repeat(5000); // 15000 bytes
+        let (body, truncated) = truncate_to_tokens(&long, 1000); // 4000-byte budget
+        assert!(truncated);
+        assert!(body.len() <= 4000);
+        assert_eq!(body.chars().count() * 3, body.len(), "clean char boundary");
+        let (whole, not) = truncate_to_tokens("short", 1000);
+        assert!(!not);
+        assert_eq!(whole, "short");
+    }
+
+    #[test]
+    fn agent_config_knobs_override_defaults() {
+        let dir = std::env::temp_dir().join(format!("intent-cfg-{}", uuid::Uuid::new_v4()));
+        let mut cfg = crate::agent_config::AgentConfig {
+            intent_idle_rotate_hours: Some(6),
+            intent_handoff_max_tokens: Some(9000), // above design max -> clamped to 4000
+            ..Default::default()
+        };
+        crate::agent_config::save_agent_config(&dir, &cfg).unwrap();
+        assert_eq!(
+            idle_rotate_threshold(&dir),
+            Some(std::time::Duration::from_secs(6 * 3600))
+        );
+        assert_eq!(handoff_max_tokens(&dir), 4000);
+        // 0 disables T1.
+        cfg.intent_idle_rotate_hours = Some(0);
+        crate::agent_config::save_agent_config(&dir, &cfg).unwrap();
+        assert_eq!(idle_rotate_threshold(&dir), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

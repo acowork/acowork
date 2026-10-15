@@ -76,7 +76,9 @@ type WiredField =
   | "shellApprovalThreshold"
   | "approvalTimeoutSecs"
   | "compressionRatioThreshold"
-  | "sessionLanguage";
+  | "sessionLanguage"
+  | "intentIdleRotateHours"
+  | "intentHandoffMaxTokens";
 
 const WIRE_FIELD: Record<WiredField, string> = {
   maxTokens: "max_output_tokens",
@@ -88,6 +90,8 @@ const WIRE_FIELD: Record<WiredField, string> = {
   approvalTimeoutSecs: "approval_timeout_secs",
   compressionRatioThreshold: "compression_ratio_threshold",
   sessionLanguage: "session_language",
+  intentIdleRotateHours: "intent_idle_rotate_hours",
+  intentHandoffMaxTokens: "intent_handoff_max_tokens",
 };
 
 const FIELD_DEBOUNCE_MS = 1000;
@@ -102,6 +106,8 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   maxSessions: FIELD_DEBOUNCE_MS,
   compressionRatioThreshold: FIELD_DEBOUNCE_MS,
   sessionLanguage: FIELD_DEBOUNCE_MS,
+  intentIdleRotateHours: FIELD_DEBOUNCE_MS,
+  intentHandoffMaxTokens: FIELD_DEBOUNCE_MS,
 };
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -240,6 +246,8 @@ export function AgentSetupTab() {
           approval_timeout_secs?: number | null;
           compression_ratio_threshold?: number | null;
           session_language?: string | null;
+          intent_idle_rotate_hours?: number | null;
+          intent_handoff_max_tokens?: number | null;
         };
         // Race-safe merge (ADR-052 follow-up): only overwrite each
         // local profile field when the server returned a concrete
@@ -285,6 +293,15 @@ export function AgentSetupTab() {
         if (typeof cfg.compression_ratio_threshold === "number") {
           patch.compressionRatioThreshold = cfg.compression_ratio_threshold;
         }
+        // Intent rotation knobs (design 27 §2.1). `0` is a meaningful
+        // idle-hours value (disables T1 rotation), so guard on `>= 0`,
+        // not `> 0`.
+        if (typeof cfg.intent_idle_rotate_hours === "number") {
+          patch.intentIdleRotateHours = cfg.intent_idle_rotate_hours;
+        }
+        if (typeof cfg.intent_handoff_max_tokens === "number") {
+          patch.intentHandoffMaxTokens = cfg.intent_handoff_max_tokens;
+        }
         // session_language is a string-or-absent field — preserve
         // explicit `null` (clear) AND concrete value, leave absent
         // alone (preserves optimistic local edit while in-flight).
@@ -323,6 +340,8 @@ export function AgentSetupTab() {
               shell_approval_threshold?: string | null;
               approval_timeout_secs?: number | null;
               session_language?: string | null;
+              intent_idle_rotate_hours?: number | null;
+              intent_handoff_max_tokens?: number | null;
             };
             // Same race-safe merge as the mount effect above. The
             // retained-MQTT snapshot fires this refresh *after* every
@@ -358,6 +377,12 @@ export function AgentSetupTab() {
             }
             if (typeof cfg.approval_timeout_secs === "number") {
               patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
+            }
+            if (typeof cfg.intent_idle_rotate_hours === "number") {
+              patch.intentIdleRotateHours = cfg.intent_idle_rotate_hours;
+            }
+            if (typeof cfg.intent_handoff_max_tokens === "number") {
+              patch.intentHandoffMaxTokens = cfg.intent_handoff_max_tokens;
             }
             if (cfg.session_language !== undefined) {
               patch.sessionLanguage = cfg.session_language;
@@ -1116,6 +1141,59 @@ export function AgentSetupTab() {
             </div>
             <p className="text-9 text-text-tertiary ">
               {t("agentSetup.compressionRatioThresholdDesc")}
+            </p>
+          </div>
+
+    {/* Intent session rotation (design 27 §2.1) — only the two knobs the
+        design exposes: T1 idle threshold and the T2 handoff token cap.
+        Compaction thresholds / T2 criteria / JSONL hard cap stay closed. */}
+          <div className="space-y-1">
+            <label className="block text-10 font-medium text-text-tertiary ">
+              {t("agentSetup.intentIdleRotateHours")}
+            </label>
+            <StyledInput
+              type="number"
+              min={0}
+              max={72}
+              step={1}
+              value={profile.intentIdleRotateHours !== undefined ? profile.intentIdleRotateHours : ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                saveField(
+                  "intentIdleRotateHours",
+                  v === "" ? undefined : Math.min(72, Math.max(0, parseInt(v, 10) || 0)),
+                );
+              }}
+              placeholder="24 (default; 0 disables)"
+              className="rounded-md"
+            />
+            <p className="text-9 text-text-tertiary ">
+              {t("agentSetup.intentIdleRotateHoursDesc")}
+            </p>
+          </div>
+
+          <div className="space-y-1">
+            <label className="block text-10 font-medium text-text-tertiary ">
+              {t("agentSetup.intentHandoffMaxTokens")}
+            </label>
+            <StyledInput
+              type="number"
+              min={500}
+              max={4000}
+              step={100}
+              value={profile.intentHandoffMaxTokens && profile.intentHandoffMaxTokens > 0 ? profile.intentHandoffMaxTokens : ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                saveField(
+                  "intentHandoffMaxTokens",
+                  v === "" ? undefined : Math.min(4000, Math.max(500, parseInt(v, 10) || 0)),
+                );
+              }}
+              placeholder="1500 (default)"
+              className="rounded-md"
+            />
+            <p className="text-9 text-text-tertiary ">
+              {t("agentSetup.intentHandoffMaxTokensDesc")}
             </p>
           </div>
           </div>

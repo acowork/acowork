@@ -79,6 +79,41 @@ pub enum UserOp {
     UpdateRuntimeConfig(Box<RuntimeConfigOverrides>),
 }
 
+/// Design doc 27 §3.2 intent envelope (tech-debt plan PR-D).
+///
+/// `message_id` is the Gateway-stable identity (mailbox key),
+/// `conversation_id` / `source_chat_session_id` are empty until
+/// Phase 2, and `repo` is a Gateway-validated source-side authorized
+/// repo the target may work in. All optional (defaulted) so existing
+/// serialized forms still deserialize.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentEnvelope {
+    pub from: String,
+    pub action: String,
+    pub params: serde_json::Value,
+    #[serde(default)]
+    pub message_id: String,
+    #[serde(default)]
+    pub conversation_id: String,
+    #[serde(default)]
+    pub source_chat_session_id: String,
+    #[serde(default)]
+    pub repo: String,
+    /// Initiator's `session_config` suggestion (design 27 §4); consumed
+    /// at execution-session creation only, never rendered into the turn.
+    #[serde(default)]
+    pub session_config_json: String,
+    /// "request" | "response" (design 27 §6.5 R2); empty = request.
+    #[serde(default)]
+    pub kind: String,
+    /// For a response: the request message id this answers.
+    #[serde(default)]
+    pub in_reply_to: String,
+    /// For a response: outcome (§7.1); empty = completed.
+    #[serde(default)]
+    pub status: String,
+}
+
 /// Messages that can be injected into the agent loop from external sources.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InboundMessage {
@@ -89,36 +124,11 @@ pub enum InboundMessage {
         notification_type: String,
         data: serde_json::Value,
     },
-    /// Cross-agent intent message.
+    /// Cross-agent intent message (design doc 27 §3.2 envelope).
     ///
-    /// Envelope fields follow design doc 27 §3.2 (tech-debt plan PR-D):
-    /// `message_id` is the Gateway-stable identity (mailbox key),
-    /// `conversation_id` / `source_chat_session_id` are empty until
-    /// Phase 2, and `repo` is a Gateway-validated source-side authorized
-    /// repo the target may work in. All optional (defaulted) so existing
-    /// serialized forms still deserialize.
-    IntentMessage {
-        from: String,
-        action: String,
-        params: serde_json::Value,
-        #[serde(default)]
-        message_id: String,
-        #[serde(default)]
-        conversation_id: String,
-        #[serde(default)]
-        source_chat_session_id: String,
-        #[serde(default)]
-        repo: String,
-        /// "request" | "response" (design 27 §6.5 R2); empty = request.
-        #[serde(default)]
-        kind: String,
-        /// For a response: the request message id this answers.
-        #[serde(default)]
-        in_reply_to: String,
-        /// For a response: outcome (§7.1); empty = completed.
-        #[serde(default)]
-        status: String,
-    },
+    /// Boxed payload: the envelope carries ~11 string fields, which would
+    /// otherwise dominate every `InboundMessage` slot (`clippy::large_enum_variant`).
+    IntentMessage(Box<IntentEnvelope>),
     /// Stop signal to stop the current agent loop iteration
     Stop { reason: String },
     /// ADR-034: Continue execution after iteration limit was reached.
@@ -249,24 +259,19 @@ impl InboundMessage {
                     truncated = true;
                 }
             }
-            InboundMessage::IntentMessage {
-                from,
-                action,
-                params,
-                ..
-            } => {
-                let params_str = params.to_string();
-                let header_overhead = from.len() + action.len() + "[intent::] ".len();
+            InboundMessage::IntentMessage(env) => {
+                let params_str = env.params.to_string();
+                let header_overhead = env.from.len() + env.action.len() + "[intent::] ".len();
                 let effective_limit = MAX_INBOUND_PAYLOAD_SIZE.saturating_sub(header_overhead);
                 if params_str.len() > effective_limit {
                     tracing::warn!(
                         original_len = params_str.len(),
                         max = effective_limit,
-                        from = %from,
-                        action = %action,
+                        from = %env.from,
+                        action = %env.action,
                         "Truncating oversized inbound IntentMessage params"
                     );
-                    *params = truncate_json_to_bytes(params, effective_limit);
+                    env.params = truncate_json_to_bytes(&env.params, effective_limit);
                     truncated = true;
                 }
             }
@@ -321,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_inbound_message_serde_roundtrip() {
-        let msg = InboundMessage::IntentMessage {
+        let msg = InboundMessage::IntentMessage(Box::new(IntentEnvelope {
             from: "com.test.agent".to_string(),
             action: "update_identity".to_string(),
             params: serde_json::json!({"key": "value"}),
@@ -329,22 +334,17 @@ mod tests {
             conversation_id: String::new(),
             source_chat_session_id: String::new(),
             repo: String::new(),
+            session_config_json: String::new(),
             kind: String::new(),
             in_reply_to: String::new(),
             status: String::new(),
-        };
+        }));
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
-        if let InboundMessage::IntentMessage {
-            from,
-            action,
-            params,
-            ..
-        } = decoded
-        {
-            assert_eq!(from, "com.test.agent");
-            assert_eq!(action, "update_identity");
-            assert_eq!(params["key"], "value");
+        if let InboundMessage::IntentMessage(env) = decoded {
+            assert_eq!(env.from, "com.test.agent");
+            assert_eq!(env.action, "update_identity");
+            assert_eq!(env.params["key"], "value");
         } else {
             panic!("Expected IntentMessage");
         }
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn test_enforce_size_limit_intent_message() {
         let big_params = serde_json::json!({"data": "B".repeat(MAX_INBOUND_PAYLOAD_SIZE + 500)});
-        let msg = InboundMessage::IntentMessage {
+        let msg = InboundMessage::IntentMessage(Box::new(IntentEnvelope {
             from: "com.test.agent".to_string(),
             action: "ping".to_string(),
             params: big_params,
@@ -453,14 +453,15 @@ mod tests {
             conversation_id: String::new(),
             source_chat_session_id: String::new(),
             repo: String::new(),
+            session_config_json: String::new(),
             kind: String::new(),
             in_reply_to: String::new(),
             status: String::new(),
-        };
+        }));
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);
-        if let InboundMessage::IntentMessage { params, .. } = msg {
-            assert!(params.to_string().len() <= MAX_INBOUND_PAYLOAD_SIZE);
+        if let InboundMessage::IntentMessage(env) = msg {
+            assert!(env.params.to_string().len() <= MAX_INBOUND_PAYLOAD_SIZE);
         } else {
             panic!("Expected IntentMessage");
         }

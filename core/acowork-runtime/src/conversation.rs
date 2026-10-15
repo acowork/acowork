@@ -2875,6 +2875,32 @@ pub fn count_jsonl_lines(path: &Path) -> std::io::Result<usize> {
     Ok(count)
 }
 
+/// Design 27 §2.1 T2 handoff source: the LAST persisted compaction summary
+/// of a session (`kind == "compaction"` entries carry the LLM-distilled
+/// summary as `content`). Scanned from disk so it works whether or not the
+/// old session is still resident. `None` when the file is missing/unreadable
+/// or no compaction ever persisted.
+pub fn last_compaction_summary(work_dir: &Path, session_id: &str) -> Option<String> {
+    let path = work_dir
+        .join("conversations")
+        .join(format!("{session_id}.jsonl"));
+    let file = std::fs::File::open(path).ok()?;
+    let mut last: Option<String> = None;
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        if !line.contains(ENTRY_KIND_COMPACTION) {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<ConversationEntry>(&line)
+            && entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)
+            && !entry.content.trim().is_empty()
+        {
+            last = Some(entry.content);
+        }
+    }
+    last
+}
+
 /// Read messages from a JSONL file since a given line-number coordinate.
 ///
 /// ADR-021: This is the Runtime-side handler for incremental poll requests.
@@ -3123,6 +3149,43 @@ pub fn read_messages_since_cursor(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn last_compaction_summary_picks_the_latest_compaction_line() {
+        let dir = TempDir::new().unwrap();
+        let conv = dir.path().join("conversations");
+        std::fs::create_dir_all(&conv).unwrap();
+        let entry = |role: &str, content: &str, kind: Option<&str>| ConversationEntry {
+            id: "x".into(),
+            ts: "2026-01-01T00:00:00.000Z".into(),
+            role: role.into(),
+            content: content.into(),
+            metadata: None,
+            kind: kind.map(str::to_string),
+        };
+        std::fs::write(
+            conv.join("s-1.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::to_string(&entry("user", "hi", None)).unwrap(),
+                serde_json::to_string(&entry("system", "FIRST SUMMARY", Some(ENTRY_KIND_COMPACTION))).unwrap(),
+                serde_json::to_string(&entry("system", "SECOND SUMMARY", Some(ENTRY_KIND_COMPACTION))).unwrap(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            last_compaction_summary(dir.path(), "s-1").as_deref(),
+            Some("SECOND SUMMARY")
+        );
+        // No compaction yet / missing file -> None, never a panic.
+        std::fs::write(
+            conv.join("s-2.jsonl"),
+            serde_json::to_string(&entry("user", "hi", None)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(last_compaction_summary(dir.path(), "s-2"), None);
+        assert_eq!(last_compaction_summary(dir.path(), "nope"), None);
+    }
 
     #[test]
     fn test_generate_session_id() {

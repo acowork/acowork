@@ -184,6 +184,12 @@ fn apply_field_patch(
         ConfigField::SessionLanguage => {
             cfg.session_language = patch_typed::<String>(field, op);
         }
+        ConfigField::IntentIdleRotateHours => {
+            cfg.intent_idle_rotate_hours = patch_typed::<u64>(field, op);
+        }
+        ConfigField::IntentHandoffMaxTokens => {
+            cfg.intent_handoff_max_tokens = patch_typed::<u64>(field, op);
+        }
     }
 }
 
@@ -400,6 +406,8 @@ mod tests {
             None,                          // memory_forgetting_dormant_threshold absent -> skip
             None,                          // memory_forgetting_archive_days absent -> skip
             None,                          // session_language absent -> skip
+            None,                          // intent_idle_rotate_hours absent -> skip
+            None,                          // intent_handoff_max_tokens absent -> skip
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
@@ -456,6 +464,8 @@ mod tests {
             Some(serde_json::json!(null)), // memory_forgetting_dormant_threshold -> Clear
             None,                          // memory_forgetting_archive_days absent -> skip
             None,                          // session_language absent -> skip
+            None,                          // intent_idle_rotate_hours absent -> skip
+            None,                          // intent_handoff_max_tokens absent -> skip
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =

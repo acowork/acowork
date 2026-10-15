@@ -84,6 +84,10 @@ impl IntentSendTool {
                         "type": "string",
                         "description": "Optional git URL of a repository the task is about (design doc 27 §4.1). Format-checked by the Gateway; the target works only inside its own authorized directories."
                     },
+                    "session_config": {
+                        "type": "object",
+                        "description": "Optional initial-config suggestion for the target's execution session, e.g. {\"model\": \"...\", \"provider\": \"...\"} (design doc 27 §4). Only a suggestion: the target applies it only when creating a new session and only within its own allowed model set; fields you omit use the target's defaults. Omit unless you have a concrete reason."
+                    },
                     "conversation_id": {
                         "type": "string",
                         "description": "Optional conversation coordinate. Omit on the FIRST request (the Gateway assigns one and returns it below); pass the value from the returned message/turn metadata on every FOLLOW-UP in the same conversation, so the target answers in the same execution session and the per-conversation request budget is enforced."
@@ -145,6 +149,9 @@ impl Tool for IntentSendTool {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         let repo = params.get("repo").and_then(|v| v.as_str()).map(String::from);
+        // Design 27 §4: optional session-config suggestion — forwarded
+        // verbatim; shape-checked by the Gateway, clamped by the responder.
+        let session_config = params.get("session_config").cloned();
         // Design 27 §6.2: the initiator reuses one conversation_id across
         // follow-ups; the Gateway assigns it when absent and reports it
         // back so the model can copy it into the next request.
@@ -165,6 +172,7 @@ impl Tool for IntentSendTool {
             "action": action,
             "params": intent_params,
             "repo": repo,
+            "session_config": session_config,
             "conversation_id": conversation_id,
         });
 

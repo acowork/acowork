@@ -2507,18 +2507,21 @@ mod tests {
         let mut context_builder = ContextBuilder::new("System".to_string());
 
         inbound_tx
-            .try_send(InboundMessage::IntentMessage {
-                from: "com.test.agent".to_string(),
-                action: "ping".to_string(),
-                params: serde_json::json!({}),
-                message_id: String::new(),
-                conversation_id: String::new(),
-                source_chat_session_id: String::new(),
-                repo: String::new(),
-                kind: String::new(),
-                in_reply_to: String::new(),
-                status: String::new(),
-            })
+            .try_send(InboundMessage::IntentMessage(Box::new(
+                crate::agent::inbound::IntentEnvelope {
+                    from: "com.test.agent".to_string(),
+                    action: "ping".to_string(),
+                    params: serde_json::json!({}),
+                    message_id: String::new(),
+                    conversation_id: String::new(),
+                    source_chat_session_id: String::new(),
+                    repo: String::new(),
+                    session_config_json: String::new(),
+                    kind: String::new(),
+                    in_reply_to: String::new(),
+                    status: String::new(),
+                },
+            )))
             .unwrap();
 
         let result = agent_loop

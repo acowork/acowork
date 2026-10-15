@@ -95,6 +95,35 @@ pub fn validate_repo(repo: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Design 27 §4 `session_config` gate — **shape only**, mirroring the
+/// repo split: the Gateway checks the envelope, the responder enforces
+/// the allowed set (§13-6). Contract: a JSON object, ≤ 8 keys, every
+/// value a string ≤ 256 chars, serialized size ≤ 4 KiB. Unknown keys are
+/// tolerated (additive fields land without a wire revision); a violation
+/// is refused at the HTTP entry (`session_config_invalid`, §7.1) rather
+/// than silently dropped — a sender that meant to pin a model must learn
+/// its suggestion never reached the target.
+pub fn validate_session_config(value: &serde_json::Value) -> Result<(), String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "session_config must be a JSON object".to_string())?;
+    if obj.len() > 8 {
+        return Err("session_config has too many keys (max 8)".into());
+    }
+    for (k, v) in obj {
+        let s = v
+            .as_str()
+            .ok_or_else(|| format!("session_config.{k} must be a string"))?;
+        if s.is_empty() || s.len() > 256 {
+            return Err(format!("session_config.{k} must be 1-256 chars"));
+        }
+    }
+    if value.to_string().len() > 4096 {
+        return Err("session_config exceeds 4 KiB".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +140,40 @@ mod tests {
             "local paths must not ride the wire (design 27 §4.1)"
         );
         assert!(validate_repo("https://example.com/p").is_ok());
-        assert!(validate_repo(&format!("https://x/{}", "p".repeat(600))).is_err(), "length cap");
+        assert!(
+            validate_repo(&format!("https://x/{}", "p".repeat(600))).is_err(),
+            "length cap"
+        );
+    }
+
+    #[test]
+    fn session_config_shape_gate() {
+        use serde_json::json;
+        assert!(validate_session_config(&json!({"model": "gpt-4o"})).is_ok());
+        assert!(validate_session_config(&json!({"model": "m", "provider": "p"})).is_ok());
+        assert!(
+            validate_session_config(&json!({})).is_ok(),
+            "empty object = no opinion"
+        );
+        assert!(validate_session_config(&json!("just a string")).is_err());
+        assert!(validate_session_config(&json!([1])).is_err());
+        assert!(
+            validate_session_config(&json!({"model": 4})).is_err(),
+            "values must be strings (§4 initial values, not tunables)"
+        );
+        assert!(
+            validate_session_config(&json!({"model": ""})).is_err(),
+            "empty value"
+        );
+        assert!(
+            validate_session_config(&json!({"model": "m".repeat(300)})).is_err(),
+            "per-value length cap"
+        );
+        let many: serde_json::Map<String, serde_json::Value> =
+            (0..9).map(|i| (format!("k{i}"), json!("v"))).collect();
+        assert!(
+            validate_session_config(&serde_json::Value::Object(many)).is_err(),
+            "key count cap"
+        );
     }
 }
