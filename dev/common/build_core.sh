@@ -380,11 +380,38 @@ echo ""
 
 # Step 3.5: Build Embedding Runtime
 #
-# This script probes .ort/onnxruntime-*/lib for a local ONNX Runtime install
-# and exports ORT_LIB_LOCATION / ORT_DYLIB_PATH / ORT_PREFER_DYNAMIC_LINK
-# before invoking cargo. Run dev/common/setup_ort.sh first to download ORT.
+# detect_ort_local probes .ort/onnxruntime-*/lib for a local ONNX Runtime
+# install and exports ORT_LIB_LOCATION / ORT_DYLIB_PATH /
+# ORT_PREFER_DYNAMIC_LINK before invoking cargo. Run
+# dev/common/setup_ort.sh first to download ORT (the script will offer to
+# do that interactively when ORT is missing and a terminal is attached).
 #
 # Users can skip this step entirely with: ./dev/common/build_core.sh --skip-embed
+
+# Probe .ort/onnxruntime-*/lib and export ORT_* env vars on success.
+# Returns 0 when a usable library was found, 1 otherwise. Exposed as a
+# function because it must run twice in the missing-ORT path: once before
+# the setup_ort prompt and once after (setup_ort's exports live in its own
+# child shell and do not propagate back to this script).
+detect_ort_local() {
+    for ort_dir in "$WORKSPACE_ROOT"/.ort/onnxruntime-*; do
+        [ -d "$ort_dir" ] || continue
+        local local_lib=""
+        case "$OS" in
+            macos)   local_lib="$ort_dir/lib/libonnxruntime.dylib" ;;
+            windows) local_lib="$ort_dir/lib/onnxruntime.dll" ;;
+            *)       local_lib="$ort_dir/lib/libonnxruntime.so" ;;
+        esac
+        if [ -f "$local_lib" ]; then
+            export ORT_LIB_LOCATION="$ort_dir/lib"
+            export ORT_DYLIB_PATH="$local_lib"
+            export ORT_PREFER_DYNAMIC_LINK=1
+            echo -e "${GREEN}  Detected local ORT: $ort_dir/lib${NC}"
+            return 0
+        fi
+    done
+    return 1
+}
 
 if [ "$SKIP_EMBED" = "true" ]; then
     echo -e "${YELLOW}[3.5/8] Skipping Embedding Runtime (--skip-embed).${NC}"
@@ -393,22 +420,7 @@ else
 
     # Auto-detect local ONNX Runtime install under .ort/
     if [ -z "$ORT_LIB_LOCATION" ]; then
-        for ort_dir in "$WORKSPACE_ROOT"/.ort/onnxruntime-*; do
-            [ -d "$ort_dir" ] || continue
-            local_lib=""
-            case "$OS" in
-                macos)   local_lib="$ort_dir/lib/libonnxruntime.dylib" ;;
-                windows) local_lib="$ort_dir/lib/onnxruntime.dll" ;;
-                *)       local_lib="$ort_dir/lib/libonnxruntime.so" ;;
-            esac
-            if [ -f "$local_lib" ]; then
-                export ORT_LIB_LOCATION="$ort_dir/lib"
-                export ORT_DYLIB_PATH="$local_lib"
-                export ORT_PREFER_DYNAMIC_LINK=1
-                echo -e "${GREEN}  Detected local ORT: $ort_dir/lib${NC}"
-                break
-            fi
-        done
+        detect_ort_local || true
     fi
     
     # Fallback: Auto-detect from Cargo cache if download-ort feature was used
@@ -434,6 +446,33 @@ else
                 break
             fi
         done
+    fi
+    if [ -z "$ORT_LIB_LOCATION" ]; then
+        # Offer to run setup_ort.sh in-place. Guards:
+        #   - `[ -t 0 ]`: only prompt with a real terminal. CI / piped stdin
+        #     keeps the historical hard-exit behavior (never block on input).
+        #   - OS check: setup_ort.sh disclaims Windows (Git Bash/WSL) in its
+        #     own header, so there we point to the PowerShell path instead.
+        if [ -t 0 ] && [ "$OS" != "windows" ]; then
+            read -r -p "  Run ./dev/common/setup_ort.sh now? [Y/n] " ort_reply || ort_reply="n"
+            case "$ort_reply" in
+                ""|y|Y|yes|YES|Yes)
+                    echo -e "${CYAN}  Running setup_ort.sh ...${NC}"
+                    if bash "$SCRIPT_DIR/setup_ort.sh"; then
+                        # setup_ort's exports do not cross the process
+                        # boundary; re-probe .ort/ to pick up the install.
+                        detect_ort_local || true
+                    else
+                        echo -e "${RED}  setup_ort.sh failed. Check network/mirror, or run it manually.${NC}"
+                    fi
+                    ;;
+                *)
+                    echo -e "${GRAY}  Skipped setup_ort.sh.${NC}"
+                    ;;
+            esac
+        elif [ "$OS" = "windows" ]; then
+            echo -e "${YELLOW}  On Windows use .\\dev\\common\\build_core.ps1 (setup_ort.sh is not supported under Git Bash/WSL).${NC}"
+        fi
     fi
     if [ -z "$ORT_LIB_LOCATION" ]; then
         echo -e "${RED}  ONNX Runtime not found. Run ./dev/common/setup_ort.sh first.${NC}"

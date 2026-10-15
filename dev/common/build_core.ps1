@@ -433,22 +433,57 @@ Write-Host ""
 $step++
 Write-Host "[$step/$totalSteps] Building Embedding Runtime ($Profile mode)..." -ForegroundColor Yellow
 
-$ortDir = Join-Path $WorkspaceRoot ".ort"
-$ortEntries = @()
-if (Test-Path $ortDir) {
-    $ortEntries = Get-ChildItem -Path $ortDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "onnxruntime-win-x64-*" } | Sort-Object Name -Descending
+# Probe .ort/onnxruntime-win-x64-*/lib for onnxruntime.dll and set the ORT_*
+# environment variables on success. Function form because it must run twice
+# in the missing-ORT path: once before the setup_ort prompt and once after
+# (setup_ort.ps1 runs in-process so its $env: assignments do persist, but
+# the re-probe also covers its "already installed, skipped download" branch
+# and mirrors the build_core.sh structure).
+function Find-OrtLocal {
+    $ortDir = Join-Path $WorkspaceRoot ".ort"
+    $ortEntries = @()
+    if (Test-Path $ortDir) {
+        $ortEntries = Get-ChildItem -Path $ortDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "onnxruntime-win-x64-*" } | Sort-Object Name -Descending
+    }
+    $preferredOrt = $ortEntries | Where-Object { $_.Name -eq "onnxruntime-win-x64-1.22.0" } | Select-Object -First 1
+    if (-not $preferredOrt) {
+        $preferredOrt = $ortEntries | Select-Object -First 1
+    }
+    if ($preferredOrt) {
+        $libDir = Join-Path $preferredOrt.FullName "lib"
+        $dllPath = Join-Path $libDir "onnxruntime.dll"
+        if (Test-Path $dllPath) {
+            $env:ORT_LIB_LOCATION = $libDir
+            $env:ORT_DYLIB_PATH = $dllPath
+            Write-Host "  Using local ORT: $libDir" -ForegroundColor Green
+            return $true
+        }
+    }
+    return $false
 }
-$preferredOrt = $ortEntries | Where-Object { $_.Name -eq "onnxruntime-win-x64-1.22.0" } | Select-Object -First 1
-if (-not $preferredOrt) {
-    $preferredOrt = $ortEntries | Select-Object -First 1
-}
-if ($preferredOrt) {
-    $libDir = Join-Path $preferredOrt.FullName "lib"
-    $dllPath = Join-Path $libDir "onnxruntime.dll"
-    if (Test-Path $dllPath) {
-        $env:ORT_LIB_LOCATION = $libDir
-        $env:ORT_DYLIB_PATH = $dllPath
-        Write-Host "  Using local ORT: $libDir" -ForegroundColor Green
+
+[void](Find-OrtLocal)
+
+if (-not $env:ORT_LIB_LOCATION) {
+    # Offer to run setup_ort.ps1 in-place. Guard: only prompt when stdin is a
+    # real terminal — CI / piped stdin keeps the historical hard-exit
+    # behavior and must never block on input.
+    if (-not [Console]::IsInputRedirected) {
+        $reply = Read-Host "  Run .\dev\common\setup_ort.ps1 now? [Y/n]"
+        if ([string]::IsNullOrEmpty($reply) -or $reply -match '^[yY]') {
+            Write-Host "  Running setup_ort.ps1 ..." -ForegroundColor Cyan
+            # NB: a child script's `exit 1` does NOT raise a terminating error,
+            # so try/catch cannot see it — even with $ErrorActionPreference=Stop.
+            # Failure must be read from $LASTEXITCODE instead.
+            & (Join-Path $PSScriptRoot "setup_ort.ps1")
+            if ($LASTEXITCODE -eq 0) {
+                [void](Find-OrtLocal)
+            } else {
+                Write-Host "  setup_ort.ps1 failed (exit $LASTEXITCODE). Check network/mirror, or run it manually." -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  Skipped setup_ort.ps1." -ForegroundColor Gray
+        }
     }
 }
 if (-not $env:ORT_LIB_LOCATION) {
