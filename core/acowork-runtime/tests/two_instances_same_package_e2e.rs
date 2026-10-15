@@ -267,6 +267,9 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
                 source_agent_session_id: String::new(),
                 source_chat_session_id: String::new(),
                 repo: String::new(),
+                kind: String::new(),
+                in_reply_to: String::new(),
+                status: String::new(),
 params_json: r#"{"target":"A"}"#.into(),
             })),
         };

@@ -68,6 +68,9 @@ fn req(target: &str) -> DeliveryRequest {
         params_json: r#"{"k":1}"#.into(),
         source_chat_session_id: String::new(),
         repo: String::new(),
+        kind: "request".into(),
+        in_reply_to: String::new(),
+        status: String::new(),
     }
 }
 
@@ -88,6 +91,9 @@ fn entry(
         created_at: created_at.into(),
         delivered_at: delivered_at.into(),
         result_ref: String::new(),
+        kind: "request".into(),
+        status: String::new(),
+        source_chat_session_id: String::new(),
     }
 }
 
@@ -626,6 +632,9 @@ fn intent_wire_fields_roundtrip() {
         source_agent_session_id: "s-1".into(),
         source_chat_session_id: "ch-1".into(),
         repo: "https://github.com/o/p".into(),
+        kind: "request".into(),
+        in_reply_to: String::new(),
+        status: String::new(),
     };
     let cmd = ControlCommand {
         instance_id: TARGET.into(),

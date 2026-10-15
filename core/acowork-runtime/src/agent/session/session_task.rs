@@ -150,6 +150,27 @@ pub enum SessionMessage {
     /// Used to surface MCP connection failures and other async events
     /// to the LLM context so the Agent can self-heal.
     SystemNotification { content: String },
+    /// Design 27 §6/§7: an Intent envelope delivered to this execution
+    /// session as a *turn trigger* (the session was idle, or the turn must
+    /// run with responder-role semantics). `kind == "request"` puts the
+    /// turn in responder role: tool trimming (R1), no human-awaiting
+    /// pauses (R3), and a system `response` write-back at turn end (§7.1).
+    /// `kind == "response"` renders the initiator-side answer turn.
+    Intent {
+        /// Rendered user-visible message text (shared renderer,
+        /// `intent_turn::render_intent_message`).
+        content: String,
+        /// Stable envelope id — also the write-back path coordinate for
+        /// requests (`POST /api/intents/{request_id}/response`).
+        message_id: String,
+        conversation_id: String,
+        source_chat_session_id: String,
+        /// Sender instance (write-back `target`).
+        from: String,
+        action: String,
+        repo: String,
+        kind: String,
+    },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, the front/back suppression mechanism is gone.
 }
@@ -267,6 +288,19 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::SystemNotification { content } => f
                 .debug_struct("SystemNotification")
                 .field("len", &content.len())
+                .finish(),
+            SessionMessage::Intent {
+                message_id,
+                kind,
+                from,
+                action,
+                ..
+            } => f
+                .debug_struct("Intent")
+                .field("message_id", message_id)
+                .field("kind", kind)
+                .field("from", from)
+                .field("action", action)
                 .finish(),
         }
     }
@@ -1119,6 +1153,150 @@ impl SessionTask {
                                         "Failed to send Error chunk event"
                                     );
                                 }
+                            }
+                        }
+                    }
+                }
+                Some(SessionMessage::Intent {
+                    content,
+                    message_id,
+                    conversation_id,
+                    source_chat_session_id,
+                    from,
+                    action,
+                    repo: _,
+                    kind,
+                }) => {
+                    // Design 27 §7.1: a `request` starts a responder turn —
+                    // the loop hides intent_send / ask_user_question and
+                    // refuses human-awaiting pauses while `pending_intent`
+                    // is set. A `response` is an ordinary turn for the
+                    // initiator (the answer arrives as user input; the
+                    // model decides any follow-up with a fresh request).
+                    let is_request = kind != "response";
+                    if is_request {
+                        agent_loop.pending_intent =
+                            Some(crate::agent::intent_turn::IntentTurnContext::new(
+                                &message_id,
+                                &conversation_id,
+                                &source_chat_session_id,
+                                &from,
+                                &action,
+                            ));
+                    }
+                    last_user_message = Some((content.clone(), message_id.clone()));
+                    let result = agent_loop
+                        .run(
+                            &content,
+                            &mut context_builder,
+                            None,
+                            Some(message_id.clone()),
+                            Some(content.as_str()),
+                            None,
+                        )
+                        .await;
+                    // Take the context back regardless of outcome — the
+                    // turn is over and the next one must not inherit it.
+                    let ctx = agent_loop.pending_intent.take();
+                    match result {
+                        Ok(response) => {
+                            if let Some(ref tx) = chunk_tx {
+                                let event = SessionChunkEvent {
+                                    session_id: session_id.clone(),
+                                    event: ChunkEvent::Done {
+                                        content: response.clone(),
+                                        message_id: message_id.clone(),
+                                    },
+                                };
+                                if tx.send(event).await.is_err() {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        "Failed to send Done chunk event (intent turn)"
+                                    );
+                                }
+                            }
+                            agent_loop.session_core.notify_new_data_available();
+                            if let Some(ctx) = ctx {
+                                // System write-back (§7.1) — the model had
+                                // no tool that could produce this.
+                                let body =
+                                    crate::agent::intent_turn::truncate_response_body(&response, 64 * 1024);
+                                if let Err(e) = crate::agent::intent_turn::post_intent_response(
+                                    &agent_loop.core.config.agent_instance_id,
+                                    &agent_loop
+                                        .core
+                                        .config
+                                        .gateway_host
+                                        .clone()
+                                        .unwrap_or_else(|| "127.0.0.1".to_string()),
+                                    &agent_loop
+                                        .core
+                                        .config
+                                        .mqtt_password
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    &session_id,
+                                    &ctx,
+                                    &body,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        request_id = %ctx.request_id,
+                                        error = %e,
+                                        "Intent response write-back failed (turn already ended; Gateway mailbox keeps the fact)"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                session_id = %session_id,
+                                error = %e,
+                                "SessionTask agent loop error (intent turn)"
+                            );
+                            let (user_message, detail, error_type) = e.error_info();
+                            if let Some(ref tx) = chunk_tx {
+                                let event = SessionChunkEvent {
+                                    session_id: session_id.clone(),
+                                    event: ChunkEvent::Error {
+                                        user_message: user_message.clone(),
+                                        detail,
+                                        error_type,
+                                        message_id: message_id.clone(),
+                                    },
+                                };
+                                if tx.send(event).await.is_err() {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        "Failed to send Error chunk event (intent turn)"
+                                    );
+                                }
+                            }
+                            if let Some(mut ctx) = ctx {
+                                // §7.1 failed row: user-facing summary only,
+                                // no internal detail / stack on the wire.
+                                ctx.outcome = "failed".to_string();
+                                let _ = crate::agent::intent_turn::post_intent_response(
+                                    &agent_loop.core.config.agent_instance_id,
+                                    &agent_loop
+                                        .core
+                                        .config
+                                        .gateway_host
+                                        .clone()
+                                        .unwrap_or_else(|| "127.0.0.1".to_string()),
+                                    &agent_loop
+                                        .core
+                                        .config
+                                        .mqtt_password
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    &session_id,
+                                    &ctx,
+                                    &user_message,
+                                )
+                                .await;
                             }
                         }
                     }

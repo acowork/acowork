@@ -371,6 +371,25 @@ impl AgentLoop {
                     approval_req = self.approval_rx.recv() => {
                         match approval_req {
                             Some((req, decision_tx)) => {
+                                // Design 27 §6.5 R3: an intent responder turn
+                                // has no human watching it. Never announce the
+                                // approval (no WaitingApproval state, no 5-min
+                                // timeout wait) — reject it immediately so the
+                                // model answers without the gated tool.
+                                if self.pending_intent.is_some() {
+                                    let _ = decision_tx.send(ApprovalDecision {
+                                        approved: false,
+                                        allow_all_session: false,
+                                        reason: Some(
+                                            "intent responder turns cannot wait for human approval"
+                                                .to_string(),
+                                        ),
+                                    });
+                                    tracing::info!(
+                                        "Auto-rejected tool approval in intent responder turn"
+                                    );
+                                    continue;
+                                }
                                 let request_id = uuid::Uuid::new_v4().to_string();
                                 self.pending_approvals.insert(
                                     request_id.clone(),
@@ -1295,6 +1314,24 @@ impl AgentLoop {
         let mut parallel_calls: Vec<(usize, ToolCall)> = Vec::new();
 
         for (idx, tc) in calls_to_execute.into_iter().enumerate() {
+            // Design 27 §6.5 R1 backstop: the tools are hidden from the
+            // responder's wire tool set, but a hallucinated call (e.g. from
+            // a cached prompt) must not hang the turn awaiting a human or
+            // spawn a nested Intent — reject it as a tool error instead.
+            if self.pending_intent.is_some()
+                && matches!(
+                    tc.function.name.as_str(),
+                    "ask_user_question" | "intent_send"
+                )
+            {
+                let result = format!(
+                    "Error: `{}` is not available while answering an Intent request \
+                     (design 27 §6.5 R1). Finish the answer; the system writes the response back.",
+                    tc.function.name
+                );
+                ask_question_results.push((idx, (result, false)));
+                continue;
+            }
             if tc.function.name == "ask_user_question" {
                 let result = self.handle_ask_user_question(&tc).await;
                 ask_question_results.push((idx, (result, false)));

@@ -83,6 +83,10 @@ impl IntentSendTool {
                     "repo": {
                         "type": "string",
                         "description": "Optional git URL of a repository the target is authorized to work in, validated against your own workspace (design doc 27 §3.2)."
+                    },
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "Optional conversation coordinate. Omit on the FIRST request (the Gateway assigns one and returns it below); pass the value from the returned message/turn metadata on every FOLLOW-UP in the same conversation, so the target answers in the same execution session and the per-conversation request budget is enforced."
                     }
                 },
                 "required": ["target", "action"]
@@ -141,6 +145,14 @@ impl Tool for IntentSendTool {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         let repo = params.get("repo").and_then(|v| v.as_str()).map(String::from);
+        // Design 27 §6.2: the initiator reuses one conversation_id across
+        // follow-ups; the Gateway assigns it when absent and reports it
+        // back so the model can copy it into the next request.
+        let conversation_id = params
+            .get("conversation_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from);
 
         let url = format!(
             "http://{}:{}/api/intents",
@@ -153,6 +165,7 @@ impl Tool for IntentSendTool {
             "action": action,
             "params": intent_params,
             "repo": repo,
+            "conversation_id": conversation_id,
         });
 
         let mut req = self.client.post(&url).json(&body);
@@ -197,12 +210,18 @@ impl Tool for IntentSendTool {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let conversation_id = body
+            .get("conversation_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         match body.get("status").and_then(|v| v.as_str()) {
             Some("delivered") => Ok(ToolResult {
                 ok: true,
                 content: format!(
-                    "Intent delivered to '{target}' action='{action}' (message_id: {message_id}). \
-                     The target accepted it; any reply arrives later as a new turn in this session."
+                    "Intent delivered to '{target}' action='{action}' (message_id: {message_id}, conversation_id: {conversation_id}). \
+                     The target accepted it; the reply arrives later automatically as a new turn in this session — do not poll. \
+                     For a follow-up in the same conversation pass conversation_id: \"{conversation_id}\"."
                 ),
                 error: None,
                 token_usage: None,

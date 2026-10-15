@@ -514,6 +514,10 @@ pub struct SessionManager {
     /// whole config (which owns the `chunk_tx` mpsc Sender consumed
     /// elsewhere).
     package_dir: PathBuf,
+    /// Design 27 §3.2/§6.1: intent-context → execution-session routing
+    /// table (chat/conv keys). Loaded from the work dir so a restart
+    /// keeps follow-up turns on the session that holds the conversation.
+    intent_map: super::intent_routing::IntentSessionMap,
 }
 
 impl SessionManager {
@@ -534,6 +538,12 @@ impl SessionManager {
         // moved into `self.config` (struct literal consumes it). Same
         // pattern as the two Arc clones above.
         let package_dir = config.package_dir.clone();
+
+        // Design 27 §3.2: routing table lives next to the agent's other
+        // work-dir state; load-or-empty, never fatal.
+        let intent_map = super::intent_routing::IntentSessionMap::load(
+            std::path::Path::new(&core.config.work_dir),
+        );
 
         Self {
             core,
@@ -560,6 +570,7 @@ impl SessionManager {
             latest_session,
             session_configs,
             package_dir,
+            intent_map,
         }
     }
 
@@ -570,6 +581,37 @@ impl SessionManager {
     /// filesystem paths and send `SetWorkDir` to sessions.
     pub fn set_resolver(&mut self, resolver: Arc<std::sync::RwLock<WorkspaceResolver>>) {
         self.resolver = Some(resolver);
+    }
+
+    /// Design 27 §6.1: resolve (or create) the execution session that owns
+    /// an intent context for this agent. `key` comes from
+    /// `intent_routing::routing_key`. A mapped session that is still Active
+    /// is reused; a stale mapping (closed / evicted) is replaced by a fresh
+    /// session and the mapping is updated — the conversation lives in the
+    /// Chat session store, so a new execution session loses nothing the
+    /// envelope does not already carry.
+    pub async fn route_intent_session(&mut self, key: &str) -> Result<String> {
+        if let Some(sid) = self.intent_map.get(key).map(|e| e.session_id.clone()) {
+            if self.get_session(&sid).is_some() {
+                return Ok(sid);
+            }
+            tracing::info!(
+                key,
+                stale_session = %sid,
+                "Intent routing entry points at a non-active session — opening a fresh one"
+            );
+        }
+        let new_sid = self
+            .create_frontend_session(None, None, None, None)
+            .await?;
+        self.intent_map
+            .insert(key.to_string(), new_sid.clone())
+            .map_err(|e| {
+                RuntimeError::Config(format!(
+                    "intent routing persist failed: {e}"
+                ))
+            })?;
+        Ok(new_sid)
     }
 
     /// Create a new session, spawning it as an independent tokio task.

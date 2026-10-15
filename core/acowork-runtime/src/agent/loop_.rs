@@ -434,6 +434,12 @@ pub struct AgentLoop {
     /// Set by the creator (SessionTask / Gateway wiring) to enable
     /// `drain_compress_actions()`.  `None` means no channel was wired.
     pub(crate) compress_action_rx: Option<mpsc::Receiver<CompressionAction>>,
+
+    /// Design 27 §6.5: set when the current turn was triggered by an
+    /// Intent `request` — the agent is in the **responder** role. Drives
+    /// tool trimming (R1), refusal of human-awaiting pause states (R3),
+    /// and the system write-back at turn end (§7.1). `None` = normal turn.
+    pub(crate) pending_intent: Option<crate::agent::intent_turn::IntentTurnContext>,
 }
 
 impl AgentLoop {
@@ -502,6 +508,7 @@ impl AgentLoop {
             current_turn_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
+            pending_intent: None,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         loop_.session_core.approval_handle = Some(approval_handle.clone());
@@ -571,6 +578,7 @@ impl AgentLoop {
             current_turn_user_message: None,
             memory_retrieved_for_session: false,
             compress_action_rx: None,
+            pending_intent: None,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -1004,6 +1012,22 @@ impl AgentLoop {
 
             // ⑨ Iteration limit check — pause and await user decision
             if iteration > self.core.config.max_iterations {
+                // Design 27 §6.5 R3: a responder turn has no human behind
+                // it — never enter the Paused state, end with an `aborted`
+                // receipt naming where it got stuck (§7.1 table).
+                if let Some(ctx) = self.pending_intent.as_mut() {
+                    ctx.outcome = "aborted".to_string();
+                    tracing::warn!(
+                        iteration,
+                        request_id = %ctx.request_id,
+                        "Intent responder hit iteration limit — aborting with receipt"
+                    );
+                    self.transition_status(SessionStatus::Idle);
+                    return Ok(format!(
+                        "[aborted] Reached the iteration limit ({}/{}) before finishing this intent request.",
+                        iteration, self.core.config.max_iterations
+                    ));
+                }
                 tracing::warn!(
                     iteration,
                     max_iterations = self.core.config.max_iterations,
@@ -1148,6 +1172,17 @@ impl AgentLoop {
                 {
                     Ok(result) => break result,
                     Err(RuntimeError::LoopDetected(msg)) => {
+                        // Design 27 §6.5 R3: responder turns never pause —
+                        // loop detection ends the turn as `aborted`.
+                        if let Some(ctx) = self.pending_intent.as_mut() {
+                            ctx.outcome = "aborted".to_string();
+                            tracing::warn!(
+                                request_id = %ctx.request_id,
+                                "Intent responder hit loop detection — aborting with receipt"
+                            );
+                            self.transition_status(SessionStatus::Idle);
+                            return Ok(format!("[aborted] Loop detected before finishing this intent request: {msg}"));
+                        }
                         // Loop detection: inject system warning into history,
                         // reset detector, pause, and wait for ContinueExecution.
                         // This gives the user a "Continue" button like iteration
@@ -2480,6 +2515,9 @@ mod tests {
                 conversation_id: String::new(),
                 source_chat_session_id: String::new(),
                 repo: String::new(),
+                kind: String::new(),
+                in_reply_to: String::new(),
+                status: String::new(),
             })
             .unwrap();
 

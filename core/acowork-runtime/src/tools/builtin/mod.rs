@@ -18,6 +18,7 @@
 //! | glob_search | filesystem:read:<path> |
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
+//! | chat_history_read | (no permission table entry) — participation is enforced server-side (design 27 §9) |
 //! | rag_query | rag:query + network:<rag_url> (registered in agent_init.rs) |
 //! | context_abandon | context:write - RETIRED (dead code, not registered) |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
@@ -35,6 +36,7 @@
 //! entry.
 
 pub mod ask_user_question;
+pub mod chat_history_read;
 pub mod codebase;
 pub mod content_search;
 pub mod context_abandon;
@@ -169,7 +171,8 @@ pub fn all_builtin_tools(
         Arc::new(doc_reader::DocReaderTool::new()),
         Arc::new(glob_search::GlobSearchTool::new(resolver)),
         Arc::new(content_search::ContentSearchTool::new(resolver)),
-        Arc::new(intent_send::IntentSendTool::new(intent_send_config)),
+        Arc::new(intent_send::IntentSendTool::new(intent_send_config.clone())),
+        Arc::new(chat_history_read::ChatHistoryReadTool::new(intent_send_config)),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
         Arc::new(todo_write::TodoWriteTool::new()),
         Arc::new(mcp_install::McpInstallTool::new(

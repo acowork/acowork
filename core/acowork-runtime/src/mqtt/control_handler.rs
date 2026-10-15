@@ -69,6 +69,12 @@ pub enum ControlAction {
         source_agent_session_id: String,
         source_chat_session_id: String,
         repo: String,
+        /// "request" | "response" (design 27 §6.5 R2). Empty = request.
+        kind: String,
+        /// For a response: the request's message_id (§4).
+        in_reply_to: String,
+        /// For a response: §7.1 outcome. Empty = completed.
+        status: String,
     },
 }
 
@@ -99,6 +105,9 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             source_agent_session_id: intent.source_agent_session_id,
             source_chat_session_id: intent.source_chat_session_id,
             repo: intent.repo,
+            kind: intent.kind,
+            in_reply_to: intent.in_reply_to,
+            status: intent.status,
         },
     };
 

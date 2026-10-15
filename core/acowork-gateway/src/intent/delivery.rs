@@ -128,6 +128,15 @@ pub struct DeliveryRequest {
     /// Source-side authorized repo (design 27 §3.2; validated at the
     /// HTTP entry before this request is built — PR-D).
     pub repo: String,
+    /// "request" (default) | "response" (design 27 §6.5 R2). A response
+    /// is system-generated: the Gateway builds it at the responder's
+    /// turn end and routes it to the initiator — `intent_send` never
+    /// produces one.
+    pub kind: String,
+    /// For a response: the request `message_id` this answers (§4).
+    pub in_reply_to: String,
+    /// For a response: §7.1 outcome. Empty = completed.
+    pub status: String,
 }
 
 /// Wake-then-deliver one Intent, recording the delivery fact in the
@@ -155,7 +164,10 @@ pub async fn wake_and_deliver(
             body: req.params_json.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
             delivered_at: String::new(),
-            result_ref: String::new(),
+            result_ref: req.in_reply_to.clone(),
+            kind: req.kind.clone(),
+            status: req.status.clone(),
+            source_chat_session_id: req.source_chat_session_id.clone(),
         })
         .map_err(|e| DeliveryError::MailboxFailed(e.to_string()))?;
     }
@@ -228,6 +240,9 @@ async fn deliver_inner(
         source_agent_session_id: req.from_session_id.clone(),
         source_chat_session_id: req.source_chat_session_id.clone(),
         repo: req.repo.clone(),
+        kind: req.kind.clone(),
+        in_reply_to: req.in_reply_to.clone(),
+        status: req.status.clone(),
     };
     let command = mqtt_proto::ControlCommand {
         instance_id: instance_id.clone(),
@@ -324,6 +339,9 @@ mod tests {
             params_json: "{}".into(),
             repo: String::new(),
             source_chat_session_id: String::new(),
+            kind: "request".into(),
+            in_reply_to: String::new(),
+            status: String::new(),
         }
     }
 

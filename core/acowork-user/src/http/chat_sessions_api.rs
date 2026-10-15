@@ -59,7 +59,13 @@ pub fn chat_session_routes() -> Router<AppState> {
             post(system_append_message),
         )
         .route("/internal/chat-sessions/pair", post(system_ensure_pair))
+        .route("/internal/chat-sessions/group", post(system_ensure_group))
         .route("/internal/chat-sessions/repo", post(system_set_repo))
+        .route("/internal/chat-sessions/{session_id}", get(system_load_session))
+        .route(
+            "/internal/chat-sessions/{session_id}/messages",
+            get(system_read_messages),
+        )
 }
 
 // ── Request / response types ──────────────────────────────────────────
@@ -91,6 +97,11 @@ pub struct PageQuery {
     pub offset: usize,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// System read endpoint: the participant id on whose behalf the Gateway
+    /// reads (participation is enforced there). Absent on user-facing reads,
+    /// where the authenticated identity is used.
+    #[serde(default)]
+    pub who: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,6 +263,45 @@ async fn system_ensure_pair(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SystemGroupRequest {
+    pub project_id: String,
+    /// Group chat title (usually the project title).
+    #[serde(default)]
+    pub title: String,
+    /// Initial participants — the project owner at minimum; members are
+    /// added by the Gateway as they join the project.
+    pub participants: Vec<String>,
+}
+
+/// `POST /internal/chat-sessions/group` — idempotently ensure the one
+/// project group chat for a project (design 27 §4, Phase 2: "PM 创建项目
+/// 时幂等创建唯一项目群聊"). Idempotency key is `project_id`, enforced by
+/// the projects index in `chat_sessions::create_session`.
+async fn system_ensure_group(
+    State(state): State<AppState>,
+    Json(req): Json<SystemGroupRequest>,
+) -> Result<Json<ChatSession>, ApiError> {
+    if req.participants.is_empty() {
+        return Err(ApiError::unprocessable_entity(
+            "a project group needs at least one participant",
+        ));
+    }
+    let dir = data_dir_any(&state).await;
+    let session = offload(move || {
+        chat_sessions::create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &req.participants,
+            &req.title,
+            Some(&req.project_id),
+            now_unix(),
+        )
+    })
+    .await?;
+    Ok(Json(session))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SystemRepoRequest {
     pub session_id: String,
     /// `None` / absent clears the binding.
@@ -271,6 +321,45 @@ async fn system_set_repo(
     })
     .await?;
     Ok(Json(session))
+}
+
+/// `GET /internal/chat-sessions/{session_id}` — session metadata for the
+/// Gateway's delivery pipeline (participants for authorization, the `repo`
+/// binding for §4.1 injection). Read-only, loopback-only like the rest of
+/// the internal surface.
+async fn system_load_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<ChatSession>, ApiError> {
+    let dir = data_dir_any(&state).await;
+    let session = offload(move || chat_sessions::load(&dir, &session_id)).await?;
+    Ok(Json(session))
+}
+
+/// `GET /internal/chat-sessions/{session_id}/messages?offset&limit&who` —
+/// history read for `chat_history_read` (design 27 §9): the Gateway passes
+/// the requesting agent instance as `who`; participation is enforced here
+/// server-side, and `limit` is clamped to `MAX_PAGE` (the §9 hard cap).
+async fn system_read_messages(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(q): Query<PageQuery>,
+) -> Result<Json<MessagePage>, ApiError> {
+    let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+    let who = q
+        .who
+        .filter(|w| !w.is_empty())
+        .ok_or_else(|| ApiError::unprocessable_entity("who is required"))?;
+    let dir = data_dir_any(&state).await;
+    let (messages, total) = offload(move || {
+        let session = chat_sessions::load(&dir, &session_id)?;
+        if !session.participants.iter().any(|p| p == &who) {
+            return Err("not_a_participant".to_string());
+        }
+        chat_sessions::read_messages(&dir, &session_id, q.offset, limit)
+    })
+    .await?;
+    Ok(Json(MessagePage { messages, total }))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

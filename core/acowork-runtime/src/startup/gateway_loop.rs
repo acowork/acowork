@@ -189,6 +189,9 @@ fn control_action_to_inbound(
             source_agent_session_id,
             source_chat_session_id,
             repo,
+            kind,
+            in_reply_to,
+            status,
         } => {
             let params: serde_json::Value =
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
@@ -205,6 +208,9 @@ fn control_action_to_inbound(
                     conversation_id,
                     source_chat_session_id,
                     repo,
+                    kind,
+                    in_reply_to,
+                    status,
                 },
             ))
         }
@@ -483,15 +489,13 @@ async fn dispatch_inbound(
     // ── System-level (session_id empty) ─────────────────────────────
     if session_id.is_empty() {
         return match msg {
-            InboundMessage::IntentMessage { from, action, .. } => {
-                tracing::warn!(
-                    from = %from,
-                    action = %action,
-                    "IntentMessage without target session — dropped (MQTT dispatch expects session_id)"
-                );
-                Err(RuntimeError::Config(
-                    "IntentMessage without target session".to_string(),
-                ))
+            InboundMessage::IntentMessage { .. } => {
+                // Design 27 §3.2: an Intent with no designated session is
+                // still addressed to an intent context, not to "the system".
+                // Route it through the receiver-private registry (chat /
+                // conv / one-shot message key) so it gets an execution
+                // session instead of being dropped.
+                route_intent_inbound(session_manager, "", msg).await
             }
             // ── ADR-052 §3.5: agent-level config mutations are
             //    GLOBAL, not per-session. Route through SessionManager
@@ -721,17 +725,11 @@ async fn dispatch_inbound(
             }
         },
 
-        // ⑦ IntentMessage → session task inbox
+        // ⑦ IntentMessage → receiver-side session routing (design 27 §3.2:
+        // the wire addresses the intent context; which execution session
+        // answers is the receiving agent's private decision).
         msg @ InboundMessage::IntentMessage { .. } => {
-            forward_to_session_inbound(
-                session_manager,
-                lifecycle_publisher,
-                &session_id,
-                "intent",
-                work_dir,
-                msg,
-            )
-            .await
+            route_intent_inbound(session_manager, &session_id, msg).await
         }
 
         // ── ADR-034 §8 Phase 2 control commands ───────────────────────
@@ -941,6 +939,99 @@ async fn dispatch_inbound(
     }
 }
 
+/// Design 27 §3.2/§6.1: resolve the execution session that owns an inbound
+/// Intent on THIS agent and deliver it as a turn trigger.
+///
+/// - `request`: the designated session id is the *sender's* — meaningless
+///   here. Route via the receiver-private registry keyed on the intent
+///   context (chat session > conversation > one-shot message id), creating
+///   a fresh session when the context is new or its session has closed.
+/// - `response`: the designated session id is the initiator's own session
+///   (the Gateway read it back from the mailbox). Use it when it is still
+///   open; otherwise fall back to the registry keyed on the conversation.
+///
+/// Delivery is always `SessionMessage::Intent` — unlike a bare
+/// `InboundMessage`, it starts a turn even when the session task is idle
+/// (a mid-turn injection would otherwise sit unread in the loop channel).
+async fn route_intent_inbound(
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    designated_session_id: &str,
+    msg: crate::agent::inbound::InboundMessage,
+) -> crate::error::Result<()> {
+    use crate::agent::inbound::InboundMessage;
+    use crate::agent::intent_turn::render_intent_message;
+    use crate::agent::session::intent_routing::routing_key;
+    use crate::agent::session::SessionMessage;
+    use crate::error::RuntimeError;
+
+    let InboundMessage::IntentMessage {
+        from,
+        action,
+        params,
+        message_id,
+        conversation_id,
+        source_chat_session_id,
+        repo,
+        kind,
+        in_reply_to,
+        status,
+    } = msg
+    else {
+        return Err(RuntimeError::Config(
+            "route_intent_inbound called with a non-intent message".to_string(),
+        ));
+    };
+
+    let is_response = kind == "response";
+    let content = render_intent_message(
+        &from,
+        &action,
+        &params,
+        &message_id,
+        &conversation_id,
+        &source_chat_session_id,
+        &repo,
+        &kind,
+        &in_reply_to,
+        &status,
+    );
+
+    // Candidate session: the designated one for responses, registry for
+    // everything else.
+    let mut target: Option<String> = None;
+    if is_response && !designated_session_id.is_empty() {
+        let guard = session_manager.lock().await;
+        if guard.get_session(designated_session_id).is_some() {
+            target = Some(designated_session_id.to_string());
+        }
+    }
+    let target = match target {
+        Some(t) => t,
+        None => {
+            let key = routing_key(&source_chat_session_id, &conversation_id, &message_id);
+            session_manager
+                .lock()
+                .await
+                .route_intent_session(&key)
+                .await?
+        }
+    };
+
+    session_manager.lock().await.send_to_session(
+        &target,
+        SessionMessage::Intent {
+            content,
+            message_id,
+            conversation_id,
+            source_chat_session_id,
+            from,
+            action,
+            repo,
+            kind,
+        },
+    )
+}
+
 /// Forward an `InboundMessage` to the session task's `agent_inbound_tx`.
 ///
 /// ADR-038: when the target session is not Active (Closed or NotFound
@@ -1025,6 +1116,9 @@ mod tests {
             source_agent_session_id: String::new(),
             source_chat_session_id: String::new(),
             repo: String::new(),
+            kind: String::new(),
+            in_reply_to: String::new(),
+            status: String::new(),
         })
         .expect("Intent must map");
         assert_eq!(route, "", "cron intent has no target session — system-level");
@@ -1058,6 +1152,9 @@ mod tests {
             source_agent_session_id: String::new(),
             source_chat_session_id: String::new(),
             repo: String::new(),
+            kind: String::new(),
+            in_reply_to: String::new(),
+            status: String::new(),
         })
         .expect("Intent must still map");
 

@@ -1483,6 +1483,29 @@ impl AgentLoop {
             }
         }
 
+        // Design 27 §6.5 R1: in a responder turn the agent answers one
+        // Intent request and hands the turn back — it must not spawn new
+        // Intents or ask a human. Both tools are removed from the wire
+        // tool set for this turn (the model cannot call what it cannot
+        // see; §7.1 keeps the turn's ownership singular).
+        if self.pending_intent.is_some()
+            && let Some(tools) = chat_request.tools.as_mut()
+        {
+            const RESPONDER_HIDDEN: [&str; 2] = ["intent_send", "ask_user_question"];
+            tools.retain(|t| {
+                let name = t
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        t.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .unwrap_or("");
+                !RESPONDER_HIDDEN.contains(&name)
+            });
+        }
+
         // LLM-perspective tool dump: AFTER builtin + MCP merge.
         // This is the most authoritative view of what the LLM actually sees
         // in the next provider call. tool_names is the literal contents of

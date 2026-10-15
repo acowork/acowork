@@ -563,7 +563,7 @@ impl Default for MqttConfig {
 fn default_true() -> bool { true }
 
 /// Intent delivery tuning (intent-delivery-tech-debt-plan D8).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntentConfig {
     /// Enforce manifest `intent:send` / `intent:receive` declarations
     /// at delivery time. Default **false** = warn-only gray rollout:
@@ -572,6 +572,25 @@ pub struct IntentConfig {
     /// makes the flip a separate reviewable step).
     #[serde(default)]
     pub enforce_permissions: bool,
+    /// §6.5 R4: hard cap on `request` messages within one
+    /// `conversation_id`. Counted by the mailbox (survives restart,
+    /// §13-13); the delivery entry refuses beyond the cap and returns
+    /// `conversation_limit_exceeded`. Default 6 per design doc 27.
+    #[serde(default = "default_max_conversation_requests")]
+    pub max_conversation_requests: u32,
+}
+
+fn default_max_conversation_requests() -> u32 {
+    6
+}
+
+impl Default for IntentConfig {
+    fn default() -> Self {
+        Self {
+            enforce_permissions: false,
+            max_conversation_requests: default_max_conversation_requests(),
+        }
+    }
 }
 fn default_mqtt_host() -> String { "127.0.0.1".to_string() }
 /// Exposed as `pub(crate)` so the HTTP `/api/status` handler can report

@@ -1027,6 +1027,17 @@ message Intent {
   /// (design 27 §3.2). Validated against the sender's workspace by the
   /// Gateway before delivery (PR-D); empty = none offered.
   string repo = 8;
+  /// Message semantics (design 27 §6.5 R2): "request" (default, empty =
+  /// request for pre-upgrade senders) or "response". A response is
+  /// system-generated at the responder's turn end — never a tool
+  /// parameter — and `in_reply_to` carries the original request's
+  /// `message_id`.
+  string kind = 9;
+  /// For kind == "response": the request this answers (§4).
+  string in_reply_to = 10;
+  /// For kind == "response": outcome (§7.1) — completed / failed /
+  /// aborted / timeout. Empty is treated as completed.
+  string status = 11;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

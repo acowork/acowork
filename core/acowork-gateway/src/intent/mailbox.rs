@@ -56,10 +56,22 @@ pub struct MailboxEntry {
     /// delivered. An entry with `delivered_at` set is the "已投递" fact.
     #[serde(default)]
     pub delivered_at: String,
-    /// Reserved pointer for the response association (design doc 27 §4
-    /// `in_reply_to` / §7.1); empty until responses are routed (Phase 3).
+    /// Response association (design doc 27 §4 `in_reply_to`): for a
+    /// response entry, the request `message_id` it answers. Empty on
+    /// requests until their response is routed back.
     #[serde(default)]
     pub result_ref: String,
+    /// "request" (default) | "response" (§6.5 R2).
+    #[serde(default)]
+    pub kind: String,
+    /// For a response: §7.1 outcome (completed/failed/aborted/timeout).
+    #[serde(default)]
+    pub status: String,
+    /// Source Chat session this message belongs to (§4
+    /// `source_chat_session_id`); the reply address. Empty for
+    /// chat-less sends (cron, plain agent-to-agent before pairing).
+    #[serde(default)]
+    pub source_chat_session_id: String,
 }
 
 impl MailboxEntry {
@@ -122,9 +134,13 @@ impl IntentMailbox {
 
     /// Record a new Intent (status: not yet delivered) and count it
     /// against its conversation. Returns the entry snapshot.
+    ///
+    /// §6.5 R4: only `request` messages count against the conversation
+    /// limit — a response closes a round, it does not extend it. An
+    /// empty `kind` reads as request (cron / pre-Phase-2 producers).
     pub fn record(&self, entry: MailboxEntry) -> Result<MailboxEntry, MailboxError> {
         let mut inner = self.inner.lock().unwrap();
-        if !entry.conversation_id.is_empty() {
+        if !entry.conversation_id.is_empty() && entry.kind != "response" {
             *inner
                 .conversation_requests
                 .entry(entry.conversation_id.clone())
@@ -193,6 +209,9 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             delivered_at: String::new(),
             result_ref: String::new(),
+            kind: "request".into(),
+            status: String::new(),
+            source_chat_session_id: String::new(),
         }
     }
 

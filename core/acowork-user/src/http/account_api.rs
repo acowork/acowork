@@ -1117,6 +1117,7 @@ mod tests {
                 "avatar",
                 "builtin_avatar",
                 "display_name",
+                "role",
                 "user_id",
                 "username"
             ]

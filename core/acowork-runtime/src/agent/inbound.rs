@@ -109,6 +109,15 @@ pub enum InboundMessage {
         source_chat_session_id: String,
         #[serde(default)]
         repo: String,
+        /// "request" | "response" (design 27 §6.5 R2); empty = request.
+        #[serde(default)]
+        kind: String,
+        /// For a response: the request message id this answers.
+        #[serde(default)]
+        in_reply_to: String,
+        /// For a response: outcome (§7.1); empty = completed.
+        #[serde(default)]
+        status: String,
     },
     /// Stop signal to stop the current agent loop iteration
     Stop { reason: String },
@@ -320,6 +329,9 @@ mod tests {
             conversation_id: String::new(),
             source_chat_session_id: String::new(),
             repo: String::new(),
+            kind: String::new(),
+            in_reply_to: String::new(),
+            status: String::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
@@ -441,6 +453,9 @@ mod tests {
             conversation_id: String::new(),
             source_chat_session_id: String::new(),
             repo: String::new(),
+            kind: String::new(),
+            in_reply_to: String::new(),
+            status: String::new(),
         };
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);

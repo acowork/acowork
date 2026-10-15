@@ -486,6 +486,9 @@ pub async fn run_cron_scheduler(
                 params_json: serde_json::to_string(&params).unwrap_or_default(),
                 source_chat_session_id: String::new(),
                 repo: String::new(),
+                kind: String::new(),
+                in_reply_to: String::new(),
+                status: String::new(),
             };
 
             let mailbox = {

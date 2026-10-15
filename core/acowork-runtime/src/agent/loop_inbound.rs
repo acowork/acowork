@@ -66,6 +66,9 @@ pub(super) fn inject_inbound_into_history(
             conversation_id,
             source_chat_session_id,
             repo,
+            kind,
+            in_reply_to,
+            status,
         } => {
             tracing::info!(
                 "inject_inbound_into_history: intent from {}: {} params={:?}",
@@ -73,28 +76,23 @@ pub(super) fn inject_inbound_into_history(
                 action,
                 params
             );
-            // Design 27 §3.2: the receiver sees the full envelope —
-            // reply coordinates (conversation / source sessions) and the
-            // authorized repo are part of the message, not ambient.
-            let mut rendered = format!("[intent:{}:{}] {}", from, action, params);
-            if !message_id.is_empty() {
-                rendered.push_str(&format!("
-(message_id: {message_id})"));
-            }
-            if !conversation_id.is_empty() {
-                rendered.push_str(&format!("
-(conversation_id: {conversation_id})"));
-            }
-            if !source_chat_session_id.is_empty() {
-                rendered.push_str(&format!(
-                    "
-(source_chat_session_id: {source_chat_session_id})"
-                ));
-            }
-            if !repo.is_empty() {
-                rendered.push_str(&format!("
-(repo: {repo})"));
-            }
+            // Design 27 §3.2: the receiver sees the full envelope — reply
+            // coordinates (conversation / source sessions) and the
+            // authorized repo are part of the message, not ambient. Shared
+            // renderer with the new-turn path (`session_task`) so the two
+            // renderings cannot drift apart.
+            let rendered = crate::agent::intent_turn::render_intent_message(
+                &from,
+                &action,
+                &params,
+                &message_id,
+                &conversation_id,
+                &source_chat_session_id,
+                &repo,
+                &kind,
+                &in_reply_to,
+                &status,
+            );
             history.append(ChatMessage::user(rendered));
             true
         }
