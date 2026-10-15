@@ -73,7 +73,13 @@ export const StreamingSourceBlock = React.memo(function StreamingSourceBlock({
   const isStreamingAssistant = variant === "assistant" && isStreaming && !hasEndTime;
   const isActive = isThinking || isStreamingAssistant;
 
-  const [expanded, setExpanded] = useState(defaultExpanded ?? isActive);
+  // Thought blocks default to collapsed: fold state is entirely the user's
+  // call (click the caret to reveal).  Only the trailing assistant slot
+  // auto-expands during streaming — it's the placeholder for the live
+  // reply, which the user explicitly wants to see arriving.
+  const [expanded, setExpanded] = useState(
+    variant === "assistant" ? isActive : (defaultExpanded ?? false)
+  );
   const [, setTick] = useState(0);
   const preRef = useRef<HTMLPreElement>(null);
   const manuallyCollapsed = useRef(false);
@@ -96,20 +102,12 @@ export const StreamingSourceBlock = React.memo(function StreamingSourceBlock({
     return () => clearInterval(interval);
   }, [isActive]);
 
-  // Auto-expand when streaming starts (respect user manual collapse)
+  // Auto-expand applies only to the assistant slot.  Thought blocks never
+  // auto-expand or auto-collapse — once the user opens one, it stays open
+  // until they collapse it; once closed, it stays closed.
   useEffect(() => {
-    if (isActive && !manuallyCollapsed.current) {
+    if (variant === "assistant" && isActive && !manuallyCollapsed.current) {
       setExpanded(true);
-    }
-  }, [isActive]);
-
-  // Auto-collapse when thought streaming completes.  Assistant slot
-  // disappears entirely on record_complete (parent unmounts this
-  // component), so the collapse effect only matters for `thought`.
-  useEffect(() => {
-    if (variant === "thought" && !isActive) {
-      setExpanded(false);
-      manuallyCollapsed.current = false;
     }
   }, [variant, isActive]);
 

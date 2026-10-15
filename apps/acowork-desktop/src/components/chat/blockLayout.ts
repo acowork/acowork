@@ -81,8 +81,8 @@ export const EXPLORE_HEADER_HEIGHT = 32;
  */
 export const EXPLORE_LEFT_INDENT_PX = 48;
 
-/** `maxHeight: 240px` on ExploreBlock expanded content scroll area. */
-export const EXPLORE_CONTENT_MAX_HEIGHT = 240;
+/** `maxHeight: 144px` on ExploreBlock expanded content scroll area. */
+export const EXPLORE_CONTENT_MAX_HEIGHT = 144;
 
 /** `py-2` on expanded content container — 8px × 2. */
 export const EXPLORE_CONTENT_PADDING_Y = 16;

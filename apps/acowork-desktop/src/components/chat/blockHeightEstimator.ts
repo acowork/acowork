@@ -311,17 +311,17 @@ export function estimateBlockHeight(
     case "explore_group": {
       // hasFollowUpReply is set by ChatPanel when it builds messageBlocks.
       // Collapsed (has follow-up reply): just the header.
-      // Expanded: header + content area up to the 240px cap, scaled by item count.
+      // Expanded: header + content area up to the 144px cap, scaled by item count.
       if (block.hasFollowUpReply) return EXPLORE_HEADER_HEIGHT;
       // Render-faithful height of an expanded explore_group:
       //   header (32) + mt-1 separator (4) + inner container with
-      //   `style={{ maxHeight: 240px }}` (the maxHeight is a HARD cap —
+      //   `style={{ maxHeight: 144px }}` (the maxHeight is a HARD cap —
       //   content scrolls internally, so itemCount does NOT affect the
       //   rendered block height).
       // The previous estimator applied Math.min(EXPLORE_CONTENT_MAX_HEIGHT,
       // itemCount * ROW + PAD) AND omitted the mt-1 separator, yielding
       // a UNDERSHOOTING 272px vs. the true 276px.  Worse, for content
-      // whose itemCount * ROW + PAD was already >= 240 the cap kicked in
+      // whose itemCount * ROW + PAD was already >= 144 the cap kicked in
       // and the result was a flat 272px regardless of how many tools
       // were inside — accurate only by accident.  scrollToIndex(end) in
       // VirtualMessageList relies on this estimate placing the last
@@ -330,10 +330,10 @@ export function estimateBlockHeight(
       // measurementsCache.  An undershoot leaves the last block outside
       // the viewport, the cache stays cold, and scrollHeight never grows
       // to the real bottom — the user has to click many times to
-      // converge.  Use the render-faithful 276px value: equals the true
-      // height in the common case, overshoots when itemCount * ROW + PAD
-      // is below 240 (overshoot is harmless; measureElement corrects it
-      // the moment the block mounts).
+      // converge.  Use the render-faithful 180px value (32 + 4 + 144):
+      // equals the true height in the common case, overshoots when
+      // itemCount * ROW + PAD is below 144 (overshoot is harmless;
+      // measureElement corrects it the moment the block mounts).
       return EXPLORE_HEADER_HEIGHT + 4 /* mt-1 */ + EXPLORE_CONTENT_MAX_HEIGHT;
     }
     case "system": {
