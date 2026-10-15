@@ -625,7 +625,7 @@
   "globalSearch": {
     "title": "Global search",
     "close": "Close",
-    "searchInputPlaceholder": "Search anywhere… (Enter to run immediately)",
+    "searchInputPlaceholder": "Type a query, press Enter to search",
     "agentScopeTitle": "Agent scope (P0: single agent; all-agents search is P1-3)",
     "toggleCaseSensitive": "Match case",
     "toggleWholeWord": "Match whole word",

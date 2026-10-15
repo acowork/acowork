@@ -30,7 +30,7 @@
 | 能力 | 现有位置 / 行为 | 本设计复用与最小改动 |
 |---|---|---|
 | 全局搜索 UI、来源列表、scope hit 类型 | `apps/acowork-desktop/src/components/search/GlobalSearchDialog.tsx` | 保留现组件与 hits state；添加 per-query coordinator 状态及摘要区，不另建全局搜索 store |
-| debounce / abort / stale response guard | 同组件已有 300ms debounce、`AbortController`、`seqRef` | 提升为一个 `SearchRun` 生命周期控制器；每个来源拥有子 `AbortController`，以 `seq` 隔离旧 run |
+| 显式触发 / abort / stale response guard | 同组件已有 `AbortController`、`seqRef` | 提升为一个 `SearchRun` 生命周期控制器；每个来源拥有子 `AbortController`，以 `seq` 隔离旧 run |
 | 文档 / 项目 API | `src/lib/doc-api.ts::searchDocs`、`src/lib/pm-api.ts::searchPm` 都接受 `AbortSignal` | 直接复用；不重写 request client |
 | Runtime memory/conversation API | `/api/agents/{id}/search?scopes=...`；通过现有 response mapper 转为 `MemoryHit` / `ConversationHit` | 继续使用现 endpoint 与 mapper；每个 scope 一次请求，独立 signal |
 | 文件搜索 | 现有 Workspace Runtime API + dialog 内 fetch | 复用 URL、`toFileHits` 与既有打开动作；增加本 run signal、统一 timeout 管理 |
@@ -201,15 +201,16 @@ Runtime 使用 `axum::Json`/Serde 现有模式；响应 JSON 总体最多 16 KiB
 
 ```
 Zone 1  border-b  [AgentPickerChip] │ 🔍 input  [Aa][][⟲] │ (高度不变)
-Zone 2  border-b  进度状态条 (源/摘要阶段, 完成 X/6)        (新增 32px)
-Zone 3  border-b  [摘要区 SummaryView · 摘要中/已生成/失败] (新增, 与 preview 同高度, 上半)
-        │         [PreviewPane]                            (preview 下半)
-Zone 4  border-b  [文件][git][doc][project][对话][记忆]   (现有, 不变)
-Zone 5  flex-1    当前 tab 的命中列表                      (现有, 不变)
+Zone 2  border-b  [文件][git][doc][project][对话][记忆]   (现有, 不变)
+Zone 3  flex-1    当前 tab 的命中列表                      (现有, 不变)
+Zone 4  border-b  [PreviewPane]                           (preview, 上半)
+Zone 5            [摘要区 SummaryView]                     (新增, 下半 — 收尾区块)
 Footer  border-t  [Close]                                  (现有, 不变)
 ```
 
-原 `h-[35vh] max-h-[300px] min-h-[140px]` 的 PreviewPane 改为**两行 flex-1 等分**：上面 SummaryView 区域，下面 PreviewPane 区域，最小高度 120px。PreviewPane 缩到原高度一半，但保持现有渲染/预览能力；摘要区与 preview 共享 `min-h-[120px]`，仍能放下约 5 行正文。`max-h` 也由 300px 改为 240px，保证两个面板均不撑破 dialog 上限。
+原 `h-[35vh] max-h-[300px] min-h-[140px]` 的 PreviewPane 改为**两行 flex-1 等分**：上面 PreviewPane 区域，下面 SummaryView 区域，最小高度 120px。摘要区作为 dialog 的收尾区块，读者按「命中列表 → 内容预览 → 摘要」自上而下阅读。PreviewPane 缩到原高度一半，但保持现有渲染/预览能力；摘要区与 preview 共享 `min-h-[120px]`，仍能放下约 5 行正文。`max-h` 也由 300px 改为 240px，保证两个面板均不撑破 dialog 上限。
+
+**独立进度状态条已取消**（实现修正）：状态直接居中显示在摘要区内，完成后被摘要正文替换，省掉一个状态栏。
 
 dialog 高度上限仍使用现 70vh。`Zone 2 + 3` 在 summary disabled（query 为空或未启用）时折叠成 0 高度，避免占用键入体验。
 
@@ -238,7 +239,7 @@ dialog 高度上限仍使用现 70vh。`Zone 2 + 3` 在 summary disabled（query
   1. 同步递增 generation。
   2. abort 旧 run 的所有源/摘要 signal。
   3. 立即清空输入框焦点，保留旧生成结果直到新结果回来（避免空白闪屏）。
-  4. 重新触发 debounce（300ms）后开始新 run。
+  4. 立即开始新 run。
 - 该按钮只对**当前 query**生效；空 query 时隐藏。
 
 #### 4.6.4 摘要取消按钮
@@ -270,7 +271,7 @@ dialog 高度上限仍使用现 70vh。`Zone 2 + 3` 在 summary disabled（query
 
 ### 5.1 一个 generation，一个固定 fan-out
 
-- 保留现有 300 ms debounce。只有 query trim 非空、dialog open、agent 条件满足才创建 run。
+- 检索由回车/重跑按钮显式触发，输入不自动检索（见 [ADR-081 §4.5.1](../../adr/zh/ADR-081-global-search.md)）。只有 query trim 非空、dialog open、agent 条件满足才创建 run。防抖只降低频率不降低量级：一次 run 是 6 个请求加一次 LLM，逐字符触发会造成数量级放大。
 - 每个 run 固定最多 6 个请求，使用 `Promise.allSettled`/每源回调；无动态递归、无无限队列、无重试风暴。
 - 不串行等待源；每个返回按 source callback 立即更新对应 hits/status。
 - 每源显示 waiting/searching/ok(count)/empty/skipped/error/timeout；overall 计数 `completed / applicable`，不展示虚假的精确百分比。
@@ -289,7 +290,7 @@ Run 自 `start` 起设绝对 monotonic deadline `t0 + 8s`（不是每源分别�
 
 ### 5.3 来源数与资源上限
 
-Fan-out 固定 6，因此并发上限就是 6；每个 dialog 同时仅一个 current generation。新 query 启动时先 abort 所有旧请求，再启动新 fan-out。debounce 减少键入风暴；每源限量、摘要候选限量、Runtime body limit 限制内存/上下文放大。禁止为每个来源创建长时间轮询或后台 retry。
+Fan-out 固定 6，因此并发上限就是 6；每个 dialog 同时仅一个 current generation。新 query 启动时先 abort 所有旧请求，再启动新 fan-out。显式触发从源头消除键入风暴；每源限量、摘要候选限量、Runtime body limit 限制内存/上下文放大。禁止为每个来源创建长时间轮询或后台 retry。
 
 Git endpoint 现有 `with503Retry` 必须遵守 AbortSignal：AbortError 不应重试。其它 source client 的既有 503/重试策略保持原样，但 deadline Abort 优先，不能被 retry loop 延长到 run deadline 之后。
 
@@ -317,7 +318,7 @@ Git endpoint 现有 `with503Retry` 必须遵守 AbortSignal：AbortError 不应�
 
 ```text
 Idle
-  └─ debounce expires → Searching(generation, source statuses)
+  └─ Enter / re-run → Searching(generation, source statuses)
        ├─ source settled → update source, remain Searching
        ├─ all settled or 8s → Summarizing(generation, frozen candidates)
        │    ├─ success → Done(summary, citations)
@@ -381,7 +382,7 @@ Idle
 
 - 摘要渲染交互（组件测试）：
   - empty query → 进度条 + 摘要区折叠；无 spinner、无摘要显示。
-  - 300 ms debounce 内连续输入 → 仅最后一次触发 run，generation 递增，旧 callback 不修改状态。
+  - 连续输入不触发任何 run；回车后仅发起一轮，generation 递增，旧 callback 不修改状态。
   - 任一来源返成 → 对应 tab 立即更新；进度条计数递增；其它 tab 继续 loading/empty。
   - 8s 到期、两个来源仍 pending → 标记 timeout；进度条 `已完成 4/6`；摘要状态 `partial_done`。
   - 摘要生成中：右上「取消摘要」可见；点按后状态变 `cancelled`，列表与输入框不变，summary POST 在 network tab 上被取消。

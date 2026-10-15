@@ -191,10 +191,20 @@ Gateway 反代一行：`/api/agents/{id}/search` → Runtime `/search`（参照�
 
 新增 `src/components/search/GlobalSearchDialog.tsx`（复用 VS Code 风格主题，与 `GlobalSearchPanel` 同视觉语言）：
 
-- 全局 keydown（`CtrlCmd+Shift+F`）打开；Esc / 失焦关闭；输入防抖 300ms + 请求取消（已有 AbortController 模式）。
+- 全局 keydown（`CtrlCmd+Shift+F`）打开；Esc / 失焦关闭；**回车触发搜索 + 请求取消**（已有 AbortController 模式）。输入过程不自动检索：见下方「显式触发」。
 - tab 切换不重置 query；六源并行请求（`Promise.allSettled`），各自独立 loading/error。
 - 结果行：type 图标 + title + snippet + 副信息（文件路径/会话标题/时间）；命中关键词 `<mark>` 高亮。
 - 点击：按 `meta` 分发到既有视图（`useFileEditorStore.openFile`、DocEditor、SessionPanel、MemoryPanel、ProjectBoard、CommitPicker）。
+
+#### 4.5.1 显式触发（输入不自动检索）
+
+检索由**回车**或输入框右侧的重跑按钮显式触发，输入过程中不发任何请求。
+
+- **理由**：ADR-093 的一次 run = 六源并发 HTTP + 一次 LLM 摘要。原 300ms 防抖只压掉了打字过程中的连续中间态，但每敲一个字符仍会独立触发一轮 run——输入 9 个字符约等于 9 轮 fan-out，停手时还要再打一次 LLM。防抖降低的是频率，不是量级。
+- **回车双义**：回车既可能是「搜索」也可能是「打开选中结果」。判定规则：输入框内容（trim 后）非空且**不等于上一次已检索的查询** → 搜索；否则（相同，或为空）→ 打开当前聚焦行。
+- **结果归属**：结果列表、高亮、git tab 客户端过滤一律基于「已检索的查询」而非输入框实时内容，否则用户编辑文本时旧结果会被错误地重新过滤/高亮。
+- **编辑不清空**：检索后继续编辑输入框不清空已有结果，直到回车或清空输入框（清空则立即复位）。
+- **空输入**：清空输入框立即复位全部状态（与原防抖分支一致）。
 
 ---
 

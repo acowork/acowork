@@ -1383,7 +1383,7 @@
   "globalSearch": {
     "title": "全域搜尋",
     "close": "關閉",
-    "searchInputPlaceholder": "全域搜尋…（Enter 立即搜尋）",
+    "searchInputPlaceholder": "輸入搜尋內容，按 Enter 開始搜尋",
     "agentScopeTitle": "agent 範圍（P0 單 agent；全部 agent 見 P1-3）",
     "toggleCaseSensitive": "區分大小寫",
     "toggleWholeWord": "全詞匹配",

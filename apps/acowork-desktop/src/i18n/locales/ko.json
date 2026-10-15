@@ -1384,7 +1384,7 @@
   "globalSearch": {
     "title": "전체 검색",
     "close": "닫기",
-    "searchInputPlaceholder": "전역 검색… (Enter 키로 즉시 검색)",
+    "searchInputPlaceholder": "검색어를 입력하고 Enter 키로 검색",
     "agentScopeTitle": "에이전트 범위 (P0: 단일 에이전트, 전체 에이전트는 P1-3)",
     "toggleCaseSensitive": "대소문자 구분",
     "toggleWholeWord": "단어 단위로 일치",

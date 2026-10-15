@@ -216,10 +216,30 @@ The Gateway reverse-proxies one line: `/api/agents/{id}/search` → Runtime `/se
 A new `src/components/search/GlobalSearchDialog.tsx` (reusing the VS Code style theme, the
 same visual language as `GlobalSearchPanel`):
 
-- A global keydown (`CtrlCmd+Shift+F`) opens it; Esc / blur closes it; the input has a 300ms debounce + request cancellation (an existing AbortController pattern).
+- A global keydown (`CtrlCmd+Shift+F`) opens it; Esc / blur closes it; **search fires on Enter + request cancellation** (an existing AbortController pattern). Typing issues no requests on its own — see "Explicit Trigger" below.
 - Switching tabs does not reset the query; the six sources are requested in parallel (`Promise.allSettled`), each with independent loading/error state.
 - Result rows: type icon + title + snippet + secondary info (file path / session title / time); the hit keyword is highlighted with `<mark>`.
 - Clicking dispatches by `meta` into the existing views (`useFileEditorStore.openFile`, DocEditor, SessionPanel, MemoryPanel, ProjectBoard, CommitPicker).
+
+#### 4.5.1 Explicit Trigger (typing does not search)
+
+A search is triggered explicitly by **Enter** or the re-run button at the right of the input. Nothing is
+requested while the user is typing.
+
+- **Why**: an ADR-093 run is a six-source HTTP fan-out plus an LLM summary call. The original 300ms
+  debounce only collapsed the intermediate states within a burst of typing — every character still
+  triggered its own run, so typing 9 characters cost roughly 9 fan-outs, plus a final LLM call when
+  the user stopped. The debounce reduced the frequency, not the magnitude.
+- **Enter is dual-purpose**: Enter may mean "search" or "open the focused row". The rule: if the box
+  (trimmed) is non-empty **and differs from the last searched query**, search it; otherwise (equal, or
+  empty) open the focused row.
+- **Results belong to the searched query**: result rows, `<mark>` highlighting, and the git tab's
+  client-side filter all read the last searched query, never the live input text — otherwise editing
+  the box would silently re-filter and re-highlight results that were never re-fetched.
+- **Editing does not clear**: continuing to type after a run leaves the existing results on screen
+  until Enter is pressed or the box is emptied (emptying it resets immediately).
+- **Empty input**: clearing the input resets all run state immediately, matching the old debounce
+  branch.
 
 ## 5. Alternatives (rejected)
 

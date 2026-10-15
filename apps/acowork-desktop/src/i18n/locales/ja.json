@@ -1383,7 +1383,7 @@
   "globalSearch": {
     "title": "グローバル検索",
     "close": "閉じる",
-    "searchInputPlaceholder": "全体を検索…（Enter で即時検索）",
+    "searchInputPlaceholder": "検索語を入力して Enter で開始",
     "agentScopeTitle": "エージェント範囲（P0 は単一エージェント、全エージェントは P1-3）",
     "toggleCaseSensitive": "大文字と小文字を区別",
     "toggleWholeWord": "単語単位で一致",

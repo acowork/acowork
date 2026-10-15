@@ -9,7 +9,10 @@
  *   ├─ Zone 2  border-b?  [文件][git][doc][project][对话][记忆] ┤
  *   │                       ─────                               │
  *   │                       result rows (flex-1)                │
- *   ├─ Zone 3 (if hit focused)  PreviewPane                     ┤
+ *   ├─ Zone 3a  border-b  PreviewPane (focused hit)              ┤
+ *   ├─ Zone 3b            LLM 摘要 (ADR-093): live status is      ┤
+ *   │                       centred in place, then replaced by    ┤
+ *   │                       the summary text itself              ┤
  *   ├─ Footer border-t                              [关闭]      ┤
  *   └────────────────────────────────────────────────────────────┘
  *
@@ -210,6 +213,24 @@ function Highlight({ text, query }: { text: string; query: string }) {
     );
 }
 
+/**
+ * Enter key disambiguation: search, or open the focused row?
+ *
+ * Search is explicit (ADR-093 amendment — a run costs six HTTP requests plus
+ * an LLM call, far too much to fire per keystroke), but Enter has always been
+ * "open the focused row". So it does both, in order:
+ *
+ *   - the box holds a query that differs from what was searched → search it
+ *   - otherwise (same query, or an empty box)          → open the row
+ *
+ * The comparison is trimmed because the input runs the search on the trimmed
+ * text; trailing spaces must not read as an unsent edit.
+ */
+export function enterShouldSearch(query: string, ranQuery: string): boolean {
+    const q = query.trim();
+    return q.length > 0 && q !== ranQuery;
+}
+
 /** CommitPicker-compatible client-side commit filter (subject/author/hash). */
 export function filterGitCommits(commits: GitCommitDto[], q: string): GitCommitDto[] {
     const term = q.trim().toLowerCase();
@@ -346,6 +367,11 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     // to it alone.
     const [phase, setPhase] = useState<SummaryPhase>("idle");
     const [sourcesDone, setSourcesDone] = useState(0);
+    /* The query the visible result set belongs to. `query` is the text box;
+       this is what was actually searched. They diverge while the user edits
+       after a run, which is what keeps stale results from flashing as if
+       they matched the new text. */
+    const [ranQuery, setRanQuery] = useState("");
     const [summaryText, setSummaryText] = useState("");
     const [summaryError, setSummaryError] = useState<string | null>(null);
     const runCtrlRef = useRef<AbortController | null>(null);
@@ -419,6 +445,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             setFocusedIdx(0);
             setPhase("idle");
             setSourcesDone(0);
+            setRanQuery("");
             setSummaryText("");
             setSummaryError(null);
             candidateRef.current = null;
@@ -493,6 +520,26 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         },
         [agentId, t],
     );
+
+    /* ── Clear one run's state (results + summary + progress) ────────── */
+    const resetRunState = useCallback(() => {
+        runCtrlRef.current?.abort();
+        summaryCtrlRef.current?.abort();
+        seqRef.current += 1;
+        setPhase("idle");
+        setSourcesDone(0);
+        setRanQuery("");
+        setSummaryText("");
+        setSummaryError(null);
+        candidateRef.current = null;
+        rowsRef.current = { file: [], git: [], doc: [], project: [], memory: [], conversation: [] };
+        setFileHits([]);
+        setFileTotal(0);
+        setDocHits([]);
+        setProjHits([]);
+        setMemoryHits([]);
+        setConversationHits([]);
+    }, []);
 
     const runSearch = useCallback(
         async (q: string) => {
@@ -655,33 +702,40 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         [agentId, workspaceId, caseSensitive, wholeWord, t, runSummaryStage],
     );
 
-    /* Display rows for the git tab stay derived (CommitPicker parity). */
-    const gitHits = useMemo(() => toGitHits(filterGitCommits(commits, query)), [commits, query]);
+    /* ── Explicit submit: commit the typed query to a new run ─────────── */
+    /* Enter (or the re-run button) is the only trigger. Nothing searches
+       while the user is still typing, so a long query costs exactly one
+       six-source fan-out plus at most one summary call. */
+    const submitSearch = useCallback(() => {
+        const q = query.trim();
+        if (!q || !agentId) return;
+        setRanQuery(q);
+        void runSearch(q);
+    }, [query, agentId, runSearch]);
 
-    /* ── Debounced run (300ms) on query change ──────────────────────── */
+    /* Display rows for the git tab stay derived (CommitPicker parity).
+       Filters against `ranQuery`, not the live text box — the rows belong to
+       the query that was submitted, so editing the box must not silently
+       re-filter or re-highlight them. */
+    const gitHits = useMemo(
+        () => toGitHits(filterGitCommits(commits, ranQuery)),
+        [commits, ranQuery],
+    );
+
+    /* ── Explicit submit (Enter / re-run button) ────────────────────── */
+    /* ADR-093 amendment: the run is no longer debounce-on-keystroke. Each
+       keystroke used to fan out six HTTP requests plus an LLM call; typing a
+       9-character query cost ~9 runs. Search is now explicit — the dialog
+       shows the typed query and the user commits it with Enter (or the
+       re-run button). Empty query still resets immediately.
+       `ranQuery` is the query the current result set belongs to; results
+       stay on screen while the user keeps typing toward a different one. */
     useEffect(() => {
         if (!open) return;
         if (!query.trim() || !agentId) {
-            runCtrlRef.current?.abort();
-            summaryCtrlRef.current?.abort();
-            seqRef.current += 1;
-            setPhase("idle");
-            setSourcesDone(0);
-            setSummaryText("");
-            setSummaryError(null);
-            candidateRef.current = null;
-            rowsRef.current = { file: [], git: [], doc: [], project: [], memory: [], conversation: [] };
-            setFileHits([]);
-            setFileTotal(0);
-            setDocHits([]);
-            setProjHits([]);
-            setMemoryHits([]);
-            setConversationHits([]);
-            return;
+            resetRunState();
         }
-        const timer = setTimeout(() => void runSearch(query), 300);
-        return () => clearTimeout(timer);
-    }, [open, query, agentId, runSearch]);
+    }, [open, query, agentId, resetRunState]);
 
     /* ── Reset focus when results change ────────────────────────────── */
     const hits: RowHit[] =
@@ -829,10 +883,14 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 setFocusedIdx((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
                 e.preventDefault();
+                if (enterShouldSearch(query, ranQuery)) {
+                    submitSearch();
+                    return;
+                }
                 activate(focusedIdx);
             }
         },
-        [hits.length, focusedIdx, activate, closeDialog],
+        [hits.length, focusedIdx, activate, closeDialog, query, ranQuery, submitSearch],
     );
 
     if (!open) return null;
@@ -910,7 +968,10 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             </div>
                         )}
                         {/* ADR-093: re-run — aborts the current generation
-                            (search + summary) and starts a fresh one. */}
+                            (search + summary) and starts a fresh one. Also
+                            serves as the visible submit affordance now that
+                            search no longer fires on keystroke: it lights up
+                            when the text differs from what was searched. */}
                         {query.trim() && (
                             <button
                                 type="button"
@@ -918,8 +979,12 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                 title={t("globalSearch.rerun")}
                                 aria-label={t("globalSearch.rerun")}
                                 onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => void runSearch(query)}
-                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-text-secondary dark:hover:bg-zinc-700/50"
+                                onClick={submitSearch}
+                                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors ${
+                                    query.trim() !== ranQuery
+                                        ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
+                                        : "text-text-tertiary hover:bg-zinc-100 hover:text-text-secondary dark:hover:bg-zinc-700/50"
+                                }`}
                             >
                                 <RotateCw className="h-3.5 w-3.5" />
                             </button>
@@ -933,7 +998,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     shrinks to its content (an empty placeholder) and the
                     dialog jumps taller the moment a query produces rows.
                     `flex-1` lets it grow up to the 70vh dialog cap once
-                    Zone 3 has claimed its fixed 140–300px. */}
+                    Zone 3 has claimed its fixed height. */}
                 <div className="flex min-h-[180px] flex-1 flex-col overflow-hidden border-b border-border-divider">
                     <div className="flex shrink-0 items-center justify-center gap-1 border-b border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
                         {TABS.map((tabDef) => (
@@ -952,39 +1017,13 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                         ))}
                     </div>
 
-                    {/* ADR-093 progress strip (design 27 §4.6): stage +
-                        "X/6 sources landed". No fake percentage — sources
-                        arrive out of order, counts are the honest unit. */}
-                    {phase !== "idle" && (
-                        <div
-                            data-testid="search-status-bar"
-                            className="flex h-8 shrink-0 items-center gap-2 border-b border-border-divider px-5 text-11 text-text-tertiary"
-                        >
-                            {phase === "searching" && (
-                                <span className="animate-pulse">
-                                    {t("globalSearch.statusSearching", { done: sourcesDone, total: SEARCH_SOURCES.length })}
-                                </span>
-                            )}
-                            {phase === "summarizing" && (
-                                <>
-                                    <span>{t("globalSearch.statusSearchDone", { total: SEARCH_SOURCES.length })}</span>
-                                    <span aria-hidden>·</span>
-                                    <span className="animate-pulse text-[var(--color-accent)]">{t("globalSearch.statusSummarizing")}</span>
-                                </>
-                            )}
-                            {(phase === "done" || phase === "error" || phase === "cancelled") && (
-                                <span>{t("globalSearch.statusSearchDone", { total: SEARCH_SOURCES.length })}</span>
-                            )}
-                        </div>
-                    )}
-
                     <div className="flex-1 overflow-y-auto">
                         {tab === "file" && loading && <RowInfo>{t("globalSearch.searching")}</RowInfo>}
                         {tab === "file" && error && !loading && <RowInfo>{error}</RowInfo>}
-                        {tab === "file" && !loading && !error && query.trim() && hits.length === 0 && (
+                        {tab === "file" && !loading && !error && ranQuery && hits.length === 0 && (
                             <RowInfo>{t("globalSearch.fileNoMatch")}</RowInfo>
                         )}
-                        {tab === "file" && !query.trim() && <RowInfo>{t("globalSearch.fileEmptyHint")}</RowInfo>}
+                        {tab === "file" && !ranQuery && <RowInfo>{t("globalSearch.fileEmptyHint")}</RowInfo>}
                         {tab === "file" && fileTotal > 0 && !loading && (
                             <div className="px-3 pt-1 text-11 text-text-tertiary">
                                 {t("globalSearch.matchCount", { total: fileTotal, shown: hits.length })}
@@ -1001,35 +1040,35 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
 
                         {tab === "doc" && docLoading && <RowInfo>{t("globalSearch.searching")}</RowInfo>}
                         {tab === "doc" && docError && !docLoading && <RowInfo>{docError}</RowInfo>}
-                        {tab === "doc" && !docLoading && !docError && query.trim() && hits.length === 0 && (
+                        {tab === "doc" && !docLoading && !docError && ranQuery && hits.length === 0 && (
                             <RowInfo>{t("globalSearch.docNoMatch")}</RowInfo>
                         )}
-                        {tab === "doc" && !query.trim() && <RowInfo>{t("globalSearch.docEmptyHint")}</RowInfo>}
+                        {tab === "doc" && !ranQuery && <RowInfo>{t("globalSearch.docEmptyHint")}</RowInfo>}
 
                         {tab === "project" && projLoading && <RowInfo>{t("globalSearch.searching")}</RowInfo>}
                         {tab === "project" && projError && !projLoading && <RowInfo>{projError}</RowInfo>}
-                        {tab === "project" && !projLoading && !projError && query.trim() && hits.length === 0 && (
+                        {tab === "project" && !projLoading && !projError && ranQuery && hits.length === 0 && (
                             <RowInfo>{t("globalSearch.projectNoMatch")}</RowInfo>
                         )}
-                        {tab === "project" && !projLoading && !projError && !query.trim() && (
+                        {tab === "project" && !projLoading && !projError && !ranQuery && (
                             <RowInfo>{t("globalSearch.projectEmptyHint")}</RowInfo>
                         )}
 
                         {tab === "memory" && memoryLoading && <RowInfo>{t("globalSearch.searching")}</RowInfo>}
                         {tab === "memory" && memoryError && !memoryLoading && <RowInfo>{memoryError}</RowInfo>}
-                        {tab === "memory" && !memoryLoading && !memoryError && query.trim() && hits.length === 0 && (
+                        {tab === "memory" && !memoryLoading && !memoryError && ranQuery && hits.length === 0 && (
                             <RowInfo>{t("globalSearch.memoryNoMatch")}</RowInfo>
                         )}
-                        {tab === "memory" && !memoryLoading && !memoryError && !query.trim() && (
+                        {tab === "memory" && !memoryLoading && !memoryError && !ranQuery && (
                             <RowInfo>{t("globalSearch.memoryEmptyHint")}</RowInfo>
                         )}
 
                         {tab === "conversation" && conversationLoading && <RowInfo>{t("globalSearch.searching")}</RowInfo>}
                         {tab === "conversation" && conversationError && !conversationLoading && <RowInfo>{conversationError}</RowInfo>}
-                        {tab === "conversation" && !conversationLoading && !conversationError && query.trim() && hits.length === 0 && (
+                        {tab === "conversation" && !conversationLoading && !conversationError && ranQuery && hits.length === 0 && (
                             <RowInfo>{t("globalSearch.conversationNoMatch")}</RowInfo>
                         )}
-                        {tab === "conversation" && !conversationLoading && !conversationError && !query.trim() && (
+                        {tab === "conversation" && !conversationLoading && !conversationError && !ranQuery && (
                             <RowInfo>{t("globalSearch.conversationEmptyHint")}</RowInfo>
                         )}
 
@@ -1057,14 +1096,14 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                     <HitIcon type={h.type} title={h.title} focused={i === focusedIdx} />
                                     <div className="min-w-0 flex-1">
                                         <div className="truncate font-medium">
-                                            <Highlight text={h.title} query={query} />
+                                            <Highlight text={h.title} query={ranQuery} />
                                         </div>
                                         <div className="flex items-center gap-2 truncate text-11 text-text-tertiary">
                                             <span className="truncate">
-                                                <Highlight text={localizeSub(h, t)} query={query} />
+                                                <Highlight text={localizeSub(h, t)} query={ranQuery} />
                                             </span>
                                             <span className="truncate font-mono">
-                                                <Highlight text={h.snippet} query={query} />
+                                                <Highlight text={h.snippet} query={ranQuery} />
                                             </span>
                                         </div>
                                     </div>
@@ -1074,12 +1113,25 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     </div>
                 </div>
 
-                {/* ── Zone 3: summary row (top) + preview row (bottom) ── */}
-                {/* ADR-093 design 27 §4.6: the AI summary gets its own
-                    always-visible row so progress/cancel/regenerate have a
-                    home; the preview keeps its old slot below. Equal split,
-                    each row scrolls independently. */}
+                {/* ── Zone 3: preview row (top) + summary row (bottom) ── */}
+                {/* ADR-093 design 27 §4.6: the AI summary is the dialog's
+                    closing block — its live status renders centred in place and
+                    is replaced by the summary text when the model returns, so
+                    no extra status strip is needed. Preview sits above it,
+                    summary last. Equal split, each row scrolls independently. */}
                 <div className="flex h-[35vh] max-h-[480px] min-h-[240px] shrink-0 flex-col overflow-hidden">
+                    <div
+                        data-testid="preview-pane"
+                        className="flex min-h-0 flex-1 flex-col overflow-hidden border-b border-border-divider"
+                    >
+                        <PreviewPane
+                            hit={focusedHit}
+                            tab={tab}
+                            agentId={agentId}
+                            workspaceId={workspaceId}
+                            gitCommit={focusedGit}
+                        />
+                    </div>
                     <div
                         data-testid="summary-pane"
                         className="flex min-h-0 flex-1 flex-col overflow-hidden"
@@ -1088,24 +1140,13 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             phase={phase}
                             summary={summaryText}
                             error={summaryError}
+                            sourcesDone={sourcesDone}
                             allowedIds={
                                 new Set((candidateRef.current?.candidates ?? []).map((c) => c.id))
                             }
                             onCancel={() => summaryCtrlRef.current?.abort()}
                             onRegenerate={() => void runSummaryStage(seqRef.current, runCtrlRef.current)}
                             onCitation={openCitation}
-                        />
-                    </div>
-                    <div
-                        data-testid="preview-pane"
-                        className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-border-divider"
-                    >
-                        <PreviewPane
-                            hit={focusedHit}
-                            tab={tab}
-                            agentId={agentId}
-                            workspaceId={workspaceId}
-                            gitCommit={focusedGit}
                         />
                     </div>
                 </div>
@@ -1192,6 +1233,7 @@ function SummaryView({
     phase,
     summary,
     error,
+    sourcesDone,
     allowedIds,
     onCancel,
     onRegenerate,
@@ -1200,6 +1242,7 @@ function SummaryView({
     phase: SummaryPhase;
     summary: string;
     error: string | null;
+    sourcesDone: number;
     allowedIds: ReadonlySet<string>;
     onCancel: () => void;
     onRegenerate: () => void;
@@ -1221,7 +1264,19 @@ function SummaryView({
         return <RowInfo>{t("globalSearch.summaryIdleHint")}</RowInfo>;
     }
     if (phase === "searching") {
-        return <RowInfo>{t("globalSearch.summaryWaiting")}</RowInfo>;
+        return (
+            <div
+                className="relative flex h-full items-center justify-center px-3 py-3 text-xs text-text-tertiary"
+                data-testid="search-status-bar"
+            >
+                <span className="animate-pulse">
+                    {t("globalSearch.statusSearching", {
+                        done: sourcesDone,
+                        total: SEARCH_SOURCES.length,
+                    })}
+                </span>
+            </div>
+        );
     }
     if (phase === "summarizing") {
         return (
@@ -1248,9 +1303,13 @@ function SummaryView({
     const segments = parseSummarySegments(summary, allowedIds);
     return (
         <div className="relative h-full">
+            {/* `whitespace-pre-wrap` keeps the model's own paragraph breaks.
+                The Runtime prompt asks for short paragraphs (ADR-093 D3 —
+                plain text, never HTML/Markdown), so newlines are the only
+                structure the renderer honours. */}
             <div
                 data-testid="summary-text"
-                className="h-full overflow-y-auto px-4 py-2.5 text-xs leading-relaxed text-text-secondary"
+                className="h-full overflow-y-auto whitespace-pre-wrap px-4 py-2.5 text-xs leading-relaxed text-text-secondary"
             >
                 {segments.map((s, i) =>
                     s.kind === "text" ? (

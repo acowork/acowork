@@ -175,6 +175,8 @@ fn build_system_prompt() -> String {
      - Cite sources inline with the exact markers [[id]] (e.g. [[r3]]) using ONLY ids given in \
      the candidate list. Never invent ids, URLs, or paths.\n\
      - Plain text only: no Markdown links, no HTML, no code fences.\n\
+     - Structure the answer as 2-4 short paragraphs separated by a blank line. Never write one \
+     long block of text, and never number or bullet the lines.\n\
      - Reply in the same language as the query.\n\
      - If the candidates cannot answer the query, say so briefly."
         .to_string()

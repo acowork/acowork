@@ -1,17 +1,26 @@
 /**
  * GlobalSearchDialog.test.ts — P0-1 runnable checks (ADR-081).
  *
- * Covers the two non-trivial pure pieces so a regression breaks a test
- * instead of shipping:
- *   1. `filterGitCommits` — CommitPicker-compatible client-side filter
+ * Covers the non-trivial pure pieces so a regression breaks a test instead
+ * of shipping:
+ *   1. `enterShouldSearch` — Enter means "search the box" or "open the
+ *      focused row"; getting this wrong either re-runs per keystroke or
+ *      makes Enter stop opening results.
+ *   2. `filterGitCommits` — CommitPicker-compatible client-side filter
  *      (subject/author/hash, case-insensitive).
- *   2. `toFileHits` — ripgrep match → SearchHit mapping (file tab rows).
+ *   3. `toFileHits` — ripgrep match → SearchHit mapping (file tab rows).
  *
  * Run: `npx vitest run src/components/search/GlobalSearchDialog.test.ts`
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { filterGitCommits, toFileHits, toMemoryHits, toConversationHits } from "./GlobalSearchDialog";
+import {
+    enterShouldSearch,
+    filterGitCommits,
+    toFileHits,
+    toMemoryHits,
+    toConversationHits,
+} from "./GlobalSearchDialog";
 
 // Importing the module pulls in zustand stores (fine in test env); the
 // presentational asset modules are unused by these pure helpers.
@@ -34,6 +43,26 @@ const COMMITS = [
         subject: "fix: sidebar overflow",
     },
 ];
+
+describe("enterShouldSearch", () => {
+    it("searches when the typed query differs from the last run", () => {
+        expect(enterShouldSearch("migration", "")).toBe(true);
+        expect(enterShouldSearch("migration", "migra")).toBe(true);
+    });
+
+    it("opens the row when the query already matches what was searched", () => {
+        expect(enterShouldSearch("migration", "migration")).toBe(false);
+    });
+
+    it("never searches on an empty or whitespace-only box", () => {
+        expect(enterShouldSearch("", "")).toBe(false);
+        expect(enterShouldSearch("   ", "migration")).toBe(false);
+    });
+
+    it("ignores surrounding whitespace so a trailing space is not an edit", () => {
+        expect(enterShouldSearch("  migration  ", "migration")).toBe(false);
+    });
+});
 
 describe("filterGitCommits", () => {
     it("returns all commits for an empty query", () => {

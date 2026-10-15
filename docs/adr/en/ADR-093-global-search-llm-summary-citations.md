@@ -80,7 +80,7 @@ Generate at most one summary per valid query; tab switches do not trigger duplic
 
 ## 5. Consequences and Risks
 
-- Each query triggers more simultaneous source requests; reuse debounce/cancellation and per-source/summary input limits to avoid resource amplification from fast typing.
+- Each query triggers more simultaneous source requests; reuse the cancellation mechanism and the per-source/summary input limits to avoid resource amplification. Search fires explicitly on Enter (see [ADR-081 §4.5.1](ADR-081-global-search.md)); nothing is requested while typing — a debounce lowers the frequency but not the magnitude, since every character still triggered one six-source fan-out plus an LLM call.
 - Sources span multiple services, so summaries after a deadline are partial, not a completeness guarantee; the UI must show coverage/timeouts.
 - The LLM may return nonexistent citation IDs; frontend allowlist validation ensures invalid references cannot navigate.
 - Git's current open action may not precisely locate a commit; MVP degrades to focusing the hit in the Git tab as described in D3.

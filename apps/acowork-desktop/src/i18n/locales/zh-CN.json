@@ -1465,7 +1465,7 @@
   "globalSearch": {
     "title": "全局搜索",
     "close": "关闭",
-    "searchInputPlaceholder": "全局搜索…（Enter 立即搜索）",
+    "searchInputPlaceholder": "输入搜索内容，按回车开始搜索",
     "agentScopeTitle": "agent 范围（P0 单 agent；全部 agent 见 P1-3）",
     "toggleCaseSensitive": "区分大小写",
     "toggleWholeWord": "全词匹配",
