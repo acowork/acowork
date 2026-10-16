@@ -85,10 +85,26 @@ pub struct SearchSummaryRequest {
 
 /// Response body: plain-text summary (with `[[id]]` markers) plus the
 /// whitelisted citation ids the summary references.
+///
+/// `model` and `usage` mirror the same fields surfaced on the
+/// compaction-card event so the Desktop UI can render a uniform
+/// "model · tokens" footer across both LLM-driven summaries (ADR-093
+/// D3 parity with `compactionCard.meta`).
 #[derive(Debug, Serialize)]
 pub struct SearchSummaryResponse {
     pub summary: String,
     pub citations: Vec<String>,
+    /// Resolved model id actually used for this summary call (post
+    /// `summary_llm_snapshot` fallback). Empty string only when the
+    /// provider factory itself returned no model — the Desktop UI hides
+    /// the footer line in that case.
+    #[serde(default)]
+    pub model: String,
+    /// Token usage from the provider's response. Some providers omit
+    /// this (no usage accounting in dev/test paths); the field stays
+    /// optional and the UI hides the token breakdown when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<acowork_core::providers::traits::UsageInfo>,
 }
 
 type Error = (StatusCode, Json<serde_json::Value>);
@@ -273,7 +289,7 @@ pub(crate) async fn search_summary(
     let Some(core) = core else {
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "agent core not ready"));
     };
-    let (model, provider_id) = {
+    let (current_model, current_provider_id) = {
         let slot = state.session_manager_slot.read().await;
         match slot.as_ref() {
             Some(sm) => {
@@ -283,9 +299,21 @@ pub(crate) async fn search_summary(
             None => (None, None),
         }
     };
-    let (provider, model) = core.summary_llm_snapshot(provider_id.as_deref(), model.as_deref());
+    // ADR-093 follow-up: try the user's `default_compact_models` list
+    // first; if every candidate is unusable (provider not available /
+    // model not in capabilities / factory returns None), fall back to
+    // the session's current model — preserving the previous behaviour
+    // for users who have not configured the list.
+    let (provider, model, _tier) = core.resolve_summary_llm(
+        current_provider_id.as_deref(),
+        current_model.as_deref(),
+    );
 
     let whitelist: HashSet<String> = req.candidates.iter().map(|c| c.id.clone()).collect();
+    // `model` is moved into the request below; clone once now so the
+    // response can echo the same id back to the Desktop footer without
+    // a second snapshot call.
+    let response_model = model.clone();
     let request = acowork_core::providers::traits::ChatRequest {
         model,
         messages: vec![
@@ -335,7 +363,12 @@ pub(crate) async fn search_summary(
     if citations.is_empty() {
         tracing::debug!("search summary: model cited nothing; returning plain summary");
     }
-    Ok(Json(SearchSummaryResponse { summary, citations }))
+    Ok(Json(SearchSummaryResponse {
+        summary,
+        citations,
+        model: response_model,
+        usage: response.usage,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -451,5 +484,49 @@ mod tests {
         assert!(prompt.contains("\"id\":\"r1\""));
         assert!(prompt.contains("Timed-out scopes: git"));
         assert!(prompt.contains("Failed scopes: project"));
+    }
+
+    /// ADR-093 D3 parity: the response body carries the same `model` +
+    /// `usage` fields the Desktop footer renders, so a serialization
+    /// regression here breaks the UI footer silently.
+    #[test]
+    fn response_carries_model_and_usage() {
+        let usage = acowork_core::providers::traits::UsageInfo {
+            prompt_tokens: 1234,
+            completion_tokens: 56,
+            total_tokens: 1290,
+            cache_read_tokens: 800,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let resp = SearchSummaryResponse {
+            summary: "hello".to_string(),
+            citations: vec!["r1".to_string()],
+            model: "gpt-4o-mini".to_string(),
+            usage: Some(usage.clone()),
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["model"], "gpt-4o-mini");
+        assert_eq!(json["usage"]["prompt_tokens"], 1234);
+        assert_eq!(json["usage"]["completion_tokens"], 56);
+        assert_eq!(json["usage"]["total_tokens"], 1290);
+        assert_eq!(json["usage"]["cache_read_tokens"], 800);
+        // Citations list still survives unchanged.
+        assert_eq!(json["citations"][0], "r1");
+    }
+
+    /// `usage` is skipped when the provider omits it (e.g. dev stub
+    /// responses) — the UI hides the token row in that case.
+    #[test]
+    fn response_omits_usage_when_none() {
+        let resp = SearchSummaryResponse {
+            summary: "hello".to_string(),
+            citations: vec![],
+            model: "default".to_string(),
+            usage: None,
+        };
+        let json = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["model"], "default");
+        assert!(json.get("usage").is_none(), "usage field must be skipped when None");
     }
 }

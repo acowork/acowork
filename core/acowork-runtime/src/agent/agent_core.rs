@@ -433,6 +433,20 @@ fn manifest_distiller_to_config(
     })
 }
 
+/// ADR-093 follow-up: which resolution tier
+/// [`AgentCore::resolve_summary_llm`] ended up using. Returned alongside
+/// the resolved `(Provider, model)` so the HTTP handler and logs can
+/// tell the two paths apart without re-parsing the model id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SummaryModelTier {
+    /// First usable entry from the global `default_compact_models`
+    /// list (ADR-056).
+    GlobalDefault,
+    /// Session's current `(model, provider_id)` — the pre-existing
+    /// fallback, preserved as the second tier.
+    SessionCurrent,
+}
+
 impl AgentCore {
     // ── ADR-063 §3.7.5: accessor methods for LLM call sites ──
     //
@@ -1532,6 +1546,83 @@ impl AgentCore {
             .unwrap_or("default")
             .to_string();
         (provider, model)
+    }
+
+    /// ADR-093 follow-up: resolve the `(Provider, model)` to use for the
+    /// `POST /search/summary` LLM call, in priority order:
+    ///
+    /// 1. **Global `default_compact_models` list** — same ordered list
+    ///    consulted by episodic distillation / context compaction
+    ///    (ADR-056). The first candidate whose provider is available
+    ///    (`is_compact_provider_available`) AND whose model resolves in
+    ///    the global capabilities map wins. Each skip is logged at
+    ///    `debug`; the chosen tier logs at `info`.
+    /// 2. **Session's current `(model, provider_id)`** — the fallback
+    ///    that the original `summary_llm_snapshot` unconditionally used.
+    ///    Always succeeds: even when the session has no model, the
+    ///    provider defaults to the agent's active one and the model id
+    ///    becomes `"default"`.
+    ///
+    /// Deliberately *not* running a context-window check (unlike
+    /// `resolve_distill_model`): the summary prompt is bounded by
+    /// `MAX_SUMMARY_CHARS` (a few hundred tokens), so a candidate that
+    /// survived the capability lookup will trivially fit any model
+    /// window. Adding the check would just be cargo-culted code.
+    pub(crate) fn resolve_summary_llm(
+        &self,
+        current_provider_id: Option<&str>,
+        current_model: Option<&str>,
+    ) -> (
+        Arc<dyn acowork_core::providers::traits::Provider>,
+        String,
+        SummaryModelTier,
+    ) {
+        // Level 1: global compact-model candidate list, in user order.
+        // Same filtering contract as `resolve_distill_model` (provider
+        // availability + capability lookup) but no context-window gate.
+        let globals: Vec<(String, String)> =
+            self.default_compact_models.read().unwrap().clone();
+        for (pid, mid) in &globals {
+            if !self.is_compact_provider_available(pid) {
+                tracing::debug!(
+                    provider_id = %pid,
+                    model_id = %mid,
+                    "summary: global compact candidate provider unavailable, skipping"
+                );
+                continue;
+            }
+            if self.get_model_capabilities(mid).is_none() {
+                tracing::debug!(
+                    model_id = %mid,
+                    "summary: global compact candidate model not in capabilities, skipping"
+                );
+                continue;
+            }
+            if let Some(provider) = self.build_compact_provider(pid) {
+                tracing::info!(
+                    provider_id = %pid,
+                    model_id = %mid,
+                    tier = "global_default",
+                    "summary: using global default compact model"
+                );
+                return (provider, mid.clone(), SummaryModelTier::GlobalDefault);
+            }
+            tracing::debug!(
+                provider_id = %pid,
+                "summary: global compact candidate provider factory returned None, skipping"
+            );
+        }
+        // Level 2: session current (or agent default if session is
+        // empty). This is the previous behaviour preserved verbatim.
+        let (provider, model) =
+            self.summary_llm_snapshot(current_provider_id, current_model);
+        tracing::info!(
+            provider_id = ?current_provider_id,
+            model_id = %model,
+            tier = "session_current",
+            "summary: using session current model"
+        );
+        (provider, model, SummaryModelTier::SessionCurrent)
     }
 
     /// Build a standalone `Provider` for a compact/distill target id.
@@ -3515,5 +3606,123 @@ batch_size = 20
             first.embedding_provider.is_some() && second.embedding_provider.is_none(),
             "the plain field is per-clone; shared readers must not use it"
         );
+    }
+
+    // ── resolve_summary_llm dispatch tests ──────────────────────────
+    //
+    // ADR-093 follow-up: the search-summary endpoint must prefer the
+    // user's `default_compact_models` list (the same one compaction
+    // uses — ADR-056) over the session's current model. These tests
+    // cover the four cases the dispatch has to get right.
+
+    /// Build a minimal `AgentCore` with one Ollama-protocol provider
+    /// and one model in its capabilities. The local `base_url` makes
+    /// `is_compact_provider_available` return true without any api-key
+    /// vault entry, keeping the test self-contained.
+    fn make_core_with_ollama_candidate(
+        provider_id: &str,
+        model_id: &str,
+        context_window: u64,
+    ) -> AgentCore {
+        let config = RuntimeConfig::default();
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.summary-resolver"
+            version = "1.0.0"
+            name = "Summary resolver test"
+            description = "Tests resolve_summary_llm dispatch"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(MockProvider::single_text("test"));
+        let core = AgentCore::new(config, manifest, provider, vec![]);
+        let list_item = ProviderListItem {
+            id: provider_id.to_string(),
+            base_url: "http://localhost:11434".to_string(),
+            protocol_type: acowork_core::protocol::ProtocolType::Ollama,
+            models: vec![ProviderModelEntry {
+                id: model_id.to_string(),
+                capabilities: test_model_caps(context_window, 16_384),
+                max_output_tokens_limit: 32_768,
+            }],
+            compact_model: None,
+            custom: false,
+        };
+        *core.global_provider_list.write().unwrap() = vec![list_item];
+        core
+    }
+
+    #[test]
+    fn resolve_summary_llm_falls_back_to_session_when_candidates_empty() {
+        // No global candidates → the previous behaviour (session model
+        // wins) is preserved exactly.
+        let core = make_core(Some(64_000), Some(64_000), Some(test_model_caps(64_000, 16_384)), 128_000);
+        let (_provider, model, tier) = core.resolve_summary_llm(Some("session-pid"), Some("session-model"));
+        assert_eq!(tier, SummaryModelTier::SessionCurrent);
+        assert_eq!(model, "session-model");
+    }
+
+    #[test]
+    fn resolve_summary_llm_falls_back_to_session_when_candidates_empty_and_no_session() {
+        // Defensive: when the session slot is also empty, the resolver
+        // must still return successfully (model becomes "default", the
+        // agent's active provider is used). This is the pre-existing
+        // `summary_llm_snapshot` contract.
+        let core = make_core(Some(64_000), Some(64_000), Some(test_model_caps(64_000, 16_384)), 128_000);
+        let (_provider, model, tier) = core.resolve_summary_llm(None, None);
+        assert_eq!(tier, SummaryModelTier::SessionCurrent);
+        assert_eq!(model, "default");
+    }
+
+    #[test]
+    fn resolve_summary_llm_uses_global_candidate_when_provider_available() {
+        let core = make_core_with_ollama_candidate("ollama-local", "qwen-1.5b", 32_000);
+        *core.default_compact_models.write().unwrap() =
+            vec![("ollama-local".to_string(), "qwen-1.5b".to_string())];
+
+        let (_provider, model, tier) =
+            core.resolve_summary_llm(Some("session-pid"), Some("session-model"));
+        assert_eq!(tier, SummaryModelTier::GlobalDefault);
+        assert_eq!(model, "qwen-1.5b");
+    }
+
+    #[test]
+    fn resolve_summary_llm_skips_unavailable_candidate_and_uses_next() {
+        // First candidate's provider is not in the list (and not a
+        // configured local one) → `is_compact_provider_available`
+        // returns false → resolver falls through to the next candidate.
+        // Second candidate IS available → GlobalDefault wins.
+        let core = make_core_with_ollama_candidate("ollama-local", "qwen-7b", 32_000);
+        *core.default_compact_models.write().unwrap() = vec![
+            ("missing-pid".to_string(), "missing-model".to_string()),
+            ("ollama-local".to_string(), "qwen-7b".to_string()),
+        ];
+
+        let (_provider, model, tier) = core.resolve_summary_llm(None, None);
+        assert_eq!(tier, SummaryModelTier::GlobalDefault);
+        assert_eq!(model, "qwen-7b");
+    }
+
+    #[test]
+    fn resolve_summary_llm_skips_candidate_when_model_not_in_capabilities() {
+        // Provider is reachable, but the model id in the candidate row
+        // does not match any model the provider exposes. The
+        // capability lookup returns None → skip → fall through to the
+        // next entry; if that fails too, fall through to session.
+        let core = make_core_with_ollama_candidate("ollama-local", "qwen-7b", 32_000);
+        *core.default_compact_models.write().unwrap() = vec![
+            ("ollama-local".to_string(), "model-not-listed".to_string()),
+        ];
+
+        let (_provider, model, tier) =
+            core.resolve_summary_llm(Some("session-pid"), Some("session-model"));
+        assert_eq!(tier, SummaryModelTier::SessionCurrent);
+        assert_eq!(model, "session-model");
     }
 }
