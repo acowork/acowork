@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 85 / 85 documents translated.
+**Coverage**: 86 / 86 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -112,6 +112,8 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 84 | [ADR-091](./ADR-091-lsp-server-registry-node.md) | LSP Server Registry Moves Down to the Node — preset ∪ custom Merge, Persistent Install State | Accepted (implemented 2026-10-10, P0–P7) | [zh](../zh/ADR-091-lsp-server-registry-node.md) |
 | 85 | [ADR-092](./ADR-092-user-message-identity-and-bounded-reads.md) | Stable Identity and Bounded Reads for User Messages — Restructuring the user chat Storage and Refresh Model | Accepted | [zh](../zh/ADR-092-user-message-identity-and-bounded-reads.md) |
 | 86 | [ADR-093](./ADR-093-global-search-llm-summary-citations.md) | LLM Synthesis and Clickable Citations for Global Search | Draft (pending review) | [zh](../zh/ADR-093-global-search-llm-summary-citations.md) |
+| 87 | [ADR-094](./ADR-094-progressive-skill-auto-load-and-load-skill-tool.md) | Per-Agent Skills Auto-Load (Progressive Default) + `load_skill` Built-in Tool | Accepted (2026-10 revision) | [zh](../zh/ADR-094-progressive-skill-auto-load-and-load-skill-tool.md) |
+| 88 | [ADR-095](./ADR-095-global-search-conversation-memory-retrieval-and-summary-candidates.md) | Global Search: Conversation and Memory Retrieval, and Summary Candidate Selection | Draft (pending review) | [zh](../zh/ADR-095-global-search-conversation-memory-retrieval-and-summary-candidates.md) |
 
 ---
 
