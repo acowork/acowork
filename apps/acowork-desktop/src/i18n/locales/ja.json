@@ -98,7 +98,8 @@
     "gateway": "ゲートウェイ",
     "globalSearch": "グローバル検索 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
-    "expandRightPanel": "Expand Right Panel"
+    "expandRightPanel": "Expand Right Panel",
+    "gatewayDetails": "詳細"
   },
   "navBar": {
     "editProfile": "Edit Profile",

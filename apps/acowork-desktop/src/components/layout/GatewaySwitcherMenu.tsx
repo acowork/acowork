@@ -94,7 +94,14 @@ type Verdict = "pending" | "ok" | "fail";
  * switch the connection out from under the user with no address chosen.
  * The live configuration's mode still marks the current row.
  */
-export function GatewaySwitcherMenu() {
+export function GatewaySwitcherMenu({
+  onOpenGatewaySettings,
+}: {
+  /** Jump to SettingsPage with the Gateway tab focused. TitleBar
+   *  wires this from AppLayout because `currentView` / `settingsInitialTab`
+   *  are owned there — same reason the avatar click handler lives there. */
+  onOpenGatewaySettings?: () => void;
+}) {
   const { t } = useTranslation();
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
   const gatewayUrlHistory = useSettingsStore((s) => s.gatewayUrlHistory);
@@ -298,9 +305,15 @@ export function GatewaySwitcherMenu() {
             </div>
           )}
 
-          {/* Label left, listbox right — one row at any language width.
-              The label is the settings tab's own wording so the two
-              screens name the concept identically. */}
+          {/* Label left, listbox + Details button right — one row at
+              any language width. The label is the settings tab's own
+              wording so the two screens name the concept identically.
+
+              Two controls share the row, so widths are pinned by side:
+              the listbox keeps `flex-1` to render "Relay" without
+              truncation, the Details button is `shrink-0` so it never
+              gets squeezed, and `ml-auto` is dropped (the button is the
+              right-anchor now, not the listbox). */}
           <div className="flex items-center gap-2 border-b border-border-divider px-1 pb-2">
             <span className="shrink-0 text-xs text-text-tertiary">
               {t("settings.gatewayMode")}
@@ -315,8 +328,17 @@ export function GatewaySwitcherMenu() {
                 { value: "relay", label: t("settings.relay") },
               ]}
               aria-label={t("settings.gatewayMode")}
-              className="ml-auto min-w-0 flex-1"
+              className="min-w-0 flex-1"
             />
+            {onOpenGatewaySettings && (
+              <button
+                type="button"
+                onClick={onOpenGatewaySettings}
+                className="btn-solid shrink-0 rounded-md px-2 py-1 text-xs font-medium"
+              >
+                {t("titleBar.gatewayDetails")}
+              </button>
+            )}
           </div>
 
           {/* Local: one address, no discovery. The lifecycle row is the

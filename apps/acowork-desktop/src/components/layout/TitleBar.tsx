@@ -43,7 +43,14 @@ export function RightPanelIcon({ className, open }: { className?: string; open: 
   );
 }
 
-export function TitleBar() {
+export function TitleBar({
+  onOpenGatewaySettings,
+}: {
+  /** Title-bar gateway switcher's "Details" button jumps to SettingsPage
+   *  with the Gateway tab focused. AppLayout owns currentView /
+   *  settingsInitialTab so the callback originates there. */
+  onOpenGatewaySettings?: () => void;
+} = {}) {
   const isMacOS = navigator.platform.includes("Mac");
   const win = getCurrentWindow();
   const { t } = useTranslation();
@@ -126,7 +133,7 @@ export function TitleBar() {
         className="flex items-center gap-1"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <GatewaySwitcherMenu />
+        <GatewaySwitcherMenu onOpenGatewaySettings={onOpenGatewaySettings} />
         <Tooltip content={t("titleBar.globalSearch")} position="bottom">
           <button
             className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"

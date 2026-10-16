@@ -4,7 +4,8 @@
     "gateway": "Gateway",
     "globalSearch": "Global Search (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
-    "expandRightPanel": "Expand Right Panel"
+    "expandRightPanel": "Expand Right Panel",
+    "gatewayDetails": "Details"
   },
   "navBar": {
     "editProfile": "Edit Profile",

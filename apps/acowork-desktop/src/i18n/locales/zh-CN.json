@@ -98,7 +98,8 @@
     "gateway": "网关",
     "globalSearch": "全局搜索 (Ctrl+Shift+F)",
     "collapseRightPanel": "折叠右侧面板",
-    "expandRightPanel": "展开右侧面板"
+    "expandRightPanel": "展开右侧面板",
+    "gatewayDetails": "详情"
   },
   "navBar": {
     "editProfile": "编辑资料",

@@ -832,6 +832,15 @@ export function AppLayout() {
     setCurrentView("settings");
   }, []);
 
+  // Title-bar gateway switcher's "Details" button — same payload as the
+  // avatar click but lands on the Gateway tab instead of Profile. Kept
+  // as a dedicated callback so the gateway menu never has to know about
+  // currentView / settingsInitialTab (both are owned here).
+  const handleOpenGatewaySettings = useCallback(() => {
+    setSettingsInitialTab("gateway");
+    setCurrentView("settings");
+  }, []);
+
   // Navigate via nav bar — reset settings tab to default
   const handleViewChange = useCallback((view: NavView) => {
     if (view === "settings") {
@@ -990,7 +999,7 @@ export function AppLayout() {
       {/* Custom title bar — on macOS, sits under the native traffic lights
           (titleBarStyle:"Overlay"). On Windows/Linux, decorations are
           disabled in Rust setup() so this is the only title bar. */}
-      <TitleBar />
+      <TitleBar onOpenGatewaySettings={handleOpenGatewaySettings} />
 
       {/* ADR-052: the Gateway outage indicator only renders for
           *steady-state* drops. AppLayout is gated by `gatewayReady` in

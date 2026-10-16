@@ -199,6 +199,19 @@ describe("GatewaySwitcherMenu", () => {
     });
     expect(screen.queryByRole("button", { name: /192\.168\.1\.20/ })).toBeNull();
   });
+
+  it("the Details button fires onOpenGatewaySettings exactly once", () => {
+    const onOpen = vi.fn();
+    render(<GatewaySwitcherMenu onOpenGatewaySettings={onOpen} />);
+    fireEvent.click(openBtn());
+    fireEvent.click(screen.getByRole("button", { name: /详情|Details|詳細|상세/ }));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the Details button when no callback is provided", () => {
+    open();
+    expect(screen.queryByRole("button", { name: /详情|Details|詳細|상세/ })).toBeNull();
+  });
 });
 
 /**

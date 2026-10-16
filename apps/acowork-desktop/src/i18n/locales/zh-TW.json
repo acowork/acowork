@@ -98,7 +98,8 @@
     "gateway": "閘道",
     "globalSearch": "全域搜尋 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
-    "expandRightPanel": "Expand Right Panel"
+    "expandRightPanel": "Expand Right Panel",
+    "gatewayDetails": "詳情"
   },
   "navBar": {
     "editProfile": "Edit Profile",
