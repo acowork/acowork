@@ -80,6 +80,11 @@ export interface AgentProfileSettings {
   /** Design 27 §2.1: T2 handoff target token cap (500–4,000).
    *  Undefined = built-in default (1,500). */
   intentHandoffMaxTokens?: number;
+  // ADR-094 note: `skillsAutoLoad` was removed from the profile
+  // shape. Skill mode (Progressive / Manual) now lives entirely
+  // on the `load_skill` tool entry in `agent_tools.json` and is
+  // mutated by the Tools panel — there is no second switch on
+  // the Agent Setup panel any more.
 }
 
 const DEFAULT_PROFILE: AgentProfileSettings = {

@@ -146,6 +146,13 @@ pub enum ConfigField {
     /// `AgentConfig::intent_handoff_max_tokens` — `Option<u64>`
     /// (design 27 §2.1 T2 handoff cap, 500–4,000 tokens).
     IntentHandoffMaxTokens,
+    // ADR-094 note: `ConfigField::SkillsAutoLoad` was removed.
+    // Skill mode (Progressive / Manual) is now driven entirely by
+    // `agent_tools.json::load_skill.enabled` — see
+    // `cli::resolve_skill_mode` for the priority chain. The user-facing
+    // UI surface (the `load_skill` row in the built-in tools list)
+    // already updates `agent_tools.json`, so no second field on
+    // `AgentConfig` is needed.
 }
 
 impl ConfigField {

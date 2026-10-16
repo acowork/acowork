@@ -243,24 +243,54 @@ pub fn reload_prompts_into_core(
 /// Backward-compatible wrapper that defaults to `SkillMode::Manual`,
 /// meaning no skill content is injected into the system prompt.
 /// For explicit mode control, use [`build_system_prompt_with_mode`].
+///
+/// Manual mode = no skills summary; this wrapper only returns the dialog
+/// `base` so existing callers keep their `Result<String>` shape.
 pub fn build_system_prompt(package_dir: &Path) -> Result<String> {
-    build_system_prompt_with_mode(package_dir, acowork_core::SkillMode::Manual)
+    Ok(build_system_prompt_with_mode(package_dir, acowork_core::SkillMode::Manual)?.base)
+}
+
+/// System-prompt parts assembled by [`build_system_prompt_with_mode`].
+///
+/// ADR-094: the dialog base (`prompts/*.md`) and the Progressive-mode
+/// skills summary are returned as **separate fields** so the caller can
+/// render them as independent `ContextBuilder` sections. This mirrors
+/// the existing `tool_definitions` separation (also pushed as its own
+/// section via `with_tools`): a single mega-string system prompt would
+/// prevent `compute_section_sizes` from emitting a distinct
+/// `skill_instructions` entry, which is what the usage popover and
+/// Debug panel render.
+///
+/// Returned as a struct (not a tuple) so the call sites stay readable
+/// when both fields are non-trivial strings.
+pub struct SystemPromptParts {
+    /// `prompts/*.md` sections joined with `---` separators. Does NOT
+    /// include the skills summary.
+    pub base: String,
+    /// Progressive-mode skills summary (name + description list). `None`
+    /// in Manual mode, when the package has no `skills/` dir, when the
+    /// skills dir fails to load, or when the registry is empty.
+    pub skills_summary: Option<String>,
 }
 
 /// Build system prompt from package files with explicit skill mode.
 ///
-/// Reads prompt files in alphabetical order and concatenates them.
-/// Skill injection behavior is controlled by `skill_mode`:
-/// - `Manual`: no skill content is injected.
-/// - `Progressive`: a compact summary (name + description) of available skills
-///   is appended after prompt sections.
+/// Reads prompt files in alphabetical order and concatenates them into
+/// `SystemPromptParts.base`. Skill injection is returned separately
+/// (`skills_summary`) so the caller can place it on a distinct
+/// `ContextBuilder` section — see [`SystemPromptParts`] docs.
+///
+/// `skill_mode` controls skills behavior:
+/// - `Manual`: `skills_summary = None`.
+/// - `Progressive`: `skills_summary = Some(compact name+description list)`
+///   when the package has a `skills/` dir with at least one SKILL.md.
 ///
 /// [`COMPACTION_PROMPT_FILE`] is excluded — it is the compaction directive,
 /// not a dialog section.
 pub fn build_system_prompt_with_mode(
     package_dir: &Path,
     skill_mode: acowork_core::SkillMode,
-) -> Result<String> {
+) -> Result<SystemPromptParts> {
     let mut sections = Vec::new();
 
     // Load prompt files
@@ -307,22 +337,29 @@ pub fn build_system_prompt_with_mode(
         }
     }
 
-    // Load skill files based on skill_mode
+    // ADR-094: load skills as a SEPARATE return field, not embedded into
+    // `base`. Embedding would defeat `compute_section_sizes` (it would
+    // not see a `skill_instructions` section) and hide the skills usage
+    // from the popover and Debug snapshot. `base` therefore only carries
+    // `prompts/*.md` content.
     let skills_dir = package_dir.join("skills");
-    if skills_dir.exists() {
+    let skills_summary = if skills_dir.exists() {
         match skill_mode {
             acowork_core::SkillMode::Manual => {
                 tracing::debug!(
                     skills_dir = %skills_dir.display(),
                     "Skill mode is Manual — skipping skill injection"
                 );
+                None
             }
             acowork_core::SkillMode::Progressive => {
                 match SkillRegistry::load_from_dir(&skills_dir) {
                     Ok(registry) => {
                         let summary = registry.build_skill_summary();
-                        if !summary.is_empty() {
-                            sections.push(summary);
+                        if summary.is_empty() {
+                            None
+                        } else {
+                            Some(summary)
                         }
                     }
                     Err(e) => {
@@ -331,18 +368,64 @@ pub fn build_system_prompt_with_mode(
                             error = %e,
                             "Failed to load skills for summary injection"
                         );
+                        None
                     }
                 }
             }
         }
-    }
+    } else {
+        None
+    };
 
-    if sections.is_empty() {
+    let base = if sections.is_empty() {
         // Default system prompt if no files found
-        return Ok(crate::prompt::PROMPT_BUILDER_FALLBACK.to_string());
-    }
+        crate::prompt::PROMPT_BUILDER_FALLBACK.to_string()
+    } else {
+        sections.join("\n\n---\n\n")
+    };
 
-    Ok(sections.join("\n\n---\n\n"))
+    Ok(SystemPromptParts {
+        base,
+        skills_summary,
+    })
+}
+
+/// Compute the Progressive-mode skills summary payload from the
+/// current package + workdir. Pure — no I/O side effects, no
+/// dispatch — so unit tests can pin its contract with a synthetic
+/// package dir, and so the HTTP layer (hot-reload handlers) can call
+/// it from any of the live-update paths (system-prompt reload,
+/// built-in-tools toggle, ...).
+///
+/// Resolution priority mirrors Phase A startup:
+/// 1. `agent_tools.json::load_skill.enabled` (user runtime override —
+///    toggling the `load_skill` Switch in the Desktop Tools panel)
+/// 2. `manifest.skills.progressive` (package author default)
+///
+/// `load_skill` is the single source of truth for "should the LLM
+/// know what skills exist at session start" — there's no separate
+/// `skills_auto_load` config field any more. Enabling the
+/// `load_skill` tool is the toggle; flipping it dispatches
+/// `UpdateSkillInstructions` alongside `UpdateBuiltinTools` (see
+/// `http::server::broadcast_builtin_tools_update`).
+///
+/// Returns:
+/// - `Ok(Some(summary))` in Progressive mode with `skills/` populated
+/// - `Ok(None)` in Manual mode or when the package has no `skills/` dir
+///   (caller dispatches `UpdateSkillInstructions { instructions: None }`
+///   to clear the live section)
+/// - `Err(msg)` on manifest load or prompt build failure — caller logs
+///   and skips the dispatch (on-disk file is authoritative for next boot)
+pub fn compute_skill_instructions_payload(
+    package_dir: &Path,
+    work_dir: &Path,
+) -> std::result::Result<Option<String>, String> {
+    let manifest = crate::package::loader::load_manifest(package_dir)
+        .map_err(|e| format!("manifest load failed: {e}"))?;
+    let skill_mode = crate::cli::resolve_skill_mode(&manifest, &work_dir.to_string_lossy());
+    let prompt_parts = build_system_prompt_with_mode(package_dir, skill_mode)
+        .map_err(|e| format!("prompt build failed: {e}"))?;
+    Ok(prompt_parts.skills_summary)
 }
 
 /// Collect markdown/text files from a directory
@@ -412,10 +495,12 @@ mod tests {
     #[test]
     fn test_build_system_prompt_manual_mode() {
         let dir = create_test_package("manual");
-        let prompt = build_system_prompt_with_mode(&dir, acowork_core::SkillMode::Manual).unwrap();
-        assert!(prompt.contains("weather assistant"));
-        assert!(!prompt.contains("Greeting"));
-        assert!(!prompt.contains("Skill:"));
+        let parts = build_system_prompt_with_mode(&dir, acowork_core::SkillMode::Manual).unwrap();
+        assert!(parts.base.contains("weather assistant"));
+        assert!(parts.skills_summary.is_none());
+        // Skills content must NEVER leak into the dialog base.
+        assert!(!parts.base.contains("Greeting"));
+        assert!(!parts.base.contains("Skill:"));
     }
 
     #[test]
@@ -448,14 +533,38 @@ Be friendly and welcoming.
         )
         .unwrap();
 
-        let prompt =
+        let parts =
             build_system_prompt_with_mode(&dir, acowork_core::SkillMode::Progressive).unwrap();
-        assert!(prompt.contains("You are a test assistant."));
-        assert!(prompt.contains("## Available Skills"));
-        assert!(prompt.contains("greeting"));
-        assert!(prompt.contains("Greet users warmly"));
-        // Full instructions should NOT appear in progressive mode
-        assert!(!prompt.contains("Be friendly and welcoming."));
+        // Dialog base: only the prompts/ content, no skills summary mixed in.
+        assert!(parts.base.contains("You are a test assistant."));
+        assert!(!parts.base.contains("## Available Skills"));
+        assert!(!parts.base.contains("Greet users warmly"));
+        assert!(!parts.base.contains("Be friendly and welcoming."));
+        // Skills summary: a separate, independent field.
+        let skills = parts.skills_summary.expect("Progressive must populate skills_summary");
+        assert!(skills.contains("## Available Skills"));
+        assert!(skills.contains("greeting"));
+        assert!(skills.contains("Greet users warmly"));
+        // Full instructions should NOT appear in progressive summary.
+        assert!(!skills.contains("Be friendly and welcoming."));
+    }
+
+    #[test]
+    fn test_build_system_prompt_progressive_mode_no_skills_dir() {
+        // Package with prompts/ only, no skills/. Progressive mode
+        // must return skills_summary = None, not error.
+        let dir = std::env::temp_dir().join("acowork-test-prompt-progressive-no-skills");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(
+            dir.join("prompts").join("system.md"),
+            "You are a test assistant.",
+        )
+        .unwrap();
+        let parts =
+            build_system_prompt_with_mode(&dir, acowork_core::SkillMode::Progressive).unwrap();
+        assert!(parts.base.contains("You are a test assistant."));
+        assert!(parts.skills_summary.is_none());
     }
 
     #[test]

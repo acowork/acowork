@@ -222,6 +222,15 @@ pub enum InboundMessage {
     /// session's `ContextBuilder` — so editing `system.md` takes effect
     /// immediately, without an agent restart.
     UpdateSystemPrompt { system_prompt: String },
+    /// ADR-094: agent-level Progressive-mode skills summary update.
+    /// `None` clears the section (Manual mode hot-toggle). Mirrors
+    /// the `UpdateSystemPrompt` shape and lifecycle: agent-scoped
+    /// template + per-session broadcast via
+    /// `SessionManager::apply_skill_instructions`. Without this,
+    /// `rebuild_and_dispatch_system_prompt` (HTTP hot-reload) would
+    /// silently drop the skills section in Progressive mode because
+    /// `SystemPromptParts.base` no longer embeds it.
+    UpdateSkillInstructions { instructions: Option<String> },
 }
 
 impl InboundMessage {
@@ -312,6 +321,19 @@ impl InboundMessage {
                         "Truncating oversized inbound UpdateSystemPrompt"
                     );
                     *system_prompt = truncate_to_bytes(system_prompt, MAX_INBOUND_PAYLOAD_SIZE);
+                    truncated = true;
+                }
+            }
+            InboundMessage::UpdateSkillInstructions { instructions } => {
+                if let Some(s) = instructions.as_ref()
+                    && s.len() > MAX_INBOUND_PAYLOAD_SIZE
+                {
+                    tracing::warn!(
+                        original_len = s.len(),
+                        max = MAX_INBOUND_PAYLOAD_SIZE,
+                        "Truncating oversized inbound UpdateSkillInstructions"
+                    );
+                    *instructions = Some(truncate_to_bytes(s, MAX_INBOUND_PAYLOAD_SIZE));
                     truncated = true;
                 }
             }

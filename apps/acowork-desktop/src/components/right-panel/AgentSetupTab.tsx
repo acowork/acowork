@@ -26,6 +26,7 @@ import { log } from "../../lib/logger";
 import { useToast } from "../common/ToastProvider";
 import { ListBox, ExpandableRow } from "../common/list";
 import { flushPendingWrites } from "./agentSetupPendingWrites";
+import { buildProfilePatchFromServerConfig } from "./agentSetupConfigSync";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -77,6 +78,10 @@ type WiredField =
   | "approvalTimeoutSecs"
   | "compressionRatioThreshold"
   | "sessionLanguage"
+  // ADR-094 note: the `skillsAutoLoad` switch was removed from the
+  // Agent Setup panel. Skill mode (Progressive vs Manual) is now
+  // driven entirely by the `load_skill` tool switch in the Tools
+  // panel — see ADR-094 §4 (single source of truth, no drift).
   | "intentIdleRotateHours"
   | "intentHandoffMaxTokens";
 
@@ -92,6 +97,11 @@ const WIRE_FIELD: Record<WiredField, string> = {
   sessionLanguage: "session_language",
   intentIdleRotateHours: "intent_idle_rotate_hours",
   intentHandoffMaxTokens: "intent_handoff_max_tokens",
+  // ADR-094 note: `skillsAutoLoad` was removed from the
+  // `WIRE_FIELD` table. Skill mode lives on the `load_skill`
+  // tool entry in `agent_tools.json` (ADR-094 §4) — Toggling it
+  // goes through `PUT /agents/{id}/builtin-tools`, not this
+  // endpoint.
 };
 
 const FIELD_DEBOUNCE_MS = 1000;
@@ -108,6 +118,10 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   sessionLanguage: FIELD_DEBOUNCE_MS,
   intentIdleRotateHours: FIELD_DEBOUNCE_MS,
   intentHandoffMaxTokens: FIELD_DEBOUNCE_MS,
+  // ADR-094 note: `skillsAutoLoad` was removed from the debounce
+  // table. Skill mode toggling goes through the Tools panel
+  // (`load_skill` Switch) and uses the built-in tools debounce,
+  // not this per-field map.
 };
 
 // ── Component ───────────────────────────────────────────────────────────
@@ -229,85 +243,12 @@ export function AgentSetupTab() {
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (cancelled || !data) return;
-        // Runtime's `GET /agents/{id}/config` returns a nested envelope
-        // `{ agent_id, matches, config: <AgentConfig>, manifest_path, work_dir }`
-        // (see acowork-runtime/src/http/server.rs::get_agent_config). The
-        // Setup panel cares about the **flattened** config fields, so we
-        // unwrap `data.config` here. Tolerating a missing/empty `config`
-        // (e.g. agent_id mismatch) keeps the rest of the panel usable —
-        // it just renders the localStorage fallback values.
-        const cfg = (data.config ?? {}) as {
-          max_output_tokens?: number | null;
-          max_iterations?: number | null;
-          max_sessions?: number | null;
-          temperature?: number | null;
-          context_window?: number | null;
-          shell_approval_threshold?: string | null;
-          approval_timeout_secs?: number | null;
-          compression_ratio_threshold?: number | null;
-          session_language?: string | null;
-          intent_idle_rotate_hours?: number | null;
-          intent_handoff_max_tokens?: number | null;
-        };
-        // Race-safe merge (ADR-052 follow-up): only overwrite each
-        // local profile field when the server returned a concrete
-        // value. All `AgentConfig` fields use `skip_serializing_if =
-        // "Option::is_none"` (acowork-runtime/src/agent_config.rs), so
-        // the runtime response represents "no opinion" as a missing
-        // or JSON-null field. The old `?? undefined` / `?? 300` shape
-        // would silently clobber a value the user typed into a number
-        // input or clicked on the Switch before this GET returned,
-        // dropping their intent before the next Apply could persist
-        // it (this is the wider pattern behind the original
-        // switch-clobber bug — see `saveField` below).
-        const patch: Partial<typeof profile> = {
-          // `global_max_output_tokens` lives on the Gateway
-          // AgentConfigResponse (not on Runtime AgentConfig), so the
-          // proxy response doesn't carry it. We leave the previously
-          // cached value alone if it's already set; the panel reads
-          // `globalMaxTokens` as a "fallback limit" hint.
-          activeModel: data.model,
-          activeProvider: data.provider,
-        };
-        if (typeof cfg.max_output_tokens === "number") {
-          patch.maxTokens = cfg.max_output_tokens;
-        }
-        if (typeof cfg.max_iterations === "number") {
-          patch.maxIterations = cfg.max_iterations;
-        }
-        if (typeof cfg.max_sessions === "number") {
-          patch.maxSessions = cfg.max_sessions;
-        }
-        if (typeof cfg.temperature === "number") {
-          patch.temperature = cfg.temperature;
-        }
-        if (typeof cfg.context_window === "number") {
-          patch.contextWindow = cfg.context_window;
-        }
-        if (typeof cfg.shell_approval_threshold === "string") {
-          patch.shellApprovalThreshold = cfg.shell_approval_threshold;
-        }
-        if (typeof cfg.approval_timeout_secs === "number") {
-          patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
-        }
-        if (typeof cfg.compression_ratio_threshold === "number") {
-          patch.compressionRatioThreshold = cfg.compression_ratio_threshold;
-        }
-        // Intent rotation knobs (design 27 §2.1). `0` is a meaningful
-        // idle-hours value (disables T1 rotation), so guard on `>= 0`,
-        // not `> 0`.
-        if (typeof cfg.intent_idle_rotate_hours === "number") {
-          patch.intentIdleRotateHours = cfg.intent_idle_rotate_hours;
-        }
-        if (typeof cfg.intent_handoff_max_tokens === "number") {
-          patch.intentHandoffMaxTokens = cfg.intent_handoff_max_tokens;
-        }
-        // session_language is a string-or-absent field — preserve
-        // explicit `null` (clear) AND concrete value, leave absent
-        // alone (preserves optimistic local edit while in-flight).
-        if (cfg.session_language !== undefined) {
-          patch.sessionLanguage = cfg.session_language;
-        }
+        // ADR-052 follow-up: the unwrap + patch-build logic lives
+        // in `buildProfilePatchFromServerConfig` (single source of
+        // truth, shared with the refresh-event listener below).
+        // Do NOT inline another cfg-cast here — the drift between
+        // two such blocks is exactly how fields used to get missed.
+        const patch = buildProfilePatchFromServerConfig(data);
         setProfile(selectedAgentId, patch);
       })
       .catch((err) => {
@@ -327,66 +268,11 @@ export function AgentSetupTab() {
           .then((res) => (res.ok ? res.json() : null))
           .then((data) => {
             if (!data) return;
-            // Same nested-envelope unwrap as the mount effect above
-            // (see comment there for the rationale). Keep the two paths
-            // in lockstep so a refresh event doesn't silently lose the
-            // flattening logic.
-            const cfg = (data.config ?? {}) as {
-              max_output_tokens?: number | null;
-              max_iterations?: number | null;
-              max_sessions?: number | null;
-              temperature?: number | null;
-              context_window?: number | null;
-              shell_approval_threshold?: string | null;
-              approval_timeout_secs?: number | null;
-              session_language?: string | null;
-              intent_idle_rotate_hours?: number | null;
-              intent_handoff_max_tokens?: number | null;
-            };
-            // Same race-safe merge as the mount effect above. The
-            // retained-MQTT snapshot fires this refresh *after* every
-            // successful PUT, so the clobber-to-undefined path was the
-            // exact mechanism that erased a user's Switch click before
-            // the click even made it into the PUT body. The new
-            // write-through `saveField` (below) makes this race
-            // window much narrower — a user edit lands in the local
-            // store and is sent to the server *before* the
-            // refresh handler can observe the response — but we keep
-            // the typeof-guard as belt-and-suspenders.
-            const patch: Partial<typeof profile> = {
-              activeModel: data.model,
-              activeProvider: data.provider,
-            };
-            if (typeof cfg.max_output_tokens === "number") {
-              patch.maxTokens = cfg.max_output_tokens;
-            }
-            if (typeof cfg.max_iterations === "number") {
-              patch.maxIterations = cfg.max_iterations;
-            }
-            if (typeof cfg.max_sessions === "number") {
-              patch.maxSessions = cfg.max_sessions;
-            }
-            if (typeof cfg.temperature === "number") {
-              patch.temperature = cfg.temperature;
-            }
-            if (typeof cfg.context_window === "number") {
-              patch.contextWindow = cfg.context_window;
-            }
-            if (typeof cfg.shell_approval_threshold === "string") {
-              patch.shellApprovalThreshold = cfg.shell_approval_threshold;
-            }
-            if (typeof cfg.approval_timeout_secs === "number") {
-              patch.approvalTimeoutSecs = cfg.approval_timeout_secs;
-            }
-            if (typeof cfg.intent_idle_rotate_hours === "number") {
-              patch.intentIdleRotateHours = cfg.intent_idle_rotate_hours;
-            }
-            if (typeof cfg.intent_handoff_max_tokens === "number") {
-              patch.intentHandoffMaxTokens = cfg.intent_handoff_max_tokens;
-            }
-            if (cfg.session_language !== undefined) {
-              patch.sessionLanguage = cfg.session_language;
-            }
+            // Same single-source-of-truth helper as the mount effect.
+            // The retained-MQTT snapshot fires this refresh *after*
+            // every successful PUT, so the clobber-to-undefined path
+            // is closed by the typeof-guard inside the helper.
+            const patch = buildProfilePatchFromServerConfig(data);
             setProfile(selectedAgentId, patch);
           })
           .catch(() => { });
@@ -580,6 +466,11 @@ export function AgentSetupTab() {
       });
     };
   }, [selectedAgentId, putField]);
+
+  // ── ADR-094 note: `handleSkillsAutoLoadToggle` was removed. The
+  //    skill mode (Progressive vs Manual) toggle now lives in the
+  //    Tools panel as the `load_skill` Switch and goes through
+  //    `PUT /agents/{id}/builtin-tools` like every other tool.
 
   // Sync the new temperature into the chat store so the RightPanel
   // status tab shows the updated value right away, without waiting for
@@ -1196,6 +1087,11 @@ export function AgentSetupTab() {
               {t("agentSetup.intentHandoffMaxTokensDesc")}
             </p>
           </div>
+
+    {/* ADR-094 note: the `skillsAutoLoad` Switch + label block was
+        removed from the Session Parameters card. Skill mode now
+        toggles via the `load_skill` Switch in the Tools panel —
+        see ADR-094 §4. */}
           </div>
         </ExpandableRow>
       </ListBox>

@@ -361,7 +361,17 @@ impl SkillRegistry {
         }
 
         let mut output = String::from("## Available Skills\n\n");
-        for skill in self.skills.values() {
+        // Deterministic order (name-sorted). `self.skills` is a
+        // `HashMap`, so iterating `values()` directly yields a
+        // per-instance random order: the same skill set would render
+        // differently across boots and across every
+        // `UpdateSkillInstructions` hot-reload. This summary is injected
+        // into Block A of the system prompt (ADR-060), so an unstable
+        // order silently rewrites the prompt bytes and misses the prompt
+        // cache. Same fix/comment as `http::skills::list_from_registry`.
+        let mut skills: Vec<&SkillDefinition> = self.skills.values().collect();
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        for skill in skills {
             output.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
         }
         output
@@ -698,5 +708,34 @@ Auto skill instructions.
     fn test_skill_registry_empty_summary() {
         let registry = SkillRegistry::new();
         assert!(registry.build_skill_summary().is_empty());
+    }
+
+    /// ADR-094: the summary is injected into Block A of the system prompt,
+    /// so its byte layout must be stable across boots and across every
+    /// `UpdateSkillInstructions` hot-reload. `self.skills` is a
+    /// `HashMap`, so without an explicit sort two runs over the same
+    /// skill set render — and hash — differently, which silently
+    /// invalidates the ADR-060 prompt cache. Pin the exact name-sorted
+    /// render (5 skills → 120 orderings, exactly one passes).
+    #[test]
+    fn test_skill_registry_summary_is_name_sorted() {
+        let mut registry = SkillRegistry::new();
+        // Register deliberately out of alphabetical order.
+        for name in ["delta", "alpha", "charlie", "bravo", "echo"] {
+            let md = format!(
+                "---\nname: {name}\ndescription: {name} skill\n---\n\nBody of {name}.\n"
+            );
+            registry.register(parse_skill_md(&md).unwrap());
+        }
+
+        assert_eq!(
+            registry.build_skill_summary(),
+            "## Available Skills\n\n\
+             - **alpha**: alpha skill\n\
+             - **bravo**: bravo skill\n\
+             - **charlie**: charlie skill\n\
+             - **delta**: delta skill\n\
+             - **echo**: echo skill\n"
+        );
     }
 }

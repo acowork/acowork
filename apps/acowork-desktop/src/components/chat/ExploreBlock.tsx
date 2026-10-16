@@ -257,7 +257,7 @@ function approvalMatchesSession(
  *
  * - Default: expanded (for new active blocks).
  * - Collapsed: "Exploring... (N steps)" + chevron.
- * - Expanded: max-height 240px container with ThinkBlock and ToolCallItem.
+ * - Expanded: max-height 144px container with ThinkBlock and ToolCallItem.
  * - Streaming: auto-scrolls to bottom.
  * - Collapse (auto): ONLY when hasFollowUpReply=true — an assistant reply
  *   message appears after this explore block in display order.
@@ -406,7 +406,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
       {expanded && (
         <OverlayScrollbar
           ref={contentRef}
-          maxHeight={240}
+          maxHeight={144}
           containerClassName="flex-none max-h-60 ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-zinc-100/60 dark:border-zinc-600 dark:bg-zinc-800/30"
           className="pl-3 pr-2 py-2 overscroll-contain"
           onViewportWheel={(event) => {
@@ -543,7 +543,6 @@ function PairedExploreItem({ item, isStreaming, pendingApproval, currentSessionI
         hasReplyStarted={false}
         startTime={item.msg.startTime}
         endTime={item.msg.endTime}
-        defaultExpanded={isStreaming && !item.msg.endTime}
       />
     );
   }

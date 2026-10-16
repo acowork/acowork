@@ -13,6 +13,75 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Anchor for the absolutely-positioned .screen-layer siblings used by the
+   * push/pop slide animation (ScreenHost). overflow: hidden clips layers
+   * that start at translate3d(100%,0,0) so they don't bleed past the
+   * screen-root edge during the animation. */
+  position: relative;
+  overflow: hidden;
+}
+
+/* --- Push/pop slide-in transition (ScreenHost) ---
+ *
+ * Every layer is absolutely positioned; the active tab's stack z-orders
+ * them so the top covers the layer beneath. The actual motion comes from
+ * one of three classes:
+ *
+ *   .screen-layer-forward — top of stack during a push: enter from right.
+ *   .screen-layer-static  — every other layer: no animation, just sits.
+ *   .screen-layer-exit    — a route that was popped but is still animating
+ *                           its slide-out before React unmounts it.
+ *
+ * The curve is iOS 7+ standard (.32,.72,0,1) — snappy enough to feel
+ * responsive, soft enough on the back-end to not be jarring. ANIM_MS in
+ * ScreenHost.tsx is the same 240ms; keep them in sync. */
+
+.screen-layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-grouped);
+  /* Force a compositor layer: Tauri WebView on Android sometimes won't
+   * promote an absolute+transformed element on will-change alone, and
+   * the fall-back path repaints into the parent layer every frame,
+   * which is exactly the jank we are trying to avoid. translateZ(0) +
+   * backface-visibility is the reliable cross-version promotion hint. */
+  transform: translateZ(0);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  will-change: transform;
+}
+
+.screen-layer-forward {
+  /* Entry: enter from the right. ease-out (fast→slow) so the screen
+   * settles into place, which is what most "slide-in" affordances use. */
+  animation: screen-layer-in 280ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+.screen-layer-exit {
+  /* Exit: leave to the right. ease-in (slow→fast) so the screen feels
+   * like it's being pushed away, not just slid off. Symmetric duration
+   * to forward so push and pop feel matched in weight. */
+  animation: screen-layer-out 280ms cubic-bezier(0.55, 0.06, 0.68, 0.19) both;
+}
+
+@keyframes screen-layer-in {
+  from {
+    transform: translate3d(100%, 0, 0);
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes screen-layer-out {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(100%, 0, 0);
+  }
 }
 
 .screen {
@@ -1432,6 +1501,54 @@
 .bubble-self .md-icode,
 .bubble-self .md-code {
   background: rgba(255, 255, 255, 0.22);
+}
+
+/* GFM tables (markdown.tsx renderTable). The wrapper is a horizontal
+ * scroller: agent tables are routinely wider than a 390pt viewport, and
+ * shrinking-to-fit would push the font below the iOS legibility floor
+ * (about 12pt). iOS-style momentum scroll is left for the WebView to
+ * enable via `-webkit-overflow-scrolling` (Tauri WebView already does). */
+.md-table-wrap {
+  overflow-x: auto;
+  margin: var(--space-2) 0;
+  border-radius: var(--radius-sm);
+  border: 0.5px solid var(--color-separator);
+}
+.md-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.4;
+  width: 100%;
+  /* Allows cells to size to their content even when the wrapper scrolls
+   * horizontally — without this Chrome clamps to the wrapper width and
+   * an unset table widths to that, defeating the whole point. */
+  min-width: max-content;
+}
+.md-th,
+.md-td {
+  padding: 6px 10px;
+  border: 0.5px solid var(--color-separator);
+  text-align: left;
+  vertical-align: top;
+  /* Long unbreakable tokens in a cell (a URL or hash) push the column
+   * wide. white-space:normal is the default but be explicit — a
+   * accidental `* { white-space: nowrap }` upstream would otherwise
+   * break the wrapper scrolling. */
+  white-space: normal;
+  word-break: break-word;
+}
+.md-th {
+  font-weight: 600;
+  background: var(--color-bg-grouped);
+}
+.md-tr:nth-child(even) .md-td {
+  background: var(--color-bg-grouped);
+}
+.bubble-self .md-th {
+  background: rgba(255, 255, 255, 0.10);
+}
+.bubble-self .md-tr:nth-child(even) .md-td {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 /* --- tool call row --------------------------------------------------- */

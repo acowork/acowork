@@ -495,60 +495,193 @@ async fn run_chat_loop(
 // truncation rule, it should import the canonical function from the
 // UseCase impl rather than re-introducing a duplicate here.
 
-/// User-facing override for skill mode, persisted in `.agent_skills.json`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
-struct AgentSkillsOverride {
-    /// Whether to use progressive skill injection mode.
-    #[serde(default)]
-    progressive: Option<bool>,
-}
+// ── Skill mode resolution ────────────────────────────────────────────
 
-/// Priority: `{work_dir}/.agent_skills.json` > manifest `[skills]` default.
+/// Resolve the effective skill mode for an agent.
+///
+/// Priority (highest to lowest):
+/// 1. `agent_tools.json::load_skill.enabled` — user runtime override
+///    (the Desktop Tools panel `load_skill` Switch — there is no
+///    separate `skills_auto_load` config field; enabling `load_skill`
+///    is the toggle, full stop)
+/// 2. `manifest.skills.progressive` — package author default (used at
+///    first-boot seed time, when `merge_tools_config` reads manifest
+///    `[[tools]]` declarations to populate `agent_tools.json`)
+/// 3. `SkillMode::Manual` — built-in fallback (`AgentManifest::skill_mode`
+///    returns Manual when `[skills]` is absent or `progressive = false`).
+///
+/// See ADR-094 for the decision rationale.
 pub(crate) fn resolve_skill_mode(
     manifest: &acowork_core::AgentManifest,
-
     work_dir: &str,
 ) -> acowork_core::SkillMode {
-    let default_progressive = manifest.skills.progressive;
+    use crate::agent_config::load_agent_tools_config;
 
-    // Check for user override in workspace
-    let override_path = std::path::Path::new(work_dir).join(".agent_skills.json");
-    if override_path.exists() {
-        match std::fs::read_to_string(&override_path) {
-            Ok(content) => match serde_json::from_str::<AgentSkillsOverride>(&content) {
-                Ok(override_config) => {
-                    if let Some(progressive) = override_config.progressive {
-                        tracing::info!(
-                            progressive = %progressive,
-                            manifest_default = %default_progressive,
-                            "Skill mode overridden by .agent_skills.json"
-                        );
-                        return if progressive {
-                            acowork_core::SkillMode::Progressive
-                        } else {
-                            acowork_core::SkillMode::Manual
-                        };
-                    }
-                }
+    let manifest_default = manifest.skills.progressive;
+    let work_path = std::path::Path::new(work_dir);
 
-                Err(e) => {
-                    tracing::warn!(
-                        path = %override_path.display(),
-                        error = %e,
-                        "Failed to parse .agent_skills.json, using manifest default"
-                    );
-                }
-            },
-
-            Err(e) => {
-                tracing::warn!(
-                    path = %override_path.display(),
-                    error = %e,
-                    "Failed to read .agent_skills.json, using manifest default"
-                );
-            }
-        }
+    // The user override lives in `agent_tools.json` under the
+    // `load_skill` entry's `enabled` flag, since `load_skill` is the
+    // single source of truth for "should the LLM know what skills
+    // exist at session start". No separate `skills_auto_load` field.
+    if let Ok(Some(tools_cfg)) = load_agent_tools_config(work_path)
+        && let Some(load_skill_enabled) = tools_cfg
+            .tools
+            .iter()
+            .find(|t| t.name == "load_skill")
+            .map(|t| t.enabled)
+    {
+        tracing::debug!(
+            load_skill_enabled,
+            manifest_default,
+            "Skill mode resolved from agent_tools.json"
+        );
+        return if load_skill_enabled {
+            acowork_core::SkillMode::Progressive
+        } else {
+            acowork_core::SkillMode::Manual
+        };
     }
 
     manifest.skill_mode()
 }
+
+#[cfg(test)]
+mod resolve_skill_mode_tests {
+    //! `resolve_skill_mode` priority tests.
+    //!
+    //! The function resolves the effective `SkillMode` from three
+    //! sources in priority order:
+    //! 1. `agent_tools.json::load_skill.enabled` (user runtime override)
+    //! 2. `manifest.skills.progressive` (package author default)
+    //! 3. `SkillMode::Manual` (implicit fallback in
+    //!    `AgentManifest::skill_mode` when `progressive = false`)
+    //!
+    //! The tests below pin all four cells of the priority matrix
+    //! (`load_skill` Some/None × enabled true/false) so a future
+    //! refactor can't silently break the precedence.
+
+    use super::resolve_skill_mode;
+    use acowork_core::SkillMode;
+    use std::path::Path;
+
+    /// Build a minimal manifest with the given `progressive` default.
+    fn manifest_with(progressive: bool) -> acowork_core::AgentManifest {
+        acowork_core::AgentManifest::from_toml(&format!(
+            "agent_id = \"com.test.skill-mode\"\n\
+             name = \"test\"\n\
+             version = \"0.0.1\"\n\
+             author = \"test\"\n\
+             description = \"synthetic manifest for resolve_skill_mode tests\"\n\
+             runtime_version = \"1.0.0\"\n\
+             [skills]\n\
+             progressive = {progressive}\n"
+        ))
+        .expect("synthetic manifest parses")
+    }
+
+    /// Write `agent_tools.json` with `load_skill.enabled` set to
+    /// `value`. `value = None` writes a tools list without a
+    /// `load_skill` entry (the on-disk file omits it).
+    fn write_tools(work_dir: &Path, value: Option<bool>) {
+        let dir = work_dir.join("config");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut tools = serde_json::json!([
+            { "name": "memory_recall", "enabled": true },
+            { "name": "file_edit", "enabled": true },
+        ]);
+        if let Some(v) = value {
+            tools.as_array_mut().unwrap().push(serde_json::json!({
+                "name": "load_skill",
+                "enabled": v,
+            }));
+        }
+        let body = serde_json::json!({ "tools": tools });
+        std::fs::write(dir.join("agent_tools.json"), body.to_string()).unwrap();
+    }
+
+    /// `agent_tools.json` absent — fall through to manifest default.
+    #[test]
+    fn no_config_file_uses_manifest_default() {
+        let tmp = std::env::temp_dir().join(format!(
+            "acowork-rsm-no-cfg-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Manifest default = Progressive; no override file.
+        let mode = resolve_skill_mode(&manifest_with(true), tmp.to_str().unwrap());
+        assert_eq!(mode, SkillMode::Progressive);
+
+        // Manifest default = Manual; no override file.
+        let mode = resolve_skill_mode(&manifest_with(false), tmp.to_str().unwrap());
+        assert_eq!(mode, SkillMode::Manual);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `agent_tools.json::load_skill.enabled = true` — override
+    /// wins over manifest default in BOTH directions.
+    #[test]
+    fn user_override_true_overrides_manifest_manual() {
+        let tmp = std::env::temp_dir().join(format!(
+            "acowork-rsm-true-override-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_tools(&tmp, Some(true));
+
+        // Manifest says Manual; load_skill=true flips it to Progressive.
+        let mode = resolve_skill_mode(&manifest_with(false), tmp.to_str().unwrap());
+        assert_eq!(mode, SkillMode::Progressive);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `agent_tools.json::load_skill.enabled = false` — override
+    /// wins over manifest default in BOTH directions.
+    #[test]
+    fn user_override_false_overrides_manifest_progressive() {
+        let tmp = std::env::temp_dir().join(format!(
+            "acowork-rsm-false-override-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_tools(&tmp, Some(false));
+
+        // Manifest says Progressive; load_skill=false flips it to Manual.
+        let mode = resolve_skill_mode(&manifest_with(true), tmp.to_str().unwrap());
+        assert_eq!(mode, SkillMode::Manual);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `agent_tools.json` exists but `load_skill` entry absent —
+    /// fall through to manifest default.
+    #[test]
+    fn config_without_load_skill_uses_manifest_default() {
+        let tmp = std::env::temp_dir().join(format!(
+            "acowork-rsm-no-load-skill-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        write_tools(&tmp, None); // file exists, no load_skill entry
+
+        let mode = resolve_skill_mode(&manifest_with(true), tmp.to_str().unwrap());
+        assert_eq!(mode, SkillMode::Progressive);
+
+        let mode = resolve_skill_mode(&manifest_with(false), tmp.to_str().unwrap());
+        assert_eq!(mode, SkillMode::Manual);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+

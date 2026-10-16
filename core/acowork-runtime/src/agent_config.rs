@@ -284,6 +284,11 @@ pub struct AgentConfig {
     pub intent_handoff_max_tokens: Option<u64>,
 }
 
+// ADR-094 note: there is no `skills_auto_load` field on
+// `AgentConfig` any more. The Progressive/Manual mode decision
+// is driven entirely by `agent_tools.json::load_skill.enabled`
+// — see `cli::resolve_skill_mode` for the priority chain.
+
 impl AgentConfig {
     /// Fold the legacy single `distiller_model` into `distiller_models`.
     /// Idempotent; called once after loading from disk.

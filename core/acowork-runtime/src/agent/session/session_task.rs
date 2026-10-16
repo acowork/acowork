@@ -31,9 +31,12 @@ pub enum SessionMessage {
     ChatMessage {
         content: String,
         message_id: String,
-        /// Skill instructions to inject into the system prompt (from command-based skill selection).
-        /// When set, the instructions are injected via ContextBuilder rather than prepended to user content.
-        skill_instructions: Option<String>,
+        /// Per-turn skill instructions the user explicitly selected via a chat
+        /// `command` (resolved against the agent's `SkillRegistry`). Turn-scoped:
+        /// `None` means "no skill selected this turn" and clears only this slot —
+        /// it does NOT touch the agent-level Progressive summary, which lives on
+        /// `SessionManagerConfig.skill_summary` and is seeded separately.
+        active_skill: Option<String>,
         /// ADR-046: unified array of attached items replacing the prior
         /// `documents` + `attached_context` fields. Each item is a
         /// discriminated union (file_upload / image_upload / attached_file
@@ -72,6 +75,12 @@ pub enum SessionMessage {
     /// including the required `system.md`). The next `build_chat_request`
     /// uses the new value — no agent restart needed.
     UpdateSystemPrompt { system_prompt: String },
+    /// ADR-094: replace the Progressive-mode skills summary in this
+    /// session's `ContextBuilder`. `None` clears the section
+    /// (Manual mode hot-toggle). Mirrors `UpdateSystemPrompt` /
+    /// `UpdateIdentityContext` shape and lifecycle — agent-scoped
+    /// template + per-session broadcast via `SessionManager`.
+    UpdateSkillInstructions { instructions: Option<String> },
     /// ADR-030 C3: Sidecar came online (LSP relay became ready, embed model
     /// switched, ...) and we want to surface a new builtin tool to this
     /// session. Carries a pre-decorated `BuiltinToolEntry` so each session
@@ -181,14 +190,14 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::ChatMessage {
                 content,
                 message_id,
-                skill_instructions,
+                active_skill,
                 attached_items,
                 content_parts,
             } => f
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
                 .field("message_id", message_id)
-                .field("has_skill", &skill_instructions.is_some())
+                .field("has_skill", &active_skill.is_some())
                 .field(
                     "attached_count",
                     &attached_items.as_ref().map(|c| c.len()).unwrap_or(0),
@@ -234,6 +243,10 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::UpdateSystemPrompt { system_prompt } => f
                 .debug_struct("UpdateSystemPrompt")
                 .field("prompt_len", &system_prompt.len())
+                .finish(),
+            SessionMessage::UpdateSkillInstructions { instructions } => f
+                .debug_struct("UpdateSkillInstructions")
+                .field("has_skills", &instructions.is_some())
                 .finish(),
             SessionMessage::AddDynamicBuiltinTool { entry } => f
                 .debug_struct("AddDynamicBuiltinTool")
@@ -338,6 +351,17 @@ pub(crate) struct SessionTask {
     /// turn stamps its rotation bookkeeping (T1 idle clock + T2 compaction
     /// marker) here at turn end, after the response write-back path runs.
     intent_map: Arc<std::sync::Mutex<super::intent_routing::IntentSessionMap>>,
+    /// ADR-094: agent-level Progressive-mode skills summary, seeded from
+    /// `SessionManagerConfig.skill_summary` at session creation. Applied to
+    /// the new session's `ContextBuilder` in `run()` via
+    /// `set_skill_summary` (parallel to how `system_prompt` and
+    /// `identity_context` are applied). Hot reloads arrive via
+    /// `SessionMessage::UpdateSkillInstructions`.
+    ///
+    /// Named `skill_summary` (not `skill_instructions`) because it is a
+    /// different lifecycle from the per-turn `ChatMessage.active_skill`:
+    /// this one lives as long as the session.
+    skill_summary: Option<String>,
 }
 
 // ADR-046: pre-extraction helpers (`extract_document_text`,
@@ -451,6 +475,10 @@ impl SessionTask {
         session: SessionState,
         inbound_rx: mpsc::Receiver<SessionMessage>,
         system_prompt: String,
+        // ADR-094: agent-level Progressive-mode skills summary - see struct
+        // field docs. Mirrors `system_prompt` / `identity_context` placement
+        // in the parameter list.
+        skill_summary: Option<String>,
         chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
         session_id: String,
         identity_context: Option<String>,
@@ -567,6 +595,7 @@ impl SessionTask {
             agent_inbound_tx: agent_inbound_tx.clone(),
             inbound_rx,
             system_prompt,
+            skill_summary,
             chunk_tx,
             session_id,
             identity_context,
@@ -632,6 +661,7 @@ impl SessionTask {
             identity_context,
             protocol_type,
             intent_map,
+            skill_summary,
         } = self;
 
         // Build ContextBuilder with identity. Tool definitions are NOT
@@ -644,6 +674,16 @@ impl SessionTask {
         // `rebuild_context_tool_definitions`).
         let mut context_builder =
             ContextBuilder::new(system_prompt.clone()).with_identity(identity_context.clone());
+
+        // ADR-094: seed the agent-level Progressive-mode skills summary.
+        // `None` means Manual mode, so the section simply stays unset.
+        // This slot is session-lifetime: the per-turn skill-command path
+        // writes `active_skill`, never this field, so a turn without a
+        // selected skill cannot wipe the summary (see
+        // `ContextBuilder::set_active_skill`).
+        if let Some(ref skills) = skill_summary {
+            context_builder.set_skill_summary(skills.clone());
+        }
 
         // Mirror the identity onto SessionState so compaction paths
         // (loop_context / loop_session) can inject the user's preferred
@@ -890,7 +930,7 @@ impl SessionTask {
                 Some(SessionMessage::ChatMessage {
                     content,
                     message_id,
-                    skill_instructions,
+                    active_skill,
                     attached_items,
                     content_parts,
                 }) => {
@@ -951,21 +991,24 @@ impl SessionTask {
                         agent_home.as_deref(),
                     );
 
-                    // Apply skill instructions to ContextBuilder (system prompt injection).
-                    // This replaces the old behavior of prepending skill text to the user message,
-                    // making skill instructions visible in the debug panel's system prompt section.
-                    // When skill_instructions is None (no command specified), clear any
-                    // previously set skill to prevent stale instructions leaking across turns.
-                    if let Some(ref instructions) = skill_instructions {
+                    // Per-turn skill selection (from the chat `command`) goes
+                    // on the turn-scoped slot. One unconditional call:
+                    // `Some` sets it, `None` clears it so a skill chosen last
+                    // turn cannot leak into this one. The agent-level
+                    // Progressive summary is a different field and is not
+                    // touched here — see `ContextBuilder::set_active_skill`.
+                    //
+                    // Injected via ContextBuilder rather than prepended to the
+                    // user message so it shows up in the debug panel's system
+                    // prompt section.
+                    if active_skill.is_some() {
                         tracing::info!(
                             session_id = %session_id,
-                            skill_len = instructions.len(),
-                            "Applying skill instructions to ContextBuilder"
+                            skill_len = active_skill.as_deref().map(str::len).unwrap_or(0),
+                            "Applying per-turn skill instructions to ContextBuilder"
                         );
-                        context_builder.set_skill_instructions(instructions.clone());
-                    } else {
-                        context_builder.clear_skill_instructions();
                     }
+                    context_builder.set_active_skill(active_skill);
 
                     // ── Debug mode: apply rewind/patches before running agent loop ──
                     agent_loop
@@ -1407,6 +1450,25 @@ impl SessionTask {
                     // ContextBuilder. The next `build_chat_request` picks
                     // up the new value — no agent restart needed.
                     context_builder.set_system_prompt(system_prompt);
+                }
+                // ── ADR-094: Progressive-mode skills summary hot-reload ──
+                //
+                // Mirrors the `UpdateSystemPrompt` handler above: replace (or
+                // clear) the agent-level `skill_summary` slot so the next
+                // `build_chat_request` picks up the new value. `None` clears
+                // the summary (Manual mode hot-toggle) and deliberately leaves
+                // any per-turn `active_skill` alone — that slot is owned by the
+                // user-message branch above, not by config reloads.
+                Some(SessionMessage::UpdateSkillInstructions { instructions }) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        has_skills = instructions.is_some(),
+                        "SessionTask: updating skill instructions (ADR-094)"
+                    );
+                    match instructions {
+                        Some(skills) => context_builder.set_skill_summary(skills),
+                        None => context_builder.clear_skill_summary(),
+                    }
                 }
                 // ── ADR-030 C3: dynamic builtin tool add/remove ──────
                 //

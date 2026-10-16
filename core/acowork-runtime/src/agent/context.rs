@@ -45,9 +45,19 @@ pub struct ContextBuilder {
     /// sure" rather than fabricate an answer. Injected after retrieved
     /// memory (same slot as `ambiguous_confirmation_hint`).
     abstention_prompt: Option<String>,
-    /// Skill instructions override (for debug patching and runtime config).
-    /// Injected into system prompt after identity and before memory sections.
-    skill_instructions: Option<String>,
+    /// ADR-094: agent-level Progressive-mode skills summary (compact
+    /// name + description list). Session-lifetime: seeded when the session
+    /// is created and replaced by `UpdateSkillInstructions` broadcasts.
+    /// Only [`Self::set_skill_summary`] / [`Self::clear_skill_summary`]
+    /// touch this — the per-turn skill-command path writes
+    /// [`Self::active_skill`] instead.
+    skill_summary: Option<String>,
+    /// Per-turn skill instructions selected explicitly by the user (chat
+    /// `command` resolved against the agent's `SkillRegistry`). Turn-scoped:
+    /// cleared on any message without a command so it cannot leak into the
+    /// next turn. Never touches [`Self::skill_summary`] — the two have
+    /// different lifecycles and are therefore different fields.
+    active_skill: Option<String>,
     /// Reasoning effort level for the LLM request.
     /// Resolved from ModelCapabilitiesInfo.default_reasoning_effort in
     /// `build_chat_request()` each iteration (supports mid-session model switch).
@@ -78,7 +88,8 @@ impl ContextBuilder {
             retrieved_memory: None,
             ambiguous_confirmation_hint: None,
             abstention_prompt: None,
-            skill_instructions: None,
+            skill_summary: None,
+            active_skill: None,
             reasoning_effort: None,
             thinking_mode: None,
             temperature: None,
@@ -268,28 +279,76 @@ impl ContextBuilder {
         }
     }
 
-    /// Set skill instructions (for debug patching and runtime skill injection).
-    /// Empty instructions are treated as a clear signal, consistent with
-    /// `set_environment_override()` and `set_retrieved_memory_patch()`.
-    pub fn set_skill_instructions(&mut self, instructions: String) {
-        if instructions.is_empty() {
-            self.clear_skill_instructions();
+    /// Set the agent-level Progressive-mode skills summary (ADR-094).
+    ///
+    /// Session-lifetime state: seeded at session creation, replaced by
+    /// `UpdateSkillInstructions` broadcasts, overwritten by a debug patch.
+    /// Empty string is treated as a clear signal, consistent with
+    /// `set_environment_override()`.
+    ///
+    /// This does NOT touch [`Self::active_skill`] — a per-turn skill
+    /// selection survives a summary reload, and clearing the summary
+    /// (Manual-mode hot-toggle) does not silently drop a skill the user
+    /// explicitly picked for the current turn.
+    pub fn set_skill_summary(&mut self, summary: String) {
+        if summary.is_empty() {
+            self.clear_skill_summary();
         } else {
             tracing::info!(
-                len = instructions.len(),
-                "ContextBuilder skill instructions updated"
+                len = summary.len(),
+                "ContextBuilder skill summary updated"
             );
-            self.skill_instructions = Some(instructions);
+            self.skill_summary = Some(summary);
         }
     }
 
-    /// Clear skill instructions, removing them from the system prompt.
-    /// Called when a ChatMessage arrives without a skill command, preventing
-    /// stale skill instructions from leaking across conversation turns.
-    pub fn clear_skill_instructions(&mut self) {
-        if self.skill_instructions.is_some() {
-            tracing::debug!("ContextBuilder skill instructions cleared");
-            self.skill_instructions = None;
+    /// Clear the agent-level skills summary (Manual mode). Leaves any
+    /// per-turn [`Self::active_skill`] alone.
+    pub fn clear_skill_summary(&mut self) {
+        if self.skill_summary.is_some() {
+            tracing::debug!("ContextBuilder skill summary cleared");
+            self.skill_summary = None;
+        }
+    }
+
+    /// Set or clear the skill instructions explicitly selected for THIS
+    /// turn via a chat `command`.
+    ///
+    /// `None` clears only the turn-scoped slot. The agent-level
+    /// [`Self::skill_summary`] is deliberately untouched here: the two
+    /// used to share one field, which meant the "don't leak a skill
+    /// across turns" clear also destroyed the Progressive-mode summary
+    /// seeded at session creation (a turn without a command is the normal
+    /// case, so the summary vanished on the first message).
+    pub fn set_active_skill(&mut self, instructions: Option<String>) {
+        match instructions {
+            Some(instructions) if !instructions.is_empty() => {
+                tracing::info!(
+                    len = instructions.len(),
+                    "ContextBuilder active skill set (per-turn)"
+                );
+                self.active_skill = Some(instructions);
+            }
+            Some(_) | None => {
+                if self.active_skill.is_some() {
+                    tracing::debug!("ContextBuilder active skill cleared (per-turn)");
+                }
+                self.active_skill = None;
+            }
+        }
+    }
+
+    /// The composed text rendered into the `## Skill Instructions` section:
+    /// the agent-level summary first, then any skill the user explicitly
+    /// selected for this turn. `None` when neither is set.
+    fn skill_section(&self) -> Option<String> {
+        match (self.skill_summary.as_ref(), self.active_skill.as_ref()) {
+            (Some(summary), Some(active)) => {
+                Some(format!("{}\n\n### Selected skill\n\n{}", summary, active))
+            }
+            (Some(summary), None) => Some(summary.clone()),
+            (None, Some(active)) => Some(active.clone()),
+            (None, None) => None,
         }
     }
 
@@ -330,7 +389,10 @@ impl ContextBuilder {
                     "system_prompt" => self.set_system_prompt(content),
                     "workspace_context" => self.set_workspace_context(content),
                     "environment" => self.set_environment_override(content),
-                    "skill_instructions" => self.set_skill_instructions(content),
+                    // Debug patches override the persistent (agent-level)
+                    // slot; the turn-scoped active skill is runtime state
+                    // the debugger does not address by section key.
+                    "skill_instructions" => self.set_skill_summary(content),
                     "workspace_prompt_file" => self.set_workspace_prompt_file(Some(content)),
                     "ambiguous_confirmation_hint" => {
                         self.set_ambiguous_confirmation_hint(content);
@@ -456,11 +518,12 @@ impl ContextBuilder {
         self.environment_override.as_deref()
     }
 
-    /// Get the skill instructions text, if set.
-    /// Returns the full skill instructions that will be injected into the
-    /// system prompt under the "## Skill Instructions" section.
-    pub fn skill_instructions(&self) -> Option<&str> {
-        self.skill_instructions.as_deref()
+    /// The composed skills text injected under the
+    /// "## Skill Instructions" section: agent-level Progressive summary
+    /// plus this turn's explicitly selected skill, whichever are set.
+    /// Owned because it may concatenate the two lifecycle slots.
+    pub fn skill_instructions(&self) -> Option<String> {
+        self.skill_section()
     }
 
     /// Build the complete ChatRequest for the LLM.
@@ -526,8 +589,10 @@ impl ContextBuilder {
             system_content.push_str(&format!("\n\n## Memory Abstention Guidance\n{prompt}"));
         }
 
-        // 2.6 Skill instructions (debug patching or runtime config)
-        if let Some(ref skills) = self.skill_instructions {
+        // 2.6 Skill instructions: agent-level Progressive summary + this
+        // turn's explicitly selected skill (whichever are set). Composed by
+        // `skill_section` so the two lifecycle slots render as one section.
+        if let Some(skills) = self.skill_section() {
             system_content.push_str(&format!("\n\n## Skill Instructions\n{skills}"));
         }
 
@@ -1538,7 +1603,7 @@ mod tests {
             .with_workspace_prompt_file(Some(prompt_file.into()))
             .with_tools(vec![builtin_tool.clone()]);
         builder.set_retrieved_memory(retrieved.into());
-        builder.set_skill_instructions(skills.into());
+        builder.set_skill_summary(skills.into());
         builder.set_ambiguous_confirmation_hint(hint.into());
         builder.set_abstention_prompt(abstention.into());
 
@@ -1582,6 +1647,67 @@ mod tests {
         );
 
         assert!(lookup(&sections, "messages") > 0);
+    }
+
+    // ── ADR-094: skills summary vs per-turn skill are separate slots ──
+    //
+    // They used to share one `ContextBuilder` field, so the per-turn
+    // "don't leak a skill across turns" clear also destroyed the
+    // Progressive-mode summary seeded at session creation. A turn without
+    // a selected skill is the NORMAL case, so the summary vanished on the
+    // first message and the LLM never saw the skill list.
+
+    #[test]
+    fn per_turn_clear_keeps_agent_skill_summary() {
+        let mut builder = ContextBuilder::new("Base prompt".to_string());
+        builder.set_skill_summary("## Available Skills\n- **ponytail**: lazy dev".into());
+
+        // A plain chat message (no skill command) clears only the turn slot.
+        builder.set_active_skill(None);
+
+        let skills = builder.skill_instructions().expect("summary survives a turn without a skill");
+        assert!(skills.contains("ponytail"), "summary text lost: {skills:?}");
+    }
+
+    #[test]
+    fn per_turn_skill_composes_with_summary_then_leaves_it_intact() {
+        let mut builder = ContextBuilder::new("Base prompt".to_string());
+        builder.set_skill_summary("SUMMARY".into());
+        builder.set_active_skill(Some("SKILL BODY".into()));
+
+        let both = builder.skill_instructions().unwrap();
+        assert!(both.contains("SUMMARY"), "summary missing while a skill is active");
+        assert!(both.contains("SKILL BODY"), "active skill missing");
+
+        // Next turn selects nothing: the body goes, the summary stays.
+        builder.set_active_skill(None);
+        assert_eq!(builder.skill_instructions().as_deref(), Some("SUMMARY"));
+    }
+
+    #[test]
+    fn clearing_summary_leaves_active_skill_and_vice_versa() {
+        let mut builder = ContextBuilder::new("Base prompt".to_string());
+        builder.set_skill_summary("SUMMARY".into());
+        builder.set_active_skill(Some("SKILL BODY".into()));
+
+        // Manual-mode hot toggle must not silently drop a skill the user
+        // explicitly picked for this turn.
+        builder.clear_skill_summary();
+        assert_eq!(builder.skill_instructions().as_deref(), Some("SKILL BODY"));
+    }
+
+    #[test]
+    fn empty_active_skill_clears_the_turn_slot_only() {
+        let mut builder = ContextBuilder::new("Base prompt".to_string());
+        builder.set_skill_summary("SUMMARY".into());
+        builder.set_active_skill(Some(String::new()));
+        assert_eq!(builder.skill_instructions().as_deref(), Some("SUMMARY"));
+    }
+
+    #[test]
+    fn no_skill_state_emits_no_skill_section() {
+        let builder = ContextBuilder::new("Base prompt".to_string());
+        assert!(builder.skill_instructions().is_none());
     }
 
     // ── regression t-83afab47 ─────────────────────────────────────────

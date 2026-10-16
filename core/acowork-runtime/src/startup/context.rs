@@ -91,6 +91,12 @@ pub(crate) struct AgentBootContext {
     // ADR-034 §8 Phase 6 cleanup: legacy standalone-mode gRPC path removed.
     pub system_prompt: String,
 
+    /// ADR-094: Progressive-mode skills summary (name + description list),
+    /// carried separately from `system_prompt` so the caller can mount it
+    /// as a distinct `ContextBuilder` section (`skill_instructions`).
+    /// `None` in Manual mode or when the package has no `skills/`.
+    pub skills_summary: Option<String>,
+
     /// ADR-053: agent-specific compaction prompt loaded from
     /// `prompts/summary.md` (package-level declaration). `None` → the
     /// built-in `COMPACTION_SYSTEM_PROMPT` fallback is used at compaction
@@ -341,6 +347,10 @@ pub(crate) fn build_session_manager_config(
     SessionManagerConfig {
         inbound_channel_capacity: 64,
         system_prompt: ctx.system_prompt.clone(),
+        // ADR-094: forward the Progressive-mode skills summary so
+        // sessions opened LATER inherit the same Progressive-mode summary
+        // section. Mirrors the `system_prompt` field above.
+        skill_summary: ctx.skills_summary.clone(),
         per_session_budget: ctx.budget.clone(),
         history_max_tokens: config.history_max_tokens,
         chunk_tx: ctx.chunk_tx.clone(),
