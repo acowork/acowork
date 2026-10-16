@@ -42,10 +42,16 @@ export function AgentPickerChip({ agents, value, onChange }: AgentPickerChipProp
                 setOpen(false);
             }
         };
-        window.addEventListener("mousedown", onDown);
+        // Capture phase: the parent dialog's `onMouseDown` calls
+        // stopPropagation on any click inside the dialog, which kills
+        // the native event before it bubbles to `window`. Listening in
+        // capture runs before the React bubble so the outside-click
+        // detector still fires when the user clicks the search input,
+        // results list, etc.
+        window.addEventListener("mousedown", onDown, true);
         window.addEventListener("keydown", onKey, true);
         return () => {
-            window.removeEventListener("mousedown", onDown);
+            window.removeEventListener("mousedown", onDown, true);
             window.removeEventListener("keydown", onKey, true);
         };
     }, [open]);
