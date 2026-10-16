@@ -22,6 +22,7 @@ import {
     toConversationHits,
     pickFirstResultTab,
     formatTokenCount,
+    isSummaryDisabledView,
     TAB_ORDER,
 } from "./GlobalSearchDialog";
 
@@ -253,5 +254,42 @@ describe("formatTokenCount", () => {
     it("truncates non-integer values so the formatter never lies about precision", () => {
         expect(formatTokenCount(1234.9)).toBe("1.2k");
         expect(formatTokenCount(7.4)).toBe("7");
+    });
+});
+
+describe("isSummaryDisabledView", () => {
+    // The toggle defaults on; the hint must NEVER appear while summary is
+    // enabled — a regression here would mean the disabled hint overwrites
+    // a freshly-generated summary.
+    it("never returns true when summary is enabled, regardless of phase", () => {
+        expect(isSummaryDisabledView(true, "idle", "")).toBe(false);
+        expect(isSummaryDisabledView(true, "done", "")).toBe(false);
+        expect(isSummaryDisabledView(true, "done", "some text")).toBe(false);
+        expect(isSummaryDisabledView(true, "summarizing", "")).toBe(false);
+    });
+
+    // With summary off and no search yet, the pane should already tell
+    // the user the toggle is off so they're not waiting for a model that
+    // will never be invoked.
+    it("shows the disabled hint at idle when summary is off", () => {
+        expect(isSummaryDisabledView(false, "idle", "")).toBe(true);
+    });
+
+    // The post-search branch is the one that can confuse: phase advances
+    // to "done" but summary text stays empty (runSearch skips the call).
+    // The hint must still surface so the pane doesn't render the
+    // "no candidates" message that belongs to the summary-on path.
+    it("shows the disabled hint after a search lands with summary off", () => {
+        expect(isSummaryDisabledView(false, "done", "")).toBe(true);
+    });
+
+    // In-flight states must NEVER be hijacked by the disabled hint — the
+    // user clicked the toggle mid-summary, the run aborts, and the
+    // SummaryView's own cancelled/error branches own the rendering.
+    it("never returns true while the summary is in flight or has failed", () => {
+        expect(isSummaryDisabledView(false, "searching", "")).toBe(false);
+        expect(isSummaryDisabledView(false, "summarizing", "")).toBe(false);
+        expect(isSummaryDisabledView(false, "error", "boom")).toBe(false);
+        expect(isSummaryDisabledView(false, "cancelled", "")).toBe(false);
     });
 });

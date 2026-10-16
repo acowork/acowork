@@ -678,6 +678,8 @@
     "statusSearchDone": "{{total}} sources done",
     "statusSummarizing": "AI summarizing…",
     "summaryIdleHint": "The AI summary will appear here after the search",
+    "summaryDisabledHint": "AI summary is off — showing raw results only",
+    "toggleSummary": "AI summary (on/off)",
     "summaryWaiting": "Waiting for results…",
     "summaryWorking": "AI is generating the summary…",
     "summaryNoCandidates": "No results available to summarize",

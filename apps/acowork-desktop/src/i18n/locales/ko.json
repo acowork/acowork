@@ -1437,6 +1437,8 @@
     "statusSearchDone": "{{total}}개 소스 완료",
     "statusSummarizing": "AI 요약 중…",
     "summaryIdleHint": "검색이 끝나면 AI 요약이 여기에 표시됩니다",
+    "summaryDisabledHint": "AI 요약이 비활성화되었습니다. 원본 결과만 표시합니다",
+    "toggleSummary": "AI 요약(켜기/끄기)",
     "summaryWaiting": "검색 결과를 기다리는 중…",
     "summaryWorking": "AI가 요약을 생성하는 중…",
     "summaryNoCandidates": "요약에 사용할 결과가 없습니다",

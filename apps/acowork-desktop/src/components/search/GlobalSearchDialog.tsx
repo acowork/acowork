@@ -33,7 +33,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { BookOpen, KanbanSquare, MessageSquare, RotateCw, Search, Square } from "lucide-react";
+import { BookOpen, KanbanSquare, MessageSquare, RotateCw, Search, Sparkles, Square } from "lucide-react";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSearchStore } from "../../stores/searchStore";
@@ -159,6 +159,22 @@ export type RowHit =
 
 /** ADR-093 summary state machine (design 27 §4.6). */
 export type SummaryPhase = "idle" | "searching" | "summarizing" | "done" | "error" | "cancelled";
+
+/** When the user has turned the AI summary off, the dialog still advances
+ *  phase to "done" after the search lands but `summary` stays empty.
+ *  SummaryView reads this gate to render the "raw results only" hint
+ *  instead of the generic idle/no-candidates messages — and to skip the
+ *  hint whenever the user re-enables summary and the model returns text.
+ *  Extracted so a regression is a one-line test, not a manual click
+ *  through three phases. */
+export function isSummaryDisabledView(
+    summaryEnabled: boolean,
+    phase: SummaryPhase,
+    summary: string,
+): boolean {
+    if (summaryEnabled) return false;
+    return phase === "idle" || (phase === "done" && summary.length === 0);
+}
 
 export interface GlobalSearchDialogProps {
     /** Switch the app-level view (projects/docs/chat) when a hit is opened. */
@@ -382,6 +398,11 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     const [agentId, setAgentId] = useState<string>("");
     const [caseSensitive, setCaseSensitive] = useState(false);
     const [wholeWord, setWholeWord] = useState(false);
+    /* ADR-093: AI summary on by default; user can opt out per session so
+       re-running on the same query returns raw results only and costs no
+       LLM tokens. Persists across dialog opens (component is mounted once
+       in AppLayout, gated by `open`). */
+    const [summaryEnabled, setSummaryEnabled] = useState(true);
 
     const [fileHits, setFileHits] = useState<FileHit[]>([]);
     const [fileTotal, setFileTotal] = useState(0);
@@ -530,6 +551,12 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     // while the rest arrive.
     const runSummaryStage = useCallback(
         async (gen: number, parentCtrl: AbortController | null) => {
+            // Token-safety guard (ADR-093 user opt-out): the regenerate
+            // button stays clickable in phase=cancelled after a user
+            // toggles summary off mid-summarize, and clicking it must not
+            // re-fire the LLM. Mirror the gate in `runSearch` so neither
+            // caller can bypass it.
+            if (!summaryEnabled) return;
             const req = lastSummaryReqRef.current;
             if (!req) return;
             setPhase("summarizing");
@@ -585,7 +612,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 parentSignal?.removeEventListener("abort", onParent);
             }
         },
-        [agentId, t],
+        [agentId, summaryEnabled, t],
     );
 
     /* ── Clear one run's state (results + summary + progress) ────────── */
@@ -752,6 +779,15 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             // RowHit carries title/snippet — directly the candidate shape.
             const set = buildSummaryCandidates(rowsRef.current);
             candidateRef.current = set;
+            if (!summaryEnabled) {
+                // User opted out of the LLM summary. Skip the call entirely
+                // so the search costs zero tokens; the SummaryView renders
+                // a "disabled" hint in place of the model output.
+                setPhase("done");
+                setSummaryText("");
+                setSummaryMeta(null);
+                return;
+            }
             if (set.candidates.length === 0) {
                 // Nothing to summarize — keep the lists browsable, no LLM call.
                 setPhase("done");
@@ -768,7 +804,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             };
             await runSummaryStage(gen, ctrl);
         },
-        [agentId, workspaceId, caseSensitive, wholeWord, t, runSummaryStage],
+        [agentId, workspaceId, caseSensitive, wholeWord, summaryEnabled, t, runSummaryStage],
     );
 
     /* ── Explicit submit: commit the typed query to a new run ─────────── */
@@ -1071,6 +1107,25 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                 </ToggleBtn>
                             </div>
                         )}
+                        {/* ADR-093: AI summary opt-out. Default on; turn off
+                            to skip the LLM call and show raw results only. */}
+                        <ToggleBtn
+                            title={t("globalSearch.toggleSummary")}
+                            active={summaryEnabled}
+                            onClick={() => {
+                                setSummaryEnabled((prev) => {
+                                    const next = !prev;
+                                    // Switching off mid-summary aborts the
+                                    // in-flight LLM call so the pane returns
+                                    // to its disabled hint without waiting.
+                                    if (!next) summaryCtrlRef.current?.abort();
+                                    return next;
+                                });
+                            }}
+                            data-testid="summary-toggle"
+                        >
+                            <Sparkles className="h-3.5 w-3.5" />
+                        </ToggleBtn>
                         {/* ADR-093: re-run — aborts the current generation
                             (search + summary) and starts a fresh one. Also
                             serves as the visible submit affordance now that
@@ -1250,6 +1305,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             error={summaryError}
                             sourcesDone={sourcesDone}
                             summaryMeta={summaryMeta}
+                            summaryEnabled={summaryEnabled}
                             allowedIds={
                                 new Set((candidateRef.current?.candidates ?? []).map((c) => c.id))
                             }
@@ -1325,9 +1381,9 @@ function GitCommitRowIcon({ focused }: { focused: boolean }) {
     </svg>;
 }
 
-function RowInfo({ children }: { children: React.ReactNode }) {
+function RowInfo({ children, "data-testid": testId }: { children: React.ReactNode; "data-testid"?: string }) {
     return (
-        <div className="px-3 py-3 text-center text-xs text-text-tertiary">{children}</div>
+        <div data-testid={testId} className="px-3 py-3 text-center text-xs text-text-tertiary">{children}</div>
     );
 }
 
@@ -1344,6 +1400,7 @@ function SummaryView({
     error,
     sourcesDone,
     summaryMeta,
+    summaryEnabled,
     allowedIds,
     onCancel,
     onRegenerate,
@@ -1357,6 +1414,9 @@ function SummaryView({
      *  call. `null`/missing means older Runtime or before the call
      *  lands; the footer line hides itself in that case. */
     summaryMeta?: { model: string; usage: SummaryUsage | undefined } | null;
+    /** When false, the dialog skipped the LLM call entirely; show a
+     *  "raw results only" hint in place of the summary text. */
+    summaryEnabled: boolean;
     allowedIds: ReadonlySet<string>;
     onCancel: () => void;
     onRegenerate: () => void;
@@ -1374,6 +1434,12 @@ function SummaryView({
         </button>
     );
 
+    if (isSummaryDisabledView(summaryEnabled, phase, summary)) {
+        // After a search lands with summary off, phase advances to "done"
+        // with an empty summary string — surface the disabled hint here
+        // so the pane never flashes the "no candidates" message.
+        return <RowInfo data-testid="summary-disabled">{t("globalSearch.summaryDisabledHint")}</RowInfo>;
+    }
     if (phase === "idle") {
         return <RowInfo>{t("globalSearch.summaryIdleHint")}</RowInfo>;
     }
@@ -1506,11 +1572,13 @@ function ToggleBtn({
     active,
     onClick,
     children,
+    "data-testid": testId,
 }: {
     title: string;
     active: boolean;
     onClick: () => void;
     children: React.ReactNode;
+    "data-testid"?: string;
 }) {
     return (
         <button
@@ -1518,6 +1586,7 @@ function ToggleBtn({
             title={title}
             onMouseDown={(e) => e.preventDefault()}
             onClick={onClick}
+            data-testid={testId}
             className={`flex h-6 min-w-[1.5rem] items-center justify-center rounded px-1.5 text-11 font-medium transition-colors ${
                 active
                     ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"

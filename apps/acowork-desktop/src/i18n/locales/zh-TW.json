@@ -1427,6 +1427,8 @@
     "statusSearchDone": "已完成 {{total}} 個來源",
     "statusSummarizing": "AI 摘要中…",
     "summaryIdleHint": "搜尋完成後，AI 摘要將顯示在此處",
+    "summaryDisabledHint": "已關閉 AI 摘要，僅顯示原始結果",
+    "toggleSummary": "AI 摘要（開/關）",
     "summaryWaiting": "等待檢索結果…",
     "summaryWorking": "AI 正在產生摘要…",
     "summaryNoCandidates": "沒有可用於摘要的結果",
