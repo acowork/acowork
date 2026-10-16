@@ -33,7 +33,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { BookOpen, KanbanSquare, MessageSquare, RotateCw, Search } from "lucide-react";
+import { BookOpen, KanbanSquare, MessageSquare, RotateCw, Search, Square } from "lucide-react";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSearchStore } from "../../stores/searchStore";
@@ -65,6 +65,7 @@ import {
     type SearchSource,
     type CandidateSet,
     type SummaryCandidate,
+    type SummaryUsage,
 } from "../../lib/searchRun";
 
 /* ─── Types ─────────────────────────────────────────────────────────── */
@@ -172,6 +173,21 @@ export interface GlobalSearchDialogProps {
 export const GIT_LOG_LIMIT = 100;
 const FILE_MAX_RESULTS = 50;
 const GLOBAL_SOURCE_LIMIT = 20;
+
+/**
+ * Canonical render order of the result tabs. Drives both the tab strip
+ * in Zone 2 and the auto-switch policy (first non-empty wins). Kept
+ * module-level so the auto-switch `useEffect` does not depend on a
+ * re-allocated array each render.
+ */
+export const TAB_ORDER: readonly Tab[] = [
+    "file",
+    "git",
+    "doc",
+    "project",
+    "conversation",
+    "memory",
+] as const;
 
 /* ─── Pure helpers (unit-tested) ────────────────────────────────────── */
 
@@ -322,6 +338,38 @@ export function toConversationHits(hits: GlobalSearchHit[]): ConversationHit[] {
         }));
 }
 
+/**
+ * Pick the first tab that has any landed hits, following the canonical
+ * `TABS` order. Returns `null` when nothing has results (caller stays
+ * put — file is still the natural "no match anywhere" surface).
+ *
+ * Extracted as a pure helper so the auto-switch policy is testable
+ * independently of React effects.
+ */
+export function pickFirstResultTab(
+    counts: Partial<Record<Tab, number>>,
+    order: readonly Tab[],
+): Tab | null {
+    for (const k of order) {
+        if ((counts[k] ?? 0) > 0) return k;
+    }
+    return null;
+}
+
+/**
+ * Render a token count in the same compact form CompactionCard uses
+ * (≥1000 → `1.2k` with one decimal, <1000 → raw integer). Returns `null`
+ * for undefined / non-finite values so callers can do `{n !== null && ...}`
+ * and never need to check the input type.
+ */
+export function formatTokenCount(n: number | undefined): string | null {
+    if (n === undefined || !Number.isFinite(n)) return null;
+    if (n < 0) return null; // token counts are non-negative by definition
+    const safe = Math.trunc(n);
+    if (safe >= 1000) return `${(safe / 1000).toFixed(1)}k`;
+    return `${safe}`;
+}
+
 /* ─── Component ─────────────────────────────────────────────────────── */
 
 export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
@@ -374,6 +422,15 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     const [ranQuery, setRanQuery] = useState("");
     const [summaryText, setSummaryText] = useState("");
     const [summaryError, setSummaryError] = useState<string | null>(null);
+    // ADR-093 D3 parity with `compactionCard.meta`: model id + token
+    // usage returned by the Runtime so the summary footer can render
+    // "model · tokens" the same way CompactionCard does. `null` until
+    // the summary call returns; reset on every new run so a stale
+    // previous-run footer never bleeds into a regenerating pane.
+    const [summaryMeta, setSummaryMeta] = useState<{
+        model: string;
+        usage: SummaryUsage | undefined;
+    } | null>(null);
     const runCtrlRef = useRef<AbortController | null>(null);
     const summaryCtrlRef = useRef<AbortController | null>(null);
     const candidateRef = useRef<CandidateSet | null>(null);
@@ -393,6 +450,10 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     const [focusedIdx, setFocusedIdx] = useState(0);
     const inputRef = useRef<HTMLInputElement>(null);
     const seqRef = useRef(0);
+    // Set by an explicit tab-button click. The auto-switch effect defers to
+    // it so a one-time click on, e.g., "doc" is not overridden the moment
+    // the file results land. Reset on dialog open and on every new submit.
+    const userChoseTabRef = useRef(false);
 
     const agents = useAgentStore((s) => s.agents);
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
@@ -448,9 +509,11 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             setRanQuery("");
             setSummaryText("");
             setSummaryError(null);
+            setSummaryMeta(null);
             candidateRef.current = null;
             lastSummaryReqRef.current = null;
             rowsRef.current = { file: [], git: [], doc: [], project: [], memory: [], conversation: [] };
+            userChoseTabRef.current = false;
             requestAnimationFrame(() => inputRef.current?.focus());
         } else {
             runCtrlRef.current?.abort();
@@ -497,6 +560,10 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 });
                 if (gen !== seqRef.current) return;
                 setSummaryText(resp.summary);
+                setSummaryMeta({
+                    model: resp.model ?? "",
+                    usage: resp.usage,
+                });
                 setPhase("done");
             } catch (e: unknown) {
                 if (gen !== seqRef.current) return;
@@ -531,6 +598,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         setRanQuery("");
         setSummaryText("");
         setSummaryError(null);
+        setSummaryMeta(null);
         candidateRef.current = null;
         rowsRef.current = { file: [], git: [], doc: [], project: [], memory: [], conversation: [] };
         setFileHits([]);
@@ -688,6 +756,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 // Nothing to summarize — keep the lists browsable, no LLM call.
                 setPhase("done");
                 setSummaryText("");
+                setSummaryMeta(null);
                 return;
             }
             lastSummaryReqRef.current = {
@@ -709,6 +778,9 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     const submitSearch = useCallback(() => {
         const q = query.trim();
         if (!q || !agentId) return;
+        // Each new run is a fresh intent: re-arm the auto-switch so a
+        // prior manual tab click does not pin us to an empty pane.
+        userChoseTabRef.current = false;
         setRanQuery(q);
         void runSearch(q);
     }, [query, agentId, runSearch]);
@@ -721,6 +793,38 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         () => toGitHits(filterGitCommits(commits, ranQuery)),
         [commits, ranQuery],
     );
+
+    /* ── Auto-switch tab to the first non-empty source once the run
+       has fully landed (design 27 §4.1: every source has either resolved
+       or hit its deadline). Guarded by `userChoseTabRef` so an explicit
+       tab click is never overridden; re-armed by `submitSearch` and the
+       open-reset effect above. ────────────────────────────────────────── */
+    useEffect(() => {
+        if (sourcesDone !== SEARCH_SOURCES.length) return;
+        if (userChoseTabRef.current) return;
+        const counts: Partial<Record<Tab, number>> = {
+            file: fileHits.length,
+            git: gitHits.length,
+            doc: docHits.length,
+            project: projHits.length,
+            memory: memoryHits.length,
+            conversation: conversationHits.length,
+        };
+        const first = pickFirstResultTab(counts, TAB_ORDER);
+        if (first && first !== tab) {
+            setTab(first);
+            setFocusedIdx(0);
+        }
+    }, [
+        sourcesDone,
+        fileHits,
+        gitHits,
+        docHits,
+        projHits,
+        memoryHits,
+        conversationHits,
+        tab,
+    ]);
 
     /* ── Explicit submit (Enter / re-run button) ────────────────────── */
     /* ADR-093 amendment: the run is no longer debounce-on-keystroke. Each
@@ -1005,7 +1109,11 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             <button
                                 key={tabDef.key}
                                 data-testid={`tab-${tabDef.key}`}
-                                onClick={() => setTab(tabDef.key)}
+                                onClick={() => {
+                                    userChoseTabRef.current = true;
+                                    setTab(tabDef.key);
+                                    setFocusedIdx(0);
+                                }}
                                 className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                                     tab === tabDef.key
                                         ? "bg-zinc-200 text-text dark:bg-zinc-700"
@@ -1141,6 +1249,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             summary={summaryText}
                             error={summaryError}
                             sourcesDone={sourcesDone}
+                            summaryMeta={summaryMeta}
                             allowedIds={
                                 new Set((candidateRef.current?.candidates ?? []).map((c) => c.id))
                             }
@@ -1234,6 +1343,7 @@ function SummaryView({
     summary,
     error,
     sourcesDone,
+    summaryMeta,
     allowedIds,
     onCancel,
     onRegenerate,
@@ -1243,6 +1353,10 @@ function SummaryView({
     summary: string;
     error: string | null;
     sourcesDone: number;
+    /** Model id + token usage returned by the Runtime on the summary
+     *  call. `null`/missing means older Runtime or before the call
+     *  lands; the footer line hides itself in that case. */
+    summaryMeta?: { model: string; usage: SummaryUsage | undefined } | null;
     allowedIds: ReadonlySet<string>;
     onCancel: () => void;
     onRegenerate: () => void;
@@ -1279,12 +1393,28 @@ function SummaryView({
         );
     }
     if (phase === "summarizing") {
+        // Centred column: pulsing status text on top, a real button
+        // below. The previous `cornerBtn` rendering put "Cancel" in the
+        // top-right as a ghost link — easy to miss and visually
+        // inconsistent with the abort-style button used by
+        // ContextUsageIcon for the same "stop an in-flight LLM call"
+        // affordance (same accent/10 + Square recipe).
         return (
-            <div className="relative flex h-full items-center justify-center px-3 py-3 text-xs text-text-tertiary">
-                <span className="animate-pulse" data-testid="summary-working">
-                    {t("globalSearch.summaryWorking")}
-                </span>
-                {cornerBtn(t("globalSearch.cancelSummary"), onCancel)}
+            <div
+                className="flex h-full flex-col items-center justify-center gap-3 px-3 py-3 text-xs text-text-tertiary"
+                data-testid="summary-working"
+            >
+                <span className="animate-pulse">{t("globalSearch.summaryWorking")}</span>
+                <button
+                    type="button"
+                    onClick={onCancel}
+                    data-testid="summary-cancel"
+                    aria-label={t("globalSearch.cancelSummary")}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)]/50 hover:bg-[var(--color-accent)]/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40"
+                >
+                    <Square size={12} fill="currentColor" />
+                    {t("globalSearch.cancelSummary")}
+                </button>
             </div>
         );
     }
@@ -1301,15 +1431,29 @@ function SummaryView({
         return <RowInfo>{t("globalSearch.summaryNoCandidates")}</RowInfo>;
     }
     const segments = parseSummarySegments(summary, allowedIds);
+    // ADR-093 D3 footer parity with CompactionCard: same recipe
+    // (`border-top-divider`, `text-text-tertiary`, smaller font, `select-text`),
+    // hidden entirely when the Runtime returned no model/usage — a
+    // regeneration never wipes the meta, only a new run that lands
+    // without it does.
+    const meta = summaryMeta;
+    const usage = meta?.usage;
+    const promptStr = formatTokenCount(usage?.prompt_tokens);
+    const completionStr = formatTokenCount(usage?.completion_tokens);
+    const cacheStr = formatTokenCount(usage?.cache_read_tokens);
+    const totalStr = formatTokenCount(usage?.total_tokens);
+    const hasTokenBreakdown = promptStr !== null || completionStr !== null;
+    const modelLabel = meta?.model?.trim() ? meta.model.trim() : "";
+    const hasFooter = modelLabel !== "" || hasTokenBreakdown || cacheStr !== null || totalStr !== null;
     return (
-        <div className="relative h-full">
+        <div className="relative flex h-full flex-col">
             {/* `whitespace-pre-wrap` keeps the model's own paragraph breaks.
                 The Runtime prompt asks for short paragraphs (ADR-093 D3 —
                 plain text, never HTML/Markdown), so newlines are the only
                 structure the renderer honours. */}
             <div
                 data-testid="summary-text"
-                className="h-full overflow-y-auto whitespace-pre-wrap px-4 py-2.5 text-xs leading-relaxed text-text-secondary"
+                className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap px-4 py-2.5 text-xs leading-relaxed text-text-secondary"
             >
                 {segments.map((s, i) =>
                     s.kind === "text" ? (
@@ -1328,6 +1472,30 @@ function SummaryView({
                     ),
                 )}
             </div>
+            {hasFooter && (
+                <div
+                    data-testid="summary-meta"
+                    className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-border-divider px-4 py-1.5 text-11 text-text-tertiary"
+                >
+                    {modelLabel && (
+                        <span>{t("globalSearch.summaryModel", { model: modelLabel })}</span>
+                    )}
+                    {hasTokenBreakdown && (
+                        <span>
+                            {t("globalSearch.summaryTokens", {
+                                prompt: promptStr ?? "—",
+                                completion: completionStr ?? "—",
+                            })}
+                        </span>
+                    )}
+                    {cacheStr !== null && (
+                        <span>{t("globalSearch.summaryTokensCached", { cached: cacheStr })}</span>
+                    )}
+                    {totalStr !== null && (
+                        <span>{t("globalSearch.summaryTokensTotal", { total: totalStr })}</span>
+                    )}
+                </div>
+            )}
             {cornerBtn(t("globalSearch.regenerate"), onRegenerate)}
         </div>
     );

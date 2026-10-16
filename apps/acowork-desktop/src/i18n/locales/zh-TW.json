@@ -1435,7 +1435,11 @@
     "cancelSummary": "取消摘要",
     "regenerate": "重新產生",
     "citationAria": "跳轉至引用 {{id}}",
-    "previewPlaceholder": "單擊結果以預覽 · 雙擊或回車開啟"
+    "previewPlaceholder": "單擊結果以預覽 · 雙擊或回車開啟",
+    "summaryModel": "模型: {{model}}",
+    "summaryTokens": "tokens: {{prompt}} → {{completion}}",
+    "summaryTokensCached": "(快取命中 {{cached}})",
+    "summaryTokensTotal": "合計 {{total}}"
   },
   "memoryNodeDetail": {
     "ariaLabelBackToList": "返回清單",

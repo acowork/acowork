@@ -560,6 +560,15 @@
       "reveal": "Reveal in File Explorer",
       "revealDisabled": "Unavailable in remote mode (Gateway is on a different machine)"
     },
+    "search": {
+      "addedToChat": "Added {{name}} to chat",
+      "addToChatShortcut": "Ctrl+Enter",
+      "addToChatDisabled": {
+        "no-agent": "Select an agent first",
+        "no-session": "Open a session first",
+        "read-only-session": "Cannot add context in a read-only session"
+      }
+    },
     "defaultWorkingDirectory": "Default working directory",
     "noMatchingWorkspaces": "No matching workspaces",
     "noWorkspacesConfigured": "No workspaces configured",
@@ -677,7 +686,11 @@
     "cancelSummary": "Cancel",
     "regenerate": "Regenerate",
     "citationAria": "Jump to citation {{id}}",
-    "previewPlaceholder": "Single-click a result to preview · double-click or Enter to open"
+    "previewPlaceholder": "Single-click a result to preview · double-click or Enter to open",
+    "summaryModel": "Model: {{model}}",
+    "summaryTokens": "tokens: {{prompt}} → {{completion}}",
+    "summaryTokensCached": "(cache hit {{cached}})",
+    "summaryTokensTotal": "total {{total}}"
   },
   "memoryNodeDetail": {
     "ariaLabelBackToList": "Back to list",

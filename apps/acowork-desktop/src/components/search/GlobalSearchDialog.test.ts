@@ -20,6 +20,9 @@ import {
     toFileHits,
     toMemoryHits,
     toConversationHits,
+    pickFirstResultTab,
+    formatTokenCount,
+    TAB_ORDER,
 } from "./GlobalSearchDialog";
 
 // Importing the module pulls in zustand stores (fine in test env); the
@@ -177,5 +180,78 @@ describe("toConversationHits", () => {
         });
         expect(hits[0].sub).toContain("assistant");
         expect(hits[1].sub).toContain("user");
+    });
+});
+
+describe("pickFirstResultTab", () => {
+    it("returns the first non-empty tab in canonical TAB_ORDER", () => {
+        // file=0, doc>0 → doc wins, even though git (between them) is also empty.
+        expect(
+            pickFirstResultTab(
+                { file: 0, git: 0, doc: 3, project: 1, memory: 0, conversation: 0 },
+                TAB_ORDER,
+            ),
+        ).toBe("doc");
+    });
+
+    it("picks file first when file has hits — preserves default-tab intent", () => {
+        expect(
+            pickFirstResultTab(
+                { file: 5, git: 0, doc: 0, project: 0, memory: 0, conversation: 0 },
+                TAB_ORDER,
+            ),
+        ).toBe("file");
+    });
+
+    it("returns null when every tab is empty — caller stays put", () => {
+        expect(
+            pickFirstResultTab(
+                { file: 0, git: 0, doc: 0, project: 0, memory: 0, conversation: 0 },
+                TAB_ORDER,
+            ),
+        ).toBeNull();
+    });
+
+    it("treats missing keys as zero (partial counts map)", () => {
+        // Caller might pass only the keys it knows about — the helper must
+        // not crash and must still honour the documented TAB_ORDER priority.
+        expect(pickFirstResultTab({ doc: 2 }, TAB_ORDER)).toBe("doc");
+        expect(pickFirstResultTab({}, TAB_ORDER)).toBeNull();
+    });
+
+    it("ignores zero-valued keys and picks the first strictly-positive one", () => {
+        expect(
+            pickFirstResultTab(
+                { file: 0, git: 0, doc: 0, project: 0, memory: 0, conversation: 1 },
+                TAB_ORDER,
+            ),
+        ).toBe("conversation");
+    });
+});
+
+describe("formatTokenCount", () => {
+    it("returns null for undefined / non-finite / negative inputs", () => {
+        expect(formatTokenCount(undefined)).toBeNull();
+        expect(formatTokenCount(NaN)).toBeNull();
+        expect(formatTokenCount(Infinity)).toBeNull();
+        expect(formatTokenCount(-5)).toBeNull();
+    });
+
+    it("renders integers below 1000 verbatim", () => {
+        expect(formatTokenCount(0)).toBe("0");
+        expect(formatTokenCount(42)).toBe("42");
+        expect(formatTokenCount(999)).toBe("999");
+    });
+
+    it("renders ≥1000 with one-decimal k suffix", () => {
+        expect(formatTokenCount(1000)).toBe("1.0k");
+        expect(formatTokenCount(1234)).toBe("1.2k");
+        expect(formatTokenCount(12_500)).toBe("12.5k");
+        expect(formatTokenCount(1_290_000)).toBe("1290.0k");
+    });
+
+    it("truncates non-integer values so the formatter never lies about precision", () => {
+        expect(formatTokenCount(1234.9)).toBe("1.2k");
+        expect(formatTokenCount(7.4)).toBe("7");
     });
 });

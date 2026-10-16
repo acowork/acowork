@@ -935,6 +935,15 @@
       "reveal": "在文件管理器中显示",
       "revealDisabled": "远程模式下不可用（网关不在本机）"
     },
+    "search": {
+      "addedToChat": "已添加 {{name}} 到对话",
+      "addToChatShortcut": "Ctrl+Enter 添加到对话",
+      "addToChatDisabled": {
+        "no-agent": "请先选择一个 Agent",
+        "no-session": "请先打开一个会话",
+        "read-only-session": "只读会话无法添加上下文"
+      }
+    },
     "ariaLabelClearSearch": "清除搜索",
     "removeWorkspaceTitle": "移除工作区",
     "buttonRemove": "移除",
@@ -1517,7 +1526,11 @@
     "cancelSummary": "取消摘要",
     "regenerate": "重新生成",
     "citationAria": "跳转到引用 {{id}}",
-    "previewPlaceholder": "单击结果以预览 · 双击或回车打开"
+    "previewPlaceholder": "单击结果以预览 · 双击或回车打开",
+    "summaryModel": "模型: {{model}}",
+    "summaryTokens": "tokens: {{prompt}} → {{completion}}",
+    "summaryTokensCached": "(缓存命中 {{cached}})",
+    "summaryTokensTotal": "合计 {{total}}"
   },
   "memoryNodeDetail": {
     "ariaLabelBackToList": "返回列表",

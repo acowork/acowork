@@ -178,9 +178,32 @@ function truncate(s: string, max: number): string {
 
 /* ─── Summary request ───────────────────────────────────────────────── */
 
+/**
+ * Mirrors the `UsageInfo` block the Runtime returns on
+ * `POST /search/summary` (acowork-core `UsageInfo`). Kept as a
+ * structural subtype here — the Desktop footer only needs prompt /
+ * completion / total / cache_read; everything else is cost-accounting
+ * detail not surfaced to the user.
+ *
+ * All fields are optional because the provider may omit usage (dev
+ * stubs, certain free-tier APIs); the UI hides the token row when the
+ * whole object is missing.
+ */
+export interface SummaryUsage {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cache_read_tokens?: number;
+}
+
 export interface SummaryResponse {
     summary: string;
     citations: string[];
+    /** Resolved model id actually used for the summary call. Empty
+     *  string when the Runtime could not resolve one — the footer
+     *  hides itself in that case. */
+    model?: string;
+    usage?: SummaryUsage;
 }
 
 /**

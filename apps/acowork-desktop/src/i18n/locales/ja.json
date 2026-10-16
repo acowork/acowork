@@ -860,6 +860,15 @@
       "reveal": "ファイルマネージャーで表示",
       "revealDisabled": "リモートモードでは使用できません（ゲートウェイは別のマシンにあります）"
     },
+    "search": {
+      "addedToChat": "{{name}} をチャットに追加しました",
+      "addToChatShortcut": "Ctrl+Enter",
+      "addToChatDisabled": {
+        "no-agent": "最初にエージェントを選択してください",
+        "no-session": "最初にセッションを開いてください",
+        "read-only-session": "読み取り専用セッションではコンテキストを追加できません"
+      }
+    },
     "ariaLabelClearSearch": "検索をクリア",
     "removeWorkspaceTitle": "ワークスペースを削除",
     "buttonRemove": "削除",
@@ -1435,7 +1444,11 @@
     "cancelSummary": "キャンセル",
     "regenerate": "再生成",
     "citationAria": "引用 {{id}} に移動",
-    "previewPlaceholder": "クリックでプレビュー · ダブルクリックまたは Enter で開く"
+    "previewPlaceholder": "クリックでプレビュー · ダブルクリックまたは Enter で開く",
+    "summaryModel": "モデル: {{model}}",
+    "summaryTokens": "tokens: {{prompt}} → {{completion}}",
+    "summaryTokensCached": "(キャッシュ {{cached}})",
+    "summaryTokensTotal": "合計 {{total}}"
   },
   "memoryNodeDetail": {
     "ariaLabelBackToList": "リストに戻る",
