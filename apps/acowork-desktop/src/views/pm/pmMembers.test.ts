@@ -81,17 +81,62 @@ describe("resolveMember (ADR-076 §决策 11 成员身份)", () => {
     expect(m.displayName).toBeNull();
   });
 
-  it("marks another account's user member unresolved (not self)", () => {
-    // Cross-user rosters need /api/users/directory — see the ponytail note
-    // in pmMembers.tsx. Until then this degrades to the raw id, which is
-    // what the UI showed before members had names at all.
-    const m = resolveMember(member("a5a57ab4-9a6c-4b53-909a-c7d6ca91ac05", "user"), agents, self);
+  it("resolves another user's name from the directory while signed in as admin", () => {
+    const directory = [{
+      user_id: "a5a57ab4-9a6c-4b53-909a-c7d6ca91ac05",
+      username: "nicholas",
+      display_name: "Nicholas",
+      avatar: null,
+      builtin_avatar: null,
+    }];
+    const m = resolveMember(
+      member(directory[0].user_id, "user"), agents, self, null, directory,
+    );
+    expect(m.displayName).toBe("Nicholas");
+    expect(m.unresolved).toBe(false);
+  });
+
+  it("resolves the other direction when nicholas views admin's project", () => {
+    const nicholas = {
+      user_id: "a5a57ab4-9a6c-4b53-909a-c7d6ca91ac05",
+      username: "nicholas",
+      display_name: "Nicholas",
+    };
+    const directory = [{
+      user_id: USER_ID,
+      username: "admin",
+      display_name: "Administrator",
+      avatar: null,
+      builtin_avatar: null,
+    }];
+    const m = resolveMember(member(USER_ID, "user"), agents, nicholas, null, directory);
+    expect(m.displayName).toBe("Administrator");
+    expect(m.unresolved).toBe(false);
+  });
+
+  it("uses username when a directory user's display name is empty", () => {
+    const directory = [{
+      user_id: "a5a57ab4-9a6c-4b53-909a-c7d6ca91ac05",
+      username: "nicholas",
+      display_name: "",
+    }];
+    const m = resolveMember(
+      member(directory[0].user_id, "user"), agents, self, null, directory,
+    );
+    expect(m.displayName).toBe("nicholas");
+    expect(m.unresolved).toBe(false);
+  });
+
+  it("marks another account's user member unresolved when absent from the directory", () => {
+    const m = resolveMember(
+      member("a5a57ab4-9a6c-4b53-909a-c7d6ca91ac05", "user"), agents, self, null, [],
+    );
     expect(m.unresolved).toBe(true);
     expect(m.displayName).toBeNull();
   });
 });
 
-describe("memberOptions (assignee dropdown, linked assignment)", () => {
+ describe("memberOptions (assignee dropdown, linked assignment)", () => {
   it("lists the creator's user_id so a task can be assigned to oneself", () => {
     const opts = memberOptions(
       [member(USER_ID, "user"), member(AGENT_ID, "agent")],

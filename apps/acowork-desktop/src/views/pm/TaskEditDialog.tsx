@@ -25,7 +25,7 @@ import { Dropdown } from "../../components/common/Dropdown";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
 import { showToast } from "../../components/common/ToastProvider";
 import type { PmTaskResponse, Priority, TaskType } from "../../lib/pm-types";
-import { memberOptions, useSelfAccount } from "./pmMembers";
+import { memberOptions, usePmDirectoryUsers, useSelfAccount } from "./pmMembers";
 
 export interface TaskEditDialogProps {
   mode: "create" | "edit";
@@ -79,6 +79,7 @@ export function TaskEditDialog({
   // local 模式：`authStore.account` 恒 null，但 PM 仍可能有 `kind:"user"`
   // 成员（`instance_id` 是 "human"/"unknown" 哨兵），用本地 profile 命名。
   const localProfile = useUserProfileStore((s) => s.profile);
+  const directory = usePmDirectoryUsers();
 
   const [title, setTitle] = useState(initial?.title ?? "");
   const [type, setType] = useState<TaskType>(initial?.type ?? "task");
@@ -123,8 +124,8 @@ export function TaskEditDialog({
   // 必须是 project.members 本身，不能是 agentStore —— 否则 `kind: "user"`
   // 的成员（恒为项目创建者）不在下拉里，用户没法把任务指派给自己。
   const assigneeOptions = useMemo(
-    () => memberOptions(project?.members ?? [], agents, selfAccount, localProfile),
-    [project?.members, agents, selfAccount, localProfile],
+    () => memberOptions(project?.members ?? [], agents, selfAccount, localProfile, directory),
+    [project?.members, agents, selfAccount, localProfile, directory],
   );
 
   const parentOptions = useMemo(

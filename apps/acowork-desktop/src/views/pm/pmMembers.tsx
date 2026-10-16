@@ -5,49 +5,26 @@
  * UUID（ADR-073），`kind: "user"` → user_id（ADR-076）。两者只差一个字段值，
  * 显示信息来自完全不同的源：Agent 走 `agentStore`，人类走当前登录账号。
  *
- * 之前每个视图各自 join `agentStore`，于是 `kind: "user"` 的成员（恒为项目
- * 创建者，见 `create_project_as`）永远查不到 → 画问号占位 / 显示裸 UUID /
- * 指派下拉里选不到自己。本模块是该 join 的**唯一**实现。
- *
- * 不存快照：成员身份是身份，显示名/头像是当前状态，join 实时源。
- *
- * 为什么不查 `/api/users/directory`：User 成员只可能来自"创建者"（加成员的
- * REST/MCP 路径都要求 `agent_exists`），所以当前登录账号就能命名列表里
- * 唯一可能的 User 成员。新增 HTTP 调用会让 PM 离线只读模式多一个失败点，
- * 收益为零。
- *
- * ponytail: 跨用户显示（给别人的项目看成员）需要 `/api/users/directory`。
- * 支持"添加人类成员"时再接这个源——那时列表里会有非本机账号，当前实现
- * 对它们退化为裸 UUID，与加成员之前的行为一致。
+ * User names come from the authenticated account directory, joined by `user_id`.
+ * The directory endpoint omits the caller, so the signed-in account remains a
+ * separate first-party resolution source. Local mode keeps its profile fallback.
  */
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { AgentAvatar } from "../../components/common/AgentAvatar";
 import { UserAvatar } from "../../components/common/UserAvatar";
 import type { PmProjectMember } from "../../lib/pm-types";
-import type { UserAccount } from "../../lib/types";
+import type { DirectoryUser, UserAccount } from "../../lib/types";
+import { usePmUserDirectoryStore } from "../../stores/pmUserDirectoryStore";
 
 /**
- * `kind: "user"` 成员的解析源。
- *
- * 两条候选身份，**取第一个命中的**：
- *
- * 1. `authStore.account`（multi_user 模式）—— 用 user_id 精确匹配，命中即
- *    返回该账号（带自定义头像）。账号可能比 user_id 字段晚几个渲染帧到位
- *    （`authStore.init()` 走 `fetchMe`），hook 订阅 store，会自动重渲染。
- * 2. `userProfileStore.profile`（local 模式或单用户回退）—— local 模式下
- *    `authStore` 在 `status="disabled"` 处早退、`account` 恒 null，但
- *    Gateway 仍然注入 `X-Actor: "human"` 哨兵常量，PM 把
- *    `{instance_id: "human", kind: "user"}` 写进 members。userProfileStore
- *    是 local 模式下唯一稳定的人类身份源（持久化在 localStorage）。
- *
- * 不引入 `/api/users/directory` 调用 —— PM 离线只读模式不该多一个失败点。
- * 见文件头 ponytail 注释。
+ * `authStore.account` (multi-user mode) is matched first, then the shared directory
+ * resolves other enabled accounts. `userProfileStore.profile` remains the fallback
+ * for local-mode sentinel actors.
  */
-
 
 /**
  * 成员身份最小投影：Agent 与 User 两条路解析完都落成这一个形状，
@@ -93,6 +70,7 @@ function resolveUserMemberPure(
   member: PmProjectMember,
   self: AccountLike | null,
   localProfile: { displayName: string; backendAvatarUrl?: string | null; backendBuiltinAvatarId?: string | null } | null,
+  directory: ReadonlyArray<DirectoryUser>,
 ): { displayName: string | null; avatarUrl: string | null; builtinAvatarId: string | null; unresolved: boolean } {
   if (self && self.user_id === member.instance_id) {
     return {
@@ -102,9 +80,16 @@ function resolveUserMemberPure(
       unresolved: false,
     };
   }
-  // local 模式哨兵（"human"/"unknown"，见 MemberKind::from_actor）→ 落到
-  // 当前用户的 userProfileStore。displayName 也用它，因为 local 模式没
-  // 账号可读；multi_user 模式账号若不匹配则保留 unresolved。
+  const user = directory.find((candidate) => candidate.user_id === member.instance_id);
+  if (user) {
+    return {
+      displayName: user.display_name || user.username,
+      avatarUrl: user.avatar ?? null,
+      builtinAvatarId: user.builtin_avatar ?? null,
+      unresolved: false,
+    };
+  }
+  // Local mode uses stable sentinel actors and has no account directory.
   if (member.instance_id === "human" || member.instance_id === "unknown") {
     if (!localProfile) return { displayName: null, avatarUrl: null, builtinAvatarId: null, unresolved: true };
     return {
@@ -129,6 +114,7 @@ export function resolveMember(
   agents: AgentMap,
   self: AccountLike | null,
   localProfile?: { displayName: string; backendAvatarUrl?: string | null; backendBuiltinAvatarId?: string | null } | null,
+  directory: ReadonlyArray<DirectoryUser> = [],
 ): ResolvedMember {
   const base = {
     instance_id: member.instance_id,
@@ -137,7 +123,7 @@ export function resolveMember(
     builtinAvatarId: null,
   };
   if (member.kind === "user") {
-    const u = resolveUserMemberPure(member, self, localProfile ?? null);
+    const u = resolveUserMemberPure(member, self, localProfile ?? null, directory);
     return { ...base, displayName: u.displayName, avatarUrl: u.avatarUrl, builtinAvatarId: u.builtinAvatarId, unresolved: u.unresolved };
   }
   const meta = agents[member.instance_id]?.meta;
@@ -157,8 +143,9 @@ export function resolveMembers(
   agents: AgentMap,
   self: AccountLike | null,
   localProfile?: { displayName: string; backendAvatarUrl?: string | null; backendBuiltinAvatarId?: string | null } | null,
+  directory: ReadonlyArray<DirectoryUser> = [],
 ): ResolvedMember[] {
-  return members.map((m) => resolveMember(m, agents, self, localProfile));
+  return members.map((m) => resolveMember(m, agents, self, localProfile, directory));
 }
 
 /**
@@ -172,8 +159,9 @@ export function memberOptions(
   agents: AgentMap,
   self: AccountLike | null,
   localProfile?: { displayName: string; backendAvatarUrl?: string | null; backendBuiltinAvatarId?: string | null } | null,
+  directory: ReadonlyArray<DirectoryUser> = [],
 ): Array<{ value: string; label: string }> {
-  return resolveMembers(members, agents, self, localProfile).map((m) => ({
+  return resolveMembers(members, agents, self, localProfile, directory).map((m) => ({
     value: m.instance_id,
     label: m.displayName ?? m.instance_id,
   }));
@@ -250,13 +238,19 @@ export function resolveActorLabel(
 }
 
 /**
- * `resolveActorLabel` 的 hook 版（订阅 agentStore + 登录账号）。
- * 调用方直接传 agent 渲染需要的话不要用这个。
+ * `resolveActorLabel` 的 hook 版（订阅 agentStore + 登录账号 + user directory）。
+ * 不同用户的 task actor id 也使用同一份目录数据源解析。
  */
 export function useActorLabel(id: string | null): string | null {
   const agents = useAgentStore((s) => s.agents);
   const self = useSelfAccount();
-  return useMemo(() => resolveActorLabel(agents, self, id), [agents, self, id]);
+  const directory = usePmDirectoryUsers();
+  return useMemo(() => {
+    const localLabel = resolveActorLabel(agents, self, id);
+    if (!id || localLabel !== id) return localLabel;
+    const user = directory.find((candidate) => candidate.user_id === id);
+    return user ? user.display_name || user.username : localLabel;
+  }, [agents, self, directory, id]);
 }
 
 /**
@@ -269,11 +263,30 @@ export function useSelfAccount(): UserAccount | null {
   return useAuthStore((s) => s.account);
 }
 
+export function usePmDirectoryUsers(): ReadonlyArray<DirectoryUser> {
+  const self = useSelfAccount();
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const mode = useAuthStore((s) => s.mode);
+  const status = useAuthStore((s) => s.status);
+  const ownerUserId = usePmUserDirectoryStore((s) => s.ownerUserId);
+  const storedUsers = usePmUserDirectoryStore((s) => s.users);
+  const loadDirectory = usePmUserDirectoryStore((s) => s.loadDirectory);
+  const resetDirectory = usePmUserDirectoryStore((s) => s.reset);
+
+  useEffect(() => {
+    if (mode === "multi_user" && status === "logged_in" && self && accessToken) {
+      void loadDirectory(self.user_id, accessToken);
+    } else {
+      resetDirectory();
+    }
+  }, [mode, status, self?.user_id, accessToken, loadDirectory, resetDirectory]);
+
+  // Never briefly expose another account's cached directory after an account switch.
+  return ownerUserId === self?.user_id ? storedUsers : [];
+}
+
 /**
- * 成员解析 hook：成员列表 + agentStore + 登录账号 + 本地 profile → 解析结果。
- *
- * memo 依赖是四个源本身；`projects` store 的 `members` 数组在每次 reload 时
- * 都是新引用，所以按引用比内容是对的（也是 store 契约要求的读法）。
+ * 成员解析 hook：成员列表 + agentStore + 登录账号 + user directory + 本地 profile。
  */
 export function useResolvedMembers(
   members: ReadonlyArray<PmProjectMember> | undefined,
@@ -281,8 +294,9 @@ export function useResolvedMembers(
   const agents = useAgentStore((s) => s.agents);
   const self = useSelfAccount();
   const localProfile = useUserProfileStore((s) => s.profile);
+  const directory = usePmDirectoryUsers();
   return useMemo(
-    () => resolveMembers(members ?? [], agents, self, localProfile),
-    [members, agents, self, localProfile],
+    () => resolveMembers(members ?? [], agents, self, localProfile, directory),
+    [members, agents, self, localProfile, directory],
   );
 }
