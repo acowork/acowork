@@ -1,12 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Search, RefreshCw, FolderOpen, FilePlus, FolderPlus, X } from "lucide-react";
+import { Search, RefreshCw, FolderOpen, FilePlus, FolderPlus, X, MessageSquarePlus } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
-import { useFileTreeStore, treeKey, isReadyNode, type TreeEntry } from "../../stores/fileTree";
+import { useFileTreeStore, treeKey, isReadyNode, type TreeEntry, getCachedWorkspaceRoot } from "../../stores/fileTree";
 import { useChatStore } from "../../stores/chatStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { FileTree } from "./FileTree/FileTree";
 import { WorkspaceSelector } from "./WorkspaceSelector";
 import { SetiIcon } from "../common/SetiIcon";
@@ -68,6 +69,20 @@ export function WorkspaceExplorer() {
     const currentWorkspaceId = activeSessionId
         ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
         : "__agent_home__";
+    // ADR-076: read-only sessions cannot mutate the chat (no new messages, no
+    // attached-context edits). Mirrors FileEditorPanel's `addToChatDisabledReason`
+    // gating so the search-result "add to chat" affordance behaves identically.
+    const readOnlySession = useActiveSessionReadOnly();
+    const addAttachedContext = useChatStore((s) => s.addAttachedContext);
+
+    // Search-result "add to chat" eligibility. The search hits the currently
+    // selected workspace, so "wrong agent/workspace" reasons from the editor
+    // panel don't apply — only the session-side gates remain.
+    const searchAddToChatDisabledReason: "no-agent" | "no-session" | "read-only-session" | null =
+        !selectedAgentId ? "no-agent"
+            : !activeSessionId ? "no-session"
+                : readOnlySession ? "read-only-session"
+                    : null;
 
     // ADR-078 (2026-XX revision) — git strip source: (agent, workspace) of
     // the currently selected session workspace. Independent of whether any
@@ -512,6 +527,37 @@ export function WorkspaceExplorer() {
         searchInputRef.current?.blur();
     }, [selectedAgentId, currentWorkspaceId, openFile, openPreview]);
 
+    /**
+     * Attach a search-result file to the active conversation — mirrors
+     * `FileEditorPanel.handleTabAddToChat` so the two entry points produce
+     * an identical context chip (same id, same absPath resolution). Unlike
+     * `handleSearchSelect`, this does NOT close the search dropdown: the
+     * user may want to add several files in a row (the store de-dupes by
+     * id, so re-adding the same file is a no-op).
+     *
+     * `searchAddToChatDisabledReason` is checked by the caller (the
+     * rendered button + the Ctrl/Cmd+Enter shortcut) so this function can
+     * stay a pure store mutation.
+     */
+    const handleSearchAddToChat = useCallback((item: { name: string; relPath: string }) => {
+        if (!selectedAgentId || !activeSessionId) return;
+        if (searchAddToChatDisabledReason !== null) return;
+        const root = getCachedWorkspaceRoot(selectedAgentId, currentWorkspaceId);
+        const absPath = root ? `${root}/${item.relPath}` : item.relPath;
+        addAttachedContext(selectedAgentId, activeSessionId, {
+            id: `${selectedAgentId}:${item.relPath}`,
+            type: "file",
+            name: item.name,
+            absPath,
+        });
+        // Toast so the user gets feedback when the search dropdown stays
+        // open and the new chip is not in the immediate field of view.
+        addToast({
+            type: "info",
+            message: t("workspace.search.addedToChat", { name: item.name }),
+        });
+    }, [selectedAgentId, activeSessionId, currentWorkspaceId, searchAddToChatDisabledReason, addAttachedContext, addToast, t]);
+
     const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === "Escape") {
             e.preventDefault();
@@ -527,9 +573,18 @@ export function WorkspaceExplorer() {
         } else if (e.key === "Enter") {
             e.preventDefault();
             const item = matchingFiles[focusedIdx];
-            if (item) handleSearchSelect(item.relPath);
+            if (!item) return;
+            // Ctrl/Cmd+Enter attaches to chat; bare Enter opens the file —
+            // splits the two actions so a keyboard-only flow can either
+            // "open to inspect" or "attach to chat" without leaving the
+            // input.
+            if (e.ctrlKey || e.metaKey) {
+                handleSearchAddToChat(item);
+            } else {
+                handleSearchSelect(item.relPath);
+            }
         }
-    }, [matchingFiles, focusedIdx, handleSearchSelect]);
+    }, [matchingFiles, focusedIdx, handleSearchSelect, handleSearchAddToChat]);
 
     const showDropdown = searchFocused && searchQuery.trim().length > 0;
 
@@ -896,6 +951,7 @@ export function WorkspaceExplorer() {
                             ) : (
                                 matchingFiles.map((f, idx) => {
                                     const focused = idx === focusedIdx;
+                                    const addDisabled = searchAddToChatDisabledReason !== null;
                                     return (
                                         <div
                                             key={f.relPath}
@@ -918,6 +974,46 @@ export function WorkspaceExplorer() {
                                             <span className="min-w-0 truncate text-10 text-text-tertiary  ml-3">
                                                 {abbreviatePath(f.dir)}
                                             </span>
+                                            {/* Hover/focus-reveal "add to chat" button.
+                                                Mirrors the floating button on the editor
+                                                selection (handleTabAddToChat) so the two
+                                                entry points feel like one feature.
+                                                `e.preventDefault()` on mousedown keeps
+                                                focus on the search input (matches the
+                                                outer row); `e.stopPropagation()` on click
+                                                prevents the row's onClick from also
+                                                opening the file. */}
+                                            <Tooltip
+                                                content={
+                                                    addDisabled
+                                                        ? t(`workspace.search.addToChatDisabled.${searchAddToChatDisabledReason}`)
+                                                        : `${t("workspace.contextMenu.addToChat")} (${t("workspace.search.addToChatShortcut")})`
+                                                }
+                                                variant="plain"
+                                            >
+                                                <button
+                                                    type="button"
+                                                    aria-label={t("workspace.contextMenu.addToChat")}
+                                                    disabled={addDisabled}
+                                                    onMouseDown={(e) => e.preventDefault()}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleSearchAddToChat(f);
+                                                    }}
+                                                    className={cn(
+                                                        "ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-secondary",
+                                                        "opacity-0 transition-opacity hover:bg-bg-hover hover:text-text",
+                                                        // Reveal on hover or when the row is
+                                                        // keyboard-focused (ArrowUp/Down
+                                                        // drives `focused`).
+                                                        "group-hover:opacity-100",
+                                                        focused && "opacity-100",
+                                                        addDisabled && "cursor-not-allowed",
+                                                    )}
+                                                >
+                                                    <MessageSquarePlus className="h-3.5 w-3.5" />
+                                                </button>
+                                            </Tooltip>
                                         </div>
                                     );
                                 })
