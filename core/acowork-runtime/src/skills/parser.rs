@@ -203,7 +203,7 @@ pub fn load_skill_md(path: &Path) -> Result<SkillDefinition, SkillParseError> {
 }
 
 /// Skill registry — manages loaded skills for an Agent
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillRegistry {
     /// Map of skill name → SkillDefinition
     skills: HashMap<String, SkillDefinition>,
@@ -722,9 +722,8 @@ Auto skill instructions.
         let mut registry = SkillRegistry::new();
         // Register deliberately out of alphabetical order.
         for name in ["delta", "alpha", "charlie", "bravo", "echo"] {
-            let md = format!(
-                "---\nname: {name}\ndescription: {name} skill\n---\n\nBody of {name}.\n"
-            );
+            let md =
+                format!("---\nname: {name}\ndescription: {name} skill\n---\n\nBody of {name}.\n");
             registry.register(parse_skill_md(&md).unwrap());
         }
 

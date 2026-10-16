@@ -550,6 +550,10 @@ async fn dispatch_inbound(
             // the skills summary is part of the agent template, not
             // per-session, so the SessionManager owns the broadcast.
             // `None` clears the section (Manual mode hot-toggle).
+            InboundMessage::UpdateSkillRegistry { registry } => {
+                session_manager.lock().await.apply_skill_registry(registry);
+                Ok(())
+            }
             InboundMessage::UpdateSkillInstructions { instructions } => {
                 session_manager
                     .lock()
@@ -851,6 +855,9 @@ async fn dispatch_inbound(
         // ADR-094: same defensive uniformity as `UpdateSystemPrompt`
         // — even a per-session routing key routes through the
         // SessionManager because the skills summary is agent-scoped.
+        InboundMessage::UpdateSkillRegistry { .. } => Err(RuntimeError::Config(
+            "UpdateSkillRegistry requires system-level dispatch".to_string(),
+        )),
         InboundMessage::UpdateSkillInstructions { instructions } => {
             session_manager
                 .lock()

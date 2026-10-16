@@ -231,6 +231,8 @@ pub enum InboundMessage {
     /// silently drop the skills section in Progressive mode because
     /// `SystemPromptParts.base` no longer embeds it.
     UpdateSkillInstructions { instructions: Option<String> },
+    /// Replace the agent-wide immutable skill registry snapshot after package reload.
+    UpdateSkillRegistry { registry: crate::skills::parser::SkillRegistry },
 }
 
 impl InboundMessage {
@@ -324,6 +326,7 @@ impl InboundMessage {
                     truncated = true;
                 }
             }
+            InboundMessage::UpdateSkillRegistry { .. } => {}
             InboundMessage::UpdateSkillInstructions { instructions } => {
                 if let Some(s) = instructions.as_ref()
                     && s.len() > MAX_INBOUND_PAYLOAD_SIZE

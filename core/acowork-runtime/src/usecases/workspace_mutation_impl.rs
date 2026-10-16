@@ -21,6 +21,7 @@ use crate::usecases::workspace_query::WorkspaceError;
 
 pub struct RuntimeWorkspaceMutationService {
     work_dir: PathBuf,
+    package_dir: Option<PathBuf>,
 }
 
 /// RFC3339 mtime of a file's metadata, or `None` when unavailable.
@@ -39,7 +40,17 @@ fn metadata_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
 
 impl RuntimeWorkspaceMutationService {
     pub fn new(work_dir: PathBuf) -> Self {
-        Self { work_dir }
+        Self {
+            work_dir,
+            package_dir: None,
+        }
+    }
+
+    pub fn new_with_package_dir(work_dir: PathBuf, package_dir: PathBuf) -> Self {
+        Self {
+            work_dir,
+            package_dir: Some(package_dir),
+        }
     }
 
     /// Generate a fresh workspace id (`ws-` + 12 lowercase hex chars).
@@ -145,10 +156,12 @@ impl RuntimeWorkspaceMutationService {
         workspace_id: Option<&str>,
         requested_path: &str,
     ) -> Result<(PathBuf, PathBuf, String), WorkspaceError> {
-        // The query service holds the work_dir too, but its API is
-        // centered around HTTP responses. Re-implementing the same
-        // path-traversal guard here keeps the two impls decoupled —
-        // callers don't need a query service to do mutations.
+        if crate::usecases::package_workspace::is_package_workspace(workspace_id) {
+            let package_dir = self.package_dir.as_deref().ok_or_else(|| {
+                WorkspaceError::WorkspaceNotFound("__agent_package__".to_string())
+            })?;
+            return crate::usecases::package_workspace::resolve_within(package_dir, requested_path);
+        }
         resolve_within_static(&self.work_dir, workspace_id, requested_path)
     }
 
@@ -635,6 +648,13 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         }
         let (_root, abs_path, rel_path) = self.resolve_within(workspace_id.as_deref(), &path)?;
 
+        if crate::usecases::package_workspace::is_package_workspace(workspace_id.as_deref())
+            && crate::usecases::package_workspace::is_protected_root(&rel_path)
+        {
+            return Err(WorkspaceError::InvalidPath(
+                "cannot delete prompts/ or skills/ root".to_string(),
+            ));
+        }
         if !abs_path.exists() {
             return Err(WorkspaceError::NotFound(format!(
                 "file does not exist: {}",
@@ -702,6 +722,13 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
             });
         }
         let (_root, abs_path, rel_path) = self.resolve_within(workspace_id.as_deref(), &path)?;
+        if crate::usecases::package_workspace::is_package_workspace(workspace_id.as_deref())
+            && crate::usecases::package_workspace::is_protected_root(&rel_path)
+        {
+            return Err(WorkspaceError::InvalidPath(
+                "cannot delete prompts/ or skills/ root".to_string(),
+            ));
+        }
 
         if !abs_path.exists() {
             return Err(WorkspaceError::NotFound(format!(
@@ -737,6 +764,18 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         }
         let (_root, abs_src, rel_src) = self.resolve_within(workspace_id.as_deref(), &source)?;
         let (_root, abs_dest, rel_dest) = self.resolve_within(workspace_id.as_deref(), &dest)?;
+        if crate::usecases::package_workspace::is_package_workspace(workspace_id.as_deref()) {
+            let src_root = rel_src.split('/').next();
+            let dest_root = rel_dest.split('/').next();
+            if src_root != dest_root
+                || crate::usecases::package_workspace::is_protected_root(&rel_src)
+                || crate::usecases::package_workspace::is_protected_root(&rel_dest)
+            {
+                return Err(WorkspaceError::InvalidPath(
+                    "package operations must stay within prompts/ or skills/".to_string(),
+                ));
+            }
+        }
 
         if !abs_src.exists() {
             return Err(WorkspaceError::NotFound(format!(
@@ -799,6 +838,18 @@ impl WorkspaceMutationService for RuntimeWorkspaceMutationService {
         }
         let (_root, abs_src, rel_src) = self.resolve_within(workspace_id.as_deref(), &source)?;
         let (_root, abs_dest, rel_dest) = self.resolve_within(workspace_id.as_deref(), &dest)?;
+        if crate::usecases::package_workspace::is_package_workspace(workspace_id.as_deref()) {
+            let src_root = rel_src.split('/').next();
+            let dest_root = rel_dest.split('/').next();
+            if src_root != dest_root
+                || crate::usecases::package_workspace::is_protected_root(&rel_src)
+                || crate::usecases::package_workspace::is_protected_root(&rel_dest)
+            {
+                return Err(WorkspaceError::InvalidPath(
+                    "package operations must stay within prompts/ or skills/".to_string(),
+                ));
+            }
+        }
 
         if !abs_src.exists() {
             return Err(WorkspaceError::NotFound(format!(
@@ -869,6 +920,63 @@ mod tests {
     /// `agent_workspaces.json` it manages is fully isolated per test.
     fn make_service(dir: &tempfile::TempDir) -> RuntimeWorkspaceMutationService {
         RuntimeWorkspaceMutationService::new(dir.path().to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn package_workspace_allows_edits_but_blocks_escape_and_root_delete() {
+        let temp = tempdir().expect("tempdir");
+        let work = temp.path().join("work");
+        let package = temp.path().join("package");
+        std::fs::create_dir_all(work.join("config")).unwrap();
+        std::fs::create_dir_all(package.join("prompts")).unwrap();
+        std::fs::create_dir_all(package.join("skills")).unwrap();
+        std::fs::write(package.join("prompts/system.md"), "old").unwrap();
+        std::fs::write(package.join("manifest.toml"), "private").unwrap();
+        let svc = RuntimeWorkspaceMutationService::new_with_package_dir(work, package.clone());
+
+        svc.write_file(
+            FilePathQuery {
+                workspace_id: Some("__agent_package__".into()),
+                path: "prompts/system.md".into(),
+            },
+            crate::usecases::workspace_mutation::WriteFileBody {
+                content: "new".into(),
+            },
+        )
+        .await
+        .expect("write allowed prompt");
+        assert_eq!(
+            std::fs::read_to_string(package.join("prompts/system.md")).unwrap(),
+            "new"
+        );
+
+        let outside = svc
+            .create_file(
+                CreateFileBody {
+                    workspace_id: Some("__agent_package__".into()),
+                    path: Some("manifest.toml".into()),
+                    content: "overwrite".into(),
+                    overwrite: true,
+                },
+                None,
+                None,
+            )
+            .await
+            .expect_err("package metadata must be inaccessible");
+        assert_eq!(outside.http_status(), 400);
+
+        let root_delete = svc
+            .delete_dir(
+                Some("__agent_package__"),
+                PathOnlyBody {
+                    workspace_id: None,
+                    path: Some("prompts".into()),
+                },
+            )
+            .await
+            .expect_err("top-level package subtree is protected");
+        assert_eq!(root_delete.http_status(), 400);
+        assert!(package.join("prompts/system.md").exists());
     }
 
     /// Smoke test for the create / read round-trip on the partial-update

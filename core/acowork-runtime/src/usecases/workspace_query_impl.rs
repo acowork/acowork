@@ -68,12 +68,39 @@ const BINARY_EXTENSIONS: &[&str] = &[
 
 pub struct RuntimeWorkspaceQueryService {
     work_dir: PathBuf,
+    package_dir: Option<PathBuf>,
     agent_id: String,
 }
 
 impl RuntimeWorkspaceQueryService {
     pub fn new(work_dir: PathBuf, agent_id: String) -> Self {
-        Self { work_dir, agent_id }
+        Self {
+            work_dir,
+            package_dir: None,
+            agent_id,
+        }
+    }
+
+    pub fn new_with_package_dir(work_dir: PathBuf, agent_id: String, package_dir: PathBuf) -> Self {
+        Self {
+            work_dir,
+            package_dir: Some(package_dir),
+            agent_id,
+        }
+    }
+
+    fn resolve_requested_path(
+        &self,
+        workspace_id: Option<&str>,
+        path: &str,
+    ) -> Result<(PathBuf, PathBuf, String), WorkspaceError> {
+        if crate::usecases::package_workspace::is_package_workspace(workspace_id) {
+            let package_dir = self.package_dir.as_deref().ok_or_else(|| {
+                WorkspaceError::WorkspaceNotFound("__agent_package__".to_string())
+            })?;
+            return crate::usecases::package_workspace::resolve_within(package_dir, path);
+        }
+        self.resolve_within(workspace_id, path)
     }
 
     /// Resolve a workspace root absolute path from `agent_workspaces.json`.
@@ -278,6 +305,83 @@ fn match_word_boundary(name: &str, seg: &str) -> bool {
 
 // ── Trait impl ─────────────────────────────────────────────────────────────
 
+impl RuntimeWorkspaceQueryService {
+    fn list_package_tree(&self, requested_path: &str) -> Result<TreeResponse, WorkspaceError> {
+        let package_dir = self
+            .package_dir
+            .as_deref()
+            .ok_or_else(|| WorkspaceError::WorkspaceNotFound("__agent_package__".to_string()))?;
+        let (canonical_root, abs_path, rel_path) =
+            crate::usecases::package_workspace::resolve_within(package_dir, requested_path)?;
+        if requested_path.is_empty() {
+            let entries = ["prompts", "skills"]
+                .iter()
+                .filter_map(|name| {
+                    let (_, path, _) =
+                        crate::usecases::package_workspace::resolve_within(package_dir, name)
+                            .ok()?;
+                    let metadata = std::fs::metadata(&path).ok()?;
+                    metadata.is_dir().then(|| TreeEntryDto {
+                        name: (*name).to_string(),
+                        entry_type: "directory".to_string(),
+                        size: None,
+                        modified: Self::modified_rfc3339(&metadata),
+                        children_count: std::fs::read_dir(&path).ok().map(|rd| rd.count()),
+                    })
+                })
+                .collect();
+            return Ok(TreeResponse {
+                root: canonical_to_root_string(&canonical_root),
+                path: String::new(),
+                entries,
+            });
+        }
+        let read_dir = std::fs::read_dir(&abs_path).map_err(|e| {
+            WorkspaceError::Io(std::io::Error::other(format!(
+                "Failed to read directory: {e}"
+            )))
+        })?;
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_vscode_default_excluded(&name)
+                || entry
+                    .file_type()
+                    .is_ok_and(|file_type| file_type.is_symlink())
+            {
+                continue;
+            }
+            let metadata = entry.metadata().ok();
+            if metadata.as_ref().is_some_and(|m| m.is_dir()) {
+                dirs.push(TreeEntryDto {
+                    name,
+                    entry_type: "directory".to_string(),
+                    size: None,
+                    modified: metadata.as_ref().and_then(Self::modified_rfc3339),
+                    children_count: std::fs::read_dir(entry.path()).ok().map(|rd| rd.count()),
+                });
+            } else {
+                files.push(TreeEntryDto {
+                    name,
+                    entry_type: "file".to_string(),
+                    size: metadata.as_ref().map(|m| m.len()),
+                    modified: metadata.as_ref().and_then(Self::modified_rfc3339),
+                    children_count: None,
+                });
+            }
+        }
+        dirs.sort_by_key(|e| e.name.to_lowercase());
+        files.sort_by_key(|e| e.name.to_lowercase());
+        dirs.extend(files);
+        Ok(TreeResponse {
+            root: canonical_to_root_string(&canonical_root),
+            path: rel_path,
+            entries: dirs,
+        })
+    }
+}
+
 #[async_trait]
 impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
     async fn list_workspaces(&self) -> Result<WorkspacesListResponse, WorkspaceError> {
@@ -306,8 +410,12 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
     }
 
     async fn list_tree(&self, params: &ListTreeParams) -> Result<TreeResponse, WorkspaceError> {
-        let workspace_root = self.resolve_root(params.workspace_id.as_deref())?;
         let requested_path = params.path.as_deref().unwrap_or("");
+        if crate::usecases::package_workspace::is_package_workspace(params.workspace_id.as_deref())
+        {
+            return self.list_package_tree(requested_path);
+        }
+        let workspace_root = self.resolve_root(params.workspace_id.as_deref())?;
 
         // Mirror the original server.rs list_tree: canonicalize the
         // workspace root for the response + path-traversal guard.
@@ -409,7 +517,7 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
 
     async fn read_file(&self, params: &ReadFileParams) -> Result<WorkspaceFileDto, WorkspaceError> {
         let (_root, abs_path, rel_path) =
-            self.resolve_within(params.workspace_id.as_deref(), &params.path)?;
+            self.resolve_requested_path(params.workspace_id.as_deref(), &params.path)?;
 
         let meta = std::fs::metadata(&abs_path).map_err(|_| {
             WorkspaceError::NotFound(format!("failed to read metadata for: {}", rel_path))
@@ -443,7 +551,7 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         // Same `resolve_within` guard as `read_file` — canonicalise +
         // containment check (path-traversal defence) before touching disk.
         let (_root, abs_path, rel_path) =
-            self.resolve_within(params.workspace_id.as_deref(), &params.path)?;
+            self.resolve_requested_path(params.workspace_id.as_deref(), &params.path)?;
 
         let meta = std::fs::metadata(&abs_path).map_err(|_| {
             WorkspaceError::NotFound(format!("failed to read metadata for: {}", rel_path))
@@ -798,6 +906,54 @@ mod tests {
         let a = normalised_root(&input);
         let b = canonical_to_root_string(&tmp.path().canonicalize().expect("canonicalize"));
         assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn package_tree_exposes_only_prompts_and_skills_and_reads_files() {
+        let temp = tempdir().expect("tempdir");
+        let work = temp.path().join("work");
+        let package = temp.path().join("package");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(package.join("prompts")).unwrap();
+        std::fs::create_dir_all(package.join("skills/demo")).unwrap();
+        std::fs::write(package.join("prompts/system.md"), "prompt").unwrap();
+        std::fs::write(package.join("skills/demo/SKILL.md"), "skill").unwrap();
+        std::fs::write(package.join("manifest.toml"), "hidden").unwrap();
+        let svc = RuntimeWorkspaceQueryService::new_with_package_dir(
+            work,
+            "test-agent".to_string(),
+            package,
+        );
+        let tree = svc
+            .list_tree(&ListTreeParams {
+                workspace_id: Some("__agent_package__".to_string()),
+                path: Some(String::new()),
+            })
+            .await
+            .expect("package root");
+        assert_eq!(
+            tree.entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prompts", "skills"]
+        );
+        let prompt = svc
+            .read_file(&ReadFileParams {
+                workspace_id: Some("__agent_package__".to_string()),
+                path: "prompts/system.md".to_string(),
+            })
+            .await
+            .expect("read prompt");
+        assert_eq!(prompt.content, "prompt");
+        let err = svc
+            .read_file(&ReadFileParams {
+                workspace_id: Some("__agent_package__".to_string()),
+                path: "manifest.toml".to_string(),
+            })
+            .await
+            .expect_err("metadata must be hidden");
+        assert_eq!(err.http_status(), 400);
     }
 
     /// Regression test for the bug where `list_tree`'s response

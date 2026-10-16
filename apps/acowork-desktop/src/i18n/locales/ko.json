@@ -742,9 +742,9 @@
     "save": "저장",
     "editCustomMcpServer": "사용자 정의 MCP 서버 수정",
     "nameIdentityHint": "에이전트가 이 서버를 참조하는 식별 키 — 변경할 수 없습니다. 표시 이름으로 다시 지정하세요.",
-        "displayName": "표시 이름",
-        "displayNamePlaceholder": "읽기 쉬운 레이블",
-        "displayNameHint": "앱에 표시하는 친숙한 레이블입니다. 에이전트의 참조 방식은 바뀌지 않습니다.",
+    "displayName": "표시 이름",
+    "displayNamePlaceholder": "읽기 쉬운 레이블",
+    "displayNameHint": "앱에 표시하는 친숙한 레이블입니다. 에이전트의 참조 방식은 바뀌지 않습니다.",
     "envMaskedHint": "마스킹된 값(••••)은 교체하지 않는 한 그대로 유지됩니다",
     "pastePlaceholder": "벤더 설정 / CLI 명령 붙여넣기",
     "hidePaste": "붙여넣기 상자 숨기기",
@@ -1515,8 +1515,7 @@
     "refreshing": "새로고침 중...",
     "node": "노드",
     "relayUnavailable": "이 노드의 LSP Relay를 사용할 수 없습니다",
-    "noRelayNodes": "사용 가능한 LSP Relay가 있는 노드가 없습니다"
-,
+    "noRelayNodes": "사용 가능한 LSP Relay가 있는 노드가 없습니다",
     "addServer": "LSP 서버 추가",
     "editServer": "LSP 서버 편집",
     "deleteServer": "레지스트리에서 제거",
@@ -1661,20 +1660,12 @@
     },
     "offlineHint": "PM service offline — board is read-only"
   },
-  "prompts": {
-    "badgeBuiltin": "내장",
-    "badgeMissing": "누락",
-    "badgeOverridden": "오버라이드됨",
-    "badgeRequired": "필수",
-    "error": "로드 실패: {{message}}",
-    "help": "항목을 클릭하여 편집; 저장 후 새로고침으로 적용.",
-    "loading": "프롬프트 로딩 중...",
-    "openAria": "편집기에서 프롬프트 {{name}} 열기",
-    "reload": "새로고침",
-    "reloadAria": "디스크에서 모든 프롬프트를 다시 로드",
-    "reloadOk": "다시 로드 완료 — 디스크에서 8개의 오버라이드를 새로 고치고 메인 대화 system prompt를 동기화했습니다.",
-    "reloadSystemPromptFailed": "8개의 오버라이드는 새로 고쳤지만 메인 대화 system prompt 재구축 실패 — system.md 변경은 Agent 재시작 후 적용됩니다.",
-    "title": "PROMPT"
+  "debugFiles": {
+    "title": "프롬프트 및 스킬",
+    "reload": "프롬프트 및 스킬 다시 불러오기",
+    "loadError": "프롬프트 및 스킬 로드 실패",
+    "empty": "이 패키지에 prompts/ 또는 skills/가 없습니다",
+    "emptyDir": "빈 폴더"
   },
   "doc": {
     "title": "문서 라이브러리",

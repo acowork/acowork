@@ -741,9 +741,9 @@
     "save": "保存",
     "editCustomMcpServer": "カスタムMCPサーバーを編集",
     "nameIdentityHint": "エージェントがこのサーバーを参照する識別キー——変更できません。表示名でリネームしてください。",
-        "displayName": "表示名",
-        "displayNamePlaceholder": "可読なラベル",
-        "displayNameHint": "アプリ内に表示する親切なラベル。エージェントの参照方法は変わりません。",
+    "displayName": "表示名",
+    "displayNamePlaceholder": "可読なラベル",
+    "displayNameHint": "アプリ内に表示する親切なラベル。エージェントの参照方法は変わりません。",
     "envMaskedHint": "マスク値（••••）は置き換えない限りそのまま保持されます",
     "pastePlaceholder": "ベンダー設定 / CLI コマンドを貼り付け",
     "hidePaste": "貼り付けボックスを閉じる",
@@ -1514,8 +1514,7 @@
     "refreshing": "更新中...",
     "node": "ノード",
     "relayUnavailable": "このノードの LSP Relay を利用できません",
-    "noRelayNodes": "LSP Relay が利用可能なノードがありません"
-,
+    "noRelayNodes": "LSP Relay が利用可能なノードがありません",
     "addServer": "LSP サーバーを追加",
     "editServer": "LSP サーバーを編集",
     "deleteServer": "レジストリから削除",
@@ -1660,20 +1659,12 @@
     },
     "offlineHint": "PM service offline — board is read-only"
   },
-  "prompts": {
-    "badgeBuiltin": "組み込み",
-    "badgeMissing": "欠落",
-    "badgeOverridden": "オーバーライド済み",
-    "badgeRequired": "必須",
-    "error": "読み込み失敗：{{message}}",
-    "help": "クリックして編集；保存後に「更新」で反映。",
-    "loading": "プロンプトを読み込み中...",
-    "openAria": "エディタでプロンプト {{name}} を開く",
-    "reload": "更新",
-    "reloadAria": "ディスクからすべてのプロンプトを再読み込み",
-    "reloadOk": "再読み込み完了 — 8 件のオーバーライドを更新し、メイン対話 system prompt を同期しました。",
-    "reloadSystemPromptFailed": "8 件のオーバーライドは更新しましたが、メイン対話 system prompt の再構築に失敗 — system.md の変更は Agent 再起動後に反映されます。",
-    "title": "PROMPT"
+  "debugFiles": {
+    "title": "プロンプトとスキル",
+    "reload": "プロンプトとスキルを再読込",
+    "loadError": "プロンプトとスキルの読み込みに失敗",
+    "empty": "このパッケージに prompts/ または skills/ がありません",
+    "emptyDir": "空のフォルダー"
   },
   "doc": {
     "title": "ドキュメントライブラリ",

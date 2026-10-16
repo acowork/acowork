@@ -10,6 +10,7 @@ pub mod attachment;
 pub mod debug_service;
 pub mod git_query;
 pub mod memory_query;
+pub(crate) mod package_workspace;
 pub mod session_config;
 pub mod session_control;
 pub mod session_metadata;

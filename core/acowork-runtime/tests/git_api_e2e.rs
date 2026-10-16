@@ -8,7 +8,7 @@
 //! workspace_id semantics, path traversal defence, rename/deleted/binary
 //! diff variants, and log path/limit filtering.
 //!
-//! Mirrors the `prompts_api_e2e.rs` minimal-server pattern: one
+//! Mirrors the `prompts_reload_e2e.rs` minimal-server pattern: one
 //! `#[tokio::test]` per scenario, every test owns its own temp dir +
 //! repo so tests can run in parallel.
 
@@ -93,7 +93,7 @@ async fn spawn_server_with_git_bin(tag: &str, git_bin: String) -> (u16, std::pat
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir).unwrap();
 
-    // Minimal stub slots — see `prompts_api_e2e.rs` for why each is None;
+    // Minimal stub slots — see `prompts_reload_e2e.rs` for why each is None;
     // the /git/* routes only touch `git_query`.
     let snapshots = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
     let latest = Arc::new(std::sync::RwLock::new(None));
@@ -148,7 +148,7 @@ async fn spawn_server_with_git_bin(tag: &str, git_bin: String) -> (u16, std::pat
         mqtt_client,
         session_metadata,
         memory_query,
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
         workspace_query,
         workspace_mutation,
         git_query,
@@ -212,7 +212,7 @@ async fn status_mixed_changes_fields_sort_and_rename_old_path() {
     git_in(&dir, &["mv", "d.txt", "e.txt"]); // staged R
     git_in(&dir, &["add", "-u"]); // stage f.txt deletion + a.txt? (a.txt re-modified after)
     std::fs::remove_file(dir.join("f.txt")).unwrap(); // f.txt: staged D
-    // NOTE: after `add -u`, a.txt was re-written → worktree M on top of staged M.
+                                                      // NOTE: after `add -u`, a.txt was re-written → worktree M on top of staged M.
     std::fs::write(dir.join("a.txt"), "final a\n").unwrap();
 
     let (status, body) = get_git(port, "status", &[]).await;
@@ -783,9 +783,12 @@ async fn diff_worktree_honours_explicit_base_for_clean_file() {
     assert_eq!(body["kind"], "nochange");
     assert_eq!(
         body["baseRev"],
-        git_in(&dir, &["log", "-n", "1", "--pretty=%H", "HEAD", "--", "a.txt"])
-            .trim()
-            .to_string(),
+        git_in(
+            &dir,
+            &["log", "-n", "1", "--pretty=%H", "HEAD", "--", "a.txt"]
+        )
+        .trim()
+        .to_string(),
         "HEAD base still promotes to the newest commit touching a.txt"
     );
 }

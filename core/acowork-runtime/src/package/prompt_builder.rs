@@ -541,7 +541,9 @@ Be friendly and welcoming.
         assert!(!parts.base.contains("Greet users warmly"));
         assert!(!parts.base.contains("Be friendly and welcoming."));
         // Skills summary: a separate, independent field.
-        let skills = parts.skills_summary.expect("Progressive must populate skills_summary");
+        let skills = parts
+            .skills_summary
+            .expect("Progressive must populate skills_summary");
         assert!(skills.contains("## Available Skills"));
         assert!(skills.contains("greeting"));
         assert!(skills.contains("Greet users warmly"));
@@ -919,9 +921,9 @@ Be friendly and welcoming.
     }
 
     /// Non-canonical filenames must NOT be recognised. This is the
-    /// security guard for the Debug panel PUT handler — see
-    /// `http/prompts::put_prompt` which calls this to reject writes
-    /// outside `OVERRIDABLE_PROMPTS`.
+    /// security guard for prompt reload — `reload_prompts_into_core`
+    /// only reads files whose basename is listed here, so arbitrary
+    /// files under `prompts/` never reach the live AgentCore.
     #[test]
     fn test_is_overridable_prompt_rejects_unknown_filenames() {
         assert!(!is_overridable_prompt("system.md"));

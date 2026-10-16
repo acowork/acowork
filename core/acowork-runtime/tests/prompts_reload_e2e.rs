@@ -1,9 +1,11 @@
 //! End-to-end tests: ADR-063 §3.7.7 — `POST /agents/{id}/prompts/reload`.
 //!
-//! Companion to [`prompts_api_e2e`]. That file covers the GET/PUT
-//! prompts handlers; this one covers the L2 reload handler at the
-//! HTTP layer (status codes, instance-identity mismatch guard, route
-//! registration, and 503 when the late-bind slot is empty).
+//! Covers the L2 reload handler at the HTTP layer (status codes,
+//! instance-identity mismatch guard, route registration, and 503 when
+//! the late-bind slot is empty). Prompt file read/write moved to the
+//! restricted `__agent_package__` workspace API (see the workspace
+//! usecase tests), so the former GET/PUT e2e file was retired with
+//! those routes.
 //!
 //! ## Scope
 //!
@@ -56,7 +58,7 @@ const OLD_RELOAD_PATH: &str = "/api/agents/com.test.prompts-reload-e2e/debug/pro
 // ── Test harness ───────────────────────────────────────────────────────
 
 /// Spawn a `RuntimeHttpServer` with the same minimal-stub slot
-/// configuration as `prompts_api_e2e::spawn_server` — the only
+/// configuration used by the workspace-file e2e servers — the only
 /// difference is that this one accepts an `agent_core` slot so the
 /// 503 vs (future) 200 paths can be exercised.
 async fn spawn_server(
@@ -71,9 +73,8 @@ async fn spawn_server(
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir).unwrap();
 
-    // Minimal stub slots — see `prompts_api_e2e::spawn_server` for why
-    // each is `None` / empty. The reload route only reads
-    // `package_dir`, `agent_id`, and `agent_core`.
+    // Minimal stub slots — each is `None` / empty because the reload route
+    // only reads `package_dir`, `agent_id`, and `agent_core`.
     let snapshots = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
     let latest = Arc::new(std::sync::RwLock::new(None));
     let dispatch_tx = Arc::new(tokio::sync::Mutex::new(None));
@@ -116,7 +117,7 @@ async fn spawn_server(
         mqtt_client,
         session_metadata,
         memory_query,
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
         workspace_query,
         workspace_mutation,
         agent_tools,

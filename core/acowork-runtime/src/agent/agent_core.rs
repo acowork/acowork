@@ -187,7 +187,7 @@ pub struct AgentCore {
     /// source for resolving a per-turn chat `command` (skill name) into
     /// skill instructions (see `SessionManager::resolve_skill_instructions`).
     /// Shared across session clones; empty registry = no skills installed.
-    pub(crate) skill_registry: Arc<crate::skills::parser::SkillRegistry>,
+    pub(crate) skill_registry: Arc<std::sync::RwLock<Arc<crate::skills::parser::SkillRegistry>>>,
     /// Agent-specific compaction prompt (from `prompts/summary.md` in the
     /// .agent package). `None` (the inner `Option`) = use the built-in
     /// [`crate::prompt::COMPACTION_SYSTEM_PROMPT`] fallback.
@@ -550,7 +550,7 @@ impl AgentCore {
             approval_timeout_secs: None,
             system_prompt_override: None,
             session_language_override: None,
-            skill_registry: Arc::new(crate::skills::parser::SkillRegistry::new()),
+            skill_registry: Arc::new(std::sync::RwLock::new(Arc::new(crate::skills::parser::SkillRegistry::new()))),
             // ADR-053: populated in Phase B of session_init from
             // prompts/summary.md (see `load_compaction_prompt`).
             // ADR-063 §3.7.5: wrapped in `Arc<RwLock<...>>` so the L2

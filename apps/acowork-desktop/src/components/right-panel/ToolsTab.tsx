@@ -57,7 +57,7 @@ interface McpServerCardProps {
 /**
  * Collapsible MCP server card (ADR-068 UX, ADR-069 data).
  *
- * Layout mirrors `PromptList.tsx`'s Debug-panel style:
+ * Layout mirrors the Debug-panel card style:
  *   - Header row: ChevronDown/Right + server name + transport badge +
  *     activation Switch. Clicking anywhere on the header toggles
  *     collapse; the Switch stops propagation so toggling activation

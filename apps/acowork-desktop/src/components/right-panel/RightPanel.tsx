@@ -29,11 +29,11 @@ import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 import { CompressionHistoryCard } from "../debug/CompressionHistoryCard";
-// ADR-063 §3.7 — package prompt override editor. Always rendered at
+// ADR-063 §3.7 — prompts / skills browser. Always rendered at
 // the TOP of the Debug tab regardless of DevMode state (operators can
 // prepare overrides before clicking "Enter Debug"; the reload button
 // stays reachable once DevMode is on).
-import { PromptList } from "../debug/PromptList";
+import { PromptsSkillsCard } from "../debug/PromptsSkillsCard";
 import { ListBox, ExpandableRow } from "../common/list";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { Switch } from "../common/Switch";
@@ -480,7 +480,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
             4. running, DevMode on, local,
                not connected                → "debug connection lost"
             5. running, DevMode on, local,
-               connected                    → state + snapshots + prompts
+               connected                    → state + snapshots + package files
                                               + compression history */}
       {activeTab === "debug" && (
         <OverlayScrollbar dataTabScroll className="min-h-0 flex flex-1 flex-col bg-right-panel">
@@ -489,11 +489,18 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               "no agent running" placeholder, the action block, and
               the debug-only state/snapshots/compression cards.
               Operators must be able to browse and prepare overrides
-              regardless of agent running state or DevMode. */}
-          <PromptList />
+              regardless of agent running state or DevMode.
 
-          {/* Divider — full panel-width hairline separating the PROMPT
-              override area (above) from the debug controls (below). Matches
+              Padding matches the action block below (`p-3`) so the card
+              left edge aligns with the rest of the tab's content column,
+              and it renders on the unified `ListBox` box-card grammar —
+              the same card the Settings and Status panels use. */}
+          <div className="p-3 pb-0">
+            <PromptsSkillsCard />
+          </div>
+
+          {/* Divider — full panel-width hairline separating the prompts &
+              skills card (above) from the debug controls (below). Matches
               the workspace/memory panel divider style. */}
           <div className="my-2 border-t border-border-divider" />
 
@@ -648,7 +655,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               </div>
 
               {/* Below action block — only when in debug mode. The
-                  lower cards (state, snapshots, prompts, compression
+                  lower cards (state, snapshots, package files, compression
                   history) are intentionally hidden until the operator
                   commits to a debug session. */}
               {selectedAgent?.debug_state === "enabled" && (

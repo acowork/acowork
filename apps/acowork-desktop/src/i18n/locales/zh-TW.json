@@ -740,9 +740,9 @@
     "save": "儲存",
     "editCustomMcpServer": "編輯自訂 MCP 伺服器",
     "nameIdentityHint": "Agent 引用該伺服器的身份鍵，不可修改——請用「顯示名稱」重新命名。",
-        "displayName": "顯示名稱",
-        "displayNamePlaceholder": "可讀的名稱",
-        "displayNameHint": "應用內展示的可讀名稱，不改變 Agent 引用該伺服器的方式。",
+    "displayName": "顯示名稱",
+    "displayNamePlaceholder": "可讀的名稱",
+    "displayNameHint": "應用內展示的可讀名稱，不改變 Agent 引用該伺服器的方式。",
     "envMaskedHint": "遮罩值（••••）除非替換，否則保持不變",
     "pastePlaceholder": "貼上廠商設定 / CLI 命令",
     "hidePaste": "收合貼上框",
@@ -1505,8 +1505,7 @@
     "refreshing": "重新整理中...",
     "node": "節點",
     "relayUnavailable": "該節點的 LSP Relay 不可用",
-    "noRelayNodes": "沒有可用 LSP Relay 的節點"
-,
+    "noRelayNodes": "沒有可用 LSP Relay 的節點",
     "addServer": "新增 LSP 伺服器",
     "editServer": "編輯 LSP 伺服器",
     "deleteServer": "從註冊表移除",
@@ -1651,20 +1650,12 @@
     },
     "offlineHint": "PM service offline — board is read-only"
   },
-  "prompts": {
-    "badgeBuiltin": "內建",
-    "badgeMissing": "缺失",
-    "badgeOverridden": "已覆寫",
-    "badgeRequired": "必填",
-    "error": "載入失敗：{{message}}",
-    "help": "點擊條目編輯；儲存後點重新整理使其生效。",
-    "loading": "載入提示詞中...",
-    "openAria": "在編輯器中開啟提示詞 {{name}}",
-    "reload": "重新整理",
-    "reloadAria": "從磁碟重新載入所有提示詞",
-    "reloadOk": "重新載入完成 — 8 個覆寫已從磁碟刷新，主對話 system prompt 已同步。",
-    "reloadSystemPromptFailed": "8 個覆寫已刷新，但主對話 system prompt 重建失敗 — system.md 變更需重啟 Agent 後生效。",
-    "title": "PROMPT"
+  "debugFiles": {
+    "title": "提示詞與技能",
+    "reload": "重新載入提示詞與技能",
+    "loadError": "載入提示詞與技能失敗",
+    "empty": "此套件沒有 prompts/ 或 skills/",
+    "emptyDir": "空資料夾"
   },
   "doc": {
     "title": "文件庫",

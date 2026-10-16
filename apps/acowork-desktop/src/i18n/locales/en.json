@@ -1086,9 +1086,9 @@
     "save": "Save",
     "editCustomMcpServer": "Edit Custom MCP Server",
     "nameIdentityHint": "Identity key agents use to reference this server — cannot be changed. Use Display name to relabel it.",
-        "displayName": "Display name",
-        "displayNamePlaceholder": "Readable label",
-        "displayNameHint": "Friendly label shown in the app. Doesn't change how agents reference this server.",
+    "displayName": "Display name",
+    "displayNamePlaceholder": "Readable label",
+    "displayNameHint": "Friendly label shown in the app. Doesn't change how agents reference this server.",
     "envMaskedHint": "Masked values (••••) are kept as-is unless you replace them",
     "pastePlaceholder": "Paste vendor config / CLI command",
     "hidePaste": "Hide paste box",
@@ -1579,8 +1579,7 @@
     "refreshing": "Refreshing...",
     "node": "Node",
     "relayUnavailable": "LSP Relay unavailable on this node",
-    "noRelayNodes": "No node with an available LSP Relay"
-,
+    "noRelayNodes": "No node with an available LSP Relay",
     "addServer": "Add LSP Server",
     "editServer": "Edit LSP Server",
     "deleteServer": "Remove from Registry",
@@ -1740,20 +1739,12 @@
     },
     "offlineHint": "PM service offline — board is read-only"
   },
-  "prompts": {
-    "badgeBuiltin": "built-in",
-    "badgeMissing": "missing",
-    "badgeOverridden": "overridden",
-    "badgeRequired": "required",
-    "error": "Failed: {{message}}",
-    "help": "Click an entry to edit; click Reload to apply.",
-    "loading": "Loading prompts...",
-    "openAria": "Open prompt {{name}} in editor",
-    "reload": "Refresh",
-    "reloadAria": "Reload all prompts from disk",
-    "reloadOk": "Reload complete — 8 overrides refreshed and the main-dialog system prompt synced.",
-    "reloadSystemPromptFailed": "8 overrides refreshed, but the main-dialog system prompt rebuild failed — system.md changes need an agent restart.",
-    "title": "PROMPT"
+  "debugFiles": {
+    "title": "Prompts & Skills",
+    "reload": "Reload prompts & skills",
+    "loadError": "Failed to load prompts & skills",
+    "empty": "No prompts/ or skills/ in this package",
+    "emptyDir": "Empty folder"
   },
   "doc": {
     "title": "Docs",

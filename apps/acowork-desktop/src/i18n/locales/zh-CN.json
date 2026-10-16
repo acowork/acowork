@@ -813,9 +813,9 @@
     "save": "保存",
     "editCustomMcpServer": "编辑自定义 MCP 服务器",
     "nameIdentityHint": "Agent 引用该服务器的身份键，不可修改——请用“显示名称”重新命名。",
-        "displayName": "显示名称",
-        "displayNamePlaceholder": "可读的名称",
-        "displayNameHint": "应用内展示的可读名称，不改变 Agent 引用该服务器的方式。",
+    "displayName": "显示名称",
+    "displayNamePlaceholder": "可读的名称",
+    "displayNameHint": "应用内展示的可读名称，不改变 Agent 引用该服务器的方式。",
     "envMaskedHint": "掩码值（••••）除非替换，否则保持不变",
     "pastePlaceholder": "粘贴厂商配置 / CLI 命令",
     "hidePaste": "收起粘贴框",
@@ -1596,8 +1596,7 @@
     "refreshing": "刷新中...",
     "node": "节点",
     "relayUnavailable": "该节点的 LSP Relay 不可用",
-    "noRelayNodes": "没有可用 LSP Relay 的节点"
-,
+    "noRelayNodes": "没有可用 LSP Relay 的节点",
     "addServer": "添加 LSP 服务器",
     "editServer": "编辑 LSP 服务器",
     "deleteServer": "从注册表移除",
@@ -1757,20 +1756,12 @@
     },
     "offlineHint": "PM service offline — board is read-only"
   },
-  "prompts": {
-    "badgeBuiltin": "内置",
-    "badgeMissing": "缺失",
-    "badgeOverridden": "已覆盖",
-    "badgeRequired": "必填",
-    "error": "加载失败：{{message}}",
-    "help": "点击条目编辑；保存后点刷新使其生效。",
-    "loading": "加载提示词中...",
-    "openAria": "在编辑器中打开提示词 {{name}}",
-    "reload": "刷新",
-    "reloadAria": "从磁盘重新加载所有提示词",
-    "reloadOk": "重新加载完成 — 8 个覆盖已从磁盘刷新，主对话 system prompt 已同步。",
-    "reloadSystemPromptFailed": "8 个覆盖已刷新，但主对话 system prompt 重建失败 — system.md 改动需重启 Agent 后生效。",
-    "title": "PROMPT"
+  "debugFiles": {
+    "title": "提示词与技能",
+    "reload": "重载提示词与技能",
+    "loadError": "加载提示词与技能失败",
+    "empty": "该包没有 prompts/ 或 skills/",
+    "emptyDir": "空文件夹"
   },
   "doc": {
     "title": "文档库",

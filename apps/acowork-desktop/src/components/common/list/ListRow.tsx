@@ -42,6 +42,11 @@ export interface ListRowProps {
   surface?: "card" | "inset";
   /** When provided the row renders as a <button> with click semantics. */
   onClick?: () => void;
+  /** Second click gesture on a clickable row (e.g. file trees where a single
+   *  click selects and a double click opens — the workspace Explorer
+   *  convention). Only wired when `onClick` is set, since the row must render
+   *  as a <button> for the native `dblclick` event to reach it. */
+  onDoubleClick?: () => void;
   /** Accessible label for clickable rows (aria-label). */
   ariaLabel?: string;
   /** Extra classes appended to the row. */
@@ -61,6 +66,7 @@ export function ListRow({
   padding = "default",
   surface = "card",
   onClick,
+  onDoubleClick,
   ariaLabel,
   className,
   testId,
@@ -90,7 +96,14 @@ export function ListRow({
 
   if (onClick) {
     return (
-      <button type="button" onClick={onClick} disabled={disabled} aria-label={ariaLabel} className={base}>
+      <button
+        type="button"
+        onClick={onClick}
+        onDoubleClick={onDoubleClick}
+        disabled={disabled}
+        aria-label={ariaLabel}
+        className={base}
+      >
         {content}
       </button>
     );

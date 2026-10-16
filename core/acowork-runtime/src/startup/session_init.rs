@@ -311,7 +311,8 @@ pub(crate) async fn phase_b_init_session(
     // server in Phase A, and `workspace_resolver` is built before it), so
     // this is the first point where a shell tool call can actually
     // publish a `git-changed` event.
-    Arc::get_mut(&mut core).expect("AgentCore must be unshared at construction")
+    Arc::get_mut(&mut core)
+        .expect("AgentCore must be unshared at construction")
         .set_git_nudge(crate::agent::git_nudge::GitNudgeSlots {
             mqtt_slot: ctx.mqtt_client_slot.clone(),
             resolver: ctx.workspace_resolver.clone(),
@@ -436,14 +437,13 @@ pub(crate) async fn phase_b_init_session(
                 vault.clear();
                 for p in &available.providers {
                     if !p.api_key.is_empty() {
-                        vault
-                            .entry(p.id.clone())
-                            .or_default()
-                            .push(acowork_core::protocol::ProviderKeyEntry {
+                        vault.entry(p.id.clone()).or_default().push(
+                            acowork_core::protocol::ProviderKeyEntry {
                                 provider_id: p.id.clone(),
                                 account_id: p.account_id.clone(),
                                 api_key: p.api_key.clone(),
-                            });
+                            },
+                        );
                     }
                 }
                 tracing::info!(
@@ -468,7 +468,7 @@ pub(crate) async fn phase_b_init_session(
         // (skills/*/SKILL.md) on AgentCore so `dispatch_inbound` can resolve
         // a chat `command` (skill name) into instructions — the runtime is
         // the authoritative source, the frontend only sends names.
-        c.skill_registry = ctx.skill_registry.clone();
+        c.skill_registry = Arc::new(std::sync::RwLock::new(ctx.skill_registry.clone()));
         // ADR-071 D4/D6: seed the AgentCore runtime distiller layer from
         // `agent_config.json` BEFORE the consolidation pipeline starts
         // (init_memory_provider → start_consolidation_pipeline reads
@@ -513,12 +513,11 @@ pub(crate) async fn phase_b_init_session(
         // ADR-040: Publish MemoryAdminAdapter to the HTTP server's
         // late-bind slot so memory handlers can use the trait path.
         {
-            let adapter: Arc<dyn crate::usecases::MemoryQueryService> = Arc::new(
-                crate::usecases::memory_query_impl::MemoryAdminAdapter::new(
+            let adapter: Arc<dyn crate::usecases::MemoryQueryService> =
+                Arc::new(crate::usecases::memory_query_impl::MemoryAdminAdapter::new(
                     ctx.memory_store_shared.clone(),
                     c.embedding_provider_shared.clone(),
-                ),
-            );
+                ));
             let mut slot = ctx.memory_query_slot.lock().await;
             *slot = Some(adapter);
         }
@@ -584,17 +583,22 @@ pub(crate) async fn phase_b_init_session(
         // can wire them immediately. Both services must be published
         // BEFORE the workspace HTTP handlers can serve a real response.
         {
-            let query_svc: Arc<dyn crate::usecases::WorkspaceQueryService> =
-                Arc::new(crate::usecases::RuntimeWorkspaceQueryService::new(
+            let query_svc: Arc<dyn crate::usecases::WorkspaceQueryService> = Arc::new(
+                crate::usecases::RuntimeWorkspaceQueryService::new_with_package_dir(
                     work_dir_path.to_path_buf(),
                     ctx.agent_id.clone(),
-                ));
+                    ctx.loaded.package_dir.clone(),
+                ),
+            );
             let mut slot = ctx.workspace_query_slot.lock().await;
             *slot = Some(query_svc);
         }
         {
             let mutation_svc: Arc<dyn crate::usecases::WorkspaceMutationService> = Arc::new(
-                crate::usecases::RuntimeWorkspaceMutationService::new(work_dir_path.to_path_buf()),
+                crate::usecases::RuntimeWorkspaceMutationService::new_with_package_dir(
+                    work_dir_path.to_path_buf(),
+                    ctx.loaded.package_dir.clone(),
+                ),
             );
             let mut slot = ctx.workspace_mutation_slot.lock().await;
             *slot = Some(mutation_svc);
@@ -747,12 +751,11 @@ pub(crate) async fn phase_b_init_session(
                     && let Some(d) = manifest_distiller.as_ref()
                     && (d.model_provider_id.is_some() || d.model_id.is_some())
                 {
-                    updated.distiller_models = Some(vec![
-                        acowork_core::protocol::CompactModelRef {
+                    updated.distiller_models =
+                        Some(vec![acowork_core::protocol::CompactModelRef {
                             provider_id: d.model_provider_id.clone().unwrap_or_default(),
                             model_id: d.model_id.clone().unwrap_or_default(),
-                        },
-                    ]);
+                        }]);
                     dirty = true;
                 }
                 if updated.distiller_interval_minutes.is_none() {

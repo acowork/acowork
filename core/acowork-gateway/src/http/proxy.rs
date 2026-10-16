@@ -16,14 +16,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
-    routing::{any, get, post, put, delete},
+    routing::{any, delete, get, post, put},
 };
-use axum::body::Bytes;
 use tokio::sync::RwLock;
 
 use crate::http::agents::resolve_avatar_from_manifest;
@@ -116,10 +116,7 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/workspaces",
             get(proxy_list_workspaces).post(proxy_add_workspace),
         )
-        .route(
-            "/api/agents/{id}/workspaces/tree",
-            get(proxy_list_tree),
-        )
+        .route("/api/agents/{id}/workspaces/tree", get(proxy_list_tree))
         // Routes 16-17: Workspace filename / content search (ADR-040).
         // ADR-009 v2: the Runtime is the authoritative workspace API owner;
         // the Gateway is now a thin reverse-proxy for these CPU-heavy
@@ -131,10 +128,7 @@ pub fn proxy_routes() -> Router<AppState> {
         //   2. Path-traversal / canonicalize guard lives in one place.
         //   3. Query params are forwarded verbatim — no Gateway-side
         //      schema drift to maintain.
-        .route(
-            "/api/agents/{id}/workspaces/find",
-            get(proxy_find_files),
-        )
+        .route("/api/agents/{id}/workspaces/find", get(proxy_find_files))
         .route(
             "/api/agents/{id}/workspaces/search",
             get(proxy_search_files),
@@ -142,10 +136,7 @@ pub fn proxy_routes() -> Router<AppState> {
         // ADR-081 §4.1: single-agent aggregate search (memory/file/git;
         // conversation arrives in P1-2). Transparent forward — the Runtime
         // owns all aggregation/sorting (ADR-064/070).
-        .route(
-            "/api/agents/{id}/search",
-            get(proxy_global_search),
-        )
+        .route("/api/agents/{id}/search", get(proxy_global_search))
         // ADR-093: LLM summary over the Desktop's bounded candidate
         // snapshot. Transparent forward — the Runtime owns the provider
         // call and citation whitelist; the Gateway parses no body and
@@ -158,22 +149,10 @@ pub fn proxy_routes() -> Router<AppState> {
         // (workspace owner, ADR-009 v2) via the system git CLI with
         // `GIT_OPTIONAL_LOCKS=0`; the Gateway only forwards — no .git
         // bytes ever cross this process (run_gateway_fs_redline).
-        .route(
-            "/api/agents/{id}/git/status",
-            get(proxy_git_status),
-        )
-        .route(
-            "/api/agents/{id}/git/diff",
-            get(proxy_git_diff),
-        )
-        .route(
-            "/api/agents/{id}/git/log",
-            get(proxy_git_log),
-        )
-        .route(
-            "/api/agents/{id}/git/revert",
-            post(proxy_git_revert),
-        )
+        .route("/api/agents/{id}/git/status", get(proxy_git_status))
+        .route("/api/agents/{id}/git/diff", get(proxy_git_diff))
+        .route("/api/agents/{id}/git/log", get(proxy_git_log))
+        .route("/api/agents/{id}/git/revert", post(proxy_git_revert))
         // ADR-076 §决策 4: the session *control* plane moved from MQTT to
         // HTTP so the auth middleware above can authenticate it — an MQTT
         // control message carries no identity, so `create` could not record
@@ -206,10 +185,7 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/workspace",
             put(proxy_put_session_workspace),
         )
-        .route(
-            "/api/agents/{id}/latest-session",
-            get(proxy_latest_session),
-        )
+        .route("/api/agents/{id}/latest-session", get(proxy_latest_session))
         .route(
             "/api/agents/{id}/sessions/{sid}/messages",
             get(proxy_get_messages).post(proxy_post_message),
@@ -246,10 +222,7 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/memory/nodes",
             get(proxy_memory_nodes).post(proxy_create_memory_node),
         )
-        .route(
-            "/api/agents/{id}/memory/stats",
-            get(proxy_memory_stats),
-        )
+        .route("/api/agents/{id}/memory/stats", get(proxy_memory_stats))
         .route(
             "/api/agents/{id}/memory/nodes/{nid}",
             delete(proxy_memory_delete_node)
@@ -260,10 +233,7 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/memory/rebuild-embeddings",
             post(proxy_memory_rebuild_embeddings),
         )
-        .route(
-            "/api/agents/{id}/memory/graph",
-            get(proxy_get_memory_graph),
-        )
+        .route("/api/agents/{id}/memory/graph", get(proxy_get_memory_graph))
         // ADR-051: consolidation status + RAG endpoints.
         .route(
             "/api/agents/{id}/memory/consolidation/status",
@@ -277,14 +247,8 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/memory/distill",
             post(proxy_memory_distill),
         )
-        .route(
-            "/api/agents/{id}/rag/status",
-            get(proxy_rag_status),
-        )
-        .route(
-            "/api/agents/{id}/rag/query",
-            post(proxy_rag_query),
-        )
+        .route("/api/agents/{id}/rag/status", get(proxy_rag_status))
+        .route("/api/agents/{id}/rag/query", post(proxy_rag_query))
         // Shell risk rules — GET returns effective content (user override or defaults),
         // PUT writes a user override to {work_dir}/config/shell_risk_rules.toml.
         .route(
@@ -428,10 +392,7 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/config",
             get(proxy_get_config).put(proxy_put_config),
         )
-        .route(
-            "/api/agents/{id}/tools",
-            get(proxy_get_tools),
-        )
+        .route("/api/agents/{id}/tools", get(proxy_get_tools))
         // ADR-040 follow-up: builtin-tools moved off `/config` onto its
         // own route. The read-side merge still lives at `/tools` (GET
         // only), but write-side persistence of the enabled flag list is
@@ -440,10 +401,7 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/builtin-tools",
             get(proxy_get_builtin_tools).put(proxy_put_builtin_tools),
         )
-        .route(
-            "/api/agents/{id}/status",
-            get(proxy_get_status),
-        )
+        .route("/api/agents/{id}/status", get(proxy_get_status))
         // Win11-MCP-ToolsBugFix: reverse-proxy per-agent MCP server activation
         // (GET/PUT) to the Runtime. The
         // Gateway used to handle these via `agents.rs` stubs that returned 200
@@ -477,10 +435,7 @@ pub fn proxy_routes() -> Router<AppState> {
         // ADR-040 follow-up: provider list read-through — reads
         // agent_provider.json on the Runtime side. The frontend calls
         // this to verify what the Runtime has received via MQTT.
-        .route(
-            "/api/agents/{id}/providers",
-            get(proxy_get_providers),
-        )
+        .route("/api/agents/{id}/providers", get(proxy_get_providers))
         // ADR-063: Package-level LLM prompt overrides (see ADR-063 §3.7.6).
         // Four transparent reverse-proxy rules forward the Desktop
         // Debug panel's read/write + reload traffic to the Runtime HTTP
@@ -497,14 +452,6 @@ pub fn proxy_routes() -> Router<AppState> {
         // namespace (was previously forwarded by the `/debug/{*rest}`
         // wildcard, which 503'd outside DevMode — see ADR-063 §3.7.7).
         .route(
-            "/api/agents/{id}/prompts",
-            get(proxy_list_prompts),
-        )
-        .route(
-            "/api/agents/{id}/prompts/{name}",
-            get(proxy_get_prompt).put(proxy_put_prompt),
-        )
-        .route(
             "/api/agents/{id}/prompts/reload",
             post(proxy_reload_prompts),
         )
@@ -519,10 +466,7 @@ pub fn proxy_routes() -> Router<AppState> {
         // NOTE: as of ADR-063 §3.7.7 the L2 prompts reload endpoint
         // (`prompts/reload`) is registered explicitly above this
         // wildcard so it can be invoked without DevMode being enabled.
-        .route(
-            "/api/agents/{id}/debug/{*rest}",
-            any(proxy_debug_rpc),
-        )
+        .route("/api/agents/{id}/debug/{*rest}", any(proxy_debug_rpc))
         // Health double-check (distributed liveness): exposes the Runtime's
         // `/health` endpoint through the Gateway so clients (e.g. the desktop
         // app) can verify a Runtime is actually alive over HTTP when MQTT
@@ -531,14 +475,11 @@ pub fn proxy_routes() -> Router<AppState> {
         // itself stays alive. MQTT liveness alone would misreport such an
         // agent as offline/sleeping. Proxied verbatim so the Runtime remains
         // the source of truth for its own `status`/`degraded_reasons`.
-        .route(
-            "/api/agents/{id}/health",
-            get(proxy_get_health),
-        )
-        // NOTE: the global `DefaultBodyLimit` layer is applied at
-        // the merged-router level in `http::routes::api_router` so
-        // every merged sub-router (agents, chat, proxy, …) shares the
-        // same cap. See `GLOBAL_BODY_LIMIT` for the rationale.
+        .route("/api/agents/{id}/health", get(proxy_get_health))
+    // NOTE: the global `DefaultBodyLimit` layer is applied at
+    // the merged-router level in `http::routes::api_router` so
+    // every merged sub-router (agents, chat, proxy, …) shares the
+    // same cap. See `GLOBAL_BODY_LIMIT` for the rationale.
 }
 
 // ── Proxy handlers ────────────────────────────────────────────────────
@@ -624,7 +565,11 @@ async fn proxy_search_summary(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let payload = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -685,7 +630,11 @@ async fn proxy_git_revert(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -721,7 +670,11 @@ async fn proxy_create_session(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -818,7 +771,11 @@ async fn proxy_set_session_visibility(
     body: Bytes,
 ) -> Response {
     let path = format!("/sessions/{}/visibility", sid);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -845,7 +802,11 @@ async fn proxy_put_session_workspace(
     body: Bytes,
 ) -> Response {
     let path = format!("/sessions/{}/workspace", sid);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -907,7 +868,11 @@ async fn proxy_post_session_action(
     body: Bytes,
 ) -> Response {
     let path = format!("/sessions/{}/{}", sid, action);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         state,
         id,
@@ -1082,8 +1047,21 @@ async fn proxy_rag_query(
     body: Bytes,
 ) -> Response {
     let path = format!("/agents/{}/rag/query", id);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::POST, payload, &headers).await
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/shell-risk-rules` to Runtime.
@@ -1104,8 +1082,21 @@ async fn proxy_put_shell_risk_rules(
     body: Bytes,
 ) -> Response {
     let path = format!("/agents/{}/shell-risk-rules", id);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 // ── ADR-009 §5: agent asset reads (served by the Node) ───────────────
@@ -1220,9 +1211,15 @@ async fn proxy_to_node(
             let body = response.bytes().await.unwrap_or_default();
             let mut builder = Response::builder().status(status);
             *builder.headers_mut().unwrap() = resp_headers;
-            builder.body(axum::body::Body::from(body)).unwrap_or_else(|_| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build proxy response").into_response()
-            })
+            builder
+                .body(axum::body::Body::from(body))
+                .unwrap_or_else(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to build proxy response",
+                    )
+                        .into_response()
+                })
         }
         Err(e) => {
             tracing::warn!(agent_id = id, url = %target_url, error = %e, "Failed to proxy to node");
@@ -1418,11 +1415,9 @@ async fn proxy_delete_avatar_file(
         gw.installed(&id).and_then(|info| {
             let overrides = gw.overrides_of(info.instance_id.as_str());
             let (avatar, _, _) = match overrides {
-                Some(ov) if ov.avatar.is_some() || ov.builtin_avatar.is_some() => (
-                    ov.avatar.clone(),
-                    ov.builtin_avatar.clone(),
-                    "overrides",
-                ),
+                Some(ov) if ov.avatar.is_some() || ov.builtin_avatar.is_some() => {
+                    (ov.avatar.clone(), ov.builtin_avatar.clone(), "overrides")
+                }
                 _ => resolve_avatar_from_manifest(&info.manifest),
             };
             avatar
@@ -1545,7 +1540,10 @@ pub(crate) async fn forward_avatar_config_put(
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::warn!(agent_id = id, error = %e, "avatar-config: cannot read Runtime response");
-            return (parts.status, Json(serde_json::json!({ "error": "unreadable upstream response" })))
+            return (
+                parts.status,
+                Json(serde_json::json!({ "error": "unreadable upstream response" })),
+            )
                 .into_response();
         }
     };
@@ -1571,51 +1569,6 @@ pub(crate) async fn forward_avatar_config_put(
 // `POST /api/agents/{id}/debug/prompts/reload` is forwarded by the
 // `/debug/{*rest}` wildcard above (R7) — see ADR-063 §3.7.6.
 
-/// Reverse-proxy `GET /api/agents/{id}/prompts` to Runtime's
-/// `GET /agents/{id}/prompts`. Returns a JSON list of the 9 overridable
-/// prompts with their per-file metadata (`name`, `file`, `overridden`,
-/// `size_bytes`, `fallback_constant`).
-async fn proxy_list_prompts(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let path = format!("/agents/{id}/prompts");
-    proxy_to_runtime(&state, &id, &path, "", &headers).await
-}
-
-/// Reverse-proxy `GET /api/agents/{id}/prompts/{name}` to Runtime's
-/// `GET /agents/{id}/prompts/{name}`. Returns the prompt's metadata
-/// plus its current content (`None` when the package does not declare
-/// an override).
-async fn proxy_get_prompt(
-    State(state): State<AppState>,
-    Path((id, name)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> Response {
-    let path = format!("/agents/{id}/prompts/{name}");
-    proxy_to_runtime(&state, &id, &path, "", &headers).await
-}
-
-/// Reverse-proxy `PUT /api/agents/{id}/prompts/{name}` to Runtime's
-/// `PUT /agents/{id}/prompts/{name}`. Body is a JSON `{content}`
-/// (per Runtime `PutPromptRequest`); the Runtime's `http/prompts.rs`
-/// whitelist + 1 MiB cap + atomic-rename discipline are authoritative.
-/// Successful PUTs return `reload_required: true` — the Desktop
-/// Debug panel is expected to follow up with
-/// `POST /api/agents/{id}/prompts/reload` to push the on-disk
-/// content into the live `AgentCore` Arc (ADR-063 §3.7.6).
-async fn proxy_put_prompt(
-    State(state): State<AppState>,
-    Path((id, name)): Path<(String, String)>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let path = format!("/agents/{id}/prompts/{name}");
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
-}
-
 /// Reverse-proxy `POST /api/agents/{id}/prompts/reload` to Runtime's
 /// `POST /agents/{id}/prompts/reload` (ADR-063 §3.7.6 L2 reload).
 ///
@@ -1631,7 +1584,11 @@ async fn proxy_reload_prompts(
     body: Bytes,
 ) -> Response {
     let path = format!("/agents/{id}/prompts/reload");
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -1695,7 +1652,11 @@ async fn proxy_create_memory_node(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -1717,7 +1678,11 @@ async fn proxy_update_memory_node(
     body: Bytes,
 ) -> Response {
     let path = format!("/memory/nodes/{}", nid);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -1744,7 +1709,11 @@ async fn proxy_memory_rebuild_embeddings(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -1771,8 +1740,21 @@ async fn proxy_upload_file(
     body: Bytes,
 ) -> Response {
     let path = format!("/sessions/{}/files", sid);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::POST, payload, &headers).await
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/files/{document_id}`
@@ -1832,8 +1814,21 @@ async fn proxy_put_session_config(
     body: Bytes,
 ) -> Response {
     let path = format!("/sessions/{}/config", sid);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `POST /api/agents/{id}/workspaces`
@@ -1844,8 +1839,21 @@ async fn proxy_add_workspace(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, "/workspaces", "", reqwest::Method::POST, payload, &headers).await
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        "/workspaces",
+        "",
+        reqwest::Method::POST,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}`
@@ -1857,8 +1865,21 @@ async fn proxy_update_workspace(
     body: Bytes,
 ) -> Response {
     let path = format!("/workspaces/{}", ws_id);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}/prompt-file`
@@ -1870,8 +1891,21 @@ async fn proxy_set_prompt_file(
     body: Bytes,
 ) -> Response {
     let path = format!("/workspaces/{}/prompt-file", ws_id);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `PUT /api/agents/{id}/workspaces/{ws_id}/fs-watch`
@@ -1887,8 +1921,21 @@ async fn proxy_set_workspace_fs_watch(
     body: Bytes,
 ) -> Response {
     let path = format!("/workspaces/{}/fs-watch", ws_id);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::PUT, payload, &headers).await
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `DELETE /api/agents/{id}/workspaces/{ws_id}`
@@ -1899,7 +1946,16 @@ async fn proxy_delete_workspace(
     headers: HeaderMap,
 ) -> Response {
     let path = format!("/workspaces/{}", ws_id);
-    proxy_to_runtime_with_method(&state, &id, &path, "", reqwest::Method::DELETE, None, &headers).await
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::DELETE,
+        None,
+        &headers,
+    )
+    .await
 }
 
 // ── Workspace file & dir REST proxy (Gateway is transparent; see ADR-034 §11.2) ─
@@ -1940,7 +1996,11 @@ async fn proxy_create_workspace_file(
     body: Bytes,
 ) -> Response {
     let query = build_query_string(&params);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -1964,7 +2024,11 @@ async fn proxy_write_workspace_file(
     body: Bytes,
 ) -> Response {
     let query = build_query_string(&params);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -1988,7 +2052,11 @@ async fn proxy_delete_workspace_file(
     body: Bytes,
 ) -> Response {
     let query = build_query_string(&params);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -2012,7 +2080,11 @@ async fn proxy_create_workspace_dir(
     body: Bytes,
 ) -> Response {
     let query = build_query_string(&params);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -2036,7 +2108,11 @@ async fn proxy_delete_workspace_dir(
     body: Bytes,
 ) -> Response {
     let query = build_query_string(&params);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -2063,7 +2139,11 @@ async fn proxy_copy_workspace_item(
     body: Bytes,
 ) -> Response {
     let query = build_query_string(&params);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -2089,7 +2169,11 @@ async fn proxy_rename_workspace_item(
     body: Bytes,
 ) -> Response {
     let query = build_query_string(&params);
-    let payload: Option<Vec<u8>> = if body.is_empty() { None } else { Some(body.to_vec()) };
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
     proxy_to_runtime_with_method(
         &state,
         &id,
@@ -2392,16 +2476,8 @@ async fn proxy_debug_rpc(
     } else {
         Some(body.to_vec())
     };
-    let response = proxy_to_runtime_with_method(
-        &state,
-        &id,
-        &path,
-        &query,
-        method,
-        payload,
-        &headers,
-    )
-    .await;
+    let response =
+        proxy_to_runtime_with_method(&state, &id, &path, &query, method, payload, &headers).await;
 
     // ADR-048 follow-up: refresh Gateway-side state on a successful
     // runtime enable. We only act on the literal `enable` suffix —
@@ -2504,15 +2580,15 @@ pub(crate) fn is_hop_by_hop_header(name: &axum::http::HeaderName) -> bool {
     matches!(
         name.as_str(),
         "connection"
-        | "keep-alive"
-        | "proxy-authenticate"
-        | "proxy-authorization"
-        | "te"
-        | "trailer"
-        | "transfer-encoding"
-        | "upgrade"
-        | "host"
-        | "content-length"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+            | "content-length"
     )
 }
 
@@ -2814,27 +2890,29 @@ mod tests {
     /// HTTP requests.
     #[tokio::test]
     async fn test_debug_rpc_proxy_forwards_verbatim() {
-        use tower::util::ServiceExt;
         use std::sync::Arc;
         use tokio::sync::RwLock;
+        use tower::util::ServiceExt;
 
         // ── Mock Runtime: echoes method/path/query/body back as JSON ──
         let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let received_for_server = received.clone();
-        let runtime_app = axum::Router::new().fallback(
-            axum::routing::any(move |req: axum::extract::Request| async move {
+        let runtime_app = axum::Router::new().fallback(axum::routing::any(
+            move |req: axum::extract::Request| async move {
                 let method = req.method().to_string();
                 let uri = req.uri().to_string();
                 let body = axum::body::to_bytes(req.into_body(), usize::MAX)
                     .await
                     .unwrap_or_default();
-                received_for_server
-                    .lock()
-                    .unwrap()
-                    .push(format!("{} {} body={}", method, uri, String::from_utf8_lossy(&body)));
+                received_for_server.lock().unwrap().push(format!(
+                    "{} {} body={}",
+                    method,
+                    uri,
+                    String::from_utf8_lossy(&body)
+                ));
                 axum::Json(serde_json::json!({"ok": true}))
-            }),
-        );
+            },
+        ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -2842,10 +2920,8 @@ mod tests {
         });
 
         // ── Gateway state with the mock Runtime registered ──
-        let dir = std::env::temp_dir().join(format!(
-            "acowork-test-debug-proxy-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("acowork-test-debug-proxy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
@@ -2854,7 +2930,10 @@ mod tests {
             Arc::new(crate::http::auth::HttpAuth::new(false)),
         );
         let registry = crate::http::proxy::new_shared_registry();
-        registry.write().await.register("glm-5.3_common", &format!("http://127.0.0.1:{}", port));
+        registry
+            .write()
+            .await
+            .register("glm-5.3_common", &format!("http://127.0.0.1:{}", port));
         state.runtime_http_registry = Some(registry);
 
         let app = super::proxy_routes().with_state(state);
@@ -2921,186 +3000,11 @@ mod tests {
             got[1]
         );
         assert!(
-            got[2].starts_with("GET /api/debug/context/3/sections/system_prompt?session_id=s1 body="),
+            got[2]
+                .starts_with("GET /api/debug/context/3/sections/system_prompt?session_id=s1 body="),
             "deep path forwarded verbatim: {}",
             got[2]
         );
-    }
-
-    /// ADR-063 §3.7 — `prompts/` override reverse-proxy rules.
-    ///
-    /// Three top-level routes plus the L2 reload endpoint (forwarded by
-    /// the existing `/debug/{*rest}` wildcard from
-    /// `test_debug_rpc_proxy_forwards_verbatim`). The Runtime's
-    /// `http/prompts.rs` handler is the source of truth for whitelist,
-    /// 1 MiB cap, and atomic-rename discipline; the Gateway proxy must
-    /// be a transparent pass-through.
-    ///
-    /// Pinning the four behaviours here catches regressions in
-    /// `proxy_list_prompts` / `proxy_get_prompt` / `proxy_put_prompt` /
-    /// the debug wildcard dispatch if anyone refactors the route table.
-    #[tokio::test]
-    async fn test_prompts_proxy_forwards_verbatim() {
-        use tower::util::ServiceExt;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
-
-        // ── Mock Runtime: echoes method/path/body back as JSON ──
-        let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let received_for_server = received.clone();
-        let runtime_app = axum::Router::new().fallback(
-            axum::routing::any(move |req: axum::extract::Request| async move {
-                let method = req.method().to_string();
-                let uri = req.uri().to_string();
-                let body = axum::body::to_bytes(req.into_body(), usize::MAX)
-                    .await
-                    .unwrap_or_default();
-                received_for_server
-                    .lock()
-                    .unwrap()
-                    .push(format!(
-                        "{} {} body={}",
-                        method,
-                        uri,
-                        String::from_utf8_lossy(&body)
-                    ));
-                axum::Json(serde_json::json!({"ok": true}))
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            axum::serve(listener, runtime_app).await.unwrap();
-        });
-
-        // ── Gateway state with the mock Runtime registered ──
-        let dir = std::env::temp_dir().join(format!(
-            "acowork-test-prompts-proxy-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
-        let mut state = crate::http::routes::AppState::new(
-            Arc::new(RwLock::new(gw_state)),
-            Arc::new(crate::http::auth::HttpAuth::new(false)),
-        );
-        let registry = crate::http::proxy::new_shared_registry();
-        registry.write().await.register(
-            "com.test.prompts-proxy",
-            &format!("http://127.0.0.1:{}", port),
-        );
-        state.runtime_http_registry = Some(registry);
-
-        let app = super::proxy_routes().with_state(state);
-
-        // ── 1. GET /api/agents/{id}/prompts → mock GET /agents/{id}/prompts ──
-        let resp = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("GET")
-                    .uri("/api/agents/com.test.prompts-proxy/prompts")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-
-        // ── 2. GET /api/agents/{id}/prompts/{name} ──
-        let resp = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("GET")
-                    .uri("/api/agents/com.test.prompts-proxy/prompts/summary")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-
-        // ── 3. PUT /api/agents/{id}/prompts/{name} with JSON body ──
-        let resp = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("PUT")
-                    .uri("/api/agents/com.test.prompts-proxy/prompts/compact-template")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        r#"{"content":"override payload"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-
-        // ── 4. POST /api/agents/{id}/prompts/reload → explicit prompts route ──
-        let resp = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/api/agents/com.test.prompts-proxy/prompts/reload")
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-
-        let got = received.lock().unwrap().clone();
-        assert_eq!(
-            got.len(),
-            4,
-            "all four prompts requests must reach the Runtime: {:?}",
-            got
-        );
-
-        // The 4 forwarded requests, in order:
-        //   1. GET  /agents/com.test.prompts-proxy/prompts
-        //   2. GET  /agents/com.test.prompts-proxy/prompts/summary
-        //   3. PUT  /agents/com.test.prompts-proxy/prompts/compact-template
-        //   4. POST /agents/com.test.prompts-proxy/prompts/reload
-        //      (explicit prompts route — ADR-063 §3.7.7; was previously
-        //       routed through /api/agents/{id}/debug/{*rest} wildcard,
-        //       which 503'd outside DevMode.)
-        assert!(
-            got[0].starts_with("GET /agents/com.test.prompts-proxy/prompts body="),
-            "list request must rewrite /api/agents/{{id}}/prompts -> /agents/{{id}}/prompts; got: {}",
-            got[0]
-        );
-        assert!(
-            got[1].starts_with(
-                "GET /agents/com.test.prompts-proxy/prompts/summary body="
-            ),
-            "single-prompt GET must forward verbatim; got: {}",
-            got[1]
-        );
-        assert!(
-            got[2].starts_with(
-                "PUT /agents/com.test.prompts-proxy/prompts/compact-template body="
-            ),
-            "PUT must rewrite path AND forward method; got: {}",
-            got[2]
-        );
-        assert!(
-            got[2].contains(r#""content":"override payload""#),
-            "PUT body must be forwarded verbatim (Runtime's whitelist/1MiB/atomic rename is the validation gate, not the proxy); got: {}",
-            got[2]
-        );
-        assert!(
-            got[3].starts_with("POST /agents/com.test.prompts-proxy/prompts/reload body={}"),
-            "L2 reload must reach the Runtime under the prompts namespace (ADR-063 §3.7.7); got: {}",
-            got[3]
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ADR-069 regression: `GET/PUT /api/agents/{id}/mcp-tools` must be
@@ -3115,37 +3019,34 @@ mod tests {
     /// path (method and body preserved verbatim).
     #[tokio::test]
     async fn mcp_tools_proxy_reaches_runtime() {
-        use tower::util::ServiceExt;
         use std::sync::Arc;
         use tokio::sync::RwLock;
+        use tower::util::ServiceExt;
 
         // ── Mock Runtime: echoes method/path/body back as JSON ──
         let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let received_for_server = received.clone();
-        let runtime_app = axum::Router::new().fallback(
-            axum::routing::any(move |req: axum::extract::Request| async move {
+        let runtime_app = axum::Router::new().fallback(axum::routing::any(
+            move |req: axum::extract::Request| async move {
                 let method = req.method().to_string();
                 let uri = req.uri().to_string();
                 let body = axum::body::to_bytes(req.into_body(), usize::MAX)
                     .await
                     .unwrap_or_default();
-                received_for_server
-                    .lock()
-                    .unwrap()
-                    .push(format!(
-                        "{} {} body={}",
-                        method,
-                        uri,
-                        String::from_utf8_lossy(&body)
-                    ));
+                received_for_server.lock().unwrap().push(format!(
+                    "{} {} body={}",
+                    method,
+                    uri,
+                    String::from_utf8_lossy(&body)
+                ));
                 axum::Json(serde_json::json!({
                     "agent_id": "com.test.mcp-tools",
                     "servers": {
                         "pm": [{ "name": "pm_claim_task", "enabled": true }]
                     }
                 }))
-            }),
-        );
+            },
+        ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -3165,10 +3066,10 @@ mod tests {
             Arc::new(crate::http::auth::HttpAuth::new(false)),
         );
         let registry = crate::http::proxy::new_shared_registry();
-        registry.write().await.register(
-            "com.test.mcp-tools",
-            &format!("http://127.0.0.1:{}", port),
-        );
+        registry
+            .write()
+            .await
+            .register("com.test.mcp-tools", &format!("http://127.0.0.1:{}", port));
         state.runtime_http_registry = Some(registry);
 
         let app = super::proxy_routes().with_state(state);
@@ -3207,7 +3108,11 @@ mod tests {
         // ── 3. Assert the Runtime actually received both calls with the
         //    correct method / path / body ──
         let got = received.lock().unwrap().clone();
-        assert_eq!(got.len(), 2, "both GET and PUT must reach the Runtime; got: {got:?}");
+        assert_eq!(
+            got.len(),
+            2,
+            "both GET and PUT must reach the Runtime; got: {got:?}"
+        );
         assert!(
             got[0].starts_with("GET /agents/com.test.mcp-tools/mcp-tools"),
             "GET must be forwarded to Runtime /agents/{{id}}/mcp-tools; got: {}",
@@ -3234,24 +3139,42 @@ mod tests {
         // RFC 7230 §6.1 hop-by-hop headers
         assert!(is_hop_by_hop_header(&HeaderName::from_static("connection")));
         assert!(is_hop_by_hop_header(&HeaderName::from_static("keep-alive")));
-        assert!(is_hop_by_hop_header(&HeaderName::from_static("proxy-authenticate")));
-        assert!(is_hop_by_hop_header(&HeaderName::from_static("proxy-authorization")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static(
+            "proxy-authenticate"
+        )));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static(
+            "proxy-authorization"
+        )));
         assert!(is_hop_by_hop_header(&HeaderName::from_static("te")));
         assert!(is_hop_by_hop_header(&HeaderName::from_static("trailer")));
-        assert!(is_hop_by_hop_header(&HeaderName::from_static("transfer-encoding")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static(
+            "transfer-encoding"
+        )));
         assert!(is_hop_by_hop_header(&HeaderName::from_static("upgrade")));
 
         // Proxy-specific exclusions
         assert!(is_hop_by_hop_header(&HeaderName::from_static("host")));
-        assert!(is_hop_by_hop_header(&HeaderName::from_static("content-length")));
+        assert!(is_hop_by_hop_header(&HeaderName::from_static(
+            "content-length"
+        )));
 
         // Standard headers that MUST be forwarded
-        assert!(!is_hop_by_hop_header(&HeaderName::from_static("content-type")));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static(
+            "content-type"
+        )));
         assert!(!is_hop_by_hop_header(&HeaderName::from_static("accept")));
-        assert!(!is_hop_by_hop_header(&HeaderName::from_static("authorization")));
-        assert!(!is_hop_by_hop_header(&HeaderName::from_static("user-agent")));
-        assert!(!is_hop_by_hop_header(&HeaderName::from_static("x-request-id")));
-        assert!(!is_hop_by_hop_header(&HeaderName::from_static("x-custom-header")));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static(
+            "authorization"
+        )));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static(
+            "user-agent"
+        )));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static(
+            "x-request-id"
+        )));
+        assert!(!is_hop_by_hop_header(&HeaderName::from_static(
+            "x-custom-header"
+        )));
     }
 
     /// ADR-048 follow-up: a successful `POST /api/agents/{id}/debug/enable`
@@ -3269,10 +3192,9 @@ mod tests {
         use std::sync::Arc as StdArc;
         use tokio::sync::RwLock as TokioRwLock;
 
-        let shared_state: crate::http::routes::SharedHttpState =
-            StdArc::new(TokioRwLock::new(GatewayState::new(
-                std::env::temp_dir().to_str().unwrap_or("/tmp"),
-            )));
+        let shared_state: crate::http::routes::SharedHttpState = StdArc::new(TokioRwLock::new(
+            GatewayState::new(std::env::temp_dir().to_str().unwrap_or("/tmp")),
+        ));
         {
             let mut gw = shared_state.write().await;
             gw.add_running(RunningAgentInfo {
@@ -3338,10 +3260,9 @@ mod tests {
         use std::sync::Arc as StdArc;
         use tokio::sync::RwLock as TokioRwLock;
 
-        let shared_state: crate::http::routes::SharedHttpState =
-            StdArc::new(TokioRwLock::new(GatewayState::new(
-                std::env::temp_dir().to_str().unwrap_or("/tmp"),
-            )));
+        let shared_state: crate::http::routes::SharedHttpState = StdArc::new(TokioRwLock::new(
+            GatewayState::new(std::env::temp_dir().to_str().unwrap_or("/tmp")),
+        ));
         {
             let mut gw = shared_state.write().await;
             gw.add_running(RunningAgentInfo {
@@ -3435,7 +3356,13 @@ mod tests {
             .unwrap();
         // Mutate the state back to Enabled first to make this a
         // meaningful test of the failure path.
-        shared_state.write().await.running_agents.get_mut(id).unwrap().debug_state = DebugState::Enabled;
+        shared_state
+            .write()
+            .await
+            .running_agents
+            .get_mut(id)
+            .unwrap()
+            .debug_state = DebugState::Enabled;
         if err_response.status().is_success() {
             // (intentionally never taken on the failure path)
             let mut gw = shared_state.write().await;
@@ -3473,8 +3400,8 @@ mod tests {
         let received: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let received_for_server = received.clone();
-        let runtime_app = axum::Router::new().fallback(any(
-            move |req: axum::extract::Request| async move {
+        let runtime_app =
+            axum::Router::new().fallback(any(move |req: axum::extract::Request| async move {
                 let method = req.method().to_string();
                 let uri = req.uri().to_string();
                 let body = axum::body::to_bytes(req.into_body(), usize::MAX)
@@ -3492,8 +3419,7 @@ mod tests {
                     "agent_id": "com.acowork.architect",
                     "degraded_reasons": []
                 }))
-            },
-        ));
+            }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -3549,8 +3475,7 @@ mod tests {
         use tower::util::ServiceExt;
 
         let (port, received) = spawn_mock_runtime().await;
-        let (state, _registry) =
-            build_proxy_state_with_agent("com.acowork.architect", port).await;
+        let (state, _registry) = build_proxy_state_with_agent("com.acowork.architect", port).await;
         let app = super::proxy_routes().with_state(state);
 
         let resp = app
@@ -3591,8 +3516,7 @@ mod tests {
         use tower::util::ServiceExt;
 
         let (port, received) = spawn_mock_runtime().await;
-        let (state, _registry) =
-            build_proxy_state_with_agent("com.acowork.architect", port).await;
+        let (state, _registry) = build_proxy_state_with_agent("com.acowork.architect", port).await;
         let app = super::proxy_routes().with_state(state);
 
         // Even if the client somehow includes a body, the proxy must drop
@@ -3659,7 +3583,9 @@ mod tests {
 
         assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
-            resp.headers().get("retry-after").map(|v| v.to_str().unwrap()),
+            resp.headers()
+                .get("retry-after")
+                .map(|v| v.to_str().unwrap()),
             Some("2"),
             "503 must carry Retry-After: 2 to match the boot-window cadence"
         );
@@ -3691,8 +3617,7 @@ mod tests {
         let dead_port = probe.local_addr().unwrap().port();
         drop(probe);
 
-        let (state, _registry) =
-            build_proxy_state_with_agent("com.acowork.dead", dead_port).await;
+        let (state, _registry) = build_proxy_state_with_agent("com.acowork.dead", dead_port).await;
         let app = super::proxy_routes().with_state(state);
 
         let resp = app
@@ -3735,33 +3660,31 @@ mod tests {
         let received_for_server = received.clone();
         let runtime_app = axum::Router::new().route(
             "/memory/distill",
-            axum::routing::post(
-                move |req: axum::extract::Request| async move {
-                    let method = req.method().to_string();
-                    let uri = req.uri().to_string();
-                    let body = axum::body::to_bytes(req.into_body(), usize::MAX)
-                        .await
-                        .unwrap_or_default();
-                    received_for_server.lock().unwrap().push(format!(
-                        "{} {} body={}",
-                        method,
-                        uri,
-                        String::from_utf8_lossy(&body)
-                    ));
-                    // Mimic acowork-runtime `post_memory_distill` success body
-                    // (server.rs `post_memory_distill`).
-                    axum::Json(serde_json::json!({
-                        "started": true,
-                        "episodes_scanned": 3,
-                        "facts_promoted": 1,
-                        "preferences_promoted": 0,
-                        "relations_promoted": 0,
-                        "procedures_promoted": 0,
-                        "autobio_promoted": 0,
-                        "episodes_marked_consolidated": 3,
-                    }))
-                },
-            ),
+            axum::routing::post(move |req: axum::extract::Request| async move {
+                let method = req.method().to_string();
+                let uri = req.uri().to_string();
+                let body = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap_or_default();
+                received_for_server.lock().unwrap().push(format!(
+                    "{} {} body={}",
+                    method,
+                    uri,
+                    String::from_utf8_lossy(&body)
+                ));
+                // Mimic acowork-runtime `post_memory_distill` success body
+                // (server.rs `post_memory_distill`).
+                axum::Json(serde_json::json!({
+                    "started": true,
+                    "episodes_scanned": 3,
+                    "facts_promoted": 1,
+                    "preferences_promoted": 0,
+                    "relations_promoted": 0,
+                    "procedures_promoted": 0,
+                    "autobio_promoted": 0,
+                    "episodes_marked_consolidated": 3,
+                }))
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -3769,8 +3692,7 @@ mod tests {
             axum::serve(listener, runtime_app).await.unwrap();
         });
 
-        let (state, _registry) =
-            build_proxy_state_with_agent("com.acowork.architect", port).await;
+        let (state, _registry) = build_proxy_state_with_agent("com.acowork.architect", port).await;
         let app = super::proxy_routes().with_state(state);
 
         let resp = app
@@ -3840,7 +3762,9 @@ mod tests {
 
         assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
-            resp.headers().get("retry-after").map(|v| v.to_str().unwrap()),
+            resp.headers()
+                .get("retry-after")
+                .map(|v| v.to_str().unwrap()),
             Some("2"),
             "503 must carry Retry-After: 2 to match the boot-window cadence"
         );
@@ -3866,18 +3790,15 @@ mod tests {
                 axum::Json(serde_json::json!({"error": "session_not_ready"})),
             )
                 .into_response();
-            resp.headers_mut().insert(
-                "retry-after",
-                axum::http::HeaderValue::from_static("2"),
-            );
+            resp.headers_mut()
+                .insert("retry-after", axum::http::HeaderValue::from_static("2"));
             resp
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, runtime_app).await.unwrap() });
 
-        let (state, _registry) =
-            build_proxy_state_with_agent("com.acowork.architect", port).await;
+        let (state, _registry) = build_proxy_state_with_agent("com.acowork.architect", port).await;
         let app = super::proxy_routes().with_state(state);
 
         let resp = app
@@ -3897,7 +3818,9 @@ mod tests {
             "Runtime 503 must survive the proxy as 503, not collapse to 404"
         );
         assert_eq!(
-            resp.headers().get("retry-after").map(|v| v.to_str().unwrap()),
+            resp.headers()
+                .get("retry-after")
+                .map(|v| v.to_str().unwrap()),
             Some("2"),
             "Runtime's Retry-After must be forwarded"
         );

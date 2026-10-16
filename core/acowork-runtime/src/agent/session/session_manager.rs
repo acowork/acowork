@@ -1748,7 +1748,13 @@ impl SessionManager {
     /// Returns `None` for unknown/empty commands so the caller can fall
     /// back to no skill injection.
     pub(crate) fn resolve_skill_instructions(&self, command: &str) -> Option<String> {
-        self.core.skill_registry.instructions_for(command)
+        let registry = self.core.skill_registry.read().ok()?.clone();
+        registry.instructions_for(command)
+    }
+
+    /// Atomically replace the skill-registry snapshot shared by all sessions.
+    pub(crate) fn apply_skill_registry(&mut self, registry: crate::skills::parser::SkillRegistry) {
+        *self.core.skill_registry.write().expect("skill registry lock poisoned") = Arc::new(registry);
     }
 
     /// ADR-034 Phase 7: Send a message to a session by ID.
