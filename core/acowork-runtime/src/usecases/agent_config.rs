@@ -141,10 +141,10 @@ pub enum ConfigField {
     /// language from `UserProfile`.
     SessionLanguage,
     /// `AgentConfig::intent_idle_rotate_hours` — `Option<u64>`
-    /// (design 27 §2.1 T1 threshold, 1–72 hours, 0 disables).
+    /// (design 27 §4.1 T1 threshold, 1–72 hours, 0 disables).
     IntentIdleRotateHours,
     /// `AgentConfig::intent_handoff_max_tokens` — `Option<u64>`
-    /// (design 27 §2.1 T2 handoff cap, 500–4,000 tokens).
+    /// (design 27 §4.1 T2 handoff cap, 500–4,000 tokens).
     IntentHandoffMaxTokens,
     // ADR-094 note: `ConfigField::SkillsAutoLoad` was removed.
     // Skill mode (Progressive / Manual) is now driven entirely by

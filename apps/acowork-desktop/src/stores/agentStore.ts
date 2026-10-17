@@ -166,7 +166,7 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
       s.compressionRatioThreshold <= 0.95
         ? s.compressionRatioThreshold
         : undefined,
-    // Intent rotation knobs (design 27 §2.1). `0` is meaningful for
+    // Intent rotation knobs (design 27 §4.1). `0` is meaningful for
     // idle hours (disables T1), so the guard is `>= 0`.
     intentIdleRotateHours:
       typeof s.intentIdleRotateHours === "number" &&

@@ -58,7 +58,7 @@ use prost::Message as ProstMessage;
 #[derive(Debug)]
 pub enum ControlAction {
     /// Gateway pushed an Intent (cron trigger, cross-agent messaging).
-    /// Envelope fields follow design doc 27 §3.2; every value is
+    /// Envelope fields follow design doc 27 §4.2.3; every value is
     /// Gateway-stamped (tech-debt plan D4/D5).
     IntentReceived {
         from: String,
@@ -69,11 +69,11 @@ pub enum ControlAction {
         source_agent_session_id: String,
         source_chat_session_id: String,
         repo: String,
-        /// Initiator's session-config suggestion (design 27 §4; shape
+        /// Initiator's session-config suggestion (design 27 §4.5; shape
         /// checked by the Gateway, clamped to the responder's allowed
         /// set at session creation, §13-6). Empty = none.
         session_config_json: String,
-        /// "request" | "response" (design 27 §6.5 R2). Empty = request.
+        /// "request" | "response" (design 27 §5.4.5 R2). Empty = request.
         kind: String,
         /// For a response: the request's message_id (§4).
         in_reply_to: String,

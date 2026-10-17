@@ -1035,7 +1035,7 @@ export function AgentSetupTab() {
             </p>
           </div>
 
-    {/* Intent session rotation (design 27 §2.1) — only the two knobs the
+    {/* Intent session rotation (design 27 §4.1) — only the two knobs the
         design exposes: T1 idle threshold and the T2 handoff token cap.
         Compaction thresholds / T2 criteria / JSONL hard cap stay closed. */}
           <div className="space-y-1">

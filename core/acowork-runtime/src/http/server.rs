@@ -327,7 +327,9 @@ pub(crate) struct HttpState {
     /// through this trait instead of calling `agent_config::*`
     /// directly. Also serves `/agents/{id}/builtin-tools` because that
     /// endpoint persists `agent_tools.json` (a separate file).
-    agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
+    /// Read by `/search` for the retrieval policy (ADR-095 D6), which must be
+    /// live so the `analyzer_mode` rollback switch takes effect immediately.
+    pub(crate) agent_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AgentConfigService>>>>,
     /// ADR-046: Late-bind slot for the unified attachment blob store
     /// (`POST /sessions/{sid}/files` upload + `GET /files/{doc_id}`
     /// download). The HTTP handlers route through this trait instead
@@ -1531,6 +1533,9 @@ async fn get_memory_nodes(
             mode: semantic_mode.to_string(),
             limit: params.size.unwrap_or(20) as usize,
             embedding,
+            // This panel endpoint has no query analyzer: `q` drives both
+            // sources, which is what an empty term list means to the engine.
+            lexical_terms: Vec::new(),
         };
         let svc = state.memory_query.lock().await;
         let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;

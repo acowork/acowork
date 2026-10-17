@@ -22,6 +22,7 @@ pub mod package;
 pub mod platform;
 pub mod prompt;
 pub mod providers;
+pub mod search;
 pub mod security;
 pub mod skills;
 pub mod startup;

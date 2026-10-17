@@ -266,7 +266,7 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_language: Option<String>,
 
-    // ── Intent session rotation (design 27 §2.1, frontend-configurable
+    // ── Intent session rotation (design 27 §4.1, frontend-configurable
     //    surface) ──────────────────────────────────────────────────────
     //
     // Layer 1 (highest priority) of the two Intent knobs; `None` = system
@@ -282,6 +282,18 @@ pub struct AgentConfig {
     /// not configurable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intent_handoff_max_tokens: Option<u64>,
+
+    // ── Global-search retrieval config (ADR-095) ─────────────────────
+    //
+    // Layer 1 of the search retrieval policy chain, same convention as the
+    // distiller/forgetting fields above. `None` (the default, and what every
+    // pre-ADR-095 `agent_config.json` contains) means "use the ADR-specified
+    // starting points", which are today's production behaviour for
+    // conversation and the `memory_recall` 4:1 tendency for memory. The
+    // analyzer is inert unless `analyzer_mode` is set — shipping this code
+    // must not change retrieval (ADR-095 D6 / §7 rollback).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<crate::search::policy::SearchPolicyConfig>,
 }
 
 // ADR-094 note: there is no `skills_auto_load` field on

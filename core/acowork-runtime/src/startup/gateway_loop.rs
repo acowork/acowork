@@ -198,7 +198,7 @@ fn control_action_to_inbound(
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
             Some((
                 // Route to the sender-designated session when present
-                // (design 27 §3.2 source_agent_session_id); otherwise the
+                // (design 27 §4.2.3 source_agent_session_id); otherwise the
                 // empty id keeps the system-level path (cron).
                 source_agent_session_id,
                 InboundMessage::IntentMessage(Box::new(IntentEnvelope {
@@ -743,7 +743,7 @@ async fn dispatch_inbound(
             }
         },
 
-        // ⑦ IntentMessage → receiver-side session routing (design 27 §3.2:
+        // ⑦ IntentMessage → receiver-side session routing (design 27 §4.2.3:
         // the wire addresses the intent context; which execution session
         // answers is the receiving agent's private decision).
         msg @ InboundMessage::IntentMessage { .. } => {

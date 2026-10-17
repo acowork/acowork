@@ -116,7 +116,7 @@ export function buildProfilePatchFromServerConfig(
   // ADR-094 note: `skills_auto_load` was removed from the wire. The
   // `load_skill` tool entry in `agent_tools.json` is the single
   // source of truth for skill-mode (Progressive / Manual) now.
-  // Intent rotation knobs (design 27 §2.1). `0` is a meaningful
+  // Intent rotation knobs (design 27 §4.1). `0` is a meaningful
   // idle-hours value (it disables T1 rotation), so guard on
   // `typeof === "number"` only — never on `> 0`.
   if (typeof cfg.intent_idle_rotate_hours === "number") {
