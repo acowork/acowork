@@ -33,7 +33,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { BookOpen, KanbanSquare, MessageSquare, RotateCw, Search, Sparkles, Square } from "lucide-react";
+import { ArrowRight, BookOpen, KanbanSquare, MessageSquare, Search, Sparkles, Square } from "lucide-react";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSearchStore } from "../../stores/searchStore";
@@ -54,6 +54,7 @@ import { log } from "../../lib/logger";
 import { useTranslation } from "../../i18n/useTranslation";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { AgentPickerChip } from "./AgentPickerChip";
+import { CopyButton } from "../common/CopyButton";
 import { PreviewPane } from "./PreviewPane";
 import {
     runSearchSources,
@@ -157,24 +158,15 @@ export type RowHit =
     | ConversationHit
     | SearchHit;
 
-/** ADR-093 summary state machine (design 27 §4.6). */
+/** ADR-093 summary state machine (design 27 §4.6), opt-in.
+ *
+ *  idle → searching → done → summarizing → done | error | cancelled
+ *
+ *  `done` is now the resting state after a search lands, not "summary
+ *  finished": the summary call is opt-in, so the run ends there and waits
+ *  for a click on the summary area's trigger. `summarizing` exists purely
+ *  as the state in which that same trigger becomes "Cancel". */
 export type SummaryPhase = "idle" | "searching" | "summarizing" | "done" | "error" | "cancelled";
-
-/** When the user has turned the AI summary off, the dialog still advances
- *  phase to "done" after the search lands but `summary` stays empty.
- *  SummaryView reads this gate to render the "raw results only" hint
- *  instead of the generic idle/no-candidates messages — and to skip the
- *  hint whenever the user re-enables summary and the model returns text.
- *  Extracted so a regression is a one-line test, not a manual click
- *  through three phases. */
-export function isSummaryDisabledView(
-    summaryEnabled: boolean,
-    phase: SummaryPhase,
-    summary: string,
-): boolean {
-    if (summaryEnabled) return false;
-    return phase === "idle" || (phase === "done" && summary.length === 0);
-}
 
 export interface GlobalSearchDialogProps {
     /** Switch the app-level view (projects/docs/chat) when a hit is opened. */
@@ -398,11 +390,12 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     const [agentId, setAgentId] = useState<string>("");
     const [caseSensitive, setCaseSensitive] = useState(false);
     const [wholeWord, setWholeWord] = useState(false);
-    /* ADR-093: AI summary on by default; user can opt out per session so
-       re-running on the same query returns raw results only and costs no
-       LLM tokens. Persists across dialog opens (component is mounted once
-       in AppLayout, gated by `open`). */
-    const [summaryEnabled, setSummaryEnabled] = useState(true);
+    /* ADR-093 opt-in summary: the LLM call is NEVER automatic. A search
+       lands on `phase: "done"` and the summary area shows a "Summarize"
+       button; only clicking it spends tokens. The input-box Sparkles
+       toggle is gone — a toggle implied a default-on LLM cost, which is
+       the thing we want the user to opt into explicitly. The summary
+       survives until the next search starts, which resets the pane. */
 
     const [fileHits, setFileHits] = useState<FileHit[]>([]);
     const [fileTotal, setFileTotal] = useState(0);
@@ -551,14 +544,10 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     // while the rest arrive.
     const runSummaryStage = useCallback(
         async (gen: number, parentCtrl: AbortController | null) => {
-            // Token-safety guard (ADR-093 user opt-out): the regenerate
-            // button stays clickable in phase=cancelled after a user
-            // toggles summary off mid-summarize, and clicking it must not
-            // re-fire the LLM. Mirror the gate in `runSearch` so neither
-            // caller can bypass it.
-            if (!summaryEnabled) return;
             const req = lastSummaryReqRef.current;
-            if (!req) return;
+            // No frozen snapshot = nothing landed to summarize. The button
+            // is hidden in that case too; this is a guard, not a UI path.
+            if (!req || req.candidates.length === 0) return;
             setPhase("summarizing");
             setSummaryError(null);
             const ctrl = new AbortController();
@@ -612,7 +601,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 parentSignal?.removeEventListener("abort", onParent);
             }
         },
-        [agentId, summaryEnabled, t],
+        [agentId, t],
     );
 
     /* ── Clear one run's state (results + summary + progress) ────────── */
@@ -779,22 +768,13 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             // RowHit carries title/snippet — directly the candidate shape.
             const set = buildSummaryCandidates(rowsRef.current);
             candidateRef.current = set;
-            if (!summaryEnabled) {
-                // User opted out of the LLM summary. Skip the call entirely
-                // so the search costs zero tokens; the SummaryView renders
-                // a "disabled" hint in place of the model output.
-                setPhase("done");
-                setSummaryText("");
-                setSummaryMeta(null);
-                return;
-            }
-            if (set.candidates.length === 0) {
-                // Nothing to summarize — keep the lists browsable, no LLM call.
-                setPhase("done");
-                setSummaryText("");
-                setSummaryMeta(null);
-                return;
-            }
+            // ── Summary candidates are FROZEN here, but never called.
+            // The LLM call is opt-in: the search lands on `phase: "done"`
+            // and the summary area offers a "Summarize" button. Freezing
+            // the snapshot at landing time is what lets that click reuse
+            // the exact candidate set this run produced instead of
+            // re-reading state that may have moved on (design 27 §4.6.5:
+            // regenerate never re-issues retrieval).
             lastSummaryReqRef.current = {
                 query: q,
                 candidates: set.candidates,
@@ -802,9 +782,9 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 timedOutScopes,
                 failedScopes,
             };
-            await runSummaryStage(gen, ctrl);
+            setPhase("done");
         },
-        [agentId, workspaceId, caseSensitive, wholeWord, summaryEnabled, t, runSummaryStage],
+        [agentId, workspaceId, caseSensitive, wholeWord],
     );
 
     /* ── Explicit submit: commit the typed query to a new run ─────────── */
@@ -1107,25 +1087,6 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                 </ToggleBtn>
                             </div>
                         )}
-                        {/* ADR-093: AI summary opt-out. Default on; turn off
-                            to skip the LLM call and show raw results only. */}
-                        <ToggleBtn
-                            title={t("globalSearch.toggleSummary")}
-                            active={summaryEnabled}
-                            onClick={() => {
-                                setSummaryEnabled((prev) => {
-                                    const next = !prev;
-                                    // Switching off mid-summary aborts the
-                                    // in-flight LLM call so the pane returns
-                                    // to its disabled hint without waiting.
-                                    if (!next) summaryCtrlRef.current?.abort();
-                                    return next;
-                                });
-                            }}
-                            data-testid="summary-toggle"
-                        >
-                            <Sparkles className="h-3.5 w-3.5" />
-                        </ToggleBtn>
                         {/* ADR-093: re-run — aborts the current generation
                             (search + summary) and starts a fresh one. Also
                             serves as the visible submit affordance now that
@@ -1145,7 +1106,19 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                         : "text-text-tertiary hover:bg-zinc-100 hover:text-text-secondary dark:hover:bg-zinc-700/50"
                                 }`}
                             >
-                                <RotateCw className="h-3.5 w-3.5" />
+                                {/* Submit arrow, not a refresh glyph: this
+                                    button commits the typed query (Enter is
+                                    the same action), and both refresh
+                                    variants read as "retry the last thing"
+                                    when the query in the box has not even
+                                    been run yet. `Search` is deliberately
+                                    NOT used — the magnifier already sits
+                                    on the left of the box, so a second one
+                                    here would read as decoration.
+                                    strokeWidth 2.25 keeps the 2-path glyph
+                                    crisp at 14px (ChatPanel's send icon
+                                    uses the same value). */}
+                                <ArrowRight className="h-3.5 w-3.5" strokeWidth={2.25} />
                             </button>
                         )}
                     </div>
@@ -1305,12 +1278,16 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             error={summaryError}
                             sourcesDone={sourcesDone}
                             summaryMeta={summaryMeta}
-                            summaryEnabled={summaryEnabled}
+                            // Frozen by `runSearch` when the fan-out
+                            // settles; re-running a search replaces it, so
+                            // the pane always offers the trigger against the
+                            // results the user is actually looking at.
+                            canSummarize={(candidateRef.current?.candidates.length ?? 0) > 0}
                             allowedIds={
                                 new Set((candidateRef.current?.candidates ?? []).map((c) => c.id))
                             }
+                            onSummarize={() => void runSummaryStage(seqRef.current, runCtrlRef.current)}
                             onCancel={() => summaryCtrlRef.current?.abort()}
-                            onRegenerate={() => void runSummaryStage(seqRef.current, runCtrlRef.current)}
                             onCitation={openCitation}
                         />
                     </div>
@@ -1388,22 +1365,40 @@ function RowInfo({ children, "data-testid": testId }: { children: React.ReactNod
 }
 
 /**
- * ADR-093 summary row (design 27 §4.6). Owns no fetching — the dialog
- * drives the state machine; this renders per phase. Citation chips are
- * accessible buttons carrying `data-citation-id`; the summary text itself
- * is rendered as plain text segments (LLM output is never interpreted as
- * HTML/URLs — ADR-093 D3).
+ * ADR-093 summary row (design 27 §4.6), opt-in.
+ *
+ * Summarizing costs an LLM call, so this pane never triggers one on its
+ * own. The dialog lands every search on `phase: "done"` with the body
+ * showing raw results, and this component renders the trigger in context:
+ *
+ *   idle        → hint, no button (nothing has been searched yet)
+ *   searching   → retrieval progress, button present but DISABLED: the
+ *                 candidate snapshot is only frozen when the six-source
+ *                 fan-out settles, so a click mid-flight would summarize
+ *                 an incomplete set.
+ *   done        → body + footer. Button reads "Summarize" when there is
+ *                 no summary yet and "Regenerate" once one exists —
+ *                 same action (re-run against the frozen snapshot), so
+ *                 they share one slot instead of sitting side by side.
+ *   summarizing → the button BECOMES "Cancel", so the affordance to stop
+ *                 spending tokens is always exactly where the start
+ *                 affordance was.
+ *   error/cancelled → reason text + "Summarize" to retry.
+ *
+ * Owns no fetching. Citation chips are accessible buttons carrying
+ * `data-citation-id`; the summary text is rendered as plain text segments
+ * (LLM output is never interpreted as HTML/URLs — ADR-093 D3).
  */
-function SummaryView({
+export function SummaryView({
     phase,
     summary,
     error,
     sourcesDone,
     summaryMeta,
-    summaryEnabled,
+    canSummarize,
     allowedIds,
+    onSummarize,
     onCancel,
-    onRegenerate,
     onCitation,
 }: {
     phase: SummaryPhase;
@@ -1414,94 +1409,152 @@ function SummaryView({
      *  call. `null`/missing means older Runtime or before the call
      *  lands; the footer line hides itself in that case. */
     summaryMeta?: { model: string; usage: SummaryUsage | undefined } | null;
-    /** When false, the dialog skipped the LLM call entirely; show a
-     *  "raw results only" hint in place of the summary text. */
-    summaryEnabled: boolean;
+    /** The frozen candidate snapshot is non-empty, so an LLM call has
+     *  something to work with. False before a search lands and when the
+     *  sources produced no candidates at all. */
+    canSummarize: boolean;
     allowedIds: ReadonlySet<string>;
+    onSummarize: () => void;
     onCancel: () => void;
-    onRegenerate: () => void;
     onCitation: (id: string) => void;
 }) {
     const { t } = useTranslation();
 
-    const cornerBtn = (label: string, onClick: () => void) => (
-        <button
-            type="button"
-            onClick={onClick}
-            className="absolute right-2 rounded px-2 py-0.5 text-11 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-text-secondary dark:hover:bg-zinc-700/50"
+    /* One trigger, four renderings. Position is the footer's right slot
+     * so it never covers the scrolling body — the corner-button version
+     * (`absolute right-2` with no `top`) resolved to the pane's TOP-right
+     * under the flexbox static-position rule and painted over the text. */
+    const trigger = () => {
+        if (phase === "summarizing") {
+            return (
+                <button
+                    type="button"
+                    data-testid="summary-cancel"
+                    aria-label={t("globalSearch.cancelSummary")}
+                    onClick={onCancel}
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)]/50 hover:bg-[var(--color-accent)]/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40"
+                >
+                    <Square size={12} fill="currentColor" />
+                    {t("globalSearch.cancelSummary")}
+                </button>
+            );
+        }
+        // Rendered disabled rather than hidden when there is nothing to
+        // summarize, so the row does not appear and vanish between phases.
+        const label = summary ? t("globalSearch.regenerate") : t("globalSearch.summarize");
+        return (
+            <button
+                type="button"
+                data-testid="summary-start"
+                disabled={!canSummarize || phase === "searching"}
+                aria-label={label}
+                onClick={onSummarize}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)]/50 hover:bg-[var(--color-accent)]/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40 disabled:cursor-not-allowed disabled:border-border-divider disabled:bg-transparent disabled:text-text-tertiary disabled:hover:bg-transparent"
+            >
+                <Sparkles className="h-3.5 w-3.5" />
+                {label}
+            </button>
+        );
+    };
+
+    // Footer carries the trigger. `py-1.5` rather than the
+    // `--ui-dialog-zone-h` token: Zone 3 splits into two `flex-1` panes so
+    // this row can have as little as ~120px, and 44px would claim a third
+    // of the body.
+    const footerRow = (meta: React.ReactNode) => (
+        <div
+            data-testid="summary-footer"
+            className="flex shrink-0 items-center gap-3 border-t border-border-divider px-4 py-1.5"
         >
-            {label}
-        </button>
+            <div
+                data-testid="summary-meta"
+                className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-0.5 text-11 text-text-tertiary"
+            >
+                {meta}
+            </div>
+            {/* Copy only once there is prose to copy. `summary` is the raw
+                model text including `[[r1]]` markers — that is what the
+                user asked for when they hit copy, so no stripping here;
+                the citation chips are a rendering affordance only. */}
+            {summary && (
+                <CopyButton
+                    text={summary}
+                    ariaLabel={t("globalSearch.copySummary")}
+                    testId="summary-copy"
+                />
+            )}
+            {trigger()}
+        </div>
     );
 
-    if (isSummaryDisabledView(summaryEnabled, phase, summary)) {
-        // After a search lands with summary off, phase advances to "done"
-        // with an empty summary string — surface the disabled hint here
-        // so the pane never flashes the "no candidates" message.
-        return <RowInfo data-testid="summary-disabled">{t("globalSearch.summaryDisabledHint")}</RowInfo>;
-    }
     if (phase === "idle") {
         return <RowInfo>{t("globalSearch.summaryIdleHint")}</RowInfo>;
     }
     if (phase === "searching") {
         return (
-            <div
-                className="relative flex h-full items-center justify-center px-3 py-3 text-xs text-text-tertiary"
-                data-testid="search-status-bar"
-            >
-                <span className="animate-pulse">
-                    {t("globalSearch.statusSearching", {
-                        done: sourcesDone,
-                        total: SEARCH_SOURCES.length,
-                    })}
-                </span>
+            <div className="flex h-full flex-col">
+                <div
+                    className="flex min-h-0 flex-1 items-center justify-center px-3 py-3 text-xs text-text-tertiary"
+                    data-testid="search-status-bar"
+                >
+                    <span className="animate-pulse">
+                        {t("globalSearch.statusSearching", {
+                            done: sourcesDone,
+                            total: SEARCH_SOURCES.length,
+                        })}
+                    </span>
+                </div>
+                {footerRow(null)}
             </div>
         );
     }
     if (phase === "summarizing") {
-        // Centred column: pulsing status text on top, a real button
-        // below. The previous `cornerBtn` rendering put "Cancel" in the
-        // top-right as a ghost link — easy to miss and visually
-        // inconsistent with the abort-style button used by
-        // ContextUsageIcon for the same "stop an in-flight LLM call"
-        // affordance (same accent/10 + Square recipe).
         return (
-            <div
-                className="flex h-full flex-col items-center justify-center gap-3 px-3 py-3 text-xs text-text-tertiary"
-                data-testid="summary-working"
-            >
-                <span className="animate-pulse">{t("globalSearch.summaryWorking")}</span>
-                <button
-                    type="button"
-                    onClick={onCancel}
-                    data-testid="summary-cancel"
-                    aria-label={t("globalSearch.cancelSummary")}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] transition-colors hover:border-[var(--color-accent)]/50 hover:bg-[var(--color-accent)]/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40"
+            <div className="flex h-full flex-col">
+                <div
+                    className="flex min-h-0 flex-1 items-center justify-center px-3 py-3 text-xs text-text-tertiary"
+                    data-testid="summary-working"
                 >
-                    <Square size={12} fill="currentColor" />
-                    {t("globalSearch.cancelSummary")}
-                </button>
+                    <span className="animate-pulse">{t("globalSearch.summaryWorking")}</span>
+                </div>
+                {footerRow(null)}
             </div>
         );
     }
     if (phase === "error" || phase === "cancelled") {
         return (
-            <div className="relative flex h-full items-center justify-center px-3 py-3 text-xs text-text-tertiary">
-                <span>{error ?? t("globalSearch.summaryCancelled")}</span>
-                {cornerBtn(t("globalSearch.regenerate"), onRegenerate)}
+            <div className="flex h-full flex-col">
+                <div className="flex min-h-0 flex-1 items-center justify-center px-3 py-3 text-center text-xs text-text-tertiary">
+                    <span>{error ?? t("globalSearch.summaryCancelled")}</span>
+                </div>
+                {footerRow(null)}
             </div>
         );
     }
     // phase === "done"
     if (!summary) {
-        return <RowInfo>{t("globalSearch.summaryNoCandidates")}</RowInfo>;
+        // Search landed, nothing summarized yet. The footer carries the
+        // trigger; the body explains what a click would cost.
+        return (
+            <div className="flex h-full flex-col">
+                <div className="flex min-h-0 flex-1 items-center justify-center px-3 py-3 text-center text-xs text-text-tertiary">
+                    <span>
+                        {canSummarize
+                            ? t("globalSearch.summaryReadyHint")
+                            : t("globalSearch.summaryNoCandidates")}
+                    </span>
+                </div>
+                {footerRow(null)}
+            </div>
+        );
     }
     const segments = parseSummarySegments(summary, allowedIds);
     // ADR-093 D3 footer parity with CompactionCard: same recipe
-    // (`border-top-divider`, `text-text-tertiary`, smaller font, `select-text`),
-    // hidden entirely when the Runtime returned no model/usage — a
-    // regeneration never wipes the meta, only a new run that lands
-    // without it does.
+    // (`border-top-divider`, `text-text-tertiary`, smaller font), and the
+    // model/usage spans simply hide themselves when the Runtime returned
+    // neither — a regeneration never wipes the meta, only a new run that
+    // lands without it does. The row itself always renders so the
+    // trigger holds a stable position instead of jumping between runs.
     const meta = summaryMeta;
     const usage = meta?.usage;
     const promptStr = formatTokenCount(usage?.prompt_tokens);
@@ -1510,16 +1563,20 @@ function SummaryView({
     const totalStr = formatTokenCount(usage?.total_tokens);
     const hasTokenBreakdown = promptStr !== null || completionStr !== null;
     const modelLabel = meta?.model?.trim() ? meta.model.trim() : "";
-    const hasFooter = modelLabel !== "" || hasTokenBreakdown || cacheStr !== null || totalStr !== null;
     return (
-        <div className="relative flex h-full flex-col">
+        <div className="flex h-full flex-col">
             {/* `whitespace-pre-wrap` keeps the model's own paragraph breaks.
                 The Runtime prompt asks for short paragraphs (ADR-093 D3 —
                 plain text, never HTML/Markdown), so newlines are the only
                 structure the renderer honours. */}
             <div
                 data-testid="summary-text"
-                className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap px-4 py-2.5 text-xs leading-relaxed text-text-secondary"
+                // `select-text` + `cursor-text`: `body` sets
+                // `user-select: none` for the Tauri window drag region, so
+                // without this opt-in the summary is neither selectable nor
+                // copyable by hand. Same escape hatch CompactionCard and
+                // MessageBubble use for their prose.
+                className="min-h-0 flex-1 cursor-text select-text overflow-y-auto whitespace-pre-wrap px-4 py-2.5 text-xs leading-relaxed text-text-secondary"
             >
                 {segments.map((s, i) =>
                     s.kind === "text" ? (
@@ -1538,16 +1595,13 @@ function SummaryView({
                     ),
                 )}
             </div>
-            {hasFooter && (
-                <div
-                    data-testid="summary-meta"
-                    className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-border-divider px-4 py-1.5 text-11 text-text-tertiary"
-                >
+            {footerRow(
+                <>
                     {modelLabel && (
-                        <span>{t("globalSearch.summaryModel", { model: modelLabel })}</span>
+                        <span data-testid="summary-model">{t("globalSearch.summaryModel", { model: modelLabel })}</span>
                     )}
                     {hasTokenBreakdown && (
-                        <span>
+                        <span data-testid="summary-tokens">
                             {t("globalSearch.summaryTokens", {
                                 prompt: promptStr ?? "—",
                                 completion: completionStr ?? "—",
@@ -1555,14 +1609,17 @@ function SummaryView({
                         </span>
                     )}
                     {cacheStr !== null && (
-                        <span>{t("globalSearch.summaryTokensCached", { cached: cacheStr })}</span>
+                        <span data-testid="summary-tokens-cached">
+                            {t("globalSearch.summaryTokensCached", { cached: cacheStr })}
+                        </span>
                     )}
                     {totalStr !== null && (
-                        <span>{t("globalSearch.summaryTokensTotal", { total: totalStr })}</span>
+                        <span data-testid="summary-tokens-total">
+                            {t("globalSearch.summaryTokensTotal", { total: totalStr })}
+                        </span>
                     )}
-                </div>
+                </>,
             )}
-            {cornerBtn(t("globalSearch.regenerate"), onRegenerate)}
         </div>
     );
 }

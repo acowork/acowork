@@ -3140,6 +3140,27 @@ After installation, ask the user to re-enable the MCP server.",
     ///   3. The first `(provider, model)` from `global_provider_list`.
     ///
     /// Returns `(None, None)` only when no provider is configured at all.
+    /// The identity-context block (`- Display Name: …` / `- Language: …`)
+    /// currently injected into every session's ContextBuilder, formatted by
+    /// [`format_user_profile_context`] from the last `UserProfile` received
+    /// via `update_user_identity`, with `AgentConfig.session_language`
+    /// already applied as the `Language` override.
+    ///
+    /// Shared by every summarization surface so they cannot disagree on
+    /// output language: context compaction reads it from the live session
+    /// ([`crate::agent::context::ContextBuilder::identity_context`]), and
+    /// the global-search summary reads it from here
+    /// (`crate::http::search_summary`) because it runs outside any
+    /// session's turn loop. Same string, same override chain, one
+    /// language decision (ADR-093 follow-up).
+    ///
+    /// `None` = no profile has arrived yet. Callers fall back to English
+    /// rather than guessing from the query, matching
+    /// [`crate::prompt::build_compaction_system_prompt`].
+    pub(crate) fn identity_context(&self) -> Option<&str> {
+        self.config.identity_context.as_deref()
+    }
+
     pub fn current_model_and_provider(&self) -> (Option<String>, Option<String>) {
         // Level 1: ConversationSession meta (always up-to-date — the
         // canonical source of truth, mutated synchronously by

@@ -228,6 +228,33 @@ pub fn truncate_title_for_display(s: &str) -> String {
 ///   (English default — safe fallback for sessions with no user profile).
 /// - Non-empty identity → returns `base` + identity block + language directive.
 pub fn build_compaction_system_prompt(base: &str, identity_context: Option<&str>) -> String {
+    build_language_aware_system_prompt(
+        base,
+        identity_context,
+        "Write the summary and knowledge triples in the user's preferred \
+         language as indicated above.",
+    )
+}
+
+/// Shared mechanism behind [`build_compaction_system_prompt`]: embed the
+/// identity block in `base` and point the model at its `Language` field so
+/// it can decide the output language itself.
+///
+/// Every summarization surface routes through here rather than embedding
+/// the identity text on its own, so they cannot drift apart on *which*
+/// language they produce. Only the closing `directive` differs — compaction
+/// also distills knowledge triples; the global-search summary
+/// ([`crate::http::search_summary`]) does not.
+///
+/// `None`/blank identity returns `base` unchanged, so each caller keeps
+/// control of its own default. Note the `base` prompt may still carry a
+/// query-language rule of its own — the identity block only *adds* an
+/// override when one exists, it never removes the caller's fallback.
+pub fn build_language_aware_system_prompt(
+    base: &str,
+    identity_context: Option<&str>,
+    directive: &str,
+) -> String {
     let Some(ctx) = identity_context.map(str::trim).filter(|s| !s.is_empty()) else {
         return base.to_string();
     };
@@ -236,8 +263,7 @@ pub fn build_compaction_system_prompt(base: &str, identity_context: Option<&str>
          User identity context (use the Language field to determine what language \
          to write the summary in):\n\
          {ctx}\n\n\
-         Write the summary and knowledge triples in the user's \
-         preferred language as indicated above."
+         {directive}"
     )
 }
 
