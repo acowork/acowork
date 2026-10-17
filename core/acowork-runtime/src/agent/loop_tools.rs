@@ -1326,7 +1326,7 @@ impl AgentLoop {
             {
                 let result = format!(
                     "Error: `{}` is not available while answering an Intent request \
-                     (design 27 §6.5 R1). Finish the answer; the system writes the response back.",
+                     (design 27 §5.4.5 R1). Finish the answer; the system writes the response back.",
                     tc.function.name
                 );
                 ask_question_results.push((idx, (result, false)));

@@ -95,7 +95,7 @@ impl GatewayClient {
         sid
     }
 
-    /// Dispatch a PM task as a group-chat Intent (design 27 §6.2 / §9):
+    /// Dispatch a PM task as a group-chat Intent (design 27 §5.4.2 / §9):
     /// the Gateway keys the execution context on
     /// `task:{project_id}:{task_id}`, writes the `intent_request` row into
     /// the project group chat, injects the repo server-side, and wakes the

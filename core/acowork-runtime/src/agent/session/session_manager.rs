@@ -614,7 +614,7 @@ impl SessionManager {
     /// itself lives in the Chat session store, so nothing is copied.
     /// Returns `(session_id, handoff_note)` — the caller prepends the note to
     /// the routed intent when a rotation just happened. `seed` is the
-    /// initiator's optional `session_config` suggestion (design 27 §4);
+    /// initiator's optional `session_config` suggestion (design 27 §4.5);
     /// clamped to this agent's provider list (§13-6) and applied only when
     /// a session is actually created (fresh mapping or rotation successor) —
     /// a reused session keeps its own configuration.
@@ -673,7 +673,7 @@ impl SessionManager {
                             old_session = %sid,
                             new_session = %new_sid,
                             reason = ?reason,
-                            "Intent session rotated (design 27 §2.1)"
+                            "Intent session rotated (design 27 §4.1)"
                         );
                         // §2.1 Handoff grading: T2 carries the old session's
                         // last persisted compaction summary (already an LLM
@@ -731,7 +731,7 @@ impl SessionManager {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(key)
                 .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
-            tracing::info!(key, session_id = %sid, "Intent execution context closed (task terminal, design 27 §2.1 T2-a)");
+            tracing::info!(key, session_id = %sid, "Intent execution context closed (task terminal, design 27 §4.1 T2-a)");
         }
         Ok(())
     }
