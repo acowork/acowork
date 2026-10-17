@@ -7,10 +7,11 @@ this folder adds the automations on top of it:
 
 | script | what it does |
 |---|---|
-| [`build_mobile.ps1`](build_mobile.ps1) | **Start here.** Toolchain discovery → `tauri android init` (if needed) → icon / permission / release overlays → verification → `tauri android build`. Debug or release, optional device install. |
+| [`build_mobile.sh`](build_mobile.sh) | **macOS / Linux — start here.** Same 5 steps and same overlays as the `.ps1`, in bash + npx + python3. No PowerShell needed. |
+| [`build_mobile.ps1`](build_mobile.ps1) | **Windows — start here.** Toolchain discovery → `tauri android init` (if needed) → icon / permission / release overlays → verification → `tauri android build`. Debug or release, optional device install. |
 | [`manifest-permissions.xml`](manifest-permissions.xml) | The committed `<uses-permission>` block (CAMERA for the QR scanner). Source of truth; the build script splices it into the generated manifest. |
-| [`check_android_icon.py`](check_android_icon.py) | Asserts the generated `gen/` tree has a correct adaptive icon and the required permissions. Runs as step 4.5 of the build; also runnable standalone. |
-| [`sign_release.ps1`](sign_release.ps1) | Interactive release signing (keystore + `gradle.properties`) for a signed APK. |
+| [`check_android_icon.py`](check_android_icon.py) | Asserts the generated `gen/` tree has a correct adaptive icon and the required permissions. Runs as step 4.5 of the build; also runnable standalone. Platform-agnostic, so it gates both build scripts identically. |
+| [`sign_release.ps1`](sign_release.ps1) | Interactive release signing (keystore + `gradle.properties`) for a signed APK. Windows only. |
 
 ### Why the overlays exist
 
@@ -32,6 +33,44 @@ survive it, and each has already shipped a broken APK:
 
 `check_android_icon.py` is what keeps (1)–(3) from regressing silently; it
 fails the build rather than shipping.
+
+## build_mobile.sh (macOS / Linux)
+
+The bash twin of `build_mobile.ps1`, for the same reason `dev/common/` ships
+`.sh` twins: requiring a PowerShell install (~200MB, a second language on a
+machine that already has bash) just to produce an APK is a real cost. Same
+five steps, same overlays, same flags — only the shell differs.
+
+```bash
+# debug APK (default) — one command from a fresh clone
+./dev/android/build_mobile.sh
+
+# release APK, installed on the connected device
+./dev/android/build_mobile.sh --release-apk --install
+
+# nuke gen/ and prove the from-scratch path still works
+./dev/android/build_mobile.sh --reinit
+```
+
+| flag | `.ps1` equivalent |
+|---|---|
+| `--release-apk` | `-ReleaseApk` |
+| `--target <abi>` | `-Target <abi>` |
+| `--install` | `-Install` |
+| `--reinit` | `-Reinit` |
+| `--skip-build` | `-SkipBuild` |
+
+Finds a JDK ≥ 17 itself: explicit `$JAVA_HOME` wins, otherwise it probes the
+macOS Android Studio JBR and the usual Homebrew / Debian / Ubuntu openjdk-17
+locations, and takes the newest it finds. The Android SDK comes from
+`$ANDROID_HOME`, then `$ANDROID_SDK_ROOT`, then
+`~/Library/Android/sdk`, then `~/Android/Sdk`.
+
+The two scripts are twins by contract, not by shared code — the XML edits use
+each language's native DOM API (`.ps1` uses .NET `XmlDocument`, the `.sh` uses
+a `python3` heredoc). When you change a step in one, change the other;
+`check_android_icon.py` is the shared regression gate and will surface a
+divergence as a failure on one host only.
 
 ## build_mobile.ps1 (Windows)
 
@@ -83,6 +122,9 @@ Flags: `-StorePath`, `-GradlePropsPath`, `-KeytoolPath`, `-Alias`, `-KeySize`,
 - `rustup target add aarch64-linux-android`
 - `ANDROID_HOME` / `NDK_HOME` exported
 - `@tauri-apps/api` and the Rust `tauri` crate aligned on the same minor
+- On macOS / Linux: `python3` on `PATH` for `build_mobile.sh` (it uses a
+  `python3` heredoc for the manifest / gradle XML edits, and calls
+  `check_android_icon.py`). Both build scripts also need `node` + `npx`.
 - On Windows: **Developer Mode** must be on. The Tauri CLI symlinks the `.so`
   into `jniLibs`, and non-admin processes can't create symlinks without it
   (`Creation symbolic link is not allowed for this system`). `sign_release.ps1`

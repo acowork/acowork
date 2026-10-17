@@ -29,7 +29,7 @@ Scripts are grouped by **scope**, not by file type:
 |---|---|
 | [`common/`](common/) | Cross-platform build steps that ship a `.sh` + `.ps1` twin (`build_core`, `setup_ort`, `start_node`, `build-agent`, `gen_icons`). The `.sh` serves both Linux and macOS, so the twins live together rather than under an OS folder. |
 | [`desktop/windows/`](desktop/windows/) · [`desktop/macos/`](desktop/macos/) · [`desktop/linux/`](desktop/linux/) | Per-OS desktop packaging (`package_desktop_*`), plus the macOS one-click build and the Windows stop-latency test. |
-| [`android/`](android/) | Mobile build/sign helpers — `sign_release.ps1` drives keystore creation, `gradle.properties`, and the signed release build. Authoritative flow: [apps/acowork-mobile/README.md](../apps/acowork-mobile/README.md). |
+| [`android/`](android/) | Mobile build/sign helpers — `build_mobile.sh` / `build_mobile.ps1` are twins covering the same APK build (bash on macOS/Linux, PowerShell on Windows), and `sign_release.ps1` drives keystore creation, `gradle.properties`, and the signed release build. Authoritative flow: [apps/acowork-mobile/README.md](../apps/acowork-mobile/README.md). |
 | `ci.sh`, `ort_env.js` (repo root of `dev/`) | Kept at the top level because they are referenced by path from `AGENTS.md`, `apps/acowork-desktop/package.json`, and the ADR corpus. |
 | [`deploy/`](deploy/), [`e2e_frontend_smoke/`](e2e_frontend_smoke/) | Server deployment units and the frontend smoke suite (unchanged locations). |
 
@@ -61,6 +61,7 @@ profile. `-Debug` / `--debug` switches to the debug profile and auto-raises
 | [`package_desktop_windows.ps1`](desktop/windows/package_desktop_windows.ps1) | Windows installer (`.msi` / NSIS bundle). `-ReinstallOrt`, `-NoMirror`. |
 | [`package_desktop_macos.sh`](desktop/macos/package_desktop_macos.sh) | macOS `.app` / `.dmg`. |
 | [`package_desktop_linux.sh`](desktop/linux/package_desktop_linux.sh) | Linux `.deb` / `.rpm` / AppImage. |
+| [`build_mobile.sh`](android/build_mobile.sh) · [`build_mobile.ps1`](android/build_mobile.ps1) | Android APK. Twins — bash on macOS / Linux, PowerShell on Windows, same steps and overlays either way. See [android/README.md](android/README.md). |
 
 App icons come straight from the Tauri CLI — there is no wrapper pipeline.
 [`common/gen_icons.ps1`](common/gen_icons.ps1) · [`common/gen_icons.sh`](common/gen_icons.sh)
