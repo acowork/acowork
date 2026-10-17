@@ -1,4 +1,4 @@
-//! Intent → execution-session routing (design doc 27 §3.2).
+//! Intent → execution-session routing (design doc 27 §4.2.3).
 //!
 //! The wire addresses an **intent context** (a `conversation_id`, or a Chat
 //! session for group chats), not an execution session — "which execution
@@ -33,7 +33,7 @@ pub struct IntentSessionEntry {
     /// every rotation rekey).
     pub created_at: String,
     /// RFC3339 stamp of the last intent turn end (or routing touch). T1 idle
-    /// rotation compares the next arrival against this (design 27 §2.1).
+    /// rotation compares the next arrival against this (design 27 §4.1).
     pub last_active_at: String,
     /// T2 compaction marker (§2.1): set when at least one LLM compaction
     /// happened during the last intent turn. The next arrival rotates to a
@@ -59,7 +59,7 @@ pub enum RotateReason {
 }
 
 /// Idle threshold for T1 rotation. Layer 1 = `AgentConfig::intent_idle_rotate_hours`
-/// (design 27 §2.1 settings-card surface); falls back to the deployment-level
+/// (design 27 §4.1 settings-card surface); falls back to the deployment-level
 /// `ACOWORK_INTENT_IDLE_ROTATE_HOURS`, then the design default 24h.
 /// `0` disables T1. Values above the design range (1–72) are clamped.
 pub fn idle_rotate_threshold(work_dir: &Path) -> Option<std::time::Duration> {
@@ -76,7 +76,7 @@ pub fn idle_rotate_threshold(work_dir: &Path) -> Option<std::time::Duration> {
     }
 }
 
-/// T2 handoff token cap (design 27 §2.1: target 1,500, configurable
+/// T2 handoff token cap (design 27 §4.1: target 1,500, configurable
 /// 500–4,000 via `AgentConfig::intent_handoff_max_tokens`). T1's 500-token
 /// cap is design-fixed and not exposed here.
 pub fn handoff_max_tokens(work_dir: &Path) -> u64 {
@@ -193,7 +193,7 @@ impl IntentSessionMap {
     }
 
     /// Drop a mapping (PM task reached a terminal state → the logical
-    /// execution context is closed, no successor; design 27 §2.1 T2-a).
+    /// execution context is closed, no successor; design 27 §4.1 T2-a).
     pub fn remove(&mut self, key: &str) -> Result<()> {
         if self.entries.remove(key).is_some() {
             return self.flush();
@@ -217,7 +217,7 @@ impl IntentSessionMap {
     }
 }
 
-/// Inbound Intent's optional `session_config` suggestion (design 27 §4
+/// Inbound Intent's optional `session_config` suggestion (design 27 §4.5
 /// field table, §13-6: "只是应方允许范围内的建议"). Only `model` and
 /// `provider` are honored — the two knobs the responder's session
 /// creation path already accepts. Skills are deliberately NOT part of
@@ -302,7 +302,7 @@ pub fn routing_key(chat_session_id: &str, conversation_id: &str, message_id: &st
 }
 
 /// Handoff note prepended to the first intent routed into a successor
-/// session after a rotation (design 27 §2.1 Handoff grading).
+/// session after a rotation (design 27 §4.1 Handoff grading).
 ///
 /// Grading per the design table:
 /// - **T1 idle**: open items / key decisions only — the Runtime records no
@@ -341,7 +341,7 @@ pub fn rotation_handoff(
                 if truncated {
                     tracing::warn!(
                         cap_tokens,
-                        "Intent T2 handoff truncated to token cap (design 27 §2.1)"
+                        "Intent T2 handoff truncated to token cap (design 27 §4.1)"
                     );
                 }
                 body_note

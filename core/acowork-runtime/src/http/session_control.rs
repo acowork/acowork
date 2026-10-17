@@ -84,7 +84,7 @@ fn not_found(sid: &str) -> ApiError {
     )
 }
 
-/// `POST /intent-context/close` — design 27 §2.1 T2-a: a PM task reached a
+/// `POST /intent-context/close` — design 27 §4.1 T2-a: a PM task reached a
 /// terminal state, so its logical execution context ends. The Gateway
 /// (acting for the PM service) resolves the target instance and calls this
 /// with the registry key (`conv:task:{project}:{task}`); the Runtime closes

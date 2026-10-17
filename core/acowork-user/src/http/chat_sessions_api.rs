@@ -1,4 +1,4 @@
-//! Chat session HTTP API (design doc 27 §2.2 / §8, Phase 1).
+//! Chat session HTTP API (design doc 27 §4.2 / §8, Phase 1).
 //!
 //! ```text
 //! POST   /api/chat-sessions                          create a session
@@ -250,7 +250,7 @@ fn default_pair_kind() -> String {
 }
 
 /// `POST /internal/chat-sessions/pair` — idempotently ensure the shared
-/// one-to-one Chat session between two participants (design 27 §6.3).
+/// one-to-one Chat session between two participants (design 27 §5.4.3).
 async fn system_ensure_pair(
     State(state): State<AppState>,
     Json(req): Json<SystemPairRequest>,
@@ -274,7 +274,7 @@ pub struct SystemGroupRequest {
 }
 
 /// `POST /internal/chat-sessions/group` — idempotently ensure the one
-/// project group chat for a project (design 27 §4, Phase 2: "PM 创建项目
+/// project group chat for a project (design 27 §4.5, Phase 2: "PM 创建项目
 /// 时幂等创建唯一项目群聊"). Idempotency key is `project_id`, enforced by
 /// the projects index in `chat_sessions::create_session`.
 async fn system_ensure_group(
@@ -310,7 +310,7 @@ pub struct SystemRepoRequest {
 }
 
 /// `POST /internal/chat-sessions/repo` — bind a project group chat to its
-/// repo (design 27 §4.1); the Gateway injects it into delivered Intents.
+/// repo (design 27 §4.5.1); the Gateway injects it into delivered Intents.
 async fn system_set_repo(
     State(state): State<AppState>,
     Json(req): Json<SystemRepoRequest>,
@@ -337,7 +337,7 @@ async fn system_load_session(
 }
 
 /// `GET /internal/chat-sessions/{session_id}/messages?offset&limit&who` —
-/// history read for `chat_history_read` (design 27 §9): the Gateway passes
+/// history read for `chat_history_read` (design 27 §5.6): the Gateway passes
 /// the requesting agent instance as `who`; participation is enforced here
 /// server-side, and `limit` is clamped to `MAX_PAGE` (the §9 hard cap).
 async fn system_read_messages(
@@ -419,7 +419,7 @@ fn data_dir(state: &AppState) -> Result<std::path::PathBuf, ApiError> {
 
 /// Data dir for the **system** (Gateway-mediated) endpoints: local mode has
 /// no account system, but chat sessions are still the storage the Gateway
-/// mediates (design 27 §8) — the shared data dir is the same one every
+/// mediates (design 27 §4.6) — the shared data dir is the same one every
 /// other store uses. The human-facing endpoints keep [`data_dir`].
 async fn data_dir_any(state: &AppState) -> std::path::PathBuf {
     match state.auth_service.as_ref() {

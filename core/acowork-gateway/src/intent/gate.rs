@@ -74,7 +74,7 @@ pub fn permission_denial(sender: &AgentInfo, target: &AgentInfo) -> Option<Strin
 
 /// PR-D repo validation — **format only**. The repo is a remote URL, not
 /// a path: existence and authorized-directory boundaries are enforced on
-/// the target side at execution time (design 27 §4.1 — the protocol
+/// the target side at execution time (design 27 §4.5.1 — the protocol
 /// carries "which repo this task is about", the receiving model decides
 /// how to use it within its registered workspaces). The Gateway must not
 /// touch the sender's node-local workspace to "verify" the claim: that is
@@ -137,7 +137,7 @@ mod tests {
         assert!(validate_repo("   ").is_err(), "whitespace only");
         assert!(
             validate_repo("C:/Users/dev/project").is_err(),
-            "local paths must not ride the wire (design 27 §4.1)"
+            "local paths must not ride the wire (design 27 §4.5.1)"
         );
         assert!(validate_repo("https://example.com/p").is_ok());
         assert!(

@@ -1,4 +1,4 @@
-//! Gateway → acowork-user Chat-session client (design 27 §2.2, §6.3).
+//! Gateway → acowork-user Chat-session client (design 27 §4.2, §6.3).
 //!
 //! The Chat session store lives in the user service; the Gateway is its
 //! only system writer — Intent request / response rows are appended here
@@ -8,7 +8,7 @@
 //! Gateway process on this host; `message_id` idempotency bounds replay).
 //!
 //! Every method degrades to `Err(String)`: the caller decides whether a
-//! chat-log write failure blocks delivery. Per design 27 §6.3 the Intent
+//! chat-log write failure blocks delivery. Per design 27 §5.4.3 the Intent
 //! itself is the chat row — a session that cannot be written means the
 //! message has no durable address, so the delivery entry treats append
 //! failures on the request path as fatal-to-delivery, and pair-ensure
@@ -61,7 +61,7 @@ fn client() -> reqwest::Client {
 }
 
 /// `POST /internal/chat-sessions/pair` — idempotently ensure the shared
-/// agent-agent Chat session between two instances (design 27 §6.3).
+/// agent-agent Chat session between two instances (design 27 §5.4.3).
 pub async fn ensure_pair(port: u16, a: &str, b: &str) -> Result<SessionInfo, String> {
     let resp = client()
         .post(format!("http://127.0.0.1:{port}/internal/chat-sessions/pair"))
@@ -144,7 +144,7 @@ pub async fn load_session(port: u16, session_id: &str) -> Result<SessionInfo, St
 }
 
 /// `GET /internal/chat-sessions/{id}/messages?who=` — the read path behind
-/// the `chat_history_read` tool (design 27 §9). Returns the raw page JSON;
+/// the `chat_history_read` tool (design 27 §5.6). Returns the raw page JSON;
 /// the tool layer renders it.
 pub async fn read_messages(
     port: u16,

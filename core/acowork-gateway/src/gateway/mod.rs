@@ -482,7 +482,7 @@ impl Gateway {
 
         // D3 (tech-debt plan): open the Intent mailbox. Persistence is
         // required, not optional — the conversation request counts must
-        // survive a Gateway restart (design doc 27 §13-13), and every
+        // survive a Gateway restart (design doc 27 §6-13), and every
         // delivery must leave an observable fact.
         {
             let mailbox_path =

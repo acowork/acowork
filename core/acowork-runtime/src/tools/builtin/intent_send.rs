@@ -82,11 +82,11 @@ impl IntentSendTool {
                     },
                     "repo": {
                         "type": "string",
-                        "description": "Optional git URL of a repository the task is about (design doc 27 §4.1). Format-checked by the Gateway; the target works only inside its own authorized directories."
+                        "description": "Optional git URL of a repository the task is about (design doc 27 §4.5.1). Format-checked by the Gateway; the target works only inside its own authorized directories."
                     },
                     "session_config": {
                         "type": "object",
-                        "description": "Optional initial-config suggestion for the target's execution session, e.g. {\"model\": \"...\", \"provider\": \"...\"} (design doc 27 §4). Only a suggestion: the target applies it only when creating a new session and only within its own allowed model set; fields you omit use the target's defaults. Omit unless you have a concrete reason."
+                        "description": "Optional initial-config suggestion for the target's execution session, e.g. {\"model\": \"...\", \"provider\": \"...\"} (design doc 27 §4.5). Only a suggestion: the target applies it only when creating a new session and only within its own allowed model set; fields you omit use the target's defaults. Omit unless you have a concrete reason."
                     },
                     "conversation_id": {
                         "type": "string",

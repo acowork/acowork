@@ -12,7 +12,7 @@
 //! Two facts make persistence mandatory rather than optional:
 //!
 //! - `intent_send` must report a truthful delivery state, and
-//! - design doc 27 §13-13: the `conversation_id` request count must
+//! - design doc 27 §6-13: the `conversation_id` request count must
 //!   survive a Gateway restart, otherwise the conversation budget
 //!   (§6.5 R4) can be bypassed by restarting the Gateway.
 //!
@@ -34,7 +34,7 @@ const MAX_ENTRIES: usize = 10_000;
 /// One delivered (or attempted) Intent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxEntry {
-    /// Stable message identity (design doc 27 §4 `message_id`).
+    /// Stable message identity (design doc 27 §4.5 `message_id`).
     pub message_id: String,
     /// Conversation this request belongs to (§6.5). Empty string for
     /// pre-conversation senders (cron triggers).
@@ -56,7 +56,7 @@ pub struct MailboxEntry {
     /// delivered. An entry with `delivered_at` set is the "已投递" fact.
     #[serde(default)]
     pub delivered_at: String,
-    /// Response association (design doc 27 §4 `in_reply_to`): for a
+    /// Response association (design doc 27 §4.5 `in_reply_to`): for a
     /// response entry, the request `message_id` it answers. Empty on
     /// requests until their response is routed back.
     #[serde(default)]

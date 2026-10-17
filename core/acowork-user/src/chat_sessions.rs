@@ -1,4 +1,4 @@
-//! Chat session persistence (design doc 27 §2.2 / §3 / §8, Phase 1).
+//! Chat session persistence (design doc 27 §4.2 / §3 / §8, Phase 1).
 //!
 //! The Chat session is the authoritative message history between users and
 //! agents (and between agents). It is owned by this service — Runtime, PM
@@ -41,7 +41,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
-/// Fixed message vocabulary (design 27 §2.2). Anything else is an agent
+/// Fixed message vocabulary (design 27 §4.2). Anything else is an agent
 /// execution detail and has no business in a chat log.
 pub const KIND_USER_MESSAGE: &str = "user_message";
 pub const KIND_INTENT_REQUEST: &str = "intent_request";
@@ -55,7 +55,7 @@ const KINDS: &[&str] = &[
     KIND_INTENT_RESPONSE,
 ];
 
-/// Chat session kinds (design 27 §3.2).
+/// Chat session kinds (design 27 §4.2.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionKind {
@@ -156,7 +156,7 @@ pub struct ChatSession {
     /// for "one project, exactly one group chat".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
-    /// Normalised git remote URL bound to this session (design 27 §4.1:
+    /// Normalised git remote URL bound to this session (design 27 §4.5.1:
     /// a project carries 0 or 1 repos). The Gateway injects it into every
     /// Intent delivered out of a project group chat; nothing else reads
     /// or enforces it here.
@@ -213,7 +213,7 @@ fn session_lock(dir: &Path) -> Arc<Mutex<()>> {
 /// Create a chat session.
 ///
 /// `project_group` sessions are idempotent on `project_id`: a second create
-/// for the same project returns the existing session (design 27 §3.3 /
+/// for the same project returns the existing session (design 27 §4.4 /
 /// Phase 2). Other kinds are created as given; duplicate participant ids are
 /// rejected, not silently deduped — a caller that passes the same id twice
 /// is confused about the membership it asked for.
@@ -302,7 +302,7 @@ fn validate_session_id(id: &str) -> Result<(), String> {
 
 /// Append one message — the ONLY writer path for chat history.
 ///
-/// Guarantees (design 27 §8):
+/// Guarantees (design 27 §4.6):
 /// 1. the sender must be a session participant (participant relation is the
 ///    permission, not the session id itself — §5.3);
 /// 2. `message_id` idempotency: a repeat returns the stored message with
@@ -391,9 +391,9 @@ pub fn append_message(
     Ok((stored, true))
 }
 
-// ── System paths (Gateway-mediated, design 27 §8) ────────────────────
+// ── System paths (Gateway-mediated, design 27 §4.6) ────────────────────
 
-/// Bind (or clear) the repo of a session (design 27 §4.1). Called by the
+/// Bind (or clear) the repo of a session (design 27 §4.5.1). Called by the
 /// Gateway when a project's repo is set; the repo is then injected into
 /// every Intent delivered out of this session.
 pub fn set_repo(data_dir: &Path, session_id: &str, repo: Option<&str>) -> Result<ChatSession, String> {
@@ -422,7 +422,7 @@ fn pairs_index_path(data_dir: &Path) -> PathBuf {
 static PAIRS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Idempotently ensure the one-to-one chat session between two
-/// participants (design 27 §6.3: A–B Intents always land on one shared
+/// participants (design 27 §5.4.3: A–B Intents always land on one shared
 /// agent-agent Chat session, created on first use). The pair key is
 /// order-insensitive; the kind is `agent_agent` only when both ids look
 /// like agent instances is *not* judged here — the caller (Gateway)

@@ -36,7 +36,7 @@ use crate::mqtt::node_control::NodeControlClient;
 const ONLINE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Delivery failures with the error-code vocabulary the sender sees
-/// (design doc 27 §10; formal codes are frozen at the next protocol
+/// (design doc 27 §5.7; formal codes are frozen at the next protocol
 /// revision).
 #[derive(Debug, Clone)]
 pub enum DeliveryError {
@@ -81,7 +81,7 @@ impl std::fmt::Display for DeliveryError {
 }
 
 impl DeliveryError {
-    /// Stable machine-readable code (design doc 27 §10 vocabulary).
+    /// Stable machine-readable code (design doc 27 §5.7 vocabulary).
     pub fn code(&self) -> &'static str {
         match self {
             DeliveryError::TargetNotInstalled(_) => "target_not_found",
@@ -123,16 +123,16 @@ pub struct DeliveryRequest {
     pub action: String,
     /// JSON-serialised params (wire `Intent.params_json`).
     pub params_json: String,
-    /// Source chat session id (design 27 §3.2; empty until Phase 2).
+    /// Source chat session id (design 27 §4.2.3; empty until Phase 2).
     pub source_chat_session_id: String,
-    /// Source-side authorized repo (design 27 §3.2; validated at the
+    /// Source-side authorized repo (design 27 §4.2.3; validated at the
     /// HTTP entry before this request is built — PR-D).
     pub repo: String,
-    /// Initiator's session-config suggestion (design 27 §4, serialized
+    /// Initiator's session-config suggestion (design 27 §4.5, serialized
     /// from a shape-checked JSON object; empty = none). The responder
     /// treats it as a suggestion within its allowed set (§13-6).
     pub session_config_json: String,
-    /// "request" (default) | "response" (design 27 §6.5 R2). A response
+    /// "request" (default) | "response" (design 27 §5.4.5 R2). A response
     /// is system-generated: the Gateway builds it at the responder's
     /// turn end and routes it to the initiator — `intent_send` never
     /// produces one.

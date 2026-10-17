@@ -99,11 +99,11 @@ pub struct IntentEnvelope {
     pub source_chat_session_id: String,
     #[serde(default)]
     pub repo: String,
-    /// Initiator's `session_config` suggestion (design 27 §4); consumed
+    /// Initiator's `session_config` suggestion (design 27 §4.5); consumed
     /// at execution-session creation only, never rendered into the turn.
     #[serde(default)]
     pub session_config_json: String,
-    /// "request" | "response" (design 27 §6.5 R2); empty = request.
+    /// "request" | "response" (design 27 §5.4.5 R2); empty = request.
     #[serde(default)]
     pub kind: String,
     /// For a response: the request message id this answers.
@@ -124,7 +124,7 @@ pub enum InboundMessage {
         notification_type: String,
         data: serde_json::Value,
     },
-    /// Cross-agent intent message (design doc 27 §3.2 envelope).
+    /// Cross-agent intent message (design doc 27 §4.2.3 envelope).
     ///
     /// Boxed payload: the envelope carries ~11 string fields, which would
     /// otherwise dominate every `InboundMessage` slot (`clippy::large_enum_variant`).

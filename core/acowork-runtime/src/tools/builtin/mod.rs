@@ -18,7 +18,7 @@
 //! | glob_search | filesystem:read:<path> |
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
-//! | chat_history_read | (no permission table entry) — participation is enforced server-side (design 27 §9) |
+//! | chat_history_read | (no permission table entry) — participation is enforced server-side (design 27 §5.6) |
 //! | rag_query | rag:query + network:<rag_url> (registered in agent_init.rs) |
 //! | context_abandon | context:write - RETIRED (dead code, not registered) |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |

@@ -1,4 +1,4 @@
-//! Intent response-deadline sweeper (design doc 27 §7.1 "Runtime 崩溃 /
+//! Intent response-deadline sweeper (design doc 27 §5.5.1 "Runtime 崩溃 /
 //! 无任何事件" row, plan §10-1 / §13-12).
 //!
 //! A responder's answer is written back by the Runtime at turn end. If the
@@ -32,7 +32,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// The §7.1 fixed fallback wording. User-facing text, no internal detail.
 const FALLBACK_BODY: &str = "No answer received before the response deadline — \
 the responder's execution may have crashed or been lost. This is a system \
-fallback receipt (design 27 §7.1).";
+fallback receipt (design 27 §5.5.1).";
 
 /// Start the loop. Called once from the HTTP server startup with the
 /// same AppState the delivery entry uses.

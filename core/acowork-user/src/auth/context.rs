@@ -100,7 +100,7 @@ fn header_str<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a 
 /// authenticate), and the service binds loopback only, so the reachable set is
 /// the Gateway and any process already at the OS user's privilege level.
 pub(crate) fn is_public_path(path: &str) -> bool {
-    // The `/internal/chat-sessions/*` system surface (design 27 §8) joins
+    // The `/internal/chat-sessions/*` system surface (design 27 §4.6) joins
     // `/internal/user-profiles` for the same reason: the caller is the
     // Gateway on this host with no user identity to present. Loopback-only
     // binding is the trust boundary; `message_id` idempotency bounds replay.

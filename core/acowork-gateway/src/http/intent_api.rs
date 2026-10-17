@@ -117,7 +117,7 @@ struct ProjectGroupRequest {
 }
 
 /// `POST /api/intents/task-dispatch` — PM task dispatch as a group-chat
-/// Intent (design 27 §6.2 / §9). The task is the execution-context
+/// Intent (design 27 §5.4.2 / §9). The task is the execution-context
 /// boundary: `conversation_id = "task:{project}:{task}"`, which the
 /// receiving Runtime keys its logical session map on (one session chain
 /// per task, even inside a shared project group chat). The project group
@@ -431,7 +431,7 @@ pub struct IntentDeliveryResponse {
     pub message_id: String,
     /// `delivered` | `failed` — the mailbox status at return time.
     pub status: String,
-    /// The conversation this request belongs to (design 27 §6.5 R4):
+    /// The conversation this request belongs to (design 27 §5.4.5 R4):
     /// either the one the initiator passed or the one the Gateway just
     /// assigned. The initiator copies it into follow-up requests so the
     /// target answers in the same execution session and the budget gate
@@ -444,7 +444,7 @@ pub struct IntentDeliveryResponse {
     pub error: Option<String>,
 }
 
-/// Body of `POST /api/intents`. Field set follows design doc 27 §3.2
+/// Body of `POST /api/intents`. Field set follows design doc 27 §4.2.3
 /// (PR-D adds `repo`).
 #[derive(Debug, Deserialize)]
 pub struct IntentRequest {
@@ -463,11 +463,11 @@ pub struct IntentRequest {
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub source_chat_session_id: Option<String>,
-    /// Source-declared repo (design 27 §4.1). Format-validated here; the
+    /// Source-declared repo (design 27 §4.5.1). Format-validated here; the
     /// target-side authorized-directory boundary is the enforcement point.
     #[serde(default)]
     pub repo: Option<String>,
-    /// Initiator's session-config suggestion (design 27 §4: model /
+    /// Initiator's session-config suggestion (design 27 §4.5: model /
     /// reasoning / skills 初值). Shape-checked here (small JSON object of
     /// string values); the responder treats it as a suggestion within its
     /// own allowed set (§13-6). Absent / null = use target defaults.
@@ -540,7 +540,7 @@ async fn deliver_intent(
         None => String::new(),
     };
 
-    // --- design 27 §4: session_config shape check (only when declared) --
+    // --- design 27 §4.5: session_config shape check (only when declared) --
     if let Some(sc) = req.session_config.as_ref() {
         validate_session_config(sc).map_err(|e| {
             ApiError::unprocessable_entity(&format!("session_config_invalid: {e}"))
@@ -715,7 +715,7 @@ async fn deliver_intent(
     }))
 }
 
-/// `POST /api/intents/task-close` — design 27 §2.1 T2-a, PM-facing twin of
+/// `POST /api/intents/task-close` — design 27 §4.1 T2-a, PM-facing twin of
 /// `/api/intents/task-dispatch`: a task reached a terminal state
 /// (`Done` / `Rejected` / `Cancelled`), so the target agent's logical
 /// execution context for that task ends. The Gateway does not know the
@@ -783,7 +783,7 @@ async fn close_task_context(
 }
 
 /// The plain-text content of an Intent as it appears in the chat log
-/// (design 27 §4: routing facts live in `meta`, the body is the message).
+/// (design 27 §4.5: routing facts live in `meta`, the body is the message).
 /// `params.message` is the human-readable form; otherwise the params
 /// object is logged verbatim so nothing is silently dropped.
 fn intent_body(req: &IntentRequest) -> String {
@@ -846,7 +846,7 @@ async fn intent_max_conversation_requests(state: &AppState) -> u32 {
         .unwrap_or(6)
 }
 
-// ── Response write-back (design 27 §7.1) ──────────────────────────────
+// ── Response write-back (design 27 §5.5.1) ──────────────────────────────
 
 /// `POST /api/intents/{message_id}/response` — the responder's Runtime
 /// calls this at the end of an intent turn; the Gateway then:
@@ -1019,7 +1019,7 @@ async fn deliver_response(
     }))
 }
 
-// ── Group-chat mentions (design 27 §5) ────────────────────────────────
+// ── Group-chat mentions (design 27 §5.3) ────────────────────────────────
 
 /// Body of `POST /api/intents/mentions`.
 #[derive(Debug, Deserialize)]

@@ -237,7 +237,7 @@ pub struct GatewayState {
     /// Opened at startup next to the cron store; every Gateway-mediated
     /// Intent delivery records its fact here so `intent_send` can report
     /// a truthful delivery state and conversation request counts survive
-    /// a restart (design doc 27 §13-13).
+    /// a restart (design doc 27 §6-13).
     pub intent_mailbox: Option<std::sync::Arc<crate::intent::mailbox::IntentMailbox>>,
     /// Gateway configuration snapshot (for Config API)
     pub config: Option<crate::config::GatewayConfig>,

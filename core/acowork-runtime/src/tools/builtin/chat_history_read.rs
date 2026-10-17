@@ -1,5 +1,5 @@
 //! `chat_history_read` — read the Chat session history an Intent envelope
-//! points at (design doc 27 §5.2, §7.3, §9).
+//! points at (design doc 27 §5.3.2, §7.3, §9).
 //!
 //! An agent @-mentioned in a group chat does **not** automatically receive
 //! the whole group history (§5.2): the envelope carries the
@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use super::intent_send::IntentSendConfig;
 
-/// Mirrors the Gateway hard caps (design 27 §9). The server is the
+/// Mirrors the Gateway hard caps (design 27 §5.6). The server is the
 /// authority; these only shape the tool's own error text.
 const MAX_COUNT: usize = 50;
 const DEFAULT_COUNT: usize = 20;
@@ -52,7 +52,7 @@ impl Tool for ChatHistoryReadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "chat_history_read".to_string(),
-            description: "Read messages of a Chat session (project group chat or agent-agent chat) you are a participant of. Use the source_chat_session_id from an intent envelope. Returns up to 50 messages per call, newest window first; read with increasing offset for more. Your own turns are NOT part of the chat history — do not expect them here (design 27 §5.2).".to_string(),
+            description: "Read messages of a Chat session (project group chat or agent-agent chat) you are a participant of. Use the source_chat_session_id from an intent envelope. Returns up to 50 messages per call, newest window first; read with increasing offset for more. Your own turns are NOT part of the chat history — do not expect them here (design 27 §5.3.2).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

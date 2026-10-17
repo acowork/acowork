@@ -1,4 +1,4 @@
-//! Intent turn support (design doc 27 §6.5, §7.1).
+//! Intent turn support (design doc 27 §5.4.5, §7.1).
 //!
 //! A turn triggered by an inbound Intent `request` puts the agent in the
 //! **responder** role: `intent_send` / `ask_user_question` are hidden from
@@ -137,7 +137,7 @@ pub async fn post_intent_response(
 }
 
 /// Truncate a response body to the byte ceiling with an explicit marker
-/// (design 27 §7.1 length bound; the initiator asks for more with a new
+/// (design 27 §5.5.1 length bound; the initiator asks for more with a new
 /// request rather than the wire carrying an unbounded turn).
 pub fn truncate_response_body(body: &str, max_bytes: usize) -> String {
     if body.len() <= max_bytes {
