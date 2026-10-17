@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 
 use acowork_core::error::{AcoworkError, Result as AcoworkResult};
+use acowork_core::retrieval::{FusedHit, FusionPolicy, LexicalQuery, MatchedBy};
 use acowork_memory::MemoryAdminService;
 use acowork_memory::admin::{
     AdminListNodesOutput, AdminListNodesParams, AdminNodeDetail, AdminNodeRecord, AdminStats,
@@ -25,6 +26,12 @@ use serde_json::{Map, Value};
 
 use crate::{SqliteStore, labels, ts_text};
 
+/// Whitespace-split a lexical query into terms for
+/// [`SqliteStore::text_search_terms`].
+///
+/// The keyword-mode path has no analyzed term list, so it re-tokenizes here.
+/// Terms are **not** escaped at this layer — the executor owns FTS escaping
+/// (ADR-095 D2: exactly one escaping implementation).
 /// Refuse an unfiltered list scan past this many nodes (mirrors the grafeo
 /// guard). An unfiltered scan materializes every node to render its content,
 /// so without a ceiling one panel request could load the whole store.
@@ -106,43 +113,113 @@ impl MemoryAdminService for SqliteStore {
         mode: &str,
         limit: usize,
     ) -> Vec<AdminNodeRecord> {
+        self.semantic_search_detailed(
+            query_text,
+            &[],
+            embedding,
+            mode,
+            limit,
+            // Equal weight + no gate is the pre-ADR-095 behaviour of this path.
+            &FusionPolicy::EQUAL_NO_GATE,
+        )
+        .into_iter()
+        .map(|(record, _)| record)
+        .collect()
+    }
+
+    /// The global-search memory retrieval path (ADR-095 D2/D3/D4).
+    ///
+    /// Before ADR-095 this path drove both sources with one query text at equal
+    /// weight and then threw the per-source signals away, while `memory_recall`
+    /// used a dual-query, 4:1-weighted form of the *same* engine. This
+    /// implementation converges the two onto the shared engine; the legacy
+    /// [`Self::semantic_search`] is now a projection of it.
+    fn semantic_search_detailed(
+        &self,
+        query_text: &str,
+        lexical_terms: &[String],
+        embedding: Option<&[f32]>,
+        mode: &str,
+        limit: usize,
+        policy: &FusionPolicy,
+    ) -> Vec<(AdminNodeRecord, FusedHit)> {
         let limit = limit.clamp(1, MAX_PAGE_SIZE as usize);
         if query_text.is_empty() && embedding.is_none() {
             return Vec::new();
         }
+        // The dual query is passed through as-is. Joining `lexical_terms` back
+        // into a string and re-splitting it would be a second tokenization of
+        // the same input, and the two would drift (ADR-095 D2).
+        let lexical = LexicalQuery {
+            raw: query_text,
+            terms: lexical_terms,
+        };
 
         // Labels are disjoint, so node ids cannot collide across them; the
-        // merge is a plain score sort.
-        let mut scored: Vec<(f64, u64)> = Vec::new();
+        // merge is a plain fused-score sort. Each label's own `FusedHit` ranks
+        // stay as computed; only `fused_rank` is recomputed for the merged list
+        // (D4: in-source rank vs. merged order are different signals and are
+        // named differently).
+        let mut scored: Vec<(AdminNodeRecord, FusedHit)> = Vec::new();
         for label in labels::ALL {
-            let hits = match (mode, embedding) {
-                ("vector", Some(embedding)) => self.vector_search(label, embedding, limit),
-                ("hybrid", Some(embedding)) => SqliteStore::hybrid_search_full(
-                    self, label, query_text, embedding, limit, 1.0, 1.0, None,
-                ),
+            let hits: Vec<FusedHit> = match (mode, embedding) {
+                ("vector", Some(embedding)) => self
+                    .vector_search(label, embedding, limit)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, (id, cos))| FusedHit {
+                        id,
+                        matched_by: MatchedBy::Vector,
+                        vector_rank: Some(rank),
+                        text_rank: None,
+                        cosine: Some(cos),
+                        // Vector-only mode runs no fusion, so the honest score
+                        // is the cosine itself — labelled as such, not as RRF.
+                        fused_score: cos,
+                        fused_rank: rank,
+                    })
+                    .collect(),
+                ("hybrid", Some(embedding)) => {
+                    self.hybrid_search_detailed(label, &lexical, Some(embedding), limit, policy)
+                        .unwrap_or_default()
+                }
                 // "keyword" / "" / unknown mode, or no embedding available:
                 // BM25 text search is the documented fallback.
-                _ => self.text_search(label, query_text, limit),
+                _ => self
+                    .text_search_by_query(label, &lexical, limit)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, (id, score))| FusedHit {
+                        id,
+                        matched_by: MatchedBy::Text,
+                        vector_rank: None,
+                        text_rank: Some(rank),
+                        cosine: None,
+                        fused_score: score,
+                        fused_rank: rank,
+                    })
+                    .collect(),
             };
-            match hits {
-                Ok(hits) => scored.extend(hits.into_iter().map(|(id, score)| (score, id))),
-                Err(e) => {
-                    tracing::warn!(label, error = %e, "memory semantic_search: label search failed");
+            for hit in hits {
+                if let Some(record) = self.admin_row(hit.id).ok().flatten() {
+                    scored.push((record_from_row(&record), hit));
                 }
             }
         }
+
         scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
+            b.1.fused_score
+                .partial_cmp(&a.1.fused_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.1.id.cmp(&b.1.id))
         });
         scored.truncate(limit);
-
+        for (rank, (_, hit)) in scored.iter_mut().enumerate() {
+            hit.fused_rank = rank;
+        }
         scored
-            .into_iter()
-            .filter_map(|(_, id)| self.admin_row(id).ok().flatten())
-            .map(|row| record_from_row(&row))
-            .collect()
     }
 
     fn get_node(&self, node_id: u64) -> AdminNodeDetail {

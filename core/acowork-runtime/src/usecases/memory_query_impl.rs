@@ -16,7 +16,7 @@ use crate::embedding::SharedEmbedProvider;
 use crate::http::{SharedMemoryStore, memory_query};
 use crate::usecases::memory_query::{
     CreateMemoryNodeInput, MemoryNode, MemoryNodeListResponse, MemoryNodeQuery, MemoryQueryService,
-    MemoryStats, RebuildReport, SemanticMemoryQuery,
+    MemoryStats, RebuildReport, RetrievalEvidence, ScoredMemoryNode, SemanticMemoryQuery,
 };
 
 pub struct MemoryAdminAdapter {
@@ -129,6 +129,55 @@ impl MemoryQueryService for MemoryAdminAdapter {
             size: out.size,
             model_dim: dim,
         })
+    }
+
+    async fn semantic_search_detailed(
+        &self,
+        query: &SemanticMemoryQuery,
+        policy: &acowork_core::retrieval::FusionPolicy,
+    ) -> Result<Vec<ScoredMemoryNode>> {
+        let store = self.memory_store.read().ok().and_then(|g| g.clone());
+        let lexical = acowork_core::retrieval::LexicalQuery {
+            raw: &query.query_text,
+            terms: &query.lexical_terms,
+        };
+        let hits = memory_query::semantic_search_detailed(
+            store.as_ref(),
+            &lexical,
+            query.embedding.as_deref(),
+            &query.mode,
+            query.limit,
+            policy,
+        );
+        Ok(hits
+            .into_iter()
+            .map(|(n, f)| {
+                let evidence = RetrievalEvidence {
+                    matched_by: f.matched_by,
+                    vector_rank: f.vector_rank,
+                    text_rank: f.text_rank,
+                    cosine: f.cosine,
+                    fused_score: f.fused_score,
+                    fused_rank: Some(f.fused_rank),
+                };
+                ScoredMemoryNode {
+                    node: MemoryNode {
+                        node_id: n.node_id,
+                        node_type: n.node_type,
+                        sub_type: n.sub_type,
+                        content: n.content,
+                        confidence: n.confidence,
+                        importance: n.importance,
+                        decay_score: n.decay_score,
+                        created_at: n.created_at,
+                        last_accessed_at: n.last_accessed_at,
+                        access_count: n.access_count,
+                        status: n.status,
+                    },
+                    evidence: Some(evidence),
+                }
+            })
+            .collect())
     }
 
     async fn get_node(&self, node_id: u64) -> Result<serde_json::Value> {
@@ -365,6 +414,8 @@ mod tests {
                 mode: "hybrid".to_string(),
                 limit: 20,
                 embedding: None,
+            // No analyzer on this path: raw text drives both sources.
+            lexical_terms: Vec::new(),
             })
             .await
             .expect("semantic search should succeed");

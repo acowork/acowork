@@ -24,6 +24,7 @@ use crate::quality::MemoryQualityConfig;
 use acowork_core::EmbeddingProvider;
 use crate::types::{DistilledEpisode, EpisodicDecayConfig, NodeStatus};
 use acowork_core::error::{AcoworkError, Result};
+use acowork_core::retrieval::{FusedHit, LexicalQuery, MatchedBy};
 
 // ---------------------------------------------------------------------------
 // Procedural embedding fallback (ADR-057 P0 ProceduralNode embedding required)
@@ -197,6 +198,27 @@ pub struct RetrievalResult {
     pub abstention_prompt: Option<String>,
 }
 
+/// One retrieval candidate between the per-label search and the final
+/// [`RetrievedMemory`]: the fused score plus the in-source signals that must
+/// survive dedup, Dormant exclusion, session/time filtering and decay.
+///
+/// This replaced a `(f64, String, String)` tuple. The tuple is the reason
+/// ADR-095 D4's signals were historically dropped at the fusion boundary — a
+/// positional record with four fields of different meanings is easy to thread
+/// and impossible to read.
+#[derive(Debug, Clone)]
+struct RetrievalCandidate {
+    /// Weighted RRF fused score. In-source rank signal, not a similarity.
+    score: f64,
+    label: String,
+    /// `"hybrid"` | `"text"` — the legacy provenance string, kept for
+    /// compatibility. [`Self::matched_by`] is its precise replacement.
+    source: String,
+    matched_by: Option<MatchedBy>,
+    vector_rank: Option<usize>,
+    text_rank: Option<usize>,
+}
+
 /// A single retrieved memory with relevance metadata.
 #[derive(Debug, Clone)]
 pub struct RetrievedMemory {
@@ -215,6 +237,16 @@ pub struct RetrievedMemory {
     pub source_url: Option<String>,
     /// Chunk ID within the source document (for RAG results).
     pub chunk_id: Option<String>,
+    /// Which retrieval source(s) matched this node (ADR-095 D4).
+    ///
+    /// `None` means the provider could not say (a default-impl
+    /// `hybrid_search_detailed`), **not** "matched nothing". RAG-channel
+    /// results always carry `None` — they never went through the fusion engine.
+    pub matched_by: Option<acowork_core::retrieval::MatchedBy>,
+    /// Rank inside the vector source's candidate pool. In-source signal only.
+    pub vector_rank: Option<usize>,
+    /// Rank inside the lexical source's candidate pool. In-source signal only.
+    pub text_rank: Option<usize>,
 }
 
 /// Formatted memory block ready for prompt injection.
@@ -358,23 +390,40 @@ impl MemoryManager {
         // only affected the vector source anyway, so passing `None` is the
         // honest choice — quality is controlled downstream by `k` and by
         // the eventual LLM-judge / z-score follow-up tracked separately.
-        let mut all_results: Vec<(u64, f64, String, String)> = Vec::new();
+        // One shared fusion engine for every caller (ADR-095 D3): the hint
+        // weights become a `FusionPolicy` and the detailed form keeps the
+        // per-source signals instead of discarding them after fusion.
+        //
+        // `min_cosine: None` is deliberate and unchanged — see the note above
+        // on anisotropic embeddings.
+        let fusion_policy = acowork_core::retrieval::FusionPolicy {
+            vector_weight,
+            text_weight,
+            min_cosine: None,
+            pool_factor: 2,
+        };
+
+        let mut all_results: Vec<(u64, RetrievalCandidate)> = Vec::new();
 
         for label in &search_labels {
-            let search_result = if let Some(ref embedding) = query.embedding {
+            let search_result: Result<Vec<FusedHit>> = if let Some(ref embedding) = query.embedding
+            {
                 provider
-                    .hybrid_search_full(
+                    .hybrid_search_detailed(
                         label,
-                        &query.query_text,
+                        // This path has no analyzer: `query_text` is already the
+                        // lexical query (for `memory_recall` it is the
+                        // LLM-extracted keywords), so `raw_only` is the honest
+                        // representation — not a fallback.
+                        &LexicalQuery::raw_only(&query.query_text),
                         embedding,
                         k,
-                        text_weight,
-                        vector_weight,
-                        None,
+                        &fusion_policy,
                     )
                     .map_err(|e| AcoworkError::Memory(format!("Hybrid search failed: {e}")))
             } else {
-                // Fallback to text search when no embedding is available.
+                // Fallback to text search when no embedding is available. Every
+                // hit is lexical evidence and there is no cosine to report.
                 provider
                     .text_search_with_filter(
                         label,
@@ -382,6 +431,20 @@ impl MemoryManager {
                         &query.query_text,
                         k,
                     )
+                    .map(|hits| {
+                        hits.into_iter()
+                            .enumerate()
+                            .map(|(rank, (id, score))| FusedHit {
+                                id,
+                                matched_by: MatchedBy::Text,
+                                vector_rank: None,
+                                text_rank: Some(rank),
+                                cosine: None,
+                                fused_score: score,
+                                fused_rank: rank,
+                            })
+                            .collect()
+                    })
                     .map_err(|e| AcoworkError::Memory(format!("Text search failed: {e}")))
             };
 
@@ -398,12 +461,17 @@ impl MemoryManager {
                         source,
                         "Memory search completed (before dedup + exclude)"
                     );
-                    for (node_id, score) in results {
+                    for hit in results {
                         all_results.push((
-                            node_id,
-                            score,
-                            label.to_string(),
-                            source.to_string(),
+                            hit.id,
+                            RetrievalCandidate {
+                                score: hit.fused_score,
+                                label: label.to_string(),
+                                source: source.to_string(),
+                                matched_by: Some(hit.matched_by),
+                                vector_rank: hit.vector_rank,
+                                text_rank: hit.text_rank,
+                            },
                         ));
                     }
                 }
@@ -425,12 +493,12 @@ impl MemoryManager {
             let before = all_results.len();
             // Resolve status once per unique node to avoid repeated lookups.
             let mut status_cache: HashMap<u64, Option<NodeStatus>> = HashMap::new();
-            for (id, _, _, _) in &all_results {
+            for (id, _) in &all_results {
                 status_cache
                     .entry(*id)
                     .or_insert_with(|| provider.get_node_status(*id).ok().flatten());
             }
-            all_results.retain(|(id, _, _, _)| {
+            all_results.retain(|(id, _)| {
                 status_cache
                     .get(id)
                     .and_then(|s| s.clone())
@@ -443,19 +511,21 @@ impl MemoryManager {
             );
         }
 
-        // Deduplicate by node_id, keeping the highest score.
-        let mut best_by_id: HashMap<u64, (f64, String, String)> = HashMap::new();
-        for (id, score, label, source) in all_results {
+        // Deduplicate by node_id, keeping the highest-scoring candidate and
+        // **its own** signals. Carrying the signals of the winning candidate is
+        // the point: a node that surfaced from both sources must not be
+        // reported as the text-only copy of itself just because the other label
+        // scored marginally lower.
+        let mut best_by_id: HashMap<u64, RetrievalCandidate> = HashMap::new();
+        for (id, cand) in all_results {
             best_by_id
                 .entry(id)
-                .and_modify(|(existing_score, existing_label, existing_source)| {
-                    if score > *existing_score {
-                        *existing_score = score;
-                        *existing_label = label.clone();
-                        *existing_source = source.clone();
+                .and_modify(|existing| {
+                    if cand.score > existing.score {
+                        *existing = cand.clone();
                     }
                 })
-                .or_insert((score, label, source));
+                .or_insert(cand);
         }
 
         // Post-filter: exclude nodes belonging to the current session.
@@ -516,7 +586,15 @@ impl MemoryManager {
 
         // Build RetrievedMemory list, sorted by score descending.
         let mut memories: Vec<RetrievedMemory> = Vec::new();
-        for (node_id, (score, label, source)) in best_by_id {
+        for (node_id, cand) in best_by_id {
+            let RetrievalCandidate {
+                score,
+                label,
+                source,
+                matched_by,
+                vector_rank,
+                text_rank,
+            } = cand;
             let content = match provider.get_node_content(node_id) {
                 Ok(Some(c)) => c,
                 Ok(None) => String::new(),
@@ -533,6 +611,9 @@ impl MemoryManager {
                 node_id,
                 source_url: None,
                 chunk_id: None,
+                matched_by,
+                vector_rank,
+                text_rank,
             });
         }
 
@@ -923,14 +1004,15 @@ impl MemoryManager {
 /// Kept as a pure module-level function (no provider I/O) so the scoring
 /// branch is directly unit-testable.
 fn apply_retrieval_decay(
-    mut best_by_id: HashMap<u64, (f64, String, String)>,
+    mut best_by_id: HashMap<u64, RetrievalCandidate>,
     config: &EpisodicDecayConfig,
     mut age_days: impl FnMut(u64) -> Option<f64>,
-) -> HashMap<u64, (f64, String, String)> {
+) -> HashMap<u64, RetrievalCandidate> {
     if !config.enabled || best_by_id.is_empty() {
         return best_by_id;
     }
-    for (node_id, (score, label, _)) in best_by_id.iter_mut() {
+    for (node_id, cand) in best_by_id.iter_mut() {
+        let (score, label) = (&mut cand.score, &cand.label);
         if label != labels::EPISODIC {
             continue;
         }
@@ -1022,6 +1104,19 @@ fn estimate_tokens(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    /// Decay operates on the post-dedup candidate map; tests only care about
+    /// `score` and `label`, so build the rest here rather than repeating it.
+    fn cand(score: f64, label: &str) -> RetrievalCandidate {
+        RetrievalCandidate {
+            score,
+            label: label.to_string(),
+            source: "hybrid".into(),
+            matched_by: None,
+            vector_rank: None,
+            text_rank: None,
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1034,10 +1129,10 @@ mod tests {
             dormant_threshold: 0.1,
             archive_days: 90,
         };
-        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
-        best.insert(1, (1.0, labels::EPISODIC.to_string(), "hybrid".into()));
-        best.insert(2, (1.0, labels::EPISODIC.to_string(), "hybrid".into()));
-        best.insert(3, (1.0, labels::KNOWLEDGE.to_string(), "hybrid".into()));
+        let mut best: HashMap<u64, RetrievalCandidate> = HashMap::new();
+        best.insert(1, cand(1.0, labels::EPISODIC));
+        best.insert(2, cand(1.0, labels::EPISODIC));
+        best.insert(3, cand(1.0, labels::KNOWLEDGE));
 
         let out = apply_retrieval_decay(best, &cfg, |id| match id {
             1 => Some(180.0),
@@ -1046,17 +1141,17 @@ mod tests {
         });
 
         assert!(
-            (out[&1].0 - 0.5).abs() < 1e-6,
+            (out[&1].score - 0.5).abs() < 1e-6,
             "half-life Episodic node must be halved, got {}",
-            out[&1].0
+            out[&1].score
         );
         assert!(
-            out[&2].0 > 0.99,
+            out[&2].score > 0.99,
             "fresh Episodic node must keep ~full score, got {}",
-            out[&2].0
+            out[&2].score
         );
         assert_eq!(
-            out[&3].0, 1.0,
+            out[&3].score, 1.0,
             "Knowledge must never be decayed by retrieval-side forgetting"
         );
     }
@@ -1065,20 +1160,20 @@ mod tests {
     fn test_retrieval_decay_disabled_or_unknown_age_keeps_scores() {
         // enabled = false (default) → no decay at all.
         let cfg_off = EpisodicDecayConfig::default();
-        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
-        best.insert(1, (0.8, labels::EPISODIC.to_string(), "hybrid".into()));
+        let mut best: HashMap<u64, RetrievalCandidate> = HashMap::new();
+        best.insert(1, cand(0.8, labels::EPISODIC));
         let out = apply_retrieval_decay(best, &cfg_off, |_| Some(100000.0));
-        assert_eq!(out[&1].0, 0.8, "disabled config must be a no-op");
+        assert_eq!(out[&1].score, 0.8, "disabled config must be a no-op");
 
         // enabled with missing/error timestamp → keep current score.
         let cfg_on = EpisodicDecayConfig {
             enabled: true,
             ..Default::default()
         };
-        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
-        best.insert(1, (0.8, labels::EPISODIC.to_string(), "hybrid".into()));
+        let mut best: HashMap<u64, RetrievalCandidate> = HashMap::new();
+        best.insert(1, cand(0.8, labels::EPISODIC));
         let out = apply_retrieval_decay(best, &cfg_on, |_| None);
-        assert_eq!(out[&1].0, 0.8, "unknown age must keep current score");
+        assert_eq!(out[&1].score, 0.8, "unknown age must keep current score");
     }
 
     #[test]
@@ -1089,10 +1184,10 @@ mod tests {
             half_life_days: 0,
             ..Default::default()
         };
-        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
-        best.insert(1, (0.9, labels::EPISODIC.to_string(), "hybrid".into()));
+        let mut best: HashMap<u64, RetrievalCandidate> = HashMap::new();
+        best.insert(1, cand(0.9, labels::EPISODIC));
         let out = apply_retrieval_decay(best, &cfg_zero, |_| Some(100000.0));
-        assert_eq!(out[&1].0, 0.9, "zero half-life must disable decay");
+        assert_eq!(out[&1].score, 0.9, "zero half-life must disable decay");
 
         // Future timestamp (negative age) → retention clamped to [0, 1]:
         // the score must never be amplified above its original value.
@@ -1101,13 +1196,13 @@ mod tests {
             half_life_days: 180,
             ..Default::default()
         };
-        let mut best: HashMap<u64, (f64, String, String)> = HashMap::new();
-        best.insert(1, (0.5, labels::EPISODIC.to_string(), "hybrid".into()));
+        let mut best: HashMap<u64, RetrievalCandidate> = HashMap::new();
+        best.insert(1, cand(0.5, labels::EPISODIC));
         let out = apply_retrieval_decay(best, &cfg, |_| Some(-50.0));
         assert!(
-            out[&1].0 <= 0.5 + 1e-9 && out[&1].0 > 0.0,
+            out[&1].score <= 0.5 + 1e-9 && out[&1].score > 0.0,
             "future timestamp must not amplify score, got {}",
-            out[&1].0
+            out[&1].score
         );
     }
 
@@ -1148,6 +1243,11 @@ mod tests {
                     node_id: 1,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "Previous discussion about traits.".to_string(),
@@ -1157,6 +1257,11 @@ mod tests {
                     node_id: 2,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
             ],
             metrics: RetrievalMetrics::default(),
@@ -1186,6 +1291,11 @@ mod tests {
                     node_id: 1,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "Another very long memory content that takes up many tokens."
@@ -1196,6 +1306,11 @@ mod tests {
                     node_id: 2,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "Third memory with even more text content to exceed token budget."
@@ -1206,6 +1321,11 @@ mod tests {
                     node_id: 3,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
             ],
             metrics: RetrievalMetrics::default(),
@@ -1253,6 +1373,11 @@ mod tests {
                     node_id: 1,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "Identity: role: weather assistant that provides detailed forecasts and climate analysis".to_string(),
@@ -1262,6 +1387,11 @@ mod tests {
                     node_id: 2,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "Capability: forecast: can provide 7-day weather forecasts with temperature and precipitation details".to_string(),
@@ -1271,6 +1401,11 @@ mod tests {
                     node_id: 3,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
             ],
             metrics: RetrievalMetrics::default(),
@@ -1307,6 +1442,11 @@ mod tests {
                     node_id: 1,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "History: milestone: first release on 2024-01-01, successfully deployed to production environment".to_string(),
@@ -1316,6 +1456,11 @@ mod tests {
                     node_id: 2,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "History: milestone: version 2.0 release with major feature improvements".to_string(),
@@ -1325,6 +1470,11 @@ mod tests {
                     node_id: 3,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "Relationship: user: collaborates with Alice on data analysis".to_string(),
@@ -1334,6 +1484,11 @@ mod tests {
                     node_id: 4,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
             ],
             metrics: RetrievalMetrics::default(),
@@ -1366,6 +1521,11 @@ mod tests {
                     node_id: 1,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "History: event: deployed to production".to_string(),
@@ -1375,6 +1535,11 @@ mod tests {
                     node_id: 2,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
                 RetrievedMemory {
                     content: "User prefers concise answers in technical discussions about programming languages".to_string(),
@@ -1384,6 +1549,11 @@ mod tests {
                     node_id: 3,
                     source_url: None,
                     chunk_id: None,
+                    // Tests exercise the inject/compact pipeline, not the
+                    // retrieval signals, so leave them absent.
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
                 },
             ],
             metrics: RetrievalMetrics::default(),
@@ -1453,6 +1623,9 @@ mod tests {
                 node_id: 1,
                 source_url: None,
                 chunk_id: None,
+                matched_by: None,
+                vector_rank: None,
+                text_rank: None,
             }],
             metrics: RetrievalMetrics::default(),
             abstention_prompt: None,

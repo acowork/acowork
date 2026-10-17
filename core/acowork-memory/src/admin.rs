@@ -230,6 +230,12 @@ pub trait MemoryAdminService: Send + Sync {
     /// `mode` ∈ `{"vector", "hybrid"}`; when `embedding` is `None` the
     /// engine falls back to text search (embedding model not ready).
     /// Returns up to `limit` records ranked by descending relevance score.
+    ///
+    /// The returned score is the **in-source RRF fused rank signal**, not a
+    /// similarity — see [`acowork_core::retrieval::FusedHit::fused_score`].
+    /// Implementations that can report per-source evidence should override
+    /// [`Self::semantic_search_detailed`]; this method is the compatibility
+    /// projection of it.
     fn semantic_search(
         &self,
         query_text: &str,
@@ -237,6 +243,48 @@ pub trait MemoryAdminService: Send + Sync {
         mode: &str,
         limit: usize,
     ) -> Vec<AdminNodeRecord>;
+
+    /// Semantic search that also reports how each hit was matched
+    /// (ADR-095 D4): `matched_by`, in-source ranks, cosine and fused rank.
+    ///
+    /// `lexical_terms` drives the BM25/FTS source and is deliberately separate
+    /// from `query_text`, which is the raw query the caller embedded (D2). An
+    /// empty term list means "the analyzer produced nothing usable" and MUST
+    /// fall back to `query_text` — never to no lexical search (D2: an analyzer
+    /// miss may not cost recall).
+    ///
+    /// Default implementation degrades to [`Self::semantic_search`] and
+    /// synthesizes text-only metadata, so a provider without a hybrid engine
+    /// still satisfies the contract honestly (`matched_by = Text`, no cosine).
+    fn semantic_search_detailed(
+        &self,
+        query_text: &str,
+        lexical_terms: &[String],
+        embedding: Option<&[f32]>,
+        mode: &str,
+        limit: usize,
+        policy: &acowork_core::retrieval::FusionPolicy,
+    ) -> Vec<(AdminNodeRecord, acowork_core::retrieval::FusedHit)> {
+        let _ = (lexical_terms, policy);
+        self.semantic_search(query_text, embedding, mode, limit)
+            .into_iter()
+            .enumerate()
+            .map(|(rank, record)| {
+                let hit = acowork_core::retrieval::FusedHit {
+                    id: record.node_id,
+                    matched_by: acowork_core::retrieval::MatchedBy::Text,
+                    vector_rank: None,
+                    text_rank: Some(rank),
+                    cosine: None,
+                    // Unknown fusion signal: this provider did not run a fused
+                    // search, so it must not imply a score it did not compute.
+                    fused_score: 0.0,
+                    fused_rank: rank,
+                };
+                (record, hit)
+            })
+            .collect()
+    }
 
     /// Get a single node's full detail by numeric ID.
     fn get_node(&self, node_id: u64) -> AdminNodeDetail;

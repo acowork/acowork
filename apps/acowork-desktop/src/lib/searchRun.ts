@@ -124,11 +124,26 @@ export interface SummaryCandidate {
     id: string;
     title: string;
     snippet: string;
+    /** How retrieval matched this hit (ADR-095 D4). Absent means the source
+     *  did not report it — treated as **unknown**, never as "text". The
+     *  Runtime validates this against an enum whitelist; an unrecognized
+     *  value is dropped rather than rendered. */
+    matchedBy?: MatchedBy;
 }
+
+/** Wire values of `acowork_core::retrieval::MatchedBy`. */
+export type MatchedBy = "vector" | "text" | "both";
 
 export interface CandidateInput {
     title: string;
     snippet: string;
+    /** Retrieval evidence from the `/search` payload (ADR-095 D4). Absent on
+     *  file/git/doc/project, which have no fusion engine. */
+    matchedBy?: MatchedBy;
+    /** In-source fused rank, 0-based. The list is already in this order. */
+    fusedRank?: number;
+    /** Dedup key: `session_id` (conversation) / `node_id` (memory). */
+    dedupKey?: string;
 }
 
 export interface CandidateSet {
@@ -140,34 +155,118 @@ export interface CandidateSet {
     indexOf: Record<string, number>;
 }
 
+/** Sources with no fusion engine: they keep their own order and a flat
+ *  per-source budget (ADR-095 D5 — "evidence from a source that cannot tell
+ *  how it matched is not demoted, it is just not promoted"). */
+const FLAT_SOURCES: readonly SearchSource[] = ["file", "git", "doc", "project"];
+/** Sources backed by the hybrid engine, so they carry retrieval evidence. */
+const FUSED_SOURCES: readonly SearchSource[] = ["memory", "conversation"];
+
+/** At most this many candidates from one conversation, so a single verbose
+ *  session cannot monopolize the summary (session diversity, design 28 §4.4). */
+export const MAX_CANDIDATES_PER_DEDUP_KEY = 2;
+
 /**
  * Budget the six hit lists into the summary candidate payload.
- * Per source: first `MAX_CANDIDATES_PER_SOURCE` rows; total capped at
- * `MAX_CANDIDATES_TOTAL` in fixed source order (file, git, doc, project,
- * memory, conversation) so the ids are stable for one run.
+ *
+ * Deterministic and threshold-free by design (ADR-095 D5): the ordering keys
+ * are the *in-source rank* the engine already computed and the evidence
+ * category, never an uncalibrated score. A fused score is not comparable
+ * across sources, so nothing here sorts by `score`.
+ *
+ * Rules:
+ * - file/git/doc/project: unchanged — source order, first
+ *   `MAX_CANDIDATES_PER_SOURCE`.
+ * - memory/conversation: server order (`fusedRank`), but within the per-source
+ *   budget a hit matched by **both** sources takes a slot ahead of a
+ *   single-source one, and a vector-only hit goes last. Rationale: two
+ *   independent signals agreeing is the only cross-source-comparable evidence
+ *   we have; vector-only matches are where an embedding miss shows up.
+ * - conversation/memory additionally cap at
+ *   `MAX_CANDIDATES_PER_DEDUP_KEY` rows per dedup key.
+ *
+ * The per-source budget is a **ceiling, not a target**: if a source has fewer
+ * eligible rows, fewer are submitted, and an empty result means the caller
+ * must not call `/search/summary` at all.
  */
-export function buildSummaryCandidates(
+export function selectSummaryCandidates(
     hitsBySource: Record<SearchSource, CandidateInput[]>,
 ): CandidateSet {
     const candidates: SummaryCandidate[] = [];
     const byId: Record<string, SearchSource> = {};
     const indexOf: Record<string, number> = {};
+
+    const push = (source: SearchSource, rowIndex: number, input: CandidateInput) => {
+        const id = `r${candidates.length + 1}`;
+        const c: SummaryCandidate = {
+            scope: source,
+            id,
+            title: truncate(input.title, MAX_TITLE_CHARS),
+            snippet: truncate(input.snippet, MAX_SNIPPET_CHARS),
+        };
+        // Only forward evidence that exists. Sending `matchedBy: undefined`
+        // would serialize as absent anyway, but omitting the key explicitly
+        // keeps the request byte-stable for tests.
+        if (input.matchedBy) c.matchedBy = input.matchedBy;
+        candidates.push(c);
+        byId[id] = source;
+        // Click-to-row needs the **list row index**, and the list is rendered
+        // in server order — so the row is the original index, not the
+        // selection order (design 28 §4.4).
+        indexOf[id] = rowIndex;
+    };
+
     for (const source of SEARCH_SOURCES) {
+        if (candidates.length >= MAX_CANDIDATES_TOTAL) break;
         const hits = hitsBySource[source] ?? [];
-        for (let i = 0; i < Math.min(hits.length, MAX_CANDIDATES_PER_SOURCE); i++) {
+
+        if (FLAT_SOURCES.includes(source)) {
+            for (let i = 0; i < Math.min(hits.length, MAX_CANDIDATES_PER_SOURCE); i++) {
+                if (candidates.length >= MAX_CANDIDATES_TOTAL) break;
+                push(source, i, hits[i]);
+            }
+            continue;
+        }
+
+        if (!FUSED_SOURCES.includes(source)) continue;
+
+        // Selection order: evidence class first, then the engine's own rank.
+        // `Array.sort` is stable, so ties keep server order without a
+        // secondary comparator inventing a tie-break the engine never had.
+        const ranked = hits
+            .map((h, i) => ({ h, i }))
+            .sort((a, b) => evidenceClass(a.h.matchedBy) - evidenceClass(b.h.matchedBy));
+
+        const perKey = new Map<string, number>();
+        let taken = 0;
+        for (const { h, i } of ranked) {
+            if (taken >= MAX_CANDIDATES_PER_SOURCE) break;
             if (candidates.length >= MAX_CANDIDATES_TOTAL) break;
-            const id = `r${candidates.length + 1}`;
-            candidates.push({
-                scope: source,
-                id,
-                title: truncate(hits[i].title, MAX_TITLE_CHARS),
-                snippet: truncate(hits[i].snippet, MAX_SNIPPET_CHARS),
-            });
-            byId[id] = source;
-            indexOf[id] = i;
+            if (h.dedupKey) {
+                const seen = perKey.get(h.dedupKey) ?? 0;
+                if (seen >= MAX_CANDIDATES_PER_DEDUP_KEY) continue;
+                perKey.set(h.dedupKey, seen + 1);
+            }
+            push(source, i, h);
+            taken++;
         }
     }
+
     return { candidates, byId, indexOf };
+}
+
+/**
+ * Selection priority inside a fused source's budget. Lower runs first.
+ *
+ * `unknown` (absent `matchedBy`) is deliberately grouped with `text`: a source
+ * that cannot report how it matched must not be penalized into never being
+ * summarized — that would turn an observability gap into a quality regression.
+ */
+function evidenceClass(matchedBy?: MatchedBy): number {
+    if (matchedBy === "both") return 0;
+    if (matchedBy === "text") return 1;
+    if (matchedBy === undefined) return 1;
+    return 2; // "vector" only
 }
 
 function truncate(s: string, max: number): string {
@@ -230,7 +329,17 @@ export async function requestSearchSummary(params: {
         partial: params.partial,
         timed_out_scopes: params.timedOutScopes,
         failed_scopes: params.failedScopes,
-        candidates: params.candidates,
+        // camelCase in TS, snake_case on the wire (same convention as
+        // timed_out_scopes above). `matchedBy` would deserialize as absent on
+        // the Runtime side, silently dropping the evidence the whole point of
+        // ADR-095 D4 is to surface.
+        candidates: params.candidates.map((c) => ({
+            id: c.id,
+            scope: c.scope,
+            title: c.title,
+            snippet: c.snippet,
+            ...(c.matchedBy ? { matched_by: c.matchedBy } : {}),
+        })),
     });
     const resp = await with503Retry(
         (sig) =>

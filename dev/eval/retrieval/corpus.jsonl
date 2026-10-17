@@ -1,0 +1,38 @@
+{"type": "memory", "label": "knowledge", "content": "Gateway MQTT broker listens on port 19875 and HTTP API on port 19876."}
+{"type": "memory", "label": "knowledge", "content": "The embedded MQTT broker is rumqttd, bound to localhost only."}
+{"type": "memory", "label": "knowledge", "content": "Gateway reverse-proxies Runtime localhost HTTP; agents never expose ports directly."}
+{"type": "memory", "label": "knowledge", "content": "ADR-009 forbids the Gateway from reading agent-private files through the filesystem."}
+{"type": "memory", "label": "knowledge", "content": "Runtime owns skills, prompts, conversations and memory; Gateway owns routing and resources."}
+{"type": "memory", "label": "knowledge", "content": "Conversation index rebuild is delete-and-recreate when the embedding dimension changes."}
+{"type": "memory", "label": "episodic", "content": "Discussed why the desktop build failed: acowork-lsp-relay was missing from the release bundle."}
+{"type": "memory", "label": "episodic", "content": "Reviewed the RRF fusion formula and settled on k=60 with per-source weights."}
+{"type": "memory", "label": "episodic", "content": "Debugged a memory_recall regression where Chinese queries returned nothing because the cosine floor was applied to the fused score."}
+{"type": "memory", "label": "episodic", "content": "Talked through why fused scores must not be shown as percentages in the UI."}
+{"type": "memory", "label": "procedural", "content": "When the user asks for a summary, reply in at most three sentences."}
+{"type": "memory", "label": "procedural", "content": "When building the Android APK, use dev/android/build_mobile.ps1 instead of tauri android init."}
+{"type": "memory", "label": "procedural", "content": "When editing a Chinese ADR, update the English counterpart in the same commit."}
+{"type": "memory", "label": "autobiographical", "content": "The user works as a software engineer and goes by 码农."}
+{"type": "memory", "label": "autobiographical", "content": "The user lives in Shanghai and works in the Asia/Shanghai timezone."}
+{"type": "memory", "label": "autobiographical", "content": "The user prefers dark mode and concise answers."}
+{"type": "memory", "label": "knowledge", "content": "网关的 MQTT 端口配置是 19875，HTTP 端口是 19876。"}
+{"type": "memory", "label": "knowledge", "content": "运行时负责会话与记忆，网关只做路由与资源管理。"}
+{"type": "memory", "label": "episodic", "content": "上次讨论了混合检索的加权排名融合，向量路与词法路各取两倍候选池。"}
+{"type": "memory", "label": "episodic", "content": "排查了全局搜索把返回顺序伪装成相似度分数的问题。"}
+{"type": "memory", "label": "procedural", "content": "当用户要求总结时，优先输出三句话以内。"}
+{"type": "memory", "label": "autobiographical", "content": "用户在杭州出生，现在常驻上海工作。"}
+{"type": "conversation", "session_id": "s-1", "message_index": 0, "role": "user", "content": "网关的 MQTT 端口是多少来着"}
+{"type": "conversation", "session_id": "s-1", "message_index": 1, "role": "assistant", "content": "Gateway 的嵌入式 MQTT broker 监听 19875，HTTP API 是 19876。"}
+{"type": "conversation", "session_id": "s-1", "message_index": 2, "role": "user", "content": "那 runtime 的端口呢"}
+{"type": "conversation", "session_id": "s-1", "message_index": 3, "role": "assistant", "content": "Runtime 只监听 localhost 随机端口，由网关反向代理。"}
+{"type": "conversation", "session_id": "s-2", "message_index": 0, "role": "user", "content": "为什么 android 打包后图标变回默认机器人了"}
+{"type": "conversation", "session_id": "s-2", "message_index": 1, "role": "assistant", "content": "因为直接跑了 tauri android init，它会重置 gen/android 里的图标；用 build_mobile.ps1。"}
+{"type": "conversation", "session_id": "s-3", "message_index": 0, "role": "user", "content": "memory search in chinese returns nothing, is the embedding broken"}
+{"type": "conversation", "session_id": "s-3", "message_index": 1, "role": "assistant", "content": "No — the cosine floor was applied to the fused RRF score, which lives in a different value range. The floor must gate the vector source only."}
+{"type": "conversation", "session_id": "s-3", "message_index": 2, "role": "user", "content": "所以中文查询受影响，英文不受影响？"}
+{"type": "conversation", "session_id": "s-3", "message_index": 3, "role": "assistant", "content": "对，因为英文查询词法命中通常足够强，融合后仍高于阈值。"}
+{"type": "conversation", "session_id": "s-4", "message_index": 0, "role": "user", "content": "总结一下这次的检索改动"}
+{"type": "conversation", "session_id": "s-4", "message_index": 1, "role": "assistant", "content": "三句话：全局搜索改用双查询，词法与向量分离；融合结果保留 matched_by 与来源内排名；摘要候选按证据类别筛选。"}
+{"type": "conversation", "session_id": "s-5", "message_index": 0, "role": "user", "content": "how do I rotate the provider api key"}
+{"type": "conversation", "session_id": "s-5", "message_index": 1, "role": "assistant", "content": "Use the vault CLI; keys are stored encrypted per agent."}
+{"type": "conversation", "session_id": "s-5", "message_index": 2, "role": "user", "content": "does the desktop app need a restart after that"}
+{"type": "conversation", "session_id": "s-5", "message_index": 3, "role": "assistant", "content": "No, the config snapshot is re-published over MQTT."}

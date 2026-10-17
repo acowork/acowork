@@ -42,6 +42,7 @@ use std::sync::{Mutex, RwLock};
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use rusqlite::{Connection, OptionalExtension, ToSql, params};
 
+use acowork_core::retrieval::{LexicalPlan, LexicalQuery};
 use acowork_memory::labels;
 use acowork_memory::quality::MemoryQualityConfig;
 use acowork_memory::{
@@ -50,6 +51,17 @@ use acowork_memory::{
 };
 
 pub use schema::{SCHEMA_SQL, SCHEMA_VERSION};
+
+/// Minimum pattern length the FTS5 `trigram` tokenizer can match. Terms
+/// shorter than this are dropped by [`SqliteStore::text_search_terms`] (and
+/// by the Runtime query analyzer, which uses the same floor so it never
+/// emits a term the executor will discard).
+pub const TRIGRAM_MIN: usize = 3;
+
+/// Defensive ceiling on the number of terms executed in one FTS query. The
+/// analyzer caps lexical terms lower than this; this exists only so a
+/// hand-built term list cannot produce an unbounded `MATCH` expression.
+pub const MAX_EXECUTED_TERMS: usize = 32;
 
 /// Convenience alias for callers that want the active number without a
 /// `schema::` import path.
@@ -834,60 +846,147 @@ impl SqliteStore {
 
     /// Text relevance ranking for `label` (ADR-082 D3).
     ///
-    /// Scores are `-bm25(...)` so larger is better, aligning with the vector
-    /// domain. FTS5's `trigram` tokenizer cannot match patterns shorter than
-    /// three characters, so those queries fall back to `LIKE` (unscored, `0.0`)
-    /// rather than silently returning nothing.
+    /// Whitespace tokenization only — the term encoding, the trigram-minimum
+    /// rule and the `LIKE` fallback all live in
+    /// [`Self::text_search_terms`], which this delegates to. Callers that have
+    /// already analyzed a query into terms (the Runtime query analyzer, ADR-095
+    /// D2) call that function directly instead of re-joining terms into a
+    /// string here.
     pub fn text_search(&self, label: &str, query: &str, k: usize) -> Result<Vec<(u64, f64)>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let terms: Vec<String> = query.split_whitespace().map(str::to_string).collect();
+        self.text_search_terms(label, &terms, k)
+    }
+
+    /// Lexical retrieval driven by a [`LexicalQuery`] — the analyzer's terms
+    /// when it produced any, otherwise the raw text.
+    ///
+    /// This exists so the fallback rule is applied by the executor rather than
+    /// re-derived at each call site (ADR-095 D2).
+    pub fn text_search_by_query(
+        &self,
+        label: &str,
+        lexical: &LexicalQuery<'_>,
+        k: usize,
+    ) -> Result<Vec<(u64, f64)>> {
+        match lexical.lexical_plan() {
+            LexicalPlan::Skip => Ok(Vec::new()),
+            LexicalPlan::Terms(terms) => self.text_search_terms(label, terms, k),
+            LexicalPlan::Raw(raw) => self.text_search(label, raw, k),
+        }
+    }
+
+    /// Lexical retrieval over **pre-tokenized, bounded terms** — the only place
+    /// in the codebase that quotes/escapes terms for FTS5 (ADR-095 D2: one
+    /// escaping implementation, so the analyzer and the executor can never
+    /// drift into two different quoting rules).
+    ///
+    /// Terms are OR-ed as quoted FTS5 phrases. Quoting is what makes this safe:
+    /// an operator inside a term (`AND`, `*`, `(`, `-`) is data, not syntax.
+    ///
+    /// Two deliberate degradations, both inherited from the pre-ADR-095
+    /// `text_search` behavior and kept because they bound cost rather than
+    /// expand it:
+    ///
+    /// * terms shorter than the `trigram` tokenizer's minimum are dropped,
+    ///   because FTS5 cannot match a pattern shorter than three characters;
+    /// * if *every* term is dropped that way (or the list is empty after the
+    ///   defensive truncation), the search falls back to a single unscored
+    ///   `LIKE` on the first term instead of returning nothing — an empty
+    ///   `MATCH ''` silently yields zero rows, which would turn a short query
+    ///   into a false "no results".
+    ///
+    /// `k` bounds the result count; the term list is defensively truncated to
+    /// [`MAX_EXECUTED_TERMS`] so an over-long analyzed query cannot amplify
+    /// into an over-long `MATCH` expression.
+    pub fn text_search_terms(
+        &self,
+        label: &str,
+        terms: &[String],
+        k: usize,
+    ) -> Result<Vec<(u64, f64)>> {
         let Some(fts) = schema::fts_table(label) else {
             return Ok(Vec::new());
         };
-        let query = query.trim();
-        if query.is_empty() || k == 0 {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+
+        let kept: Vec<String> = terms
+            .iter()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .take(MAX_EXECUTED_TERMS)
+            .map(str::to_string)
+            .collect();
+        if kept.is_empty() {
             return Ok(Vec::new());
         }
 
         let conn = self.lock();
         let mut hits = Vec::new();
-        if query.chars().count() < 3 {
-            let pattern = format!("%{}%", escape_like(query));
-            let mut stmt = conn.prepare(&format!(
-                "SELECT rowid FROM {fts} WHERE content LIKE ?1 ESCAPE '\\' LIMIT ?2"
-            ))?;
-            let rows = stmt.query_map(params![pattern, k as i64], |r| r.get::<_, i64>(0))?;
+
+        // Trigram tokenizer: a pattern shorter than three characters can never
+        // match, so those terms are dropped (and, if all of them are short,
+        // handled by the LIKE fallback below).
+        let phrases: Vec<String> = kept
+            .iter()
+            .filter(|term| term.chars().count() >= TRIGRAM_MIN)
+            .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+            .collect();
+
+        if phrases.is_empty() {
+            // Every term is shorter than the trigram minimum: FTS5 can match
+            // none of them, and an empty `MATCH ''` returns zero rows. Fall
+            // back to an OR of `LIKE` patterns so a short query still yields
+            // lexical evidence instead of a false "no results" (ADR-095 D2,
+            // "空词项退化"). Scores are unscored (`0.0`) — the fusion layer
+            // reads this list for its rank order only.
+            let patterns: Vec<String> = kept
+                .iter()
+                .map(|term| format!("%{}%", escape_like(term)))
+                .collect();
+            let clauses = vec!["content LIKE ? ESCAPE '\\'"; patterns.len()].join(" OR ");
+            let sql = format!(
+                "SELECT rowid FROM {fts} WHERE {clauses} LIMIT ?{}",
+                patterns.len() + 1
+            );
+            let limit = k as i64;
+            let mut args: Vec<&dyn rusqlite::ToSql> =
+                patterns.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+            args.push(&limit);
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(args.as_slice(), |r| r.get::<_, i64>(0))?;
             for row in rows {
                 hits.push((row? as u64, 0.0));
             }
-        } else {
-            // Quote each term as an FTS5 phrase so operators (`AND`, `*`, `(`,
-            // `-`, …) cannot leak into the MATCH expression, then OR them: the
-            // trigram tokenizer matches contiguous text, so a phrase of the
-            // whole query would demand the query appear verbatim, and a
-            // multi-word ask ("网关 route 配置") would then return almost
-            // nothing. BM25 ranks the union, matching what token-based
-            // retrieval in the previous backend did.
-            //
-            // ponytail: no shingle expansion, so a Chinese query written as one
-            // long run still needs its three-character windows to appear
-            // contiguously. Upgrade path: split CJK runs into 3-grams here if
-            // partial-phrase recall turns out to matter.
-            let terms: Vec<String> = query
-                .split_whitespace()
-                .filter(|term| term.chars().count() >= 3)
-                .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-                .collect();
-            let phrase = terms.join(" OR ");
-            let mut stmt = conn.prepare(&format!(
-                "SELECT rowid, -bm25({fts}) FROM {fts} WHERE {fts} MATCH ?1 \
-                 ORDER BY bm25({fts}) LIMIT ?2"
-            ))?;
-            let rows = stmt.query_map(params![phrase, k as i64], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
-            })?;
-            for row in rows {
-                let (id, score) = row?;
-                hits.push((id as u64, score));
-            }
+            return Ok(hits);
+        }
+
+        // OR the phrases: the trigram tokenizer matches contiguous text, so a
+        // single phrase of the whole query would demand the query appear
+        // verbatim and a multi-word ask ("网关 route 配置") would return almost
+        // nothing. BM25 ranks the union.
+        //
+        // ponytail: no shingle expansion, so a Chinese query written as one
+        // long run still needs its three-character windows to appear
+        // contiguously. Upgrade path: split CJK runs into 3-grams in the
+        // analyzer (`CjkStrategy::Trigram`) if partial-phrase recall turns out
+        // to matter — measured first, per ADR-095 §9.2.
+        let phrase = phrases.join(" OR ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT rowid, -bm25({fts}) FROM {fts} WHERE {fts} MATCH ?1 \
+             ORDER BY bm25({fts}) LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![phrase, k as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+        })?;
+        for row in rows {
+            let (id, score) = row?;
+            hits.push((id as u64, score));
         }
         Ok(hits)
     }

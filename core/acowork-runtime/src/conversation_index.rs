@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use acowork_core::retrieval::{FusionPolicy, LexicalQuery, MatchedBy};
 use acowork_sqlite::conversation::ConversationStore;
 
 use crate::conversation::ConversationEntry;
@@ -32,7 +33,25 @@ pub struct ConversationHit {
     pub message_index: usize,
     pub role: String,
     pub content: String,
+    /// In-source RRF fused rank signal, **not** a similarity (design 28 §4.1).
+    /// Only comparable against other conversation hits.
     pub score: f64,
+    /// Which retrieval source(s) produced this hit (ADR-095 D4). `None` on the
+    /// legacy path that cannot report it.
+    pub matched_by: Option<MatchedBy>,
+    /// 1-based rank in the vector pool, when the vector source contributed.
+    pub vector_rank: Option<usize>,
+    /// 1-based rank in the BM25 pool, when the lexical source contributed.
+    pub text_rank: Option<usize>,
+    /// Raw cosine of the vector hit, when the vector source contributed.
+    /// Kept for evaluation and for the summary prompt's evidence wording; not a
+    /// ranking key.
+    pub cosine: Option<f64>,
+    /// Position in this source's returned list, when the engine reports it.
+    /// This is the key the UI renders by (ADR-095 D4: order comes from the
+    /// engine, not from `score`). `None` on the legacy path, which has no
+    /// fusion to rank.
+    pub fused_rank: Option<usize>,
 }
 
 /// The conversation vector index + per-session watermark.
@@ -188,10 +207,54 @@ impl ConversationIndex {
                     role: h.role,
                     content: h.content,
                     score: h.score,
+                    matched_by: None,
+                    vector_rank: None,
+                    text_rank: None,
+                    cosine: None,
+                    fused_rank: None,
                 })
                 .collect(),
             Err(e) => {
                 tracing::warn!(error = %e, "conversation index search failed");
+                Vec::new()
+            }
+        }
+    }
+
+    /// [`Self::search`] plus the per-source evidence that global search needs
+    /// for summary-candidate selection (ADR-095 D4, design 28 §4.2).
+    ///
+    /// `lexical_terms` drives the BM25 source; `query_text` is what the caller
+    /// embedded. An empty term list falls back to `query_text` inside the
+    /// engine, so an analyzer miss cannot cost recall (D2).
+    pub fn search_detailed(
+        &self,
+        lexical: &LexicalQuery<'_>,
+        embedding: Option<&[f32]>,
+        k: usize,
+        policy: &FusionPolicy,
+    ) -> Vec<ConversationHit> {
+        match self
+            .store
+            .search_detailed(lexical, embedding, k, policy)
+        {
+            Ok(hits) => hits
+                .into_iter()
+                .map(|(h, fused)| ConversationHit {
+                    session_id: h.session_id,
+                    message_index: h.message_index,
+                    role: h.role,
+                    content: h.content,
+                    score: fused.fused_score,
+                    matched_by: Some(fused.matched_by),
+                    vector_rank: fused.vector_rank,
+                    text_rank: fused.text_rank,
+                    cosine: fused.cosine,
+                    fused_rank: Some(fused.fused_rank),
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "conversation index detailed search failed");
                 Vec::new()
             }
         }

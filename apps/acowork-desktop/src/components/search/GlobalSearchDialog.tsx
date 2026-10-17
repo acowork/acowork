@@ -58,7 +58,7 @@ import { CopyButton } from "../common/CopyButton";
 import { PreviewPane } from "./PreviewPane";
 import {
     runSearchSources,
-    buildSummaryCandidates,
+    selectSummaryCandidates,
     requestSearchSummary,
     parseSummarySegments,
     SEARCH_SOURCES,
@@ -766,7 +766,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             const failedScopes = SEARCH_SOURCES.filter((s) => results[s].status === "error");
             const partial = timedOutScopes.length > 0 || failedScopes.length > 0;
             // RowHit carries title/snippet — directly the candidate shape.
-            const set = buildSummaryCandidates(rowsRef.current);
+            const set = selectSummaryCandidates(rowsRef.current);
             candidateRef.current = set;
             // ── Summary candidates are FROZEN here, but never called.
             // The LLM call is opt-in: the search lands on `phase: "done"`

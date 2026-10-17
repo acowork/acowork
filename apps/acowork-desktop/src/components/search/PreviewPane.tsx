@@ -474,8 +474,24 @@ function MemoryPreview({ hit, agentId }: { hit: MemoryHit; agentId: string }) {
         };
     }, [agentId, hit.nodeId, fetchNode]);
 
-    if (loading || !node) {
+    if (loading) {
         return <PreviewLoading icon={Brain} label={hit.sub} />;
+    }
+    // A resolved-but-absent node is not "still loading". `fetchNode` returns
+    // null on any error, and folding that into the loading branch turned every
+    // detail-fetch failure (including a missing locate id) into an endless
+    // spinner with nothing to read. Fall back to what the search result already
+    // carries so the user sees the snippet and why it is not the full node.
+    if (!node) {
+        return (
+            <PreviewEmpty
+                icon={Brain}
+                title={hit.title}
+                sub={hit.sub}
+                snippet={hit.snippet}
+                footer="未能读取该记忆节点的详情（节点可能已被合并或删除，或搜索结果缺少定位信息）"
+            />
+        );
     }
 
     // Show the node's content (the main thing) + a compact dl with the

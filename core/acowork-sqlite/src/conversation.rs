@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use acowork_core::retrieval::{FusedHit, FusionPolicy, LexicalQuery, MatchedBy};
+
 use crate::{Result, SqliteStore};
 
 /// Label for every indexed conversation-message node (unchanged from grafeo).
@@ -36,10 +38,23 @@ pub const STORE_FILE: &str = "conversation_index.sqlite";
 pub const MAX_INDEX_CONTENT: usize = 4_000;
 
 /// Cosine floor applied to the vector source of a hybrid conversation search
-/// (ADR-082 D5). Same default as the memory retrieval path: below this an
-/// "orthogonal" neighbour is noise, not a hit — but the floor gates the vector
-/// source *only*, so a keyword hit whose embedding is far still comes back.
+/// (ADR-082 D5). Kept as a named constant for callers that document the
+/// behaviour; the *effective* value lives in
+/// [`FusionPolicy::CONVERSATION_BASELINE`] so the policy and this note cannot
+/// drift apart. Below the floor an "orthogonal" neighbour is noise, not a hit
+/// — but the floor gates the vector source *only*, so a keyword hit whose
+/// embedding is far still comes back (ADR-095 D3).
 pub const DEFAULT_MIN_COSINE: f32 = 0.3;
+
+// The named constant above is documentation; the constant below is behaviour.
+// If they ever disagree, the conversation scope silently changes its gate.
+const _: () = assert!(
+    matches!(
+        FusionPolicy::CONVERSATION_BASELINE.min_cosine,
+        Some(v) if v == DEFAULT_MIN_COSINE
+    ),
+    "DEFAULT_MIN_COSINE and FusionPolicy::CONVERSATION_BASELINE.min_cosine drifted"
+);
 
 /// One ranked conversation hit.
 #[derive(Debug, Clone, PartialEq)]
@@ -280,39 +295,95 @@ impl ConversationStore {
     ///
     /// A missing embedding degrades to text-only rather than failing: the
     /// embedding provider is a remote service and is not always reachable.
+    ///
+    /// Compatibility wrapper over [`Self::search_detailed`] with today's
+    /// production policy ([`FusionPolicy::CONVERSATION_BASELINE`]).
     pub fn search(
         &self,
         query_text: &str,
         embedding: Option<&[f32]>,
         k: usize,
     ) -> Result<Vec<ConversationHit>> {
-        let hits = match embedding {
-            Some(emb) => self.store.hybrid_search_full(
-                LABEL,
-                query_text,
-                emb,
+        Ok(self
+            .search_detailed(
+                &LexicalQuery::raw_only(query_text),
+                embedding,
                 k,
-                1.0,
-                1.0,
-                Some(DEFAULT_MIN_COSINE),
+                &FusionPolicy::CONVERSATION_BASELINE,
+            )?
+            .into_iter()
+            .map(|(hit, _)| hit)
+            .collect())
+    }
+
+    /// Conversation retrieval with the per-source signals ADR-095 D4 requires.
+    ///
+    /// Shares the one fusion engine with the memory paths
+    /// ([`SqliteStore::hybrid_search_detailed`]); only the default policy
+    /// differs. `min_cosine` gates the **vector source only**, so an exact
+    /// keyword hit whose embedding sits far away still comes back (D3) — that
+    /// is why the existing 0.3 floor is kept rather than removed.
+    ///
+    /// `lexical` carries the raw query (what was embedded) separately from the
+    /// analyzed terms (what FTS runs), so a full natural language sentence can
+    /// drive cosine while precise terms drive the lexical source (D2).
+    pub fn search_detailed(
+        &self,
+        lexical: &LexicalQuery<'_>,
+        embedding: Option<&[f32]>,
+        k: usize,
+        policy: &FusionPolicy,
+    ) -> Result<Vec<(ConversationHit, FusedHit)>> {
+        let fused = match embedding {
+            Some(emb) => self.store.hybrid_search_detailed(
+                LABEL,
+                lexical,
+                Some(emb),
+                k,
+                &FusionPolicy {
+                    min_cosine: policy.min_cosine,
+                    ..*policy
+                },
             )?,
-            None => self.store.text_search(LABEL, query_text, k)?,
+            // No embedding: the vector source did not run, so every hit is
+            // lexical and no cosine floor applies.
+            None => self
+                .store
+                .text_search_by_query(LABEL, lexical, k)?
+                .into_iter()
+                .enumerate()
+                .map(|(fused_rank, (id, score))| {
+                    FusedHit {
+                        id,
+                        matched_by: MatchedBy::Text,
+                        vector_rank: None,
+                        text_rank: Some(fused_rank),
+                        cosine: None,
+                        fused_score: score,
+                        fused_rank,
+                    }
+                })
+                .collect(),
         };
-        let mut out = Vec::with_capacity(hits.len());
-        for (id, score) in hits {
-            let Some(props) = self.store.load_props(id, LABEL)? else {
+
+        let mut out = Vec::with_capacity(fused.len());
+        for f in fused {
+            let Some(props) = self.store.load_props(f.id, LABEL)? else {
                 continue;
             };
             let Ok(p) = serde_json::from_str::<MessageProps>(&props) else {
                 continue;
             };
-            out.push(ConversationHit {
-                session_id: p.session_id,
-                message_index: p.message_index.max(0) as usize,
-                role: p.role,
-                content: p.content,
-                score,
-            });
+            out.push((
+                ConversationHit {
+                    session_id: p.session_id,
+                    message_index: p.message_index.max(0) as usize,
+                    role: p.role,
+                    content: p.content,
+                    score: f.fused_score,
+                },
+                f,
+            ));
         }
         Ok(out)
     }

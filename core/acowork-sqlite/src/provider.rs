@@ -365,6 +365,26 @@ impl MemoryProvider for SqliteStore {
         )?)
     }
 
+    /// Real per-source signals: delegates to the shared engine's detailed form
+    /// instead of the trait's degraded default (ADR-095 D4).
+    fn hybrid_search_detailed(
+        &self,
+        label: &str,
+        lexical: &acowork_core::retrieval::LexicalQuery<'_>,
+        embedding: &[f32],
+        k: usize,
+        policy: &acowork_core::retrieval::FusionPolicy,
+    ) -> AcoworkResult<Vec<acowork_core::retrieval::FusedHit>> {
+        Ok(SqliteStore::hybrid_search_detailed(
+            self,
+            label,
+            lexical,
+            Some(embedding),
+            k,
+            policy,
+        )?)
+    }
+
     fn text_search_with_filter(
         &self,
         label: &str,

@@ -673,6 +673,85 @@ fn hybrid_keeps_lexical_hit_whose_embedding_is_far() {
     }
 }
 
+/// ADR-095 D2: analyzed terms drive FTS **as terms**, not as re-split text.
+///
+/// The regression this guards is subtle: if the engine joined terms back into
+/// a string and re-split it, a multi-word term (or a CJK bigram) would be
+/// tokenized twice and the analyzer's work would be silently undone. Here the
+/// term list is deliberately one that whitespace splitting could not produce.
+#[test]
+fn hybrid_uses_analyzed_terms_instead_of_resplitting_raw() {
+    let store = store();
+
+    let mut a = episode("rust borrow checker lifetime rules");
+    a.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    let id_a = store.store_episode(&a).unwrap();
+
+    let mut b = episode("tokio scheduler task budget");
+    b.embedding = Some(vec![0.0, 1.0, 0.0, 0.0]);
+    let id_b = store.store_episode(&b).unwrap();
+
+    // Raw text mentions neither word in a splittable form; the analyzer hands
+    // over exact terms that only match `b`.
+    let terms = vec!["tokio".to_string(), "scheduler".to_string()];
+    let hits = store
+        .hybrid_search_detailed(
+            labels::EPISODIC,
+            &acowork_core::retrieval::LexicalQuery { raw: "zzz-unanalyzable", terms: &terms },
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            10,
+            &acowork_core::retrieval::FusionPolicy::SEMANTIC_4TO1,
+        )
+        .unwrap();
+
+    let ids: Vec<u64> = hits.iter().map(|h| h.id).collect();
+    assert!(ids.contains(&id_b), "analyzed terms did not reach FTS: {ids:?}");
+
+    // SEMANTIC_4TO1 has no cosine floor, so the vector source ranks *every*
+    // node and `matched_by` alone cannot show which source did the work.
+    // `text_rank` is the honest discriminator: it exists only if FTS returned
+    // the id, and FTS ran on the analyzer's terms and nothing else.
+    let by_id = |id| hits.iter().find(|h| h.id == id).unwrap();
+    assert!(
+        by_id(id_b).text_rank.is_some(),
+        "analyzed terms did not reach FTS"
+    );
+    assert!(
+        by_id(id_a).text_rank.is_none(),
+        "raw fallback leaked into the lexical source"
+    );
+}
+
+/// The fallback half of D2: no terms ⇒ the raw text drives FTS.
+#[test]
+fn hybrid_falls_back_to_raw_when_analyzer_produced_nothing() {
+    let store = store();
+
+    let mut a = episode("kafka consumer group rebalance");
+    a.embedding = Some(vec![0.0, 1.0, 0.0, 0.0]);
+    let id_a = store.store_episode(&a).unwrap();
+
+    // `raw_only` is what every pre-ADR-095 caller now maps to.
+    let hits = store
+        .hybrid_search_detailed(
+            labels::EPISODIC,
+            &acowork_core::retrieval::LexicalQuery::raw_only("kafka rebalance"),
+            Some(&[1.0, 0.0, 0.0, 0.0]),
+            10,
+            &acowork_core::retrieval::FusionPolicy::SEMANTIC_4TO1,
+        )
+        .unwrap();
+    let ids: Vec<u64> = hits.iter().map(|h| h.id).collect();
+    assert!(ids.contains(&id_a), "raw fallback lost recall: {ids:?}");
+    // The raw text matched, which is the entire point of the fallback. The hit
+    // also carries a vector rank because the memory policy gates nothing —
+    // asserting `matched_by == Text` here would encode the wrong floor.
+    assert!(
+        hits.iter().find(|h| h.id == id_a).unwrap().text_rank.is_some(),
+        "raw fallback produced no lexical evidence"
+    );
+}
+
 /// A hit found by *both* sources must outrank a hit found by only one.
 #[test]
 fn hybrid_ranks_dual_source_hit_first() {

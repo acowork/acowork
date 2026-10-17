@@ -81,6 +81,7 @@ pub mod protocol;
 pub mod providers;
 pub mod rag;
 pub mod relay;
+pub mod retrieval;
 pub mod shutdown;
 pub mod supervisor;
 pub mod timeout_config;

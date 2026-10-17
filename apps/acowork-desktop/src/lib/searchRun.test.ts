@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import {
     runSearchSources,
-    buildSummaryCandidates,
+    selectSummaryCandidates,
     parseSummarySegments,
     SEARCH_SOURCES,
     type CandidateInput,
@@ -99,9 +99,20 @@ describe("runSearchSources", () => {
     });
 });
 
-describe("buildSummaryCandidates", () => {
+describe("selectSummaryCandidates", () => {
     const rows = (n: number, prefix: string): CandidateInput[] =>
         Array.from({ length: n }, (_, i) => ({ title: `${prefix}-${i}`, snippet: `s${i}` }));
+
+    const fused = (
+        n: number,
+        prefix: string,
+        evidence: (i: number) => Partial<CandidateInput>,
+    ): CandidateInput[] =>
+        Array.from({ length: n }, (_, i) => ({
+            title: `${prefix}-${i}`,
+            snippet: `s${i}`,
+            ...evidence(i),
+        }));
 
     it("caps per source at 5 and numbers ids r1.. in fixed source order", () => {
         const hits = {
@@ -112,7 +123,7 @@ describe("buildSummaryCandidates", () => {
             memory: rows(5, "m"),
             conversation: rows(1, "c"),
         } as Record<SearchSource, CandidateInput[]>;
-        const set = buildSummaryCandidates(hits);
+        const set = selectSummaryCandidates(hits);
         expect(set.candidates.map((c) => c.id)).toEqual([
             "r1", "r2", "r3", "r4", "r5", // file (capped at 5)
             "r6", "r7", "r8", // git
@@ -129,7 +140,7 @@ describe("buildSummaryCandidates", () => {
         const hits = Object.fromEntries(
             SEARCH_SOURCES.map((s) => [s, rows(10, s)]),
         ) as Record<SearchSource, CandidateInput[]>;
-        const set = buildSummaryCandidates(hits);
+        const set = selectSummaryCandidates(hits);
         expect(set.candidates).toHaveLength(30);
     });
 
@@ -138,10 +149,87 @@ describe("buildSummaryCandidates", () => {
             file: [{ title: "字".repeat(300), snippet: "x".repeat(900) }],
             git: [], doc: [], project: [], memory: [], conversation: [],
         } as Record<SearchSource, CandidateInput[]>;
-        const [c] = buildSummaryCandidates(hits).candidates;
+        const [c] = selectSummaryCandidates(hits).candidates;
         expect(Array.from(c.title).length).toBeLessThanOrEqual(200);
         expect(Array.from(c.snippet).length).toBeLessThanOrEqual(500);
         expect(c.title.endsWith("…")).toBe(true);
+    });
+
+    it("prefers both-source evidence inside a source budget", () => {
+        // Server order puts the vector-only hit first; selection must still
+        // promote the hit two independent signals agreed on.
+        const hits = {
+            file: [], git: [], doc: [], project: [],
+            conversation: [],
+            memory: fused(3, "m", (i) =>
+                i === 0
+                    ? { matchedBy: "vector", fusedRank: 0 }
+                    : { matchedBy: "both", fusedRank: i },
+            ),
+        } as Record<SearchSource, CandidateInput[]>;
+        const set = selectSummaryCandidates(hits);
+        expect(set.candidates.map((c) => c.title)).toEqual(["m-1", "m-2", "m-0"]);
+        // ...and each citation still points at its own rendered row.
+        expect(set.indexOf).toEqual({ r1: 1, r2: 2, r3: 0 });
+    });
+
+    it("orders vector-only matches after text and both", () => {
+        const hits = {
+            file: [], git: [], doc: [], project: [], memory: [],
+            conversation: fused(3, "c", (i) => ({
+                matchedBy: (["vector", "text", "both"] as const)[i],
+                fusedRank: i,
+            })),
+        } as Record<SearchSource, CandidateInput[]>;
+        const set = selectSummaryCandidates(hits);
+        expect(set.candidates.map((c) => c.title)).toEqual(["c-2", "c-1", "c-0"]);
+    });
+
+    it("treats missing evidence as unknown and never demotes it", () => {
+        // A provider that cannot report matched_by must not lose its slot to a
+        // vector-only match: an observability gap is not a relevance signal.
+        const hits = {
+            file: [], git: [], doc: [], project: [], memory: [],
+            conversation: fused(2, "c", (i) =>
+                i === 0 ? {} : { matchedBy: "vector" },
+            ),
+        } as Record<SearchSource, CandidateInput[]>;
+        const set = selectSummaryCandidates(hits);
+        expect(set.candidates[0].title).toBe("c-0");
+        expect(set.candidates[0].matchedBy).toBeUndefined();
+    });
+
+    it("caps candidates per dedup key so one session cannot monopolize", () => {
+        const hits = {
+            file: [], git: [], doc: [], project: [], memory: [],
+            conversation: fused(6, "c", (i) => ({
+                dedupKey: i % 2 === 0 ? "session-A" : "session-B",
+                fusedRank: i,
+            })),
+        } as Record<SearchSource, CandidateInput[]>;
+        const set = selectSummaryCandidates(hits);
+        expect(set.candidates).toHaveLength(4);
+        expect(set.candidates.map((c) => c.title)).toEqual(["c-0", "c-1", "c-2", "c-3"]);
+    });
+
+    it("forwards matchedBy only when the source reported it", () => {
+        const hits = {
+            file: [{ title: "f", snippet: "s" }],
+            git: [], doc: [], project: [], memory: [],
+            conversation: [{ title: "c", snippet: "s", matchedBy: "both" }],
+        } as Record<SearchSource, CandidateInput[]>;
+        const set = selectSummaryCandidates(hits);
+        expect("matchedBy" in set.candidates[0]).toBe(false);
+        expect(set.candidates[1].matchedBy).toBe("both");
+    });
+
+    it("submits fewer than the budget when sources are thin (ceiling, not target)", () => {
+        const hits = {
+            file: rows(1, "f"), git: [], doc: [], project: [],
+            memory: rows(2, "m"), conversation: [],
+        } as Record<SearchSource, CandidateInput[]>;
+        const set = selectSummaryCandidates(hits);
+        expect(set.candidates).toHaveLength(3);
     });
 });
 

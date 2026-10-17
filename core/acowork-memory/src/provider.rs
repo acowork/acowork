@@ -203,6 +203,52 @@ pub trait MemoryProvider: Send + Sync {
         min_cosine: Option<f32>,
     ) -> Result<Vec<(u64, f64)>>;
 
+    /// Hybrid retrieval that keeps the per-source signals ADR-095 D4 requires
+    /// (`matched_by`, in-source rank, cosine, fused rank).
+    ///
+    /// `lexical_query` drives the BM25/FTS source and `embedding` drives the
+    /// cosine source; they are separate inputs so a sentence can be embedded
+    /// while analyzed terms drive the lexical side (D2).
+    ///
+    /// The default implementation degrades honestly: it runs
+    /// [`Self::hybrid_search_full`] and reports `matched_by = Text` with no
+    /// cosine, because a provider that does not keep per-source pools genuinely
+    /// does not know which source matched. Callers must therefore treat
+    /// `matched_by` from a default-impl provider as **absent evidence**, not as
+    /// a classification — which is why the summary-candidate rules rank
+    /// `both`/`text` above `vector`-only rather than trusting the label alone.
+    fn hybrid_search_detailed(
+        &self,
+        label: &str,
+        lexical: &acowork_core::retrieval::LexicalQuery<'_>,
+        embedding: &[f32],
+        k: usize,
+        policy: &acowork_core::retrieval::FusionPolicy,
+    ) -> Result<Vec<acowork_core::retrieval::FusedHit>> {
+        Ok(self
+            .hybrid_search_full(
+                label,
+                lexical.raw,
+                embedding,
+                k,
+                policy.text_weight,
+                policy.vector_weight,
+                policy.min_cosine,
+            )?
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (id, score))| acowork_core::retrieval::FusedHit {
+                id,
+                matched_by: acowork_core::retrieval::MatchedBy::Text,
+                vector_rank: None,
+                text_rank: Some(rank),
+                cosine: None,
+                fused_score: score,
+                fused_rank: rank,
+            })
+            .collect())
+    }
+
     /// Pure text retrieval with label filter. No score threshold: BM25 scores
     /// have no cross-corpus absolute meaning (they drift with corpus size and
     /// average document length), so only their ranking is meaningful.

@@ -27,18 +27,16 @@
 //!     persistence boundary
 
 /// Maximum number of characters a single keyword may have (rule 1).
-pub const MAX_KEYWORD_CHARS: usize = 30;
+///
+/// Aliased from [`acowork_core::retrieval::MAX_TERM_CHARS`] rather than
+/// restated: the query-time analyzer (ADR-095 D2) enforces the same limit on
+/// the other side of the index, and two numbers that must agree but are
+/// written twice eventually stop agreeing.
+pub const MAX_KEYWORD_CHARS: usize = acowork_core::retrieval::MAX_TERM_CHARS;
 
 /// Maximum number of keywords kept per node (rule 6).
 pub const MAX_KEYWORDS_PER_NODE: usize = 8;
 
-/// Common no-op tokens that never help retrieval (rule 5).
-const STOPWORDS: &[&str] = &[
-    "the", "a", "user", "fact", "memory", "note", "info", "data", "thing",
-    "item", "stuff", "kind", "type", "way", "something", "anything",
-    "everything", "one", "two", "three", "yes", "no", "ok", "okay", "um",
-    "uh", "hmm", "oh", "ah", "wow",
-];
 
 /// Per-rule drop counters for observability (`memory_write_keyword_gate`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -112,8 +110,8 @@ pub fn sanitize_with_stats(input: Vec<String>) -> (Vec<String>, SanitizeStats) {
             continue;
         }
 
-        // Rule 5: stopword filter.
-        if STOPWORDS.contains(&lowered.as_str()) {
+        // Rule 5: stopword filter (shared table: acowork_core::retrieval::STOPWORDS).
+        if acowork_core::retrieval::is_stopword(&lowered) {
             stats.dropped_stopword += 1;
             continue;
         }

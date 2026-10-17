@@ -40,10 +40,18 @@ pub struct MemoryNodeQuery {
 /// through; when it is `None` the engine falls back to BM25 text search.
 #[derive(Debug, Clone, Default)]
 pub struct SemanticMemoryQuery {
+    /// Query text as written. This is what gets embedded for the vector source.
     pub query_text: String,
     pub mode: String,
     pub limit: usize,
     pub embedding: Option<Vec<f32>>,
+    /// Pre-analyzed terms driving the lexical source (ADR-095 D2).
+    ///
+    /// Empty means "no analyzer output" and falls back to `query_text` inside
+    /// the engine — an analyzer miss must never cost recall. Kept on the query
+    /// rather than a side parameter so the dual query travels as one unit and
+    /// cannot be paired with the wrong raw text at a call site.
+    pub lexical_terms: Vec<String>,
 }
 
 /// Lightweight memory node for list responses.
@@ -76,6 +84,79 @@ pub struct MemoryNodeListResponse {
     pub page: u32,
     pub size: u32,
     pub model_dim: u64,
+}
+
+/// A memory node plus how the retrieval engine matched it (ADR-095 D4).
+///
+/// `evidence` is `None` when the answering provider cannot report per-source
+/// signals — deliberately nullable here even though the engine-level
+/// [`acowork_core::retrieval::FusedHit`] always knows, because the honest
+/// statement for "did not compute" is absence, not a guess.
+#[derive(Debug, Clone)]
+pub struct ScoredMemoryNode {
+    pub node: MemoryNode,
+    pub evidence: Option<RetrievalEvidence>,
+}
+
+/// Per-source retrieval signals for one hit.
+///
+/// Ranks are **in-source** (position inside each candidate pool), not
+/// comparable across sources; `fused_score` is the in-source RRF signal and
+/// must not be presented as a similarity.
+#[derive(Debug, Clone)]
+pub struct RetrievalEvidence {
+    pub matched_by: acowork_core::retrieval::MatchedBy,
+    pub vector_rank: Option<usize>,
+    pub text_rank: Option<usize>,
+    pub cosine: Option<f64>,
+    pub fused_score: f64,
+    /// `None` when the answering source has no fusion to rank (the legacy
+    /// single-path search).
+    pub fused_rank: Option<usize>,
+}
+
+impl RetrievalEvidence {
+    /// The **whitelisted** client-facing projection of these signals.
+    ///
+    /// Lives on the type rather than at each call site on purpose: `cosine` and
+    /// `fused_score` must not reach the list payload (design 28 §4.2 — a cosine
+    /// in a UI payload gets rendered as a confidence percentage, and this one
+    /// is not calibrated). Putting the projection here means adding a field to
+    /// the struct does not silently publish it to Desktop.
+    ///
+    /// Absent signals are omitted, not emitted as `null`: a consumer reading
+    /// `matched_by` then sees "unknown" instead of inventing a category.
+    pub fn to_payload(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        self.write_into(&mut map);
+        serde_json::Value::Object(map)
+    }
+
+    /// Merge the evidence keys into an existing scope payload.
+    ///
+    /// Evidence is **additive**: a hit is only actionable if the UI keeps its
+    /// locate keys (`node_id`, `session_id`, ...). Building the evidence object
+    /// and assigning it as the whole payload silently drops those, which is why
+    /// this helper exists and why every scope uses it.
+    pub fn merge_into(&self, payload: &mut serde_json::Map<String, serde_json::Value>) {
+        self.write_into(payload);
+    }
+
+    fn write_into(&self, map: &mut serde_json::Map<String, serde_json::Value>) {
+        map.insert(
+            "matched_by".to_string(),
+            serde_json::json!(self.matched_by),
+        );
+        if let Some(r) = self.vector_rank {
+            map.insert("vector_rank".to_string(), serde_json::json!(r));
+        }
+        if let Some(r) = self.text_rank {
+            map.insert("text_rank".to_string(), serde_json::json!(r));
+        }
+        if let Some(r) = self.fused_rank {
+            map.insert("fused_rank".to_string(), serde_json::json!(r));
+        }
+    }
 }
 
 /// Memory store statistics.
@@ -167,6 +248,34 @@ pub trait MemoryQueryService: Send + Sync {
         query: &SemanticMemoryQuery,
     ) -> Result<MemoryNodeListResponse>;
 
+    /// Semantic search that keeps the retrieval evidence with each hit
+    /// (ADR-095 D4). Global search uses this to choose summary candidates,
+    /// which are selected from `matched_by` and in-source rank rather than
+    /// from the fused score alone.
+    ///
+    /// `lexical_terms` drives the FTS source and is deliberately separate from
+    /// the embedded `query.query_text` (D2); an empty list falls back to the
+    /// raw text inside the engine.
+    ///
+    /// The default implementation projects [`Self::semantic_search`] and
+    /// reports **no** evidence (`evidence: None`) rather than guessing one: a
+    /// provider without a hybrid engine must not claim it fused two sources.
+    /// Callers that require signals should treat `None` as "this source cannot
+    /// tell me how it matched".
+    async fn semantic_search_detailed(
+        &self,
+        query: &SemanticMemoryQuery,
+        policy: &acowork_core::retrieval::FusionPolicy,
+    ) -> Result<Vec<ScoredMemoryNode>> {
+        let _ = policy;
+        let resp = self.semantic_search(query).await?;
+        Ok(resp
+            .nodes
+            .into_iter()
+            .map(|node| ScoredMemoryNode { node, evidence: None })
+            .collect())
+    }
+
     /// Get a single node by id.
     async fn get_node(&self, node_id: u64) -> Result<serde_json::Value>;
 
@@ -231,4 +340,53 @@ pub struct CreateMemoryNodeInput {
     pub label: String,
     /// Flat key→JSON property map. Empty map is allowed.
     pub properties: HashMap<String, serde_json::Value>,
+}
+
+#[cfg(test)]
+mod retrieval_evidence_tests {
+    use super::*;
+    use acowork_core::retrieval::MatchedBy;
+
+    fn evidence() -> RetrievalEvidence {
+        RetrievalEvidence {
+            matched_by: MatchedBy::Both,
+            vector_rank: Some(1),
+            text_rank: Some(0),
+            cosine: Some(0.72),
+            fused_score: 0.032,
+            fused_rank: Some(0),
+        }
+    }
+
+    /// The payload is locate keys *plus* evidence, never evidence *instead of*
+    /// locate keys. Dropping `node_id` made every memory preview fetch node 0
+    /// and spin forever, so this is a regression guard, not a shape preference.
+    #[test]
+    fn merge_into_adds_evidence_without_touching_locate_keys() {
+        let mut payload = serde_json::Map::new();
+        payload.insert("node_id".to_string(), serde_json::json!(42u64));
+        payload.insert("node_type".to_string(), serde_json::json!("Knowledge"));
+        payload.insert("sub_type".to_string(), serde_json::json!(null));
+
+        evidence().merge_into(&mut payload);
+
+        assert_eq!(payload.get("node_id").and_then(|v| v.as_u64()), Some(42));
+        assert_eq!(payload.get("node_type").and_then(|v| v.as_str()), Some("Knowledge"));
+        assert!(payload.contains_key("sub_type"), "sub_type must survive, even as null");
+        assert_eq!(payload.get("matched_by").and_then(|v| v.as_str()), Some("both"));
+        assert_eq!(payload.get("fused_rank").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    /// Cosine stays out of the merged payload for the same reason it stays out
+    /// of `to_payload`: an uncalibrated similarity must not reach the UI.
+    #[test]
+    fn merge_into_does_not_expose_cosine() {
+        let mut payload = serde_json::Map::new();
+        payload.insert("node_id".to_string(), serde_json::json!(7u64));
+        evidence().merge_into(&mut payload);
+        assert!(
+            !payload.contains_key("cosine"),
+            "cosine must not be published to the list payload"
+        );
+    }
 }
