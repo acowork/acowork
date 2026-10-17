@@ -958,6 +958,9 @@ export function WorkspaceExplorer() {
                                             onMouseDown={(e) => e.preventDefault()}
                                             onMouseEnter={() => setFocusedIdx(idx)}
                                             onClick={() => handleSearchSelect(f.relPath)}
+                                            // Names truncate on narrow panes, so the
+                                            // full path stays reachable on hover.
+                                            title={f.relPath}
                                             className={cn(
                                                 "group flex items-center gap-2 px-3 py-1.5 transition-colors cursor-pointer",
                                                 focused
@@ -968,10 +971,41 @@ export function WorkspaceExplorer() {
                                             <div className="h-3.5 w-3.5 shrink-0 flex items-center justify-center">
                                                 <SetiIcon {...getFileIcon(f.name)} size={14} />
                                             </div>
-                                            <span className="shrink-0 text-xs text-text-secondary ">
+                                            {/* The trailing action button must stay
+                                                pinned to the END OF THE ROW, not to
+                                                the end of the file name.
+
+                                                Why the previous classes broke that:
+                                                the name was `shrink-0`, so a long
+                                                name could never shrink below its
+                                                content width and pushed the row
+                                                wider than the pane. A `shrink-0`
+                                                item does not shrink below content
+                                                width, so the dir span absorbed
+                                                the squeeze down to 0 and `ml-auto`
+                                                on the button had no free space to
+                                                consume — the button rode out past
+                                                the name and only reappeared once
+                                                the pane was wide enough.
+
+                                                Contract that fixes it (shrink
+                                                factors decide who yields):
+                                                  name  shrink-[3] — yields 3x
+                                                        faster than the dir, so the
+                                                        identifying name survives
+                                                        longest, but still yields.
+                                                  dir   shrink (1)    — secondary.
+                                                  button shrink-0 + ml-auto — never
+                                                        yields; `ml-auto` now has
+                                                        free space again and pins it
+                                                        to the row's trailing edge.
+                                                `min-w-0` on both text spans is
+                                                required for `truncate` to have
+                                                anything to shrink against. */}
+                                            <span className="min-w-0 shrink-[3] truncate text-xs text-text-secondary ">
                                                 {f.name}
                                             </span>
-                                            <span className="min-w-0 truncate text-10 text-text-tertiary  ml-3">
+                                            <span className="ml-3 min-w-0 shrink truncate text-10 text-text-tertiary ">
                                                 {abbreviatePath(f.dir)}
                                             </span>
                                             {/* Hover/focus-reveal "add to chat" button.
