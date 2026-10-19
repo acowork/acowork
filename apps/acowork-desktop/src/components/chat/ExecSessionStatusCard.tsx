@@ -20,17 +20,20 @@
 // pending error / approval / pause as they arrive.
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, MessageCircleQuestion } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { getProcessingPhase } from "../../lib/types";
-import type { ToolApprovalNeededEvent, TodoItem } from "../../lib/types";
+import type { ToolApprovalNeededEvent, TodoItem, AskQuestionEvent } from "../../lib/types";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import * as sessionControl from "../../lib/session-control";
 import { log } from "../../lib/logger";
 import { AgentAvatar } from "../common/AgentAvatar";
+import { FilledBrainIcon } from "../common/BrainIcon";
+import { StyledTextarea } from "../common/StyledInput";
+import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 
 interface ExecSessionStatusCardProps {
   agentId: string;
@@ -40,6 +43,12 @@ interface ExecSessionStatusCardProps {
   execSid: string | null;
   /** Drill into the execution view (open the exec tab + flip the surface). */
   onDrill?: () => void;
+  /** The durable Chat-session `interaction_request` card this mirror is the
+   *  live projection of, when there is one (an unanswered ask_question /
+   *  approval). Its `messageId` is the `in_reply_to` target an answer rides. */
+  card?: { kind: string; messageId: string };
+  /** Forward an answer for `card` back through the Chat answer channel. */
+  onAnswerCard?: (messageId: string, text: string, immediate: boolean) => void;
 }
 
 /** `alias ?? path basename`, else "Agent Home" for the sentinel — same rule
@@ -50,7 +59,7 @@ function workspaceDisplayName(id: string | undefined, alias: string | null | und
   return base || id;
 }
 
-export function ExecSessionStatusCard({ agentId, execSid, onDrill }: ExecSessionStatusCardProps) {
+export function ExecSessionStatusCard({ agentId, execSid, onDrill, card, onAnswerCard }: ExecSessionStatusCardProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const agentName = agent?.display_name ?? agent?.name ?? "";
@@ -69,14 +78,14 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill }: ExecSession
   const todos = useChatStore((s) =>
     execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.todos ?? [] : [],
   );
-  const toolProgress = useChatStore((s) =>
-    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.toolProgress ?? {} : {},
-  );
   const pendingApproval = useChatStore((s) =>
     execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.pendingApproval ?? {} : {},
   );
   const serverError = useChatStore((s) =>
     execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.serverError ?? null : null,
+  );
+  const pendingQuestions = useChatStore((s) =>
+    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.pendingQuestions ?? [] : [],
   );
   const title = useAgentStore((s) =>
     execSid ? s.agents[agentId]?.sessions.find((x) => x.session_id === execSid)?.title ?? null : null,
@@ -110,7 +119,6 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill }: ExecSession
     () => Object.values(pendingApproval) as ToolApprovalNeededEvent[],
     [pendingApproval],
   );
-  const runningToolCount = Object.keys(toolProgress).length;
   const activeTodoIndex = useMemo(
     () => (todos as TodoItem[]).findIndex((x) => x.status === "in_progress"),
     [todos],
@@ -118,25 +126,17 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill }: ExecSession
   const activeTodo =
     activeTodoIndex >= 0 ? (todos as TodoItem[])[activeTodoIndex] : null;
 
-  // Step priority: an approval waiting on the user first (it is the reason the
-  // run is stalled), then an in-flight tool, then the active todo — annotated
-  // with its position so "step 2 of 5" is legible — then a phase fallback.
-  const step = useMemo(() => {
-    if (approvals.length > 0) {
-      return t("chatView.statusCard.stepApproval", { tool: approvals[0].tool_name });
-    }
-    if (runningToolCount > 0) {
-      return t("chatView.statusCard.stepRunningTool", { count: runningToolCount });
-    }
-    if (activeTodo) {
-      return t("chatView.statusCard.stepTodo", {
+  // The "current step" row is the todo list ONLY — with no in-progress todo
+  // there is no step to name, so the row is dropped (the execution status
+  // moved to its own row in the detail block). Approvals / running tools are
+  // surfaced as action blocks below, not as a step label.
+  const step = activeTodo
+    ? t("chatView.statusCard.stepTodo", {
         content: activeTodo.content,
         index: activeTodoIndex + 1,
         total: (todos as TodoItem[]).length,
-      });
-    }
-    return t(`chatView.statusCard.phase.${phase}`);
-  }, [approvals, runningToolCount, activeTodo, activeTodoIndex, todos, phase, t]);
+      })
+    : null;
 
   // Pause that needs a human decision (iteration limit / loop) — the 429 retry
   // wait (`retry_info`) and DevMode (`reason: "debug"`) resume on their own, so
@@ -241,38 +241,48 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill }: ExecSession
   }
 
   const hasActions =
-    !!serverError || approvals.length > 0 || needsContinue || !!pausedDetail?.message;
+    !!serverError ||
+    approvals.length > 0 ||
+    needsContinue ||
+    !!pausedDetail?.message ||
+    (card?.kind === "ask_question" && pendingQuestions.length > 0);
 
   return shell(
     <div className="rounded-md border border-border-outer bg-panel-block text-xs">
-      {/* Header — status dot + coarse status on the LEFT; an explicit "详情"
-          button on the RIGHT drills into the execution session. The trigger is
-          a labeled button, not the whole bar, so what is clickable is obvious.
-          No title here — it lives in the detail rows below (no duplication). */}
+      {/* Header — a brain icon marks this as the agent's execution process
+          (same pair the session tabs use) and the exec session title names the
+          run. The status dot + label moved into the detail rows below, so the
+          header no longer duplicates it. An explicit "详情" button on the RIGHT
+          drills into the execution session. */}
       <div className="flex items-center gap-2 px-3 py-2">
-        <span className={dotClass} />
-        <span className="shrink-0 font-medium text-text-secondary">{statusLabel}</span>
-        <span className="min-w-0 flex-1" />
+        <FilledBrainIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+        <span className="min-w-0 flex-1 truncate font-medium text-text-secondary">
+          {title?.trim() || t("chatView.statusCard.untitled")}
+        </span>
         {onDrill && (
           <button
             type="button"
             onClick={onDrill}
-            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border-outer px-2 py-0.5 text-text-tertiary transition-colors hover:bg-panel-inset hover:text-[var(--color-accent)]"
+            className="inline-flex shrink-0 items-center gap-1 rounded btn-accent px-2 py-0.5 text-xs font-medium"
           >
-            {t("chatView.statusCard.detail")}
             <ExternalLink size={11} />
+            {t("chatView.statusCard.detail")}
           </button>
         )}
       </div>
 
-      {/* Detail block — global StatRow grammar. Status is in the header, so the
-          rows carry run identity + live progress: 会话 / 当前步骤 / 模型 / 工作区. */}
+      {/* Detail block — global StatRow grammar. The execution status (dot +
+          label) now lives here; the current step shows the todo only and is
+          dropped when there is none. Title is not repeated (it is the header). */}
       <div className="mx-2 mb-2 rounded-md bg-panel-inset px-3 py-2">
-        <StatRow
-          label={t("chatView.statusCard.labelTitle")}
-          value={title?.trim() || t("chatView.statusCard.untitled")}
-        />
-        <StatRow label={t("chatView.statusCard.labelStep")} value={step} />
+        <div className="flex items-center justify-between gap-2 py-1">
+          <span className="shrink-0 text-text-tertiary">{t("chatView.statusCard.labelStatus")}</span>
+          <span className="flex min-w-0 items-center gap-1.5 truncate text-text-secondary">
+            <span className={dotClass} />
+            {statusLabel}
+          </span>
+        </div>
+        {step && <StatRow label={t("chatView.statusCard.labelStep")} value={step} />}
         <StatRow
           label={t("chatView.statusCard.labelModel")}
           value={model ? (provider ? `${model} · ${provider}` : model) : undefined}
@@ -286,6 +296,17 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill }: ExecSession
       {/* Dynamic region — grows downward, one block per pending item. */}
       {hasActions && (
         <div className="flex flex-col gap-2 border-t border-border-divider px-3 py-2">
+          {card?.kind === "ask_question" &&
+            pendingQuestions.map((q) => (
+              <AskQuestionBlock
+                key={q.request_id}
+                event={q}
+                agentId={agentId}
+                sessionId={execSid}
+                onAnswer={(ans) => onAnswerCard?.(card.messageId, ans, true)}
+              />
+            ))}
+
           {serverError && (
             <div className="flex items-start gap-2">
               <div className="min-w-0 flex-1">
@@ -379,6 +400,156 @@ function StatRow({ label, value }: { label: string; value?: string }) {
       <span className="min-w-0 truncate font-mono text-text-secondary" title={value}>
         {value ?? "\u2014"}
       </span>
+    </div>
+  );
+}
+
+/**
+ * AskQuestionBlock — the Chat-surface projection of a pending `ask_user_question`.
+ * Mirrors the execution view's AskQuestionCard (title + question + radio options
+ * with descriptions + "Other" free text + submit), rendered inside the unified
+ * status card's action region. The answer is forwarded through the Chat answer
+ * channel (`onAnswer` → `sendText(sessionId, answer, card.messageId)`), which
+ * continues the ORIGINAL turn — never a new one.
+ *
+ * The countdown badge reuses the runtime's 5s heartbeat (`toolProgress[request_id]`)
+ * so it stays in lock-step with the backend's wall-clock timeout, same as the
+ * execution card.
+ */
+function AskQuestionBlock({
+  event,
+  agentId,
+  sessionId,
+  onAnswer,
+}: {
+  event: AskQuestionEvent;
+  agentId: string;
+  sessionId: string | null;
+  onAnswer: (answer: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [selected, setSelected] = useState<string | null>(null);
+  const [otherText, setOtherText] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  const progress = useChatStore((s) =>
+    agentId && sessionId
+      ? s.agentStates[agentId]?.sessionStates[sessionId]?.toolProgress?.[event.request_id]
+      : undefined,
+  );
+  const fallbackMs = (event.timeout_seconds ?? 0) * 1000;
+  const elapsedMs = progress?.elapsedMs ?? 0;
+  const timeoutMs = progress?.timeoutMs ?? fallbackMs;
+  const remainingSecs: number | null =
+    !timeoutMs ? null : Math.max(0, Math.ceil((timeoutMs - elapsedMs) / 1000));
+
+  const isOtherSelected = selected === "__other__";
+  const canSubmit =
+    !submitted && selected !== null && (!isOtherSelected || otherText.trim().length > 0);
+  const countdownLabel =
+    remainingSecs !== null && remainingSecs > 0
+      ? `${Math.floor(remainingSecs / 60)}:${String(remainingSecs % 60).padStart(2, "0")}`
+      : remainingSecs === 0
+        ? "expired"
+        : null;
+
+  const handleSubmit = () => {
+    if (!canSubmit) return;
+    const answer = isOtherSelected ? otherText.trim() : selected!;
+    setSubmitted(true);
+    onAnswer(answer);
+  };
+
+  return (
+    <div className="rounded-md border border-border-outer bg-panel-inset px-3 py-2">
+      {/* Header — question icon + title (if present) + question text + countdown. */}
+      <div className="mb-1.5 flex items-start gap-1.5">
+        <MessageCircleQuestion className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+        <div className="min-w-0 flex-1">
+          {event.title && (
+            <div className="mb-0.5 text-xs font-medium text-text-primary">{event.title}</div>
+          )}
+          <div className="text-xs text-text-secondary">{event.question}</div>
+        </div>
+        {countdownLabel && countdownLabel !== "expired" && (
+          <span className="shrink-0 text-right font-mono text-10 text-amber-600 dark:text-amber-400">
+            {countdownLabel}
+          </span>
+        )}
+      </div>
+
+      {/* Options — radio list with descriptions, plus an "Other" free-text row. */}
+      <div className="ml-5 space-y-0.5">
+        {(event.options ?? []).map((opt, idx) => (
+          <label
+            key={idx}
+            className={cn(
+              "flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors",
+              submitted ? "pointer-events-none opacity-60" : listRowHover,
+              selected === opt.label && listRowSelected,
+            )}
+          >
+            <input
+              type="radio"
+              name={`chat-question-${event.request_id}`}
+              value={opt.label}
+              checked={selected === opt.label}
+              disabled={submitted}
+              onChange={() => setSelected(opt.label)}
+              className="h-3 w-3 shrink-0"
+              style={{ accentColor: "var(--color-accent)" }}
+            />
+            <span className="font-medium text-text-primary">{opt.label}</span>
+            {opt.description && (
+              <span className="text-text-tertiary">— {opt.description}</span>
+            )}
+          </label>
+        ))}
+
+        <label
+          className={cn(
+            "flex cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors",
+            submitted ? "pointer-events-none opacity-60" : listRowHover,
+            isOtherSelected && listRowSelected,
+          )}
+        >
+          <input
+            type="radio"
+            name={`chat-question-${event.request_id}`}
+            value="__other__"
+            checked={isOtherSelected}
+            disabled={submitted}
+            onChange={() => setSelected("__other__")}
+            className="h-3 w-3 shrink-0"
+            style={{ accentColor: "var(--color-accent)" }}
+          />
+          <span className="font-medium text-text-primary">{t("askQuestionCard.other")}</span>
+        </label>
+
+        {isOtherSelected && !submitted && (
+          <StyledTextarea
+            className="mt-1 ml-4"
+            rows={1}
+            placeholder={t("askQuestionCard.placeholder")}
+            value={otherText}
+            onChange={(e) => setOtherText(e.target.value)}
+            autoFocus
+          />
+        )}
+      </div>
+
+      {/* Submit. */}
+      <div className="ml-5 mt-1.5 flex items-center gap-2">
+        <button
+          type="button"
+          disabled={!canSubmit}
+          onClick={handleSubmit}
+          className="rounded px-3 py-0.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          style={{ backgroundColor: "var(--color-accent-strong)" }}
+        >
+          {submitted ? t("askQuestionCard.submitted") : t("askQuestionCard.submit")}
+        </button>
+      </div>
     </div>
   );
 }

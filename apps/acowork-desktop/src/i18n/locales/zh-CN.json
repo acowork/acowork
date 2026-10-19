@@ -254,7 +254,7 @@
       "pausedIteration": "已达迭代上限，已暂停。",
       "stepApproval": "等待授权：{{tool}}",
       "stepRunningTool": "正在执行 {{count}} 个工具…",
-      "stepTodo": "{{content}}（{{index}}/{{total}}）",
+      "stepTodo": "（{{index}}/{{total}}）{{content}}",
       "status": {
         "idle": "空闲",
         "llm_awaiting_first_chunk": "等待模型",
@@ -307,6 +307,8 @@
     "uploadFile": "上传文件",
     "uploadHint": "上传文件 (PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP)",
     "sendMessage": "发送消息",
+    "attach": "添加附件",
+    "removeAttachment": "移除附件",
     "sendFailedNotConnected": "发送失败:Agent 可能尚未连接,请稍候重试",
     "modelSwitchFailed": "切换模型失败:{{model}}",
     "reasoningEffortFailed": "推理强度设置失败",

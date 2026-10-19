@@ -254,7 +254,7 @@
       "pausedIteration": "반복 상한에 도달하여 일시 정지되었습니다.",
       "stepApproval": "승인 대기: {{tool}}",
       "stepRunningTool": "도구 {{count}}개 실행 중…",
-      "stepTodo": "{{content}} ({{index}}/{{total}})",
+      "stepTodo": "({{index}}/{{total}}) {{content}}",
       "status": {
         "idle": "유휴",
         "llm_awaiting_first_chunk": "모델 대기 중",
@@ -307,6 +307,8 @@
     "uploadFile": "파일 업로드",
     "uploadHint": "파일 업로드（PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP）",
     "sendMessage": "메시지 전송",
+    "attach": "첨부 파일 추가",
+    "removeAttachment": "첨부 파일 제거",
     "sendFailedNotConnected": "메시지 전송 실패: 에이전트가 아직 연결되지 않았을 수 있습니다. 잠시 후 다시 시도하세요",
     "modelSwitchFailed": "모델 전환 실패:{{model}}",
     "reasoningEffortFailed": "추론 강도 설정 실패",

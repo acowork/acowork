@@ -160,7 +160,7 @@
       "pausedIteration": "Paused at the iteration limit.",
       "stepApproval": "Waiting for approval: {{tool}}",
       "stepRunningTool": "Running {{count}} tool(s)…",
-      "stepTodo": "{{content}} ({{index}}/{{total}})",
+      "stepTodo": "({{index}}/{{total}}) {{content}}",
       "status": {
         "idle": "Idle",
         "llm_awaiting_first_chunk": "Waiting for model",
@@ -213,6 +213,8 @@
     "uploadFile": "Upload file",
     "uploadHint": "Upload file (PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP)",
     "sendMessage": "Send message",
+    "attach": "Add attachment",
+    "removeAttachment": "Remove attachment",
     "sendFailedNotConnected": "Failed to send message: the agent may not be connected yet. Please wait and try again.",
     "modelSwitchFailed": "Failed to switch model: {{model}}",
     "reasoningEffortFailed": "Failed to update reasoning effort",

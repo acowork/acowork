@@ -254,7 +254,7 @@
       "pausedIteration": "已達迭代上限，已暫停。",
       "stepApproval": "等待授權：{{tool}}",
       "stepRunningTool": "正在執行 {{count}} 個工具…",
-      "stepTodo": "{{content}}（{{index}}/{{total}}）",
+      "stepTodo": "（{{index}}/{{total}}）{{content}}",
       "status": {
         "idle": "閒置",
         "llm_awaiting_first_chunk": "等待模型",
@@ -307,6 +307,8 @@
     "uploadFile": "上傳檔案",
     "uploadHint": "上傳檔案（PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP）",
     "sendMessage": "傳送訊息",
+    "attach": "新增附件",
+    "removeAttachment": "移除附件",
     "sendFailedNotConnected": "傳送失敗:Agent 可能尚未連線,請稍後重試",
     "modelSwitchFailed": "切換模型失敗:{{model}}",
     "reasoningEffortFailed": "推理強度設定失敗",

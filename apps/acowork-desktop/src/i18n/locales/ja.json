@@ -254,7 +254,7 @@
       "pausedIteration": "イテレーション上限に達して一時停止しました。",
       "stepApproval": "承認待ち：{{tool}}",
       "stepRunningTool": "{{count}} 個のツールを実行中…",
-      "stepTodo": "{{content}}（{{index}}/{{total}}）",
+      "stepTodo": "（{{index}}/{{total}}）{{content}}",
       "status": {
         "idle": "アイドル",
         "llm_awaiting_first_chunk": "モデル待機中",
@@ -307,6 +307,8 @@
     "uploadFile": "ファイルをアップロード",
     "uploadHint": "ファイルをアップロード（PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP）",
     "sendMessage": "メッセージを送信",
+    "attach": "添付を追加",
+    "removeAttachment": "添付を削除",
     "sendFailedNotConnected": "メッセージの送信に失敗しました:エージェントはまだ接続されていない可能性があります。しばらくしてから再試行してください",
     "modelSwitchFailed": "モデルの切り替えに失敗しました:{{model}}",
     "reasoningEffortFailed": "推論強度の設定に失敗しました",

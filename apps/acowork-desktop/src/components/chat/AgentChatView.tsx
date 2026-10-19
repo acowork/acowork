@@ -21,11 +21,10 @@
 //   chat-message channel carries no skill/command field — there is nothing
 //   this surface could write per-message, so the chip is hidden rather than
 //   shown disabled with a "can't use this" tooltip.
-// - No Paperclip yet: `POST /api/intents/chat-message` carries no
-//   attachment ids (the session-scoped write does, but that channel never
-//   starts a turn). `ponytail:` ceiling — attachment send needs the
-//   gateway `ChatMessageRequest` field + runtime ingestion first; upgrade
-//   path is one backend wave, then this composer adds the button.
+// - Attachments: the composer's Paperclip uploads into the Chat session's
+//   `files/` dir (§4.2.1) and the send carries the resolved ids on the intent
+//   `chat-message` request, so the durable row shows them and the Gateway
+//   forwards them to the execution turn.
 // - No @-mention UI: a 1:1 user_agent session has exactly one other
 //   participant (design 27 §5.5.4 "单聊无需 @").
 //
@@ -36,7 +35,7 @@ import { Children, isValidElement, useEffect, useMemo, useRef, useState } from "
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, ExternalLink } from "lucide-react";
+import { Send, ExternalLink, Paperclip } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
 import { toolbarIconButton } from "../../lib/ui-styles";
@@ -48,7 +47,7 @@ import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/mar
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ExecSessionStatusCard } from "./ExecSessionStatusCard";
-import { useChatSessionStore, answeredCardIds, type ChatMessageRow, type ChatSessionConfig } from "../../stores/chatSessionStore";
+import { useChatSessionStore, answeredCardIds, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useAuthStore } from "../../stores/authStore";
@@ -115,8 +114,6 @@ interface RowProps {
   row: ChatMessageRow;
   agentId: string;
   showHeader: boolean;
-  answered: boolean;
-  onAnswer: (card: ChatMessageRow, text: string, immediate: boolean) => void;
   /** Drill into the execution session that produced this agent message.
    *  Every `agent_message` with a resolved exec session id is clickable —
    *  finished, failed or empty-bodied alike (§5.5.5: the pointer survives
@@ -124,7 +121,7 @@ interface RowProps {
   onJumpToExec: (execSid: string) => void;
 }
 
-function RowView({ row, agentId, showHeader, answered, onAnswer, onJumpToExec }: RowProps) {
+function RowView({ row, agentId, showHeader, onJumpToExec }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
@@ -142,49 +139,13 @@ function RowView({ row, agentId, showHeader, answered, onAnswer, onJumpToExec }:
   }
 
   if (row.kind === "interaction_request") {
-    const it = row.meta?.interaction;
-    const question = it?.question || row.body;
-    if (answered) {
-      return (
-        <div className="mx-6 my-1 rounded-md border border-border-divider bg-chat-bubble px-3 py-2 text-xs text-text-tertiary">
-          {t("chatView.cardAnswered")}: {question}
-        </div>
-      );
-    }
-    return (
-      <div className="mx-6 my-2 rounded-lg border border-[var(--color-accent)]/30 bg-chat-bubble p-3">
-        <div className="text-xs font-medium text-text-primary">{question}</div>
-        {it?.options && it.options.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {it.options.map((opt) => (
-              <button
-                key={opt}
-                onClick={() => onAnswer(row, opt, true)}
-                className="rounded btn-accent px-3 py-1.5 text-xs"
-              >
-                {opt}
-              </button>
-            ))}
-            <button
-              onClick={() => onAnswer(row, "", false)}
-              className="rounded btn-solid px-3 py-1.5 text-xs"
-            >
-              {t("chatView.freeAnswer")}
-            </button>
-          </div>
-        )}
-        {!it?.options?.length && (
-          <div className="mt-2">
-            <button
-              onClick={() => onAnswer(row, "", false)}
-              className="rounded btn-accent px-3 py-1.5 text-xs"
-            >
-              {t("chatView.answer")}
-            </button>
-          </div>
-        )}
-      </div>
-    );
+    // Every execute-session projection (ask_question / approval / pause) is
+    // rendered through the unified ExecSessionStatusCard, not as a standalone
+    // row — so the durable card row never paints here. An unanswered card is
+    // surfaced live by the status card (bound to its exec session); an
+    // answered one is intentionally left with no orphan "已回答" line (§ 5.5.4,
+    // answer-then-done).
+    return null;
   }
 
   if (row.kind === "agent_message") {
@@ -331,10 +292,16 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // by `saveDraft`'s PATCH response. Stable ref so the selector never
   // re-renders on an absent draft.
   const draft = useChatSessionStore((s) => s.draft[sessionId] ?? EMPTY_DRAFT);
-  const { sendText, loadOlder, setMode, saveDraft } = useChatSessionStore.getState();
+  const { sendText, loadOlder, setMode, saveDraft, upload } = useChatSessionStore.getState();
 
   const [input, setInput] = useState("");
   const [answerTarget, setAnswerTarget] = useState<ChatMessageRow | null>(null);
+  // Composer attachments — uploaded into the Chat session's `files/` dir
+  // (§4.2.1) before send; the send carries their ids so the durable row and
+  // the execution turn both see them.
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentMeta[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastCompositionEndRef = useRef(0);
@@ -368,6 +335,21 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   );
   const answered = useMemo(() => answeredCardIds(rows), [rows]);
 
+  // The latest `interaction_request` card, if it is still unanswered — this
+  // is the execute-session projection the unified status card mirrors live
+  // (ask_question / approval). An answered card (or none) yields `null`, so
+  // nothing lingers in the stream (§ 5.5.4: answer-then-done).
+  const pendingCard = useMemo<ChatMessageRow | null>(() => {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i]!;
+      if (r.kind === "interaction_request") {
+        const mid = r.meta?.message_id;
+        return mid && !answered.has(mid) ? r : null;
+      }
+    }
+    return null;
+  }, [rows, answered]);
+
   // Stick to the bottom when new rows land (same simple rule the IM view
   // uses; the execution view's scroll controller is session-stream shaped
   // and does not apply to HTTP windows).
@@ -387,7 +369,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
 
   const handleSend = () => {
     const text = input.trim();
-    if (!text || sending) return;
+    const attachmentIds = pendingAttachments.map((a) => a.id);
+    if ((!text && attachmentIds.length === 0) || sending || uploading) return;
     const replyTo = answerTarget?.meta?.message_id;
     // A card answer continues the ORIGINAL turn — no new execution session
     // is created, so a config draft would be meaningless there (§4.5 seed
@@ -395,8 +378,30 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     const sessionConfig = replyTo ? undefined : (Object.keys(draft).length > 0 ? draft : undefined);
     setInput("");
     setAnswerTarget(null);
-    void sendText(sessionId, text, replyTo, sessionConfig);
+    setPendingAttachments([]);
+    void sendText(sessionId, text, replyTo, sessionConfig, attachmentIds);
   };
+
+  // Upload each chosen file into the session's `files/` dir and stack a chip.
+  const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-picking the same file
+    if (files.length === 0) return;
+    setUploading(true);
+    try {
+      for (const f of files) {
+        const meta = await upload(sessionId, f);
+        setPendingAttachments((prev) => [...prev, meta]);
+      }
+    } catch (err) {
+      console.warn("[AgentChatView] attachment upload failed:", err);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const removeAttachment = (id: string) =>
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
 
   const drillIntoExec = async () => {
     if (!inFlight?.execSid) return;
@@ -461,27 +466,56 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             showHeader={
               r.kind === "agent_message" && rows[i - 1]?.kind !== "agent_message"
             }
-            answered={!!(r.meta?.message_id && answered.has(r.meta.message_id))}
-            onAnswer={handleAnswer}
             onJumpToExec={(sid) => void jumpToExec(sid)}
           />
         ))}
         {/* Status card — the one live row the Chat surface owns (§5.5.5:
-            pointer durable, state projected). The card mirrors the exec
-            session's live event stream (status / step / model / workspace /
-            error / approval / pause) and forwards controls to the session-
-            scoped HTTP endpoints — no independent frontend state. */}
-        {inFlight && (
-          <ExecSessionStatusCard
-            agentId={agentId}
-            execSid={inFlight.execSid ?? null}
-            onDrill={inFlight.execSid ? () => void drillIntoExec() : undefined}
-          />
-        )}
+            pointer durable, state projected). It renders both the in-flight
+            turn AND an unanswered execute-session projection card (ask_question
+            / approval) bound to that card's exec session, so every projection
+            shares one unified card grammar. */}
+        {(inFlight || pendingCard) &&
+          (() => {
+            const cardExecSid =
+              inFlight?.execSid ?? pendingCard?.meta?.agent_session_id ?? null;
+            const interaction = pendingCard?.meta?.interaction;
+            return (
+              <ExecSessionStatusCard
+                agentId={agentId}
+                execSid={cardExecSid}
+                onDrill={
+                  cardExecSid
+                    ? () =>
+                        void (inFlight ? drillIntoExec() : jumpToExec(cardExecSid))
+                    : undefined
+                }
+                card={
+                  pendingCard && interaction
+                    ? {
+                        kind: interaction.kind,
+                        messageId: pendingCard.meta?.message_id ?? "",
+                      }
+                    : undefined
+                }
+                onAnswerCard={(messageId, text, immediate) => {
+                  const cardRow =
+                    rows.find((r) => r.meta?.message_id === messageId) ?? pendingCard;
+                  if (cardRow) handleAnswer(cardRow, text, immediate);
+                }}
+              />
+            );
+          })()}
       </div>
 
       {/* Composer — same chrome as the execution view (plan 5.4). */}
       <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg">
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={handleFilesChosen}
+        />
         {answerTarget && (
           <div className="flex items-center gap-1 px-3 pt-2">
             <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-[var(--color-accent)]/20" style={{ color: "var(--color-accent)" }}>
@@ -495,6 +529,28 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 ×
               </button>
             </span>
+          </div>
+        )}
+        {pendingAttachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-3 pt-2">
+            {pendingAttachments.map((a) => (
+              <span
+                key={a.id}
+                className="inline-flex items-center gap-1 rounded bg-panel-inset px-2 py-0.5 text-xs text-text-secondary"
+              >
+                <span className="max-w-[12rem] truncate" title={a.filename}>
+                  {a.filename}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(a.id)}
+                  aria-label={t("chatPanel.removeAttachment")}
+                  className="text-text-tertiary transition-colors hover:text-text-primary"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
           </div>
         )}
         <textarea
@@ -558,6 +614,16 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             </div>
           </div>
           <div data-toolbar-cluster="right" className="flex shrink-0 items-center gap-1">
+            <Tooltip content={t("chatPanel.attach")} variant="plain">
+              <button
+                className={cn(toolbarIconButton, uploading && "opacity-50")}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                aria-label={t("chatPanel.attach")}
+              >
+                <Paperclip size={16} />
+              </button>
+            </Tooltip>
             <Tooltip content={t("chatPanel.sendMessage")} variant="plain">
               <button
                 className={cn(toolbarIconButton, sending && "opacity-50")}

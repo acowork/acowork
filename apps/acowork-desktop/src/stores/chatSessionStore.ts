@@ -181,6 +181,7 @@ function sendChatMessage(
   text: string,
   inReplyTo?: string,
   sessionConfig?: ChatSessionConfig,
+  attachmentIds?: string[],
 ): Promise<void> {
   return req<void>("POST", "/api/intents/chat-message", {
     chat_session_id: chatSessionId,
@@ -188,6 +189,7 @@ function sendChatMessage(
     text,
     in_reply_to: inReplyTo ?? "",
     ...(sessionConfig ? { session_config: sessionConfig } : {}),
+    ...(attachmentIds && attachmentIds.length > 0 ? { attachment_ids: attachmentIds } : {}),
   });
 }
 
@@ -395,6 +397,7 @@ interface ChatSessionStore {
     text: string,
     inReplyTo?: string,
     sessionConfig?: ChatSessionConfig,
+    attachmentIds?: string[],
   ): Promise<boolean>;
   upload(chatSessionId: string, file: File): Promise<ChatAttachmentMeta>;
   /** The doorbell reaction: re-read every session that could be on screen. */
@@ -565,14 +568,14 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     }
   },
 
-  sendText: async (chatSessionId, text, inReplyTo, sessionConfig) => {
+  sendText: async (chatSessionId, text, inReplyTo, sessionConfig, attachmentIds) => {
     const me = useAuthStore.getState().account?.user_id;
     if (!me) return false;
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }));
     let ok = false;
     try {
-      await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig);
-      ok = true;
+      if (inReplyTo && attachmentIds?.length) throw new Error("card replies cannot include attachments");
+      await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds);
     } catch (e) {
       console.warn("[chatSessionStore] send failed:", e);
     } finally {
