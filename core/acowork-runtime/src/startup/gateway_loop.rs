@@ -1058,14 +1058,11 @@ async fn route_intent_inbound(
                 .await?
         }
     };
-    // A rotation (§2.1) prepends its handoff (pointer for T1, distilled
-    // compaction summary for T2) to the routed intent — one injection with
-    // the turn it belongs to, no extra plumbing.
-    let content = match target.1 {
-        Some(note) => format!("{}\n\n{}", note, content),
-        None => content,
-    };
-
+    // A rotation (§2.1) carries a handoff note (pointer for T1, distilled
+    // compaction summary for T2) alongside the routed intent. It is passed
+    // as a *separate* field — never folded into `content` — so the user's
+    // actual message stays clean for the auto-title and the persisted `user`
+    // entry; the SessionTask records it as its own `system` turn (§4.1).
     session_manager.lock().await.send_to_session(
         &target.0,
         SessionMessage::Intent {
@@ -1078,6 +1075,7 @@ async fn route_intent_inbound(
             repo,
             kind,
             has_human,
+            handoff_note: target.1,
         },
     )
 }

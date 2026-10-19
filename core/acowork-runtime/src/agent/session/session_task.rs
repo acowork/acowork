@@ -182,6 +182,13 @@ pub enum SessionMessage {
         /// Design 27 §5.5.4 / plan 2b.3: answerability fact for this turn
         /// (`None` = unknown → keep human-facing tools).
         has_human: Option<bool>,
+        /// Design 27 §2.1 / §4.1: when this intent opened a *rotated*
+        /// successor session, the handoff note describing the session it
+        /// replaced. Persisted as a standalone `system` JSONL row (transcript
+        /// copy) and folded into the model-facing `user_message`; `content`
+        /// itself stays the user's verbatim text so the auto-title and the
+        /// persisted `user` entry stay clean (ADR-046).
+        handoff_note: Option<String>,
     },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, the front/back suppression mechanism is gone.
@@ -1221,6 +1228,7 @@ impl SessionTask {
                     repo: _,
                     kind,
                     has_human,
+                    handoff_note,
                 }) => {
                     // Design 27 §7.1 / plan D-C/C1: the inbound kind
                     // decides two orthogonal things — the responder role
@@ -1291,10 +1299,27 @@ impl SessionTask {
                     // §5.5.4 answerability for this turn (plan 2b.3); reset
                     // with the turn like the two fields above.
                     agent_loop.chat_has_human = has_human;
+                    // A rotation (§2.1) hands off with a note describing the
+                    // session it replaced. Two deliveries: (a) persist it as a
+                    // standalone `system` JSONL row for the transcript/UI, and
+                    // (b) fold it into the model-facing message so the live
+                    // turn sees the handoff — `ContextBuilder::build` drops
+                    // System-role history, so the note must ride on the user
+                    // turn (a cold restart re-feeds it via the restorer's
+                    // `rotation_handoff` → User replay). `content` stays the
+                    // user's clean text for the auto-title and the JSONL `user`
+                    // entry (ADR-046).
+                    let llm_message = match handoff_note.as_deref() {
+                        Some(note) => {
+                            agent_loop.record_intent_handoff(note, &message_id);
+                            format!("{note}\n\n{content}")
+                        }
+                        None => content.clone(),
+                    };
                     last_user_message = Some((content.clone(), message_id.clone()));
                     let result = agent_loop
                         .run(
-                            &content,
+                            &llm_message,
                             &mut context_builder,
                             None,
                             Some(message_id.clone()),

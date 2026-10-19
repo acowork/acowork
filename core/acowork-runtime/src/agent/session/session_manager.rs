@@ -612,8 +612,10 @@ impl SessionManager {
     /// or when the mapping is stale (closed / evicted). The successor starts
     /// empty with a pointer handoff naming the old session; the conversation
     /// itself lives in the Chat session store, so nothing is copied.
-    /// Returns `(session_id, handoff_note)` — the caller prepends the note to
-    /// the routed intent when a rotation just happened. `seed` is the
+    /// Returns `(session_id, handoff_note)` — the caller attaches the note to
+    /// the routed intent (persisted as a standalone `system` JSONL row and
+    /// folded into the model-facing user turn) when a rotation just happened.
+    /// `seed` is the
     /// initiator's optional `session_config` suggestion (design 27 §4.5);
     /// clamped to this agent's provider list (§13-6) and applied only when
     /// a session is actually created (fresh mapping or rotation successor) —

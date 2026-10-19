@@ -395,8 +395,10 @@ pub fn routing_key(chat_session_id: &str, conversation_id: &str, message_id: &st
     }
 }
 
-/// Handoff note prepended to the first intent routed into a successor
-/// session after a rotation (design 27 §4.1 Handoff grading).
+/// Handoff note carried by the first intent routed into a successor session
+/// after a rotation (design 27 §4.1 Handoff grading). The caller persists it
+/// as a standalone `system` JSONL row and folds it into the model-facing user
+/// turn; the user's own message text (`content`) stays clean.
 ///
 /// Grading per the design table:
 /// - **T1 idle**: open items / key decisions only — the Runtime records no
