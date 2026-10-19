@@ -396,6 +396,14 @@ pub struct ChatSession {
     /// the Runtime reads through tools that clear as it goes.
     #[serde(default)]
     pub unread: std::collections::BTreeMap<String, u32>,
+    /// Last-message preview shown in the sidebar's project-group row. This
+    /// is a read-path projection, not durable state: [`skip_serializing_if`]
+    /// keeps it out of `session.json` (it is always `None` when a session is
+    /// saved), and only the project-group list handlers populate it by
+    /// reading the tail of `messages.jsonl`. Mirrors how `chat_api` derives
+    /// `last_message_preview` for one-to-one chats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_preview: Option<String>,
 }
 
 // ── Paths ─────────────────────────────────────────────────────────────
@@ -516,6 +524,7 @@ fn write_new(
         last_active_at: now,
         message_count: 0,
         unread: Default::default(),
+        last_message_preview: None,
     };
     save(&dir, &s)?;
     // Index after persist: a crash between the two leaves the session
@@ -1285,6 +1294,64 @@ pub fn read_messages(
         }
     }
     Ok((out, total))
+}
+
+/// `last_message_preview` length, in characters — kept identical to
+/// `chat.rs` `PREVIEW_CHARS` so the group list and the one-to-one list
+/// truncate their meta line the same way.
+const GROUP_PREVIEW_CHARS: usize = 80;
+
+/// The sidebar's last-message preview for a session's tail row: the body, or
+/// a kind-appropriate stand-in when the row carries no text (an
+/// attachment-only message, an interaction card, a bare system notice).
+/// Truncated on a char boundary so multi-byte content cannot panic — the same
+/// rule as `chat::preview`.
+fn preview_of_message(msg: &SessionMessage) -> String {
+    let source = if !msg.body.trim().is_empty() {
+        msg.body.clone()
+    } else if let Some(a) = msg.attachments.first() {
+        if a.kind() == "image" {
+            format!("[image] {}", a.filename)
+        } else {
+            format!("[file] {}", a.filename)
+        }
+    } else if msg.kind == KIND_INTERACTION_REQUEST {
+        msg.meta
+            .interaction
+            .as_ref()
+            .map(|i| i.question.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let trimmed = source.trim();
+    if trimmed.chars().count() <= GROUP_PREVIEW_CHARS {
+        return trimmed.to_string();
+    }
+    let mut s: String = trimmed.chars().take(GROUP_PREVIEW_CHARS).collect();
+    s.push('…');
+    s
+}
+
+/// Fill `last_message_preview` for every `project_group` session in place by
+/// reading its tail row. Other kinds are left untouched — their lists derive
+/// the preview elsewhere (`chat_api` for one-to-one). Best-effort: a session
+/// whose log cannot be read, or that has no messages, keeps `None` so the
+/// sidebar row just shows an empty meta line rather than failing the list.
+///
+/// Read-path only, so it must be driven from inside an `offload` closure (it
+/// touches the filesystem synchronously).
+pub fn attach_group_previews(data_dir: &Path, sessions: &mut [ChatSession]) {
+    for s in sessions
+        .iter_mut()
+        .filter(|s| s.kind == SessionKind::ProjectGroup)
+    {
+        if let Ok((mut page, _)) = read_messages(data_dir, &s.session_id, 0, 1)
+            && let Some(last) = page.pop()
+        {
+            s.last_message_preview = Some(preview_of_message(&last));
+        }
+    }
 }
 
 // ── Per-participant index (plan §10.12 / Wave 6.1) ───────────────────
@@ -2288,6 +2355,68 @@ mod tests {
     }
 
     // ── Attachments (§4.2.1, plan 3.5) ────────────────────────────────
+
+    #[test]
+    fn group_previews_derive_from_last_message() {
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "P",
+            Some("proj-1"),
+            1,
+        )
+        .unwrap();
+
+        // No messages yet → no preview (the sidebar row shows an empty meta
+        // line rather than a placeholder).
+        let mut empty = vec![g.clone()];
+        attach_group_previews(&dir, &mut empty);
+        assert_eq!(empty[0].last_message_preview, None);
+
+        append_message(
+            &dir,
+            &g.session_id,
+            &msg("u1", KIND_USER_MESSAGE, "first", "m1"),
+            2,
+        )
+        .unwrap();
+        append_message(
+            &dir,
+            &g.session_id,
+            &msg("ag", KIND_AGENT_MESSAGE, "  latest tail  ", "m2"),
+            3,
+        )
+        .unwrap();
+        // The newest row wins, trimmed.
+        let mut rows = vec![g.clone()];
+        attach_group_previews(&dir, &mut rows);
+        assert_eq!(
+            rows[0].last_message_preview.as_deref(),
+            Some("latest tail")
+        );
+
+        // A long body truncates on a char boundary with a trailing ellipsis.
+        let long = "话".repeat(GROUP_PREVIEW_CHARS + 10);
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, &long, "m3"), 4)
+            .unwrap();
+        let mut rows = vec![g.clone()];
+        attach_group_previews(&dir, &mut rows);
+        let p = rows[0].last_message_preview.clone().unwrap();
+        assert_eq!(p.chars().count(), GROUP_PREVIEW_CHARS + 1); // body + ellipsis
+        assert!(p.ends_with('…'));
+
+        // Only project groups are touched — a sibling one-to-one / agent
+        // session keeps `None` (its preview is derived in `chat_api`).
+        let ua = ua_session(&dir);
+        let mut mixed = vec![ua.clone()];
+        attach_group_previews(&dir, &mut mixed);
+        assert_eq!(mixed[0].last_message_preview, None);
+    }
 
     fn ua_session(dir: &Path) -> ChatSession {
         ensure_pair(

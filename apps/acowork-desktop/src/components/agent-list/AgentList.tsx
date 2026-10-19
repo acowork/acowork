@@ -25,6 +25,7 @@ import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { fetchNodes } from "../../lib/gateway-api";
 import { partitionAgentsByNode, nodeDisplayName } from "./partitionAgentsByNode";
 import { UserList, type UserListHandle } from "../user-list/UserList";
+import { GroupAvatarStack } from "../chat/GroupAvatarStack";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { useAuthStore } from "../../stores/authStore";
 import {
@@ -887,11 +888,13 @@ export function AgentList({ width }: AgentListProps) {
             </div>
             {!groupsCollapsed && visibleGroupsChats.map((g, index) => {
               const unread = selfUserId ? (g.unread?.[selfUserId] ?? 0) : 0;
+              const active = activeGroupId === g.session_id;
               return (
                 <div
                   key={g.session_id}
                   role="listitem"
                   data-testid="project-group-row"
+                  title={g.title}
                   onClick={() => {
                     // Middle-pane exclusivity (see projectGroupStore docs):
                     // drop any agent selection and inbox peer first.
@@ -900,22 +903,57 @@ export function AgentList({ width }: AgentListProps) {
                     selectGroup(g.session_id);
                   }}
                   className={cn(
-                    "flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 transition-colors duration-150",
-                    activeGroupId === g.session_id
-                      ? "bg-accent-strong/90 text-white"
-                      : listRowHover,
+                    "relative flex cursor-pointer items-center rounded-md px-3 py-2 transition-colors duration-150",
+                    isCollapsed ? "gap-0" : "gap-3",
+                    active ? "bg-accent-strong/90 text-white" : listRowHover,
                     index < visibleGroupsChats.length - 1 && "row-divider-b",
                   )}
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--color-accent)]/10 text-text-secondary">
-                    <MessagesSquare className="h-4 w-4" />
+                  {/* Member composite at the agent / user 40px footprint —
+                      the same square the rows above and below it carry, which
+                      is what makes the three lists read as one inbox. */}
+                  <span className={cn("relative shrink-0", isCollapsed && "mx-auto")}>
+                    <GroupAvatarStack participants={g.participants} />
+                    {/* Unread count on the avatar's top-right corner, the IM
+                        position the user rows use for the same signal. */}
+                    {unread > 0 && (
+                      <span className="absolute -right-1.5 -top-1.5 rounded-full bg-red-500 px-1.5 text-10 font-medium leading-4 text-white">
+                        {unread > 99 ? "99+" : unread}
+                      </span>
+                    )}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-xs">{g.title || g.session_id.slice(0, 8)}</span>
-                  {unread > 0 && (
-                    <span className="shrink-0 rounded-full bg-red-500 px-1.5 text-10 font-medium leading-4 text-white">
-                      {unread > 99 ? "99+" : unread}
-                    </span>
-                  )}
+                  {/* Two-line content — mirrors the agent row. A group has no
+                      topic, so the meta line is the tail of the chat. */}
+                  <div className={cn("min-w-0 overflow-hidden", isCollapsed ? "w-0" : "flex-1")}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={cn(
+                          "truncate font-medium text-xs",
+                          active ? "text-white" : "text-text-secondary",
+                        )}
+                      >
+                        {g.title || g.session_id.slice(0, 8)}
+                      </span>
+                    </div>
+                    {/* min-height locks the row height even when the group
+                        has no messages yet, so an empty meta line does not
+                        make the row shorter than its neighbours. */}
+                    <div
+                      className="mt-0.5 flex items-center text-10"
+                      style={{
+                        minHeight: "calc(var(--ui-font-size, 0.875rem) * 0.85 * 1.5)",
+                      }}
+                    >
+                      <span
+                        className={cn(
+                          "block truncate",
+                          active ? "text-white/70" : "text-text-tertiary",
+                        )}
+                      >
+                        {g.last_message_preview ?? ""}
+                      </span>
+                    </div>
+                  </div>
                 </div>
               );
             })}

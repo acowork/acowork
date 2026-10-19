@@ -82,6 +82,10 @@ export interface ChatSessionInfo {
    *  endpoint carries it; reading a session's messages clears mine
    *  server-side. */
   unread?: Record<string, number>;
+  /** Sidebar meta line for a `project_group` row — the last message's text.
+   *  Derived server-side on the list read (mirrors the one-to-one chats'
+   *  `last_message_preview`); absent for other kinds and for an empty group. */
+  last_message_preview?: string;
 }
 
 export interface ChatMessagesPage {

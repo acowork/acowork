@@ -303,7 +303,15 @@ async fn list_sessions(
         return Err(ApiError::forbidden("not your sessions"));
     }
     let dir = data_dir(&state)?;
-    let mut sessions = offload(move || chat_sessions::list_for(&dir, &participant)).await?;
+    let mut sessions = offload(move || {
+        let mut sessions = chat_sessions::list_for(&dir, &participant)?;
+        // Sidebar group rows need the last-message meta line; derive it for
+        // the project-group rows while we already hold the read lock-free
+        // offload thread (one-to-one / agent rows preview elsewhere).
+        chat_sessions::attach_group_previews(&dir, &mut sessions);
+        Ok(sessions)
+    })
+    .await?;
     // D-B/B1: the Agent page's history entry queries as the current user
     // and filters by agent server-side — the agent instance id is not a
     // participant the caller's token may address.
@@ -330,7 +338,12 @@ async fn list_all_project_groups(
         return Err(ApiError::forbidden("admin only"));
     }
     let dir = data_dir(&state)?;
-    let groups = offload(move || Ok(chat_sessions::list_project_groups(&dir))).await?;
+    let groups = offload(move || {
+        let mut groups = chat_sessions::list_project_groups(&dir);
+        chat_sessions::attach_group_previews(&dir, &mut groups);
+        Ok(groups)
+    })
+    .await?;
     Ok(Json(groups))
 }
 
