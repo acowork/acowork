@@ -51,6 +51,16 @@ interface ExecSessionStatusCardProps {
   onAnswerCard?: (messageId: string, text: string, immediate: boolean) => void;
 }
 
+/** Stable empty fallbacks for the store selectors below. `useSyncExternalStore`
+ *  (Zustand) compares snapshots by reference, so returning a fresh `[]`/`{}`
+ *  from `??` on every call — which happens while `execSid` is null or the
+ *  session state has not been created yet (right after an agent starts, while
+ *  requests still 503) — forces an infinite rerender loop. Share one frozen
+ *  instance instead. */
+const EMPTY_TODOS: TodoItem[] = [];
+const EMPTY_APPROVALS: Record<string, ToolApprovalNeededEvent> = {};
+const EMPTY_QUESTIONS: AskQuestionEvent[] = [];
+
 /** `alias ?? path basename`, else "Agent Home" for the sentinel — same rule
  *  the WorkspaceSelector uses, so the card and the toolbar never disagree. */
 function workspaceDisplayName(id: string | undefined, alias: string | null | undefined, path: string | undefined, agentHomeLabel: string): string {
@@ -76,16 +86,16 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill, card, onAnswe
     execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.provider ?? null : null,
   );
   const todos = useChatStore((s) =>
-    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.todos ?? [] : [],
+    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.todos ?? EMPTY_TODOS : EMPTY_TODOS,
   );
   const pendingApproval = useChatStore((s) =>
-    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.pendingApproval ?? {} : {},
+    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.pendingApproval ?? EMPTY_APPROVALS : EMPTY_APPROVALS,
   );
   const serverError = useChatStore((s) =>
     execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.serverError ?? null : null,
   );
   const pendingQuestions = useChatStore((s) =>
-    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.pendingQuestions ?? [] : [],
+    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.pendingQuestions ?? EMPTY_QUESTIONS : EMPTY_QUESTIONS,
   );
   const title = useAgentStore((s) =>
     execSid ? s.agents[agentId]?.sessions.find((x) => x.session_id === execSid)?.title ?? null : null,
