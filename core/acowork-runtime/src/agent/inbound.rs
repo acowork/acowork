@@ -103,7 +103,9 @@ pub struct IntentEnvelope {
     /// at execution-session creation only, never rendered into the turn.
     #[serde(default)]
     pub session_config_json: String,
-    /// "request" | "response" (design 27 §5.4.5 R2); empty = request.
+    /// "request" | "response" | "user_message" (design 27 §5.4.5 R2,
+    /// §5.4.4: a human Chat-session message routed through the Intent
+    /// transport); empty = request.
     #[serde(default)]
     pub kind: String,
     /// For a response: the request message id this answers.
@@ -112,6 +114,11 @@ pub struct IntentEnvelope {
     /// For a response: outcome (§7.1); empty = completed.
     #[serde(default)]
     pub status: String,
+    /// Design 27 §5.5.4 / plan 2b.3: whether the source Chat session has
+    /// a human participant who can answer a decision card. `None` =
+    /// unknown → human-facing tools stay available (fail open).
+    #[serde(default)]
+    pub has_human: Option<bool>,
 }
 
 /// Messages that can be injected into the agent loop from external sources.
@@ -363,6 +370,7 @@ mod tests {
             kind: String::new(),
             in_reply_to: String::new(),
             status: String::new(),
+            has_human: None,
         }));
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
@@ -482,6 +490,7 @@ mod tests {
             kind: String::new(),
             in_reply_to: String::new(),
             status: String::new(),
+            has_human: None,
         }));
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);

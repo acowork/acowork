@@ -106,6 +106,12 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 // AppLayout.tsx for the same reason.
 const CHAT_PANEL_SHELL_CN = cn(CAPSULE_PANE_CN, "min-w-[338px] flex-1 bg-chat-body");
 
+// Embedded variant (design 27 §6.1, WeChat model): AgentPage owns the
+// capsule shell and the unified tab strip (pinned chat tab + exec tabs),
+// ChatPanel contributes only the flex column inside — a second capsule /
+// tab bar here would double the border.
+const CHAT_PANEL_EMBEDDED_CN = "flex min-h-0 min-w-0 flex-1 flex-col bg-chat-body";
+
 // Monaco-style top-edge shadow: the messages area shows a soft gradient
 // under the session tab bar's hairline whenever it is scrolled away from
 // the very top, so the boundary reads as a depth edge (same affordance as
@@ -448,7 +454,8 @@ function ConnectionStatusBanner({
   );
 }
 
-export function ChatPanel() {
+export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
+  const shellCn = embedded ? CHAT_PANEL_EMBEDDED_CN : CHAT_PANEL_SHELL_CN;
   const { t } = useTranslation();
   const { addToast } = useToast();
   const { selectedAgentId } = useAgentStore();
@@ -2224,7 +2231,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
   // through to session hydration — see comment on the constant above.
   if (Object.keys(useAgentStore.getState().agents).length === 0) {
     return (
-      <div className={CHAT_PANEL_SHELL_CN}>
+      <div className={shellCn}>
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center">
             <Bot className="mx-auto h-12 w-12 text-text-secondary " />
@@ -2239,7 +2246,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
   // ── No agent selected ──
   if (!selectedAgent) {
     return (
-      <div className={CHAT_PANEL_SHELL_CN}>
+      <div className={shellCn}>
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center">
             <Bot className="mx-auto h-12 w-12 text-text-secondary " />
@@ -2262,7 +2269,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
   // mounted, causing a one-frame flash.
   if (!selectedAgent.alive) {
     return (
-      <div className={CHAT_PANEL_SHELL_CN}>
+      <div className={shellCn}>
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center">
             <Tooltip content={t("chatPanel.startAgent")} variant="plain">
@@ -2351,7 +2358,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
   // when the chat view finally mounts, the session is fully bootstrapped.
   if (!currentSessionId) {
     return (
-      <div className={CHAT_PANEL_SHELL_CN}>
+      <div className={shellCn}>
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center">
             <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
@@ -2371,7 +2378,7 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
 
   return (
     <>
-      <div className={CHAT_PANEL_SHELL_CN}>
+      <div className={shellCn}>
         {/* LLM config warning */}
         {llmAvailability === "missing" && (
           <div
@@ -2388,8 +2395,9 @@ async function readClipboardImageBlob(): Promise<Blob | null> {
         {llmAvailability === "loading" && (
           <PlaceholderBar text={t("chatPanel.llmSyncing")} />
         )}
-        {/* ADR-015: Session tab bar */}
-        {selectedAgentId && <SessionTabBar agentId={selectedAgentId} />}
+        {/* ADR-015: Session tab bar — skipped when embedded: AgentPage
+            renders the unified strip (pinned chat tab + exec tabs) above. */}
+        {selectedAgentId && !embedded && <SessionTabBar agentId={selectedAgentId} />}
         {/* Messages area with drawer overlay */}
         <div
           className="relative flex flex-1 flex-col overflow-hidden"
@@ -3287,7 +3295,7 @@ export function groupModelsByProvider<
  * an account level (`provider → model → account`) instead of silently using
  * the first key. Single-key providers keep the flat two-level behaviour.
  */
-function ModelMenu({
+export function ModelMenu({
   models,
   accountsByProvider,
   currentModel,
@@ -3298,6 +3306,7 @@ function ModelMenu({
   wrapperRef: externalRef,
   btnId,
   readOnly,
+  readOnlyTip,
 }: {
   models: { name: string; provider: string; tool_call?: boolean; reasoning?: boolean; input_modalities?: string[] }[];
   /** Accounts per provider id; provider missing or single-entry = no account level */
@@ -3313,6 +3322,12 @@ function ModelMenu({
   btnId?: string;
   /** ADR-076 §决策 4: session is not writable by the signed-in account. */
   readOnly?: boolean;
+  /** Override for the read-only tooltip. The ADR-076 default ("session is
+   *  shared") only fits the execution view — the Chat surface renders the
+   *  same chips read-only for a different reason (they are display mirrors
+   *  of the agent's config, not shared-session locks), so it passes its
+   *  own wording here. */
+  readOnlyTip?: string;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -3504,7 +3519,7 @@ function ModelMenu({
       label={modelDisplayName}
       collapseClass="tb-model-text"
       tipClass="tb-model-tip"
-      tooltip={readOnly ? t("chatPanel.readOnlySession") : t("chatPanel.selectModel")}
+      tooltip={readOnly ? (readOnlyTip ?? t("chatPanel.readOnlySession")) : t("chatPanel.selectModel")}
       open={open}
       onToggle={() => !readOnly && (open ? closeMenu() : setOpen(true))}
       disabled={readOnly}
@@ -3723,7 +3738,7 @@ function ModelMenu({
 }
 
 /** Reasoning effort selector — popup with Auto/Off/Low/Medium/High */
-function ReasoningEffortMenu({
+export function ReasoningEffortMenu({
   effort,
   onChange,
   textHidden,

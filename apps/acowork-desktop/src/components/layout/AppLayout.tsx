@@ -4,9 +4,11 @@ import type { NavView } from "../../lib/types";
 import { NavBar } from "./NavBar";
 import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
-import { ChatPanel } from "../chat/ChatPanel";
+import { AgentPage } from "../chat/AgentPage";
 import { EmptyChatPane } from "../chat/EmptyChatPane";
 import { InboxPanel } from "../../views/InboxPanel";
+import { GroupChatPanel } from "../chat/GroupChatPanel";
+import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
 // FileEditorPanel is lazy-loaded: its module graph pulls in monaco-editor
@@ -298,6 +300,7 @@ export function AppLayout() {
   // Middle-panel routing: agent session wins; otherwise an open inbox thread
   // takes the pane. An explicit empty state at the bottom handles "neither".
   const activePeerId = useUserChatStore((s) => s.activePeerId);
+  const activeGroupId = useProjectGroupStore((s) => s.activeGroupId);
   // ADR-009 §V-Q: the name is server-side (Runtime `.overrides.json`,
   // mirrored into the Gateway's list view) — no local override.
   const agentDisplayName = selectedAgent
@@ -1047,7 +1050,7 @@ export function AppLayout() {
             {/* Middle panel — agent session takes priority; an open inbox
                 thread falls back to the user chat composer. Empty state is
                 handled by the panel components themselves. */}
-            {selectedAgentId ? <ChatPanel /> : activePeerId ? <InboxPanel /> : <EmptyChatPane />}
+            {selectedAgentId ? <AgentPage /> : activeGroupId ? <GroupChatPanel /> : activePeerId ? <InboxPanel /> : <EmptyChatPane />}
 
             {/* File editor panel — shown when files are open */}
             {hasOpenFiles && (

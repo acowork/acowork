@@ -79,6 +79,10 @@ pub enum ControlAction {
         in_reply_to: String,
         /// For a response: §7.1 outcome. Empty = completed.
         status: String,
+        /// Design 27 §5.5.4 / plan 2b.3: whether the source Chat session
+        /// has a human who can answer a card. `None` = unknown (older
+        /// Gateway, or chat-less delivery) → keep human-facing tools.
+        has_human: Option<bool>,
     },
 }
 
@@ -113,6 +117,7 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             kind: intent.kind,
             in_reply_to: intent.in_reply_to,
             status: intent.status,
+            has_human: intent.has_human_participant,
         },
     };
 

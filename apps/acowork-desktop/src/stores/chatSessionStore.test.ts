@@ -1,0 +1,281 @@
+/**
+ * The desktop Chat-session surface (design 27 §6, plan Wave 5).
+ *
+ * Two things are pinned here, both store rules rather than pixels:
+ *
+ *   1. `projectInFlight` — the read-time turn projection. Copied VERBATIM
+ *      from the mobile twin (`acowork-mobile/src/__tests__/
+ *      agent-chat-session.test.ts`): the two clients read one endpoint and
+ *      one vocabulary, so these mirrored cases are the drift guard — change
+ *      the projection on one side and the other goes red.
+ *   2. the freshness loop — the `chat/changed` doorbell is content-free, so
+ *      `wake()` re-reads over HTTP and never patches a row from a signal;
+ *      `sendText` re-reads once after the POST because the durable row
+ *      exists before the delivery resolves (§5.1).
+ *
+ * `fetch` is the seam (the store talks to the Gateway's user proxy
+ * directly); local mode (no account) must fall the store to mode 'exec'.
+ * The pair has EXACTLY ONE Chat session (WeChat model): `openAgent`
+ * resolves it through the default endpoint and never fetches a session
+ * list.
+ */
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import {
+  projectInFlight,
+  useChatSessionStore,
+  wakeAgentChat,
+  type ChatMessageRow,
+  type ChatSessionConfig,
+} from "./chatSessionStore";
+import { useAuthStore } from "./authStore";
+
+const PAGE = { messages: [] as ChatMessageRow[], total: 0 };
+
+// A shared default router: the GET default session, the intent POST, the
+// message window. Draft tests override it per-case via mockImplementation and
+// reset to this in `beforeEach`. `init` is read so a PATCH body can be asserted.
+async function defaultFetch(url: string, init?: RequestInit): Promise<unknown> {
+  if (init?.method === "PATCH" && url.includes("/session-config")) {
+    return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+  }
+  if (url.includes("/api/chat-sessions/default")) {
+    return {
+      ok: true,
+      json: async () => ({
+        session_id: "cs-1",
+        kind: "user_agent",
+        title: "",
+        created_at: 1,
+        last_active_at: 1,
+        message_count: 0,
+      }),
+    };
+  }
+  if (url.includes("/api/intents/chat-message")) return { ok: true, json: async () => ({}) };
+  if (url.includes("/messages")) return { ok: true, json: async () => ({ ...PAGE }) };
+  if (url.includes("/api/chat-sessions/u1")) {
+    return { ok: true, json: async () => [] };
+  }
+  return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+}
+const fetchMock = vi.fn(defaultFetch);
+vi.stubGlobal("fetch", fetchMock);
+
+const calls = (needle: string) =>
+  fetchMock.mock.calls.filter((c) => String(c[0]).includes(needle));
+
+const row = (kind: string, meta: Partial<NonNullable<ChatMessageRow["meta"]>> = {}): ChatMessageRow => ({
+  seq: 0,
+  ts: 0,
+  from: "u1",
+  kind,
+  body: "x",
+  to: "",
+  meta: { message_id: "", ...meta },
+});
+
+const user = (id: string) => row("user_message", { message_id: id });
+const pointer = (trigger: string, sid: string) =>
+  row("system_notice", { notice_type: "turn_started", in_reply_to: trigger, agent_session_id: sid });
+const terminal = (trigger: string) =>
+  row("agent_message", { message_id: `resp-${trigger}`, in_reply_to: trigger });
+
+describe("projectInFlight (mirrored from mobile — drift guard)", () => {
+  it("sees a trailing user_message with its pointer as in flight", () => {
+    const rows = [user("t1"), pointer("t1", "exec-1")];
+    expect(projectInFlight(rows)).toEqual({ triggerId: "t1", execSid: "exec-1" });
+  });
+
+  it("clears once the terminal row lands", () => {
+    const rows = [user("t1"), pointer("t1", "exec-1"), terminal("t1")];
+    expect(projectInFlight(rows)).toBeNull();
+  });
+
+  it("ignores a trailing user_message without a pointer (group message that @-nobody)", () => {
+    expect(projectInFlight([user("t1")])).toBeNull();
+  });
+
+  it("treats an interaction card as turn-end (the card is pending, not the turn)", () => {
+    const rows = [
+      user("t1"),
+      pointer("t1", "exec-1"),
+      row("interaction_request", {
+        message_id: "c1",
+        in_reply_to: "t1",
+        interaction: { kind: "ask_question", request_id: "r1" },
+      }),
+    ];
+    expect(projectInFlight(rows)).toBeNull();
+  });
+
+  it("follows a card answer back into flight (position rule, not id chain)", () => {
+    const rows = [
+      user("t1"),
+      pointer("t1", "exec-1"),
+      row("interaction_request", { message_id: "c1", in_reply_to: "t1" }),
+      row("user_message", { message_id: "t2", in_reply_to: "c1" }),
+    ];
+    expect(projectInFlight(rows)).toEqual({ triggerId: "t2", execSid: "exec-1" });
+  });
+
+  it("is null for an empty window", () => {
+    expect(projectInFlight([])).toBeNull();
+  });
+});
+
+describe("chatSessionStore freshness loop", () => {
+  beforeEach(() => {
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, inFlight: {}, sending: {}, draft: {} });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(defaultFetch);
+    useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
+  });
+
+  it("openAgent resolves the single default session and loads its window", async () => {
+    await useChatSessionStore.getState().openAgent("agent-1");
+    const st = useChatSessionStore.getState().byAgent["agent-1"];
+    expect(st.chatSessionId).toBe("cs-1");
+    expect(st.resolved).toBe(true);
+    expect(st.mode).toBe("chat");
+    expect(calls("/messages").length).toBe(1);
+    // One pair, one chat session: no per-agent session list is fetched.
+    expect(calls("?agent=").length).toBe(0);
+  });
+
+  it("no account (local mode) resolves straight to the exec surface — the rollback path", async () => {
+    useAuthStore.setState({ account: null, accessToken: null });
+    await useChatSessionStore.getState().openAgent("agent-1");
+    expect(useChatSessionStore.getState().byAgent["agent-1"]).toEqual({
+      chatSessionId: null,
+      resolved: true,
+      mode: "exec",
+    });
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  it("openAgent failure resolves to the exec surface, never a stuck spinner", async () => {
+    fetchMock.mockImplementationOnce(async () => ({ ok: false, status: 503, json: async () => ({}), text: async () => "" }));
+    await useChatSessionStore.getState().openAgent("agent-dead");
+    expect(useChatSessionStore.getState().byAgent["agent-dead"].mode).toBe("exec");
+    expect(useChatSessionStore.getState().byAgent["agent-dead"].resolved).toBe(true);
+  });
+
+  it("sendText posts through the intent channel and re-reads once (§5.1)", async () => {
+    await useChatSessionStore.getState().openAgent("agent-1");
+    fetchMock.mockClear();
+    const ok = await useChatSessionStore.getState().sendText("cs-1", "hello", "card-9");
+    expect(ok).toBe(true);
+    const post = calls("/api/intents/chat-message");
+    expect(post.length).toBe(1);
+    const body = JSON.parse((post[0]![1] as RequestInit).body as string);
+    expect(body).toMatchObject({ chat_session_id: "cs-1", from_user: "u1", text: "hello", in_reply_to: "card-9" });
+    expect(calls("/messages").length).toBe(1);
+  });
+
+  it("wake() re-reads the pinned chat session over HTTP even in exec mode — the tab's pulse must stay honest", async () => {
+    await useChatSessionStore.getState().openAgent("agent-1");
+    useChatSessionStore.getState().setMode("agent-1", "exec");
+    fetchMock.mockClear();
+    wakeAgentChat();
+    await vi.waitFor(() => expect(calls("/messages").length).toBe(1));
+    expect(useChatSessionStore.getState().windows["cs-1"]!.tail).toEqual([]);
+  });
+
+  it("refresh projects the in-flight turn from the durable rows", async () => {
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes("/messages")) {
+        return {
+          ok: true,
+          json: async () => ({ messages: [user("t1"), pointer("t1", "exec-9")], total: 2 }),
+        };
+      }
+      return (original as (u: string) => unknown)(url) as never;
+    });
+    await useChatSessionStore.getState().openAgent("agent-1");
+    expect(useChatSessionStore.getState().inFlight["cs-1"]).toEqual({
+      triggerId: "t1",
+      execSid: "exec-9",
+    });
+  });
+});
+
+describe("chatSessionStore seed draft (design 27 §4.5 — backend-persisted, store is a cache)", () => {
+  beforeEach(() => {
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, inFlight: {}, sending: {}, draft: {} });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(defaultFetch);
+    useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
+  });
+
+  it("hydrates the draft cache from the default session's session_config", async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (String(url).includes("/api/chat-sessions/default")) {
+        return {
+          ok: true,
+          json: async () => ({
+            session_id: "cs-1",
+            kind: "user_agent",
+            title: "",
+            session_config: { model: "gpt-x", provider: "prov-y" },
+            created_at: 1,
+            last_active_at: 1,
+            message_count: 0,
+          }),
+        };
+      }
+      if (String(url).includes("/messages")) return { ok: true, json: async () => ({ messages: [], total: 0 }) };
+      return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+    });
+    await useChatSessionStore.getState().openAgent("agent-1");
+    expect(useChatSessionStore.getState().draft["cs-1"]).toEqual({ model: "gpt-x", provider: "prov-y" });
+  });
+
+  it("saveDraft PATCHes the whole draft (undefined/empty stripped), shows it optimistically, then adopts the server-normalized value", async () => {
+    await useChatSessionStore.getState().openAgent("agent-1"); // default carries no session_config → {}
+    fetchMock.mockClear();
+    let optimistic: ChatSessionConfig | undefined;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") {
+        // Mid-flight the cache already reflects the full pick (optimistic UI).
+        optimistic = useChatSessionStore.getState().draft["cs-1"];
+        return {
+          ok: true,
+          json: async () => ({
+            session_id: "cs-1",
+            kind: "user_agent",
+            title: "",
+            session_config: { model: "m2", provider: "p2" },
+            created_at: 1,
+            last_active_at: 1,
+            message_count: 0,
+          }),
+        };
+      }
+      return defaultFetch(url, init);
+    });
+    await useChatSessionStore
+      .getState()
+      .saveDraft("agent-1", { model: "m2", provider: "p2", workspace: undefined, reasoning_effort: undefined });
+    const patch = calls("/session-config");
+    expect(patch.length).toBe(1);
+    const body = JSON.parse((patch[0]![1] as RequestInit).body as string);
+    // Whole-replace wire strips undefined/empty — an absent field clears server-side.
+    expect(body).toEqual({ model: "m2", provider: "p2" });
+    expect(optimistic).toEqual({ model: "m2", provider: "p2" });
+    // Final cache is the server-normalized row, not the local guess.
+    expect(useChatSessionStore.getState().draft["cs-1"]).toEqual({ model: "m2", provider: "p2" });
+  });
+
+  it("reverts the optimistic draft when the PATCH fails — a draft that never landed must not be shown", async () => {
+    await useChatSessionStore.getState().openAgent("agent-1");
+    useChatSessionStore.setState({ draft: { "cs-1": { model: "keep" } } });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") return { ok: false, status: 503, json: async () => ({}), text: async () => "" };
+      return defaultFetch(url, init);
+    });
+    await useChatSessionStore.getState().saveDraft("agent-1", { model: "gone" });
+    expect(useChatSessionStore.getState().draft["cs-1"]).toEqual({ model: "keep" });
+  });
+});

@@ -23,6 +23,8 @@ import type {
   AccountMe,
   AgentRow,
   ChatMessage,
+  ChatMessagesPage,
+  ChatSessionInfo,
   ConversationEntry,
   DirectoryEntry,
   GatewayStatus,
@@ -500,6 +502,59 @@ export async function sendUserMessage(me: string, chatId: string, body: string):
 
 export async function markUserChatRead(me: string, chatId: string): Promise<void> {
   await req<void>('POST', `/api/users/${me}/chats/${chatId}/read`)
+}
+
+/* ------------------------------------------------------------------ */
+/* Chat sessions — the unified surface (design 27 §6.5, plan Wave 5.5)  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The caller's default 1:1 Chat session with `agentId`, created on first
+ * call (idempotent server-side: `GET /api/chat-sessions/default?pair=`).
+ * The agent is addressed by instance id — the same value the inbox lists.
+ */
+export async function fetchDefaultChatSession(agentId: string): Promise<ChatSessionInfo> {
+  return req<ChatSessionInfo>(
+    'GET',
+    `/api/chat-sessions/default?pair=${encodeURIComponent(agentId)}`,
+  )
+}
+
+/**
+ * One page of a Chat session. `offset` counts BACK from the newest row, so
+ * `offset=0` is the newest window in ascending order and `offset=loaded`
+ * is the next-older page — identical to Desktop's `chatSessionStore` paging.
+ */
+export async function fetchChatMessages(
+  chatSessionId: string,
+  offset: number,
+  limit = 50,
+): Promise<ChatMessagesPage> {
+  return req<ChatMessagesPage>(
+    'GET',
+    `/api/chat-sessions/${encodeURIComponent(chatSessionId)}/messages?offset=${offset}&limit=${limit}`,
+  )
+}
+
+/**
+ * Post one turn into a Chat session. Goes through the intent channel
+ * (`POST /api/intents/chat-message`), NOT a session-scoped write: the
+ * durable row lands before delivery resolves (design 27 §5.1), so the
+ * caller re-reads after the response regardless of the delivery outcome.
+ * `inReplyTo` is a card's `message_id` when answering a decision card.
+ */
+export async function sendChatMessage(
+  me: string,
+  chatSessionId: string,
+  text: string,
+  inReplyTo?: string,
+): Promise<void> {
+  await req<void>('POST', '/api/intents/chat-message', {
+    chat_session_id: chatSessionId,
+    from_user: me,
+    text,
+    in_reply_to: inReplyTo ?? '',
+  })
 }
 
 /* ------------------------------------------------------------------ */

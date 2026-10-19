@@ -56,6 +56,13 @@ pub enum RotateReason {
     T1Idle,
     /// T2: the previous turn compacted at least once (long-running task).
     T2Compaction,
+    /// T3 (design 27 §4.5, chat config surface): the inbound intent carries
+    /// a `session_config` seed that differs from the mapped session's own
+    /// config. Reuse would silently ignore the initiator's explicit choice
+    /// ("send this task with model X"), so the context rotates to a fresh
+    /// session created under the seed instead. Handoff is the pointer form
+    /// (like T1 — no distilled summary exists for a config change).
+    T3Config,
 }
 
 /// Idle threshold for T1 rotation. Layer 1 = `AgentConfig::intent_idle_rotate_hours`
@@ -218,16 +225,22 @@ impl IntentSessionMap {
 }
 
 /// Inbound Intent's optional `session_config` suggestion (design 27 §4.5
-/// field table, §13-6: "只是应方允许范围内的建议"). Only `model` and
-/// `provider` are honored — the two knobs the responder's session
-/// creation path already accepts. Skills are deliberately NOT part of
-/// the seed: skills are auto-loaded by the model, not session-seeded,
-/// so an initiator suggestion must never name one. Unknown keys are
-/// ignored (additive fields land without a wire change).
+/// field table, §13-6: "只是应方允许范围内的建议"). `model`/`provider`
+/// are clamped against the responder's provider list; `workspace` is
+/// validated against the responder's workspace registry at creation
+/// (an unknown id is dropped, never left to poison the session into the
+/// pending-workspace state); `reasoning_effort` must parse as a known
+/// level. Skills are deliberately NOT part of the seed: skills are
+/// auto-loaded by the model, not session-seeded, so an initiator
+/// suggestion must never name one. A `provider` without a `model` is
+/// meaningless (the pair is suggested together) and dropped. Unknown
+/// keys are ignored (additive fields land without a wire change).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionSeed {
     pub model: Option<String>,
     pub provider: Option<String>,
+    pub workspace: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 impl SessionSeed {
@@ -246,41 +259,122 @@ impl SessionSeed {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         };
-        let seed = Self { model: get("model"), provider: get("provider") };
-        if seed.model.is_none() && seed.provider.is_none() {
+        let seed = Self {
+            model: get("model"),
+            provider: get("provider"),
+            workspace: get("workspace"),
+            // Only a level the enum understands may reach the session —
+            // a garbage string would otherwise persist and resolve to None
+            // on every later read.
+            reasoning_effort: get("reasoning_effort").filter(|s| {
+                acowork_core::providers::traits::ReasoningEffort::from_str_loose(s).is_some()
+            }),
+        };
+        // A lone provider (no model) cannot pin anything — drop it.
+        let seed = if seed.model.is_none() {
+            Self {
+                provider: None,
+                ..seed
+            }
+        } else {
+            seed
+        };
+        let empty = seed.model.is_none()
+            && seed.provider.is_none()
+            && seed.workspace.is_none()
+            && seed.reasoning_effort.is_none();
+        if empty {
             None
         } else {
             Some(seed)
         }
     }
 
-    /// Clamp the suggestion to the responder's allowed set (§13-6): the
-    /// model must exist in the responder's provider list — under the
+    /// Clamp the model suggestion to the responder's allowed set (§13-6):
+    /// the model must exist in the responder's provider list — under the
     /// suggested provider when one is given, otherwise under any provider
     /// that serves it (the provider is then pinned to the hit so the pair
-    /// is never half-suggested). If nothing of the suggestion survives it
-    /// returns `None` → responder defaults.
+    /// is never half-suggested). Only the (model, provider) pair degrades
+    /// to the responder's defaults when nothing of it survives; `workspace`
+    /// and `reasoning_effort` are provider-independent and pass through
+    /// (workspace still gets validated against the resolver at creation).
     pub fn clamp_to_responder(
         self,
         providers: &[acowork_core::protocol::ProviderListItem],
     ) -> Option<Self> {
-        let model = self.model.as_deref()?;
-        let want_provider = self.provider.as_deref().filter(|p| !p.is_empty());
-        for p in providers {
-            let provider_ok = want_provider.is_none_or(|w| w == p.id);
-            if provider_ok && p.models.iter().any(|m| m.id == model) {
-                return Some(Self {
-                    model: Some(model.to_string()),
-                    provider: Some(p.id.clone()),
-                });
+        let Self {
+            model,
+            provider,
+            workspace,
+            reasoning_effort,
+        } = self;
+        let mut clamped_model = None;
+        let mut clamped_provider = None;
+        if let Some(m) = model.as_deref() {
+            let want_provider = provider.as_deref().filter(|p| !p.is_empty());
+            for p in providers {
+                let provider_ok = want_provider.is_none_or(|w| w == p.id);
+                if provider_ok && p.models.iter().any(|mid| mid.id == m) {
+                    clamped_model = Some(m.to_string());
+                    clamped_provider = Some(p.id.clone());
+                    break;
+                }
+            }
+            if clamped_model.is_none() {
+                tracing::warn!(
+                    model = m,
+                    provider = want_provider.unwrap_or(""),
+                    "Intent session_config model suggestion outside the responder's allowed set — using defaults"
+                );
             }
         }
-        tracing::warn!(
-            model,
-            provider = want_provider.unwrap_or(""),
-            "Intent session_config suggestion outside the responder's allowed set — using defaults"
-        );
-        None
+        let out = Self {
+            model: clamped_model,
+            provider: clamped_provider,
+            workspace,
+            reasoning_effort,
+        };
+        let empty = out.model.is_none()
+            && out.provider.is_none()
+            && out.workspace.is_none()
+            && out.reasoning_effort.is_none();
+        if empty {
+            None
+        } else {
+            Some(out)
+        }
+    }
+
+    /// True when every field is `None` — nothing the initiator pinned
+    /// survives clamping/validation, so the seed carries no opinion.
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none()
+            && self.provider.is_none()
+            && self.workspace.is_none()
+            && self.reasoning_effort.is_none()
+    }
+
+    /// T3 rotation trigger (design 27 §4.5, chat config surface): the
+    /// initiator explicitly pinned a config the mapped session does not
+    /// already carry. Reuse would silently drop that choice ("send this
+    /// task with model X"), so the context rotates to a fresh session
+    /// created under the seed instead. A seed field left `None` expresses
+    /// no opinion and never conflicts; only a `Some` value that differs
+    /// from the session's current config counts.
+    pub fn conflicts_with(
+        &self,
+        current_model: Option<&str>,
+        current_provider: Option<&str>,
+        current_workspace: Option<&str>,
+        current_reasoning: Option<&str>,
+    ) -> bool {
+        let differs = |want: &Option<String>, have: Option<&str>| {
+            want.as_deref().is_some_and(|w| Some(w) != have)
+        };
+        differs(&self.model, current_model)
+            || differs(&self.provider, current_provider)
+            || differs(&self.workspace, current_workspace)
+            || differs(&self.reasoning_effort, current_reasoning)
     }
 }
 
@@ -328,6 +422,10 @@ pub fn rotation_handoff(
         ),
         RotateReason::T2Compaction => format!(
             "[intent rotation] The previous execution session for this context (session id \"{old}\") was rotated after an in-turn compaction (T2: long-running task).",
+            old = old_session_id
+        ),
+        RotateReason::T3Config => format!(
+            "[intent rotation] The previous execution session for this context (session id \"{old}\") was rotated because this inbound intent carried an explicit session-config choice that differs from that session's own config; the new session starts under the requested config. Its full history stays available under that session id.",
             old = old_session_id
         ),
     };
@@ -539,6 +637,7 @@ mod tests {
         let s = SessionSeed {
             model: Some("m2".into()),
             provider: None,
+            ..Default::default()
         }
         .clamp_to_responder(&list)
         .unwrap();
@@ -547,6 +646,7 @@ mod tests {
         let bad = SessionSeed {
             model: Some("m2".into()),
             provider: Some("p1".into()),
+            ..Default::default()
         }
         .clamp_to_responder(&list);
         assert!(bad.is_none());
@@ -554,9 +654,58 @@ mod tests {
         assert!(SessionSeed {
             model: Some("nope".into()),
             provider: None,
+            ..Default::default()
         }
         .clamp_to_responder(&list)
         .is_none());
+    }
+
+    #[test]
+    fn session_seed_parses_workspace_and_valid_reasoning() {
+        // workspace passes through; reasoning_effort only when the enum
+        // understands it — an unknown effort string is dropped at parse
+        // so it can never persist and resolve to None on every later read.
+        let s = SessionSeed::from_json(r#"{"workspace":"w-9","reasoning_effort":"high"}"#)
+            .unwrap();
+        assert_eq!(s.workspace.as_deref(), Some("w-9"));
+        assert_eq!(s.reasoning_effort.as_deref(), Some("high"));
+        // A reasoning/workspace-only seed is valid (no model required).
+        assert_eq!(s.model, None);
+        // An unparseable effort alone -> every field empty -> no seed.
+        assert!(
+            SessionSeed::from_json(r#"{"reasoning_effort":"turbo"}"#).is_none(),
+            "unparseable effort must not reach the session"
+        );
+    }
+
+    #[test]
+    fn seed_conflicts_only_on_pinned_fields_that_differ() {
+        // T3 rotation trigger (§4.5): a pinned value that differs from the
+        // mapped session's own config; a `None` field expresses no opinion.
+        let seed = SessionSeed {
+            model: Some("m1".into()),
+            provider: Some("p1".into()),
+            workspace: None,
+            reasoning_effort: None,
+        };
+        assert!(
+            !seed.conflicts_with(Some("m1"), Some("p1"), Some("w"), None),
+            "matching config -> reuse, no rotation"
+        );
+        assert!(seed.conflicts_with(Some("m2"), Some("p1"), Some("w"), None));
+        // Unpinned fields never conflict, even when the session has none.
+        assert!(!seed.conflicts_with(Some("m1"), Some("p1"), None, None));
+        // A differently-pinned provider also conflicts (the pair is explicit).
+        assert!(seed.conflicts_with(Some("m1"), Some("p2"), None, None));
+    }
+
+    #[test]
+    fn t3_config_handoff_is_pointer_only() {
+        // Like T1: a config change has no distilled summary to carry.
+        let t3 = rotation_handoff(RotateReason::T3Config, "s-old", Some("summary"), 1500);
+        assert!(!t3.contains("distilled handoff"), "T3 carries no summary");
+        assert!(t3.contains("session-config"), "{t3}");
+        assert!(t3.contains("s-old"), "predecessor id kept");
     }
 
     #[test]

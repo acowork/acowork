@@ -48,6 +48,36 @@ impl IntentTurnContext {
     }
 }
 
+/// Design 27 §5.4.5 / plan D-C/C1: an inbound Intent kind decides **two
+/// orthogonal things**, and conflating them is what made 1:1 user-agent
+/// chat unusable (a human message judged as a `request` stripped
+/// `ask_user_question` from the turn).
+///
+/// Returns `(responder_role, needs_write_back)`:
+///
+/// - `"request"` (and empty = legacy request): the turn must answer an
+///   agent-to-agent request — responder role (R1 tool trim, R3 no
+///   human-awaiting pause) **and** a system write-back at turn end. The
+///   write-back goes through `POST /api/intents/{request_id}/response`
+///   even when no Chat session is bound (mailbox-only degradation), so a
+///   request always owes a write-back.
+/// - `"user_message"`: a human chat message routed through the Intent
+///   transport (§5.4.4) — an ordinary initiator turn with the full tool
+///   set, but the turn owes its Chat session a terminal row. Needs a
+///   `message_id` to answer against; without one there is no coordinate.
+/// - `"response"`: the answer arriving back at the initiator — an
+///   ordinary turn with **no** write-back (the response row is already
+///   durable; the Gateway appended it when the answer was posted).
+pub fn turn_kind_semantics(kind: &str, message_id: &str) -> (bool, bool) {
+    match kind {
+        "response" => (false, false),
+        "user_message" => (false, !message_id.is_empty()),
+        // "request" and any unknown kind keep request semantics —
+        // same conservative default the pre-split code used.
+        _ => (true, true),
+    }
+}
+
 /// Render an Intent envelope as the user-role message the receiving model
 /// sees. Shared by the mid-turn injection path (`loop_inbound`) and the
 /// new-turn path (`session_task`) so both renderings stay identical.
@@ -67,6 +97,17 @@ pub fn render_intent_message(
     // Design 27 §3.2: the receiver sees the full envelope — reply
     // coordinates (conversation / source sessions) and the authorized repo
     // are part of the message, not ambient.
+    //
+    // §5.4.4: a `user_message` is human input routed through the Intent
+    // transport — the model must see the person speaking, not an envelope.
+    // No reply coordinates either: the write-back is system-driven from
+    // the envelope, not from anything the model reads here.
+    if kind == "user_message" {
+        return match params.get("message").and_then(|v| v.as_str()) {
+            Some(text) => text.to_string(),
+            None => params.to_string(),
+        };
+    }
     let mut rendered = if kind == "response" || kind == "intent_response" {
         format!(
             "[intent_response:{from}:{action}] {params}
@@ -91,6 +132,49 @@ pub fn render_intent_message(
         rendered.push_str(&format!("\n(repo: {repo})"));
     }
     rendered
+}
+
+/// POST a Runtime-owned chat row through the Gateway relay
+/// (`POST /api/intents/chat-append`, plan 3.0): `interaction_request`
+/// cards (§5.5.4) and `system_notice / turn_started` pointers (§5.5.5).
+/// Same source as the §5.5.1 write-back — the Runtime never speaks to
+/// the user service directly. Idempotent by `meta.message_id`: a
+/// redelivered turn produces no second row.
+///
+/// Best-effort by contract: a lost pointer or card degrades the surface,
+/// it does not lose the conversation; callers log and continue.
+#[allow(clippy::too_many_arguments)] // positional row shape; a struct here is boilerplate
+pub async fn append_chat_row(
+    instance_id: &str,
+    gateway_host: &str,
+    node_token: &str,
+    chat_session_id: &str,
+    kind: &str,
+    to: &str,
+    body: &str,
+    meta: serde_json::Value,
+) -> Result<(), String> {
+    let url = format!("http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/chat-append");
+    let payload = serde_json::json!({
+        "from": instance_id,
+        "chat_session_id": chat_session_id,
+        "kind": kind,
+        "to": to,
+        "body": body,
+        "meta": meta,
+    });
+    let mut req = reqwest::Client::new().post(&url).json(&payload);
+    if !node_token.is_empty() {
+        req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, node_token);
+    }
+    let resp = req.send().await.map_err(|e| format!("chat-append failed: {e}"))?;
+    let status = resp.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("chat-append rejected (HTTP {status}): {body}"))
+    }
 }
 
 /// POST the responder's final output back through the Gateway write entry
@@ -202,5 +286,59 @@ mod tests {
         assert!(t.ends_with("[truncated]"));
         assert!(s.starts_with(&t[..t.len() - "\n[truncated]".len()]));
         assert_eq!(truncate_response_body(s, 100), s);
+    }
+
+    #[test]
+    fn user_message_renders_as_plain_human_input() {
+        // §5.4.4: a human 1:1 message routed through the Intent transport
+        // must reach the model as the person speaking — no envelope tag,
+        // no coordinates.
+        let s = render_intent_message(
+            "user-1",
+            "chat",
+            &serde_json::json!({"message": "帮我看看日志"}),
+            "m1",
+            "",
+            "cs1",
+            "",
+            "user_message",
+            "",
+            "",
+        );
+        assert_eq!(s, "帮我看看日志");
+    }
+
+    #[test]
+    fn kind_semantics_split_role_from_writeback() {
+        // D-C/C1: responder role and write-back are orthogonal.
+        // A `request` carries both; a human `user_message` owes a
+        // write-back but must not take the responder role.
+        assert_eq!(turn_kind_semantics("request", "m1"), (true, true));
+        assert_eq!(turn_kind_semantics("", "m1"), (true, true));
+        assert_eq!(turn_kind_semantics("user_message", "m1"), (false, true));
+        // No message_id → no write-back coordinate for a human message.
+        assert_eq!(turn_kind_semantics("user_message", ""), (false, false));
+        // A response arriving at the initiator: ordinary turn, no debt.
+        assert_eq!(turn_kind_semantics("response", "m2"), (false, false));
+    }
+
+    #[test]
+    fn tool_visibility_splits_role_from_answerability() {
+        // §6.5 R1 + §5.5.4 (plan 2b.3): `intent_send` is hidden by role,
+        // `ask_user_question` by a *known* human-free session. Unknown
+        // fails open.
+        use crate::agent::loop_context::hidden_tools_for_turn as h;
+        // Responder in a pure agent-agent pair: both gone.
+        assert_eq!(h(true, Some(false)), ["intent_send", "ask_user_question"]);
+        // Responder in a group with humans: only the nested-Intent gate.
+        assert_eq!(h(true, Some(true)), ["intent_send"]);
+        // Responder, answerability unknown (older Gateway): role only.
+        assert_eq!(h(true, None), ["intent_send"]);
+        // Initiator turn in a human-free pair (response arrival): the card
+        // tool goes, the ability to continue the conversation stays.
+        assert_eq!(h(false, Some(false)), ["ask_user_question"]);
+        // Human 1:1 / mention turns: nothing hidden.
+        assert!(h(false, Some(true)).is_empty());
+        assert!(h(false, None).is_empty());
     }
 }

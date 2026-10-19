@@ -10,6 +10,7 @@ import { useAuthStore } from "./authStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useFileTreeStore } from "./fileTree";
 import { useUserChatStore } from "./userChatStore";
+import { useProjectGroupStore } from "./projectGroupStore";
 import { log } from "../lib/logger";
 import { with503Retry } from "../lib/httpRetry";
 import * as sessionControl from "../lib/session-control";
@@ -637,6 +638,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     }
     set({ selectedAgentId: id });
 
+    // Project group chats share the middle pane: picking an agent closes
+    // an open group (mirror of `AgentList`'s group row clearing agents).
+    useProjectGroupStore.getState().clearSelection();
+
     // Mirror of the reverse direction in `UserList.openThread`, which clears
     // `selectedAgentId` so AppLayout falls through to <InboxPanel />. Picking
     // an agent while a user row is the active inbox peer would otherwise leave
@@ -1212,16 +1217,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       let newCurrentId: string | null;
       if (isCurrent) {
         // Prefer an already-open tab (e.g. the default session) so the user
-        // doesn't see a random old session auto-open.  If no open tabs remain,
-        // fall back to the first remaining session; if none, clear messages.
+        // doesn't see a random old session auto-open. Design 27 (v2.1): when
+        // no open tabs remain there is NO fallback to a closed background
+        // session any more — that pre-chat rule ("the exec surface must
+        // always have a session") made the last exec tab unclosable: closing
+        // it re-opened `remaining[0]`, forever. The pinned Chat tab is the
+        // landing surface now; the caller (SessionTabBar.finishCloseTab)
+        // flips the view to chat when the strip empties.
         const openRemaining = remaining.filter((s) => openIds.includes(s.session_id));
-        if (openRemaining.length > 0) {
-          newCurrentId = openRemaining[0].session_id;
-        } else if (remaining.length > 0) {
-          newCurrentId = remaining[0].session_id;
-        } else {
-          newCurrentId = null;
-        }
+        newCurrentId = openRemaining.length > 0 ? openRemaining[0].session_id : null;
       } else {
         newCurrentId = useChatStore.getState().getActiveSessionId(agentId);
       }
@@ -1270,8 +1274,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       if (!storage) return;
       const isCurrent = useChatStore.getState().getActiveSessionId(agentId) === sessionId;
       const remaining = storage.sessions.filter((s) => s.session_id !== sessionId);
+      // Design 27 (v2.1): deleting the current session must not resurrect a
+      // closed background session — same unclosable-tab loop as `closeSession`
+      // above. Only `closeTab`'s still-open neighbour (assigned below) becomes
+      // the new active; otherwise the pinned chat tab is the landing surface
+      // (the dropdown caller flips the mode).
       let newCurrentId: string | null = isCurrent
-        ? (remaining.length > 0 ? remaining[0].session_id : null)
+        ? null
         : useChatStore.getState().getActiveSessionId(agentId);
 
       set((state) => patchAgent(state, agentId, { sessions: remaining }));

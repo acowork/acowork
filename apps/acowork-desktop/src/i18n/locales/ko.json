@@ -226,6 +226,55 @@
       "unavailable": "사용 불가"
     }
   },
+  "chatView": {
+    "empty": "채팅에 메시지가 없습니다",
+    "processing": "Agent 처리 중 · 클릭하면 실행 과정 보기",
+    "queued": "전달됨, Agent 시작을 기다리는 중…",
+    "cardAnswered": "답변됨",
+    "freeAnswer": "직접 답변",
+    "answer": "답변",
+    "replyingTo": "답장 대상",
+    "cancelReply": "답장 취소",
+    "emptyReply": "(출력 없이 종료됨)",
+    "viewRun": "실행 보기",
+    "statusCard": {
+      "untitled": "제목 없는 실행",
+      "detail": "세부정보",
+      "workspaceAgentHome": "Agent 홈",
+      "labelStatus": "상태",
+      "labelTitle": "세션",
+      "labelStep": "현재 단계",
+      "labelModel": "모델",
+      "labelWorkspace": "워크스페이스",
+      "errorTitle": "오류",
+      "dismiss": "닫기",
+      "continue": "계속",
+      "deny": "거부",
+      "allow": "허용",
+      "pausedIteration": "반복 상한에 도달하여 일시 정지되었습니다.",
+      "stepApproval": "승인 대기: {{tool}}",
+      "stepRunningTool": "도구 {{count}}개 실행 중…",
+      "stepTodo": "{{content}} ({{index}}/{{total}})",
+      "status": {
+        "idle": "유휴",
+        "llm_awaiting_first_chunk": "모델 대기 중",
+        "thinking": "생각 중",
+        "llm_streaming": "출력 중",
+        "tool_executing": "도구 실행 중",
+        "waiting_approval": "승인 대기",
+        "paused": "일시 정지"
+      },
+      "phase": {
+        "idle": "유휴",
+        "waiting": "모델 대기 중",
+        "thinking": "생각 중",
+        "streaming": "답변 생성 중",
+        "tool_executing": "도구 실행 중",
+        "waiting_approval": "승인 대기",
+        "paused": "일시 정지"
+      }
+    }
+  },
   "time": {
     "justNow": "방금",
     "minutesAgo": "{{count}}분 전",
@@ -412,7 +461,8 @@
     "node": "Node",
     "contextPermissions": "권한",
     "nodePermissions": "노드 권한",
-    "noAccess": "접근 권한 없음"
+    "noAccess": "접근 권한 없음",
+    "projectGroupsBanner": "프로젝트 그룹 채팅"
   },
   "cloneDialog": {
     "skeleton": "스켈레톤",
@@ -1802,5 +1852,15 @@
     "claimOwnerHint": "이 {{kind}}에는 소유자가 없어 관리할 수 있는 사람은 당신뿐이며 아직 {{pub}}(으)로 설정할 수 없습니다. 소유권을 주장하면 공개 범위를 변경할 수 있습니다.",
     "agent": "에이전트",
     "node": "노드"
+  },
+  "groupChat": {
+    "members": "멤버 {{count}}명",
+    "loadEarlier": "이전 메시지 불러오기",
+    "empty": "아직 메시지가 없습니다",
+    "working": "Agent 처리 중…",
+    "placeholder": "프로젝트 팀에게 보내기",
+    "placeholderWithMentions": "보내기 — @Agent로 처리 요청",
+    "send": "보내기",
+    "emptyTurn": "(출력 없음)"
   }
 }

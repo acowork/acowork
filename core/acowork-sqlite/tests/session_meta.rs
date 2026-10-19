@@ -79,6 +79,7 @@ fn make_meta(
         corrupted: false,
         user_id: None,
         visibility: None,
+    chat_session_id: None,
     }
 }
 
@@ -136,6 +137,16 @@ fn round_trip_preserves_every_field() -> AcoworkResult<()> {
     assert_eq!(got.perf.as_ref().map(|p| p.tps_samples), Some(2));
     assert_eq!(got.perf.as_ref().map(|p| p.ttft_ms_samples), Some(3));
     assert_eq!(got.model_ratio, Some(1.0));
+    // Design 27 §8.2: the Chat session binding round-trips with the
+    // `members` visibility it depends on — a lost binding would silently
+    // revoke every group participant's read access.
+    let mut bound = got.clone();
+    bound.visibility = Some(SessionVisibility::Members);
+    bound.chat_session_id = Some("cs-group-1".into());
+    sm.upsert(&bound)?;
+    let got = sm.get("abc")?.expect("row present after binding");
+    assert_eq!(got.visibility, Some(SessionVisibility::Members));
+    assert_eq!(got.chat_session_id.as_deref(), Some("cs-group-1"));
     let tokens = got.tokens.as_ref().expect("tokens persisted");
     assert_eq!(tokens.last_input, 100);
     assert_eq!(tokens.last_output, 50);
@@ -335,7 +346,11 @@ fn visibility_text_encoding_matches_the_json_representation() {
     // The SQLite column and the serde representation must agree, or a row that
     // migrated from the JSON sidecar era would read back as a different
     // sharing state than the same value written after the migration.
-    for v in [SessionVisibility::Public, SessionVisibility::Private] {
+    for v in [
+        SessionVisibility::Public,
+        SessionVisibility::Private,
+        SessionVisibility::Members,
+    ] {
         let json = serde_json::to_string(&v).unwrap();
         assert_eq!(json, format!("\"{}\"", v.as_str()));
         assert_eq!(SessionVisibility::from_db_str(v.as_str()), Some(v));
@@ -474,6 +489,11 @@ fn migrations_run_in_order_and_stop_at_stored_version() -> AcoworkResult<()> {
         cols.iter().any(|c| c == "perf_ttft_ms_samples"),
         "v3 added `perf_ttft_ms_samples`"
     );
+    // Design 27 §8.2: v4 added the Chat session binding column.
+    assert!(
+        cols.iter().any(|c| c == "chat_session_id"),
+        "v4 added `chat_session_id`"
+    );
 
     let v: i64 = rusqlite::Connection::open(&path)
         .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?
@@ -492,6 +512,9 @@ fn migrations_run_in_order_and_stop_at_stored_version() -> AcoworkResult<()> {
     assert_eq!(row.visibility, None);
     // A pre-perf row migrates to "no measurement", never a fabricated 0.
     assert_eq!(row.perf, None);
+    // A pre-v4 row migrates to "no chat binding", which only matters for
+    // `members` rows (none pre-exist), so nothing is retroactively hidden.
+    assert_eq!(row.chat_session_id, None);
 
     // Reopen is a no-op: file mtime unchanged (no transaction, no rewrite).
     let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
@@ -520,7 +543,8 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
 
     // A v1 database: build it fully, then roll it back to the shape every
     // database created before ADR-076 has (no `user_id` / `visibility` /
-    // `perf_*`, `user_version = 1`) and let the store upgrade it again.
+    // `perf_*` / `chat_session_id`, `user_version = 1`) and let the store
+    // upgrade it again.
     let old = dir.path().join("old.sqlite");
     let _ = open_pair(&old);
     open_raw(&old)
@@ -531,6 +555,7 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              ALTER TABLE sessions DROP COLUMN perf_tps_samples;
              ALTER TABLE sessions DROP COLUMN perf_ttft_ms_sum;
              ALTER TABLE sessions DROP COLUMN perf_ttft_ms_samples;
+             ALTER TABLE sessions DROP COLUMN chat_session_id;
              PRAGMA user_version = 1;",
         )
         .unwrap();

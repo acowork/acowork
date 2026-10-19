@@ -95,6 +95,46 @@ impl GatewayClient {
         sid
     }
 
+    /// Design 27 §8.3: re-sync the project group's participant set after a
+    /// member joins or is removed. Best-effort like provisioning — the PM
+    /// store is the source of truth and the next sync converges; a failure
+    /// is logged, never surfaced.
+    pub async fn sync_group(&self, project_id: &str, participants: &[String]) {
+        let mut req = self.client.post(format!(
+            "{}/api/intents/project-group/sync",
+            self.gateway_url
+        ));
+        if let Some(token) = &self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = match req
+            .json(&serde_json::json!({
+                "project_id": project_id,
+                "participants": participants,
+            }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, project_id, "project group participant sync unreachable");
+                return;
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                project_id,
+                %status,
+                body = %body,
+                "project group participant sync rejected by Gateway"
+            );
+            return;
+        }
+        tracing::info!(project_id, "project group participants synced");
+    }
+
     /// Dispatch a PM task as a group-chat Intent (design 27 §5.4.2 / §9):
     /// the Gateway keys the execution context on
     /// `task:{project_id}:{task_id}`, writes the `intent_request` row into

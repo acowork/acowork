@@ -101,9 +101,14 @@ async fn emit_fallback_receipt(
             &chat_client::AppendMessage {
                 from: req.to_instance.clone(),
                 to: req.from_instance.clone(),
-                kind: "intent_response".to_string(),
+                // Wave 2B (§4.2): the fallback receipt is a terminal
+                // `agent_message` with `status=failed` — the same shape a
+                // real write-back takes, written on the responder's
+                // behalf because its Runtime never produced one (§5.5.1).
+                kind: "agent_message".to_string(),
                 body: FALLBACK_BODY.to_string(),
                 meta,
+                attachment_ids: Vec::new(),
             },
         )
         .await
@@ -142,6 +147,7 @@ async fn emit_fallback_receipt(
             kind: "response".to_string(),
             in_reply_to: req.message_id.clone(),
             status: "failed".to_string(),
+            has_human: req.has_human,
         };
         // A failed push does not undo the durable chat row; the initiator
         // can still read it via the Chat history surface.

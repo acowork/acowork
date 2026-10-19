@@ -4720,6 +4720,7 @@ mod tests {
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
+        chat_session_id: None,
         };
         crate::conversation::write_session_meta(&conversations_dir, &meta).unwrap();
 
@@ -7829,6 +7830,7 @@ mod tests {
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
+        chat_session_id: None,
         };
         crate::conversation::write_session_meta(&temp_dir.join("conversations"), &meta).unwrap();
 
@@ -8565,6 +8567,7 @@ mod tests {
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
+        chat_session_id: None,
         };
         write_session_meta(&temp_dir.join("conversations"), &meta).unwrap();
 

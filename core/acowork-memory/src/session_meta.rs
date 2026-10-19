@@ -193,6 +193,15 @@ pub enum SessionVisibility {
     Public,
     /// Readable only by the owning account (and administrators).
     Private,
+    /// Readable by the **participants of the Chat session this execution
+    /// session belongs to** (design 27 §8.2), plus its owner. The binding
+    /// is [`SessionMeta::chat_session_id`]; the caller's Chat membership
+    /// arrives as a Gateway-injected scope token, so no ACL table exists
+    /// (the participant relation *is* the permission).
+    ///
+    /// Deliberately **not** `Public`: `Public` is platform-wide and would
+    /// leak group execution history to any signed-in account (§8.2).
+    Members,
 }
 
 impl SessionVisibility {
@@ -211,6 +220,7 @@ impl SessionVisibility {
         match self {
             Self::Public => "public",
             Self::Private => "private",
+            Self::Members => "members",
         }
     }
 
@@ -224,6 +234,7 @@ impl SessionVisibility {
         match value {
             "public" => Some(Self::Public),
             "private" => Some(Self::Private),
+            "members" => Some(Self::Members),
             _ => None,
         }
     }
@@ -242,21 +253,58 @@ pub enum SessionScope {
     /// No restriction: an administrator, or a local-mode Runtime where
     /// the account system is off.
     Unfiltered,
-    /// A signed-in account.
-    User(String),
+    /// A signed-in account, plus the ids of the Chat sessions it currently
+    /// participates in (design 27 §8.2). `chats` is empty unless the
+    /// Gateway injected the `x-acowork-chat-scope` header; an empty set
+    /// simply means no `Members`-visible session is readable through the
+    /// chat path — fail closed, never fail open.
+    User {
+        uid: String,
+        chats: Vec<String>,
+    },
 }
 
 impl SessionScope {
-    /// Parse the `x-user-id` header value.
+    /// Construct a plain user scope with no Chat membership.
+    pub fn user(uid: impl Into<String>) -> Self {
+        Self::User {
+            uid: uid.into(),
+            chats: Vec::new(),
+        }
+    }
+
+    /// Parse the `x-user-id` + `x-acowork-chat-scope` headers.
     ///
-    /// `None` (header absent) means local mode — the Gateway never strips
-    /// or injects in that mode, so an absent header is the normal local
-    /// case and must NOT be treated as "anonymous, deny everything".
+    /// `user` absent (header missing) means local mode — the Gateway never
+    /// strips or injects in that mode, so an absent header is the normal
+    /// local case and must NOT be treated as "anonymous, deny everything".
     /// The all-axes sentinel `*` is the administrator's unfiltered view.
+    /// `chats` is the comma-separated Chat session id list; empty/absent
+    /// yields an empty membership set.
+    pub fn from_headers(user: Option<&str>, chats: Option<&str>) -> Self {
+        let scope = Self::from_header_value(user);
+        match scope {
+            Self::User { uid, .. } => Self::User {
+                uid,
+                chats: chats
+                    .map(|v| {
+                        v.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            },
+            other => other,
+        }
+    }
+
+    /// Parse the `x-user-id` header value alone (no Chat membership).
     pub fn from_header_value(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             None | Some("") | Some("*") => Self::Unfiltered,
-            Some(uid) => Self::User(uid.to_string()),
+            Some(uid) => Self::user(uid),
         }
     }
 
@@ -264,7 +312,7 @@ impl SessionScope {
     pub fn user_id(&self) -> Option<&str> {
         match self {
             Self::Unfiltered => None,
-            Self::User(uid) => Some(uid.as_str()),
+            Self::User { uid, .. } => Some(uid.as_str()),
         }
     }
 }
@@ -296,6 +344,13 @@ pub struct SessionMeta {
     /// any time via `ConversationSession::set_visibility`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<SessionVisibility>,
+    /// Design 27 §8.2: the Chat session this execution session belongs to,
+    /// stamped when the session is created from a `chat:{chat_session_id}`
+    /// routing key. Meaningful only with `visibility = Members`; the read
+    /// check matches it against the caller's Chat membership set injected
+    /// by the Gateway (`x-acowork-chat-scope`), so no ACL table is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_session_id: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -349,7 +404,20 @@ impl SessionMeta {
     pub fn is_readable_by(&self, scope: &SessionScope) -> bool {
         match scope {
             SessionScope::Unfiltered => true,
-            SessionScope::User(uid) => match self.user_id.as_deref() {
+            SessionScope::User { uid, chats } => {
+                if self.visibility == Some(SessionVisibility::Members) {
+                    // Design 27 §8.2: a group execution session is readable
+                    // by its owner and by any current participant of the
+                    // bound Chat session. Membership is the Gateway-injected
+                    // set — removed participants lose access immediately
+                    // (§8.3), no stale grant exists.
+                    let member = self
+                        .chat_session_id
+                        .as_deref()
+                        .is_some_and(|c| chats.iter().any(|x| x == c));
+                    return member || self.user_id.as_deref() == Some(uid.as_str());
+                }
+                match self.user_id.as_deref() {
                 // Ownerless sessions are a two-way split, and the split is
                 // the whole reason `None` and `Some(Private)` must not be
                 // collapsed:
@@ -372,9 +440,11 @@ impl SessionMeta {
                 // reach (see `is_writable_by` and `put_session_visibility`).
                 None => !self.visibility.is_some_and(SessionVisibility::is_private),
                 Some(owner) => {
-                    !self.visibility.is_some_and(SessionVisibility::is_private) || owner == uid
+                    !self.visibility.is_some_and(SessionVisibility::is_private)
+                        || owner == uid.as_str()
                 }
-            },
+                }
+            }
         }
     }
 
@@ -398,9 +468,16 @@ impl SessionMeta {
     pub fn is_writable_by(&self, scope: &SessionScope) -> bool {
         match scope {
             SessionScope::Unfiltered => true,
-            SessionScope::User(uid) => match self.user_id.as_deref() {
-                None => !self.visibility.is_some_and(SessionVisibility::is_private),
-                Some(owner) => owner == uid,
+            SessionScope::User { uid, .. } => match self.user_id.as_deref() {
+                // `Members` behaves like `Private` for writes: chat
+                // participants read the group execution history, they do
+                // not own or mutate the session itself — their messages
+                // enter through the agent's delivery path, not a direct
+                // session write (design 27 §8.2).
+                None => !self
+                    .visibility
+                    .is_some_and(|v| v.is_private() || v == SessionVisibility::Members),
+                Some(owner) => owner == uid.as_str(),
             },
         }
     }

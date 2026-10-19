@@ -178,6 +178,7 @@ fn integration_control_message_flow() {
                 kind: String::new(),
                 in_reply_to: String::new(),
                 status: String::new(),
+                has_human_participant: None,
 params_json: r#"{"hello":"e2e"}"#.into(),
             })),
         };
@@ -276,6 +277,7 @@ fn integration_control_intent_flow() {
                 kind: String::new(),
                 in_reply_to: String::new(),
                 status: String::new(),
+                has_human_participant: None,
 params_json: String::new(),
             })),
         };
@@ -318,6 +320,7 @@ params_json: String::new(),
                                     kind: String::new(),
                                     in_reply_to: String::new(),
                                     status: String::new(),
+                                    has_human_participant: None,
 params_json: String::new(),
                                 })),
                             },
@@ -402,6 +405,7 @@ fn integration_multiple_messages() {
                     kind: String::new(),
                     in_reply_to: String::new(),
                     status: String::new(),
+                    has_human_participant: None,
 params_json: format!(r#"{{"seq":{i}}}"#),
                 })),
             };

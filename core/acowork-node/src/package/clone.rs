@@ -827,6 +827,7 @@ mod tests {
                     created_at: chrono::Utc::now().to_rfc3339(),
                     user_id: None,
                     visibility: None,
+                    chat_session_id: None,
                     title: Some("Test session".to_string()),
                     workspace_id: None,
                     model: None,

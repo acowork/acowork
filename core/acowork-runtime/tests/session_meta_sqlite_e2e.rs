@@ -46,6 +46,7 @@ fn make_meta(sid: &str, last_active: &str, title: &str) -> SessionMeta {
         model_ratio: None,
         last_compaction_offset: None,
         corrupted: false,
+    chat_session_id: None,
     }
 }
 

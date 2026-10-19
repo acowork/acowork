@@ -128,7 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 ///
 /// History: 1 = `version` / `corrupted` columns; 2 = `user_id` / `visibility`
 /// (ADR-076 §决策 4 session ownership); 3 = `perf_*` LLM speed averages.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -179,6 +179,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
          ALTER TABLE sessions ADD COLUMN perf_tps_samples INTEGER; \
          ALTER TABLE sessions ADD COLUMN perf_ttft_ms_sum REAL; \
          ALTER TABLE sessions ADD COLUMN perf_ttft_ms_samples INTEGER;",
+    ),
+    // Design 27 §8.2: the Chat session a group execution session belongs to.
+    // Nullable, no default: every pre-existing row migrates to NULL, which
+    // only matters for rows with `visibility = 'members'` (none exist yet),
+    // so nothing changes retroactively.
+    (
+        4,
+        "ALTER TABLE sessions ADD COLUMN chat_session_id TEXT;",
     ),
 ];
 

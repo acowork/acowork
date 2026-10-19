@@ -495,6 +495,10 @@ pub struct ConversationSession {
     /// ADR-076 §决策 4: read visibility, mirrored from
     /// `SessionMeta.visibility`. `None` = public (the default).
     visibility: std::sync::Mutex<Option<SessionVisibility>>,
+    /// Design 27 §8.2: Chat session binding, mirrored from
+    /// `SessionMeta.chat_session_id`. Stamped with `Members` visibility
+    /// when a session is created from a `chat:` routing key.
+    chat_session_id: std::sync::Mutex<Option<String>>,
     /// ADR-060: todo snapshot mirror (Block C source).
     ///
     /// The single persistence owner is [`ConversationSession`] — the
@@ -634,6 +638,7 @@ impl ConversationSession {
             created_at: self.created_at.clone(),
             user_id: self.user_id.lock().ok().and_then(|u| u.clone()),
             visibility: self.visibility.lock().ok().and_then(|v| *v),
+            chat_session_id: self.chat_session_id.lock().ok().and_then(|c| c.clone()),
             title: self.current_title.lock().ok().and_then(|t| t.clone()),
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             model: self.model.lock().ok().and_then(|m| m.clone()),
@@ -902,6 +907,7 @@ impl ConversationSession {
             todos: std::sync::Mutex::new(None),
             user_id: std::sync::Mutex::new(None),
             visibility: std::sync::Mutex::new(None),
+            chat_session_id: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
             llm_call_counter: std::sync::Mutex::new(None),
             perf: std::sync::Mutex::new(None),
@@ -1005,6 +1011,7 @@ impl ConversationSession {
                 todos: std::sync::Mutex::new(meta.todos),
                 user_id: std::sync::Mutex::new(meta.user_id),
                 visibility: std::sync::Mutex::new(meta.visibility),
+                chat_session_id: std::sync::Mutex::new(meta.chat_session_id.clone()),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
                 perf: std::sync::Mutex::new(meta.perf.clone()),
@@ -1574,6 +1581,30 @@ impl ConversationSession {
         self.write_meta();
     }
 
+    /// Design 27 §8.2: bind this execution session to a Chat session and
+    /// mark it `Members`-visible in one persisted step. Called once at
+    /// creation from the `chat:` routing path; the pair is what makes the
+    /// group read check (`is_readable_by`) work without an ACL table.
+    pub fn set_chat_binding(&self, chat_session_id: &str) {
+        {
+            let mut slot = self
+                .chat_session_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if slot.as_deref() == Some(chat_session_id)
+                && self.visibility() == Some(SessionVisibility::Members)
+            {
+                return;
+            }
+            *slot = Some(chat_session_id.to_string());
+        }
+        {
+            let mut v = self.visibility.lock().unwrap_or_else(|e| e.into_inner());
+            *v = Some(SessionVisibility::Members);
+        }
+        self.write_meta();
+    }
+
     /// THE single entry point for ALL config changes (ADR-047).
     ///
     /// Synchronous: memory + meta.json + MQTT notification.
@@ -2072,6 +2103,7 @@ impl Clone for ConversationSession {
             todos: std::sync::Mutex::new(self.todos.lock().ok().and_then(|t| t.clone())),
             user_id: std::sync::Mutex::new(self.user_id.lock().ok().and_then(|u| u.clone())),
             visibility: std::sync::Mutex::new(self.visibility.lock().ok().and_then(|v| *v)),
+            chat_session_id: std::sync::Mutex::new(self.chat_session_id.lock().ok().and_then(|c| c.clone())),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             llm_call_counter: std::sync::Mutex::new(
                 self.llm_call_counter.lock().ok().and_then(|c| *c),
@@ -3445,6 +3477,7 @@ mod tests {
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
+        chat_session_id: None,
         };
         std::fs::write(conv.join(format!("{}.jsonl", sid)), "").unwrap();
         write_session_meta(conv, &meta).unwrap();
@@ -3660,6 +3693,7 @@ mod tests {
                 model_ratio: None,
                 last_compaction_offset: None,
                 corrupted: false,
+            chat_session_id: None,
             };
             write_session_meta(&conv_dir, &meta).unwrap();
         }
@@ -3868,6 +3902,7 @@ mod tests {
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
+        chat_session_id: None,
         };
         write_session_meta(&conv_dir, &valid_meta).unwrap();
 
@@ -4471,6 +4506,7 @@ mod tests {
             model_ratio: None,
             last_compaction_offset: None,
             corrupted: false,
+        chat_session_id: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
@@ -4795,6 +4831,7 @@ mod tests {
                 model_ratio: None,
                 last_compaction_offset: None,
                 corrupted: false,
+            chat_session_id: None,
             };
 
             // Session A: full cache breakdown.
@@ -6545,7 +6582,7 @@ mod tests {
             (None, SessionScope::Unfiltered),
             (Some(""), SessionScope::Unfiltered), // empty == absent
             (Some("*"), SessionScope::Unfiltered), // administrator
-            (Some("u-alice"), SessionScope::User("u-alice".into())),
+            (Some("u-alice"), SessionScope::user("u-alice")),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -6556,7 +6593,7 @@ mod tests {
         }
         // The unfiltered scope has no user id, so `create` records no owner.
         assert_eq!(SessionScope::Unfiltered.user_id(), None);
-        assert_eq!(SessionScope::User("u-1".into()).user_id(), Some("u-1"));
+        assert_eq!(SessionScope::user("u-1").user_id(), Some("u-1"));
     }
 
     /// The read/write rules are the whole point of the visibility switch:
@@ -6564,8 +6601,8 @@ mod tests {
     /// the same as writable**.
     #[test]
     fn visibility_and_ownership_gate_read_and_write() {
-        let alice = SessionScope::User("u-alice".into());
-        let bob = SessionScope::User("u-bob".into());
+        let alice = SessionScope::user("u-alice");
+        let bob = SessionScope::user("u-bob");
         let admin = SessionScope::Unfiltered;
 
         let meta = |owner: Option<&str>, visibility: Option<SessionVisibility>| SessionMeta {
@@ -6592,6 +6629,7 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
+        chat_session_id: None,
         };
 
         // (owner, visibility) -> (alice reads, bob reads, alice writes, bob writes)
@@ -6635,6 +6673,94 @@ mod tests {
         }
     }
 
+    /// Design 27 §8.2: `Members` visibility resolves against the caller's
+    /// Chat membership — the bound session's participants read the group
+    /// execution history, everyone else gets a hidden 404, and the binding
+    /// never grants write (participants' own messages enter through the
+    /// agent's delivery path, not a direct session write).
+    #[test]
+    fn members_visibility_gates_read_on_chat_membership() {
+        fn session_meta_fixture() -> SessionMeta {
+            SessionMeta {
+                version: 1,
+                session_id: "s".into(),
+                agent_id: "a".into(),
+                created_at: "t".into(),
+                user_id: None,
+                visibility: None,
+                chat_session_id: None,
+                title: None,
+                workspace_id: None,
+                model: None,
+                provider: None,
+                account_id: None,
+                reasoning_effort: None,
+                temperature: None,
+                context_window: None,
+                todos: None,
+                message_count: 0,
+                last_active_at: "t".into(),
+                tokens: None,
+                llm_call_counter: None,
+                perf: None,
+                model_ratio: None,
+                last_compaction_offset: None,
+                corrupted: false,
+            }
+        }
+        let owner = SessionScope::user("u-alice");
+        let member = SessionScope::User {
+            uid: "u-bob".into(),
+            chats: vec!["cs-group-1".into()],
+        };
+        let outsider = SessionScope::User {
+            uid: "u-carol".into(),
+            chats: vec!["cs-other".into()],
+        };
+        // §8.3: a removed participant — the binding is no longer in their
+        // scope set. This is the exact shape the Gateway injects after
+        // `remove_participant`, and it must read as revoked.
+        let revoked = SessionScope::user("u-bob");
+
+        let bound = || SessionMeta {
+            chat_session_id: Some("cs-group-1".into()),
+            visibility: Some(SessionVisibility::Members),
+            user_id: Some("u-alice".into()),
+            ..session_meta_fixture()
+        };
+        let m = bound();
+        assert!(m.is_readable_by(&owner), "owner reads own session");
+        assert!(m.is_readable_by(&member), "chat participant reads");
+        assert!(!m.is_readable_by(&outsider), "non-participant hidden");
+        assert!(!m.is_readable_by(&revoked), "removed participant revoked");
+        assert!(m.is_readable_by(&SessionScope::Unfiltered), "admin reads");
+
+        // Write stays owner-only: membership is a read grant (§8.2), not
+        // an ownership transfer.
+        assert!(m.is_writable_by(&owner));
+        assert!(!m.is_writable_by(&member));
+        assert!(!m.is_writable_by(&outsider));
+
+        // Ownerless + Members (a binding without an attributable creator)
+        // is readable through the chat path only.
+        let unowned = SessionMeta {
+            user_id: None,
+            ..bound()
+        };
+        assert!(unowned.is_readable_by(&member));
+        assert!(!unowned.is_readable_by(&owner));
+        assert!(!unowned.is_writable_by(&member), "membership never writes");
+
+        // `Members` without a binding is inert: nothing to match against,
+        // so only owner / admin reach it.
+        let unbound = SessionMeta {
+            chat_session_id: None,
+            ..bound()
+        };
+        assert!(unbound.is_readable_by(&owner));
+        assert!(!unbound.is_readable_by(&member));
+    }
+
     /// The listing filter must run **before** pagination. Filtering the
     /// returned page instead would hand back short pages and a page count
     /// pointing at rows the caller cannot see.
@@ -6676,6 +6802,7 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
+            chat_session_id: None,
             }
         };
 
@@ -6716,14 +6843,14 @@ mod tests {
         // Alice: legacy + her own. Bob's private session is gone, and
         // `total` already reflects that (2, not 3) even though the page
         // size is 2 — the filter runs before pagination.
-        let (ids, total) = scan(SessionScope::User("u-alice".into())).await;
+        let (ids, total) = scan(SessionScope::user("u-alice")).await;
         assert_eq!(ids, vec!["s-legacy", "s-alice"]);
         assert_eq!(total, 2, "total must count the filtered set, not all rows");
 
         // Bob: everything except Alice's *private* sessions — her session
         // here is public (the default), so he can read it. Privacy is
         // per-session, not a blanket "only show me my own".
-        let (ids, total) = scan(SessionScope::User("u-bob".into())).await;
+        let (ids, total) = scan(SessionScope::user("u-bob")).await;
         assert_eq!(ids, vec!["s-legacy", "s-bob-private"]);
         assert_eq!(total, 3);
 
@@ -6749,7 +6876,7 @@ mod tests {
             conv.clone(),
             None,
             None,
-            SessionScope::User("u-bob".into()),
+            SessionScope::user("u-bob"),
         )
         .await
         .unwrap();

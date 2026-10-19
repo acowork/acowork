@@ -55,20 +55,27 @@ pub async fn create(
         );
         let pid = project.id.as_str().to_string();
         let title = project.title.clone();
-        // Participants: the owner plus whoever the store recorded as
-        // members (MCP face seeds the creator there; REST face leaves
-        // the list at the owner).
-        let mut participants: Vec<String> =
-            std::iter::once(project.created_by.clone())
-                .chain(project.members.iter().map(|m| m.instance_id.clone()))
-                .collect();
-        participants.sort();
-        participants.dedup();
+        let participants = group_participants(&project);
         tokio::spawn(async move {
             provisioner.ensure_group(&pid, &title, &participants).await;
         });
     }
     Ok(Json(project))
+}
+
+/// The project group chat's participant set: the owner plus whoever the
+/// store recorded as members (MCP face seeds the creator there; REST face
+/// leaves the list at the owner). `sync_group` **converges** the set to
+/// exactly this list, so the owner must always be in it — a members-only
+/// list would evict the human owner from the group chat (and flip the
+/// session's `has_human_participant` fact) on the first member add/remove.
+pub(crate) fn group_participants(project: &Project) -> Vec<String> {
+    let mut participants: Vec<String> = std::iter::once(project.created_by.clone())
+        .chain(project.members.iter().map(|m| m.instance_id.clone()))
+        .collect();
+    participants.sort();
+    participants.dedup();
+    participants
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -189,24 +196,20 @@ pub async fn add_member(
         .store
         .add_project_member(&pid, &input.instance_id)
         .await?;
-    // Design 27 Phase 2: a new project member joins the project group
-    // chat too (idempotent — the chat store dedups on re-add).
+    // Design 27 Phase 2 + §8.3: a new project member joins the project
+    // group chat too. `sync_group` converges the participant set to the
+    // project's current members — the old `ensure_group` call was idempotent
+    // on `project_id` but never actually added the newcomer.
     if let Some((gw_url, token)) = &state.gateway {
         let provisioner = crate::gateway_client::GatewayClient::new(
             gw_url.clone(),
             token.clone(),
         );
         let pid_str = pid.as_str().to_string();
-        let title = project.title.clone();
-        let participants: Vec<String> = project
-            .members
-            .iter()
-            .map(|m| m.instance_id.clone())
-            .collect();
+        // Converged set includes the owner — see `group_participants`.
+        let participants = group_participants(&project);
         tokio::spawn(async move {
-            provisioner
-                .ensure_group(&pid_str, &title, &participants)
-                .await;
+            provisioner.sync_group(&pid_str, &participants).await;
         });
     }
     Ok(Json(project))
@@ -230,5 +233,64 @@ pub async fn remove_member(
         .store
         .remove_project_member(&pid, &instance_id)
         .await?;
+    // Design 27 §8.3: the removed member leaves the project group chat
+    // too — participant removal is what revokes their read access to the
+    // group's execution sessions (the chat history itself is kept).
+    if let Some((gw_url, token)) = &state.gateway {
+        let provisioner = crate::gateway_client::GatewayClient::new(
+            gw_url.clone(),
+            token.clone(),
+        );
+        let pid_str = pid.as_str().to_string();
+        // Converged set includes the owner — see `group_participants`.
+        let participants = group_participants(&project);
+        tokio::spawn(async move {
+            provisioner.sync_group(&pid_str, &participants).await;
+        });
+    }
     Ok(Json(project))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ProjectMember, ProjectStatus};
+
+    fn project(created_by: &str, members: &[&str]) -> Project {
+        Project {
+            id: "p-test0000".parse().unwrap(),
+            title: "T".into(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            created_by: created_by.into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: Default::default(),
+            members: members
+                .iter()
+                .map(|id| ProjectMember {
+                    instance_id: (*id).into(),
+                    kind: crate::types::MemberKind::Agent,
+                    added_at: chrono::Utc::now(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn group_participants_always_include_the_owner() {
+        // Regression: `sync_group` converges the participant set to
+        // exactly what PM sends — a members-only list evicted the human
+        // owner on the first member add.
+        let p = project("u-owner", &["ag1", "ag2"]);
+        let got = group_participants(&p);
+        assert!(got.contains(&"u-owner".to_string()), "{got:?}");
+        assert!(got.contains(&"ag1".to_string()) && got.contains(&"ag2".to_string()));
+        // Creator seeded as a member (MCP face) must not appear twice.
+        let p = project("u-owner", &["u-owner", "ag1"]);
+        let got = group_participants(&p);
+        assert_eq!(got.iter().filter(|x| *x == "u-owner").count(), 1);
+        // No members yet: the owner alone is the set.
+        assert_eq!(group_participants(&project("u-owner", &[])), vec!["u-owner".to_string()]);
+    }
 }

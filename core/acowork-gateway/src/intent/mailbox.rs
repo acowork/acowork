@@ -78,6 +78,11 @@ pub struct MailboxEntry {
     /// past the response deadline.
     #[serde(default)]
     pub answered_at: String,
+    /// Design 27 §5.5.4: whether the source Chat session has a human who
+    /// can answer a card — carried onto the response push so the
+    /// initiator's turn sees the same answerability fact.
+    #[serde(default)]
+    pub has_human: Option<bool>,
 }
 
 impl MailboxEntry {
@@ -259,6 +264,7 @@ mod tests {
             status: String::new(),
             source_chat_session_id: String::new(),
         answered_at: String::new(),
+            has_human: None,
         }
     }
 
@@ -286,14 +292,23 @@ mod tests {
         let mut resp = entry("m-resp", "c1");
         resp.kind = "response".into();
         resp.delivered_at = past.clone();
-        for e in [old, fresh, undelivered, resp] {
+        // Plan 2a.4: a human 1:1 message rides the mailbox as
+        // `kind = "user_message"` — it owes an answer too, so the
+        // sweeper must consider it (design 27 §5.5.1: no silence).
+        let mut human = entry("m-human", "");
+        human.kind = "user_message".into();
+        human.delivered_at = past.clone();
+        human.source_chat_session_id = "cs-1".into();
+        for e in [old, fresh, undelivered, resp, human] {
             mb.record(e).unwrap();
         }
         let stale = mb.stale_unanswered(&cutoff);
-        assert_eq!(stale.len(), 1, "only the old delivered request");
-        assert_eq!(stale[0].message_id, "m-old");
-        // Closing it removes it from the candidate set.
+        assert_eq!(stale.len(), 2, "the old request and the old human message");
+        assert!(stale.iter().any(|e| e.message_id == "m-old"));
+        assert!(stale.iter().any(|e| e.message_id == "m-human"));
+        // Closing them removes them from the candidate set.
         mb.mark_answered("m-old").unwrap();
+        mb.mark_answered("m-human").unwrap();
         assert!(mb.stale_unanswered(&cutoff).is_empty());
     }
 

@@ -2096,6 +2096,7 @@ fn purge_conversation_state_drops_sessions_and_conversation_nodes_keeps_memory()
                 created_at: "2025-01-01T00:00:00.000Z".to_string(),
                 user_id: None,
                 visibility: None,
+                chat_session_id: None,
                 title: Some("x".to_string()),
                 workspace_id: None,
                 model: None,

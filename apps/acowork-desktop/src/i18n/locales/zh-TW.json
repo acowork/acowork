@@ -226,6 +226,55 @@
       "unavailable": "已不可用"
     }
   },
+  "chatView": {
+    "empty": "該聊天暫無訊息",
+    "processing": "Agent 處理中 · 點擊查看執行過程",
+    "queued": "已送達，等待 Agent 開始處理…",
+    "cardAnswered": "已回答",
+    "freeAnswer": "自由回答",
+    "answer": "回答",
+    "replyingTo": "回覆對象",
+    "cancelReply": "取消回覆",
+    "emptyReply": "（已結束，無輸出）",
+    "viewRun": "檢視執行",
+    "statusCard": {
+      "untitled": "未命名執行",
+      "detail": "詳情",
+      "workspaceAgentHome": "Agent 主頁",
+      "labelStatus": "狀態",
+      "labelTitle": "會話",
+      "labelStep": "當前步驟",
+      "labelModel": "模型",
+      "labelWorkspace": "工作區",
+      "errorTitle": "錯誤",
+      "dismiss": "忽略",
+      "continue": "繼續",
+      "deny": "拒絕",
+      "allow": "允許",
+      "pausedIteration": "已達迭代上限，已暫停。",
+      "stepApproval": "等待授權：{{tool}}",
+      "stepRunningTool": "正在執行 {{count}} 個工具…",
+      "stepTodo": "{{content}}（{{index}}/{{total}}）",
+      "status": {
+        "idle": "閒置",
+        "llm_awaiting_first_chunk": "等待模型",
+        "thinking": "思考中",
+        "llm_streaming": "輸出中",
+        "tool_executing": "執行工具中",
+        "waiting_approval": "等待授權",
+        "paused": "已暫停"
+      },
+      "phase": {
+        "idle": "閒置",
+        "waiting": "等待模型",
+        "thinking": "思考中",
+        "streaming": "生成回覆中",
+        "tool_executing": "執行工具中",
+        "waiting_approval": "等待授權",
+        "paused": "已暫停"
+      }
+    }
+  },
   "time": {
     "justNow": "剛剛",
     "minutesAgo": "{{count}} 分鐘前",
@@ -412,7 +461,8 @@
     "node": "節點",
     "contextPermissions": "權限",
     "nodePermissions": "節點權限",
-    "noAccess": "無存取權限"
+    "noAccess": "無存取權限",
+    "projectGroupsBanner": "專案群組聊天"
   },
   "cloneDialog": {
     "skeleton": "骨架",
@@ -1792,5 +1842,15 @@
     "claimOwnerHint": "該{{kind}}無歸屬，因此僅你可管理，且暫時無法設為{{pub}}。認領歸屬後即可調整可見性。",
     "agent": "Agent",
     "node": "節點"
+  },
+  "groupChat": {
+    "members": "{{count}} 名成員",
+    "loadEarlier": "載入更早的訊息",
+    "empty": "尚無訊息",
+    "working": "Agent 處理中…",
+    "placeholder": "傳送訊息給專案組",
+    "placeholderWithMentions": "傳送訊息，@Agent 讓其處理",
+    "send": "傳送",
+    "emptyTurn": "（無輸出）"
   }
 }

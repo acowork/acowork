@@ -285,3 +285,59 @@ export interface UserChatMessage {
   kind: string
   body: string
 }
+
+/* ------------------------------------------------------------------ */
+/* Chat sessions (design 27; plan Wave 5.5 mobile alignment)           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One durable row of a Chat session (`GET /api/chat-sessions/{id}/messages`).
+ * Mirrors `chat_sessions_api::MessageRow` — the same view model Desktop's
+ * `chatSessionStore` consumes; the mobile differences are presentation-only
+ * (design 27 §6.5: status card collapsed to one line, decision card in a
+ * bottom sheet).
+ */
+export interface ChatMessageRow {
+  seq: number
+  ts: number
+  from: string
+  /** user_message | agent_message | interaction_request | system_notice */
+  kind: string
+  body: string
+  to: string
+  meta?: {
+    message_id?: string
+    conversation_id?: string
+    in_reply_to?: string
+    status?: string
+    repo?: string
+    notice_type?: string
+    agent_session_id?: string
+    interaction?: {
+      kind: string
+      request_id: string
+      question?: string
+      options?: string[]
+    }
+  }
+  attachment_ids?: string[]
+  attachments?: Array<{ id: string; name: string; mime: string; size: number }>
+}
+
+/** `GET /api/chat-sessions/default` response envelope (the pair's session). */
+export interface ChatSessionInfo {
+  session_id: string
+  kind: string
+  title: string
+  project_id?: string
+  created_at: number
+  last_active_at: number
+  message_count: number
+}
+
+export interface ChatMessagesPage {
+  messages: ChatMessageRow[]
+  total: number
+  offset: number
+  limit: number
+}

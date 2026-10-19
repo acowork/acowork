@@ -1045,6 +1045,13 @@ message Intent {
   /// suggestion within its own allowed set (§13-6) and applies it only
   /// when creating the execution session. Empty = no suggestion.
   string session_config_json = 12;
+  /// Design 27 §5.5.4 / plan 2b.3: whether the source Chat session has a
+  /// human participant who can answer a decision card. The Gateway — the
+  /// only party that can read the session — stamps this fact at delivery
+  /// time; the Runtime uses it to decide `ask_user_question` visibility
+  /// (answerability, not role). Absent = unknown (pre-upgrade senders or
+  /// chat-less delivery) → fail open, keep the tool. Additive field 13.
+  optional bool has_human_participant = 13;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

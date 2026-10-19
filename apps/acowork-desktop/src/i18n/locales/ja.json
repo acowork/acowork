@@ -226,6 +226,55 @@
       "unavailable": "利用不可"
     }
   },
+  "chatView": {
+    "empty": "このチャットにメッセージはありません",
+    "processing": "Agent 処理中 · クリックで実行過程を表示",
+    "queued": "送信完了、Agent の開始を待っています…",
+    "cardAnswered": "回答済み",
+    "freeAnswer": "自由回答",
+    "answer": "回答",
+    "replyingTo": "返信対象",
+    "cancelReply": "返信をキャンセル",
+    "emptyReply": "（出力なく終了）",
+    "viewRun": "実行を表示",
+    "statusCard": {
+      "untitled": "無題の実行",
+      "detail": "詳細",
+      "workspaceAgentHome": "Agent ホーム",
+      "labelStatus": "ステータス",
+      "labelTitle": "セッション",
+      "labelStep": "現在のステップ",
+      "labelModel": "モデル",
+      "labelWorkspace": "ワークスペース",
+      "errorTitle": "エラー",
+      "dismiss": "閉じる",
+      "continue": "続行",
+      "deny": "拒否",
+      "allow": "許可",
+      "pausedIteration": "イテレーション上限に達して一時停止しました。",
+      "stepApproval": "承認待ち：{{tool}}",
+      "stepRunningTool": "{{count}} 個のツールを実行中…",
+      "stepTodo": "{{content}}（{{index}}/{{total}}）",
+      "status": {
+        "idle": "アイドル",
+        "llm_awaiting_first_chunk": "モデル待機中",
+        "thinking": "思考中",
+        "llm_streaming": "出力中",
+        "tool_executing": "ツール実行中",
+        "waiting_approval": "承認待ち",
+        "paused": "一時停止"
+      },
+      "phase": {
+        "idle": "アイドル",
+        "waiting": "モデル待機中",
+        "thinking": "思考中",
+        "streaming": "返信生成中",
+        "tool_executing": "ツール実行中",
+        "waiting_approval": "承認待ち",
+        "paused": "一時停止"
+      }
+    }
+  },
   "time": {
     "justNow": "たった今",
     "minutesAgo": "{{count}}分前",
@@ -413,7 +462,8 @@
     "node": "Node",
     "contextPermissions": "権限",
     "nodePermissions": "ノードの権限",
-    "noAccess": "アクセス権がありません"
+    "noAccess": "アクセス権がありません",
+    "projectGroupsBanner": "プロジェクトグループチャット"
   },
   "cloneDialog": {
     "skeleton": "スケルトン",
@@ -1801,5 +1851,15 @@
     "claimOwnerHint": "この{{kind}}には所有者がいないため、あなたが管理でき、現時点では{{pub}}に設定できません。所有権を主張すると公開設定を変更できます。",
     "agent": "エージェント",
     "node": "ノード"
+  },
+  "groupChat": {
+    "members": "{{count}} 人のメンバー",
+    "loadEarlier": "以前のメッセージを読み込む",
+    "empty": "まだメッセージはありません",
+    "working": "Agent が処理中…",
+    "placeholder": "プロジェクトチームに送信",
+    "placeholderWithMentions": "送信。@Agent で処理を依頼",
+    "send": "送信",
+    "emptyTurn": "（出力なし）"
   }
 }

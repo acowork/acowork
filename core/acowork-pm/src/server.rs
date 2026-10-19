@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::config::PmConfig;
 use crate::error::Result;
 use crate::mcp::{AgentDirectory, NoopAgentDirectory};
-use crate::store::tree::TreePmStore;
+use crate::store::tree::{PmStore, TreePmStore};
 
 /// PM 服务运行实例。
 ///
@@ -141,6 +141,52 @@ impl PmService {
     /// @deprecated 使用 [`PmService::serve`] 替代（ADR-064 独立进程）。
     pub async fn start_dev(self: Arc<Self>, bind: SocketAddr) -> Result<SocketAddr> {
         self.serve(bind).await
+    }
+
+    /// Design 27 Phase 2 follow-up: backfill the unique group chat for
+    /// projects created before per-project group chats existed.
+    ///
+    /// `ensure_group` is idempotent on `project_id`, so this is safe to run
+    /// on every start. A few retries because at PM start the Gateway/user
+    /// service may still be warming up (the endpoint answers 503 and
+    /// `ensure_group` logs + returns `None`). Best-effort like the
+    /// create-time provisioning: a project without its chat still works.
+    pub fn spawn_group_chat_backfill(self: &Arc<Self>) {
+        let Some((gw_url, token)) = self.gateway.clone() else {
+            return; // standalone/test mode — no Gateway to provision through
+        };
+        let store = self.store.clone();
+        tokio::spawn(async move {
+            let client = crate::gateway_client::GatewayClient::new(gw_url, token);
+            for attempt in 0..3u32 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                }
+                let projects = match store.list_projects().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, attempt, "group chat backfill: project list failed");
+                        continue;
+                    }
+                };
+                let mut failed = 0usize;
+                for p in projects {
+                    let participants = crate::api::projects::group_participants(&p);
+                    if client
+                        .ensure_group(p.id.as_str(), &p.title, &participants)
+                        .await
+                        .is_none()
+                    {
+                        failed += 1;
+                    }
+                }
+                if failed == 0 {
+                    tracing::info!("group chat backfill complete (all projects have their group chat)");
+                    return;
+                }
+                tracing::warn!(failed, attempt, "group chat backfill: some projects could not be provisioned");
+            }
+        });
     }
 
     /// 优雅停机（flush 待写、关闭 store）。

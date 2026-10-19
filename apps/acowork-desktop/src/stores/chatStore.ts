@@ -9,6 +9,8 @@ import { useGatewayStore, stopGatewayDeathWatch } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useAuthStore } from "./authStore";
 import { setChatPushChannel, useUserChatStore } from "./userChatStore";
+import { wakeAgentChat } from "./chatSessionStore";
+import { useProjectGroupStore } from "./projectGroupStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { releaseAdapterSession, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
 import { getGatewayUrl } from "../lib/config";
@@ -945,11 +947,13 @@ interface ChatStore {
    * `SessionConfigDelta` path) — no new MQTT control command (D3).
    */
   setSessionContextWindow: (window: number | null, agentId: string) => void;
-  continueExecution: (agentId: string) => Promise<void>;
+  continueExecution: (agentId: string, sessionId?: string) => Promise<void>;
   resolveApproval: (agentId: string) => void;
-  /** Resolve a specific approval by tool_call_id, removing it from the pending map. */
-  resolveApprovalByToolCallId: (agentId: string, toolCallId: string) => void;
-  resolveQuestion: (agentId: string, requestId: string) => void;
+  /** Resolve a specific approval by tool_call_id, removing it from the pending map.
+   *  `sessionId` targets a specific execution session (the Chat surface drives
+   *  a non-foreground exec session); absent falls back to the active session. */
+  resolveApprovalByToolCallId: (agentId: string, toolCallId: string, sessionId?: string) => void;
+  resolveQuestion: (agentId: string, requestId: string, sessionId?: string) => void;
   /**
    * Load messages for a session via HTTP pagination.
    * - `offset === undefined` (default): initial load — fetches the newest `limit` raw entries.
@@ -1490,6 +1494,12 @@ async function doInitMqttListener(): Promise<void> {
       const me = useAuthStore.getState().account?.user_id;
       if (!me || event.payload.user_id !== me) return;
       void useUserChatStore.getState().wake();
+      // Design 27 Wave 5: the same doorbell lands on agent Chat sessions —
+      // the user service publishes it after every append, human or agent.
+      wakeAgentChat();
+      // ...and on the sidebar's project-group list (a new project's group
+      // appears without reopening the app).
+      void useProjectGroupStore.getState().fetchGroups();
     },
   );
 
@@ -2411,12 +2421,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   setProviderAccounts: (accounts: Record<string, ProviderAccount[]>) => {
     set({ providerAccounts: accounts });
   },
-  continueExecution: async (agentId: string) => {
+  continueExecution: async (agentId: string, sessionId?: string) => {
     try {
-      const sessionId = getAgentState(get(), agentId).activeSessionId;
-      if (!sessionId) return;
+      const sid = sessionId ?? getAgentState(get(), agentId).activeSessionId;
+      if (!sid) return;
       // ADR-076 §决策 4: HTTP now (was MQTT `continue_execution`).
-      await sessionControl.continueSession(agentId, sessionId);
+      await sessionControl.continueSession(agentId, sid);
     } catch (error) {
       log.error("[ChatStore] Failed to send continue signal:", error);
     }
@@ -2436,21 +2446,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!sessionId) return;
     set((state) => updateSessionState(state, agentId, sessionId, { pendingApproval: {} }));
   },
-  resolveApprovalByToolCallId: (agentId: string, toolCallId: string) => {
-    const sessionId = getAgentState(get(), agentId).activeSessionId;
-    if (!sessionId) return;
+  resolveApprovalByToolCallId: (agentId: string, toolCallId: string, sessionId?: string) => {
+    const sid = sessionId ?? getAgentState(get(), agentId).activeSessionId;
+    if (!sid) return;
     set((state) => {
-      const prevPending = getSessionState(state, agentId, sessionId).pendingApproval;
+      const prevPending = getSessionState(state, agentId, sid).pendingApproval;
       const nextPending = { ...prevPending };
       delete nextPending[toolCallId];
-      return updateSessionState(state, agentId, sessionId, { pendingApproval: nextPending });
+      return updateSessionState(state, agentId, sid, { pendingApproval: nextPending });
     });
   },
-  resolveQuestion: (agentId: string, requestId: string) => {
-    const sessionId = getAgentState(get(), agentId).activeSessionId;
-    if (!sessionId) return;
-    set((state) => updateSessionState(state, agentId, sessionId, {
-      pendingQuestions: (getSessionState(state, agentId, sessionId).pendingQuestions ?? []).filter(
+  resolveQuestion: (agentId: string, requestId: string, sessionId?: string) => {
+    const sid = sessionId ?? getAgentState(get(), agentId).activeSessionId;
+    if (!sid) return;
+    set((state) => updateSessionState(state, agentId, sid, {
+      pendingQuestions: (getSessionState(state, agentId, sid).pendingQuestions ?? []).filter(
         (q) => q.request_id !== requestId
       ),
     }));

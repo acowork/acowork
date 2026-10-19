@@ -358,7 +358,7 @@ run_permission_route_redline() {
     # update IS the review moment where the author must state the tier
     # (classify() default-denies unknown segments to AgentManage, so this
     # red line guards the *visibility* of new routes, not their safety).
-    local known_segments="avatar avatar-config avatar-file claim clone config cron debug files git guests health interactions latest-session lsp-endpoint manifest mcp-ensure mcp-servers mcp-tools memory messages model owner permissions prompts publish rag search sessions shell-risk-rules skills start status stop tools upgrade visibility workspaces {*rest}"
+    local known_segments="avatar avatar-config avatar-file claim clone config cron debug files git guests health interactions latest-session lsp-endpoint manifest mcp-ensure mcp-servers mcp-tools memory messages model owner permissions prompts providers publish rag search sessions shell-risk-rules skills start status stop tools upgrade visibility workspaces {*rest}"
     local segments seg
     segments=$(grep -rhoE '\.route\("/api/agents/\{id\}/[^"{]*' --include='*.rs' "$root"         | sed -E 's|.*\{id\}/||; s|/.*$||'         | grep -v '^$' | sort -u)
     # Also the bare catch-all wildcard (proxy forwards `{*rest}`).

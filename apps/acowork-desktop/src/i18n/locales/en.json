@@ -132,6 +132,55 @@
       "unavailable": "no longer available"
     }
   },
+  "chatView": {
+    "empty": "No messages yet",
+    "processing": "Agent working · click to view the run",
+    "queued": "Delivered — waiting for the Agent to start…",
+    "cardAnswered": "Answered",
+    "freeAnswer": "Free answer",
+    "answer": "Answer",
+    "replyingTo": "Replying to",
+    "cancelReply": "Cancel reply",
+    "emptyReply": "(ended with no output)",
+    "viewRun": "View run",
+    "statusCard": {
+      "untitled": "Untitled run",
+      "detail": "Details",
+      "workspaceAgentHome": "Agent Home",
+      "labelStatus": "Status",
+      "labelTitle": "Session",
+      "labelStep": "Current step",
+      "labelModel": "Model",
+      "labelWorkspace": "Workspace",
+      "errorTitle": "Error",
+      "dismiss": "Dismiss",
+      "continue": "Continue",
+      "deny": "Deny",
+      "allow": "Allow",
+      "pausedIteration": "Paused at the iteration limit.",
+      "stepApproval": "Waiting for approval: {{tool}}",
+      "stepRunningTool": "Running {{count}} tool(s)…",
+      "stepTodo": "{{content}} ({{index}}/{{total}})",
+      "status": {
+        "idle": "Idle",
+        "llm_awaiting_first_chunk": "Waiting for model",
+        "thinking": "Thinking",
+        "llm_streaming": "Streaming",
+        "tool_executing": "Running tools",
+        "waiting_approval": "Waiting for approval",
+        "paused": "Paused"
+      },
+      "phase": {
+        "idle": "Idle",
+        "waiting": "Waiting for model",
+        "thinking": "Thinking",
+        "streaming": "Generating reply",
+        "tool_executing": "Running tools",
+        "waiting_approval": "Waiting for approval",
+        "paused": "Paused"
+      }
+    }
+  },
   "time": {
     "justNow": "Just now",
     "minutesAgo": "{{count}} min ago",
@@ -244,7 +293,6 @@
     "rename": "Rename…",
     "newConversation": "New conversation",
     "sessionHistory": "Session history",
-    "chatHistory": "Chat history",
     "clearAll": "Clear all conversations",
     "clearAllConfirmTitle": "Clear all conversations?",
     "clearAllConfirmWarning": "This permanently deletes all {{count}} sessions of this agent, including their message history and stored records. This cannot be undone.",
@@ -258,19 +306,7 @@
     "untitled": "Untitled"
   },
   "chatHistory": {
-    "title": "Chat history",
-    "empty": "No chat sessions yet",
-    "untitled": "Untitled chat",
-    "messages": "messages",
-    "noMessages": "No messages in this chat",
-    "loadEarlier": "Load earlier",
-    "kind": {
-      "user_user": "Direct",
-      "user_group": "Group",
-      "project_group": "Project group",
-      "user_agent": "Agent chat",
-      "agent_agent": "Agent ↔ Agent"
-    }
+    "loadEarlier": "Load earlier"
   },
   "contextUsage": {
     "ariaLabel": "Context usage",
@@ -449,7 +485,8 @@
     "node": "Node",
     "contextPermissions": "Permissions",
     "nodePermissions": "Node permissions",
-    "noAccess": "No access"
+    "noAccess": "No access",
+    "projectGroupsBanner": "Project group chats"
   },
   "cloneDialog": {
     "skeleton": "Skeleton",
@@ -1881,5 +1918,15 @@
     "claimOwnerHint": "This {{kind}} has no owner, so only you can manage it and it cannot be made {{pub}} yet. Take ownership to set its visibility.",
     "agent": "agent",
     "node": "node"
+  },
+  "groupChat": {
+    "members": "{{count}} members",
+    "loadEarlier": "Load earlier messages",
+    "empty": "No messages yet",
+    "working": "Agent working…",
+    "placeholder": "Message the project team",
+    "placeholderWithMentions": "Message the team — @Agent to assign work",
+    "send": "Send",
+    "emptyTurn": "(no output)"
   }
 }

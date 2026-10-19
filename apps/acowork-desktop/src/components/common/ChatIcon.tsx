@@ -1,9 +1,10 @@
 /**
  * Outline chat bubble — pill/oval silhouette, stroke-only.
  *
- * Single source of truth for the chat icon: both the left NavBar and
- * the SessionTabBar (dropdown rows + tab titles) import this so the
- * session-related icons stay visually identical across the app.
+ * Single source of truth for the chat icon: the left NavBar and the
+ * pinned Chat tab in the SessionTabBar import this so the Chat-surface
+ * icon stays visually identical across the app. Execution sessions use
+ * the brain pair instead (BrainIcon.tsx, design 27 §6.1).
  */
 export function OutlineChatIcon({ className }: { className?: string }) {
   return (
@@ -27,7 +28,7 @@ export function OutlineChatIcon({ className }: { className?: string }) {
  * Filled chat bubble — same pill/oval silhouette, solid fill.
  *
  * Used for the selected/active state (current nav item in NavBar, the
- * currently-selected tab in SessionTabBar). Pairs with `OutlineChatIcon`.
+ * pinned Chat tab in SessionTabBar). Pairs with `OutlineChatIcon`.
  */
 export function FilledChatIcon({ className }: { className?: string }) {
   return (

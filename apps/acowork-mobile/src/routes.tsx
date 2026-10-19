@@ -11,6 +11,7 @@
 import type { ComponentType } from 'react'
 import { ChatListScreen } from './screens/chat/ChatListScreen'
 import { ChatDetailScreen } from './screens/chat/ChatDetailScreen'
+import { AgentChatScreen } from './screens/chat/AgentChatScreen'
 import { UserChatScreen } from './screens/chat/UserChatScreen'
 import { ProjectListScreen } from './screens/projects/ProjectListScreen'
 import { BoardScreen } from './screens/projects/BoardScreen'
@@ -32,6 +33,7 @@ type ScreenComponent = ComponentType
 export const ROUTES: Record<string, ScreenComponent> = {
   'chat/list': ChatListScreen,
   'chat/detail': ChatDetailScreen,
+  'chat/agent': AgentChatScreen,
   'chat/user': UserChatScreen,
 
   'projects/list': ProjectListScreen,

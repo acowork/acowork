@@ -1483,27 +1483,32 @@ impl AgentLoop {
             }
         }
 
-        // Design 27 §6.5 R1: in a responder turn the agent answers one
-        // Intent request and hands the turn back — it must not spawn new
-        // Intents or ask a human. Both tools are removed from the wire
-        // tool set for this turn (the model cannot call what it cannot
-        // see; §7.1 keeps the turn's ownership singular).
-        if self.pending_intent.is_some()
-            && let Some(tools) = chat_request.tools.as_mut()
+        // Design 27 §6.5 R1 + §5.5.4 (plan 2b.3): two orthogonal gates on
+        // the wire tool set. `intent_send` is hidden by ROLE — a responder
+        // turn answers one request and hands the turn back (§7.1 keeps
+        // ownership singular). `ask_user_question` is hidden by
+        // ANSWERABILITY — only when the Gateway stamped the session as
+        // having no human participant; a group-mention responder turn
+        // still has humans to answer a card, so the tool stays (§5.5.4).
+        // Unknown (`None`) fails open: keep the tool.
         {
-            const RESPONDER_HIDDEN: [&str; 2] = ["intent_send", "ask_user_question"];
-            tools.retain(|t| {
-                let name = t
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        t.get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|v| v.as_str())
-                    })
-                    .unwrap_or("");
-                !RESPONDER_HIDDEN.contains(&name)
-            });
+            let hidden = hidden_tools_for_turn(self.pending_intent.is_some(), self.chat_has_human);
+            if !hidden.is_empty()
+                && let Some(tools) = chat_request.tools.as_mut()
+            {
+                tools.retain(|t| {
+                    let name = t
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            t.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|v| v.as_str())
+                        })
+                        .unwrap_or("");
+                    !hidden.contains(&name)
+                });
+            }
         }
 
         // LLM-perspective tool dump: AFTER builtin + MCP merge.
@@ -2024,6 +2029,27 @@ impl AgentLoop {
         }
 
         truncated
+    }
+}
+
+/// Design 27 §6.5 R1 + §5.5.4 (plan 2b.3): the per-turn wire tool-set
+/// removals. `intent_send` is gated by ROLE (responder turns answer and
+/// hand back, they must not spawn a nested Intent); `ask_user_question`
+/// is gated by ANSWERABILITY (only a session *known* to have no human
+/// participant hides it — `None` fails open so older Gateways and
+/// chat-less deliveries keep today's behaviour).
+pub(crate) fn hidden_tools_for_turn(
+    responder: bool,
+    has_human: Option<bool>,
+) -> &'static [&'static str] {
+    const BOTH: [&str; 2] = ["intent_send", "ask_user_question"];
+    const NO_HUMAN: [&str; 1] = ["ask_user_question"];
+    const RESPONDER: [&str; 1] = ["intent_send"];
+    match (responder, has_human) {
+        (true, Some(false)) => &BOTH,
+        (true, _) => &RESPONDER,
+        (false, Some(false)) => &NO_HUMAN,
+        (false, _) => &[],
     }
 }
 

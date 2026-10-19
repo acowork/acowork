@@ -371,22 +371,28 @@ impl AgentLoop {
                     approval_req = self.approval_rx.recv() => {
                         match approval_req {
                             Some((req, decision_tx)) => {
-                                // Design 27 §6.5 R3: an intent responder turn
-                                // has no human watching it. Never announce the
-                                // approval (no WaitingApproval state, no 5-min
-                                // timeout wait) — reject it immediately so the
-                                // model answers without the gated tool.
-                                if self.pending_intent.is_some() {
+                                // Design 27 §5.5.4 (plan 3.1): a session the
+                                // Gateway stamped human-free has nobody to
+                                // answer — never announce the approval (no
+                                // WaitingApproval state, no 5-min timeout
+                                // wait); reject immediately so the model
+                                // continues without the gated tool. A
+                                // responder turn WITH humans keeps the
+                                // bounded wait: the approval is also dropped
+                                // as an `interaction_request` card below
+                                // (WaitingApproval is time-boxed, not the
+                                // indefinite pause §6.5 R3 forbids).
+                                if self.chat_has_human == Some(false) {
                                     let _ = decision_tx.send(ApprovalDecision {
                                         approved: false,
                                         allow_all_session: false,
                                         reason: Some(
-                                            "intent responder turns cannot wait for human approval"
+                                            "this chat session has no human participant to approve"
                                                 .to_string(),
                                         ),
                                     });
                                     tracing::info!(
-                                        "Auto-rejected tool approval in intent responder turn"
+                                        "Auto-rejected tool approval in a human-free chat session"
                                     );
                                     continue;
                                 }
@@ -401,6 +407,23 @@ impl AgentLoop {
                                         request_id: request_id.clone(),
                                     },
                                 );
+                                // §5.5.4 (plan 3.1): the approval is also a
+                                // Chat-session card. Summary only — tool
+                                // name + risk reason, never the command line
+                                // or tool payload (§2.2); the answer resolves
+                                // the same request id through either surface.
+                                self.write_interaction_card(
+                                    serde_json::json!({
+                                        "kind": "approval",
+                                        "request_id": request_id.clone(),
+                                        "question": format!(
+                                            "Approve `{}`? {}",
+                                            req.tool_name, req.reason
+                                        ),
+                                    }),
+                                    &format!("Tool approval: {}", req.tool_name),
+                                )
+                                .await;
                                 // First in-flight approval starts the
                                 // 5-minute approval deadline; subsequent
                                 // concurrent approvals share it.
@@ -1314,19 +1337,21 @@ impl AgentLoop {
         let mut parallel_calls: Vec<(usize, ToolCall)> = Vec::new();
 
         for (idx, tc) in calls_to_execute.into_iter().enumerate() {
-            // Design 27 §6.5 R1 backstop: the tools are hidden from the
-            // responder's wire tool set, but a hallucinated call (e.g. from
-            // a cached prompt) must not hang the turn awaiting a human or
-            // spawn a nested Intent — reject it as a tool error instead.
-            if self.pending_intent.is_some()
-                && matches!(
-                    tc.function.name.as_str(),
-                    "ask_user_question" | "intent_send"
-                )
-            {
+            // Design 27 §6.5 R1 / §5.5.4 backstop (plan 2b.3): the gated
+            // tools are hidden from the wire tool set, but a hallucinated
+            // call (e.g. from a cached prompt) must not hang the turn
+            // awaiting a human or spawn a nested Intent — reject it as a
+            // tool error instead. Same two gates: role for `intent_send`,
+            // answerability for `ask_user_question`.
+            let hallucinated_gate = match tc.function.name.as_str() {
+                "intent_send" => self.pending_intent.is_some(),
+                "ask_user_question" => self.chat_has_human == Some(false),
+                _ => false,
+            };
+            if hallucinated_gate {
                 let result = format!(
-                    "Error: `{}` is not available while answering an Intent request \
-                     (design 27 §5.4.5 R1). Finish the answer; the system writes the response back.",
+                    "Error: `{}` is not available in this turn (design 27 §5.4.5 R1 / \
+                     §5.5.4). Finish the answer; the system writes the response back.",
                     tc.function.name
                 );
                 ask_question_results.push((idx, (result, false)));

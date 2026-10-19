@@ -271,6 +271,7 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
                 kind: String::new(),
                 in_reply_to: String::new(),
                 status: String::new(),
+                has_human_participant: None,
 params_json: r#"{"target":"A"}"#.into(),
             })),
         };

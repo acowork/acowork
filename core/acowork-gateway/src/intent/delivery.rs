@@ -141,6 +141,11 @@ pub struct DeliveryRequest {
     pub in_reply_to: String,
     /// For a response: §7.1 outcome. Empty = completed.
     pub status: String,
+    /// Design 27 §5.5.4 / plan 2b.3: whether the source Chat session has a
+    /// human participant who can answer a card. The Gateway stamps this at
+    /// delivery; `None` = undecidable (no session, legacy rows) → the
+    /// Runtime keeps human-facing tools (fail open).
+    pub has_human: Option<bool>,
 }
 
 /// Wake-then-deliver one Intent, recording the delivery fact in the
@@ -173,6 +178,7 @@ pub async fn wake_and_deliver(
             status: req.status.clone(),
             source_chat_session_id: req.source_chat_session_id.clone(),
             answered_at: String::new(),
+            has_human: req.has_human,
         })
         .map_err(|e| DeliveryError::MailboxFailed(e.to_string()))?;
     }
@@ -249,6 +255,7 @@ async fn deliver_inner(
         kind: req.kind.clone(),
         in_reply_to: req.in_reply_to.clone(),
         status: req.status.clone(),
+        has_human_participant: req.has_human,
     };
     let command = mqtt_proto::ControlCommand {
         instance_id: instance_id.clone(),
@@ -349,6 +356,7 @@ mod tests {
             kind: "request".into(),
             in_reply_to: String::new(),
             status: String::new(),
+            has_human: None,
         }
     }
 

@@ -170,6 +170,10 @@ async fn main() {
         "PM service listening (ADR-064 standalone)"
     );
 
+    // Design 27 Phase 2 follow-up: old projects (created before per-project
+    // group chats existed) get their group chat backfilled, idempotently.
+    service.spawn_group_chat_backfill();
+
     // 把实际绑定端口写入 port_file（Gateway supervisor 读取）
     if let Some(path) = &cli.port_file {
         if let Err(e) = std::fs::write(path, addr.port().to_string()) {

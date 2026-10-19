@@ -38,6 +38,8 @@ const ROUTES_MAP: [RegExp, () => unknown][] = [
   [/\/memory\/stats$/, () => ({ total_nodes: 12, by_type: { fact: 12 }, by_status: { active: 12 }, index_health: 'ok', stored_dim: 512 })],
   [/\/builtin-tools$/, () => ({ agent_id: AGENT, tools: [{ name: 'bash', enabled: true }, { name: 'file_edit', enabled: false }] })],
   [/\/config$/, () => ({ agent_id: AGENT, matches: true, config: { model: 'gpt-5', provider: 'openai' } })],
+  [/\/api\/chat-sessions\/default/, () => ({ session_id: 'cs-1', kind: 'user_agent', title: 'Ponytail', created_at: 1, last_active_at: 2, message_count: 1 })],
+  [/\/api\/chat-sessions\/[^/]+\/messages/, () => ({ messages: [{ seq: 1, ts: 1728000000, from: 'u1', kind: 'user_message', body: 'ping', to: 'a1', meta: { message_id: 'm1' } }], total: 1, offset: 0, limit: 50 })],
   [/\/api\/users\/[^/]+\/chats$/, () => ({ chats: [{ chat_id: 'u1__u2', peer_user_id: 'u2', peer_display_name: 'Bob', unread_count: 0, last_active_at: '2026-10-04T09:00:00Z', last_message_preview: 'ping' }] })],
   [/\/api\/pm\/projects$/, () => [{ id: 'p1', title: 'acowork', description: '', status: 'active', created_by: 'u1', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z', metadata: {}, members: [] }]],
   [/\/api\/pm\/projects\/p1\/tasks/, () => [{ id: 't1', project_id: 'p1', title: 'Ship the APK', description: '', type: 'task', status: 'in_progress', review_status: 'not_required', priority: 'high', assignee: null, due_at: null, created_by: 'u1', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-04T00:00:00Z', depends_on: [], attachments: [], depth: 0, is_blocked: false, blocked_by: [] }]],

@@ -490,6 +490,9 @@ pub async fn run_cron_scheduler(
                 kind: String::new(),
                 in_reply_to: String::new(),
                 status: String::new(),
+                // Cron triggers carry no Chat session — answerability
+                // unknown → the Runtime keeps human-facing tools.
+                has_human: None,
             };
 
             let mailbox = {

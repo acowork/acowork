@@ -19,7 +19,7 @@ import { ErrorBox } from "../common/ErrorBox";
  * path is unreachable while viewing someone else's session and still works
  * from any session we own — no capability is actually lost.
  */
-export function SkillsPanel({ textHidden, readOnly }: { textHidden?: boolean; readOnly?: boolean } = {}) {
+export function SkillsPanel({ textHidden, readOnly, readOnlyTip }: { textHidden?: boolean; readOnly?: boolean; /** Overrides the ADR-076 "shared session" tooltip when read-only — the Chat surface shows the same chip for a different reason (display mirror, not a share lock). */ readOnlyTip?: string } = {}) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   const {
@@ -133,7 +133,7 @@ export function SkillsPanel({ textHidden, readOnly }: { textHidden?: boolean; re
         label={skillsLabel}
         collapseClass="tb-sk-text"
         tipClass="tb-sk-tip"
-        tooltip={readOnly ? t("chatPanel.readOnlySession") : t("skillsPanel.selectSkill")}
+        tooltip={readOnly ? (readOnlyTip ?? t("chatPanel.readOnlySession")) : t("skillsPanel.selectSkill")}
         open={open}
         onToggle={() => !readOnly && setOpen(!open)}
         wrapperRef={ref}

@@ -21,7 +21,7 @@ function workspaceDisplayName(dir: WorkspaceDir) {
   return name;
 }
 
-export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }: { dropDirection?: "up" | "down"; textHidden?: boolean; readOnly?: boolean }) {
+export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, readOnlyTip, value, onChange }: { dropDirection?: "up" | "down"; textHidden?: boolean; readOnly?: boolean; /** Overrides the ADR-076 "shared session" tooltip when read-only — the Chat surface shows the same chip for a different reason (display mirror, not a share lock). */ readOnlyTip?: string; /** Draft mode (design 27 §4.5, Chat surface): the highlighted workspace id instead of the active session's. `undefined` falls back to the session-derived value so the chip still shows the agent's current workspace before the user picks one. */ value?: string; /** Draft mode: route a selection here (a per-message `session_config` suggestion) instead of writing the active session's workspace. When present, the picker becomes a controlled draft selector. */ onChange?: (workspaceId: string) => void }) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
   // Node id of the machine hosting the selected agent instance — when set,
@@ -59,10 +59,13 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
   const menuRef = useRef<HTMLDivElement>(null);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
 
-  // Current workspace ID for the active session (defaults to agent home)
-  const currentWsId = activeSessionId
+  // Current workspace ID for the active session (defaults to agent home).
+  // Draft mode (`value`) overrides it with the composer's pending choice —
+  // the Chat surface has no execution session to write yet, so a pick is
+  // carried on the next message instead of mutating a session.
+  const currentWsId = value ?? (activeSessionId
     ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
-    : "__agent_home__";
+    : "__agent_home__");
 
   // Fetch workspaces whenever the selected agent changes. The store
   // owns the 503 retry loop — see `lib/httpRetry.ts` and the comment
@@ -162,6 +165,12 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
   }, [open, computeMenuPos]);
 
   const handleSelect = async (dir: WorkspaceDir) => {
+    // Draft mode: record the choice on the composer's pending config.
+    if (onChange) {
+      onChange(dir.id);
+      setOpen(false);
+      return;
+    }
     if (!selectedAgentId || !activeSessionId) return;
     await setSessionWorkspace(selectedAgentId, activeSessionId, dir.id);
     setOpen(false);
@@ -273,7 +282,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
         label={currentWsName}
         collapseClass="tb-ws-text"
         tipClass="tb-ws-tip"
-        tooltip={readOnly ? t("chatPanel.readOnlySession") : t("workspace.selectWorkspace")}
+        tooltip={readOnly ? (readOnlyTip ?? t("chatPanel.readOnlySession")) : t("workspace.selectWorkspace")}
         open={open}
         onToggle={() => !readOnly && setOpen(!open)}
         wrapperRef={ref}
@@ -319,6 +328,12 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly }
               {/* Agent Home — always first, cannot be deleted */}
               <button
                 onClick={async () => {
+                  // Draft mode: pick agent home as the pending config.
+                  if (onChange) {
+                    onChange("__agent_home__");
+                    setOpen(false);
+                    return;
+                  }
                   if (!selectedAgentId || !activeSessionId) return;
                   await setSessionWorkspace(selectedAgentId, activeSessionId, "__agent_home__");
                   setOpen(false);

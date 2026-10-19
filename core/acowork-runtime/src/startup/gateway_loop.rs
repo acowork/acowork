@@ -193,6 +193,7 @@ fn control_action_to_inbound(
             kind,
             in_reply_to,
             status,
+            has_human,
         } => {
             let params: serde_json::Value =
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
@@ -213,6 +214,7 @@ fn control_action_to_inbound(
                     kind,
                     in_reply_to,
                     status,
+                    has_human,
                 })),
             ))
         }
@@ -1013,6 +1015,7 @@ async fn route_intent_inbound(
         kind,
         in_reply_to,
         status,
+        has_human,
     } = *env;
 
     let is_response = kind == "response";
@@ -1074,6 +1077,7 @@ async fn route_intent_inbound(
             action,
             repo,
             kind,
+            has_human,
         },
     )
 }
@@ -1166,6 +1170,7 @@ mod tests {
             kind: String::new(),
             in_reply_to: String::new(),
             status: String::new(),
+            has_human: None,
         })
         .expect("Intent must map");
         assert_eq!(route, "", "cron intent has no target session — system-level");
@@ -1197,6 +1202,7 @@ mod tests {
             kind: String::new(),
             in_reply_to: String::new(),
             status: String::new(),
+            has_human: None,
         })
         .expect("Intent must still map");
 

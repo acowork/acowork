@@ -105,6 +105,7 @@ pub(crate) fn is_public_path(path: &str) -> bool {
     // Gateway on this host with no user identity to present. Loopback-only
     // binding is the trust boundary; `message_id` idempotency bounds replay.
     path.starts_with("/internal/chat-sessions/")
+        || path == "/internal/chat-sessions"
         || matches!(
             path,
             "/health"

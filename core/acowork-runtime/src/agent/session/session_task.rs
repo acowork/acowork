@@ -179,6 +179,9 @@ pub enum SessionMessage {
         action: String,
         repo: String,
         kind: String,
+        /// Design 27 §5.5.4 / plan 2b.3: answerability fact for this turn
+        /// (`None` = unknown → keep human-facing tools).
+        has_human: Option<bool>,
     },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, the front/back suppression mechanism is gone.
@@ -1217,24 +1220,77 @@ impl SessionTask {
                     action,
                     repo: _,
                     kind,
+                    has_human,
                 }) => {
-                    // Design 27 §7.1: a `request` starts a responder turn —
-                    // the loop hides intent_send / ask_user_question and
-                    // refuses human-awaiting pauses while `pending_intent`
-                    // is set. A `response` is an ordinary turn for the
-                    // initiator (the answer arrives as user input; the
-                    // model decides any follow-up with a fresh request).
-                    let is_request = kind != "response";
-                    if is_request {
-                        agent_loop.pending_intent =
-                            Some(crate::agent::intent_turn::IntentTurnContext::new(
-                                &message_id,
-                                &conversation_id,
-                                &source_chat_session_id,
-                                &from,
-                                &action,
-                            ));
+                    // Design 27 §7.1 / plan D-C/C1: the inbound kind
+                    // decides two orthogonal things — the responder role
+                    // (`request` only: hide intent_send / ask_user_question,
+                    // refuse human-awaiting pauses) and the write-back the
+                    // turn owes (a `request`, or a human `user_message`
+                    // routed from a Chat session per §5.4.4). A `response`
+                    // is an ordinary turn for the initiator (the answer
+                    // arrives as user input; the model decides any
+                    // follow-up with a fresh request).
+                    let (responder, write_back) =
+                        crate::agent::intent_turn::turn_kind_semantics(&kind, &message_id);
+                    let turn_ctx = || {
+                        crate::agent::intent_turn::IntentTurnContext::new(
+                            &message_id,
+                            &conversation_id,
+                            &source_chat_session_id,
+                            &from,
+                            &action,
+                        )
+                    };
+                    agent_loop.pending_intent = if responder { Some(turn_ctx()) } else { None };
+                    agent_loop.chat_writeback = if write_back { Some(turn_ctx()) } else { None };
+                    // §5.5.5 (plan 3.3): the turn-started pointer row,
+                    // written before the turn runs so a refresh mid-turn
+                    // recovers "a round is in flight". Deterministic
+                    // message id — a redelivered trigger dedups at the
+                    // store, never a second row. Awaited rather than
+                    // spawned so the pointer precedes the write-back in
+                    // seq order; a failure is logged, never fatal (the
+                    // pointer is a credential for the surface, not for
+                    // the conversation).
+                    if write_back
+                        && !source_chat_session_id.is_empty()
+                        && let Err(e) = crate::agent::intent_turn::append_chat_row(
+                            &agent_loop.core.config.agent_instance_id,
+                            &agent_loop
+                                .core
+                                .config
+                                .gateway_host
+                                .clone()
+                                .unwrap_or_else(|| "127.0.0.1".to_string()),
+                            &agent_loop
+                                .core
+                                .config
+                                .mqtt_password
+                                .clone()
+                                .unwrap_or_default(),
+                            &source_chat_session_id,
+                            "system_notice",
+                            &from,
+                            "",
+                            serde_json::json!({
+                                "message_id": format!("ts:{message_id}"),
+                                "notice_type": "turn_started",
+                                "in_reply_to": message_id,
+                                "agent_session_id": session_id,
+                            }),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "turn_started pointer row failed — turn proceeds without it"
+                        );
                     }
+                    // §5.5.4 answerability for this turn (plan 2b.3); reset
+                    // with the turn like the two fields above.
+                    agent_loop.chat_has_human = has_human;
                     last_user_message = Some((content.clone(), message_id.clone()));
                     let result = agent_loop
                         .run(
@@ -1246,9 +1302,13 @@ impl SessionTask {
                             None,
                         )
                         .await;
-                    // Take the context back regardless of outcome — the
-                    // turn is over and the next one must not inherit it.
-                    let ctx = agent_loop.pending_intent.take();
+                    // Take both fields back regardless of outcome — the
+                    // turn is over and the next one must not inherit them.
+                    // The write-back context (D-C/C1) is what the turn-end
+                    // posting and the routing registry stamp read.
+                    agent_loop.pending_intent = None;
+                    agent_loop.chat_has_human = None;
+                    let ctx = agent_loop.chat_writeback.take();
                     // Design 27 §2.1: stamp the routing registry for the next
                     // arrival — reset the T1 idle clock and carry the T2
                     // compaction marker if this turn compacted. Bookkeeping

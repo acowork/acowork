@@ -1,6 +1,8 @@
 import { useEffect, useState, useRef, useMemo, useCallback, Fragment } from "react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useProjectGroupStore } from "../../stores/projectGroupStore";
+import { useUserChatStore } from "../../stores/userChatStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
@@ -14,7 +16,7 @@ import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor, MessagesSquare } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -552,6 +554,25 @@ export function AgentList({ width }: AgentListProps) {
     a.name.toLowerCase().includes(searchQuery.toLowerCase()),
   );
 
+  // Project group chats (design 27 §4.4): one `project_group` session per
+  // project, listed through the user service's chat surface. The section
+  // hides itself when empty (local mode has no user service at all).
+  const projectGroups = useProjectGroupStore((s) => s.groups);
+  const activeGroupId = useProjectGroupStore((s) => s.activeGroupId);
+  const fetchGroups = useProjectGroupStore((s) => s.fetchGroups);
+  const selectGroup = useProjectGroupStore((s) => s.selectGroup);
+  const selfUserId = useAuthStore((s) => s.account?.user_id ?? "");
+  const [groupsCollapsed, setGroupsCollapsed] = useState(false);
+  useEffect(() => {
+    void fetchGroups();
+  }, [fetchGroups]);
+  const visibleGroupsChats = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return q
+      ? projectGroups.filter((g) => g.title.toLowerCase().includes(q))
+      : projectGroups;
+  }, [projectGroups, searchQuery]);
+
   // ADR-073 §4: in remote mode we partition agents by `node_id` so each
   // group renders below a collapsible 1/3-height header. Groups are
   // emitted in `nodes` order (Gateway's natural ordering); any agents
@@ -841,6 +862,65 @@ export function AgentList({ width }: AgentListProps) {
               {agentsList.length === 0 ? t("agentList.noAgentsInstalled") : t("agentList.noMatchingAgents")}
             </div>
           )}
+
+        {/* Project group chats — one row per project's group chat
+            (design 27 §4.4). Between the agent groups and the account
+            group: agents are things you run, groups are places you talk. */}
+        {visibleGroupsChats.length > 0 && (
+          <div data-testid="project-group-section">
+            <div className="flex h-6 items-center border-y border-nav-divider/40 bg-panel-block dark:border-zinc-600/40">
+              <button
+                type="button"
+                onClick={() => setGroupsCollapsed((c) => !c)}
+                aria-expanded={!groupsCollapsed}
+                aria-label={t("agentList.projectGroupsBanner")}
+                data-testid="project-group-header"
+                className="flex h-6 min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-xs font-medium text-text-tertiary transition-colors duration-150 hover:text-zinc-600 dark:hover:text-zinc-300"
+              >
+                <ChevronRight
+                  className={cn("h-3 w-3 shrink-0 transition-transform duration-150", !groupsCollapsed && "rotate-90")}
+                />
+                <MessagesSquare className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
+                <span className="truncate">{t("agentList.projectGroupsBanner")}</span>
+                <span className="ml-auto text-xs font-normal opacity-60">{visibleGroupsChats.length}</span>
+              </button>
+            </div>
+            {!groupsCollapsed && visibleGroupsChats.map((g, index) => {
+              const unread = selfUserId ? (g.unread?.[selfUserId] ?? 0) : 0;
+              return (
+                <div
+                  key={g.session_id}
+                  role="listitem"
+                  data-testid="project-group-row"
+                  onClick={() => {
+                    // Middle-pane exclusivity (see projectGroupStore docs):
+                    // drop any agent selection and inbox peer first.
+                    if (selectedAgentId) selectAgent(null);
+                    useUserChatStore.getState().closeChat();
+                    selectGroup(g.session_id);
+                  }}
+                  className={cn(
+                    "flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 transition-colors duration-150",
+                    activeGroupId === g.session_id
+                      ? "bg-accent-strong/90 text-white"
+                      : listRowHover,
+                    index < visibleGroupsChats.length - 1 && "row-divider-b",
+                  )}
+                >
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--color-accent)]/10 text-text-secondary">
+                    <MessagesSquare className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs">{g.title || g.session_id.slice(0, 8)}</span>
+                  {unread > 0 && (
+                    <span className="shrink-0 rounded-full bg-red-500 px-1.5 text-10 font-medium leading-4 text-white">
+                      {unread > 99 ? "99+" : unread}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* ADR-076 §决策 7: account group, below the agent groups. */}
         <UserList ref={userListRef} />

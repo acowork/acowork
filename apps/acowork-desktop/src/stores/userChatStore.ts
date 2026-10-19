@@ -52,6 +52,7 @@ import type {
   UserChatSummary,
 } from "../lib/types";
 import { useAuthStore } from "./authStore";
+import { useProjectGroupStore } from "./projectGroupStore";
 
 interface UserChatState {
   /** Conversations of the signed-in user, most recently active first. */
@@ -339,6 +340,9 @@ export const useUserChatStore = create<UserChatState>((set, get) => ({
   },
 
   openChat: async (peerId, peerLabel) => {
+    // Middle-pane exclusivity: opening an inbox peer closes any open
+    // project group chat (mirror of `agentStore.selectAgent`).
+    useProjectGroupStore.getState().clearSelection();
     const self = selfId();
     if (!self) return;
     set({

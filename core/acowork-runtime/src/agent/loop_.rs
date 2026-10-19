@@ -437,9 +437,27 @@ pub struct AgentLoop {
 
     /// Design 27 §6.5: set when the current turn was triggered by an
     /// Intent `request` — the agent is in the **responder** role. Drives
-    /// tool trimming (R1), refusal of human-awaiting pause states (R3),
-    /// and the system write-back at turn end (§7.1). `None` = normal turn.
+    /// tool trimming (R1) and refusal of human-awaiting pause states (R3).
+    /// `None` = normal turn. Since plan D-C/C1 this field is *role only* —
+    /// whether the turn owes the Chat session a write-back is decided
+    /// independently by [`Self::chat_writeback`] (a human `user_message`
+    /// turn writes back without ever being a responder).
     pub(crate) pending_intent: Option<crate::agent::intent_turn::IntentTurnContext>,
+
+    /// Design 27 §5.4.5: the write-back this turn owes, independent of the
+    /// turn's role. Set when the inbound is a `request` (answer goes back
+    /// through the Gateway response entry even in the mailbox-only
+    /// degradation) or a human `user_message` carrying a `message_id`
+    /// (§5.4.4 — the Agent page's 1:1 turns). At turn end the system posts
+    /// the final output against it (§7.1); `None` = nothing owed.
+    pub(crate) chat_writeback: Option<crate::agent::intent_turn::IntentTurnContext>,
+
+    /// Design 27 §5.5.4 / plan 2b.3: whether the source Chat session has a
+    /// human who can answer a card, stamped by the Gateway per turn.
+    /// Drives answerability-based tool visibility (`ask_user_question`),
+    /// orthogonal to the responder role. `None` = unknown → fail open.
+    /// Reset at turn end like [`Self::pending_intent`].
+    pub(crate) chat_has_human: Option<bool>,
 }
 
 impl AgentLoop {
@@ -509,6 +527,8 @@ impl AgentLoop {
             memory_retrieved_for_session: false,
             compress_action_rx: None,
             pending_intent: None,
+            chat_writeback: None,
+            chat_has_human: None,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         loop_.session_core.approval_handle = Some(approval_handle.clone());
@@ -579,6 +599,8 @@ impl AgentLoop {
             memory_retrieved_for_session: false,
             compress_action_rx: None,
             pending_intent: None,
+            chat_writeback: None,
+            chat_has_human: None,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -1012,14 +1034,58 @@ impl AgentLoop {
 
             // ⑨ Iteration limit check — pause and await user decision
             if iteration > self.core.config.max_iterations {
-                // Design 27 §6.5 R3: a responder turn has no human behind
-                // it — never enter the Paused state, end with an `aborted`
-                // receipt naming where it got stuck (§7.1 table).
-                if let Some(ctx) = self.pending_intent.as_mut() {
-                    ctx.outcome = "aborted".to_string();
+                // Design 27 §6.5 R3 + §5.5.4 (plan 3.1): a chat-triggered
+                // turn never enters the indefinite Paused state. With an
+                // answerable human the pause becomes an
+                // `interaction_request` card and the turn ends `waiting`
+                // — the execution slot is released, the human's answer
+                // opens a new turn in the same session (§5.5.4). With no
+                // human to answer (pure agent-agent, or a responder turn
+                // whose answerability is unknown) the turn ends `aborted`
+                // naming where it got stuck (§7.1 table). The outcome
+                // lives on the write-back context (plan D-C/C1): that is
+                // what the turn-end write-back reads.
+                let pause_message = format!(
+                    "Iteration limit reached ({}/{}). Reply to continue.",
+                    iteration, self.core.config.max_iterations
+                );
+                if self.chat_writeback.is_some() && self.chat_has_human == Some(true) {
+                    let card_request_id = self
+                        .chat_writeback
+                        .as_ref()
+                        .map(|c| c.request_id.clone())
+                        .unwrap_or_default();
+                    self.write_interaction_card(
+                        serde_json::json!({
+                            "kind": "pause",
+                            "request_id": card_request_id,
+                            "question": pause_message,
+                        }),
+                        &pause_message,
+                    )
+                    .await;
+                    if let Some(ctx) = self.chat_writeback.as_mut() {
+                        ctx.outcome = "waiting".to_string();
+                    }
                     tracing::warn!(
                         iteration,
-                        request_id = %ctx.request_id,
+                        "Chat turn hit iteration limit — card written, ending waiting"
+                    );
+                    self.transition_status(SessionStatus::Idle);
+                    return Ok(format!("[waiting] {pause_message}"));
+                }
+                if self.pending_intent.is_some() || self.chat_has_human == Some(false) {
+                    let request_id = self
+                        .chat_writeback
+                        .as_mut()
+                        .map(|ctx| {
+                            ctx.outcome = "aborted".to_string();
+                            ctx.request_id.clone()
+                        })
+                        .unwrap_or_default();
+                    tracing::warn!(
+                        iteration,
+                        request_id = %request_id,
                         "Intent responder hit iteration limit — aborting with receipt"
                     );
                     self.transition_status(SessionStatus::Idle);
@@ -1173,11 +1239,51 @@ impl AgentLoop {
                     Ok(result) => break result,
                     Err(RuntimeError::LoopDetected(msg)) => {
                         // Design 27 §6.5 R3: responder turns never pause —
-                        // loop detection ends the turn as `aborted`.
-                        if let Some(ctx) = self.pending_intent.as_mut() {
-                            ctx.outcome = "aborted".to_string();
+                        // loop detection ends the turn as `aborted`. The
+                        // outcome lives on the write-back context (plan
+                        // D-C/C1 + §5.5.4 (plan 3.1): chat-triggered turn
+                        // with an answerable human → pause card + `waiting`
+                        // (slot released, answer opens a new turn); no
+                        // answerer → `aborted` receipt.
+                        let loop_summary = format!(
+                            "Loop detected ({}). Reply to continue.",
+                            msg
+                        );
+                        if self.chat_writeback.is_some() && self.chat_has_human == Some(true) {
+                            let card_request_id = self
+                                .chat_writeback
+                                .as_ref()
+                                .map(|c| c.request_id.clone())
+                                .unwrap_or_default();
+                            self.write_interaction_card(
+                                serde_json::json!({
+                                    "kind": "pause",
+                                    "request_id": card_request_id,
+                                    "question": loop_summary,
+                                }),
+                                &loop_summary,
+                            )
+                            .await;
+                            if let Some(ctx) = self.chat_writeback.as_mut() {
+                                ctx.outcome = "waiting".to_string();
+                            }
                             tracing::warn!(
-                                request_id = %ctx.request_id,
+                                "Chat turn hit loop detection — card written, ending waiting"
+                            );
+                            self.transition_status(SessionStatus::Idle);
+                            return Ok(format!("[waiting] {loop_summary}"));
+                        }
+                        if self.pending_intent.is_some() || self.chat_has_human == Some(false) {
+                            let request_id = self
+                                .chat_writeback
+                                .as_mut()
+                                .map(|ctx| {
+                                    ctx.outcome = "aborted".to_string();
+                                    ctx.request_id.clone()
+                                })
+                                .unwrap_or_default();
+                            tracing::warn!(
+                                request_id = %request_id,
                                 "Intent responder hit loop detection — aborting with receipt"
                             );
                             self.transition_status(SessionStatus::Idle);
@@ -2520,6 +2626,7 @@ mod tests {
                     kind: String::new(),
                     in_reply_to: String::new(),
                     status: String::new(),
+                    has_human: None,
                 },
             )))
             .unwrap();

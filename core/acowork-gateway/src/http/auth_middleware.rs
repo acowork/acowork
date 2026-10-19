@@ -13,7 +13,7 @@
 
 use axum::{
     extract::{Request, State},
-    http::{HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Json, Response},
 };
@@ -69,6 +69,12 @@ pub use acowork_core::auth::{AUTH_AS_USER_HEADER, AUTH_ROLE_HEADER, AUTH_USER_HE
 /// caller has been authenticated.
 pub const USER_SCOPE_HEADER: &str = "x-user-id";
 
+/// The caller's Chat-session membership, injected alongside
+/// [`USER_SCOPE_HEADER`] on agent-proxy requests (design 27 §8.2). Same
+/// trust rule: the Runtime may only ever see the Gateway-derived value,
+/// so a client-supplied copy is stripped before authentication.
+pub const CHAT_SCOPE_HEADER: &str = "x-acowork-chat-scope";
+
 /// Scope value meaning "no filtering" — the administrator view.
 pub const SCOPE_ALL: &str = "*";
 
@@ -96,6 +102,30 @@ fn scope_value(ctx: &AuthContext) -> String {
         (_, true) => SCOPE_ALL.to_string(),
         _ => ctx.user_id.clone(),
     }
+}
+
+/// The Gateway's own trusted writer for the Runtime-side scope headers —
+/// the same pair `auth_middleware` injects on proxy requests.
+///
+/// Out-of-band Gateway→Runtime calls (design 27 §5.5.4 card answers) must
+/// carry them too, but the identity-injection red line (ADR-076 §决策 3/4)
+/// allows exactly two writers of the header family. This function lives
+/// beside the constants so the derivation stays single-sourced: a route
+/// importing `USER_SCOPE_HEADER` directly is a lint failure; a route
+/// calling this keeps the "derived from the verified token" property.
+pub fn runtime_scope_headers(scope: &str, chats: &[String]) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(scope) {
+        headers.insert(HeaderName::from_static(USER_SCOPE_HEADER), v);
+    }
+    // Mirror the proxy's membership injection: the Runtime authorizes
+    // `Members`-visible sessions (card answers resolve the bound
+    // execution session) against this set. An empty set is a valid
+    // "no membership" header — fail closed, never a bypass.
+    if let Ok(v) = HeaderValue::from_str(&chats.join(",")) {
+        headers.insert(HeaderName::from_static(CHAT_SCOPE_HEADER), v);
+    }
+    headers
 }
 
 /// Whether an `as_user` value is safe to put in an HTTP header.
@@ -165,12 +195,14 @@ pub async fn auth_middleware(
         // any client-supplied scope header rather than letting it reach
         // the Runtime unvetted (ADR-076 §决策 4).
         req.headers_mut().remove(USER_SCOPE_HEADER);
+        req.headers_mut().remove(CHAT_SCOPE_HEADER);
         return next.run(req).await;
     }
 
     // Never forward a client-asserted identity: the header is re-derived
     // from the verified token below, and only for authenticated callers.
     req.headers_mut().remove(USER_SCOPE_HEADER);
+    req.headers_mut().remove(CHAT_SCOPE_HEADER);
 
     // CORS preflight must never be gated — the browser sends no
     // `Authorization` on `OPTIONS`.
@@ -363,6 +395,32 @@ pub async fn auth_middleware(
         return unauthorized("invalid session scope");
     };
     req.headers_mut().insert(USER_SCOPE_HEADER, scope_header);
+
+    // Design 27 §8.2: `Members`-visible execution sessions resolve against
+    // the caller's Chat membership on the Runtime side. Only the agent
+    // proxy surface reads the header, so only those paths pay the loopback
+    // hop — and failure is silent by design: an absent membership set
+    // hides `Members` sessions (fail closed), it never fails the request.
+    //
+    // ponytail: no cache, because §8.3 requires a removed participant to
+    // lose access on the very next request. Upgrade path if this shows up
+    // in a profile: per-user TTL cache invalidated on participant writes
+    // (the Gateway is already the only writer of those).
+    if req.uri().path().starts_with("/api/agents/")
+        && scope != SCOPE_ALL
+        && let Some(port) = crate::intent::chat_client::service_port(&state.gateway_state).await
+    {
+        match crate::intent::chat_client::list_session_ids(port, &scope).await {
+            Ok(ids) => {
+                if let Ok(v) = HeaderValue::from_str(&ids.join(",")) {
+                    req.headers_mut().insert(CHAT_SCOPE_HEADER, v);
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "chat scope injection skipped")
+            }
+        }
+    }
 
     req.extensions_mut().insert(ctx);
     next.run(req).await
@@ -714,5 +772,90 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(&body_of(resp).await[..], SCOPE_ALL.as_bytes());
+    }
+
+    /// Design 27 §8.2: a forged `x-acowork-chat-scope` must never reach
+    /// the Runtime — same strip-and-rederive rule as `x-user-id`. The
+    /// injection itself is skipped here because no user service is up in
+    /// the fixture (the absent header is the fail-closed shape).
+    #[tokio::test]
+    async fn forged_chat_scope_header_is_stripped() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::{Router, routing::get};
+        use tower::ServiceExt;
+
+        let dir = std::env::temp_dir().join(format!("acowork-mw-chatscope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let user_token = crate::http::test_support::access_token("u-alice", "user");
+
+        let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        gw.user_verifier = Some(crate::http::test_support::verifier());
+        let mut st = crate::http::routes::AppState::new(
+            Arc::new(tokio::sync::RwLock::new(gw)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        st.auth_mode = crate::auth::AuthMode::MultiUser;
+
+        async fn echo_chat_scope(req: Request<Body>) -> String {
+            req.headers()
+                .get(CHAT_SCOPE_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<none>")
+                .to_string()
+        }
+
+        let app = Router::new()
+            .route("/api/agents/{id}/sessions", get(echo_chat_scope))
+            .layer(axum::middleware::from_fn_with_state(st, auth_middleware));
+
+        // Local mode: forged value dropped, nothing injected.
+        let app_local = Router::new()
+            .route("/api/agents/{id}/sessions", get(echo_chat_scope))
+            .layer(axum::middleware::from_fn_with_state(
+                {
+                    let mut st = crate::http::routes::AppState::new(
+                        Arc::new(tokio::sync::RwLock::new(
+                            crate::gateway::state::GatewayState::new(&dir.to_string_lossy()),
+                        )),
+                        Arc::new(crate::http::auth::HttpAuth::new(false)),
+                    );
+                    st.auth_mode = crate::auth::AuthMode::Local;
+                    st
+                },
+                auth_middleware,
+            ));
+
+        let call = |token: Option<&str>| {
+            let mut b = Request::builder()
+                .uri("/api/agents/a-1/sessions")
+                .header(CHAT_SCOPE_HEADER, "cs-forged");
+            if let Some(t) = token {
+                b = b.header("authorization", format!("Bearer {t}"));
+            }
+            b.body(Body::empty()).unwrap()
+        };
+
+        let resp = app_local.oneshot(call(None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            &axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()[..],
+            b"<none>",
+            "local mode drops a forged chat scope"
+        );
+
+        // multi_user, valid user token: forged value stripped; with no
+        // user service in the fixture nothing is injected — the Runtime
+        // sees an absent header, which means no `Members` reads (fail
+        // closed), never the forged set.
+        let resp = app.oneshot(call(Some(&user_token))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            &axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()[..],
+            b"<none>",
+            "forged chat scope must not survive to the Runtime"
+        );
     }
 }

@@ -618,12 +618,24 @@ impl SessionManager {
     /// clamped to this agent's provider list (§13-6) and applied only when
     /// a session is actually created (fresh mapping or rotation successor) —
     /// a reused session keeps its own configuration.
+    /// Design 27 §8.2: an execution session created from a `chat:` routing
+    /// key is bound to that Chat session and becomes `Members`-visible —
+    /// readable by the owner and by every current participant. `conv:` /
+    /// `msg:` keys keep the pre-Wave-4 behaviour untouched.
+    fn stamp_chat_binding(&self, key: &str, session_id: &str) {
+        if let Some(chat_id) = key.strip_prefix("chat:")
+            && let Some(handle) = self.get_session(session_id)
+            && let Some(conv) = &handle.conversation
+        {
+            conv.set_chat_binding(chat_id);
+        }
+    }
+
     pub async fn route_intent_session(
         &mut self,
         key: &str,
         seed: Option<super::intent_routing::SessionSeed>,
-    ) -> Result<(String, Option<String>)> {
-        let work_dir = std::path::PathBuf::from(&self.core.config.work_dir);
+    ) -> Result<(String, Option<String>)> {        let work_dir = std::path::PathBuf::from(&self.core.config.work_dir);
         let (mapped, rotation) = {
             let map = self
                 .intent_map
@@ -639,9 +651,47 @@ impl SessionManager {
         let seed = seed.and_then(|s| {
             s.clamp_to_responder(&self.core.global_provider_list.read().unwrap())
         });
+        // Design 27 §4.5: validate the seeded workspace against this agent's
+        // registry too — an unknown id is dropped before it can trigger a
+        // spurious T3 rotation or reach creation. A seed that survives
+        // clamping + validation empty carries no opinion → treated as none.
+        let seed = seed.and_then(|mut s| {
+            if let Some(ws) = &s.workspace
+                && !self.workspace_exists(ws)
+            {
+                tracing::debug!(
+                    workspace = %ws,
+                    "Intent session_config workspace outside the responder's registry — dropping (design 27 §4.5)"
+                );
+                s.workspace = None;
+            }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        });
         if let Some(sid) = &mapped {
             if self.get_session(sid).is_some() {
-                match rotation {
+                // Effective rotation reason: T1/T2 from timing / compaction,
+                // else T3 (design 27 §4.5) when the initiator's seed pins a
+                // config this session does not already carry — reusing it
+                // would silently drop an explicit choice. No conflict → the
+                // mapped session is reused untouched.
+                let reason = match rotation {
+                    Some(r) => Some(r),
+                    None => seed.as_ref().and_then(|seed| {
+                        let conv = self.get_session(sid)?.conversation.clone()?;
+                        seed.conflicts_with(
+                            conv.model().as_deref(),
+                            conv.provider().as_deref(),
+                            conv.workspace_id().as_deref(),
+                            conv.reasoning_effort().as_deref(),
+                        )
+                        .then_some(super::intent_routing::RotateReason::T3Config)
+                    }),
+                };
+                match reason {
                     None => return Ok((sid.clone(), None)),
                     Some(reason) => {
                         // §2.1 crash recovery: allocate + persist the
@@ -665,9 +715,10 @@ impl SessionManager {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .rekey(key, new_sid.clone())
-                            .map_err(|e| {
-                                RuntimeError::Config(format!("intent routing persist failed: {e}"))
-                            })?;
+                        .map_err(|e| {
+                            RuntimeError::Config(format!("intent routing persist failed: {e}"))
+                        })?;
+                        self.stamp_chat_binding(key, &new_sid);
                         tracing::info!(
                             key,
                             old_session = %sid,
@@ -702,6 +753,7 @@ impl SessionManager {
         let new_sid = self
             .create_agent_owned_session(None, seed.as_ref())
             .await?;
+        self.stamp_chat_binding(key, &new_sid);
         self.intent_map
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1098,14 +1150,49 @@ impl SessionManager {
             .as_ref()
             .map(|p| p.user_id.clone())
             .filter(|id| !id.is_empty());
-        self.create_frontend_session_inner(
-            None,
-            seed.and_then(|s| s.model.as_deref()),
-            seed.and_then(|s| s.provider.as_deref()),
-            agent_user.as_deref().or(requester_user_id),
-            preset_session_id,
-        )
-        .await
+        // Design 27 §4.5: apply the initiator's (already clamped) session-
+        // config suggestion at creation. `workspace` is validated against
+        // the resolver here — an unknown id is dropped so it can never
+        // leave the session in a dangling-workspace state. `model`/
+        // `provider` were clamped in `route_intent_session`. `reasoning_effort`
+        // is not carried by `SessionConfig`, so it is stamped right after
+        // the conversation exists — before the routed intent is delivered,
+        // so the first turn already runs under the requested effort.
+        let seeded_workspace = seed
+            .and_then(|s| s.workspace.as_deref())
+            .filter(|ws| self.workspace_exists(ws));
+        let sid = self
+            .create_frontend_session_inner(
+                seeded_workspace,
+                seed.and_then(|s| s.model.as_deref()),
+                seed.and_then(|s| s.provider.as_deref()),
+                agent_user.as_deref().or(requester_user_id),
+                preset_session_id,
+            )
+            .await?;
+        if let Some(effort) = seed.and_then(|s| s.reasoning_effort.as_deref())
+            && let Some(handle) = self.get_session(&sid)
+            && let Some(conv) = &handle.conversation
+        {
+            conv.update_reasoning_effort(Some(effort.to_string()));
+        }
+        Ok(sid)
+    }
+
+    /// Whether a workspace id resolves on this agent (design 27 §4.5 seed
+    /// validation). `__agent_home__` is always valid; otherwise the id must
+    /// be present in the resolver. Without a resolver (cold-start / test
+    /// scaffolding) a suggestion is accepted leniently — the resolver is a
+    /// hard precondition in production, so this only affects degenerate
+    /// setups and never silently drops a valid choice there.
+    fn workspace_exists(&self, workspace_id: &str) -> bool {
+        if workspace_id == "__agent_home__" {
+            return true;
+        }
+        match &self.resolver {
+            Some(resolver) => resolver.read().unwrap().find_by_id(workspace_id).is_some(),
+            None => true,
+        }
     }
 
     async fn create_frontend_session_inner(
@@ -5216,6 +5303,7 @@ mod tests {
                 model_ratio: None,
                 last_compaction_offset: None,
                 corrupted: false,
+            chat_session_id: None,
             },
         )
         .unwrap();
@@ -5320,9 +5408,9 @@ mod tests {
             Some(SessionVisibility::Private),
             "an owned session must be stamped private at creation"
         );
-        assert!(meta.is_readable_by(&SessionScope::User("u-alice".to_string())));
+        assert!(meta.is_readable_by(&SessionScope::user("u-alice")));
         assert!(
-            !meta.is_readable_by(&SessionScope::User("u-bob".to_string())),
+            !meta.is_readable_by(&SessionScope::user("u-bob")),
             "another account must not be able to read a new session"
         );
         // admin (unfiltered scope) still sees everything.
@@ -5340,7 +5428,164 @@ mod tests {
             meta.visibility, None,
             "local mode must keep writing nothing — absent means public"
         );
-        assert!(meta.is_readable_by(&SessionScope::User("u-bob".to_string())));
+        assert!(meta.is_readable_by(&SessionScope::user("u-bob")));
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    /// Design 27 §8.2: a session created through a `chat:` routing key is
+    /// bound to that Chat session and stamped `Members`-visible on disk —
+    /// the binding is what the read check matches the injected scope
+    /// against. `conv:` keys must not get the binding (pre-Wave-4 shape).
+    #[tokio::test]
+    async fn chat_routed_sessions_carry_the_members_binding() {
+        use crate::conversation::{SessionScope, SessionVisibility, read_session_meta};
+
+        let work_dir =
+            std::env::temp_dir().join(format!("acowork-chatbind-{}", Uuid::new_v4()));
+        let config = crate::config::RuntimeConfig {
+            work_dir: work_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.chat_bind"
+            version = "1.0.0"
+            name = "Test chat binding"
+            description = "Pin the chat: routing Members stamp"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+        let conversations = work_dir.join("conversations");
+
+        let (sid, _) = manager
+            .route_intent_session("chat:cs-group-1", None)
+            .await
+            .expect("route chat session");
+        let meta = read_session_meta(&conversations, &sid).expect("read chat-bound meta");
+        assert_eq!(meta.visibility, Some(SessionVisibility::Members));
+        assert_eq!(meta.chat_session_id.as_deref(), Some("cs-group-1"));
+        // The routing reuse path must not re-stamp or lose the binding.
+        let (sid2, _) = manager
+            .route_intent_session("chat:cs-group-1", None)
+            .await
+            .expect("reuse chat session");
+        assert_eq!(sid, sid2, "same chat session, same execution session");
+        let meta2 = read_session_meta(&conversations, &sid2).expect("reread meta");
+        assert_eq!(meta2.chat_session_id.as_deref(), Some("cs-group-1"));
+
+        // A `conv:` key keeps the pre-Wave-4 shape: no binding, private.
+        let (csid, _) = manager
+            .route_intent_session("conv:c-1", None)
+            .await
+            .expect("route conv session");
+        let cmeta = read_session_meta(&conversations, &csid).expect("read conv meta");
+        assert_eq!(cmeta.chat_session_id, None);
+        assert_ne!(cmeta.visibility, Some(SessionVisibility::Members));
+
+        // And the read check agrees with the stamp: a scope carrying the
+        // chat id reads the session, one without it does not.
+        assert!(meta.is_readable_by(&SessionScope::User {
+            uid: "u-outside".into(),
+            chats: vec!["cs-group-1".into()],
+        }));
+        assert!(!meta.is_readable_by(&SessionScope::user("u-outside")));
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    /// Design 27 §4.5 T3: an inbound intent carrying a `session_config`
+    /// seed that conflicts with the mapped session's own config must NOT be
+    /// silently dropped by session reuse — the context rotates to a fresh
+    /// session created under the seed, with a pointer handoff. A `None` seed
+    /// (no opinion) keeps plain reuse. Uses a reasoning-effort seed because
+    /// it passes the responder clamp untouched (no provider-list dependency)
+    /// and the freshly-created session carries no effort override, so any
+    /// requested level is a genuine conflict.
+    #[tokio::test]
+    async fn t3_config_seed_rotates_a_reused_session() {
+        let work_dir =
+            std::env::temp_dir().join(format!("acowork-t3rot-{}", Uuid::new_v4()));
+        let config = crate::config::RuntimeConfig {
+            work_dir: work_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.t3_rotate"
+            version = "1.0.0"
+            name = "Test T3 rotate"
+            description = "Pin the §4.5 config-conflict rotation"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+
+        // Fresh chat context: a session is created and mapped.
+        let (sid, _) = manager
+            .route_intent_session("chat:cs-t3", None)
+            .await
+            .expect("create chat session");
+        // A no-opinion intent reuses it (no rotation, no handoff).
+        let (sid_same, _) = manager
+            .route_intent_session("chat:cs-t3", None)
+            .await
+            .expect("reuse chat session");
+        assert_eq!(sid, sid_same, "no seed -> plain reuse");
+
+        // A conflicting seed rotates to a successor created under it.
+        let seed = crate::agent::session::intent_routing::SessionSeed {
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        };
+        let (sid2, handoff) = manager
+            .route_intent_session("chat:cs-t3", Some(seed))
+            .await
+            .expect("rotate on config conflict");
+        assert_ne!(sid, sid2, "T3 must open a fresh session under the seed");
+        let note = handoff.expect("T3 pointer handoff");
+        assert!(note.contains("session-config"), "{note}");
+        assert!(note.contains(&sid), "names the predecessor");
+        // The successor actually starts under the requested effort.
+        let conv = manager
+            .get_session(&sid2)
+            .and_then(|h| h.conversation.clone())
+            .expect("successor conversation");
+        assert_eq!(conv.reasoning_effort().as_deref(), Some("high"));
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }

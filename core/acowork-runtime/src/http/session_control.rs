@@ -33,6 +33,9 @@ use crate::http::server::HttpState;
 ///
 /// Kept in sync with `acowork-gateway`'s `auth_middleware::USER_SCOPE_HEADER`.
 pub(crate) const USER_SCOPE_HEADER: &str = "x-user-id";
+/// Comma-separated Chat session ids the caller participates in
+/// (design 27 §8.2). Kept in sync with the Gateway's injection.
+pub(crate) const CHAT_SCOPE_HEADER: &str = "x-acowork-chat-scope";
 
 /// Body of `POST /sessions` — all fields optional.
 #[derive(Debug, Default, serde::Deserialize)]
@@ -61,9 +64,12 @@ fn err(status: StatusCode, message: impl Into<String>) -> ApiError {
     (status, Json(serde_json::json!({ "error": message.into() })))
 }
 
-/// Derive the caller's scope from the Gateway-injected header.
+/// Derive the caller's scope from the Gateway-injected headers.
 pub(crate) fn scope_from_headers(headers: &HeaderMap) -> SessionScope {
-    SessionScope::from_header_value(headers.get(USER_SCOPE_HEADER).and_then(|v| v.to_str().ok()))
+    SessionScope::from_headers(
+        headers.get(USER_SCOPE_HEADER).and_then(|v| v.to_str().ok()),
+        headers.get(CHAT_SCOPE_HEADER).and_then(|v| v.to_str().ok()),
+    )
 }
 
 /// Read a session's meta off disk, mapping "not found" to 404.
@@ -883,7 +889,7 @@ mod tests {
     /// account could hide a shared session from every other.
     #[test]
     fn only_an_admin_may_re_share_an_unowned_session() {
-        let alice = SessionScope::User("u-alice".into());
+        let alice = SessionScope::user("u-alice");
 
         assert!(
             may_change_visibility(&meta(Some("u-alice")), &alice),
@@ -912,7 +918,7 @@ mod tests {
         .map(|(sid, owner)| (sid.to_string(), meta(owner)))
         .collect();
 
-        let alice = SessionScope::User("u-alice".into());
+        let alice = SessionScope::user("u-alice");
         let mut ids = clearable_session_ids(&rows, &alice);
         ids.sort();
         assert_eq!(ids, vec!["mine", "unowned"], "own + unclaimed, not other users'");

@@ -1,4 +1,4 @@
-//! User↔user chat HTTP API (ADR-076 §决策 8, §决策 9).
+//! User↔user chat HTTP API (ADR-076 §决策 8, §决策 9) — Wave 6.2 adapter.
 //!
 //! ```text
 //! GET  /api/users/{user_id}/chats                             → { chats }
@@ -9,7 +9,14 @@
 //! GET  /api/users/{user_id}/chats/{chat_id}/files/{id}        → blob
 //! ```
 //!
-//! `chat_id` is the canonical `min__max` pair (see [`crate::chat`]).
+//! Since Wave 6.2 this is a thin adapter over [`crate::chat_sessions`]:
+//! the wire `chat_id` stays the canonical `min__max` pair id (the Desktop
+//! computes it client-side with `chatIdOf`), and it resolves to the pair's
+//! `UserUser` session through the pair index. The old `chat.rs` layout is
+//! folded into the same store at startup (`chat_sessions::migrate_legacy`),
+//! so this router and the `/api/chat-sessions*` surface share one
+//! authoritative write entry — the chat domain no longer has two.
+//!
 //! Reads are self-or-admin (the admin "view as user" scope of ADR-076
 //! §决策 4); writes are **self only** — an admin may not post as someone
 //! else, and `from` always comes from the verified token, never the body.
@@ -17,7 +24,7 @@
 //! Attachments are uploaded **before** the message that carries them: the
 //! client posts the file, gets an id back, then sends a message referencing
 //! ids only. Every attribute of a message attachment (name, mime, size) is
-//! therefore the Gateway's own record of the bytes it received, and `kind`
+//! therefore the service's own record of the bytes it received, and `kind`
 //! is derived from that rather than accepted from the caller.
 //!
 //! Registered only under `AUTH_MODE=multi_user`, alongside `account_api`
@@ -35,10 +42,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::auth::service::AuthService;
-use crate::auth::issuer::now_unix;
-use crate::chat::{self, Attachment, ChatMessage};
 use crate::auth::context::AuthContext;
+use crate::auth::issuer::now_unix;
+use crate::auth::service::AuthService;
+use crate::chat::{self, Attachment, ChatMessage};
+use crate::chat_sessions::{self, Participant, ParticipantIdentity, SessionKind, KIND_USER_MESSAGE};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -178,17 +186,75 @@ fn require_self(ctx: &AuthContext, user_id: &str) -> Result<(), ApiError> {
     }
 }
 
-/// The other participant, or 404 — a non-participant must not learn whether
-/// a chat exists.
-fn peer_in(chat_id: &str, user_id: &str) -> Result<String, ApiError> {
+/// Decode the wire `chat_id` and require `user_id` to be one of the pair.
+/// A malformed id, a non-participant, or a session that does not exist all
+/// answer the same hidden 404 — the caller must not learn which (design 27
+/// §5.3, the rule the new store already enforces on every surface).
+fn pair_of(chat_id: &str, user_id: &str) -> Result<(String, String), ApiError> {
     let (lo, hi) = chat::parse_chat_id(chat_id)
         .ok_or_else(|| ApiError::not_found("chat not found"))?;
-    if lo == user_id {
-        Ok(hi)
-    } else if hi == user_id {
-        Ok(lo)
-    } else {
-        Err(ApiError::not_found("chat not found"))
+    if lo != user_id && hi != user_id {
+        return Err(ApiError::not_found("chat not found"));
+    }
+    Ok((lo, hi))
+}
+
+/// The pair session for a wire `chat_id`, or the same hidden 404. Read
+/// paths use this (never `ensure_pair` — a GET must not mint sessions).
+async fn resolve_session(
+    state: &AppState,
+    chat_id: &str,
+    user_id: &str,
+) -> Result<(PathBuf, String), ApiError> {
+    let (lo, hi) = pair_of(chat_id, user_id)?;
+    let dir = data_dir(state)?;
+    let probe = dir.clone();
+    let session = offload(move || Ok(chat_sessions::pair_lookup(&probe, &lo, &hi)))
+        .await?
+        .ok_or_else(|| ApiError::not_found("chat not found"))?;
+    Ok((dir, session.session_id))
+}
+
+/// The idempotent write path's session: the pair is created on first send
+/// or upload, exactly where the old store created the pair directory.
+async fn ensure_session(
+    state: &AppState,
+    user_id: &str,
+    peer: &str,
+) -> Result<(PathBuf, String), ApiError> {
+    let dir = data_dir(state)?;
+    let (a, b) = (user_id.to_string(), peer.to_string());
+    let mdir = dir.clone();
+    let session = offload(move || {
+        chat_sessions::ensure_pair(
+            &mdir,
+            Participant::new(a, ParticipantIdentity::Human),
+            Participant::new(b, ParticipantIdentity::Human),
+            SessionKind::UserUser,
+            now_unix(),
+        )
+    })
+    .await?;
+    Ok((dir, session.session_id))
+}
+
+/// Project one durable row onto the legacy wire shape. The old surface
+/// never learned about message kinds beyond `text` / `image` / `document`
+/// (derived from the first attachment), and `seq` is the physical-line
+/// number the suffix-diff refresh keys on — both carry over unchanged.
+fn to_wire(m: &chat_sessions::SessionMessage) -> ChatMessage {
+    ChatMessage {
+        seq: m.seq,
+        ts: m.ts,
+        from: m.from.clone(),
+        kind: m
+            .attachments
+            .first()
+            .map(Attachment::kind)
+            .unwrap_or("text")
+            .to_string(),
+        body: m.body.clone(),
+        attachments: m.attachments.clone(),
     }
 }
 
@@ -204,8 +270,27 @@ async fn list_chats(
     let auth = service(&state)?;
     let dir = auth.data_dir().to_path_buf();
 
+    // `UserUser` sessions only — the Agent page's conversations live in
+    // the same store but are not this surface (design 27 §5.4.4).
+    // The preview is the last row of the log, read one line at a time
+    // through the paging entry (the old sidecar preview has no successor).
     let me = user_id.clone();
-    let convos = offload(move || chat::list_for(&dir, &me)).await?;
+    let rows = offload(move || {
+        let sessions = chat_sessions::list_for(&dir, &me)?;
+        let mut out: Vec<(chat_sessions::ChatSession, Option<chat_sessions::SessionMessage>)> =
+            Vec::new();
+        for s in sessions
+            .into_iter()
+            .filter(|s| s.kind == SessionKind::UserUser)
+        {
+            let last = chat_sessions::read_messages(&dir, &s.session_id, 0, 1)
+                .ok()
+                .and_then(|(page, _)| page.into_iter().next());
+            out.push((s, last));
+        }
+        Ok(out)
+    })
+    .await?;
 
     // Resolve peer presentation fields once for the whole page. A peer
     // whose account is gone still has history, so the raw id is the
@@ -243,11 +328,14 @@ async fn list_chats(
         })
         .collect();
 
-    let chats = convos
+    let mut chats: Vec<ChatSummary> = rows
         .into_iter()
-        .filter_map(|c| {
-            let peer_user_id = c.peer_of(&user_id)?.to_string();
-            let unread_count = c.unread_for(&user_id);
+        .filter_map(|(s, last)| {
+            let peer_user_id = s
+                .participants
+                .iter()
+                .map(|p| p.id.clone())
+                .find(|id| *id != user_id)?;
             let meta = peers.get(peer_user_id.as_str());
             let peer_display_name = meta
                 .map(|m| m.label.to_string())
@@ -256,22 +344,29 @@ async fn list_chats(
             let peer_builtin_avatar = meta
                 .and_then(|m| m.builtin_avatar)
                 .map(str::to_string);
+            let last_message_preview = last
+                .as_ref()
+                .map(to_wire)
+                .map(|m| chat::preview(&m))
+                .unwrap_or_default();
             Some(ChatSummary {
-                chat_id: c.chat_id,
+                chat_id: chat::chat_id(&user_id, &peer_user_id),
+                unread_count: s.unread.get(&user_id).copied().unwrap_or(0),
                 peer_user_id,
                 peer_display_name,
                 peer_avatar,
                 peer_builtin_avatar,
-                last_active_at: c.last_active_at,
-                last_message_preview: c.last_message_preview,
-                unread_count,
+                last_active_at: s.last_active_at,
+                last_message_preview,
             })
         })
         .collect();
+    chats.sort_by_key(|c| std::cmp::Reverse(c.last_active_at));
     Ok(Json(ChatListResponse { chats }))
 }
 
-/// `GET /api/users/{user_id}/chats/{chat_id}/messages` — one page, newest first.
+/// `GET /api/users/{user_id}/chats/{chat_id}/messages` — one page, newest
+/// window first-in-file order (the paging contract of the store).
 async fn list_messages(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -279,18 +374,17 @@ async fn list_messages(
     Query(page): Query<PageQuery>,
 ) -> Result<Json<MessagesResponse>, ApiError> {
     require_self_or_admin(&ctx, &user_id)?;
-    peer_in(&chat_id, &user_id)?; // 404 for a chat this user is not in
-    let dir = data_dir(&state)?;
+    let (dir, session_id) = resolve_session(&state, &chat_id, &user_id).await?;
 
     let limit = page.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let offset = page.offset;
-    let id = chat_id.clone();
-    let (messages, total) = offload(move || chat::read_messages(&dir, &id, offset, limit)).await?;
+    let (messages, total) =
+        offload(move || chat_sessions::read_messages(&dir, &session_id, offset, limit)).await?;
 
     Ok(Json(MessagesResponse {
         chat_id,
-        messages,
-        total,
+        messages: messages.iter().map(to_wire).collect(),
+        total: total as usize,
         offset,
         limit,
     }))
@@ -304,7 +398,8 @@ async fn send_message(
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<ChatMessage>), ApiError> {
     require_self(&ctx, &user_id)?;
-    let peer = peer_in(&chat_id, &user_id)?;
+    let (lo, hi) = pair_of(&chat_id, &user_id)?;
+    let peer = if user_id == lo { hi } else { lo };
 
     let body = req.body.trim().to_string();
     if body.is_empty() && req.attachments.is_empty() {
@@ -322,34 +417,40 @@ async fn send_message(
         .account(&peer)
         .map_err(|_| ApiError::not_found("recipient account not found"))?;
 
-    let dir = data_dir(&state)?;
-    // The closure below consumes both ids; the signals need them afterwards.
-    let signal_me = user_id.clone();
-    let signal_peer = peer.clone();
-    let ids = req.attachments;
-    // Reported as the caller's mistake before the write, not as a fault after
-    // it. The check is repeated inside `append_message` (single caller today).
+    let (dir, session_id) = ensure_session(&state, &user_id, &peer).await?;
+    // Reported as the caller's mistake before the write, not as a fault
+    // after it. The store re-checks at the write entry (single caller).
     {
-        let probe = dir.clone();
-        let pair = chat_id.clone();
-        let unknown = ids.iter().any(|id| !chat::attachment_exists(&probe, &pair, id));
+        let unknown = req
+            .attachments
+            .iter()
+            .any(|id| !chat_sessions::attachment_exists(&dir, &session_id, id));
         if unknown {
             return Err(ApiError::unprocessable_entity(
                 "message references an attachment that was not uploaded here",
             ));
         }
     }
-    let message =
-        offload(move || chat::append_message(&dir, &user_id, &peer, &body, &ids, now_unix())).await?;
-    // Wake both mailboxes (design doc 25 §8). The recipient has unread to see;
-    // the sender's OTHER devices have an echo to show — the device that posted
-    // this already holds it, which is why the response is the stored record.
-    // An empty signal by design: no `chat_id`, no body, because the embedded
-    // broker has no subscription ACL. Never fails the write: a down broker
-    // only delays the nudge, and every client re-reads on connect anyway.
-    crate::mqtt_publisher::notify_chat_changed(&signal_me);
-    crate::mqtt_publisher::notify_chat_changed(&signal_peer);
-    Ok((StatusCode::CREATED, Json(message)))
+    let msg = chat_sessions::SessionMessage {
+        seq: 0,
+        ts: 0,
+        from: user_id.clone(),
+        kind: KIND_USER_MESSAGE.to_string(),
+        body,
+        to: peer.clone(),
+        meta: Default::default(),
+        attachment_ids: req.attachments,
+        attachments: Vec::new(),
+    };
+    let (stored, _fresh) =
+        offload(move || chat_sessions::append_message(&dir, &session_id, &msg, now_unix()))
+            .await?;
+    // The store's append already doorbelled the peer. The sender's OTHER
+    // devices have an echo to show — the device that posted this already
+    // holds it, which is why the response is the stored record (design 25
+    // §8). An empty signal by design: no ids, no body.
+    crate::mqtt_publisher::notify_chat_changed(&user_id);
+    Ok((StatusCode::CREATED, Json(to_wire(&stored))))
 }
 
 /// `POST /api/users/{user_id}/chats/{chat_id}/files` — upload an attachment.
@@ -364,9 +465,10 @@ async fn upload_attachment(
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<Attachment>), ApiError> {
     require_self(&ctx, &user_id)?;
-    let peer = peer_in(&chat_id, &user_id)?;
-    // Upload before the first message is normal, but the recipient still has
-    // to exist — otherwise the file can never be delivered.
+    let (lo, hi) = pair_of(&chat_id, &user_id)?;
+    let peer = if user_id == lo { hi } else { lo };
+    // Upload before the first message is normal, but the recipient still
+    // has to exist — otherwise the file can never be delivered.
     service(&state)?
         .account(&peer)
         .map_err(|_| ApiError::not_found("recipient account not found"))?;
@@ -406,10 +508,13 @@ async fn upload_attachment(
         )));
     }
 
-    let dir = data_dir(&state)?;
-    let attachment =
-        offload(move || chat::store_attachment(&dir, &chat_id, &user_id, &filename, &mime, &bytes))
-            .await?;
+    // Uploading before the first message is normal: the pair session is
+    // minted here exactly where the old store minted the pair directory.
+    let (dir, session_id) = ensure_session(&state, &user_id, &peer).await?;
+    let attachment = offload(move || {
+        chat_sessions::store_attachment(&dir, &session_id, &user_id, &filename, &mime, &bytes)
+    })
+    .await?;
     Ok((StatusCode::CREATED, Json(attachment)))
 }
 
@@ -473,28 +578,29 @@ async fn download_attachment(
     Query(q): Query<ThumbQuery>,
 ) -> Result<Response, ApiError> {
     require_self_or_admin(&ctx, &user_id)?;
-    peer_in(&chat_id, &user_id)?;
+    let (dir, session_id) = resolve_session(&state, &chat_id, &user_id).await?;
 
-    let dir = data_dir(&state)?;
     // Metadata-only load — keeps the request worker from pinning the
     // blob in heap. The blob is streamed straight from disk to socket
-    // below via `ReaderStream`. Both captured values are cloned because
-    // the `?thumb=1` branch below still needs them.
-    let (meta_dir, meta_chat, meta_id) = (dir.clone(), chat_id.clone(), attachment_id.clone());
-    let (attachment, blob_path) = offload(move || {
-        chat::load_attachment_meta(&meta_dir, &meta_chat, &meta_id)
+    // below via `ReaderStream`.
+    let (attachment, blob_path) = match offload({
+        let (d, s, id) = (dir.clone(), session_id.clone(), attachment_id.clone());
+        move || chat_sessions::load_attachment(&d, &s, &id)
     })
     .await?
-    .ok_or_else(|| ApiError::not_found("attachment not found"))?;
+    {
+        Some(pair) => pair,
+        None => return Err(ApiError::not_found("attachment not found")),
+    };
 
     // `?thumb=1` swaps the blob for its sidecar. The sidecar path is
     // rebuilt from the already-validated id against a closed extension set
-    // (see `chat::thumb_sidecar`) — nothing from the query or the
+    // (see `chat_sessions::thumb_sidecar`) — nothing from the query or the
     // attachment record reaches the filesystem unchecked.
     let (path, content_type) = if q.thumb {
-        let sidecar = chat::thumb_sidecar(
+        let sidecar = chat_sessions::thumb_sidecar(
             &dir,
-            &chat_id,
+            &session_id,
             &attachment_id,
             attachment.thumb.as_deref(),
         )
@@ -539,8 +645,8 @@ async fn download_attachment(
     // No `Content-Length` — `Body::from_stream` produces a body of
     // unknown length, and axum will reject the response at runtime if
     // we try to pair the two. hyper falls back to chunked encoding,
-    // which is what we want anyway (lets the client start rendering
-    // the download before we've read the whole file).
+    // which is what we want anyway (lets the client start rendering the
+    // download before we've read the whole file).
     headers.insert(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
@@ -555,14 +661,11 @@ async fn mark_read(
     Path((user_id, chat_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     require_self(&ctx, &user_id)?;
-    peer_in(&chat_id, &user_id)?;
-    let dir = data_dir(&state)?;
-    let me = user_id.clone();
-    offload(move || chat::mark_read(&dir, &chat_id, &me).map(|_| ())).await?;
-    // Other devices of THIS account carry the same badge — clearing it here
-    // without a signal leaves a dot lit on the desktop until its next pull.
-    // The peer is not woken: a read receipt is not a message.
-    crate::mqtt_publisher::notify_chat_changed(&user_id);
+    let (dir, session_id) = resolve_session(&state, &chat_id, &user_id).await?;
+    offload(move || chat_sessions::mark_read(&dir, &session_id, &user_id).map(|_| ())).await?;
+    // The store doorbelled only when the counter actually changed — badge
+    // clears on every device of this account, and a no-op read stays silent
+    // so the refetch→mark_read cycle cannot re-signal forever.
     Ok(StatusCode::NO_CONTENT)
 }
 

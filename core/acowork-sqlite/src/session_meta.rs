@@ -78,6 +78,8 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     let visibility = visibility_text
         .as_deref()
         .and_then(SessionVisibility::from_db_str);
+    // Design 27 §8.2: Chat session binding for `Members` visibility.
+    let chat_session_id: Option<String> = row.get("chat_session_id")?;
 
     let title: Option<String> = row.get("title")?;
     let workspace_id: Option<String> = row.get("workspace_id")?;
@@ -164,6 +166,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         created_at,
         user_id,
         visibility,
+        chat_session_id,
         title,
         workspace_id,
         model,
@@ -374,7 +377,7 @@ const SELECT_ALL_COLUMNS: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id \
 FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
@@ -385,7 +388,7 @@ const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id \
 FROM sessions";
 
 /// Clamp a `u64` token counter into SQLite's `i64` column.
@@ -417,7 +420,7 @@ fn upsert_row(
             token_last_input, token_last_output, token_total_input, token_total_output, \
             token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
             perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, \
-            version, corrupted, user_id, visibility \
+            version, corrupted, user_id, visibility, chat_session_id \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
             ?5, ?6, ?7, ?8, ?9, ?10, \
@@ -426,7 +429,7 @@ fn upsert_row(
             ?18, ?19, ?20, ?21, \
             ?22, ?23, ?24, ?25, \
             ?26, ?27, ?28, ?29, \
-            ?30, ?31, ?32, ?33 \
+            ?30, ?31, ?32, ?33, ?34 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
@@ -460,7 +463,8 @@ fn upsert_row(
             version = excluded.version, \
             corrupted = excluded.corrupted, \
             user_id = excluded.user_id, \
-            visibility = excluded.visibility",
+            visibility = excluded.visibility, \
+            chat_session_id = excluded.chat_session_id",
         params![
             meta.session_id,
             meta.agent_id,
@@ -498,6 +502,7 @@ fn upsert_row(
             meta.corrupted as i64,
             meta.user_id,
             meta.visibility.map(|v| v.as_str()),
+            meta.chat_session_id,
         ],
     )?;
     Ok(())

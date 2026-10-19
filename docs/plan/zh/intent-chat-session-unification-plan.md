@@ -1,8 +1,10 @@
 # Intent / Chat Session 统一模型 — 文档到实现的 Gap 拆解
 
-> 版本：v1.0（定稿）| 日期：2026-10-16
+> 版本：v1.1（定稿）| 日期：2026-10-18
 >
-> 关联设计：[`docs/design/zh/27-intent-messaging-and-group-chat.md`](../../design/zh/27-intent-messaging-and-group-chat.md)（**v2.0**，章节已重排）
+> v1.1 修订：设计文档升级到 **v2.1（user-agent 单聊微信模型）**后，同步作废 D-B/1.5（Chat history 入口撤销）、重写 Wave 5（固定 Chat tab + exec tab 共存）、新增 §10 决策 8；其余 Wave 不变。历史决策原文保留不删。
+>
+> 关联设计：[`docs/design/zh/27-intent-messaging-and-group-chat.md`](../../design/zh/27-intent-messaging-and-group-chat.md)（**v2.1**，章节已重排）
 > 关联计划：[`intent-delivery-tech-debt-plan.md`](intent-delivery-tech-debt-plan.md)（v0.1，投递与身份链路前置技术债）
 > 关联 ADR：ADR-009（Gateway 边界）、ADR-055（Node 拓扑）、ADR-073（instance 寻址）、ADR-084（acowork-user 剥离）
 >
@@ -52,7 +54,7 @@
 | §4.2 | `in_reply_to` 语义推导应答 | ❌ `intent_response` 硬要求非空，1:1 回复无处可指 | chat_sessions.rs:337 |
 | §4.2.1 | 附件 | ❌ 完全没有（旧 `chat.rs` 有） | `grep -c attachment chat_sessions.rs` → 0 |
 | §4.2.2 | 决策卡片 / 状态卡片 | ❌ 未实现 | 同 §4.2 |
-| §4.4 | `pairs.json` 语义（默认会话 + 可建第二条） | ❌ 一 key → 一 session_id，装不下第二条 | chat_sessions.rs `ensure_pair` `index.insert(key, ..)` |
+| §4.4 | `pairs.json` 语义（默认会话 + 可建第二条） | ❌ 一 key → 一 session_id，装不下第二条（**v2.1 作废**：每 pair 恰好一条，单条语义即正确形态） | chat_sessions.rs `ensure_pair` `index.insert(key, ..)` |
 | §4.6 | 唯一写入口 + seq 单调 + 幂等 | ✅ 已实现 | chat_sessions.rs:305 起，10 个单测覆盖 |
 | §4.7 | `GET /chat-sessions/default?pair=` | ❌ 端点不存在 | chat_sessions_api.rs 路由表无 default |
 | §5.4.2 | 群聊固定 execution session | ✅ routing key 已具备 | intent_routing.rs:296 |
@@ -64,7 +66,7 @@
 | §8.1 | participants 身份类型校验 | ❌ `Vec<String>`，无类型 | chat_sessions.rs:152 |
 | §8.2 | 参与者派生可见性 | ❌ `SessionVisibility` 只有 Public / Private | [session_meta.rs:188](../../../core/acowork-memory/src/session_meta.rs#L188) |
 | §8.3 | 踢人即失既往执行记录 | ❌ 无 participants 变更 API，也无派生判据 | chat_sessions.rs 只有 `set_repo`，无 add/remove participant |
-| §6.1 | Agent 页主视图 = 默认 Chat session | ❌ 前端 `createSession` 直接建 execution session | [agentStore.ts:1160](../../../apps/acowork-desktop/src/stores/agentStore.ts#L1160) |
+| §6.1 | Agent 页主视图 = 默认 Chat session（v2.1：固定 Chat tab 与 exec tab 共存，见 §10 决策 8） | ❌ 前端 `createSession` 直接建 execution session | [agentStore.ts:1160](../../../apps/acowork-desktop/src/stores/agentStore.ts#L1160) |
 | §4.6 | unread 计数 | ❌ 新存储丢了旧能力 | `grep -c unread` → chat_sessions.rs 0 / chat.rs 32 |
 | §4.6 | `list_for` per-participant index | ❌ 全目录扫描 | chat_sessions.rs `list_for` `fs::read_dir` |
 
@@ -87,7 +89,7 @@
 
 选定理由：唯一写入口不变量不受扰动；旧行永不改写，回滚等于删掉一个读侧纯函数。
 
-### D-B：Agent 页历史入口 —— 选定 **B1「改前端传参，不动鉴权」**
+### D-B：Agent 页历史入口 —— 选定 **B1「改前端传参，不动鉴权」**（**v2.1 作废**）
 
 | 方案 | 做法 | 结论 |
 |---|---|---|
@@ -95,6 +97,8 @@
 | B2 | 放宽 `list_sessions`，允许以 agent id 作 participant 查询 | ❌ 等于给任意登录用户一个「枚举他人会话」的探针面，与 §8.4 最小暴露原则相反 |
 
 选定理由：现有鉴权规则（`!is_admin && effective_user_id != participant → 403`）本身正确，不该为一个传参错误开安全洞。
+
+> **v1.1 注**：设计 v2.1 撤销了 Agent 页 Chat history 按钮（user-agent 单聊就是固定 Chat tab，无列表入口），本决策与其验收对象一并作废；「鉴权规则本身正确、不得靠放宽修」的结论仍成立，其它 kind 会话的读取照旧受参与者作用域约束。
 
 ### D-C：写回触发点 —— 选定 **C1「拆分角色判定与写回判定」**
 
@@ -137,7 +141,7 @@
 | 1.2 | participants 携带身份类型并按 kind 校验写入者 | chat_sessions.rs:152, `append` | agent token 写 `user_message` → 4xx；人类 token 写 `agent_message` → 4xx |
 | 1.3 | `ensure_pair` 客户端 kind 参数化 | chat_client.rs:68 | 同一对 user+agent 二次调用返回同一 session_id（幂等） |
 | 1.4 | 默认会话解析端点 `GET /api/chat-sessions/default?pair=` | chat_sessions_api.rs | 打开 Agent 页能在 1 次请求内拿到默认会话 id |
-| 1.5 | Agent 页历史入口按 **D-B/B1** 修 | ChatHistoryDropdown.tsx:91, 服务端 `?agent=` | 非管理员在 Agent 页能看到并打开自己的历史会话；用别人的 agent 查不到别人的会话 |
+| 1.5 | ~~Agent 页历史入口按 **D-B/B1** 修~~（**v2.1 作废**：Chat history 入口撤销，任务随 D-B 一并关闭） | — | — |
 
 ### Wave 2A · 让 1:1 真正能对话（沿用现有词汇表，低风险）
 
@@ -183,15 +187,15 @@
 | 4.4 | PM `remove_member` 回传 Chat session participants | pm/api/projects.rs:224 | 被移出者**立即**读不到该群既往执行会话（§8.3） |
 | 4.5 | 卡片不可点时置灰而非隐藏 | 前端 | 卡片不构成枚举探针 |
 
-### Wave 5 · 前端主视图切换
+### Wave 5 · 前端主视图切换（v1.1：按设计 v2.1 微信模型执行）
 
 | ID | 任务 | 涉及 | 验收标准 |
 |---|---|---|---|
-| 5.1 | Agent 页默认视图 = 默认 Chat session，无关闭入口 | agentStore.ts:1160, SessionTabBar | 打开 Agent 必落在一个 Chat session |
-| 5.2 | 标签页可关、回落默认；仅默认会话不可删 | SessionTabBar.tsx | 三种行为各自可验证，与既有 `closeChat`/`deleteSession` 键位一致 |
-| 5.3 | execution session 降级为后台，仅经状态卡片进入 | 前端路由 | 无直达入口但可点入（受 4.1 权限约束） |
-| 5.4 | 历史渲染自 Chat session + 在途轮次渲染自事件流 | ChatPanel | 终态行到达后替换瞬时视图，无重复气泡 |
-| 5.5 | 移动端对齐（ADR-086） | acowork-mobile | 卡片折叠 / 底部弹层 |
+| 5.1 | Agent 页统一标签栏：**固定 Chat tab**（标题 = Agent 名，不可关闭/删除）+ 可开关的 execution session tab | AgentPage.tsx, SessionTabBar.tsx, chatSessionStore.ts | 打开 Agent 必落在 Chat tab；exec tab 可随意开关，关掉最后一个回落 Chat tab |
+| 5.2 | chat 与 exec 两个表面**共存**：`mode` 只切换活动 tab，不销毁对方 tab | chatSessionStore.ts, SessionTabBar.tsx | 打开 chat 不再关闭全部 exec tab；切换表面后台 tab 与状态保持 |
+| 5.3 | ~~execution session 降级为后台，仅经状态卡片进入~~（**v2.1 撤销**：exec 是平权 tab；状态卡片点击跳转到对应 exec tab） | 前端 | 卡片可跳转到对应执行 tab（受 4.1 权限约束） |
+| 5.4 | 历史渲染自 Chat session + 在途轮次读时投影（`projectInFlight`） | AgentChatView.tsx, ChatPanel.tsx | 终态行到达后替换瞬时视图，无重复气泡；doorbell `chat/changed` 触发重读 |
+| 5.5 | 移动端对齐（ADR-086）；回滚路径：无账号 / chat surface 不可达 → `chatSessionId: null` → 退回旧 ChatPanel 全量形态 | acowork-mobile, AgentPage.tsx | 卡片折叠 / 底部弹层；local mode 行为与迁移前一致 |
 
 ### Wave 6 · 性能与遗留
 
@@ -218,7 +222,7 @@ graph TD
     W4 --> W5
     W5 --> W6["Wave 6 性能与遗留"]
     DA["D-A 已定 A1"] -.-> W2B
-    DB["D-B 已定 B1"] -.-> W1
+    DB["D-B 已定 B1（v2.1 作废）"] -.-> W1
     DC["D-C 已定 C1"] -.-> W2A
     GS["全局搜索线提交<br/>（前置条件，非本计划任务）"] -.-> W4
 ```
@@ -252,7 +256,7 @@ graph TD
 | **端到端** | 三条形态各一条：① 1:1 人类消息 → 会话出现 agent 终态行；② 群聊 @ 两个 agent → 两条独立终态行；③ agent↔agent → 落在 pair 会话且不污染 1:1 | Wave 2/3 的「可观测行为」判据 |
 | **鉴权负例** | 非参与者查别人会话 → 403；群执行会话非成员读 → **404**（不区分不存在与无权） | §8.2 / §8.4 |
 | **红线守卫** | `dev/ci.sh` 的 `run_gateway_fs_redline` 必须全程绿 | 防止有人把写回塞回 Gateway（D-C 的 C2 反例） |
-| **回滚演练** | 每个 Wave 完成后演练一次「关掉新路径」 | §8 回滚条目可执行 |
+| **回滚演练** | 每个 Wave 完成后演练一次「关掉新路径」 | §8 回滚条目可执行；杠杆、演练步骤与 6.2 导出配方见 [回滚演练手册](../runbooks/intent-chat-session-rollback.md) |
 
 **不做**：不为覆盖率补测试；旧 `chat.rs` 路径不加新测试（Wave 6.2 要收敛它）。
 
@@ -266,7 +270,7 @@ graph TD
 | 写回触发点解耦后，人类 turn 也开始写回 → 可能重复落行 | 会话出现重复气泡 | 依赖 `message_id` 幂等（2a.1 先行）；回滚 = 恢复单一 `pending_intent` 门，1:1 退回「不可用」但不产生脏数据 |
 | 放开 `create_session` 参与者校验 | 越权创建他人会话 | 1.2 同批；负例测试进 CI |
 | 派生可见性误用 `Public` | 群执行历史泄露给任意登录用户 | §8.2 明确禁止；4.1 的负例测试是硬门禁 |
-| 前端主视图切换（Wave 5）改动面大 | Agent 页不可用 | 5.1–5.4 与 5.5 分开；保留旧入口开关一个版本周期 |
+| 前端主视图切换（Wave 5）改动面大 | Agent 页不可用 | 5.1–5.4 与 5.5 分开；v1.1：回滚杠杆不是入口开关，而是 chat surface 不可达时自然退回旧 ChatPanel（无 feature flag，见回滚演练手册） |
 | 与全局搜索线（ADR-093/095）文件冲突 | 合并冲突、互相覆盖 | 本文**不触碰** `search*` / `summary*` / `PreviewPane` / `GlobalSearchDialog`；若必须改 `session_meta.rs`，与搜索线协调后再动 |
 
 ---
@@ -299,10 +303,11 @@ graph TD
 | 5 | 英文版 plan | **不出** | `docs/plan/` 全仓仅中文集（见 AGENTS.md），单开 en 目录会制造第二套权威 |
 | 6 | 与全局搜索线的冲突 | Wave 4.1 排在**其提交之后**；本计划不触碰 `search*` / `summary*` / `PreviewPane` / `GlobalSearchDialog` | 同文件改动需串行；对方即将收口 |
 | 7 | 设计文档 §3.5 三处误判 | 已回写修正（中英同步），本计划不另立缺陷表 | 设计文档是缺陷事实的唯一来源，plan 只引用不复制 |
+| 8 | user-agent 单聊形态（设计 v2.1 微信模型） | **每 (user, agent) 恰好一条 Chat session**，固定 Chat tab（标题 = Agent 名）与 exec tab 同栏共存；撤销「`+` 建第二条同 pair 会话」「Chat history 列表按钮」及 D-B/1.5 | 用户反馈：聊天应对照微信——会话即联系人的唯一对话；多会话并行由 execution 层承载（ADR-086 决策 8） |
 
 ### 实现期不再讨论的事项
 
-上述 7 条已定。实现中若发现需要推翻其中任一条，**必须先回到设计文档改语义并说明为何代码事实与 §4 的判据不符**，不得在 PR 里就地改主意。
+上述 8 条已定。实现中若发现需要推翻其中任一条，**必须先回到设计文档改语义并说明为何代码事实与 §4 的判据不符**，不得在 PR 里就地改主意。
 
 ### 仍需在设计层回答（不阻塞本计划 Wave 0–3）
 

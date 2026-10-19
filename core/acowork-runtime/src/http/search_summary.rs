@@ -60,6 +60,12 @@ pub struct SummaryCandidate {
     pub scope: String,
     pub title: String,
     pub snippet: String,
+    /// Evidence category as the Desktop read it out of `/search` (ADR-095
+    /// D4: `vector` / `text` / `both`). Client-controlled, so it is
+    /// validated against [`MatchedBy::parse`] before the prompt is built —
+    /// an unknown category would read as evidence to the model.
+    #[serde(default)]
+    pub matched_by: Option<String>,
 }
 
 /// Request body for `POST /search/summary` (design 27 §4.4).
@@ -166,6 +172,18 @@ fn validate_summary_request(req: &SearchSummaryRequest) -> Result<(), Error> {
             return Err(err(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "candidate title/snippet exceeds field ceilings",
+            ));
+        }
+        // Evidence vocabulary is closed: an unknown `matched_by` reaching
+        // the prompt would read as an evidence claim the retrieval line
+        // never made. The offending value is client-controlled, so the
+        // error message must not echo it.
+        if let Some(m) = c.matched_by.as_deref()
+            && acowork_core::retrieval::MatchedBy::parse(m).is_none()
+        {
+            return Err(err(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "candidate matched_by is not a known evidence category",
             ));
         }
     }
@@ -412,6 +430,7 @@ mod tests {
             scope: scope.to_string(),
             title: "t".to_string(),
             snippet: "s".to_string(),
+            matched_by: None,
         }
     }
 
@@ -469,6 +488,7 @@ mod tests {
             scope: "file".to_string(),
             title: "é".repeat(201),
             snippet: "s".to_string(),
+            matched_by: None,
         }]);
         assert!(validate_summary_request(&req).is_err());
     }

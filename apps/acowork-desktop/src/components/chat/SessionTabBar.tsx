@@ -10,14 +10,15 @@ import {
   useContextMenu,
   type ContextMenuItem,
 } from "../common/ContextMenu";
-import { Plus, Clock, X, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil, MessagesSquare } from "lucide-react";
-import { ChatHistoryDropdown } from "./ChatHistoryDropdown";
+import { Plus, Clock, X, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil } from "lucide-react";
 import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
+import { OutlineBrainIcon, FilledBrainIcon } from "../common/BrainIcon";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
 import { useReadOnlySessionIds } from "../../lib/session-write-access";
+import { useChatSessionStore } from "../../stores/chatSessionStore";
 
 const EMPTY_ARRAY: string[] = [];
 
@@ -47,9 +48,14 @@ interface SessionListDropdownProps {
    *  speak the same visual language (see icon block below). */
   activeSessionId: string | undefined;
   onClose: () => void;
+  /** Called after a session was selected and opened. When the Agent page
+   *  has the pinned chat tab (WeChat model, design 27 §5.4.4), activating
+   *  an execution session must flip the surface to exec — the tab bar
+   *  itself does not care (it already lives there). */
+  onOpened?: () => void;
 }
 
-function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListDropdownProps) {
+export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpened }: SessionListDropdownProps) {
   const { t } = useTranslation();
   const agentStorage = useAgentStore((s) => s.agents[agentId]);
   const sessions = agentStorage?.sessions ?? [];
@@ -93,6 +99,7 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
   // (open tab) with the backend half (MQTT open_session + HTTP reload).
   const handleSelect = async (sessionId: string) => {
     await useChatStore.getState().openSession(agentId, sessionId);
+    onOpened?.();
     onClose();
   };
 
@@ -105,6 +112,14 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
       // Also close the tab if open
       if (openSessionIds.includes(sessionId)) {
         useChatStore.getState().closeTab(agentId, sessionId);
+      }
+      // Design 27 (v2.1): the pinned chat tab is the landing surface — when
+      // the delete took the last open exec tab with it, fall back to chat
+      // instead of a blank exec view (mirrors `finishCloseTab`). `agentStore
+      // .deleteSession` deliberately no longer re-opens a background session.
+      if (useChatStore.getState().getOpenSessionIds(agentId).length === 0) {
+        const st = useChatSessionStore.getState().byAgent[agentId];
+        if (st?.chatSessionId) useChatSessionStore.getState().setMode(agentId, "chat");
       }
     } finally {
       setDeletingId(null);
@@ -122,6 +137,11 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
     try {
       await clearAllSessions(agentId);
       setConfirmClearAll(false);
+      // Design 27 (v2.1): clear-all emptied the exec strip — the pinned chat
+      // tab is the landing surface, not a blank exec view. No auto-reopen
+      // (same rule as `finishCloseTab` / `handleDelete`).
+      const st = useChatSessionStore.getState().byAgent[agentId];
+      if (st?.chatSessionId) useChatSessionStore.getState().setMode(agentId, "chat");
     } catch {
       // agentStore already logs the failure; keep the modal open so the
       // user sees it did not go through.
@@ -209,26 +229,29 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
               >
                 <div className="flex items-center gap-2">
                   {/* Icon — same four-state matrix as the SessionTabBar
-                      title tabs so the dropdown matches the title bar:
-                        • selected + idle        → FilledChatIcon accent
-                        • selected + processing  → FilledChatIcon accent + animate-pulse
-                        • unselected + idle      → OutlineChatIcon muted zinc
-                        • unselected + processing → FilledChatIcon foreground + animate-pulse
+                      title tabs so the dropdown matches the title bar,
+                      but drawn with the BRAIN pair: execution sessions
+                      read as "the agent thinking", the chat bubble stays
+                      reserved for the Chat surface (design 27 §6.1):
+                        • selected + idle        → FilledBrainIcon accent
+                        • selected + processing  → FilledBrainIcon accent + animate-pulse
+                        • unselected + idle      → OutlineBrainIcon muted zinc
+                        • unselected + processing → FilledBrainIcon foreground + animate-pulse
                       The old <Loader2 animate-spin> is gone — processing is
-                      now expressed via the same chat-bubble breathing
-                      animation used in the title bar, keeping one global
-                      "still working" cue across the whole chat area. */}
+                      now expressed via the same breathing animation used in
+                      the title bar, keeping one global "still working" cue
+                      across the whole chat area. */}
                   {isSelected ? (
-                    <FilledChatIcon
+                    <FilledBrainIcon
                       className={cn(
                         "h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]",
                         isProc && "animate-pulse",
                       )}
                     />
                   ) : isProc ? (
-                    <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary " />
+                    <FilledBrainIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary " />
                   ) : (
-                    <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
+                    <OutlineBrainIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
                   )}
                   <span className={cn("min-w-0 flex-1 truncate text-xs text-text-secondary ")}>
                     {session.title || "Untitled session"}
@@ -354,9 +377,21 @@ function SessionListDropdown({ agentId, activeSessionId, onClose }: SessionListD
 
 interface SessionTabBarProps {
   agentId: string;
+  /** Pinned Chat tab (WeChat model, design 27 §5.4.4): the pair's single
+   *  Chat session, first in the strip, labelled with the agent's name,
+   *  never closable/renamable. Execution sessions are the remaining tabs —
+   *  opening or closing them never removes this one. When omitted (local
+   *  mode / chat surface unreachable) the bar behaves as before. */
+  chatTab?: {
+    label: string;
+    active: boolean;
+    /** In-flight turn → breathing icon on the pinned tab. */
+    processing: boolean;
+    onSelect: () => void;
+  };
 }
 
-export function SessionTabBar({ agentId }: SessionTabBarProps) {
+export function SessionTabBar({ agentId, chatTab }: SessionTabBarProps) {
   const { t } = useTranslation();
   const agent = useChatStore((s) => s.agentStates[agentId]);
   const openSessionIds = agent?.openSessionIds ?? [];
@@ -370,9 +405,6 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const openSession = useChatStore((s) => s.openSession);
 
   const [listOpen, setListOpen] = useState(false);
-  // Design 27 Phase 3c: Chat history (IM-style sessions) lives next to the
-  // execution Session history — two surfaces, two buttons.
-  const [chatListOpen, setChatListOpen] = useState(false);
   const [closingSessionId, setClosingSessionId] = useState<string | null>(null);
   // Right-click context menu on session tabs. Payload is the sessionId of
   // the tab the user right-clicked. Outside-click / Escape / portal
@@ -429,12 +461,21 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     return state?.sessionStatus;
   };
 
-  // ADR-038: clicking on a tab in the strip is "切换前台" (switching foreground)
-  // — the session is *already* in `openSessionIds` and has been confirmed
-  // Active on the backend. We use the strict no-side-effect `setActiveTab`.
+  // ADR-038: clicking on a tab in the strip is "切换前台" (switching
+  // foreground) — the session is *already* in `openSessionIds` and has been
+  // confirmed Active on the backend. We use the strict no-side-effect
+  // `setActiveTab`. With a pinned chat tab present, any exec-tab click also
+  // flips the surface back to exec (co-existence model — the chat surface
+  // stays one click away in the same strip).
+  const showExecSurface = () => {
+    const st = useChatSessionStore.getState().byAgent[agentId];
+    if (st?.chatSessionId) useChatSessionStore.getState().setMode(agentId, "exec");
+  };
+
   const handleTabClick = (sessionId: string) => {
     // Ignore clicks that ended a drag
     if (scrollableRef.current?.hasMoved.current) return;
+    showExecSurface();
     if (sessionId === activeSessionId) return;
     setActiveTab(agentId, sessionId);
   };
@@ -471,13 +512,17 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
         useChatStore.getState().setActiveTab(agentId, newActiveId);
       }
 
-      // If no tabs remain, reopen an existing session from the session list
-      // instead of unconditionally creating a new one.  Creating always would
-      // trigger an infinite loop: close last tab → auto-create 1-tab session →
-      // close it → auto-create again.  Switching to a real session breaks the
-      // cycle while still guaranteeing the chat area is never blank.
+      // If no tabs remain: with a pinned chat tab the strip still has a
+      // landing surface, so fall back to the chat view instead of
+      // auto-reopening a session. Without the chat tab (legacy fallback)
+      // the old rule holds — reopening an existing session (not creating
+      // one, which would loop) keeps the chat area non-blank.
       const remaining = useChatStore.getState().getOpenSessionIds(agentId);
       if (remaining.length === 0) {
+        if (chatTab) {
+          useChatSessionStore.getState().setMode(agentId, "chat");
+          return;
+        }
         const sessions = useAgentStore.getState().agents[agentId]?.sessions;
         const otherSession = sessions?.find((s: { session_id: string }) => s.session_id !== sessionId);
         if (otherSession) {
@@ -494,6 +539,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
 
   const handleNew = () => {
     createSession(agentId);
+    showExecSurface();
   };
 
   // ── Inline rename ──────────────────────────────────────────────────────
@@ -568,6 +614,7 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
 
   const handleContextOpenNewSession = () => {
     createSession(agentId);
+    showExecSurface();
   };
 
   // Memoised menu items. Built only when the right-clicked session or
@@ -575,7 +622,10 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
   const tabMenuItems = useMemo<ContextMenuItem<{ sessionId: string }>[]>(() => {
     const sid = tabMenu.payload?.sessionId;
     if (!sid) return [];
-    const canClose = openSessionIds.length > 1;
+    // With the pinned chat tab, closing every exec session is safe — the
+    // chat surface is the guaranteed landing spot. Legacy mode still keeps
+    // one tab open.
+    const canClose = chatTab ? true : openSessionIds.length > 1;
     const sidReadOnly = readOnlyIds.has(sid);
     const items: ContextMenuItem<{ sessionId: string }>[] = [
       {
@@ -616,17 +666,69 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabMenu.payload?.sessionId, openSessionIds.length, readOnlyIds, t]);
 
-  if (!agent) return null;
+  // With a pinned chat tab the strip is never empty even before the
+  // agent state exists (no exec sessions while the agent is stopped) —
+  // the chat surface must stay reachable, so only bail without it.
+  if (!agent && !chatTab) return null;
+
+  // Single-focus rule (design 27 §6.1): exactly ONE tab reads as active
+  // — whichever surface is in front. `chatStore.activeSessionId` keeps
+  // pointing at the foreground execution session even while the chat
+  // surface is shown (it is what ChatPanel restores when the user flips
+  // back), so with the pinned chat tab active no exec tab may claim the
+  // active style. Without a chat tab, the store's active session is the
+  // foreground tab directly.
+  const foregroundExecId = chatTab?.active ? undefined : activeSessionId;
 
   return (
     <div className="flex select-none px-0.5 gap-0.5 pt-[5px] border-b border-border-divider">
       <ScrollableTabBar
         ref={scrollableRef}
-        activeItemSelector={activeSessionId ? `[data-session-id="${activeSessionId}"]` : undefined}
-        activeItemId={activeSessionId ?? undefined}
+        activeItemSelector={
+          chatTab?.active
+            ? '[data-chat-tab="pinned"]'
+            : foregroundExecId
+              ? `[data-session-id="${foregroundExecId}"]`
+              : undefined
+        }
+        activeItemId={chatTab?.active ? undefined : (foregroundExecId ?? undefined)}
       >
+        {/* Pinned Chat tab — the pair's single conversation (WeChat model:
+            label = agent name, no close button, no rename, no context
+            menu). Its icon mirrors the exec tabs' four-state matrix;
+            `processing` (an in-flight chat turn) makes it breathe even
+            when it is not the active tab. */}
+        {chatTab && (
+          <TabItem
+            data-chat-tab="pinned"
+            key="__chat_pinned__"
+            onClick={chatTab.onSelect}
+            active={chatTab.active}
+          >
+            {chatTab.active ? (
+              <FilledChatIcon
+                className={cn(
+                  "h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]",
+                  chatTab.processing && "animate-pulse",
+                )}
+              />
+            ) : chatTab.processing ? (
+              <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary " />
+            ) : (
+              <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
+            )}
+            <span
+              className={cn(
+                "min-w-0 flex-1 truncate text-[length:var(--tab-font-size)] leading-[var(--tab-line-height)]",
+                chatTab.active && "text-text-secondary ",
+              )}
+            >
+              {chatTab.label}
+            </span>
+          </TabItem>
+        )}
         {openSessionIds.map((sessionId) => {
-          const isActive = sessionId === activeSessionId;
+          const isActive = sessionId === foregroundExecId;
           const status = getStatus(sessionId);
           const isProc = isProcessing(status);
           const rowReadOnly = readOnlyIds.has(sessionId);
@@ -639,43 +741,42 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               onContextMenu={(e) => handleTabContextMenu(e, sessionId)}
               active={isActive}
             >
-              {/* Streaming indicator dot was removed — it crowded the chat
-                  icon. The chat icon itself now breathes (animate-pulse)
-                  when an unselected tab is still streaming, see below. */}
-              {/* Chat icon — same pill bubble as the left NavBar.
-                  Four visual states (matches the NavBar's outline/filled
-                  toggle, plus breathing variants for tabs that are still
-                  processing — selected vs unselected only differ by colour,
-                  the breathing animation stays identical so they read as
-                  one consistent "processing" cue):
-                    • selected + idle        → FilledChatIcon in
+              {/* Streaming indicator dot was removed — it crowded the icon.
+                  The brain icon itself now breathes (animate-pulse) when an
+                  unselected tab is still streaming, see below.
+                  Exec icon — the brain pair (the chat bubble belongs to the
+                  Chat surface only; design 27 §6.1).
+                  Four visual states (selected vs unselected only differ by
+                  colour, the breathing animation stays identical so they
+                  read as one consistent "processing" cue):
+                    • selected + idle        → FilledBrainIcon in
                       --color-accent (static, the global highlight colour,
                       most prominent).
-                    • selected + processing  → FilledChatIcon in
+                    • selected + processing  → FilledBrainIcon in
                       --color-accent with animate-pulse — same breathing
                       rhythm as the unselected variant, just in accent
                       colour so the user can still spot the active tab
                       while it's working.
-                    • unselected + processing → FilledChatIcon (solid
+                    • unselected + processing → FilledBrainIcon (solid
                       silhouette) in the normal foreground colour with
                       animate-pulse — solid + breathing distinguishes it
                       from both idle tabs and the accent-coloured selected
                       tab. Replaces the old pulsing dot.
-                    • unselected + idle      → OutlineChatIcon in muted zinc.
+                    • unselected + idle      → OutlineBrainIcon in muted zinc.
                   Hidden during inline rename so the input gets the full
                   slot. */}
               {renamingSessionId !== sessionId &&
                 (isActive ? (
-                  <FilledChatIcon
+                  <FilledBrainIcon
                     className={cn(
                       "h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]",
                       isProc && "animate-pulse",
                     )}
                   />
                 ) : isProc ? (
-                  <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary " />
+                  <FilledBrainIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary " />
                 ) : (
-                  <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
+                  <OutlineBrainIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
                 ))}
               {/* Title — double-click enters inline rename (same action as the
                   right-click "Rename" menu item). */}
@@ -714,11 +815,11 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
                   {getTitle(sessionId)}
                 </span>
               )}
-              {/* Close button — hidden when this is the only remaining tab to
-                  prevent a tab-less state. Open at least one more session to
-                  close this one, matching common AI IDE conventions
-                  (Cursor / Claude Code). */}
-              {openSessionIds.length > 1 && (
+              {/* Close button — hidden when this is the only remaining tab
+                  *and* there is no pinned chat tab to land on. With the
+                  chat tab (WeChat model) every exec session is freely
+                  closable, including the last one. */}
+              {(chatTab || openSessionIds.length > 1) && (
                 <Tooltip content={t("sessionTabBar.closeTab")} variant="plain">
                   <button
                     onClick={(e) => handleClose(e, sessionId)}
@@ -790,31 +891,11 @@ export function SessionTabBar({ agentId }: SessionTabBarProps) {
               agentId={agentId}
               activeSessionId={activeSessionId ?? undefined}
               onClose={() => setListOpen(false)}
+              // Opening a session from history while the chat surface is on
+              // screen flips the strip to the exec surface (same rule as an
+              // exec tab click).
+              onOpened={showExecSurface}
             />
-          )}
-        </div>
-
-        {/* Chat history dropdown (design 27 Phase 3c) — read-only view of
-            the agent's Chat sessions (project group chats + agent↔agent
-            channels), sibling of the Session history 🕐 above. Same
-            wrapper shape for baseline parity. */}
-        <div className="relative inline-flex">
-          <Tooltip content={t("sessionTabBar.chatHistory")} variant="plain">
-            <button
-              onClick={() => setChatListOpen(!chatListOpen)}
-              className={cn(
-                "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
-                chatListOpen
-                  ? "text-[var(--color-accent)] bg-zinc-200 dark:bg-zinc-700"
-                  : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
-              )}
-            >
-              <MessagesSquare className="h-3.5 w-3.5" />
-            </button>
-          </Tooltip>
-
-          {chatListOpen && (
-            <ChatHistoryDropdown agentId={agentId} onClose={() => setChatListOpen(false)} />
           )}
         </div>
       </div>

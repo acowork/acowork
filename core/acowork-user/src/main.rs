@@ -113,6 +113,22 @@ fn main() {
         });
 
     runtime.block_on(async move {
+        // Wave 6.2: fold the legacy `users/{lo}/chats/{hi}/` layout into the
+        // chat_sessions store once, before anything can serve. Idempotent
+        // (per-row deterministic message ids + staging directories), and
+        // fail-soft: a pair that cannot convert keeps its staging directory
+        // for the next boot, and the adapter 404s that chat rather than
+        // serve a half-migrated one.
+        if let Some(svc) = auth.as_ref() {
+            match acowork_user::chat_sessions::migrate_legacy(svc.data_dir()) {
+                Ok(r) if r.pairs > 0 => {
+                    tracing::info!(pairs = r.pairs, messages = r.messages, "legacy chat layout migrated (Wave 6.2)");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, "legacy chat migration aborted"),
+            }
+        }
+
         // Profile-change signal (ADR-084 §决策 4b). Best-effort: a broker that
         // is not up yet is fine (the client reconnects), and a total failure
         // only delays the Gateway's view until its next pull.

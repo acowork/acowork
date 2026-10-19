@@ -20,6 +20,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Monitor, Users } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useChatSessionStore } from '../../stores/chatSessionStore'
 import { useUserChatStore } from '../../stores/userChatStore'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -114,7 +115,6 @@ export function ChatListScreen() {
   const refreshInbox = useAgentStore((s) => s.refreshInbox)
   const loading = useAgentStore((s) => s.directoryLoading)
   const startingAgentIds = useAgentStore((s) => s.startingAgentIds)
-  const openSession = useChatStore((s) => s.openSession)
   const push = useNavStore((s) => s.push)
   const baseUrl = useAuthStore((s) => s.baseUrl)
 
@@ -185,7 +185,7 @@ export function ChatListScreen() {
       .sort((x, y) => (y.chat?.last_active_at ?? 0) - (x.chat?.last_active_at ?? 0))
   }, [users, chatByPeer, q])
 
-  const openAgent = async (agentId: string, sessionId: string | null) => {
+  const openAgent = async (agentId: string) => {
     // Offline → wake it in place, do NOT open a chat against a stopped
     // Runtime (that was the blank screen). Re-tap once the row goes online.
     const info = useAgentStore.getState().agentList.find((a) => a.id === agentId)
@@ -194,17 +194,15 @@ export function ChatListScreen() {
       return
     }
     useChatStore.getState().selectAgent(agentId)
-    // Load this agent's sessions on open. A just-started agent's cached list
-    // is empty (the offline-time load returned nothing), so trusting the
-    // click-time `recent` landed the first open on a null session → blank;
-    // the second tap only worked because returning to the list had reloaded
-    // them. `refreshSessions` re-reads page 1 and updates the store slot.
-    await useAgentStore.getState().refreshSessions(agentId)
-    const list = useAgentStore.getState().agents[agentId]?.sessions ?? []
-    const newest = list.slice().sort((x, y) => (y.updated_at ?? 0) - (x.updated_at ?? 0))[0]
-    const target = sessionId ?? newest?.session_id ?? null
-    if (target) await openSession(agentId, target)
-    push('chat/detail')
+    // Wave 5.5 (design 27 §6.1): the PRIMARY agent surface is the Chat
+    // session. The execution-session list the tap used to land on is now
+    // behind the status card and the navbar "历史" entry in AgentChatScreen.
+    // `openAgent` is fire-and-forget: the screen gates on `resolved` and
+    // shows its own error, so a slow default-session call never blocks the
+    // navigation. `sessionId` (the inbox's last-tapped session hint) is
+    // dropped deliberately — it addressed the old execution surface.
+    void useChatSessionStore.getState().openAgent(agentId)
+    push('chat/agent')
   }
 
   const openUser = (peerId: string, peerName: string) => {
@@ -238,7 +236,7 @@ export function ChatListScreen() {
               <ListRow
                 key={a.id}
                 avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
-                onClick={() => void openAgent(a.id, recent?.session_id ?? null)}
+                onClick={() => void openAgent(a.id)}
                 label={
                   <span className="row-title">
                     {a.name}

@@ -8,6 +8,7 @@ import { httpChatTransport, fetchAgents, fetchNodes, fetchDirectory, tokenClaims
 import { setRealtimeDeps } from './lib/realtime'
 import { setPresenceDeps, startPresence, stopPresence } from './lib/presence'
 import { setChatPushChannel, wakeUserChat } from './stores/userChatStore'
+import { wakeAgentChat } from './stores/chatSessionStore'
 import { startSafeAreaSync } from './lib/safeArea'
 import type { ConnectOpts } from './lib/mqtt-wire'
 import { useAuthStore } from './stores/authStore'
@@ -77,7 +78,12 @@ setPresenceDeps({
     const me = useAuthStore.getState().me?.user_id
     return me ? userChatChangedTopic(me) : null
   },
-  onChatWake: () => void wakeUserChat(),
+  onChatWake: () => {
+    void wakeUserChat()
+    // Same doorbell, second consumer: an agent-chat row write lands here too
+    // (design 27 §6.5 — the signal is content-free, every watcher re-reads).
+    wakeAgentChat()
+  },
   onChatChannel: setChatPushChannel,
 })
 

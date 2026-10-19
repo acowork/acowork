@@ -63,8 +63,13 @@ pub fn intent_routes() -> Router<AppState> {
     Router::new()
         .route("/api/intents", post(deliver_intent))
         .route("/api/intents/mentions", post(deliver_mentions))
+        .route("/api/intents/chat-message", post(deliver_chat_message))
+        .route("/api/intents/chat-append", post(chat_append))
         .route("/api/intents/chat-history", get(chat_history_read))
         .route("/api/intents/project-group", post(ensure_project_group))
+        // Design 27 §8.3: PM member add / remove re-syncs the group's
+        // participant set; removal revokes the bound execution sessions.
+        .route("/api/intents/project-group/sync", post(sync_project_group))
         .route("/api/intents/task-dispatch", post(dispatch_task))
         .route("/api/intents/task-close", post(close_task_context))
         .route("/api/intents/{message_id}", get(intent_status))
@@ -114,6 +119,37 @@ struct ProjectGroupRequest {
     #[serde(default)]
     title: String,
     participants: Vec<String>,
+}
+
+/// `POST /api/intents/project-group/sync` — set the project group's
+/// participants to exactly `participants` (design 27 §8.3). Same internal
+/// auth as `ensure_project_group` (PM acts with the node token). An empty
+/// set is legal here: a project can lose every member.
+async fn sync_project_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ProjectGroupRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !token_presents_node(&state, &headers) {
+        return Err(ApiError::unauthorized(
+            "project group sync requires a valid node token",
+        ));
+    }
+    if req.project_id.trim().is_empty() {
+        return Err(ApiError::bad_request("project_id is required"));
+    }
+    let gw = state.gateway_state.read().await;
+    let user_port = gw.user_process.as_ref().filter(|p| p.ready).map(|p| p.port);
+    drop(gw);
+    let port = user_port
+        .ok_or_else(|| ApiError::service_unavailable("project groups require the user service"))?;
+    let session = chat_client::sync_group(port, &req.project_id, &req.participants)
+        .await
+        .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    Ok(Json(serde_json::json!({
+        "session_id": session.session_id,
+        "participants": session.participants,
+    })))
 }
 
 /// `POST /api/intents/task-dispatch` — PM task dispatch as a group-chat
@@ -258,7 +294,10 @@ async fn dispatch_task(
         })));
     }
 
-    // The intent_request chat row (§4: the chat log is the message record).
+    // The dispatch chat row (§4: the chat log is the message record).
+    // §5.4.5 role table: a PM dispatch is human input — the owner speaks,
+    // the agent answers. Wave 2B vocabulary: `user_message` carrying the
+    // task conversation, not a separate intent kind.
     let meta = serde_json::json!({
         "message_id": message_id,
         "conversation_id": conversation_id,
@@ -272,9 +311,10 @@ async fn dispatch_task(
         &chat_client::AppendMessage {
             from: req.owner.clone(),
             to: req.target_agent.clone(),
-            kind: "intent_request".to_string(),
+            kind: "user_message".to_string(),
             body: req.message.clone(),
             meta,
+            attachment_ids: Vec::new(),
         },
     )
     .await
@@ -306,6 +346,8 @@ async fn dispatch_task(
         kind: "request".to_string(),
         in_reply_to: String::new(),
         status: String::new(),
+        // PM dispatch lands in a project group the human owner belongs to.
+        has_human: Some(true),
     };
     let outcome =
         delivery::wake_and_deliver(&ctx, &dreq, acowork_core::timeout_config::constants::INTENT_DEFAULT)
@@ -423,6 +465,79 @@ struct ChatHistoryQuery {
 
 fn default_history_count() -> usize {
     20
+}
+
+/// Body of `POST /api/intents/chat-append` (plan 3.0).
+#[derive(Debug, Deserialize)]
+struct ChatAppendRequest {
+    /// The agent instance writing the row — a participant of the session.
+    pub from: String,
+    pub chat_session_id: String,
+    /// `"interaction_request"` | `"system_notice"`. `agent_message` goes
+    /// through the response write-back, `user_message` through the human
+    /// surface — this relay exists for the two Runtime-owned kinds only.
+    pub kind: String,
+    #[serde(default)]
+    pub to: String,
+    #[serde(default)]
+    pub body: String,
+    /// Row meta; `message_id` is required (the store's idempotency key —
+    /// a redelivered card or pointer never doubles).
+    pub meta: serde_json::Value,
+}
+
+/// `POST /api/intents/chat-append` — the Runtime's chat-row relay
+/// (design 27 §5.5.4 / §5.5.5, plan 3.0). Cards and `turn_started`
+/// pointers are business facts, and §5.5.5 names the Runtime as their
+/// writer; the Chat store itself is loopback-only behind the Gateway's
+/// system surface. Same-source discipline as the §5.5.1 write-back: the
+/// Runtime never talks to the user service directly. Identity follows
+/// D4 — the node token must attribute `from`; the body is not trusted.
+async fn chat_append(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ChatAppendRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    verify_sender_identity(&state, &headers, &req.from).await?;
+    if !matches!(req.kind.as_str(), "interaction_request" | "system_notice") {
+        return Err(ApiError::unprocessable_entity(
+            "chat-append accepts interaction_request and system_notice only",
+        ));
+    }
+    if req.meta.get("message_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        return Err(ApiError::unprocessable_entity(
+            "chat-append requires meta.message_id (idempotency key)",
+        ));
+    }
+    let user_port = {
+        let gw = state.gateway_state.read().await;
+        gw.user_process.as_ref().filter(|p| p.ready).map(|p| p.port)
+    };
+    let port = user_port
+        .ok_or_else(|| ApiError::service_unavailable("chat store requires the user service"))?;
+    let session = chat_client::load_session(port, &req.chat_session_id)
+        .await
+        .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    if !session.participants.iter().any(|p| p.id() == req.from) {
+        return Err(ApiError::forbidden(
+            "writer is not a participant of the chat session",
+        ));
+    }
+    chat_client::append_message(
+        port,
+        &req.chat_session_id,
+        &chat_client::AppendMessage {
+            from: req.from,
+            to: req.to,
+            kind: req.kind,
+            body: req.body,
+            meta: req.meta,
+            attachment_ids: Vec::new(),
+        },
+    )
+    .await
+    .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
 /// A delivered / failed Intent as returned to the calling Runtime.
@@ -607,10 +722,16 @@ async fn deliver_intent(
     // No user service (local single-machine mode) degrades to a
     // mailbox-only delivery; the Intent still routes.
     let mut source_chat_session_id = req.source_chat_session_id.clone().unwrap_or_default();
+    // §5.5.4 answerability fact for the responder's turn (plan 2b.3):
+    // derived from the session we just bound to, never from the sender.
+    let mut has_human: Option<bool> = None;
     if let Some(port) = user_port {
         if source_chat_session_id.is_empty() {
-            match chat_client::ensure_pair(port, &req.sender, &req.target).await {
-                Ok(s) => source_chat_session_id = s.session_id,
+            match chat_client::ensure_pair(port, &req.sender, &req.target, "agent_agent").await {
+                Ok(s) => {
+                    has_human = s.has_human_participant();
+                    source_chat_session_id = s.session_id;
+                }
                 Err(e) => tracing::warn!(
                     error = %e, sender = %req.sender, target = %req.target,
                     "agent-agent pair session unavailable — delivering without chat binding"
@@ -621,11 +742,12 @@ async fn deliver_intent(
             // check + repo injection (§4.1 — the sender cannot forge it).
             match chat_client::load_session(port, &source_chat_session_id).await {
                 Ok(session) => {
-                    if !session.participants.iter().any(|p| p == &req.sender) {
+                    if !session.participants.iter().any(|p| p.id() == req.sender) {
                         return Err(ApiError::forbidden(
                             "intent sender is not a participant of the source chat session",
                         ));
                     }
+                    has_human = session.has_human_participant();
                     if let Some(r) = session.repo.filter(|r| !r.is_empty()) {
                         repo = r;
                     }
@@ -640,7 +762,9 @@ async fn deliver_intent(
         // The Intent request row: the chat log IS the message record
         // (§2.2 single write entry). A failed append means the message
         // has no durable address — refuse delivery rather than deliver
-        // an unlogged request.
+        // an unlogged request. Wave 2B (§4.2): an agent asking another
+        // agent is agent speech — `agent_message` carrying the Intent
+        // fields, not a separate kind.
         if !source_chat_session_id.is_empty() {
             let meta = serde_json::json!({
                 "message_id": message_id,
@@ -654,16 +778,17 @@ async fn deliver_intent(
                 &chat_client::AppendMessage {
                     from: req.sender.clone(),
                     to: req.target.clone(),
-                    kind: "intent_request".to_string(),
+                    kind: "agent_message".to_string(),
                     body: intent_body(&req),
                     meta,
+                    attachment_ids: Vec::new(),
                 },
             )
             .await
             {
                 tracing::warn!(
                     error = %e, session_id = %source_chat_session_id,
-                    "intent_request chat row append failed — delivery refused"
+                    "agent_message chat row append failed — delivery refused"
                 );
                 return Ok(Json(IntentDeliveryResponse {
                     message_id,
@@ -693,6 +818,7 @@ async fn deliver_intent(
         kind: "request".to_string(),
         in_reply_to: String::new(),
         status: String::new(),
+        has_human,
     };
 
     let outcome = delivery::wake_and_deliver(
@@ -829,6 +955,7 @@ async fn write_limit_receipt(
             kind: "intent_response".to_string(),
             body,
             meta,
+            attachment_ids: Vec::new(),
         },
     )
     .await {
@@ -908,15 +1035,24 @@ async fn deliver_response(
     // Chat row (best-effort like the request path's pair-ensure, but the
     // response IS the durable answer — a failed append on a bound session
     // is reported, delivery still proceeds because the initiator's turn
-    // result is carried by the push below).
+    // result is carried by the push below). Wave 2B (§4.2): the answer is
+    // an `agent_message` row; `status` / `in_reply_to` are fields. The
+    // reply coordinate is the row the delivery answered — the request
+    // itself for agent-to-agent pairs, the single `user_message` row for
+    // a group fan-out (recorded as `result_ref` at delivery time).
     let mut chat_append_error: Option<String> = None;
     if let (Some(port), session_id) = (user_port, entry.source_chat_session_id.clone())
         && !session_id.is_empty()
     {
+        let in_reply_to = if entry.result_ref.is_empty() {
+            request_id.clone()
+        } else {
+            entry.result_ref.clone()
+        };
         let meta = serde_json::json!({
             "message_id": response_id,
             "conversation_id": entry.conversation_id,
-            "in_reply_to": request_id.clone(),
+            "in_reply_to": in_reply_to,
             "sender_session_id": req.sender_session_id.clone().unwrap_or_default(),
             "status": status,
         });
@@ -926,14 +1062,15 @@ async fn deliver_response(
             &chat_client::AppendMessage {
                 from: entry.to_instance.clone(),
                 to: entry.from_instance.clone(),
-                kind: "intent_response".to_string(),
+                kind: "agent_message".to_string(),
                 body: intent_body(&req),
                 meta,
+                attachment_ids: Vec::new(),
             },
         )
         .await
         {
-            tracing::warn!(error = %e, session_id, "intent_response chat row append failed");
+            tracing::warn!(error = %e, session_id, "agent_message chat row append failed");
             chat_append_error = Some(e);
         }
     }
@@ -999,6 +1136,8 @@ async fn deliver_response(
         kind: "response".to_string(),
         in_reply_to: request_id,
         status,
+        // Same session the request was bound to — reuse its fact.
+        has_human: entry.has_human,
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -1040,10 +1179,13 @@ pub struct MentionRequest {
 }
 
 /// `POST /api/intents/mentions` — @Agent fan-out in a group chat (§5):
-/// each mentioned agent gets its own `intent_request` chat row and its
-/// own routed Intent; the session's repo binding is injected
-/// server-side (§4.1). Ordinary (unmentioned) group messages never reach
-/// this endpoint — they are archive-only by construction.
+/// the human utterance is ONE `user_message` row carrying the mentioned
+/// targets in its `mentions` field (§5.3.1); each mentioned agent gets
+/// its own routed delivery (initiator role, §5.4.5) and its own
+/// write-back `agent_message` answering that row. The session's repo
+/// binding is injected server-side (§4.1). Ordinary (unmentioned) group
+/// messages never reach this endpoint — they are archive-only by
+/// construction.
 async fn deliver_mentions(
     State(state): State<AppState>,
     auth: Option<axum::extract::Extension<crate::http::auth_middleware::AuthContext>>,
@@ -1081,7 +1223,7 @@ async fn deliver_mentions(
     let session = chat_client::load_session(port, &req.chat_session_id)
         .await
         .map_err(|e| ApiError::not_found(&format!("chat session not loadable: {e}")))?;
-    if !session.participants.iter().any(|p| p == &req.from_user) {
+    if !session.participants.iter().any(|p| p.id() == req.from_user) {
         return Err(ApiError::forbidden("mention sender is not a participant"));
     }
     let repo = session.repo.unwrap_or_default();
@@ -1097,11 +1239,35 @@ async fn deliver_mentions(
         mailbox: mailbox.as_deref(),
     };
 
-    let conversation_id = match req.conversation_id.as_deref() {
-        Some(c) if !c.is_empty() => c.to_string(),
-        _ => uuid::Uuid::new_v4().to_string(),
-    };
-    let max_requests = intent_max_conversation_requests(&state).await;
+    // §5.3.1 (Wave 2B): one human utterance is ONE `user_message` row;
+    // the mentioned targets are a field on it (`mentions`), not N copies
+    // of the same text. 落库先于投递 (§5.1): if the row cannot be written
+    // the whole fan-out is refused — the message would have no durable
+    // address and no reply coordinate.
+    let row_id = uuid::Uuid::new_v4().to_string();
+    let meta = serde_json::json!({
+        "message_id": row_id,
+        "mentions": req.targets,
+        "repo": repo,
+    });
+    if let Err(e) = chat_client::append_message(
+        port,
+        &req.chat_session_id,
+        &chat_client::AppendMessage {
+            from: req.from_user.clone(),
+            to: String::new(),
+            kind: "user_message".to_string(),
+            body: req.text.clone(),
+            meta,
+            attachment_ids: Vec::new(),
+        },
+    )
+    .await
+    {
+        return Err(ApiError::service_unavailable(&format!(
+            "user_message chat row append failed — mention fan-out refused: {e}"
+        )));
+    }
 
     let mut results = Vec::new();
     for target in &req.targets {
@@ -1142,46 +1308,17 @@ async fn deliver_mentions(
             continue;
         }
 
+        // Per-target delivery coordinate: the mailbox entry (and thus the
+        // write-back + sweeper tracking) addresses this uuid; the durable
+        // row it answers is the shared `user_message` above (`in_reply_to`
+        // → recorded as `result_ref`, read back by `deliver_response`).
         let message_id = uuid::Uuid::new_v4().to_string();
-        if let Some(mb) = mailbox.as_deref()
-            && mb.conversation_request_count(&conversation_id) >= max_requests
-        {
-            results.push(serde_json::json!({
-                "target": target, "message_id": message_id, "status": "failed",
-                "error_code": "conversation_limit_exceeded",
-            }));
-            continue;
-        }
-
-        // The intent_request row: from = the human, to = the agent.
-        let meta = serde_json::json!({
-            "message_id": message_id,
-            "conversation_id": conversation_id,
-            "repo": repo,
-        });
-        if let Err(e) = chat_client::append_message(
-            port,
-            &req.chat_session_id,
-            &chat_client::AppendMessage {
-                from: req.from_user.clone(),
-                to: target.clone(),
-                kind: "intent_request".to_string(),
-                body: req.text.clone(),
-                meta,
-            },
-        )
-        .await
-        {
-            results.push(serde_json::json!({
-                "target": target, "message_id": message_id, "status": "failed",
-                "error_code": "chat_log_unavailable", "error": e,
-            }));
-            continue;
-        }
-
         let dreq = delivery::DeliveryRequest {
             message_id: message_id.clone(),
-            conversation_id: conversation_id.clone(),
+            // §4.2: a human-initiated round carries no agent conversation
+            // — it never counts against the R4 budget; continuity lives
+            // in the Chat session (`routing_key` → `chat:{session}`).
+            conversation_id: String::new(),
             from_instance: req.from_user.clone(),
             from_session_id: String::new(),
             target_instance: target.clone(),
@@ -1190,9 +1327,14 @@ async fn deliver_mentions(
             source_chat_session_id: req.chat_session_id.clone(),
             repo: repo.clone(),
             session_config_json: String::new(),
-            kind: "request".to_string(),
-            in_reply_to: String::new(),
+            // §5.4.5 role table: a group @ is human input — the target
+            // answers as initiator, not responder (keeps `intent_send`,
+            // and `ask_user_question` per answerability).
+            kind: "user_message".to_string(),
+            in_reply_to: row_id.clone(),
             status: String::new(),
+            // A human wrote the row this delivery answers.
+            has_human: Some(true),
         };
         let outcome = delivery::wake_and_deliver(
             &ctx,
@@ -1212,9 +1354,363 @@ async fn deliver_mentions(
     }
 
     Ok(Json(serde_json::json!({
-        "conversation_id": conversation_id,
+        "message_id": row_id,
         "results": results,
     })))
+}
+
+/// Body of `POST /api/intents/chat-message`.
+#[derive(Debug, Deserialize)]
+pub struct ChatMessageRequest {
+    /// The `user_agent` Chat session the message is posted in (§5.4.4).
+    pub chat_session_id: String,
+    /// The human sender — must match the authenticated user.
+    pub from_user: String,
+    /// The message text.
+    pub text: String,
+    /// When set, the message answers the `interaction_request` card with
+    /// this `message_id` (§5.5.4 answer channel): the answer is routed to
+    /// the execution side's pending request instead of opening a new
+    /// turn. Empty = a plain message (or a quote of a non-card row).
+    #[serde(default)]
+    pub in_reply_to: String,
+    /// Design 27 §4.5: the initiator's `session_config` suggestion carried
+    /// on a chat message that opens a new execution turn (model / workspace
+    /// / reasoning-effort chosen on the Chat surface before sending). Only
+    /// a shape-checked object of string values; the Runtime clamps it to the
+    /// target's allowed set at execution-session creation (§13-6). Absent /
+    /// null = target defaults. Ignored on the card-answer path (no new
+    /// session is created there).
+    #[serde(default)]
+    pub session_config: Option<serde_json::Value>,
+}
+
+/// §5.5.4 answer channel: the Runtime resolve endpoint and body a card
+/// answer maps to, derived from the card's `interaction.kind`. Pure so
+/// the routing table is testable without a live Runtime. `None` means no
+/// resolve applies: `pause`/`retry` cards outlive their turn (the turn
+/// ended with outcome `waiting`), so their answer is a normal delivery
+/// that opens a fresh turn carrying the answer text.
+fn card_answer_route(
+    card_kind: &str,
+    request_id: &str,
+    answer: &str,
+) -> Option<(String, serde_json::Value)> {
+    if request_id.is_empty() {
+        return None;
+    }
+    match card_kind {
+        "ask_question" => Some((
+            "answer".to_string(),
+            serde_json::json!({ "request_id": request_id, "answer": answer }),
+        )),
+        "approval" => Some((
+            "approval".to_string(),
+            serde_json::json!({
+                "request_id": request_id,
+                "approved": is_affirmative(answer),
+                "reason": answer,
+            }),
+        )),
+        _ => None,
+    }
+}
+
+/// Approval cards are answered with the button label as text (the chat
+/// composer has no button surface yet); the mapping lives in one place.
+/// Anything not on the approve list is a reject — fail-closed.
+fn is_affirmative(answer: &str) -> bool {
+    matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "approve" | "approved" | "yes" | "allow" | "同意" | "批准" | "允许"
+    )
+}
+
+/// Attempt to resolve a card answer against the execution side. Returns
+/// `true` only when the row is an `interaction_request` card AND the
+/// Runtime accepted the answer (the Agent's in-flight turn continues —
+/// no replay, no new turn). `false` falls through to normal delivery: a
+/// stale answer (request already timed out, turn already ended) opens a
+/// fresh turn that carries the answer text as a plain human message.
+async fn resolve_card_answer(
+    state: &AppState,
+    port: u16,
+    chat_session_id: &str,
+    from_user: &str,
+    card_id: &str,
+    answer: &str,
+) -> bool {
+    let Ok(Some(card)) =
+        chat_client::message_by_id(port, chat_session_id, from_user, card_id).await
+    else {
+        return false;
+    };
+    if card["kind"].as_str() != Some("interaction_request") {
+        return false; // an `in_reply_to` at a plain row is a quote, not an answer
+    }
+    let meta = &card["meta"];
+    let Some(interaction) = meta.get("interaction") else {
+        return false;
+    };
+    let Some((path, body)) = card_answer_route(
+        interaction["kind"].as_str().unwrap_or(""),
+        interaction["request_id"].as_str().unwrap_or(""),
+        answer,
+    ) else {
+        return false;
+    };
+    let agent_session_id = meta["agent_session_id"].as_str().unwrap_or("");
+    let agent_instance = card["from"].as_str().unwrap_or("");
+    if agent_session_id.is_empty() || agent_instance.is_empty() {
+        return false;
+    }
+    // Same endpoint + node-token path the reverse proxy uses (ADR-055):
+    // the Runtime authorizes the session by the `x-user-id` scope the
+    // Gateway derives from the verified human sender (injected via the
+    // single trusted writer, `auth_middleware::runtime_scope_headers`).
+    let Some(registry) = state.runtime_http_registry.as_ref() else {
+        return false;
+    };
+    let endpoint = {
+        let reg = registry.read().await;
+        reg.get_endpoint(agent_instance)
+    };
+    let Some(endpoint) = endpoint else {
+        return false; // Runtime not up — a stale answer delivers as a new turn
+    };
+    // The caller's Chat membership, exactly as the proxy injects it: the
+    // execution session is `Members`-visible and the resolve endpoint
+    // writes it, so the owner fallback alone would 404 for a non-owner
+    // participant answering a card. A failed lookup stays fail-closed.
+    let chats: Vec<String> =
+        match crate::intent::chat_client::list_session_ids(port, from_user).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::debug!(error = %e, card_id, "chat scope lookup failed for card answer");
+                Vec::new()
+            }
+        };
+    let mut req = crate::http::proxy::runtime_http_client()
+        .post(format!("{endpoint}/sessions/{agent_session_id}/{path}"))
+        .headers(crate::http::auth_middleware::runtime_scope_headers(
+            from_user, &chats,
+        ))
+        .json(&body);
+    if let Some(node_token) =
+        crate::http::proxy::resolve_node_token(state, agent_instance).await
+    {
+        req = req.header("X-ACowork-Node-Token", node_token);
+    }
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) => {
+            tracing::debug!(
+                status = %resp.status(),
+                card_id,
+                "card answer not accepted — delivering as a new turn"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, card_id, "card answer forward failed — delivering as a new turn");
+            false
+        }
+    }
+}
+
+/// `POST /api/intents/chat-message` — a human message in a 1:1
+/// user-agent Chat session, the Agent page's default conversation
+/// (design 27 §5.4.4). The message is **not** an Intent request: it
+/// archives as a `user_message` row and triggers the Agent's execution
+/// session in the initiator role, so the turn keeps `ask_user_question`
+/// and can pause for the human (§13-13). Delivery rides the Intent
+/// transport with `kind = "user_message"`, which also registers the
+/// in-flight mailbox entry the fallback sweeper acts on (plan 2a.4).
+async fn deliver_chat_message(
+    State(state): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::http::auth_middleware::AuthContext>>,
+    Json(req): Json<ChatMessageRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Identity: a chat message is a user action; the token-derived
+    // identity is the only truth (D4, same discipline as mentions).
+    let verified_user = auth
+        .as_ref()
+        .map(|axum::extract::Extension(c)| c.effective_user_id().to_string())
+        .unwrap_or_default();
+    if verified_user.is_empty() || verified_user != req.from_user {
+        return Err(ApiError::unauthorized(
+            "chat message sender must match the authenticated user",
+        ));
+    }
+    if req.text.trim().is_empty() {
+        return Err(ApiError::bad_request("a chat message needs text"));
+    }
+    // design 27 §4.5: reject a malformed session_config before the durable
+    // row is written (same gate as `intent_send`) so a bad suggestion cannot
+    // reach the Runtime or cost a message an address it never gets.
+    if let Some(sc) = req.session_config.as_ref() {
+        validate_session_config(sc).map_err(|e| {
+            ApiError::unprocessable_entity(&format!("session_config_invalid: {e}"))
+        })?;
+    }
+
+    let gw = state.gateway_state.read().await;
+    let mailbox = gw.intent_mailbox.clone();
+    let user_port = gw.user_process.as_ref().filter(|p| p.ready).map(|p| p.port);
+    let (mqtt, registry) = (state.mqtt_gateway_client.clone(), state.agent_registry.clone());
+    let node_control = state.node_control.clone();
+    drop(gw);
+    let port = user_port.ok_or_else(|| {
+        ApiError::service_unavailable("chat sessions require the user service")
+    })?;
+
+    // Server-side truth: the session must be this user's 1:1 with one
+    // Agent; the agent participant is the only delivery target.
+    let session = chat_client::load_session(port, &req.chat_session_id)
+        .await
+        .map_err(|e| ApiError::not_found(&format!("chat session not loadable: {e}")))?;
+    if !session.participants.iter().any(|p| p.id() == req.from_user) {
+        return Err(ApiError::forbidden("sender is not a participant"));
+    }
+    let target: String = match session.kind.as_str() {
+        "user_agent" => session
+            .participants
+            .iter()
+            .map(|p| p.id().to_string())
+            .find(|id| id != &req.from_user)
+            .ok_or_else(|| ApiError::not_found("no agent participant in this session"))?,
+        // Group surfaces reuse this channel ONLY to answer a pending card
+        // (§5.5.4): the card names its own agent, so groups need no target
+        // resolution rule. Plain group messages are archive-only via the
+        // chat write entry; @-fan-out goes to `/api/intents/mentions`.
+        "project_group" | "user_group" => {
+            if req.in_reply_to.is_empty() {
+                return Err(ApiError::bad_request(
+                    "chat-message in a group answers a card only; plain group messages post to /api/chat-sessions/{id}/messages and @-fan-out goes to /api/intents/mentions",
+                ));
+            }
+            let card = chat_client::message_by_id(port, &req.chat_session_id, &req.from_user, &req.in_reply_to)
+                .await
+                .ok()
+                .flatten()
+                .filter(|c| c["kind"].as_str() == Some("interaction_request"))
+                .ok_or_else(|| {
+                    ApiError::bad_request("group answer must reply to an interaction_request card in this session")
+                })?;
+            card["from"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| ApiError::bad_request("the answered card names no agent"))?
+        }
+        other => {
+            return Err(ApiError::bad_request(&format!(
+                "chat-message does not target '{other}' sessions"
+            )));
+        }
+    };
+    let repo = session.repo.unwrap_or_default();
+
+    let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
+        return Err(ApiError::internal("Gateway MQTT control plane is not available"));
+    };
+
+    // 落库先于投递 (§5.1): the durable `user_message` row exists before
+    // the Agent may act on it. The Gateway generates the id so the
+    // mailbox entry and the write-back share one coordinate. The row is
+    // the durable record of a card answer too — resolution is derived
+    // from it, never from a second write (§5.5.4).
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let meta = serde_json::json!({
+        "message_id": message_id,
+        "in_reply_to": req.in_reply_to,
+    });
+    if let Err(e) = chat_client::append_message(
+        port,
+        &req.chat_session_id,
+        &chat_client::AppendMessage {
+            from: req.from_user.clone(),
+            to: target.clone(),
+            kind: "user_message".to_string(),
+            body: req.text.clone(),
+            meta,
+            attachment_ids: Vec::new(),
+        },
+    )
+    .await
+    {
+        return Err(ApiError::service_unavailable(&format!(
+            "user_message chat row append failed — delivery refused: {e}"
+        )));
+    }
+
+    // §5.5.4 answer channel: an answer to a live card resolves the
+    // execution side's pending request and the Agent's current turn
+    // continues — no new turn is delivered. A stale/unknown card falls
+    // through: the answer delivers as a plain human message and opens a
+    // fresh turn.
+    if !req.in_reply_to.is_empty()
+        && resolve_card_answer(
+            &state,
+            port,
+            &req.chat_session_id,
+            &req.from_user,
+            &req.in_reply_to,
+            &req.text,
+        )
+        .await
+    {
+        return Ok(Json(serde_json::json!({
+            "message_id": message_id, "status": "answered",
+        })));
+    }
+
+    let ctx = DeliveryContext {
+        state: &state.gateway_state,
+        registry,
+        node_control: node_control.as_ref(),
+        mqtt: Some(mqtt),
+        mailbox: mailbox.as_deref(),
+    };
+    // `conversation_id` stays empty: 1:1 continuity lives in the Chat
+    // session itself — `routing_key` maps `chat:{session}` onto one
+    // execution session (§5.4.4 轮转对单聊生效).
+    let dreq = delivery::DeliveryRequest {
+        message_id: message_id.clone(),
+        conversation_id: String::new(),
+        from_instance: req.from_user.clone(),
+        from_session_id: String::new(),
+        target_instance: target.clone(),
+        action: "chat".to_string(),
+        params_json: serde_json::json!({ "message": req.text }).to_string(),
+        source_chat_session_id: req.chat_session_id.clone(),
+        repo: repo.clone(),
+        session_config_json: req
+            .session_config
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        kind: "user_message".to_string(),
+        in_reply_to: String::new(),
+        status: String::new(),
+        // The 1:1 sender is a human participant.
+        has_human: Some(true),
+    };
+    let outcome = delivery::wake_and_deliver(
+        &ctx,
+        &dreq,
+        acowork_core::timeout_config::constants::INTENT_DEFAULT,
+    )
+    .await;
+    match outcome {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "message_id": message_id, "status": "delivered",
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({
+            "message_id": message_id, "status": "failed",
+            "error_code": e.code(), "error": e.to_string(),
+        }))),
+    }
 }
 
 /// D3 observability: the mailbox truth for one message id.
@@ -1285,3 +1781,48 @@ async fn intent_enforce_permissions(state: &AppState) -> bool {
 }
 
 
+
+#[cfg(test)]
+mod card_answer_tests {
+    use super::*;
+
+    #[test]
+    fn ask_question_routes_to_answer_endpoint() {
+        let (path, body) = card_answer_route("ask_question", "q-1", "Option B").unwrap();
+        assert_eq!(path, "answer");
+        assert_eq!(body["request_id"], "q-1");
+        assert_eq!(body["answer"], "Option B");
+    }
+
+    #[test]
+    fn approval_routes_to_approval_endpoint_with_affirmative_mapping() {
+        let (path, body) = card_answer_route("approval", "a-1", "批准").unwrap();
+        assert_eq!(path, "approval");
+        assert_eq!(body["request_id"], "a-1");
+        assert_eq!(body["approved"], true);
+        let (_, body) = card_answer_route("approval", "a-1", "no").unwrap();
+        assert_eq!(body["approved"], false); // fail-closed
+    }
+
+    #[test]
+    fn pause_and_unknown_cards_have_no_resolve_route() {
+        // The turn already ended with `waiting`; the answer delivers as a
+        // fresh turn, not a resolve.
+        assert!(card_answer_route("pause", "p-1", "continue").is_none());
+        assert!(card_answer_route("retry", "r-1", "go").is_none());
+    }
+
+    #[test]
+    fn missing_request_id_is_not_routable() {
+        assert!(card_answer_route("ask_question", "", "answer").is_none());
+    }
+
+    #[test]
+    fn affirmative_is_case_and_whitespace_tolerant() {
+        assert!(is_affirmative(" Approve "));
+        assert!(is_affirmative("YES"));
+        assert!(is_affirmative("同意"));
+        assert!(!is_affirmative("reject"));
+        assert!(!is_affirmative(""));
+    }
+}

@@ -72,6 +72,7 @@ fn req(target: &str) -> DeliveryRequest {
         kind: "request".into(),
         in_reply_to: String::new(),
         status: String::new(),
+        has_human: None,
     }
 }
 
@@ -95,7 +96,8 @@ fn entry(
         kind: "request".into(),
         status: String::new(),
         source_chat_session_id: String::new(),
-    answered_at: String::new(),
+        answered_at: String::new(),
+        has_human: None,
     }
 }
 
@@ -638,6 +640,7 @@ fn intent_wire_fields_roundtrip() {
         kind: "request".into(),
         in_reply_to: String::new(),
         status: String::new(),
+        has_human_participant: None,
     };
     let cmd = ControlCommand {
         instance_id: TARGET.into(),

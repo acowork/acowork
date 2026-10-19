@@ -19,6 +19,56 @@ use crate::agent::session_state::SessionStatus;
 use crate::tools::builtin::ask_user_question::AskUserQuestionTool;
 
 impl AgentLoop {
+    /// Design 27 §5.5.4 (plan 3.1): drop an `interaction_request` card
+    /// into the Chat session that triggered this turn. No-op unless the
+    /// turn owes a chat write-back AND the session is known to have a
+    /// human who can answer (`chat_has_human != Some(false)` — unknown
+    /// fails open, the card is harmless if nobody picks it up, the row
+    /// is the durable record of the question).
+    ///
+    /// The card is append-only state: pending = no later row carries an
+    /// `in_reply_to` pointing at it (§5.5.4). Best-effort: a failed card
+    /// write logs; the in-flight approval/question/pause itself is
+    /// unaffected.
+    pub(crate) async fn write_interaction_card(
+        &self,
+        interaction: serde_json::Value,
+        summary: &str,
+    ) {
+        let Some(wb) = self.chat_writeback.as_ref() else {
+            return;
+        };
+        if self.chat_has_human == Some(false) {
+            return;
+        }
+        let card_id = uuid::Uuid::new_v4().to_string();
+        let meta = serde_json::json!({
+            "message_id": card_id,
+            "in_reply_to": wb.request_id,
+            "agent_session_id": self.session_core.session_id.clone().unwrap_or_default(),
+            "interaction": interaction,
+        });
+        if let Err(e) = crate::agent::intent_turn::append_chat_row(
+            &self.core.config.agent_instance_id,
+            &self
+                .core
+                .config
+                .gateway_host
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            &self.core.config.mqtt_password.clone().unwrap_or_default(),
+            &wb.source_chat_session_id,
+            "interaction_request",
+            &wb.from,
+            summary,
+            meta,
+        )
+        .await
+        {
+            tracing::warn!(error = %e, card_id, "interaction_request card write failed (best-effort)");
+        }
+    }
+
     /// Handle an `ask_user_question` tool call.
     ///
     /// Validates the params, emits ChunkEvent::AskQuestion, transitions
@@ -66,6 +116,8 @@ impl AgentLoop {
 
         // Emit ChunkEvent::AskQuestion (timeout_seconds is runtime-computed,
         // not LLM-provided, so the frontend always sees the user-preferred value)
+        let card_options: Vec<String> =
+            parsed.options.iter().map(|o| o.label.clone()).collect();
         let _ = self.session_core.try_send_chunk(ChunkEvent::AskQuestion {
             request_id: request_id.clone(),
             question: parsed.question.clone(),
@@ -73,6 +125,21 @@ impl AgentLoop {
             title: parsed.title.clone(),
             timeout_seconds: Some(effective_timeout_secs),
         });
+
+        // §5.5.4 (plan 3.1): the same question is also a Chat-session card
+        // when the turn was chat-triggered — one question, two answer
+        // surfaces (the live dialog and the chat card), never a replay.
+        self.write_interaction_card(
+            serde_json::json!({
+                "kind": "ask_question",
+                "request_id": request_id.clone(),
+                "question": parsed.question.clone(),
+                "title": parsed.title.clone(),
+                "options": card_options,
+            }),
+            &parsed.question,
+        )
+        .await;
 
         // Transition to WaitingApproval
         self.transition_status(SessionStatus::WaitingApproval {
