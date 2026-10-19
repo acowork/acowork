@@ -1863,6 +1863,7 @@
     "placeholder": "프로젝트 팀에게 보내기",
     "placeholderWithMentions": "보내기 — @Agent로 처리 요청",
     "send": "보내기",
-    "emptyTurn": "(출력 없음)"
+    "emptyTurn": "(출력 없음)",
+    "readOnly": "읽기 전용 — 이 프로젝트의 멤버가 아닙니다."
   }
 }

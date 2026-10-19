@@ -1687,7 +1687,9 @@
     "members": "成员",
     "manageMembers": "管理成员",
     "memberManagerTitle": "项目成员",
-    "memberManagerHint": "选择 Agent 实例作为项目成员。任务负责人必须是项目成员。",
+    "memberManagerHint": "选择 Agent 实例或用户账号作为项目成员。任务负责人必须是项目成员。",
+    "agentMembers": "Agent 成员",
+    "userMembers": "用户成员",
     "addMember": "添加",
     "noMembers": "暂无成员",
     "memberAdded": "成员已添加",
@@ -1946,6 +1948,14 @@
     "placeholder": "发消息给项目组",
     "placeholderWithMentions": "发消息，@Agent 让其处理",
     "send": "发送",
-    "emptyTurn": "（无输出）"
+    "mentionLabel": "提及成员",
+    "emptyTurn": "（无输出）",
+    "readOnly": "只读 — 你不是该项目的成员。"
+  },
+  "groupMembers": {
+    "title": "群成员",
+    "searchPlaceholder": "搜索成员",
+    "add": "添加",
+    "loading": "加载成员…"
   }
 }

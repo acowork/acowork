@@ -167,6 +167,12 @@ export interface CreateProjectInput {
 /** POST /projects/:pid/members 请求体 */
 export interface AddProjectMemberInput {
   instance_id: string;
+  /**
+   * 身份类型（ADR-076 §决策 11）：`"user"` → `instance_id` 按 user_id
+   * 解释，服务端跳过 Agent 存在性校验。服务端 `#[serde(default)]` =
+   * `"agent"`，旧调用方不发该字段时行为不变。
+   */
+  kind?: PmMemberKind;
 }
 
 export interface UpdateProjectInput {

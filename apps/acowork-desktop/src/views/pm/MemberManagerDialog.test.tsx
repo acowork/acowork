@@ -18,17 +18,19 @@
  * stores (no network, no i18n), assert on the rendered DOM.
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { PmProject, PmProjectMember } from "../../lib/pm-types";
 
 const MOCK_AGENT_ID = "58ef4139-ce28-46db-9ae9-7daecb042cb5";
 const MOCK_USER_ID = "21a727ee-d2ac-4d7a-9bb1-a846cb34cf3c";
+const MOCK_PEER_ID = "9b3d44cc-1f2e-4a5b-8c9d-0e7f6a5b4c3d";
 
 const mocks = vi.hoisted(() => ({
   addMember: vi.fn(async () => {}),
   removeMember: vi.fn(async () => {}),
   fetchAgents: vi.fn(async () => {}),
   agents: {} as Record<string, { meta: { instance_id: string; display_name?: string; name?: string; avatar?: string | null; builtin_avatar?: string | null } }>,
+  directoryUsers: [] as Array<{ user_id: string; username: string; display_name: string; avatar?: string | null; builtin_avatar?: string | null }>,
   localProfile: {
     displayName: "admin",
     backendAvatarUrl: null,
@@ -72,6 +74,21 @@ vi.mock("../../stores/authStore", () => {
 vi.mock("../../stores/userProfileStore", () => ({
   useUserProfileStore: (selector: (state: Record<string, unknown>) => unknown) =>
     selector({ profile: mocks.localProfile, setProfile: vi.fn() }),
+}));
+
+// The dialog reads the account directory straight from the store fields for
+// its user candidates (loading stays idempotent inside the real store — not
+// exercised here, hence the no-op). `ownerUserId` must match the mocked
+// account or `usePmDirectoryUsers` withholds the cached list as another
+// account's data.
+vi.mock("../../stores/pmUserDirectoryStore", () => ({
+  usePmUserDirectoryStore: (selector: (state: Record<string, unknown>) => unknown) =>
+    selector({
+      users: mocks.directoryUsers,
+      ownerUserId: "21a727ee-d2ac-4d7a-9bb1-a846cb34cf3c",
+      loadDirectory: vi.fn(async () => {}),
+      reset: vi.fn(),
+    }),
 }));
 
 vi.mock("../../components/common/ToastProvider", () => ({
@@ -182,5 +199,39 @@ describe("MemberManagerDialog — user-member wiring", () => {
     const row = rowFor("human");
     expect(within(row).queryByText("?")).toBeNull();
     expect(within(row).getByText("Local Admin")).toBeTruthy();
+  });
+
+  it("lists user candidates below the agents and adds them with kind:user", () => {
+    // Regression for "add-member only offered agents": the dialog must also
+    // surface the signed-in account and directory accounts as addable user
+    // members, and POST them with `kind: "user"` so the PM backend skips the
+    // agent-directory existence check.
+    (globalThis as unknown as { __authAccount: unknown }).__authAccount = {
+      user_id: MOCK_USER_ID,
+      username: "admin",
+      display_name: "admin",
+      avatar: null,
+      builtin_avatar: null,
+    };
+    mocks.directoryUsers = [
+      { user_id: MOCK_PEER_ID, username: "alice", display_name: "Alice", avatar: null, builtin_avatar: null },
+    ];
+    // The signed-in account is already a member (creator) → only Alice and
+    // the seeded peer remain candidates; agents list stays empty.
+    render(
+      <MemberManagerDialog
+        project={projectWith([member(MOCK_USER_ID, "user")])}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const row = rowFor(MOCK_PEER_ID);
+    expect(within(row).getByText("Alice")).toBeTruthy();
+    fireEvent.click(within(row).getByText("pm.addMember"));
+    expect(mocks.addMember).toHaveBeenCalledWith("p-test", MOCK_PEER_ID, "user");
+
+    // The signed-in account is NOT offered again (already a member).
+    const candidateRows = screen.getAllByText(MOCK_USER_ID);
+    expect(candidateRows).toHaveLength(1); // current-members row only
   });
 });

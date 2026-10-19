@@ -1853,6 +1853,7 @@
     "placeholder": "傳送訊息給專案組",
     "placeholderWithMentions": "傳送訊息，@Agent 讓其處理",
     "send": "傳送",
-    "emptyTurn": "（無輸出）"
+    "emptyTurn": "（無輸出）",
+    "readOnly": "唯讀 — 您不是該專案的成員。"
   }
 }

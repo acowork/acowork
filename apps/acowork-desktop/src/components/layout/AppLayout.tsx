@@ -8,9 +8,11 @@ import { AgentPage } from "../chat/AgentPage";
 import { EmptyChatPane } from "../chat/EmptyChatPane";
 import { InboxPanel } from "../../views/InboxPanel";
 import { GroupChatPanel } from "../chat/GroupChatPanel";
+import { GroupMembersPanel } from "../chat/GroupMembersPanel";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
+import { GroupRightNavBar } from "./GroupRightNavBar";
 // FileEditorPanel is lazy-loaded: its module graph pulls in monaco-editor
 // (~170 kB) plus monaco-languageclient's vscode-api stack (~1 MB) via
 // useLspClientPool. Keeping it out of the entry chunk is what actually
@@ -1139,6 +1141,14 @@ export function AppLayout() {
             {!rightPanelCollapsed && selectedAgentId && (
               <RightPanel width={rightWidth} onCollapse={toggleRightPanel} isDebugMode={isDebugMode} onResizeStart={handleMouseDownRight} activeTab={activeTab} onTabChange={setActiveTab} />
             )}
+
+            {/* Group-chat right panel — the project group's members surface
+                (WeChat-style grid + add). Mirrors the agent RightPanel slot:
+                same width / resize handle / collapse state, only shown when
+                a group is open and no agent session takes the pane. */}
+            {!rightPanelCollapsed && !selectedAgentId && activeGroupId && (
+              <GroupMembersPanel width={rightWidth} onResizeStart={handleMouseDownRight} onClose={toggleRightPanel} />
+            )}
           </div>
         )}
 
@@ -1162,6 +1172,14 @@ export function AppLayout() {
               }}
               agentRunning={selectedAgent?.alive ?? false}
               collapsed={rightPanelCollapsed}
+            />
+          ) : activeGroupId ? (
+            // Group chat: a single settings tile toggles the members panel.
+            // Shares the agent panel's collapse state + width so the 40px
+            // rail reads identically across the two right-panel surfaces.
+            <GroupRightNavBar
+              expanded={!rightPanelCollapsed}
+              onToggle={toggleRightPanel}
             />
           ) : (
             // User-chat / EmptyChatPane: no RightNavBar items yet (the

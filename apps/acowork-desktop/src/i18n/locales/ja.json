@@ -1862,6 +1862,7 @@
     "placeholder": "プロジェクトチームに送信",
     "placeholderWithMentions": "送信。@Agent で処理を依頼",
     "send": "送信",
-    "emptyTurn": "（出力なし）"
+    "emptyTurn": "（出力なし）",
+    "readOnly": "読み取り専用 — このプロジェクトのメンバーではありません。"
   }
 }

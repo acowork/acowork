@@ -31,6 +31,18 @@ async function fetchSessions(me: string): Promise<ChatSessionInfo[]> {
   return resp.json();
 }
 
+/** Admin cross-account list (`GET /api/chat-sessions`) — every project group
+ *  in the deployment, including groups the admin never joined. The server
+ *  already filters to `project_group` and gates on the admin role. */
+async function fetchAllGroupSessions(): Promise<ChatSessionInfo[]> {
+  const token = useAuthStore.getState().accessToken;
+  const resp = await fetch(`${getGatewayUrl()}/api/chat-sessions`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!resp.ok) throw new Error(`GET /api/chat-sessions (admin) -> ${resp.status}`);
+  return resp.json();
+}
+
 interface ProjectGroupStore {
   /** The caller's project group chats, newest activity first. */
   groups: ChatSessionInfo[];
@@ -48,13 +60,19 @@ export const useProjectGroupStore = create<ProjectGroupStore>((set) => ({
   activeGroupId: null,
 
   fetchGroups: async () => {
-    const me = useAuthStore.getState().account?.user_id;
+    const { account } = useAuthStore.getState();
+    const me = account?.user_id;
     if (!me) {
       set({ groups: [] });
       return;
     }
     try {
-      const all = await fetchSessions(me);
+      // Admin sees every project group (cross-account, read-only); a plain
+      // user sees only the groups they belong to.
+      const all =
+        account?.role === "admin"
+          ? await fetchAllGroupSessions()
+          : (await fetchSessions(me)).filter((s) => s.kind === "project_group");
       const groups = all
         .filter((s) => s.kind === "project_group")
         .sort((a, b) => b.last_active_at - a.last_active_at);

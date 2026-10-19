@@ -16,7 +16,7 @@
 import { create } from "zustand";
 import * as pmApi from "../../lib/pm-api";
 import { log } from "../../lib/logger";
-import type { PmProject, UpdateProjectInput } from "../../lib/pm-types";
+import type { PmMemberKind, PmProject, UpdateProjectInput } from "../../lib/pm-types";
 
 interface PmProjectState {
   projects: PmProject[];
@@ -43,8 +43,9 @@ interface PmProjectState {
   selectProject: (pid: string | null) => void;
   createProject: (title: string, description?: string) => Promise<PmProject | null>;
   updateProjectMeta: (pid: string, patch: UpdateProjectInput) => Promise<boolean>;
-  /** 添加项目成员（Agent 实例 ID）。成功返回 true，失败设置 error */
-  addMember: (pid: string, instanceId: string) => Promise<boolean>;
+  /** 添加项目成员。`kind` 区分 Agent 实例 / 人类账号（ADR-076，缺省 agent）。
+   * 成功返回 true，失败设置 error */
+  addMember: (pid: string, instanceId: string, kind?: PmMemberKind) => Promise<boolean>;
   /** 移除项目成员。成员名下有未完成任务时服务端返回 409 */
   removeMember: (pid: string, instanceId: string) => Promise<boolean>;
   deleteProject: (pid: string) => Promise<boolean>;
@@ -130,9 +131,12 @@ export const usePmProjectStore = create<PmProjectState>((set, get) => ({
     }
   },
 
-  addMember: async (pid, instanceId) => {
+  addMember: async (pid, instanceId, kind) => {
     try {
-      const updated = await pmApi.addProjectMember(pid, { instance_id: instanceId });
+      const updated = await pmApi.addProjectMember(pid, {
+        instance_id: instanceId,
+        ...(kind ? { kind } : {}),
+      });
       set((s) => ({
         projects: s.projects.map((p) => (p.id === pid ? updated : p)),
         selected: s.selected?.id === pid ? updated : s.selected,

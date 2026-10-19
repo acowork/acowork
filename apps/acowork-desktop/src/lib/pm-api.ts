@@ -113,7 +113,7 @@ export function deleteProject(pid: string) {
 
 // ── Project Members ───────────────────────────────────────────────────
 
-/** 添加项目成员（Agent 实例）。重复添加 → 409 member_already_exists */
+/** 添加项目成员（Agent 实例或人类账号，input.kind）。重复添加 → 409 member_already_exists */
 export function addProjectMember(pid: string, input: AddProjectMemberInput) {
   return request<PmProject>(`/projects/${encodeURIComponent(pid)}/members`, {
     method: "POST",

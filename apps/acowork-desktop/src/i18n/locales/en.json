@@ -1670,7 +1670,9 @@
     "members": "Members",
     "manageMembers": "Manage members",
     "memberManagerTitle": "Project members",
-    "memberManagerHint": "Select Agent instances as project members. Task assignee must be a project member.",
+    "memberManagerHint": "Select Agent instances or user accounts as project members. Task assignee must be a project member.",
+    "agentMembers": "Agent members",
+    "userMembers": "User members",
     "addMember": "Add",
     "noMembers": "No members",
     "memberAdded": "Member added",
@@ -1929,6 +1931,14 @@
     "placeholder": "Message the project team",
     "placeholderWithMentions": "Message the team — @Agent to assign work",
     "send": "Send",
-    "emptyTurn": "(no output)"
+    "mentionLabel": "Mention a member",
+    "emptyTurn": "(no output)",
+    "readOnly": "Read-only — you are not a member of this project."
+  },
+  "groupMembers": {
+    "title": "Group members",
+    "searchPlaceholder": "Search members",
+    "add": "Add",
+    "loading": "Loading members…"
   }
 }
