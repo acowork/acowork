@@ -238,14 +238,15 @@ function RowView({ row, agentId, showHeader, answered, onAnswer, onJumpToExec }:
                 </div>
               )}
             </div>
-            {/* Meta row under the bubble — same placement as the user message:
-                the timestamp reveals on hover, next to the drill-into-exec
-                affordance. Keeping it below (not `absolute -top-5`) avoids the
-                overlap with the agent role line in the header above. */}
+            {/* Meta row under the bubble. The timestamp collapses to zero width
+                instead of just going transparent: an invisible span still
+                reserves its width, which is what stranded the button
+                mid-bubble. Collapsed, the button sits on the bubble's left
+                edge and the timestamp unfurls right after it on hover —
+                `justify-between` would fling them to opposite ends of a
+                wide bubble, leaving a gap far larger than the meta row
+                warrants. */}
             <div className="mt-1 flex items-center gap-2">
-              <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
-                {formatBubbleTime(row.ts * 1000)}
-              </span>
               {/* Drill-into-exec affordance — a discrete control, not a
                   whole-bubble click, so selecting the reply text never fires a
                   jump. Present on every agent message with a resolved exec
@@ -255,12 +256,15 @@ function RowView({ row, agentId, showHeader, answered, onAnswer, onJumpToExec }:
                   type="button"
                   onClick={() => onJumpToExec(execSid)}
                   title={t("chatView.viewRun")}
-                  className="inline-flex items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
+                  className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
                 >
                   <ExternalLink size={11} />
                   {t("chatView.viewRun")}
                 </button>
               )}
+              <span className="w-0 shrink overflow-hidden whitespace-nowrap text-10 text-text-tertiary opacity-0 transition-opacity group-hover:w-auto group-hover:opacity-100">
+                {formatBubbleTime(row.ts * 1000)}
+              </span>
             </div>
           </div>
         </div>
