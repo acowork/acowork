@@ -56,12 +56,10 @@ ref-repo/
 *.tsbuildinfo
 
 # Rust test build artifacts
-target-test/
-core/target-test/
-target_test/
-core/target_test/
-# Rust verification build dir (used by build verification scripts)
-target-build-test/
+core/target-*/
+core/target_*/
+target-*/
+target_*/
 
 # Python
 __pycache__/
