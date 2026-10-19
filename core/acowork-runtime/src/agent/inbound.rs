@@ -119,6 +119,9 @@ pub struct IntentEnvelope {
     /// unknown → human-facing tools stay available (fail open).
     #[serde(default)]
     pub has_human: Option<bool>,
+    /// Durable Chat attachment ids referenced by this Intent's user_message.
+    #[serde(default)]
+    pub chat_attachment_ids: Vec<String>,
 }
 
 /// Messages that can be injected into the agent loop from external sources.
@@ -371,6 +374,7 @@ mod tests {
             in_reply_to: String::new(),
             status: String::new(),
             has_human: None,
+            chat_attachment_ids: Vec::new(),
         }));
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
@@ -491,6 +495,7 @@ mod tests {
             in_reply_to: String::new(),
             status: String::new(),
             has_human: None,
+            chat_attachment_ids: Vec::new(),
         }));
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);

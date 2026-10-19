@@ -493,6 +493,7 @@ pub async fn run_cron_scheduler(
                 // Cron triggers carry no Chat session — answerability
                 // unknown → the Runtime keeps human-facing tools.
                 has_human: None,
+                chat_attachment_ids: Vec::new(),
             };
 
             let mailbox = {

@@ -73,6 +73,7 @@ fn req(target: &str) -> DeliveryRequest {
         in_reply_to: String::new(),
         status: String::new(),
         has_human: None,
+        chat_attachment_ids: Vec::new(),
     }
 }
 
@@ -641,6 +642,7 @@ fn intent_wire_fields_roundtrip() {
         in_reply_to: String::new(),
         status: String::new(),
         has_human_participant: None,
+        chat_attachment_ids: vec!["att-1".into()],
     };
     let cmd = ControlCommand {
         instance_id: TARGET.into(),
@@ -666,4 +668,5 @@ fn intent_wire_fields_roundtrip() {
     assert_eq!(back.source_chat_session_id, "ch-1");
     assert_eq!(back.repo, "https://github.com/o/p");
     assert_eq!(back.session_config_json, r#"{"model":"m1"}"#);
+    assert_eq!(back.chat_attachment_ids, vec!["att-1".to_string()]);
 }

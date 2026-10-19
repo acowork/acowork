@@ -146,6 +146,8 @@ pub struct DeliveryRequest {
     /// delivery; `None` = undecidable (no session, legacy rows) → the
     /// Runtime keeps human-facing tools (fail open).
     pub has_human: Option<bool>,
+    /// Chat attachment ids pinned to this user_message row.
+    pub chat_attachment_ids: Vec<String>,
 }
 
 /// Wake-then-deliver one Intent, recording the delivery fact in the
@@ -256,6 +258,7 @@ async fn deliver_inner(
         in_reply_to: req.in_reply_to.clone(),
         status: req.status.clone(),
         has_human_participant: req.has_human,
+        chat_attachment_ids: req.chat_attachment_ids.clone(),
     };
     let command = mqtt_proto::ControlCommand {
         instance_id: instance_id.clone(),
@@ -357,6 +360,7 @@ mod tests {
             in_reply_to: String::new(),
             status: String::new(),
             has_human: None,
+            chat_attachment_ids: Vec::new(),
         }
     }
 

@@ -2627,6 +2627,7 @@ mod tests {
                     in_reply_to: String::new(),
                     status: String::new(),
                     has_human: None,
+                    chat_attachment_ids: Vec::new(),
                 },
             )))
             .unwrap();

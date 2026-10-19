@@ -296,7 +296,7 @@ Concrete wire/schema types will be determined during protocol implementation. Ag
 - size limits are per mime class (image / document); filename length is a display constraint and never enters the path;
 - attachments belong to the Chat session directory, not to an individual participant: a file is addressed jointly by that conversation's participants, and another namespace layer would add lookup cost without adding a boundary.
 
-What the Agent side receives is still a resolved reference; the Runtime does not read Chat session directories. The attachment read path is the same as the message body: through the trusted service that owns the single write entry point.
+What the Agent side receives is still a resolved reference; the Runtime does not read Chat session directories. The attachment read path is the same as the message body: through the trusted service that owns the single write entry point. Delivery carrier: **the MQTT Intent envelope carries attachment ids only - file bytes never ride MQTT messages**. At turn start the Runtime pulls each blob over node-authenticated HTTP (Gateway forwarding the user service's internal streaming endpoint) and materializes it into the agent-home `files/` dir; the user service verifies the durable `user_message` row is addressed to that target and pins that id - the row is the authorization. A failed pull degrades to "this attachment is invisible this turn"; the turn still runs.
 
 #### 4.2.2 Cards
 

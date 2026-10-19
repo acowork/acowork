@@ -24,18 +24,14 @@ use crate::debug::DebugHandles;
 use crate::debug::DebugObserverImpl;
 use crate::usecases::attachment::on_disk_name;
 
-/// A chat-attachment blob the Gateway forwarded for a `chat` action
-/// (design 27 §4.2.1). The Chat session's `files/` dir lives in the user
-/// service home, which the Runtime cannot read, so the Gateway inlines the
-/// bytes as base64 and the turn re-materializes them into the agent-home
-/// `files/` dir via `AttachmentService::upload_file`. `filename` + `mime`
-/// drive the on-disk `format` and the `FileUpload` / `ImageUpload` choice.
+/// A Chat attachment the Runtime pulled over node-auth HTTP from the
+/// Gateway (design 27 §4.2.1). Bytes never ride the MQTT envelope — the
+/// Intent carries ids only; this is what a successful pull yields.
 #[derive(Clone, Debug)]
-pub struct ForwardedAttachmentBlob {
+pub struct PulledAttachment {
     pub filename: String,
     pub mime: String,
-    /// Base64 (standard alphabet) of the raw file bytes.
-    pub base64: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Messages that can be sent to a SessionTask.
@@ -62,14 +58,6 @@ pub enum SessionMessage {
         /// When present, the agent loop constructs a ChatMessage::user_multimodal()
         /// instead of ChatMessage::user(), enabling image inputs to flow to the LLM.
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
-        /// Design 27 §4.2.1 chat-attachment forwarding: blobs the Gateway
-        /// inlined from the Chat session's `files/` dir (base64 bytes +
-        /// filename + mime). The turn materializes each via
-        /// `AttachmentService::upload_file` and folds the resulting
-        /// `AttachedItem` into `attached_items` before the LLM call. Empty
-        /// for execution-surface messages (the desktop uploads straight to
-        /// the Runtime) and for chat messages without attachments.
-        attachment_blobs: Vec<ForwardedAttachmentBlob>,
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
@@ -201,9 +189,9 @@ pub enum SessionMessage {
         action: String,
         repo: String,
         kind: String,
-        /// Design 27 §5.5.4 / plan 2b.3: answerability fact for this turn
-        /// (`None` = unknown → keep human-facing tools).
         has_human: Option<bool>,
+        /// Chat attachment ids from a human Chat message. Runtime pulls from Gateway HTTP.
+        chat_attachment_ids: Vec<String>,
         /// Design 27 §2.1 / §4.1: when this intent opened a *rotated*
         /// successor session, the handoff note describing the session it
         /// replaced. Persisted as a standalone `system` JSONL row (transcript
@@ -225,7 +213,6 @@ impl std::fmt::Debug for SessionMessage {
                 active_skill,
                 attached_items,
                 content_parts,
-                attachment_blobs,
             } => f
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
@@ -236,7 +223,6 @@ impl std::fmt::Debug for SessionMessage {
                     &attached_items.as_ref().map(|c| c.len()).unwrap_or(0),
                 )
                 .field("has_content_parts", &content_parts.is_some())
-                .field("forwarded_blob_count", &attachment_blobs.len())
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::UpdateRuntimeConfig(overrides) => f
@@ -967,31 +953,7 @@ impl SessionTask {
                     active_skill,
                     attached_items,
                     content_parts,
-                    attachment_blobs,
                 }) => {
-                    // Design 27 §4.2.1: materialize Gateway-forwarded chat-
-                    // attachment blobs into the agent-home `files/` dir and
-                    // fold them into `attached_items`. The Chat session's own
-                    // `files/` dir lives in the user service (which the Runtime
-                    // cannot read), so the bytes arrive inlined here and are
-                    // re-uploaded through the SAME `AttachmentService` the
-                    // execution surface uses — a fresh content-hash
-                    // `document_id` that matches the on-disk path the hint
-                    // builder and `doc_reader` resolve. A failure to store one
-                    // blob degrades to "invisible this turn", never a dropped
-                    // turn. Empty blobs (the common execution-surface case)
-                    // short-circuit and leave `attached_items` untouched.
-                    let attached_items = if attachment_blobs.is_empty() {
-                        attached_items
-                    } else {
-                        materialize_forwarded_attachments(
-                            agent_loop.core.attachment_service(),
-                            &session_id,
-                            attached_items,
-                            attachment_blobs,
-                        )
-                        .await
-                    };
                     let has_attached = attached_items.as_ref().is_some_and(|a| !a.is_empty());
                     let has_content_parts = content_parts.as_ref().is_some_and(|p| !p.is_empty());
                     if content.trim().is_empty() && !has_attached && !has_content_parts {
@@ -1276,6 +1238,7 @@ impl SessionTask {
                     repo: _,
                     kind,
                     has_human,
+                        chat_attachment_ids,
                     handoff_note,
                 }) => {
                     // Design 27 §7.1 / plan D-C/C1: the inbound kind
@@ -1357,22 +1320,122 @@ impl SessionTask {
                     // `rotation_handoff` → User replay). `content` stays the
                     // user's clean text for the auto-title and the JSONL `user`
                     // entry (ADR-046).
-                    let llm_message = match handoff_note.as_deref() {
+                    let mut llm_message = match handoff_note.as_deref() {
                         Some(note) => {
                             agent_loop.record_intent_handoff(note, &message_id);
                             format!("{note}\n\n{content}")
                         }
                         None => content.clone(),
                     };
+                    // Design 27 §4.2.1 chat attachments: the Intent carries
+                    // ids only — the bytes are pulled over node-auth HTTP
+                    // through the Gateway (never the MQTT envelope) and
+                    // materialized into the agent-home `files/` dir through
+                    // the SAME `AttachmentService` the execution surface
+                    // uses, so the hint path / `doc_reader` resolve in
+                    // lock-step. A failed pull degrades that ONE attachment
+                    // to "invisible this turn" (the durable chat row still
+                    // records it); the turn must still run.
+                    let mut intent_content_parts: Option<
+                        Vec<acowork_core::providers::traits::ContentPart>,
+                    > = None;
+                    let intent_attached_items: Option<Vec<acowork_core::protocol::AttachedItem>> =
+                        if chat_attachment_ids.is_empty() {
+                            None
+                        } else if source_chat_session_id.is_empty() {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                message_id = %message_id,
+                                "chat attachments carry ids but the Intent has no chat session — skipped"
+                            );
+                            None
+                        } else {
+                            let gateway_host = agent_loop
+                                .core
+                                .config
+                                .gateway_host
+                                .clone()
+                                .unwrap_or_else(|| "127.0.0.1".to_string());
+                            let node_token = agent_loop
+                                .core
+                                .config
+                                .mqtt_password
+                                .clone()
+                                .unwrap_or_default();
+                            let instance = agent_loop.core.config.agent_instance_id.clone();
+                            let mut pulled = Vec::new();
+                            for aid in &chat_attachment_ids {
+                                match crate::agent::intent_turn::pull_chat_attachment(
+                                    &gateway_host,
+                                    &node_token,
+                                    &instance,
+                                    &source_chat_session_id,
+                                    aid,
+                                    &message_id,
+                                )
+                                .await
+                                {
+                                    Ok((filename, mime, bytes)) => pulled.push(PulledAttachment {
+                                        filename,
+                                        mime,
+                                        bytes,
+                                    }),
+                                    Err(e) => tracing::warn!(
+                                        session_id = %session_id,
+                                        attachment_id = %aid,
+                                        error = %e,
+                                        "chat attachment pull failed, turn continues without it"
+                                    ),
+                                }
+                            }
+                            let items = materialize_pulled_attachments(
+                                agent_loop.core.attachment_service(),
+                                &session_id,
+                                pulled,
+                            )
+                            .await;
+                            if items.is_empty() {
+                                None
+                            } else {
+                                llm_message = build_attachment_hint(
+                                    &llm_message,
+                                    Some(&items),
+                                    Some(agent_loop.core.config.work_dir.as_str()),
+                                );
+                                // Images flow to the LLM multimodally, same
+                                // as the execution surface; a derive failure
+                                // only drops the image parts (the file hint
+                                // above already stands).
+                                match crate::agent::attachment_to_image::derive_image_parts(
+                                    agent_loop.core.attachment_service(),
+                                    &items,
+                                )
+                                .await
+                                {
+                                    Ok(derived) => {
+                                        intent_content_parts =
+                                            crate::agent::attachment_to_image::merge_content_parts(
+                                                None, derived,
+                                            )
+                                    }
+                                    Err(e) => tracing::warn!(
+                                        session_id = %session_id,
+                                        error = %e,
+                                        "chat attachment image parts unavailable, documents only"
+                                    ),
+                                }
+                                Some(items)
+                            }
+                        };
                     last_user_message = Some((content.clone(), message_id.clone()));
                     let result = agent_loop
                         .run(
                             &llm_message,
                             &mut context_builder,
-                            None,
+                            intent_content_parts,
                             Some(message_id.clone()),
                             Some(content.as_str()),
-                            None,
+                            intent_attached_items.as_deref(),
                         )
                         .await;
                     // Take both fields back regardless of outcome — the
@@ -2109,53 +2172,38 @@ fn forwarded_format(filename: &str, mime: &str) -> String {
     "bin".to_string()
 }
 
-/// Materialize Gateway-forwarded chat-attachment blobs (design 27 §4.2.1)
-/// into the agent-home `files/` dir and fold them into `attached_items`.
+/// Materialize HTTP-pulled Chat attachments (design 27 §4.2.1) into the
+/// agent-home `files/` dir and fold them into `attached_items`.
 ///
 /// Each blob is re-uploaded through the SAME [`AttachmentService`] the
 /// execution surface uses, so the content-hash `document_id`, the on-disk
 /// name (`on_disk_name`), and the LLM hint / `doc_reader` path all stay in
 /// lock-step — a chat attachment and an execution-view upload of the same
-/// bytes land in exactly the same place. A missing service slot, an
-/// undecodable base64 body, or a store rejection degrades that ONE blob to
-/// "invisible this turn" (a warning, not an error): the durable chat row
-/// already records it, and the turn must still run.
-async fn materialize_forwarded_attachments(
+/// bytes land in exactly the same place. A missing service slot or a store
+/// rejection degrades that ONE blob to "invisible this turn" (a warning,
+/// not an error): the durable chat row already records it, and the turn
+/// must still run.
+async fn materialize_pulled_attachments(
     svc: Option<&Arc<dyn crate::usecases::AttachmentService>>,
     session_id: &str,
-    existing: Option<Vec<acowork_core::protocol::AttachedItem>>,
-    blobs: Vec<ForwardedAttachmentBlob>,
-) -> Option<Vec<acowork_core::protocol::AttachedItem>> {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as BASE64;
+    pulled: Vec<PulledAttachment>,
+) -> Vec<acowork_core::protocol::AttachedItem> {
     let Some(svc) = svc else {
         tracing::warn!(
             session_id = %session_id,
-            blob_count = blobs.len(),
-            "chat attachments: AttachmentService slot not ready, forwarding skipped"
+            blob_count = pulled.len(),
+            "chat attachments: AttachmentService slot not ready, pull skipped"
         );
-        return existing;
+        return Vec::new();
     };
-    let mut out = existing.unwrap_or_default();
-    for blob in blobs {
-        let bytes = match BASE64.decode(&blob.base64) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    filename = %blob.filename,
-                    error = %e,
-                    "chat attachment base64 decode failed, skipping blob"
-                );
-                continue;
-            }
-        };
+    let mut out = Vec::new();
+    for blob in pulled {
         let is_image = blob.mime.starts_with("image/");
         let format = forwarded_format(&blob.filename, &blob.mime);
         let params = crate::usecases::attachment::UploadFileParams {
             filename: blob.filename.clone(),
             format,
-            bytes,
+            bytes: blob.bytes,
             width: None,
             height: None,
         };
@@ -2189,11 +2237,7 @@ async fn materialize_forwarded_attachments(
             ),
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    out
 }
 
 fn build_attachment_hint(
@@ -2548,7 +2592,7 @@ mod tests {
     }
 
     // ── Design 27 §4.2.1 chat-attachment forwarding ──────────────────
-    use super::{forwarded_format, materialize_forwarded_attachments, ForwardedAttachmentBlob};
+    use super::{forwarded_format, materialize_pulled_attachments, PulledAttachment};
 
     #[test]
     fn forwarded_format_prefers_filename_extension() {
@@ -2568,47 +2612,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_without_service_returns_existing() {
-        // The Phase-B slot not ready degrades gracefully: `attached_items`
-        // passes through untouched, a warning is logged, the turn runs.
-        let existing = vec![acowork_core::protocol::AttachedItem::AttachedFile {
-            abs_path: "/work/a.rs".into(),
-            name: "a.rs".into(),
-            client_id: None,
-        }];
-        let blobs = vec![ForwardedAttachmentBlob {
+    async fn materialize_without_service_yields_nothing() {
+        // The Phase-B slot not ready degrades gracefully: the attachments
+        // are invisible this turn (a warning, not an error), the turn runs.
+        let pulled = vec![PulledAttachment {
             filename: "pic.png".into(),
             mime: "image/png".into(),
-            base64: "aGk=".into(),
+            bytes: vec![1, 2, 3],
         }];
-        let out =
-            materialize_forwarded_attachments(None, "s1", Some(existing.clone()), blobs).await;
-        assert_eq!(out, Some(existing));
+        let out = materialize_pulled_attachments(None, "s1", pulled).await;
+        assert!(out.is_empty());
     }
 
     #[tokio::test]
-    async fn materialize_uploads_blobs_into_attached_items() {
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    async fn materialize_uploads_pulled_bytes_into_attached_items() {
         use crate::usecases::{AttachmentService, RuntimeAttachmentService};
         let dir = tempfile::tempdir().unwrap();
         let svc = RuntimeAttachmentService::new(dir.path().to_path_buf());
         let arc: std::sync::Arc<dyn AttachmentService> = std::sync::Arc::new(svc);
         let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
-        let blobs = vec![
-            ForwardedAttachmentBlob {
+        let pulled = vec![
+            PulledAttachment {
                 filename: "pic.png".into(),
                 mime: "image/png".into(),
-                base64: BASE64.encode(&png),
+                bytes: png,
             },
-            ForwardedAttachmentBlob {
+            PulledAttachment {
                 filename: "note.txt".into(),
                 mime: "text/plain".into(),
-                base64: BASE64.encode(b"hi"),
+                bytes: b"hi".to_vec(),
             },
         ];
-        let out = materialize_forwarded_attachments(Some(&arc), "s1", None, blobs)
-            .await
-            .unwrap();
+        let out = materialize_pulled_attachments(Some(&arc), "s1", pulled).await;
         assert_eq!(out.len(), 2);
         // image mime → ImageUpload, everything else → FileUpload.
         assert!(matches!(

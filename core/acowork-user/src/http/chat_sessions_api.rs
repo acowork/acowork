@@ -125,16 +125,9 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/internal/chat-sessions/{session_id}/messages/by-message-id/{message_id}",
             get(system_message_by_id),
         )
-        // Design 27 §4.2.1 chat-attachment forwarding: the Gateway reads one
-        // stored attachment back (metadata + base64 blob) so it can forward
-        // the bytes into the execution turn. Loopback-only, no injected
-        // identity — the caller is the Gateway on this host, exactly like
-        // every other `/internal/chat-sessions` route. Participation is not
-        // re-checked here because the Gateway holds no user identity; the
-        // durable row that already references this id is the authorization.
         .route(
-            "/internal/chat-sessions/{session_id}/files/{attachment_id}",
-            get(system_load_attachment),
+            "/internal/chat-sessions/{session_id}/files/{attachment_id}/{message_id}/{target}",
+            get(system_download_message_attachment),
         )
 }
 
@@ -569,35 +562,43 @@ async fn download_attachment(
     Ok(response)
 }
 
-/// `GET /internal/chat-sessions/{session_id}/files/{attachment_id}` — the
-/// Gateway's system read of one stored attachment (design 27 §4.2.1). Returns
-/// the resolved metadata plus the base64-encoded blob so the Gateway can
-/// forward the bytes to the execution turn (the Chat session's `files/` dir is
-/// in the user-service home, which the Runtime cannot read directly).
-///
-/// No participation check: the caller is the loopback Gateway, which holds no
-/// user identity (ADR-084 §决策 4b), and only the delivery path references an
-/// id already pinned by a durable row. `Ok(None)` from the store answers 404.
-async fn system_load_attachment(
+/// Download one attachment pinned to a specific durable Chat message.
+/// The user service verifies the row's target and attachment membership.
+async fn system_download_message_attachment(
     State(state): State<AppState>,
-    Path((session_id, attachment_id)): Path<(String, String)>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    Path((session_id, attachment_id, message_id, target)): Path<(String, String, String, String)>,
+) -> Result<Response, ApiError> {
     let dir = data_dir(&state)?;
-    let (dir2, sid2, aid2) = (dir.clone(), session_id.clone(), attachment_id.clone());
-    let (attachment, blob_path) = offload(move || chat_sessions::load_attachment(&dir2, &sid2, &aid2))
-        .await?
-        .ok_or_else(|| ApiError::not_found("attachment not found"))?;
-    let bytes = tokio::fs::read(&blob_path)
-        .await
-        .map_err(|e| ApiError::internal(&format!("read {}: {e}", blob_path.display())))?;
-    Ok(Json(serde_json::json!({
-        "id": attachment.id,
-        "filename": attachment.filename,
-        "mime": attachment.mime,
-        "size": attachment.size,
-        "base64": BASE64.encode(bytes),
-    })))
+    let (dir2, sid2, aid2, mid2, target2) =
+        (dir.clone(), session_id.clone(), attachment_id.clone(), message_id.clone(), target.clone());
+    let (attachment, blob_path) = offload(move || -> Result<_, String> {
+        let row = chat_sessions::message_by_id(&dir2, &sid2, &mid2)?
+            .ok_or_else(|| "message not found".to_string())?;
+        if row.kind != "user_message" || row.to != target2 || !row.attachments.iter().any(|a| a.id == aid2) {
+            return Err("attachment is not pinned to this target message".to_string());
+        }
+        chat_sessions::load_attachment(&dir2, &sid2, &aid2)?
+            .ok_or_else(|| "attachment not found".to_string())
+    })
+    .await
+    // Same rule as the user-facing download: a bad session / row / id /
+    // target coordinate is one answer — 404. Existence is not leaked to a
+    // caller the durable row was not addressed to.
+    .map_err(|_| ApiError::not_found("attachment not found"))?;
+    let file = tokio::fs::File::open(&blob_path).await
+        .map_err(|e| ApiError::internal(&format!("open {}: {e}", blob_path.display())))?;
+    let mut response = Response::new(Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+        file, DOWNLOAD_CHUNK_BYTES,
+    )));
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(&attachment.mime)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")));
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from_str(&attachment.size.to_string()).unwrap());
+    headers.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(
+        &crate::chat::content_disposition(&attachment.filename),
+    ).unwrap_or_else(|_| HeaderValue::from_static("attachment")));
+    headers.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
+    Ok(response)
 }
 
 /// `?thumb=1` / `?thumb=true` (same tolerant flag as `chat_api`).
@@ -1733,12 +1734,13 @@ mod tests {
         assert_eq!(json(resp).await.as_array().unwrap().len(), 1);
     }
 
-    /// Design 27 §4.2.1 chat-attachment forwarding: the Gateway-facing
-    /// internal read returns the resolved metadata + a byte-exact base64
-    /// blob, and an unknown id answers 404 (store `Ok(None)`).
+    /// Design 27 §4.2.1 chat-attachment HTTP pull: the Gateway-facing
+    /// internal route streams the byte-exact blob (plus the filename in
+    /// `Content-Disposition`) only when a durable `user_message` row
+    /// addressed to `target` pins the attachment id — the row is the
+    /// authorization. A wrong target or an unknown id answers 404.
     #[tokio::test]
-    async fn internal_attachment_read_returns_metadata_and_base64() {
-        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    async fn internal_attachment_stream_requires_pinned_row() {
         let dir = test_support::temp_dir("chatsessatt");
         let app = router(&dir);
         let admin = login(&app, "root", test_support::PWD).await;
@@ -1792,28 +1794,81 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let attachment_id = json(resp).await["id"].as_str().unwrap().to_string();
 
+        // Pin the attachment to a durable user_message addressed to the
+        // agent instance — exactly what the Gateway writes on delivery.
+        let row_body = serde_json::json!({
+            "session_id": session_id,
+            "message": {
+                "seq": 0,
+                "ts": 0,
+                "from": alice,
+                "to": "agent-1",
+                "kind": "user_message",
+                "body": "see the file",
+                "meta": { "message_id": "m-1" },
+                "attachment_ids": [attachment_id],
+            }
+        })
+        .to_string();
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/messages",
+                Some(&row_body),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Correct coordinates: byte-exact stream + the real filename.
         let resp = app
             .clone()
             .oneshot(req(
                 "GET",
-                &format!("/internal/chat-sessions/{session_id}/files/{attachment_id}"),
+                &format!(
+                    "/internal/chat-sessions/{session_id}/files/{attachment_id}/m-1/agent-1"
+                ),
                 None,
                 None,
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let v = json(resp).await;
-        assert_eq!(v["filename"].as_str(), Some("pic.png"));
-        assert_eq!(v["mime"].as_str(), Some("image/png"));
-        assert_eq!(BASE64.decode(v["base64"].as_str().unwrap()).unwrap(), png);
+        let cd = resp
+            .headers()
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(cd.contains("pic.png"), "filename must ride the header: {cd}");
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], &png[..]);
 
+        // A row addressed to somebody else pins nothing for `agent-2`.
         let resp = app
             .clone()
             .oneshot(req(
                 "GET",
                 &format!(
-                    "/internal/chat-sessions/{session_id}/files/00000000-0000-0000-0000-000000000000"
+                    "/internal/chat-sessions/{session_id}/files/{attachment_id}/m-1/agent-2"
+                ),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // An id the row does not pin: 404, same as a nonexistent one.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/internal/chat-sessions/{session_id}/files/00000000-0000-0000-0000-000000000000/m-1/agent-1"
                 ),
                 None,
                 None,

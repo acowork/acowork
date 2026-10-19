@@ -45,11 +45,14 @@
 //! intent timeout). The mailbox records the fact either way.
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
     http::HeaderMap,
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::http::routes::{ApiError, AppState};
@@ -64,6 +67,10 @@ pub fn intent_routes() -> Router<AppState> {
         .route("/api/intents", post(deliver_intent))
         .route("/api/intents/mentions", post(deliver_mentions))
         .route("/api/intents/chat-message", post(deliver_chat_message))
+        .route(
+            "/api/intents/chat-attachments/{target}/{session_id}/{attachment_id}/{message_id}",
+            get(download_chat_attachment),
+        )
         .route("/api/intents/chat-append", post(chat_append))
         .route("/api/intents/chat-history", get(chat_history_read))
         .route("/api/intents/project-group", post(ensure_project_group))
@@ -348,6 +355,10 @@ async fn dispatch_task(
         status: String::new(),
         // PM dispatch lands in a project group the human owner belongs to.
         has_human: Some(true),
+        // PM attachments live in the PM store, not the Chat session's
+        // `files/` dir — nothing to pin here (the chat row is written with
+        // an empty attachment list too).
+        chat_attachment_ids: Vec::new(),
     };
     let outcome =
         delivery::wake_and_deliver(&ctx, &dreq, acowork_core::timeout_config::constants::INTENT_DEFAULT)
@@ -819,8 +830,8 @@ async fn deliver_intent(
         in_reply_to: String::new(),
         status: String::new(),
         has_human,
+        chat_attachment_ids: Vec::new(),
     };
-
     let outcome = delivery::wake_and_deliver(
         &ctx,
         &dreq,
@@ -1138,6 +1149,7 @@ async fn deliver_response(
         status,
         // Same session the request was bound to — reuse its fact.
         has_human: entry.has_human,
+        chat_attachment_ids: Vec::new(),
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -1335,6 +1347,7 @@ async fn deliver_mentions(
             status: String::new(),
             // A human wrote the row this delivery answers.
             has_human: Some(true),
+            chat_attachment_ids: Vec::new(),
         };
         let outcome = delivery::wake_and_deliver(
             &ctx,
@@ -1525,63 +1538,57 @@ async fn resolve_card_answer(
     }
 }
 
-/// Ceiling on a single forwarded chat-attachment blob (design 27 §4.2.1).
-/// Mirrors the Runtime's `MAX_UPLOAD_BYTES` (50 MiB): the Runtime
-/// re-uploads each forwarded blob into the agent-home `files/` dir and
-/// rejects anything larger, so forwarding a bigger base64 payload would
-/// only bloat the MQTT envelope for a guaranteed drop. The oversized
-/// attachment still lives in the durable chat row for history / download.
-const MAX_FORWARDED_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
-
-/// Read each referenced Chat attachment back from the user service and shape
-/// it into an `attachment_blobs` delivery entry (`{filename, mime, base64}`).
-/// The Runtime materializes these into the agent-home `files/` dir at the
-/// start of the turn (ADR-046 `attached_items`). A failed read or an oversized
-/// blob is skipped with a warning — a chat turn must not fail because one
-/// attachment could not be forwarded; the durable row already records it.
-async fn forward_chat_attachments(
-    port: u16,
-    chat_session_id: &str,
-    attachment_ids: &[String],
-) -> Vec<serde_json::Value> {
-    let mut blobs = Vec::new();
-    for id in attachment_ids {
-        match chat_client::load_attachment(port, chat_session_id, id).await {
-            Ok(att) => {
-                let size = att["size"].as_u64().unwrap_or(0) as usize;
-                let base64 = att["base64"].as_str().unwrap_or_default();
-                if base64.is_empty() {
-                    tracing::warn!(
-                        chat_session_id,
-                        attachment_id = %id,
-                        "chat attachment forward skipped: empty blob"
-                    );
-                    continue;
-                }
-                if size > MAX_FORWARDED_ATTACHMENT_BYTES {
-                    tracing::warn!(
-                        chat_session_id,
-                        attachment_id = %id,
-                        size,
-                        "chat attachment forward skipped: exceeds runtime upload ceiling"
-                    );
-                    continue;
-                }
-                blobs.push(serde_json::json!({
-                    "filename": att["filename"].as_str().unwrap_or_default(),
-                    "mime": att["mime"].as_str().unwrap_or_default(),
-                    "base64": base64,
-                }));
-            }
-            Err(e) => tracing::warn!(
-                chat_session_id,
-                attachment_id = %id,
-                error = %e,
-                "chat attachment read failed — turn continues without it"
-            ),
+/// Stream an attachment pinned to a durable user_message to its target Runtime.
+///
+/// Design 27 §4.2.1: the Intent envelope carries attachment ids only — the
+/// bytes travel over this node-authenticated HTTP pull, never over MQTT.
+/// Authorization mirrors `verify_sender_identity`'s tier discipline: with a
+/// node-token store (multi-machine), the token must resolve to the node
+/// hosting `target`; without one (local single-machine mode) the boundary is
+/// a no-op, same as every other isolation mechanism at that tier. The user
+/// service then re-verifies that the durable row addressed to `target`
+/// actually pins `attachment_id` — an id the agent was never sent 404s.
+async fn download_chat_attachment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((target, session_id, attachment_id, message_id)): Path<(String, String, String, String)>,
+) -> Result<Response, ApiError> {
+    let token = headers.get("x-acowork-node-token").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let gw = state.gateway_state.read().await;
+    if let Some(auth) = gw.mqtt_broker_auth.as_ref() {
+        let store = auth.node_tokens.lock().map_err(|_| ApiError::unauthorized("node token invalid"))?;
+        let node_id = store.node_id_for_token(token).ok_or_else(|| ApiError::unauthorized("node token invalid"))?;
+        let hosted_node = gw.installed_agents.get(&target).map(|a| a.node_id.as_str())
+            .or_else(|| gw.running_agents.get(&target).map(|a| a.node_id.as_str()));
+        if hosted_node != Some(node_id.as_str()) {
+            return Err(ApiError::forbidden("runtime not hosted by authenticated node"));
         }
     }
-    blobs
+    let port = gw.user_process.as_ref().filter(|p| p.ready).map(|p| p.port)
+        .ok_or_else(|| ApiError::service_unavailable("user service unavailable"))?;
+    drop(gw);
+    let upstream = chat_client::download_message_attachment(port, &session_id, &attachment_id, &message_id, &target)
+        .await.map_err(|e| ApiError::not_found(&e))?;
+    // Snapshot the pass-through headers before the body stream consumes
+    // `upstream`.
+    let content_type = upstream.headers().get(axum::http::header::CONTENT_TYPE).cloned();
+    let content_length = upstream.headers().get(axum::http::header::CONTENT_LENGTH).cloned();
+    let content_disposition = upstream.headers().get(axum::http::header::CONTENT_DISPOSITION).cloned();
+    let mut response = Response::new(Body::from_stream(upstream.bytes_stream().map_err(std::io::Error::other)));
+    {
+        let h = response.headers_mut();
+        if let Some(v) = content_type {
+            h.insert(axum::http::header::CONTENT_TYPE, v);
+        }
+        if let Some(v) = content_length {
+            h.insert(axum::http::header::CONTENT_LENGTH, v);
+        }
+        if let Some(v) = content_disposition {
+            h.insert(axum::http::header::CONTENT_DISPOSITION, v);
+        }
+    }
+    response.headers_mut().insert(axum::http::header::X_CONTENT_TYPE_OPTIONS, axum::http::HeaderValue::from_static("nosniff"));
+    Ok(response)
 }
 
 /// `POST /api/intents/chat-message` — a human message in a 1:1
@@ -1745,12 +1752,6 @@ async fn deliver_chat_message(
     // the execution turn materializes them into the agent-home `files/` dir
     // (the Chat session's own dir lives in the user service, which the
     // Runtime cannot read). Empty when the message carries no attachments.
-    let attachment_blobs =
-        forward_chat_attachments(port, &req.chat_session_id, &req.attachment_ids).await;
-    let mut params = serde_json::json!({ "message": req.text });
-    if !attachment_blobs.is_empty() {
-        params["attachment_blobs"] = serde_json::Value::Array(attachment_blobs);
-    }
     // `conversation_id` stays empty: 1:1 continuity lives in the Chat
     // session itself — `routing_key` maps `chat:{session}` onto one
     // execution session (§5.4.4 轮转对单聊生效).
@@ -1761,7 +1762,10 @@ async fn deliver_chat_message(
         from_session_id: String::new(),
         target_instance: target.clone(),
         action: "chat".to_string(),
-        params_json: params.to_string(),
+        params_json: serde_json::json!({
+            "message": req.text,
+            "chat_attachment_ids": req.attachment_ids,
+        }).to_string(),
         source_chat_session_id: req.chat_session_id.clone(),
         repo: repo.clone(),
         session_config_json: req
@@ -1772,8 +1776,8 @@ async fn deliver_chat_message(
         kind: "user_message".to_string(),
         in_reply_to: String::new(),
         status: String::new(),
-        // The 1:1 sender is a human participant.
         has_human: Some(true),
+        chat_attachment_ids: req.attachment_ids.clone(),
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,

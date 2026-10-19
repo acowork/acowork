@@ -220,6 +220,91 @@ pub async fn post_intent_response(
     }
 }
 
+/// Pull one Chat attachment pinned to the durable `user_message` row this
+/// Intent answers (design 27 §4.2.1). The bytes travel over node-auth HTTP
+/// through the Gateway (`GET /api/intents/chat-attachments/…`), never over
+/// MQTT: the Intent envelope carries ids only. The Gateway re-reads the
+/// blob from the user service, which verifies the row is addressed to
+/// `target` and pins `attachment_id` — so an id the agent was never sent
+/// resolves to 404, not to somebody else's file.
+///
+/// Returns `(filename, mime, bytes)`. Filename comes from the streamed
+/// response's `Content-Disposition` (`filename*=UTF-8''` preferred, plain
+/// `filename="…"` fallback, attachment id as last resort).
+pub async fn pull_chat_attachment(
+    gateway_host: &str,
+    node_token: &str,
+    target_instance: &str,
+    chat_session_id: &str,
+    attachment_id: &str,
+    message_id: &str,
+) -> Result<(String, String, Vec<u8>), String> {
+    let url = format!(
+        "http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/chat-attachments/{target_instance}/{chat_session_id}/{attachment_id}/{message_id}"
+    );
+    let mut req = reqwest::Client::new().get(&url);
+    if !node_token.is_empty() {
+        req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, node_token);
+    }
+    let resp = req.send().await.map_err(|e| format!("chat attachment pull failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("chat attachment pull rejected (HTTP {status})"));
+    }
+    let headers = resp.headers().clone();
+    let mime = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let filename = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_filename_from_content_disposition)
+        .unwrap_or_else(|| attachment_id.to_string());
+    let bytes = resp.bytes().await.map_err(|e| format!("chat attachment read failed: {e}"))?;
+    Ok((filename, mime, bytes.to_vec()))
+}
+
+/// Extract the real filename from a `Content-Disposition` value, preferring
+/// the percent-encoded `filename*=UTF-8''…` form (what the user service's
+/// `content_disposition` emits for non-ASCII names).
+fn parse_filename_from_content_disposition(cd: &str) -> Option<String> {
+    if let Some(rest) = cd.to_ascii_lowercase().find("filename*=utf-8''").map(|i| &cd[i + 17..]) {
+        let enc = rest.split(';').next().unwrap_or(rest).trim();
+        return percent_decode(enc);
+    }
+    let (_, after) = cd.split_once("filename=\"")?;
+    let name = after.split('"').next()?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Minimal percent-decoding (UTF-8) for the `filename*` form — the same
+/// charset rules the user service's encoder keeps unescaped.
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// Truncate a response body to the byte ceiling with an explicit marker
 /// (design 27 §5.5.1 length bound; the initiator asks for more with a new
 /// request rather than the wire carrying an unbounded turn).

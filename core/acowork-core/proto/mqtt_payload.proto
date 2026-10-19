@@ -1052,6 +1052,8 @@ message Intent {
   /// (answerability, not role). Absent = unknown (pre-upgrade senders or
   /// chat-less delivery) → fail open, keep the tool. Additive field 13.
   optional bool has_human_participant = 13;
+  /// Runtime runs a node-authenticated HTTP pull for attachment bytes.
+  repeated string chat_attachment_ids = 14;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

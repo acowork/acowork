@@ -83,6 +83,8 @@ pub enum ControlAction {
         /// has a human who can answer a card. `None` = unknown (older
         /// Gateway, or chat-less delivery) → keep human-facing tools.
         has_human: Option<bool>,
+        /// Chat attachment ids from a human message; bytes are pulled over HTTP.
+        chat_attachment_ids: Vec<String>,
     },
 }
 
@@ -118,6 +120,7 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             in_reply_to: intent.in_reply_to,
             status: intent.status,
             has_human: intent.has_human_participant,
+            chat_attachment_ids: intent.chat_attachment_ids,
         },
     };
 

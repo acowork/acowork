@@ -194,6 +194,7 @@ fn control_action_to_inbound(
             in_reply_to,
             status,
             has_human,
+            chat_attachment_ids,
         } => {
             let params: serde_json::Value =
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
@@ -215,6 +216,7 @@ fn control_action_to_inbound(
                     in_reply_to,
                     status,
                     has_human,
+                    chat_attachment_ids,
                 })),
             ))
         }
@@ -887,8 +889,6 @@ async fn dispatch_inbound(
             let mut active_skill: Option<String> = None;
             let mut attached_items: Option<Vec<acowork_core::protocol::AttachedItem>> = None;
             let mut content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>> = None;
-            let mut attachment_blobs: Vec<crate::agent::session::ForwardedAttachmentBlob> =
-                Vec::new();
 
             if !params_json.is_empty()
                 && let Ok(params) = serde_json::from_str::<serde_json::Value>(&params_json)
@@ -914,26 +914,6 @@ async fn dispatch_inbound(
                         .collect();
                     if !parsed.is_empty() {
                         content_parts = Some(parsed);
-                    }
-                }
-                // Design 27 §4.2.1 chat-attachment forwarding: the Gateway
-                // inlines the Chat session's uploaded bytes (the blob lives
-                // in the user-service home, not the agent home). Materialize
-                // them into `attached_items` inside the session task, where
-                // the `AttachmentService` slot and `work_dir` are in scope.
-                if let Some(blobs) = params.get("attachment_blobs").and_then(|v| v.as_array()) {
-                    for b in blobs {
-                        let filename = b["filename"].as_str().unwrap_or_default().to_string();
-                        let mime = b["mime"].as_str().unwrap_or_default().to_string();
-                        let base64 = b["base64"].as_str().unwrap_or_default().to_string();
-                        if base64.is_empty() {
-                            continue;
-                        }
-                        attachment_blobs.push(crate::agent::session::ForwardedAttachmentBlob {
-                            filename,
-                            mime,
-                            base64,
-                        });
                     }
                 }
             }
@@ -976,7 +956,6 @@ async fn dispatch_inbound(
                         active_skill,
                         attached_items,
                         content_parts,
-                        attachment_blobs,
                     },
                 )
                 .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))
@@ -1039,6 +1018,7 @@ async fn route_intent_inbound(
         in_reply_to,
         status,
         has_human,
+        chat_attachment_ids,
     } = *env;
 
     let is_response = kind == "response";
@@ -1099,6 +1079,7 @@ async fn route_intent_inbound(
             kind,
             has_human,
             handoff_note: target.1,
+            chat_attachment_ids,
         },
     )
 }
@@ -1192,6 +1173,7 @@ mod tests {
             in_reply_to: String::new(),
             status: String::new(),
             has_human: None,
+            chat_attachment_ids: Vec::new(),
         })
         .expect("Intent must map");
         assert_eq!(route, "", "cron intent has no target session — system-level");
@@ -1224,6 +1206,7 @@ mod tests {
             in_reply_to: String::new(),
             status: String::new(),
             has_human: None,
+            chat_attachment_ids: Vec::new(),
         })
         .expect("Intent must still map");
 
