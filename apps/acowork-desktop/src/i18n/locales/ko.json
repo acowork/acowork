@@ -235,7 +235,7 @@
     "answer": "답변",
     "replyingTo": "답장 대상",
     "cancelReply": "답장 취소",
-    "emptyReply": "(출력 없이 종료됨)",
+    "emptyReply": "중단됨, 출력 없음",
     "viewRun": "실행 보기",
     "statusCard": {
       "untitled": "제목 없는 실행",

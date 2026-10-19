@@ -235,7 +235,7 @@
     "answer": "回答",
     "replyingTo": "返信対象",
     "cancelReply": "返信をキャンセル",
-    "emptyReply": "（出力なく終了）",
+    "emptyReply": "中断、出力なし",
     "viewRun": "実行を表示",
     "statusCard": {
       "untitled": "無題の実行",

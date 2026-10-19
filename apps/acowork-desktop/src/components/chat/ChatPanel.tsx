@@ -13,7 +13,8 @@ import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
-import { blobToBase64, extensionForMime } from "./clipboardImageExt";
+import { blobToBase64 } from "./clipboardImageExt";
+import { detectPaste } from "./pasteDetect";
 import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
@@ -1800,17 +1801,9 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // and OS-level file drop — all funnel through `uploadFileAtPath` so
   // the UX is identical to the paperclip button.
   //
-  // Why we always defer to the Rust clipboard reader instead of doing
-  // frontend text-shape heuristics: complex agent messages (mermaid,
-  // tables, code blocks) routinely contain lines like `/api/v1/users`,
-  // `D:/data/file.txt`, or `file:///C:/...` inside markdown. Heuristics
-  // that match on `s.startsWith("/")` or `^[A-Za-z]:[\\/]` mis-classify
-  // those as file paths and trigger uploads against strings that are
-  // not real files — producing `os error 53/161` floods and React
-  // duplicate-key warnings when multiple false positives fire in the
-  // same millisecond. Only the OS clipboard API can definitively say
-  // "these are real files", so we treat it as the single source of
-  // truth and skip the frontend heuristics entirely.
+  // Clipboard classification lives in `pasteDetect.ts` (shared with the
+  // Chat composer); its rationale for trusting only the Rust clipboard
+  // reader over text-shape heuristics is documented there.
 
   /**
    * Insert `text` at the textarea's current caret / selection range.
@@ -1844,22 +1837,10 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   );
 
   /**
-   * Paste handler — uploads real files from the OS clipboard; inserts
-   * plain text otherwise.
-   *
-   * Single source of truth for file detection is the Rust command
-   * `get_clipboard_file_paths`, which reads the platform's native
-   * clipboard (Windows CF_HDROP, macOS NSFilenamesPboardType, Linux
-   * text/uri-list) and returns the paths of files the OS confirms are
-   * there. Empty result ⇒ clipboard holds no real files ⇒ fall through
-   * to plain-text insertion.
-   *
-   * `text/plain` is consulted only for the plain-text branch (insertion).
-   * It is NEVER used to detect "paths" — see block comment above.
-   *
-   * `preventDefault` is called whenever we replace the default paste
-   * (file upload or text insertion); otherwise the browser's default
-   * paste runs so the user at least sees *something* happen.
+   * Paste handler — classification lives in `pasteDetect.ts` (shared
+   * with the Chat composer); this is the exec-session consumer: files
+   * upload through `uploadFileAtPath`, images bridge through the Rust
+   * temp-file writer into the same pipeline, text inserts at the caret.
    */
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const cd = e.clipboardData;
@@ -1873,182 +1854,57 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     // `insertTextAtCaret`, producing the clipboard text twice.
     e.preventDefault();
 
-    // Read plain text up front — needed for the "no files" branch.
-    // `text/uri-list` (X11/Wayland file URIs) and `text` are also probed
-    // for completeness, but in Tauri WebViews the dominant case is
-    // `text/plain` carrying the actual content the user copied.
-    const text =
-      cd.getData("text/plain").trim() ||
-      cd.getData("text").trim() ||
-      cd.getData("text/uri-list").trim();
-
-    // ALWAYS ask the Rust backend for real clipboard files. Empty result
-    // means the clipboard does not currently hold any file references,
-    // which is the case for both an empty clipboard AND a clipboard
-    // containing arbitrary text (e.g. a copied agent message).
-    let paths: string[] = [];
-    try {
-      paths = (await invoke<string[]>("get_clipboard_file_paths")) ?? [];
-    } catch (err) {
-      // Non-fatal — surface to the debug log only. The user still gets
-      // their text inserted via the fallback branch below.
-      log.debug("[ChatPanel] get_clipboard_file_paths failed", err);
-    }
-    paths = paths.filter((p): p is string => typeof p === "string" && p.length > 0);
-
-    if (paths.length > 0) {
-      // OS says these are real files — upload them. We deliberately do
-      // NOT also insert the `text/plain` here: when Explorer copies N
-      // files, the text payload is exactly the N paths joined by
-      // newlines, and inserting them would duplicate the upload UX.
-      for (const p of paths) void uploadFileAtPath(p);
-      return;
-    }
-
-    // No real files on the clipboard. If the browser gave us text, insert
-    // it at the caret — this is the dominant case when the user copies
-    // agent output (mermaid / tables / code) and pastes it back.
-    if (text) {
-      insertTextAtCaret(text);
-      return;
-    }
-
-    // Raster image on the clipboard (screenshot tool Ctrl+C). Two
-    // surfaces to try:
-    //
-    //   1. `clipboardData.items` — synchronous, populated by Chromium
-    //      itself when the in-WebView "Copy image" path fires. Saves
-    //      an async roundtrip but is empty for OS screenshot tools
-    //      (which hand the OS a `CF_BITMAP`, not a DOM-serialised
-    //      image).
-    //
-    //   2. `navigator.clipboard.read()` — async, the only path that
-    //      surfaces the OS clipboard's `CF_BITMAP` / `CF_PNG` data
-    //      inside the WebView. The `paste` event is itself the
-    //      user-activation gate that lets `clipboard.read()` succeed
-    //      without a permission prompt.
-    //
-    // The `paste` event also fires before the user's first gesture
-    // expires the activation, so both calls are auth-free here.
-    //
-    // ponytail: WebView2 has surfaced `image/png` from `clipboard.read()`
-    // since Edge 98 (Feb 2022). Tauri v2 requires Edge ≥ 109 (Jan 2023),
-    // so every shipping build supports this. The async fallback path
-    // is unconditional — no version check — because the alternative
-    // (feature-detect) costs a roundtrip on every paste.
-    const imageFromDataTransfer = await extractInlineImage(cd);
-    const imageBlob = imageFromDataTransfer?.blob
-      ?? (await readClipboardImageBlob());
-    if (imageBlob) {
-      const extension = imageFromDataTransfer?.extension
-        ?? extensionForMime(imageBlob.type);
-      // Bridge to the existing path-based upload pipeline: hand the
-      // bytes to the Rust temp-file writer, then feed the returned
-      // path into the same `uploadFileAtPath` the paperclip uses.
-      // The pipeline handles size cap, image dimension probing, and
-      // the pending → done chip transition — see `uploadFileAtPath`.
-      //
-      // Transport is base64, NOT `Array.from(bytes)`: a JSON number
-      // array costs ~4 text bytes + one boxed JS value per image byte,
-      // so a 4K screenshot would stall the WebView main thread.
-      // `readAsDataURL` is native, handles any size, and avoids the
-      // `btoa(String.fromCharCode(...))` chunking trap entirely.
-      try {
-        const path = await invoke<string>("save_clipboard_blob", {
-          dataBase64: await blobToBase64(imageBlob),
-          extension,
-        });
-        void uploadFileAtPath(path);
+    // Detection (OS files / text / screenshot image / name-only files)
+    // lives in `pasteDetect.ts`, shared with the Chat composer.
+    const outcome = await detectPaste(cd);
+    switch (outcome.kind) {
+      case "files":
+        for (const p of outcome.paths) void uploadFileAtPath(p);
         return;
-      } catch (err) {
-        // Failure here is rare (disk full, perms on temp dir) — fall
-        // through to the silent no-op so the user can try a different
-        // paste method. Surface to the debug log so the issue isn't
-        // invisible.
-        log.error("[ChatPanel] save_clipboard_blob failed", err);
-      }
+      case "text":
+        insertTextAtCaret(outcome.text);
+        return;
+      case "image":
+        // Bridge to the existing path-based upload pipeline: hand the
+        // bytes to the Rust temp-file writer, then feed the returned
+        // path into the same `uploadFileAtPath` the paperclip uses.
+        // The pipeline handles size cap, image dimension probing, and
+        // the pending → done chip transition — see `uploadFileAtPath`.
+        //
+        // Transport is base64, NOT `Array.from(bytes)`: a JSON number
+        // array costs ~4 text bytes + one boxed JS value per image byte,
+        // so a 4K screenshot would stall the WebView main thread.
+        // `readAsDataURL` is native, handles any size, and avoids the
+        // `btoa(String.fromCharCode(...))` chunking trap entirely.
+        try {
+          const path = await invoke<string>("save_clipboard_blob", {
+            dataBase64: await blobToBase64(outcome.blob),
+            extension: outcome.extension,
+          });
+          void uploadFileAtPath(path);
+        } catch (err) {
+          // Failure here is rare (disk full, perms on temp dir) — fall
+          // through to the silent no-op so the user can try a different
+          // paste method. Surface to the debug log so the issue isn't
+          // invisible.
+          log.error("[ChatPanel] save_clipboard_blob failed", err);
+        }
+        return;
+      case "fileNames":
+        // Name-only Files (no OS path, unreadable) — insert the names so
+        // the user sees *something* happen.
+        insertTextAtCaret(outcome.names.join("\n"));
+        return;
+      case "nothing":
+        // The clipboard held neither paths nor files nor text nor an
+        // image — we already called preventDefault above, so nothing
+        // pastes. The silent no-op is intentional (and matches the
+        // original comment about "user sees *some* response" — the
+        // previous default-paste fallback was the source of the
+        // double-paste bug).
+        return;
     }
-
-    // Last-resort: some WebViews populate `cd.files` even when
-    // text/plain is empty and CF_HDROP is absent. Each File has only
-    // `name` (no path), so we can't upload — but inserting the
-    // filename gives the user visual feedback.
-    if (cd.files && cd.files.length > 0) {
-      const names = Array.from(cd.files).map((f) => f.name).join("\n");
-      insertTextAtCaret(names);
-      return;
-    }
-    // else: clipboard held neither paths nor files nor text — we
-    // already called preventDefault above, so nothing pastes. The
-    // silent no-op is intentional (and matches the original comment
-    // about "user sees *some* response" — the previous default-paste
-    // fallback was the source of the double-paste bug).
   }, [insertTextAtCaret, uploadFileAtPath]);
-
-/**
- * Try to pull a raster image out of the paste event without an
- * async `clipboard.read()` roundtrip. Modern Chromium populates
- * `clipboardData.items` with `kind=file, type=image/*` for the
- * WebView's own copy-to-clipboard path; third-party screenshot
- * tools (Windows Snipping Tool, Snipaste, ShareX) typically do
- * NOT — they hand the OS a `CF_BITMAP` and the WebView sees no
- * DOM-level image item, only the async `ClipboardItem` surface.
- *
- * Returns the blob + the file extension (without leading dot) the
- * Rust writer should use, or `null` when no inline image is
- * available and the caller should fall back to `clipboard.read()`.
- */
-async function extractInlineImage(
-  cd: DataTransfer,
-): Promise<{ blob: Blob; extension: string } | null> {
-  for (let i = 0; i < cd.items.length; i++) {
-    const it = cd.items[i];
-    if (it.kind !== "file") continue;
-    const type = it.type;
-    if (!type.startsWith("image/")) continue;
-    const file = it.getAsFile();
-    if (!file) continue;
-    return { blob: file, extension: extensionForMime(type) };
-  }
-  return null;
-}
-
-/**
- * Pull a raster image `Blob` from the OS clipboard via the async
- * Clipboard API. Returns `null` if the clipboard holds no image or
- * the API is denied (the latter is rare in Tauri WebView2 but we
- * log it so the cause is visible during debugging).
- *
- * Preference order: `image/png` (lossless, native WebView2 surface
- * for the Windows Snipping Tool since 22H2), then any other raster
- * MIME the OS provides. We do NOT request `text/html` / `text/plain`
- * here — the synchronous `text` branch above already handled that.
- */
-async function readClipboardImageBlob(): Promise<Blob | null> {
-  if (typeof navigator === "undefined" || !navigator.clipboard?.read) {
-    return null;
-  }
-  try {
-    const items = await navigator.clipboard.read();
-    // Prefer PNG so the bytes are lossless and the existing image
-    // pipeline (which probes width/height via `new Image()`) gets a
-    // format the runtime accepts without conversion.
-    const pngItem = items.find((it) => it.types.includes("image/png"));
-    const anyImageItem = items.find((it) =>
-      it.types.some((t) => t.startsWith("image/")),
-    );
-    const picked = pngItem ?? anyImageItem;
-    if (!picked) return null;
-    const mime = picked.types.find((t) => t.startsWith("image/")) ?? "image/png";
-    return await picked.getType(mime);
-  } catch (err) {
-    log.debug(
-      "[ChatPanel] navigator.clipboard.read() failed (no image on clipboard, or permission denied)",
-      err,
-    );
-    return null;
-  }
-}
 
   /**
    * Right-click handler — always opens our custom context menu because

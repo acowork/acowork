@@ -235,7 +235,7 @@
     "answer": "回答",
     "replyingTo": "回覆對象",
     "cancelReply": "取消回覆",
-    "emptyReply": "（已結束，無輸出）",
+    "emptyReply": "已中斷，無輸出",
     "viewRun": "檢視執行",
     "statusCard": {
       "untitled": "未命名執行",

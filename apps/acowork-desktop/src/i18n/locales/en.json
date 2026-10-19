@@ -141,7 +141,7 @@
     "answer": "Answer",
     "replyingTo": "Replying to",
     "cancelReply": "Cancel reply",
-    "emptyReply": "(ended with no output)",
+    "emptyReply": "Interrupted, no output",
     "viewRun": "View run",
     "statusCard": {
       "untitled": "Untitled run",

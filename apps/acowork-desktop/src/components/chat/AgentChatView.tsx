@@ -32,6 +32,7 @@
 // click → `chatStore.openSession(agentId, execSid)` + mode flip.
 
 import { Children, isValidElement, useEffect, useMemo, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -43,6 +44,8 @@ import { Tooltip } from "../common/Tooltip";
 import { UserAvatar } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { CodeBlock } from "./CodeBlock";
+import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { detectPaste } from "./pasteDetect";
 import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
@@ -113,6 +116,9 @@ function ChatMarkdown({ content }: { content: string }) {
 interface RowProps {
   row: ChatMessageRow;
   agentId: string;
+  /** Chat session the row belongs to — attachment thumbnails are addressed
+   *  through it (the `files/` dir is session-scoped, §4.2.1). */
+  chatSessionId: string;
   showHeader: boolean;
   /** Drill into the execution session that produced this agent message.
    *  Every `agent_message` with a resolved exec session id is clickable —
@@ -121,7 +127,7 @@ interface RowProps {
   onJumpToExec: (execSid: string) => void;
 }
 
-function RowView({ row, agentId, showHeader, onJumpToExec }: RowProps) {
+function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
@@ -178,27 +184,40 @@ function RowView({ row, agentId, showHeader, onJumpToExec }: RowProps) {
         )}
         <div className="flex items-start gap-2">
           <div className="w-10 shrink-0" />
-          <div className="group min-w-0">
-            <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
-              {failed && (
-                <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
-                  {row.meta?.status}
-                </div>
-              )}
-              {row.body && <ChatMarkdown content={row.body} />}
-              {/* A turn can end with an empty response body — a stop after the
-                  intent already routed back writes an `agent_message` with no
-                  text (§5.5.5). Render a placeholder instead of a blank bubble
-                  so the user sees the run ended with nothing, not a glitch. */}
-              {!row.body && !row.attachments?.length && (
-                <span className="italic text-text-tertiary">{t("chatView.emptyReply")}</span>
-              )}
-              {row.attachments && row.attachments.length > 0 && (
-                <div className="mt-1 text-10 text-text-tertiary">
-                  {row.attachments.map((a) => a.filename).join(", ")}
-                </div>
-              )}
-            </div>
+          {/* The percentage line-length clamp belongs on this shrink-wrap
+              group (resolved against the wide row), exactly like the user
+              row's `max-w-[85%]`. On the bubble itself it double-clamps:
+              the group hugs the text, then 70%-of-that cuts the bubble
+              narrower than its own content and the text overflows right. */}
+          <div className="group min-w-0 max-w-[var(--content-max-width)]">
+            {/* `inline-block`: the bubble hugs its text (symmetric padding,
+                no width jump when the hover timestamp widens the group). */}
+            {/* Attachment chips above the bubble, left-aligned — the mirror
+                of the user row; the bubble never wraps them. An attachments-
+                only reply paints chips alone, no empty bubble. */}
+            {row.attachments && row.attachments.length > 0 && (
+              <div className="mb-1 flex flex-wrap gap-1.5">
+                {row.attachments.map((a) => (
+                  <ChatAttachmentChip key={a.id} chatSessionId={chatSessionId} attachment={a} />
+                ))}
+              </div>
+            )}
+            {(row.body || failed || !row.attachments?.length) && (
+              <div className="inline-block rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
+                {failed && (
+                  <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
+                    {row.meta?.status}
+                  </div>
+                )}
+                {row.body && <ChatMarkdown content={row.body} />}
+                {/* A manually stopped turn writes back an `agent_message` with
+                    no body (§5.5.5). Render a placeholder instead of a blank
+                    bubble so the user sees the run was interrupted, not a glitch. */}
+                {!row.body && !row.attachments?.length && (
+                  <span className="italic text-text-tertiary whitespace-nowrap">{t("chatView.emptyReply")}</span>
+                )}
+              </div>
+            )}
             {/* Meta row under the bubble. The timestamp collapses to zero width
                 instead of just going transparent: an invisible span still
                 reserves its width, which is what stranded the button
@@ -242,16 +261,21 @@ function RowView({ row, agentId, showHeader, onJumpToExec }: RowProps) {
             <span className="mt-[2px] text-xs text-text-tertiary ">{profile.displayName}</span>
           )}
           <div className="group mt-[6px] max-w-[85%] flex flex-col items-start">
-            <div className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
-              <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
-                {row.body}
-                {row.attachments && row.attachments.length > 0 && (
-                  <div className="mt-1 text-10 opacity-70">
-                    {row.attachments.map((a) => a.filename).join(", ")}
-                  </div>
-                )}
+            {/* Attachment chips — independent units above the text bubble,
+                right-aligned: same grammar as the execution session's
+                `UserWithAttachmentsBubble`. The bubble never wraps them. */}
+            {row.attachments && row.attachments.length > 0 && (
+              <div className="mb-1 flex flex-wrap justify-end gap-1.5 self-end">
+                {row.attachments.map((a) => (
+                  <ChatAttachmentChip key={a.id} chatSessionId={chatSessionId} attachment={a} />
+                ))}
               </div>
-            </div>
+            )}
+            {row.body && (
+              <div className="rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
+                <div className="px-4 py-2.5 whitespace-pre-wrap break-words">{row.body}</div>
+              </div>
+            )}
             <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
             </span>
@@ -382,10 +406,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     void sendText(sessionId, text, replyTo, sessionConfig, attachmentIds);
   };
 
-  // Upload each chosen file into the session's `files/` dir and stack a chip.
-  const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
-    e.target.value = ""; // allow re-picking the same file
+  // Upload each chosen file into the session's `files/` dir and stack a
+  // chip. Shared by the paperclip picker and the paste handler.
+  const uploadFiles = async (files: File[]) => {
     if (files.length === 0) return;
     setUploading(true);
     try {
@@ -397,6 +420,84 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       console.warn("[AgentChatView] attachment upload failed:", err);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-picking the same file
+    await uploadFiles(files);
+  };
+
+  /** Insert `text` at the textarea's caret / selection range (same
+   *  caret-aware shape the execution composer uses). */
+  const insertTextAtCaret = (text: string) => {
+    const ta = textareaRef.current;
+    const current = ta?.value ?? input;
+    if (!ta) {
+      setInput(current + text);
+      return;
+    }
+    const start = ta.selectionStart ?? current.length;
+    const end = ta.selectionEnd ?? current.length;
+    setInput(current.slice(0, start) + text + current.slice(end));
+    const caret = start + text.length;
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(caret, caret);
+    });
+  };
+
+  // Ctrl+V parity with the execution composer: files, images and OS
+  // screenshots paste straight into the attachment tray; plain text
+  // inserts at the caret. Classification is shared (`pasteDetect.ts`) —
+  // including its rule that only the Rust clipboard reader decides
+  // "these are real files". preventDefault ALWAYS runs (every branch
+  // inserts itself; letting the browser default paste fire alongside is
+  // the known double-paste bug in Tauri WebViews).
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    e.preventDefault();
+    const outcome = await detectPaste(cd);
+    switch (outcome.kind) {
+      case "files": {
+        // OS file paths → bytes via the asset protocol (scope `**`) →
+        // File objects into the same upload pipeline as the paperclip.
+        const files: File[] = [];
+        for (const p of outcome.paths) {
+          try {
+            const resp = await fetch(convertFileSrc(p));
+            if (!resp.ok) throw new Error(`asset fetch → ${resp.status}`);
+            const blob = await resp.blob();
+            const name = p.replace(/^.*[\\/]/, "") || "attachment";
+            files.push(new File([blob], name, { type: blob.type || "application/octet-stream" }));
+          } catch (err) {
+            console.warn("[AgentChatView] clipboard file unreadable:", p, err);
+          }
+        }
+        void uploadFiles(files);
+        return;
+      }
+      case "image": {
+        // The screenshot bytes are already in the WebView — wrap them as
+        // a File and upload directly; no temp-file roundtrip (the
+        // execution composer needs one only because its pipeline is
+        // path-based).
+        const type = outcome.blob.type || `image/${outcome.extension}`;
+        const name = `screenshot-${Date.now()}.${outcome.extension}`;
+        void uploadFiles([new File([outcome.blob], name, { type })]);
+        return;
+      }
+      case "text":
+        insertTextAtCaret(outcome.text);
+        return;
+      case "fileNames":
+        // Name-only Files (no OS path, unreadable) — surface the names.
+        insertTextAtCaret(outcome.names.join("\n"));
+        return;
+      case "nothing":
+        return;
     }
   };
 
@@ -463,6 +564,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             key={`${r.seq}`}
             row={r}
             agentId={agentId}
+            chatSessionId={sessionId}
             showHeader={
               r.kind === "agent_message" && rows[i - 1]?.kind !== "agent_message"
             }
@@ -532,24 +634,15 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           </div>
         )}
         {pendingAttachments.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 px-3 pt-2">
+          <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
             {pendingAttachments.map((a) => (
-              <span
+              <ChatAttachmentChip
                 key={a.id}
-                className="inline-flex items-center gap-1 rounded bg-panel-inset px-2 py-0.5 text-xs text-text-secondary"
-              >
-                <span className="max-w-[12rem] truncate" title={a.filename}>
-                  {a.filename}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => removeAttachment(a.id)}
-                  aria-label={t("chatPanel.removeAttachment")}
-                  className="text-text-tertiary transition-colors hover:text-text-primary"
-                >
-                  ×
-                </button>
-              </span>
+                chatSessionId={sessionId}
+                attachment={a}
+                onRemove={() => removeAttachment(a.id)}
+                removeLabel={t("chatPanel.removeAttachment")}
+              />
             ))}
           </div>
         )}
@@ -571,6 +664,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           onCompositionEnd={() => {
             lastCompositionEndRef.current = Date.now();
           }}
+          onPaste={handlePaste}
         />
         {/* Bottom toolbar — same layout as the execution composer. Model /
             reasoning / workspace are WRITABLE: a pick becomes a per-message

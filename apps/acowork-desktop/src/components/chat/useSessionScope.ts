@@ -89,7 +89,9 @@ export function useSessionScope(
   const [pendingAttachedItems, setPendingAttachedItems] = useState<PendingAttachedItem[]>([]);
   const [showImageUnsupportedDialog, setShowImageUnsupportedDialog] = useState(false);
   const [imageCapableModels, setImageCapableModels] = useState<ModelEntry[]>([]);
-  const [todosCollapsed, setTodosCollapsed] = useState(false);
+  // Todos start collapsed: the header row already carries progress + current
+  // task, so the list only expands when the user clicks the toggle.
+  const [todosCollapsed, setTodosCollapsed] = useState(true);
 
   // ── Reset on session change ──
   useLayoutEffect(() => {
@@ -123,7 +125,7 @@ export function useSessionScope(
     setPendingAttachedItems([]);
     setShowImageUnsupportedDialog(false);
     setImageCapableModels([]);
-    setTodosCollapsed(false);
+    setTodosCollapsed(true);
     onSessionChange?.();
   }, [currentSessionId, onSessionChange]);
 

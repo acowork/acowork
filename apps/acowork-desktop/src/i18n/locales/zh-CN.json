@@ -235,7 +235,7 @@
     "answer": "回答",
     "replyingTo": "回复",
     "cancelReply": "取消回复",
-    "emptyReply": "（已结束，无输出）",
+    "emptyReply": "已中断，无输出",
     "viewRun": "查看执行",
     "statusCard": {
       "untitled": "未命名执行",

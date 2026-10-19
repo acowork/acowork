@@ -245,18 +245,23 @@ async function uploadChatAttachment(
 }
 
 /** Attachment download needs the bearer token, so `<img src>` cannot work
- *  — hand out object URLs the same way `user-chat-api.ts` does. */
+ *  — hand out object URLs the same way `user-chat-api.ts` does. `thumb`
+ *  serves the upload-time thumbnail sidecar (a 4K screenshot costs a few
+ *  KB instead of the full blob) — 404 when the attachment has no sidecar,
+ *  callers fall back to the full download. */
 const objectUrlCache = new Map<string, string>();
 export async function chatAttachmentObjectUrl(
   chatSessionId: string,
   attachmentId: string,
+  opts?: { thumb?: boolean },
 ): Promise<string> {
-  const key = `${chatSessionId}/${attachmentId}`;
+  const thumb = opts?.thumb === true;
+  const key = `${chatSessionId}/${attachmentId}${thumb ? "/thumb" : ""}`;
   const hit = objectUrlCache.get(key);
   if (hit) return hit;
   const token = useAuthStore.getState().accessToken;
   const resp = await fetch(
-    `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/files/${encodeURIComponent(attachmentId)}`,
+    `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/files/${encodeURIComponent(attachmentId)}${thumb ? "?thumb=1" : ""}`,
     { headers: token ? { Authorization: `Bearer ${token}` } : {} },
   );
   if (!resp.ok) throw new Error(`attachment → ${resp.status}`);
