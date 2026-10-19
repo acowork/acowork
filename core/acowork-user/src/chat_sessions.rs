@@ -1550,6 +1550,23 @@ pub fn sync_group(
     if s.participants != before {
         save(&dir, &s)?;
         reindex(data_dir, &s.session_id, Some(&before), &s.participants)?;
+        // §6.1 doorbell (same rule as `append_message`): a participant-set
+        // change is a backend-driven refresh — every human surface viewing
+        // this group must re-read. The newcomer discovers the chat (composer
+        // unlocks, it leaves the read-only state), the still-listed members
+        // refresh the header's member count, and a removed member drops it.
+        // Notify the new set plus whoever was in `before` but is gone (they
+        // are no longer in the new set, so a removal still reaches them);
+        // each id fires once. Typed agents are skipped (no listener).
+        for p in s
+            .participants
+            .iter()
+            .chain(before.iter().filter(|p| !want.contains(p.id.as_str())))
+        {
+            if p.identity != Some(ParticipantIdentity::Agent) {
+                crate::mqtt_publisher::notify_chat_changed(&p.id);
+            }
+        }
     }
     Ok(s)
 }
@@ -2677,6 +2694,105 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.participants, s2.participants);
+    }
+
+    #[test]
+    fn sync_group_wakes_human_participants_on_change() {
+        // The member-add doorbell (backend drives the frontend refresh): when
+        // a project member is synced into the group's participant set, every
+        // human surface must re-read — the newcomer leaves the read-only
+        // state, the owner's header count refreshes. Typed agents are skipped
+        // and a no-op re-sync stays silent (same rules as `append_message`).
+        use acowork_core::mqtt_proto::user_chat_changed_topic;
+
+        let dir = temp_dir();
+        // Seed the group: a human owner plus an agent.
+        let s = sync_group(
+            &dir,
+            "proj-doorbell",
+            &[
+                Participant::new("owner-h", ParticipantIdentity::Human),
+                Participant::new("ag1", ParticipantIdentity::Agent),
+            ],
+            1,
+        )
+        .unwrap();
+        assert_eq!(s.participants.len(), 2);
+
+        let before = crate::mqtt_publisher::test_signals().len();
+        // A human joins (admin added as a project member).
+        let _ = sync_group(
+            &dir,
+            "proj-doorbell",
+            &[
+                Participant::new("owner-h", ParticipantIdentity::Human),
+                Participant::new("admin-h", ParticipantIdentity::Human),
+                Participant::new("ag1", ParticipantIdentity::Agent),
+            ],
+            2,
+        )
+        .unwrap();
+        let sent = crate::mqtt_publisher::test_signals();
+        let window = &sent[before..];
+        assert!(
+            window.contains(&user_chat_changed_topic("admin-h")),
+            "the newcomer must be signalled: {window:?}"
+        );
+        assert!(
+            window.contains(&user_chat_changed_topic("owner-h")),
+            "the still-listed member refreshes the count: {window:?}"
+        );
+        assert!(
+            !window.contains(&user_chat_changed_topic("ag1")),
+            "typed agent must not be signalled: {window:?}"
+        );
+        // The owner is in both the old and new set, yet fires exactly once.
+        assert_eq!(
+            window
+                .iter()
+                .filter(|t| **t == user_chat_changed_topic("owner-h"))
+                .count(),
+            1,
+            "an unchanged member must not be double-signalled: {window:?}"
+        );
+
+        // A later sync removes a human: the dropped party is gone from the new
+        // set but must still be woken so its surface drops the group.
+        let mid = crate::mqtt_publisher::test_signals().len();
+        let _ = sync_group(
+            &dir,
+            "proj-doorbell",
+            &[
+                Participant::new("owner-h", ParticipantIdentity::Human),
+                Participant::new("ag1", ParticipantIdentity::Agent),
+            ],
+            3,
+        )
+        .unwrap();
+        let sent2 = crate::mqtt_publisher::test_signals();
+        assert!(
+            sent2[mid..].contains(&user_chat_changed_topic("admin-h")),
+            "a removed human must be signalled: {:?}",
+            &sent2[mid..]
+        );
+
+        // Re-syncing the same set converges to no change → no new signal.
+        let mid2 = crate::mqtt_publisher::test_signals().len();
+        let _ = sync_group(
+            &dir,
+            "proj-doorbell",
+            &[
+                Participant::new("owner-h", ParticipantIdentity::Human),
+                Participant::new("ag1", ParticipantIdentity::Agent),
+            ],
+            4,
+        )
+        .unwrap();
+        let sent3 = crate::mqtt_publisher::test_signals();
+        assert!(
+            !sent3[mid2..].contains(&user_chat_changed_topic("owner-h")),
+            "a no-op re-sync must not re-signal"
+        );
     }
 
     // ── Wave 6.2 legacy layout migration ──────────────────────────────
