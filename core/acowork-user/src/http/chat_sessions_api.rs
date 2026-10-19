@@ -125,6 +125,17 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/internal/chat-sessions/{session_id}/messages/by-message-id/{message_id}",
             get(system_message_by_id),
         )
+        // Design 27 §4.2.1 chat-attachment forwarding: the Gateway reads one
+        // stored attachment back (metadata + base64 blob) so it can forward
+        // the bytes into the execution turn. Loopback-only, no injected
+        // identity — the caller is the Gateway on this host, exactly like
+        // every other `/internal/chat-sessions` route. Participation is not
+        // re-checked here because the Gateway holds no user identity; the
+        // durable row that already references this id is the authorization.
+        .route(
+            "/internal/chat-sessions/{session_id}/files/{attachment_id}",
+            get(system_load_attachment),
+        )
 }
 
 // ── Request / response types ──────────────────────────────────────────
@@ -556,6 +567,37 @@ async fn download_attachment(
         HeaderValue::from_static("nosniff"),
     );
     Ok(response)
+}
+
+/// `GET /internal/chat-sessions/{session_id}/files/{attachment_id}` — the
+/// Gateway's system read of one stored attachment (design 27 §4.2.1). Returns
+/// the resolved metadata plus the base64-encoded blob so the Gateway can
+/// forward the bytes to the execution turn (the Chat session's `files/` dir is
+/// in the user-service home, which the Runtime cannot read directly).
+///
+/// No participation check: the caller is the loopback Gateway, which holds no
+/// user identity (ADR-084 §决策 4b), and only the delivery path references an
+/// id already pinned by a durable row. `Ok(None)` from the store answers 404.
+async fn system_load_attachment(
+    State(state): State<AppState>,
+    Path((session_id, attachment_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    let dir = data_dir(&state)?;
+    let (dir2, sid2, aid2) = (dir.clone(), session_id.clone(), attachment_id.clone());
+    let (attachment, blob_path) = offload(move || chat_sessions::load_attachment(&dir2, &sid2, &aid2))
+        .await?
+        .ok_or_else(|| ApiError::not_found("attachment not found"))?;
+    let bytes = tokio::fs::read(&blob_path)
+        .await
+        .map_err(|e| ApiError::internal(&format!("read {}: {e}", blob_path.display())))?;
+    Ok(Json(serde_json::json!({
+        "id": attachment.id,
+        "filename": attachment.filename,
+        "mime": attachment.mime,
+        "size": attachment.size,
+        "base64": BASE64.encode(bytes),
+    })))
 }
 
 /// `?thumb=1` / `?thumb=true` (same tolerant flag as `chat_api`).
@@ -1689,5 +1731,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(json(resp).await.as_array().unwrap().len(), 1);
+    }
+
+    /// Design 27 §4.2.1 chat-attachment forwarding: the Gateway-facing
+    /// internal read returns the resolved metadata + a byte-exact base64
+    /// blob, and an unknown id answers 404 (store `Ok(None)`).
+    #[tokio::test]
+    async fn internal_attachment_read_returns_metadata_and_base64() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        let dir = test_support::temp_dir("chatsessatt");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, _bob_token) = make_user(&app, &admin, "bob").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let session_id = json(resp).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4];
+        let boundary = "----testBoundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"pic.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&png);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/chat-sessions/{session_id}/files"))
+                    .header("authorization", format!("Bearer {alice_token}"))
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let attachment_id = json(resp).await["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/internal/chat-sessions/{session_id}/files/{attachment_id}"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = json(resp).await;
+        assert_eq!(v["filename"].as_str(), Some("pic.png"));
+        assert_eq!(v["mime"].as_str(), Some("image/png"));
+        assert_eq!(BASE64.decode(v["base64"].as_str().unwrap()).unwrap(), png);
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/internal/chat-sessions/{session_id}/files/00000000-0000-0000-0000-000000000000"
+                ),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -262,6 +262,7 @@ impl E2eHarness {
                         active_skill: None,
                         attached_items: None,
                         content_parts: None,
+                        attachment_blobs: Vec::new(),
                     },
                 )
                 .expect("session task accepts the message");

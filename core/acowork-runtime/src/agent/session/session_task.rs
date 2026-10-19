@@ -24,6 +24,20 @@ use crate::debug::DebugHandles;
 use crate::debug::DebugObserverImpl;
 use crate::usecases::attachment::on_disk_name;
 
+/// A chat-attachment blob the Gateway forwarded for a `chat` action
+/// (design 27 §4.2.1). The Chat session's `files/` dir lives in the user
+/// service home, which the Runtime cannot read, so the Gateway inlines the
+/// bytes as base64 and the turn re-materializes them into the agent-home
+/// `files/` dir via `AttachmentService::upload_file`. `filename` + `mime`
+/// drive the on-disk `format` and the `FileUpload` / `ImageUpload` choice.
+#[derive(Clone, Debug)]
+pub struct ForwardedAttachmentBlob {
+    pub filename: String,
+    pub mime: String,
+    /// Base64 (standard alphabet) of the raw file bytes.
+    pub base64: String,
+}
+
 /// Messages that can be sent to a SessionTask.
 #[derive(Clone)]
 pub enum SessionMessage {
@@ -48,6 +62,14 @@ pub enum SessionMessage {
         /// When present, the agent loop constructs a ChatMessage::user_multimodal()
         /// instead of ChatMessage::user(), enabling image inputs to flow to the LLM.
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+        /// Design 27 §4.2.1 chat-attachment forwarding: blobs the Gateway
+        /// inlined from the Chat session's `files/` dir (base64 bytes +
+        /// filename + mime). The turn materializes each via
+        /// `AttachmentService::upload_file` and folds the resulting
+        /// `AttachedItem` into `attached_items` before the LLM call. Empty
+        /// for execution-surface messages (the desktop uploads straight to
+        /// the Runtime) and for chat messages without attachments.
+        attachment_blobs: Vec<ForwardedAttachmentBlob>,
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
@@ -203,6 +225,7 @@ impl std::fmt::Debug for SessionMessage {
                 active_skill,
                 attached_items,
                 content_parts,
+                attachment_blobs,
             } => f
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
@@ -213,6 +236,7 @@ impl std::fmt::Debug for SessionMessage {
                     &attached_items.as_ref().map(|c| c.len()).unwrap_or(0),
                 )
                 .field("has_content_parts", &content_parts.is_some())
+                .field("forwarded_blob_count", &attachment_blobs.len())
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::UpdateRuntimeConfig(overrides) => f
@@ -943,7 +967,31 @@ impl SessionTask {
                     active_skill,
                     attached_items,
                     content_parts,
+                    attachment_blobs,
                 }) => {
+                    // Design 27 §4.2.1: materialize Gateway-forwarded chat-
+                    // attachment blobs into the agent-home `files/` dir and
+                    // fold them into `attached_items`. The Chat session's own
+                    // `files/` dir lives in the user service (which the Runtime
+                    // cannot read), so the bytes arrive inlined here and are
+                    // re-uploaded through the SAME `AttachmentService` the
+                    // execution surface uses — a fresh content-hash
+                    // `document_id` that matches the on-disk path the hint
+                    // builder and `doc_reader` resolve. A failure to store one
+                    // blob degrades to "invisible this turn", never a dropped
+                    // turn. Empty blobs (the common execution-surface case)
+                    // short-circuit and leave `attached_items` untouched.
+                    let attached_items = if attachment_blobs.is_empty() {
+                        attached_items
+                    } else {
+                        materialize_forwarded_attachments(
+                            agent_loop.core.attachment_service(),
+                            &session_id,
+                            attached_items,
+                            attachment_blobs,
+                        )
+                        .await
+                    };
                     let has_attached = attached_items.as_ref().is_some_and(|a| !a.is_empty());
                     let has_content_parts = content_parts.as_ref().is_some_and(|p| !p.is_empty());
                     if content.trim().is_empty() && !has_attached && !has_content_parts {
@@ -2042,6 +2090,112 @@ fn refresh_builtin_tools_dependents(core: &mut AgentCore, context_builder: &mut 
 // between the upload pipeline and the read tool. Keeping the call here
 // in lock-step with `on_disk_name` is what guarantees the path string
 // the LLM receives matches the actual file on disk.
+/// Derive the on-disk `format` (lowercase extension, no dot) for a
+/// Gateway-forwarded chat attachment. Prefers the filename extension — the
+/// same source the execution surface's multipart upload feeds the store —
+/// and falls back to a MIME subtype when the name carries no dot. Unknown
+/// values are fine: `safe_extension` collapses anything off the whitelist to
+/// `bin`, exactly as a direct execution-view upload would.
+fn forwarded_format(filename: &str, mime: &str) -> String {
+    if let Some(ext) = filename.rsplit('.').next().filter(|e| !e.is_empty() && *e != filename) {
+        return ext.to_ascii_lowercase();
+    }
+    if let Some(sub) = mime.split('/').nth(1) {
+        let sub = sub.split(';').next().unwrap_or(sub);
+        if !sub.is_empty() {
+            return sub.to_ascii_lowercase();
+        }
+    }
+    "bin".to_string()
+}
+
+/// Materialize Gateway-forwarded chat-attachment blobs (design 27 §4.2.1)
+/// into the agent-home `files/` dir and fold them into `attached_items`.
+///
+/// Each blob is re-uploaded through the SAME [`AttachmentService`] the
+/// execution surface uses, so the content-hash `document_id`, the on-disk
+/// name (`on_disk_name`), and the LLM hint / `doc_reader` path all stay in
+/// lock-step — a chat attachment and an execution-view upload of the same
+/// bytes land in exactly the same place. A missing service slot, an
+/// undecodable base64 body, or a store rejection degrades that ONE blob to
+/// "invisible this turn" (a warning, not an error): the durable chat row
+/// already records it, and the turn must still run.
+async fn materialize_forwarded_attachments(
+    svc: Option<&Arc<dyn crate::usecases::AttachmentService>>,
+    session_id: &str,
+    existing: Option<Vec<acowork_core::protocol::AttachedItem>>,
+    blobs: Vec<ForwardedAttachmentBlob>,
+) -> Option<Vec<acowork_core::protocol::AttachedItem>> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    let Some(svc) = svc else {
+        tracing::warn!(
+            session_id = %session_id,
+            blob_count = blobs.len(),
+            "chat attachments: AttachmentService slot not ready, forwarding skipped"
+        );
+        return existing;
+    };
+    let mut out = existing.unwrap_or_default();
+    for blob in blobs {
+        let bytes = match BASE64.decode(&blob.base64) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    filename = %blob.filename,
+                    error = %e,
+                    "chat attachment base64 decode failed, skipping blob"
+                );
+                continue;
+            }
+        };
+        let is_image = blob.mime.starts_with("image/");
+        let format = forwarded_format(&blob.filename, &blob.mime);
+        let params = crate::usecases::attachment::UploadFileParams {
+            filename: blob.filename.clone(),
+            format,
+            bytes,
+            width: None,
+            height: None,
+        };
+        match svc.upload_file(params).await {
+            Ok(resp) => {
+                out.push(if is_image {
+                    acowork_core::protocol::AttachedItem::ImageUpload {
+                        document_id: resp.document_id,
+                        filename: resp.filename,
+                        format: resp.format,
+                        size_bytes: resp.size_bytes,
+                        width: None,
+                        height: None,
+                        client_id: None,
+                    }
+                } else {
+                    acowork_core::protocol::AttachedItem::FileUpload {
+                        document_id: resp.document_id,
+                        filename: resp.filename,
+                        format: resp.format,
+                        size_bytes: resp.size_bytes,
+                        client_id: None,
+                    }
+                });
+            }
+            Err(e) => tracing::warn!(
+                session_id = %session_id,
+                filename = %blob.filename,
+                error = %e,
+                "chat attachment store failed, turn continues without it"
+            ),
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
 fn build_attachment_hint(
     user_content: &str,
     items: Option<&[acowork_core::protocol::AttachedItem]>,
@@ -2391,5 +2545,82 @@ mod tests {
         // With only a folder (no hintable items) we return verbatim
         // — the user text must NOT be polluted with an empty hint block.
         assert_eq!(s, "x");
+    }
+
+    // ── Design 27 §4.2.1 chat-attachment forwarding ──────────────────
+    use super::{forwarded_format, materialize_forwarded_attachments, ForwardedAttachmentBlob};
+
+    #[test]
+    fn forwarded_format_prefers_filename_extension() {
+        assert_eq!(forwarded_format("report.PDF", "application/pdf"), "pdf");
+        assert_eq!(forwarded_format("shot.png", "image/png"), "png");
+    }
+
+    #[test]
+    fn forwarded_format_falls_back_to_mime_subtype() {
+        // A name with no extension derives `format` from the MIME subtype.
+        assert_eq!(forwarded_format("noext", "image/jpeg"), "jpeg");
+    }
+
+    #[test]
+    fn forwarded_format_defaults_to_bin_when_nothing_usable() {
+        assert_eq!(forwarded_format("", ""), "bin");
+    }
+
+    #[tokio::test]
+    async fn materialize_without_service_returns_existing() {
+        // The Phase-B slot not ready degrades gracefully: `attached_items`
+        // passes through untouched, a warning is logged, the turn runs.
+        let existing = vec![acowork_core::protocol::AttachedItem::AttachedFile {
+            abs_path: "/work/a.rs".into(),
+            name: "a.rs".into(),
+            client_id: None,
+        }];
+        let blobs = vec![ForwardedAttachmentBlob {
+            filename: "pic.png".into(),
+            mime: "image/png".into(),
+            base64: "aGk=".into(),
+        }];
+        let out =
+            materialize_forwarded_attachments(None, "s1", Some(existing.clone()), blobs).await;
+        assert_eq!(out, Some(existing));
+    }
+
+    #[tokio::test]
+    async fn materialize_uploads_blobs_into_attached_items() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        use crate::usecases::{AttachmentService, RuntimeAttachmentService};
+        let dir = tempfile::tempdir().unwrap();
+        let svc = RuntimeAttachmentService::new(dir.path().to_path_buf());
+        let arc: std::sync::Arc<dyn AttachmentService> = std::sync::Arc::new(svc);
+        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+        let blobs = vec![
+            ForwardedAttachmentBlob {
+                filename: "pic.png".into(),
+                mime: "image/png".into(),
+                base64: BASE64.encode(&png),
+            },
+            ForwardedAttachmentBlob {
+                filename: "note.txt".into(),
+                mime: "text/plain".into(),
+                base64: BASE64.encode(b"hi"),
+            },
+        ];
+        let out = materialize_forwarded_attachments(Some(&arc), "s1", None, blobs)
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        // image mime → ImageUpload, everything else → FileUpload.
+        assert!(matches!(
+            &out[0],
+            acowork_core::protocol::AttachedItem::ImageUpload { filename, .. } if filename == "pic.png"
+        ));
+        assert!(matches!(
+            &out[1],
+            acowork_core::protocol::AttachedItem::FileUpload { filename, .. } if filename == "note.txt"
+        ));
+        // The blobs landed in the agent-home `files/` dir.
+        let files_dir = dir.path().join("files");
+        assert!(std::fs::read_dir(&files_dir).unwrap().count() >= 2);
     }
 }

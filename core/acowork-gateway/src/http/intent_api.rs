@@ -1383,6 +1383,13 @@ pub struct ChatMessageRequest {
     /// session is created there).
     #[serde(default)]
     pub session_config: Option<serde_json::Value>,
+    /// Design 27 §4.2.1: ids of attachments already uploaded to this Chat
+    /// session's `files/` dir. The Gateway pins them on the durable
+    /// `user_message` row (so history renders and downloads them) and
+    /// forwards their bytes into the execution turn (design 27 §4.2.1
+    /// chat-attachment path). Empty = a plain text message.
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
 }
 
 /// §5.5.4 answer channel: the Runtime resolve endpoint and body a card
@@ -1518,6 +1525,65 @@ async fn resolve_card_answer(
     }
 }
 
+/// Ceiling on a single forwarded chat-attachment blob (design 27 §4.2.1).
+/// Mirrors the Runtime's `MAX_UPLOAD_BYTES` (50 MiB): the Runtime
+/// re-uploads each forwarded blob into the agent-home `files/` dir and
+/// rejects anything larger, so forwarding a bigger base64 payload would
+/// only bloat the MQTT envelope for a guaranteed drop. The oversized
+/// attachment still lives in the durable chat row for history / download.
+const MAX_FORWARDED_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+
+/// Read each referenced Chat attachment back from the user service and shape
+/// it into an `attachment_blobs` delivery entry (`{filename, mime, base64}`).
+/// The Runtime materializes these into the agent-home `files/` dir at the
+/// start of the turn (ADR-046 `attached_items`). A failed read or an oversized
+/// blob is skipped with a warning — a chat turn must not fail because one
+/// attachment could not be forwarded; the durable row already records it.
+async fn forward_chat_attachments(
+    port: u16,
+    chat_session_id: &str,
+    attachment_ids: &[String],
+) -> Vec<serde_json::Value> {
+    let mut blobs = Vec::new();
+    for id in attachment_ids {
+        match chat_client::load_attachment(port, chat_session_id, id).await {
+            Ok(att) => {
+                let size = att["size"].as_u64().unwrap_or(0) as usize;
+                let base64 = att["base64"].as_str().unwrap_or_default();
+                if base64.is_empty() {
+                    tracing::warn!(
+                        chat_session_id,
+                        attachment_id = %id,
+                        "chat attachment forward skipped: empty blob"
+                    );
+                    continue;
+                }
+                if size > MAX_FORWARDED_ATTACHMENT_BYTES {
+                    tracing::warn!(
+                        chat_session_id,
+                        attachment_id = %id,
+                        size,
+                        "chat attachment forward skipped: exceeds runtime upload ceiling"
+                    );
+                    continue;
+                }
+                blobs.push(serde_json::json!({
+                    "filename": att["filename"].as_str().unwrap_or_default(),
+                    "mime": att["mime"].as_str().unwrap_or_default(),
+                    "base64": base64,
+                }));
+            }
+            Err(e) => tracing::warn!(
+                chat_session_id,
+                attachment_id = %id,
+                error = %e,
+                "chat attachment read failed — turn continues without it"
+            ),
+        }
+    }
+    blobs
+}
+
 /// `POST /api/intents/chat-message` — a human message in a 1:1
 /// user-agent Chat session, the Agent page's default conversation
 /// (design 27 §5.4.4). The message is **not** an Intent request: it
@@ -1542,8 +1608,10 @@ async fn deliver_chat_message(
             "chat message sender must match the authenticated user",
         ));
     }
-    if req.text.trim().is_empty() {
-        return Err(ApiError::bad_request("a chat message needs text"));
+    if req.text.trim().is_empty() && req.attachment_ids.is_empty() {
+        return Err(ApiError::bad_request(
+            "a chat message needs text or an attachment",
+        ));
     }
     // design 27 §4.5: reject a malformed session_config before the durable
     // row is written (same gate as `intent_send`) so a bad suggestion cannot
@@ -1634,7 +1702,7 @@ async fn deliver_chat_message(
             kind: "user_message".to_string(),
             body: req.text.clone(),
             meta,
-            attachment_ids: Vec::new(),
+            attachment_ids: req.attachment_ids.clone(),
         },
     )
     .await
@@ -1672,6 +1740,17 @@ async fn deliver_chat_message(
         mqtt: Some(mqtt),
         mailbox: mailbox.as_deref(),
     };
+    // Design 27 §4.2.1 chat-attachment forwarding: read the referenced
+    // attachments back and inline their bytes into the delivery params so
+    // the execution turn materializes them into the agent-home `files/` dir
+    // (the Chat session's own dir lives in the user service, which the
+    // Runtime cannot read). Empty when the message carries no attachments.
+    let attachment_blobs =
+        forward_chat_attachments(port, &req.chat_session_id, &req.attachment_ids).await;
+    let mut params = serde_json::json!({ "message": req.text });
+    if !attachment_blobs.is_empty() {
+        params["attachment_blobs"] = serde_json::Value::Array(attachment_blobs);
+    }
     // `conversation_id` stays empty: 1:1 continuity lives in the Chat
     // session itself — `routing_key` maps `chat:{session}` onto one
     // execution session (§5.4.4 轮转对单聊生效).
@@ -1682,7 +1761,7 @@ async fn deliver_chat_message(
         from_session_id: String::new(),
         target_instance: target.clone(),
         action: "chat".to_string(),
-        params_json: serde_json::json!({ "message": req.text }).to_string(),
+        params_json: params.to_string(),
         source_chat_session_id: req.chat_session_id.clone(),
         repo: repo.clone(),
         session_config_json: req

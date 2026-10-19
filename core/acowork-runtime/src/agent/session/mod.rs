@@ -13,4 +13,4 @@ pub mod session_task;
 pub use session_manager::{
     SessionLifecycleState, SessionManager, SessionManagerConfig, SessionOpenOutcome,
 };
-pub use session_task::SessionMessage;
+pub use session_task::{ForwardedAttachmentBlob, SessionMessage};

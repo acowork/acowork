@@ -202,6 +202,28 @@ pub async fn load_session(port: u16, session_id: &str) -> Result<SessionInfo, St
     read_json(resp).await
 }
 
+/// `GET /internal/chat-sessions/{id}/files/{aid}` — read one stored
+/// attachment back (resolved metadata + base64 blob), design 27 §4.2.1.
+/// The Gateway uses this on the chat-message delivery path to forward a
+/// Chat session's uploaded bytes into the execution turn: the blob lives
+/// in the user-service home, which the Runtime cannot read directly, so
+/// the Gateway inlines it. Returns the raw JSON value `{filename, mime,
+/// size, base64}` for the caller to shape into an `attachment_blobs` entry.
+pub async fn load_attachment(
+    port: u16,
+    session_id: &str,
+    attachment_id: &str,
+) -> Result<serde_json::Value, String> {
+    let resp = client()
+        .get(format!(
+            "http://127.0.0.1:{port}/internal/chat-sessions/{session_id}/files/{attachment_id}"
+        ))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    read_json(resp).await
+}
+
 /// `GET /internal/chat-sessions/{id}/messages/by-message-id/{mid}?who=` —
 /// single-row fetch for the §5.5.4 answer channel: the Gateway resolves
 /// the `interaction_request` card a human's `in_reply_to` points at before
