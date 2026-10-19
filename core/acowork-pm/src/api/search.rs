@@ -188,7 +188,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .add_project_member(&p.id, "agent-1")
+            .add_project_member(&p.id, "agent-1", crate::types::MemberKind::Agent)
             .await
             .unwrap();
         let t = store

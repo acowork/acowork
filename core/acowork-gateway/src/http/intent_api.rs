@@ -96,7 +96,7 @@ async fn ensure_project_group(
     // The caller is a Gateway-managed service, not a user: the node token
     // is the machine credential (same boundary as the runtime-facing
     // intent endpoints; local single-machine mode has no token to present).
-    if !token_presents_node(&state, &headers) {
+    if !token_presents_node(&state, &headers).await {
         return Err(ApiError::unauthorized(
             "project group creation requires a valid node token",
         ));
@@ -137,7 +137,7 @@ async fn sync_project_group(
     headers: HeaderMap,
     Json(req): Json<ProjectGroupRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !token_presents_node(&state, &headers) {
+    if !token_presents_node(&state, &headers).await {
         return Err(ApiError::unauthorized(
             "project group sync requires a valid node token",
         ));
@@ -193,7 +193,7 @@ async fn dispatch_task(
     headers: HeaderMap,
     Json(req): Json<TaskDispatchRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !token_presents_node(&state, &headers) {
+    if !token_presents_node(&state, &headers).await {
         return Err(ApiError::unauthorized(
             "task dispatch requires a valid internal-service token",
         ));
@@ -382,7 +382,12 @@ async fn dispatch_task(
 /// Gateway hands its spawned services (PM today). With neither store
 /// configured (local single-machine mode) the boundary is a no-op — the
 /// same rule every other mechanism applies at that tier.
-fn token_presents_node(state: &AppState, headers: &HeaderMap) -> bool {
+///
+/// Async: `gateway_state` is a `tokio::sync::RwLock`, so this takes the read
+/// lock with `.await`. Every caller is an HTTP handler running on the tokio
+/// runtime — a `blocking_read()` here would panic ("Cannot block the current
+/// thread from within a runtime") and abort the request mid-connection.
+async fn token_presents_node(state: &AppState, headers: &HeaderMap) -> bool {
     let node = headers
         .get("x-acowork-node-token")
         .and_then(|v| v.to_str().ok())
@@ -393,7 +398,7 @@ fn token_presents_node(state: &AppState, headers: &HeaderMap) -> bool {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::trim)
         .unwrap_or("");
-    let gw = state.gateway_state.blocking_read();
+    let gw = state.gateway_state.read().await;
     let has_node_store = gw
         .mqtt_broker_auth
         .as_ref()
@@ -873,7 +878,7 @@ async fn close_task_context(
     headers: HeaderMap,
     Json(req): Json<TaskCloseRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !token_presents_node(&state, &headers) {
+    if !token_presents_node(&state, &headers).await {
         return Err(ApiError::unauthorized(
             "task context close requires a valid internal-service token",
         ));

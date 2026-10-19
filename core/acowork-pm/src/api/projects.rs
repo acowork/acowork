@@ -174,10 +174,12 @@ pub struct DeleteProjectQuery {
 // POST /projects/:pid/members
 // ────────────────────────────────────────────────────────────────────────────
 
-/// 添加项目成员（Agent 实例）。
+/// 添加项目成员（Agent 实例或人类账号，ADR-076 §决策 11）。
 ///
-/// 按 `AgentDirectory::agent_exists`（设计 §9.1 / ADR-073，instance_id 维度）
-/// 校验 Agent 存在；重复添加 → 409 `member_already_exists`。
+/// `kind: "agent"`（缺省）时按 `AgentDirectory::agent_exists`
+/// （设计 §9.1 / ADR-073，instance_id 维度）校验 Agent 存在；
+/// `kind: "user"` 跳过该校验（PM 服务无用户目录，user_id 由前端从
+/// 已认证的账号目录取得）。重复添加 → 409 `member_already_exists`。
 #[tracing::instrument(skip(state, input))]
 pub async fn add_member(
     State(state): State<ApiState>,
@@ -185,8 +187,11 @@ pub async fn add_member(
     Json(input): Json<AddProjectMember>,
 ) -> Result<Json<Project>, crate::error::PmError> {
     let pid = pid.parse::<ProjectId>()?;
-    // 校验 Agent 存在（宽松目录跳过）。成员必须是真实存在的 Agent 实例。
-    if !state.agent_dir.agent_exists(&input.instance_id).await {
+    // 校验 Agent 存在（宽松目录跳过）。Agent 成员必须是真实存在的实例；
+    // 人类成员只受“同一 instance_id 不能重复”约束（store 层）。
+    if input.kind == MemberKind::Agent
+        && !state.agent_dir.agent_exists(&input.instance_id).await
+    {
         return Err(crate::error::PmError::BadRequest(format!(
             "agent instance not found in agent directory: {}",
             input.instance_id
@@ -194,7 +199,7 @@ pub async fn add_member(
     }
     let project = state
         .store
-        .add_project_member(&pid, &input.instance_id)
+        .add_project_member(&pid, &input.instance_id, input.kind)
         .await?;
     // Design 27 Phase 2 + §8.3: a new project member joins the project
     // group chat too. `sync_group` converges the participant set to the

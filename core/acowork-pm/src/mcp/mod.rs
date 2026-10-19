@@ -1036,7 +1036,7 @@ mod tests {
 
         // 联动指派：agent-other 也要是成员才能被指派
         store
-            .add_project_member(&pid.parse().unwrap(), other)
+            .add_project_member(&pid.parse().unwrap(), other, crate::types::MemberKind::Agent)
             .await
             .unwrap();
 
@@ -1292,11 +1292,11 @@ mod tests {
         let pid: ProjectId = pid_str.parse().expect("valid project id");
 
         store
-            .add_project_member(&pid, member_with_role)
+            .add_project_member(&pid, member_with_role, crate::types::MemberKind::Agent)
             .await
             .expect("add member_with_role");
         store
-            .add_project_member(&pid, member_without_role)
+            .add_project_member(&pid, member_without_role, crate::types::MemberKind::Agent)
             .await
             .expect("add member_without_role");
 
@@ -1488,7 +1488,7 @@ mod tests {
         let proj = tool_text(&v);
         let pid_str = proj["id"].as_str().unwrap().to_string();
         let pid: ProjectId = pid_str.parse().unwrap();
-        store.add_project_member(&pid, worker).await.unwrap();
+        store.add_project_member(&pid, worker, crate::types::MemberKind::Agent).await.unwrap();
 
         // pm_create_project 返回值带 created_by_meta
         assert_eq!(proj["created_by"], creator);
@@ -1626,7 +1626,10 @@ mod tests {
         let pid: ProjectId = pid_str.parse().unwrap();
         assert!(proj["created_by_meta"].is_null(), "human creator → null");
         // 加 ghost 为成员（assignee 必须是成员）
-        store.add_project_member(&pid, ghost).await.unwrap();
+        store
+            .add_project_member(&pid, ghost, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
 
         // 已知存在但元信息为 null 的 instance → assignee_meta 也为 null
         let v = call_tool(
@@ -1698,7 +1701,7 @@ mod tests {
         // 不查询，assignee 正常查询
         let ghost = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";
         store
-            .add_project_member(&pid_str.parse().unwrap(), ghost)
+            .add_project_member(&pid_str.parse().unwrap(), ghost, crate::types::MemberKind::Agent)
             .await
             .unwrap();
         let v = call_tool(
@@ -1909,7 +1912,7 @@ mod tests {
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         // 联动指派：agent-other 也要是成员才能被指派
         store
-            .add_project_member(&pid.parse().unwrap(), other)
+            .add_project_member(&pid.parse().unwrap(), other, crate::types::MemberKind::Agent)
             .await
             .unwrap();
         for (i, (title, a)) in [("T1", agent), ("T2", other)].into_iter().enumerate() {

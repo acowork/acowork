@@ -147,10 +147,12 @@ impl PmService {
     /// projects created before per-project group chats existed.
     ///
     /// `ensure_group` is idempotent on `project_id`, so this is safe to run
-    /// on every start. A few retries because at PM start the Gateway/user
-    /// service may still be warming up (the endpoint answers 503 and
-    /// `ensure_group` logs + returns `None`). Best-effort like the
-    /// create-time provisioning: a project without its chat still works.
+    /// on every start. Retries with backoff because at PM start the
+    /// Gateway/user service may still be warming up (the endpoint answers 503
+    /// and `ensure_group` logs + returns `None`) — on a cold start the user
+    /// service can take well over 30s to become ready, so the window is
+    /// generous. Best-effort like the create-time provisioning: a project
+    /// without its chat still works.
     pub fn spawn_group_chat_backfill(self: &Arc<Self>) {
         let Some((gw_url, token)) = self.gateway.clone() else {
             return; // standalone/test mode — no Gateway to provision through
@@ -158,9 +160,11 @@ impl PmService {
         let store = self.store.clone();
         tokio::spawn(async move {
             let client = crate::gateway_client::GatewayClient::new(gw_url, token);
-            for attempt in 0..3u32 {
-                if attempt > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            // Retries at ~0/10/20/40/70/110s — cumulative ~2min warm-up window.
+            let backoffs = [0u64, 10, 20, 30, 40];
+            for (attempt, &delay) in backoffs.iter().enumerate() {
+                if delay > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 }
                 let projects = match store.list_projects().await {
                     Ok(p) => p,

@@ -1421,6 +1421,20 @@ pub fn list_for(data_dir: &Path, participant: &str) -> Result<Vec<ChatSession>, 
     Ok(out)
 }
 
+/// Admin inspection surface (ADR-076 §决策 4): every project group chat,
+/// regardless of who created it. The sidebar lists these to an admin so a
+/// deployment owner can see all project groups, not only the ones their own
+/// account joined. Read is granted project-group-wide in the message path;
+/// posting stays gated on participation. Newest activity first.
+pub fn list_project_groups(data_dir: &Path) -> Vec<ChatSession> {
+    let mut out: Vec<ChatSession> = scan_all_sessions(data_dir)
+        .into_iter()
+        .filter(|s| s.kind == SessionKind::ProjectGroup)
+        .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.last_active_at));
+    out
+}
+
 /// Design 27 §8.3: sync a project group's participant set to exactly
 /// `participants` — ids missing from the session are added, ids absent
 /// from the set are removed. Resolves the session through the project

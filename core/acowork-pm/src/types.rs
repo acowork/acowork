@@ -279,9 +279,14 @@ pub struct Project {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddProjectMember {
-    /// Agent 实例 ID（UUID，ADR-073）。添加前由 API 层按
+    /// Agent 实例 ID（UUID，ADR-073）或 User ID（ADR-076，按 `kind` 解释）。
+    /// `kind: "agent"` 时添加前由 API 层按
     /// `AgentDirectory::agent_exists` 校验存在性。
     pub instance_id: String,
+    /// 身份类型。`#[serde(default)]` = `Agent` → 旧客户端不发 `kind` 时
+    /// 行为与既有契约完全一致（零破坏）。
+    #[serde(default)]
+    pub kind: MemberKind,
 }
 
 /// `POST /api/pm/projects` 请求体。
@@ -609,6 +614,22 @@ mod tests {
 
         let aid = AttachmentId::generate();
         assert!(aid.as_str().starts_with("att-"));
+    }
+
+    /// ADR-076 §决策 11：`POST /members` 请求体的 `kind` 字段——旧客户端
+    /// 不发时缺省为 Agent（零破坏），发 `"user"` 时解析为人类账号。
+    #[test]
+    fn add_project_member_kind_defaults_to_agent() {
+        let legacy: AddProjectMember =
+            serde_json::from_str(r#"{"instance_id":"21a727ee-d2ac-4d7a-9bb1-a846cb34cf3c"}"#)
+                .expect("legacy body without kind");
+        assert_eq!(legacy.kind, MemberKind::Agent);
+
+        let with_user: AddProjectMember = serde_json::from_str(
+            r#"{"instance_id":"21a727ee-d2ac-4d7a-9bb1-a846cb34cf3c","kind":"user"}"#,
+        )
+        .expect("body with kind=user");
+        assert_eq!(with_user.kind, MemberKind::User);
     }
 
     #[test]

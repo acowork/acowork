@@ -54,7 +54,10 @@ const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
 pub fn chat_session_routes() -> Router<AppState> {
     Router::new()
-        .route("/api/chat-sessions", post(create_session))
+        .route(
+            "/api/chat-sessions",
+            post(create_session).get(list_all_project_groups),
+        )
         // Static segment wins over `{participant}` in axum's router.
         .route("/api/chat-sessions/default", get(default_session))
         .route("/api/chat-sessions/{participant}", get(list_sessions))
@@ -312,6 +315,25 @@ async fn list_sessions(
     Ok(Json(sessions))
 }
 
+/// `GET /api/chat-sessions` — admin-only cross-account project-group list
+/// (ADR-076 §决策 4, read-only inspection). The sidebar's own list is
+/// `GET /api/chat-sessions/{me}`, which only returns groups the caller
+/// belongs to; an admin also needs the groups they never joined. Returns
+/// every `project_group` session. Reading their messages is allowed by the
+/// same admin rule in `list_messages`; posting stays participation-gated, so
+/// this is a view, not a way to speak in someone else's project.
+async fn list_all_project_groups(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<Json<Vec<ChatSession>>, ApiError> {
+    if !ctx.is_admin() {
+        return Err(ApiError::forbidden("admin only"));
+    }
+    let dir = data_dir(&state)?;
+    let groups = offload(move || Ok(chat_sessions::list_project_groups(&dir))).await?;
+    Ok(Json(groups))
+}
+
 /// `GET /api/chat-sessions/default?pair=<agent_id>` — resolve the caller's
 /// default Chat session with an agent (design 27 §5.4.4): the Agent page
 /// opens it in one request, idempotently creating the pair on first use.
@@ -353,7 +375,13 @@ async fn list_messages(
     let (messages, total) = {
         let (dir, session_id) = (dir.clone(), session_id.clone());
         let who = ctx.effective_user_id().to_string();
-        offload(move || read_messages_guarded(&dir, &session_id, &who, q.offset, limit)).await?
+        // An admin may read a project group they never joined (the
+        // read-only half of the `GET /api/chat-sessions` admin list).
+        let admin_inspection = ctx.is_admin();
+        offload(move || {
+            read_messages_guarded(&dir, &session_id, &who, admin_inspection, q.offset, limit)
+        })
+        .await?
     };
     // §4.6 (plan 3.6): opening the session is the read that clears the
     // reader's unread. Best-effort — a failed clear only re-shows the
@@ -945,12 +973,18 @@ fn read_messages_guarded(
     dir: &std::path::Path,
     session_id: &str,
     who: &str,
+    admin_inspection: bool,
     offset: usize,
     limit: usize,
 ) -> Result<(Vec<SessionMessage>, u64), String> {
     let session = chat_sessions::load(dir, session_id)?;
     if !session.participants.iter().any(|p| p.id == who) {
-        return Err("not_a_participant".to_string());
+        // Admin read-only inspection covers project groups only — the
+        // deployment owner sees every project's channel, never a private
+        // 1:1 (user_agent / agent_agent) conversation.
+        if !(admin_inspection && session.kind == SessionKind::ProjectGroup) {
+            return Err("not_a_participant".to_string());
+        }
     }
     chat_sessions::read_messages(dir, session_id, offset, limit)
 }

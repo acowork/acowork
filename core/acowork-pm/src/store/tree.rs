@@ -92,11 +92,13 @@ pub trait PmStore: Send + Sync {
 
     // ── Member operations ───────────────────────────────────────────
 
-    /// 添加项目成员（Agent 实例）。重复添加 → [`PmError::MemberAlreadyExists`]。
+    /// 添加项目成员（Agent 实例或人类账号，ADR-076 §决策 11）。
+    /// 重复添加 → [`PmError::MemberAlreadyExists`]。
     async fn add_project_member(
         &self,
         project_id: &ProjectId,
         instance_id: &str,
+        kind: MemberKind,
     ) -> Result<Project>;
     /// 移除项目成员。成员不存在 → [`PmError::MemberNotFound`]；
     /// 该成员名下仍有未完成任务 → [`PmError::MemberHasOpenTasks`]（显式失败）。
@@ -687,6 +689,7 @@ impl PmStore for TreePmStore {
         &self,
         project_id: &ProjectId,
         instance_id: &str,
+        kind: MemberKind,
     ) -> Result<Project> {
         let path = self.project_json_path(project_id);
         let mut project: Project = if fs::try_exists(&path).await? {
@@ -699,7 +702,7 @@ impl PmStore for TreePmStore {
         }
         project.members.push(ProjectMember {
             instance_id: instance_id.to_string(),
-            kind: MemberKind::Agent,
+            kind,
             added_at: Utc::now(),
         });
         project.updated_at = Utc::now();
@@ -1561,7 +1564,10 @@ mod tests {
 
     /// 联动指派测试辅助：把 instance 加为项目成员。
     async fn add_member(store: &TreePmStore, pid: &ProjectId, instance: &str) {
-        store.add_project_member(pid, instance).await.unwrap();
+        store
+            .add_project_member(pid, instance, MemberKind::Agent)
+            .await
+            .unwrap();
     }
 
     /// 人类批准一个 Agent 创建的任务（`review_status: pending → approved`）。
@@ -2388,7 +2394,10 @@ mod tests {
             .unwrap();
         let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
 
-        let updated = store.add_project_member(&p.id, inst).await.unwrap();
+        let updated = store
+            .add_project_member(&p.id, inst, MemberKind::Agent)
+            .await
+            .unwrap();
         // ADR-076 §决策 11: 创建者（human）已是成员，故加 inst 后为 2 人。
         assert_eq!(updated.members.len(), 2);
         assert!(updated.members.iter().any(|m| m.instance_id == inst));
@@ -2397,7 +2406,10 @@ mod tests {
         assert_eq!(reloaded.members.len(), 2, "member must persist to project.json");
 
         // 重复添加 → MemberAlreadyExists
-        let err = store.add_project_member(&p.id, inst).await.unwrap_err();
+        let err = store
+            .add_project_member(&p.id, inst, MemberKind::Agent)
+            .await
+            .unwrap_err();
         assert!(matches!(err, PmError::MemberAlreadyExists(_)));
 
         // 移除 → inst 消失，仅剩创建者
@@ -2411,7 +2423,10 @@ mod tests {
 
         // 项目不存在 → ProjectNotFound
         let ghost = crate::types::ProjectId("p-00000000".into());
-        let err = store.add_project_member(&ghost, inst).await.unwrap_err();
+        let err = store
+            .add_project_member(&ghost, inst, MemberKind::Agent)
+            .await
+            .unwrap_err();
         assert!(matches!(err, PmError::ProjectNotFound(_)));
     }
 
