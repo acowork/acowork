@@ -22,6 +22,34 @@ import { MemberAvatar, useResolvedMembers, type ResolvedMember } from "../../vie
 import { MemberManagerDialog } from "../../views/pm/MemberManagerDialog";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
+import type { PmProject, PmProjectMember } from "../../lib/pm-types";
+
+/**
+ * The group's full member set for display — the project owner PLUS the
+ * recorded members, deduplicated. This mirrors the backend's participant
+ * convergence (`acowork-pm` `group_participants`): a `project_group` chat's
+ * members are the owner and whoever the store recorded, so the chat header
+ * counts the owner. A REST-created project keeps the owner out of `members`
+ * (only the MCP face seeds the creator there), so listing `project.members`
+ * here undercounts the group by one against the header. Folding the owner in
+ * keeps the two in agreement. Exported as a pure function so the rule is
+ * unit-testable without the panel's store graph.
+ *
+ * Display-only: membership is still managed through `project.members`, so the
+ * owner tile is not individually removable via the manager dialog.
+ */
+export function withOwner(
+  project: Pick<PmProject, "created_by" | "created_at" | "members"> | null | undefined,
+): PmProjectMember[] {
+  if (!project) return [];
+  if (project.members.some((m) => m.instance_id === project.created_by)) {
+    return project.members;
+  }
+  return [
+    { instance_id: project.created_by, kind: "user", added_at: project.created_at },
+    ...project.members,
+  ];
+}
 
 interface GroupMembersPanelProps {
   width: number;
@@ -56,7 +84,7 @@ export function GroupMembersPanel({ width, onResizeStart, onClose }: GroupMember
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  const members = useResolvedMembers(project?.members);
+  const members = useResolvedMembers(withOwner(project));
   const filtered = useMemo(() => filterMembers(members, query), [members, query]);
 
   return (
