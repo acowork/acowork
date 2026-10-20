@@ -578,8 +578,20 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         // the backend owns the truth, the frontend just displays it.
         // Fallback to list[0] (system per sort order) when nothing
         // has ever been interacted with.
+        //
+        // A null selectedAgentId is ALSO the legitimate state while a
+        // project group chat or a 1:1 inbox thread owns the middle pane —
+        // the sidebar row handlers clear the agent selection for that
+        // mutual exclusion (see `AgentList`'s group / user rows). Auto-
+        // selecting over one of those would light up two rows and swap the
+        // group/inbox view out for an `AgentPage`, which is exactly what a
+        // remount does on the fetch below when the user switches back to
+        // the chat tab. Only claim the pane when nothing else has it.
         let selId = state.selectedAgentId;
-        if (!selId && list.length > 0) {
+        const paneOwnedByPeer =
+          useProjectGroupStore.getState().activeGroupId != null ||
+          useUserChatStore.getState().activePeerId != null;
+        if (!selId && !paneOwnedByPeer && list.length > 0) {
           let bestId: string | null = null;
           let bestTs = -1;
           for (const a of list) {
