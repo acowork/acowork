@@ -137,11 +137,13 @@
     "processing": "Agent working · click to view the run",
     "queued": "Delivered — waiting for the Agent to start…",
     "cardAnswered": "Answered",
+    "cardClosed": "Closed",
     "freeAnswer": "Free answer",
     "answer": "Answer",
     "replyingTo": "Replying to",
     "cancelReply": "Cancel reply",
     "emptyReply": "Interrupted, no output",
+    "emptyAnswer": "(no content)",
     "viewRun": "View run",
     "statusCard": {
       "untitled": "Untitled run",

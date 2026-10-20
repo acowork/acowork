@@ -1080,6 +1080,7 @@ async fn route_intent_inbound(
             has_human,
             handoff_note: target.1,
             chat_attachment_ids,
+            in_reply_to,
         },
     )
 }

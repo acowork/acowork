@@ -42,9 +42,57 @@ function pickIconId(seed: string): string | null {
   return BUILTIN_ICON_IDS[Math.abs(h) % BUILTIN_ICON_IDS.length] ?? null
 }
 
-/** A card is answered once any later row points at it (§5.5.4). */
-function answeredCardIds(rows: ChatMessageRow[]): Set<string> {
-  return new Set(rows.map((r) => r.meta?.in_reply_to).filter((s): s is string => !!s))
+/**
+ * COPIED VERBATIM from the desktop store's `closedCardIds` — the two apps
+ * must project the same state from the same rows (§5.5.4, plan 5.5 drift
+ * guard).
+ *
+ * A card is no longer answerable when a later row answers it (a human reply
+ * or the Runtime's `interaction_resolved` notice) OR when the turn that
+ * produced it already wrote its terminal `agent_message`: the run is over,
+ * so the request behind the card is dead even if nobody stamped a closure on
+ * it — which is what heals the pre-closure transcripts instead of leaving an
+ * idle status card with a button that can never work.
+ *
+ * `status: "waiting"` (a turn that ended *because* a card stayed open) does
+ * not close anything, and a terminal row only speaks for the card of its own
+ * execution session — a group fan-out answers one trigger from several
+ * agents. Missing session ids fall back to trigger-only matching.
+ */
+export function closedCardIds(rows: ChatMessageRow[]): Set<string> {
+  const closed = new Set(rows.map((r) => r.meta?.in_reply_to).filter((s): s is string => !!s))
+  const terminals = rows
+    .map((r, i) => ({ r, i }))
+    .filter(
+      ({ r }) =>
+        r.kind === 'agent_message' &&
+        !!r.meta?.in_reply_to &&
+        (r.meta?.status ?? 'completed') !== 'waiting',
+    )
+  rows.forEach((card, i) => {
+    if (card.kind !== 'interaction_request') return
+    const mid = card.meta?.message_id
+    if (!mid || closed.has(mid)) return
+    const sid = card.meta?.agent_session_id
+    const finished = terminals.some(
+      ({ r, i: t }) =>
+        t > i &&
+        r.meta?.in_reply_to === card.meta?.in_reply_to &&
+        (!sid || !r.meta?.sender_session_id || r.meta.sender_session_id === sid),
+    )
+    if (finished) closed.add(mid)
+  })
+  return closed
+}
+
+/** Cards a human actually answered — narrows `closed` for the wording. */
+export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
+  return new Set(
+    rows
+      .filter((r) => r.kind === 'user_message')
+      .map((r) => r.meta?.in_reply_to)
+      .filter((s): s is string => !!s),
+  )
 }
 
 export function AgentChatScreen() {
@@ -70,7 +118,8 @@ export function AgentChatScreen() {
   }, [agentId])
 
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win])
-  const answered = useMemo(() => answeredCardIds(rows), [rows])
+  const closed = useMemo(() => closedCardIds(rows), [rows])
+  const answeredHuman = useMemo(() => humanAnsweredCardIds(rows), [rows])
 
   const { ref: scrollRef } = useStickToBottom([rows.length, sessionId], sessionId, () => {
     if (sessionId) void useChatSessionStore.getState().loadOlder(sessionId)
@@ -179,7 +228,8 @@ export function AgentChatScreen() {
                   selfName={myName}
                   agentAvatar={agentAvatar}
                   agentName={agent?.name ?? 'Agent'}
-                  answered={!!(r.meta?.message_id && answered.has(r.meta.message_id))}
+                  closed={!!(r.meta?.message_id && closed.has(r.meta.message_id))}
+                  answered={!!(r.meta?.message_id && answeredHuman.has(r.meta.message_id))}
                   inFlightTrigger={inFlight?.triggerId ?? null}
                   onOpenExec={openExec}
                   onAnswerCard={(card) => setAnswering(card)}
@@ -212,7 +262,8 @@ export function AgentChatScreen() {
         {answering ? (
           <AnswerSheet
             card={answering}
-            answered={!!(answering.meta?.message_id && answered.has(answering.meta.message_id))}
+            closed={!!(answering.meta?.message_id && closed.has(answering.meta.message_id))}
+            answered={!!(answering.meta?.message_id && answeredHuman.has(answering.meta.message_id))}
             onClose={() => setAnswering(null)}
             onAnswer={(text) => send(text, answering.meta?.message_id)}
           />
@@ -233,6 +284,9 @@ interface RowProps {
   selfName: string
   agentAvatar: ReactNode
   agentName: string
+  /** The card can no longer be answered (§5.5.4). */
+  closed: boolean
+  /** ...and a human did answer it — otherwise it just ended. */
   answered: boolean
   inFlightTrigger: string | null
   onOpenExec: (execSid: string) => void
@@ -240,7 +294,7 @@ interface RowProps {
 }
 
 function RowView(props: RowProps) {
-  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, answered, inFlightTrigger, onOpenExec, onAnswerCard } = props
+  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, inFlightTrigger, onOpenExec, onAnswerCard } = props
   if (row.kind === 'user_message' || row.kind === 'agent_message') {
     const fromAgent = row.kind === 'agent_message'
     return (
@@ -275,12 +329,12 @@ function RowView(props: RowProps) {
         <button
           type="button"
           className="chat-card-line-btn"
-          disabled={answered}
+          disabled={closed}
           onClick={() => onAnswerCard(row)}
         >
           <span className="chat-card-tag">{row.meta?.interaction?.kind === 'approval' ? '审批' : '提问'}</span>
           <span className="chat-card-text">{q.length > 34 ? `${q.slice(0, 34)}…` : q}</span>
-          <span className="chat-card-state">{answered ? '已回复' : '去回复'}</span>
+          <span className="chat-card-state">{closed ? (answered ? '已回复' : '已结束') : '去回复'}</span>
         </button>
       </div>
     )
@@ -306,11 +360,11 @@ function RowView(props: RowProps) {
         </div>
       )
     }
-    return (
+    return row.body ? (
       <div className="chat-notice">
-        <span className="chat-notice-pill">{row.body || '系统通知'}</span>
+        <span className="chat-notice-pill">{row.body}</span>
       </div>
-    )
+    ) : null
   }
 
   // Unknown kind (forward-compat): a plain notice line, never a blank hole.
@@ -327,20 +381,23 @@ function RowView(props: RowProps) {
 
 interface SheetProps {
   card: ChatMessageRow
+  /** The card can no longer be answered (§5.5.4) — the sheet is read-only. */
+  closed: boolean
+  /** ...and a human did answer it — otherwise it just ended. */
   answered: boolean
   onClose: () => void
   onAnswer: (text: string) => void
 }
 
-function AnswerSheet({ card, answered, onClose, onAnswer }: SheetProps) {
+function AnswerSheet({ card, closed, answered, onClose, onAnswer }: SheetProps) {
   const [free, setFree] = useState('')
   const interaction = card.meta?.interaction
   const kindLabel = interaction?.kind === 'approval' ? '允许执行？' : '需要你的回答'
   return (
     <Sheet open onClose={onClose} title={kindLabel}>
       <div className="chat-sheet-question">{interaction?.question || card.body}</div>
-      {answered ? (
-        <div className="chat-sheet-answered">该请求已被回复（可能在其他设备上）</div>
+      {closed ? (
+        <div className="chat-sheet-answered">{answered ? '该请求已被回复（可能在其他设备上）' : '该请求已结束，无法再回复'}</div>
       ) : (
         <>
           {(interaction?.options ?? []).map((opt) => (

@@ -231,11 +231,13 @@
     "processing": "Agent 처리 중 · 클릭하면 실행 과정 보기",
     "queued": "전달됨, Agent 시작을 기다리는 중…",
     "cardAnswered": "답변됨",
+    "cardClosed": "종료됨",
     "freeAnswer": "직접 답변",
     "answer": "답변",
     "replyingTo": "답장 대상",
     "cancelReply": "답장 취소",
     "emptyReply": "중단됨, 출력 없음",
+    "emptyAnswer": "(내용 없음)",
     "viewRun": "실행 보기",
     "statusCard": {
       "untitled": "제목 없는 실행",

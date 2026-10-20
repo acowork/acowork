@@ -50,12 +50,26 @@ import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/mar
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ExecSessionStatusCard } from "./ExecSessionStatusCard";
-import { useChatSessionStore, answeredCardIds, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
+import { useChatSessionStore, projectLiveTurn, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useAuthStore } from "../../stores/authStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { getGatewayUrl } from "../../lib/config";
+
+/** i18n key for an empty agent bubble, read off the turn's §7.1 outcome.
+ *
+ *  A stopped run (`aborted`, `timeout`) genuinely produced no output; a run
+ *  that answered `completed` with an empty body said nothing, which is a
+ *  different fact and used to be labelled the same way. `failed` keeps the
+ *  interrupted wording — its body is the error summary, so this path is only
+ *  a fallback. Rows predating the outcome field carry no status and keep the
+ *  historical guess. */
+export function emptyBubbleKey(status?: string): string {
+  return status === "completed" || status === "waiting"
+    ? "chatView.emptyAnswer"
+    : "chatView.emptyReply";
+}
 
 /** Strip common leading whitespace from multi-line strings (same helper
  *  the execution bubbles use for indented code blocks). */
@@ -155,7 +169,11 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec }: RowP
   }
 
   if (row.kind === "agent_message") {
-    const failed = !!row.meta?.status && row.meta.status !== "completed";
+    // §7.1 outcomes: `failed` / `timeout` are errors and wear the error
+    // badge; `aborted` is the user stopping a run — a fact of the transcript,
+    // not an error, so it must not paint red (it used to arrive as an empty
+    // `completed`, which is why stopping looked like a blank reply).
+    const failed = row.meta?.status === "failed" || row.meta?.status === "timeout";
     // The execution session that produced this reply: a 1:1 agent message
     // carries it as `sender_session_id` (the responder's own session); a
     // group / routed reply carries `agent_session_id` (routing-resolved).
@@ -210,11 +228,16 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec }: RowP
                   </div>
                 )}
                 {row.body && <ChatMarkdown content={row.body} />}
-                {/* A manually stopped turn writes back an `agent_message` with
-                    no body (§5.5.5). Render a placeholder instead of a blank
-                    bubble so the user sees the run was interrupted, not a glitch. */}
+                {/* The write-back records which outcome ended the turn (§7.1),
+                    so the placeholder no longer has to guess from an empty
+                    body: a stopped run says "interrupted", an answered one that
+                    had nothing to say says "empty reply". Rows written before
+                    the outcome existed carry no status and keep the old
+                    wording. */}
                 {!row.body && !row.attachments?.length && (
-                  <span className="italic text-text-tertiary whitespace-nowrap">{t("chatView.emptyReply")}</span>
+                  <span className="italic text-text-tertiary whitespace-nowrap">
+                    {t(emptyBubbleKey(row.meta?.status))}
+                  </span>
                 )}
               </div>
             )}
@@ -309,7 +332,6 @@ const EMPTY_DRAFT: ChatSessionConfig = {};
 export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const { t } = useTranslation();
   const win = useChatSessionStore((s) => s.windows[sessionId]);
-  const inFlight = useChatSessionStore((s) => s.inFlight[sessionId] ?? null);
   const sending = !!useChatSessionStore((s) => s.sending[sessionId]);
   // The seed draft is the CACHE of the session row's `session_config`
   // (design 27 §4.5, backend-persisted): hydrated by `openAgent`, updated
@@ -357,22 +379,16 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => (win ? [...win.older, ...win.tail] : []),
     [win],
   );
-  const answered = useMemo(() => answeredCardIds(rows), [rows]);
-
-  // The latest `interaction_request` card, if it is still unanswered — this
+  // The live round — one projection for the status card, drilled from the
+  // rows themselves so the card reacts to the window the user is looking at
+  // rather than to the last refresh tick (§5.5.5).
+  const live = useMemo(() => projectLiveTurn(rows), [rows]);
+  const inFlight = live.inFlight;
+  // The latest `interaction_request` card, if it is still answerable — this
   // is the execute-session projection the unified status card mirrors live
-  // (ask_question / approval). An answered card (or none) yields `null`, so
-  // nothing lingers in the stream (§ 5.5.4: answer-then-done).
-  const pendingCard = useMemo<ChatMessageRow | null>(() => {
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const r = rows[i]!;
-      if (r.kind === "interaction_request") {
-        const mid = r.meta?.message_id;
-        return mid && !answered.has(mid) ? r : null;
-      }
-    }
-    return null;
-  }, [rows, answered]);
+  // (ask_question / approval / pause). A closed card (or none) yields `null`,
+  // so nothing lingers in the stream (§ 5.5.4: answer-then-done).
+  const pendingCard = live.pendingCard;
 
   // Stick to the bottom when new rows land (same simple rule the IM view
   // uses; the execution view's scroll controller is session-stream shaped

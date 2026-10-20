@@ -200,6 +200,11 @@ impl IntentMailbox {
     /// have no answer — the §7.1 crash-fallback candidates. Response
     /// entries and undelivered attempts are never returned: an undelivered
     /// request failed synchronously and its sender already has the error.
+    ///
+    /// The sweeper passes the more permissive of its two windows (response
+    /// deadline, responder-liveness grace) and applies the exact cutoff per
+    /// entry, so the parameter is deliberately not named after either
+    /// meaning.
     pub fn stale_unanswered(&self, older_than: &str) -> Vec<MailboxEntry> {
         let inner = self.inner.lock().unwrap();
         inner

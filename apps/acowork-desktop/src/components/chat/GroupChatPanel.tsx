@@ -16,25 +16,32 @@
  *
  * `ponytail:` ceilings vs the 1:1 surface — no model/workspace seed
  * toolbar (group turns are seeded by the mentioned agent's defaults),
- * no attachments, no scroll-anchored pagination (a "load earlier" button
- * instead). Upgrade path: fold in the seed chips once the mentions
- * channel carries `session_config`.
+ * no scroll-anchored pagination (a "load earlier" button instead). The
+ * composer matches the 1:1 chat surface's attachment abilities: Paperclip
+ * upload + Ctrl+V paste into the session's `files/` dir, ids forwarded on
+ * the mention/archive send. Upgrade path: fold in the seed chips once the
+ * mentions channel carries `session_config`.
  */
 
 import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Send } from "lucide-react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { Send, Paperclip } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
+import { toolbarIconButton } from "../../lib/ui-styles";
 import { getGatewayUrl } from "../../lib/config";
 import { fetchDirectory } from "../../lib/auth-api";
 import type { DirectoryUser } from "../../lib/types";
 import { useStickToBottom } from "../../lib/stickToBottom";
+import { Tooltip } from "../common/Tooltip";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
 import { CodeBlock } from "./CodeBlock";
+import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { detectPaste } from "./pasteDetect";
 import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -42,8 +49,10 @@ import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import {
   useChatSessionStore,
-  answeredCardIds,
+  closedCardIds,
+  humanAnsweredCardIds,
   type ChatMessageRow,
+  type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
 
 // Same markdown shell as AgentChatView's bubbles (kept local on purpose:
@@ -141,7 +150,14 @@ function useParticipantNamer(directory: DirectoryUser[]) {
 interface RowProps {
   row: ChatMessageRow;
   me: string;
+  /** Chat session the row belongs to — attachment thumbnails are addressed
+   *  through it (the `files/` dir is session-scoped, §4.2.1). */
+  chatSessionId: string;
   nameOf: (id: string) => { name: string; isAgent: boolean };
+  /** Cards that can no longer be answered (§5.5.4). */
+  closed: Set<string>;
+  /** The subset the human actually replied to — the line says "Answered",
+   *  anything else that closed (turn ended, timeout, stop) says "Closed". */
   answered: Set<string>;
   onAnswer: (row: ChatMessageRow, text: string) => void;
   /** Admin viewing a group they never joined: cards are shown, never
@@ -149,13 +165,15 @@ interface RowProps {
   readOnly?: boolean;
 }
 
-function GroupRowView({ row, me, nameOf, answered, onAnswer, readOnly }: RowProps) {
+function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, readOnly }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
 
   if (row.kind === "system_notice") {
-    if (row.meta?.notice_type === "turn_started") return null;
+    // Bookkeeping rows — a pointer or a card closure carries no text of its
+    // own, so it never paints a line in the stream.
+    if (row.meta?.notice_type === "turn_started" || !row.body) return null;
     return (
       <div className="py-1 text-center text-10 text-text-tertiary">
         {row.body || row.meta?.status || ""}
@@ -167,10 +185,13 @@ function GroupRowView({ row, me, nameOf, answered, onAnswer, readOnly }: RowProp
     const it = row.meta?.interaction;
     const question = it?.question || row.body;
     const asker = nameOf(row.from);
-    if (answered.has(row.meta?.message_id ?? "")) {
+    if (closed.has(row.meta?.message_id ?? "")) {
       return (
         <div className="mx-6 my-1 rounded-md border border-border-divider bg-chat-bubble px-3 py-2 text-xs text-text-tertiary">
-          {t("chatView.cardAnswered")}: {question}
+          {answered.has(row.meta?.message_id ?? "")
+            ? t("chatView.cardAnswered")
+            : t("chatView.cardClosed")}
+          : {question}
         </div>
       );
     }
@@ -286,7 +307,29 @@ function GroupRowView({ row, me, nameOf, answered, onAnswer, readOnly }: RowProp
             )}
           </div>
         )}
-        <div className="group mt-[6px] flex max-w-[var(--content-max-width)] flex-col items-start">
+        <div
+          className={cn(
+            "group mt-[6px] flex max-w-[var(--content-max-width)] flex-col",
+            own ? "items-end" : "items-start",
+          )}
+        >
+          {/* Attachment chips above the bubble, on the speaker's side — same
+              grammar as the 1:1 chat surface. An attachments-only message
+              paints chips alone and the empty-bubble placeholder is suppressed
+              so the row does not collapse to a blank bubble. */}
+          {row.attachments && row.attachments.length > 0 && (
+            <div
+              className={cn(
+                "mb-1 flex flex-wrap gap-1.5",
+                own ? "justify-end" : "justify-start",
+              )}
+            >
+              {row.attachments.map((a) => (
+                <ChatAttachmentChip key={a.id} chatSessionId={chatSessionId} attachment={a} />
+              ))}
+            </div>
+          )}
+          {(row.body || row.meta?.status || !row.attachments?.length) && (
           <div
             className={cn(
               "rounded-md px-4 py-2.5 leading-relaxed break-words select-text",
@@ -304,6 +347,7 @@ function GroupRowView({ row, me, nameOf, answered, onAnswer, readOnly }: RowProp
               <span className="text-xs text-text-tertiary italic">{t("groupChat.emptyTurn")}</span>
             )}
           </div>
+          )}
           <span className="mt-1 text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
             {formatBubbleTime(row.ts * 1000)}
           </span>
@@ -389,7 +433,9 @@ export function GroupChatPanel() {
   const win = useChatSessionStore(
     (s) => (activeGroupId ? s.windows[activeGroupId] : undefined),
   );
-  const inFlight = useChatSessionStore((s) => (activeGroupId ? s.inFlight[activeGroupId] : null));
+  const inFlight = useChatSessionStore((s) =>
+    activeGroupId ? (s.live[activeGroupId]?.inFlight ?? null) : null,
+  );
   const sending = useChatSessionStore((s) => (activeGroupId ? s.sending[activeGroupId] : false));
 
   const [draft, setDraft] = useState("");
@@ -397,6 +443,12 @@ export function GroupChatPanel() {
   const nameOf = useParticipantNamer(directory);
   const agentsMap = useAgentStore((s) => s.agents);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Composer attachments — uploaded into the group's `files/` dir (§4.2.1)
+  // before send; the send carries their ids so the durable row and each
+  // mentioned agent's execution turn both see them (mirrors AgentChatView).
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentMeta[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // @-mention autocomplete: the active token under the caret + which popup
   // row is highlighted (keyboard nav). `null` = caret is not inside a mention.
@@ -420,9 +472,15 @@ export function GroupChatPanel() {
 
   const rows = useMemo(() => {
     const all = [...(win?.older ?? []), ...(win?.tail ?? [])];
-    return all.filter((r) => !(r.kind === "system_notice" && r.meta?.notice_type === "turn_started"));
+    return all.filter(
+      (r) => !(r.kind === "system_notice" && (r.meta?.notice_type === "turn_started" || !r.body)),
+    );
   }, [win]);
-  const answered = useMemo(() => (win?.tail ? answeredCardIds(win.tail) : new Set<string>()), [win]);
+  const closed = useMemo(() => (win?.tail ? closedCardIds(win.tail) : new Set<string>()), [win]);
+  const answered = useMemo(
+    () => (win?.tail ? humanAnsweredCardIds(win.tail) : new Set<string>()),
+    [win],
+  );
 
   const agentParticipants = useMemo(() => {
     if (!group?.participants) return [];
@@ -463,13 +521,115 @@ export function GroupChatPanel() {
 
   const submit = useCallback(async () => {
     const body = draft.trim();
-    if (!body || !activeGroupId) return;
+    const attachmentIds = pendingAttachments.map((a) => a.id);
+    if ((!body && attachmentIds.length === 0) || !activeGroupId || uploading) return;
     setDraft("");
+    const sentAttachments = pendingAttachments;
+    setPendingAttachments([]);
     stickNow();
     const targets = resolveMentions(body, agentParticipants);
-    const ok = await useChatSessionStore.getState().sendGroupText(activeGroupId, body, targets);
-    if (!ok) setDraft(body);
-  }, [draft, activeGroupId, agentParticipants, stickNow]);
+    const ok = await useChatSessionStore
+      .getState()
+      .sendGroupText(activeGroupId, body, targets, undefined, attachmentIds);
+    // Refund the composer on failure so nothing typed or attached is lost.
+    if (!ok) {
+      setDraft(body);
+      setPendingAttachments(sentAttachments);
+    }
+  }, [draft, activeGroupId, agentParticipants, stickNow, pendingAttachments, uploading]);
+
+  // Upload each chosen file into the group's `files/` dir and stack a chip.
+  // Shared by the paperclip picker and the paste handler (§4.2.1).
+  const uploadFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0 || !activeGroupId) return;
+    setUploading(true);
+    try {
+      for (const f of files) {
+        const meta = await useChatSessionStore.getState().upload(activeGroupId, f);
+        setPendingAttachments((prev) => [...prev, meta]);
+      }
+    } catch (err) {
+      console.warn("[GroupChatPanel] attachment upload failed:", err);
+    } finally {
+      setUploading(false);
+    }
+  }, [activeGroupId]);
+
+  const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-picking the same file
+    await uploadFiles(files);
+  };
+
+  /** Insert `text` at the textarea's caret / selection range, then re-sync
+   *  the mention picker against the new caret. */
+  const insertTextAtCaret = useCallback(
+    (text: string) => {
+      const ta = textareaRef.current;
+      const current = ta?.value ?? draft;
+      if (!ta) {
+        setDraft(current + text);
+        return;
+      }
+      const start = ta.selectionStart ?? current.length;
+      const end = ta.selectionEnd ?? current.length;
+      const next = current.slice(0, start) + text + current.slice(end);
+      setDraft(next);
+      const caret = start + text.length;
+      requestAnimationFrame(() => {
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+        syncMention(next, caret);
+      });
+    },
+    [draft, syncMention],
+  );
+
+  // Ctrl+V parity with the 1:1 chat surface: files, images and OS screenshots
+  // paste into the attachment tray; plain text inserts at the caret. Shared
+  // classification (`pasteDetect.ts`); preventDefault always runs so the
+  // WebView's default paste never double-fires alongside our own handling.
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    e.preventDefault();
+    const outcome = await detectPaste(cd);
+    switch (outcome.kind) {
+      case "files": {
+        const files: File[] = [];
+        for (const p of outcome.paths) {
+          try {
+            const resp = await fetch(convertFileSrc(p));
+            if (!resp.ok) throw new Error(`asset fetch → ${resp.status}`);
+            const blob = await resp.blob();
+            const name = p.replace(/^.*[\\/]/, "") || "attachment";
+            files.push(new File([blob], name, { type: blob.type || "application/octet-stream" }));
+          } catch (err) {
+            console.warn("[GroupChatPanel] clipboard file unreadable:", p, err);
+          }
+        }
+        void uploadFiles(files);
+        return;
+      }
+      case "image": {
+        const type = outcome.blob.type || `image/${outcome.extension}`;
+        const name = `screenshot-${Date.now()}.${outcome.extension}`;
+        void uploadFiles([new File([outcome.blob], name, { type })]);
+        return;
+      }
+      case "text":
+        insertTextAtCaret(outcome.text);
+        return;
+      case "fileNames":
+        insertTextAtCaret(outcome.names.join("\n"));
+        return;
+      case "nothing":
+        return;
+    }
+  };
+
+  const removeAttachment = (id: string) =>
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
 
   const onAnswer = useCallback(
     (row: ChatMessageRow, text: string) => {
@@ -519,7 +679,9 @@ export function GroupChatPanel() {
             key={`${row.seq}-${row.meta?.message_id ?? ""}`}
             row={row}
             me={me}
+            chatSessionId={activeGroupId}
             nameOf={nameOf}
+            closed={closed}
             answered={answered}
             onAnswer={onAnswer}
             readOnly={!canPost}
@@ -539,10 +701,32 @@ export function GroupChatPanel() {
           /* Unified input container — mirrors InboxPanel's composer card (the
              user↔user inbox) so the group chat reads as the same primitive as
              every other chat surface: rounded-xl surface wrapping a borderless
-             textarea, with the send button collapsed to the bottom-right
-             toolbar row. Group chat has no attachments, so the toolbar's left
-             half is empty space (same as the inbox when it has none). */
+             textarea, with the toolbar (Paperclip + send) collapsed to the
+             bottom row. The composer carries attachments like the 1:1 chat
+             surface, so the Paperclip sits just left of the send button. */
           <div className="relative mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg shadow-[0_1px_3px_rgba(0,0,0,0.04)] dark:shadow-[0_1px_3px_rgba(0,0,0,0.4)]">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleFilesChosen}
+            />
+            {/* Pending-attachment tray — chips with a remove affordance,
+                same grammar as the 1:1 chat composer. */}
+            {pendingAttachments.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+                {pendingAttachments.map((a) => (
+                  <ChatAttachmentChip
+                    key={a.id}
+                    chatSessionId={activeGroupId}
+                    attachment={a}
+                    onRemove={() => removeAttachment(a.id)}
+                    removeLabel={t("chatPanel.removeAttachment")}
+                  />
+                ))}
+              </div>
+            )}
             {/* @-mention picker — floats above the composer card (standard IM
                 behavior). `onMouseDown preventDefault` keeps the textarea
                 focused so selecting a row does not blur it first. */}
@@ -637,19 +821,32 @@ export function GroupChatPanel() {
                 }
                 aria-label={t("groupChat.send")}
                 disabled={sending}
+                onPaste={handlePaste}
                 className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
                 style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
               />
             </div>
-            {/* Toolbar row — textarea on top, send grouped at the bottom right
-                (matches the inbox's two-row layout). */}
+            {/* Toolbar row — textarea on top, actions grouped at the bottom
+                right: Paperclip immediately left of Send, the same cluster
+                order the 1:1 chat composer uses (attachment never drifts to
+                the far side). */}
             <div className="flex items-center justify-between gap-2 px-3 pb-2">
               <div />
-              <div className="flex shrink-0 items-center gap-1">
+              <div data-toolbar-cluster="right" className="flex shrink-0 items-center gap-1">
+                <Tooltip content={t("chatPanel.attach")} variant="plain">
+                  <button
+                    className={cn(toolbarIconButton, uploading && "opacity-50")}
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploading || sending}
+                    aria-label={t("chatPanel.attach")}
+                  >
+                    <Paperclip size={16} />
+                  </button>
+                </Tooltip>
                 <button
                   type="button"
                   onClick={() => void submit()}
-                  disabled={!draft.trim() || sending}
+                  disabled={(!draft.trim() && pendingAttachments.length === 0) || sending || uploading}
                   aria-label={t("groupChat.send")}
                   title={t("groupChat.send")}
                   className="rounded-md p-1.5 text-text-tertiary hover:bg-zinc-200 disabled:opacity-50 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"

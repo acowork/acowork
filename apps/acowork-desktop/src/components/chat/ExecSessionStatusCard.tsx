@@ -109,14 +109,17 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill, card, onAnswe
   });
 
   // The exec session's model/provider/workspace/title are authoritative only
-  // on the Runtime's config snapshot. The chat turn's session usually has no
-  // open tab, so nothing else pulls it — fetch it once per turn so the mirror
-  // has real values instead of empty rows. Guarded per execSid.
+  // on the Runtime's config snapshot, and its current status only on the
+  // runtime-state snapshot (a turn that ended before this surface opened has
+  // no `session_state` event to catch). The chat turn's session usually has no
+  // open tab, so nothing else pulls them — fetch both once per turn (ADR-047
+  // cold-load) so the mirror has real values instead of empty rows. Guarded
+  // per execSid.
   const fetchedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!execSid || fetchedRef.current.has(execSid)) return;
     fetchedRef.current.add(execSid);
-    void useChatStore.getState().fetchSessionConfig(agentId, execSid);
+    void useChatStore.getState().loadSession(agentId, execSid);
   }, [agentId, execSid]);
 
   // ── derived: coarse phase → colour + label; current step ──
@@ -256,6 +259,16 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill, card, onAnswe
     needsContinue ||
     !!pausedDetail?.message ||
     (card?.kind === "ask_question" && pendingQuestions.length > 0);
+
+  // Idle ⇒ there is no execution left to mirror. The `turn_started` pointer is
+  // durable, but this card is the LIVE view of the run: once the backend
+  // reports the exec session idle (stopped, or finished without writing its
+  // chat-side terminal row) and nothing is pending on it, the card renders
+  // nothing — a terminal-looking "idle" block is noise, not status. A still
+  // pending action (error / approval / question / continue) keeps the card,
+  // since that surface is the only place the user can act on it. An
+  // unmirrored status (`null`, still resolving) never hides either.
+  if (sessionStatus?.status === "idle" && !hasActions) return null;
 
   return shell(
     <div className="rounded-md border border-border-outer bg-panel-block text-xs">

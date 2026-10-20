@@ -18,6 +18,12 @@
 //! - the receipt id is deterministic (`fallback-{request_id}`), so the
 //!   chat store's `message_id` dedup (§8) makes a retry after a partial
 //!   failure idempotent.
+//!
+//! Two triggers, one pass: the deadline (`[intent] response_timeout_secs`,
+//! default 3600s), and a responder-liveness short-circuit — a request
+//! whose responder Runtime is *known* offline is closed after a 60s grace
+//! instead of waiting out the deadline, because a dead Runtime cannot
+//! write back and the Chat surface would sit on a dead round for an hour.
 
 use std::time::Duration;
 
@@ -28,6 +34,18 @@ use crate::intent::{chat_client, delivery};
 /// How often stale requests are looked for. Cheap (one pass over the
 /// mailbox) and five orders of magnitude below the default deadline.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Grace window before a *provably* dead responder is written off. Short
+/// enough that a crash does not leave the Chat surface hanging, long
+/// enough that a retained-status blip (restart, brief broker disconnect)
+/// never writes a premature `failed` receipt.
+const LIVENESS_GRACE: Duration = Duration::from_secs(60);
+
+/// Fallback wording for the liveness short-circuit — the reason differs,
+/// the shape of the row does not.
+const LIVENESS_BODY: &str = "The responder's runtime is no longer running, so \
+no answer will arrive for this request. This is a system fallback receipt \
+(design 27 §5.5.1).";
 
 /// The §7.1 fixed fallback wording. User-facing text, no internal detail.
 const FALLBACK_BODY: &str = "No answer received before the response deadline — \
@@ -66,10 +84,56 @@ async fn sweep_once(state: &AppState) {
     }
     // RFC3339 cutoff: same UTC clock and format as every mailbox stamp,
     // so the lexicographic compare in `stale_unanswered` is chronological.
-    let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(timeout_secs as i64)).to_rfc3339();
-    for req in mailbox.stale_unanswered(&cutoff) {
-        emit_fallback_receipt(state, &mailbox, user_port, &req).await;
+    let deadline_cutoff =
+        (chrono::Utc::now() - chrono::Duration::seconds(timeout_secs as i64)).to_rfc3339();
+    // A larger cutoff matches more entries, so the scan uses the more
+    // recent of the two windows; this also keeps the short-circuit honest
+    // when `response_timeout_secs` is configured below the grace window.
+    let scan_cutoff = deadline_cutoff
+        .as_str()
+        .max(liveness_grace_cutoff().as_str())
+        .to_string();
+    for req in mailbox.stale_unanswered(&scan_cutoff) {
+        let past_deadline = req.delivered_at.as_str() < deadline_cutoff.as_str();
+        if past_deadline {
+            emit_fallback_receipt(state, &mailbox, user_port, &req, FALLBACK_BODY).await;
+            continue;
+        }
+        // Deadline not reached: only a responder that is demonstrably gone
+        // justifies closing the request early.
+        if responder_gone(state, &req.to_instance).await {
+            emit_fallback_receipt(state, &mailbox, user_port, &req, LIVENESS_BODY).await;
+        }
     }
+}
+
+/// RFC3339 stamp of the liveness grace window — see [`LIVENESS_GRACE`].
+fn liveness_grace_cutoff() -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(LIVENESS_GRACE.as_secs() as i64)).to_rfc3339()
+}
+
+/// Whether the responder can still produce a write-back for itself.
+///
+/// Deliberately conservative: `true` only when the registry has *seen* the
+/// instance go offline (an LWT or an explicit `AgentStatus{online=false}`)
+/// or the install is gone. A missing registry entry means the retained
+/// status has simply not been observed yet — e.g. right after a Gateway
+/// restart, before the broker replays it — and guessing there would write
+/// a false `failed` receipt into a live conversation.
+async fn responder_gone(state: &AppState, target_instance: &str) -> bool {
+    let Some(registry) = state.agent_registry.as_ref() else {
+        return false;
+    };
+    let canonical = {
+        let gw = state.gateway_state.read().await;
+        gw.resolve_installed_key(target_instance)
+    };
+    let Some(instance_id) = canonical else {
+        // Uninstalled since delivery — nothing can answer this request.
+        return true;
+    };
+    let reg = registry.read().await;
+    reg.instance(&instance_id).is_some_and(|s| !s.online)
 }
 
 async fn emit_fallback_receipt(
@@ -77,6 +141,7 @@ async fn emit_fallback_receipt(
     mailbox: &crate::intent::mailbox::IntentMailbox,
     user_port: Option<u16>,
     req: &MailboxEntry,
+    body: &str,
 ) {
     // Deterministic id → the chat store dedups a retry after a partial
     // failure (append ok, mark_answered failed) with no second receipt.
@@ -106,7 +171,7 @@ async fn emit_fallback_receipt(
                 // real write-back takes, written on the responder's
                 // behalf because its Runtime never produced one (§5.5.1).
                 kind: "agent_message".to_string(),
-                body: FALLBACK_BODY.to_string(),
+                body: body.to_string(),
                 meta,
                 attachment_ids: Vec::new(),
             },
@@ -140,7 +205,7 @@ async fn emit_fallback_receipt(
             from_session_id: req.from_session_id.clone(),
             target_instance: req.from_instance.clone(),
             action: "chat".to_string(),
-            params_json: serde_json::json!({ "message": FALLBACK_BODY }).to_string(),
+            params_json: serde_json::json!({ "message": body }).to_string(),
             source_chat_session_id: req.source_chat_session_id.clone(),
             repo: String::new(),
             session_config_json: String::new(),
@@ -173,6 +238,7 @@ async fn emit_fallback_receipt(
         request_id = %req.message_id,
         conversation_id = %req.conversation_id,
         responder = %req.to_instance,
-        "Intent response deadline passed — system fallback receipt emitted (§7.1)"
+        past_deadline = body == FALLBACK_BODY,
+        "Intent request closed by system fallback receipt (§7.1)"
     );
 }

@@ -52,6 +52,7 @@ function resetStores() {
   sessionState = baseSessionState();
   chatState = {
     agentStates: { [AGENT]: { sessionStates: { [EXEC]: sessionState } } },
+    loadSession: vi.fn().mockResolvedValue(undefined),
     fetchSessionConfig: vi.fn().mockResolvedValue(undefined),
     resolveApprovalByToolCallId: vi.fn(),
     clearServerError: vi.fn(),
@@ -171,5 +172,40 @@ describe("ExecSessionStatusCard", () => {
     await waitFor(() =>
       expect(onAnswerCard).toHaveBeenCalledWith("m1", "Aggressive", true),
     );
+  });
+
+  it("renders nothing once the exec session is back to idle", () => {
+    // The `turn_started` pointer is durable, but a stopped / finished run has
+    // no live execution left to mirror — the card must not linger as a
+    // permanent "idle" block at the end of the stream.
+    sessionState.sessionStatus = { status: "idle" };
+    const { container } = renderCard();
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("keeps the card while idle if an action is still pending on the run", () => {
+    // An unanswered question / approval / error is the only place the user can
+    // act on it, so the idle status alone never drops that surface.
+    sessionState.sessionStatus = { status: "idle" };
+    sessionState.pendingQuestions = [
+      {
+        type: "ask_question",
+        request_id: "q1",
+        agent_id: AGENT,
+        question: "Which strategy should I take?",
+        options: [{ label: "Conservative", description: "safe, slow" }],
+        timeout_seconds: 300,
+      },
+    ];
+    renderCard({ card: { kind: "ask_question", messageId: "m1" } });
+    expect(screen.getByText("Which strategy should I take?")).toBeTruthy();
+  });
+
+  it("keeps the card while the status has not been mirrored yet", () => {
+    // Right after the pointer row lands there is no status to read — showing
+    // the run beats hiding a turn that is actually in flight.
+    sessionState.sessionStatus = null;
+    renderCard();
+    expect(screen.getByText("My run")).toBeTruthy();
   });
 });

@@ -497,12 +497,23 @@ impl AgentLoop {
                                 let reason =
                                     "Inbound channel closed; approval can never be answered"
                                         .to_string();
+                                let ids: Vec<String> = self
+                                    .pending_approvals
+                                    .keys()
+                                    .cloned()
+                                    .collect();
                                 for (_, tx) in self.pending_approvals.drain() {
                                     let _ = tx.send(ApprovalDecision {
                                         approved: false,
                                         allow_all_session: false,
                                         reason: Some(reason.clone()),
                                     });
+                                }
+                                // §5.5.4: the chat card for a request that can
+                                // never be answered must not stay open.
+                                for id in ids {
+                                    self.close_chat_card("approval", &id, "unanswerable")
+                                        .await;
                                 }
                                 tracing::warn!(
                                     count = count,
@@ -525,12 +536,20 @@ impl AgentLoop {
                             "tool approval timed out after {}s",
                             APPROVAL_TIMEOUT_SECS
                         );
+                        let ids: Vec<String> =
+                            self.pending_approvals.keys().cloned().collect();
                         for (_, tx) in self.pending_approvals.drain() {
                             let _ = tx.send(ApprovalDecision {
                                 approved: false,
                                 allow_all_session: false,
                                 reason: Some(reason.clone()),
                             });
+                        }
+                        // §5.5.4: a timed-out approval is resolved — close its
+                        // chat card, otherwise it renders forever as an
+                        // answerable request in a session that has moved on.
+                        for id in ids {
+                            self.close_chat_card("approval", &id, "timeout").await;
                         }
                         tracing::warn!(
                             count = count,
@@ -601,6 +620,7 @@ impl AgentLoop {
                     "Auto-rejecting pending approvals at iteration end"
                 );
                 let reason = "Iteration aborted before user response".to_string();
+                let ids: Vec<String> = self.pending_approvals.keys().cloned().collect();
                 for (request_id, tx) in self.pending_approvals.drain() {
                     tracing::warn!(
                         request_id = %request_id,
@@ -612,6 +632,12 @@ impl AgentLoop {
                         allow_all_session: false,
                         reason: Some(reason.clone()),
                     });
+                }
+                // §5.5.4: the requests are gone, so their chat cards must go
+                // too — this is the site that fires when a stop lands while an
+                // approval dialog is still unanswered.
+                for id in ids {
+                    self.close_chat_card("approval", &id, "turn_ended").await;
                 }
                 // Let a reconnecting Desktop know no stale dialogs remain.
                 let _ = self.session_core.try_send_chunk(

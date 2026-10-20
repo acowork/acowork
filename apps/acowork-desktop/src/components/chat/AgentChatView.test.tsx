@@ -7,34 +7,31 @@ const AGENT = "agent-1";
 const SESSION = "chat-1";
 
 // ── chat-session store ────────────────────────────────────────────────
-// `windows` / `inFlight` / `sending` / `draft` are read through the hook;
-// the composer actions through `getState`. `answeredCardIds` is re-implemented
-// verbatim (mirrors the store) so the view's answered detection is exercised.
+// `windows` / `sending` / `draft` are read through the hook; the composer
+// actions through `getState`. The pure read projections (`projectLiveTurn`,
+// `closedCardIds`, …) are kept REAL via importOriginal so the view's card +
+// processing-dot wiring is exercised against the actual projection rules.
 let windows: Record<string, unknown>;
-let inFlightMap: Record<string, unknown>;
 
-function answeredCardIds(rows: ChatMessageRow[]): Set<string> {
-  return new Set(
-    rows.map((r) => r.meta?.in_reply_to).filter((s): s is string => !!s),
-  );
-}
-
-vi.mock("../../stores/chatSessionStore", () => ({
-  answeredCardIds,
-  useChatSessionStore: Object.assign(
-    (selector: (state: unknown) => unknown) =>
-      selector({ windows, inFlight: inFlightMap, sending: {}, draft: {} }),
-    {
-      getState: () => ({
-        sendText: vi.fn().mockResolvedValue(undefined),
-        loadOlder: vi.fn().mockResolvedValue(undefined),
-        setMode: vi.fn(),
-        saveDraft: vi.fn().mockResolvedValue(undefined),
-        upload: vi.fn().mockResolvedValue({ id: "a1", filename: "f", mime: "image/png", size: 1 }),
-      }),
-    },
-  ),
-}));
+vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../stores/chatSessionStore")>();
+  return {
+    ...actual,
+    useChatSessionStore: Object.assign(
+      (selector: (state: unknown) => unknown) =>
+        selector({ windows, sending: {}, draft: {} }),
+      {
+        getState: () => ({
+          sendText: vi.fn().mockResolvedValue(undefined),
+          loadOlder: vi.fn().mockResolvedValue(undefined),
+          setMode: vi.fn(),
+          saveDraft: vi.fn().mockResolvedValue(undefined),
+          upload: vi.fn().mockResolvedValue({ id: "a1", filename: "f", mime: "image/png", size: 1 }),
+        }),
+      },
+    ),
+  };
+});
 
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: Object.assign(
@@ -137,7 +134,6 @@ function askCardRow(seq: number): ChatMessageRow {
 describe("AgentChatView unified-card wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    inFlightMap = {};
     vi.stubGlobal(
       "fetch",
       vi.fn().mockRejectedValue(new Error("no network in test")),

@@ -192,6 +192,14 @@ pub enum SessionMessage {
         has_human: Option<bool>,
         /// Chat attachment ids from a human Chat message. Runtime pulls from Gateway HTTP.
         chat_attachment_ids: Vec<String>,
+        /// Design 27 §5.3.1: the durable `user_message` row the attachments
+        /// are pinned to. For a 1:1 chat message this is empty (the
+        /// attachment coordinate is `message_id`, which matches the row). For
+        /// a group @ fan-out the per-target `message_id` is a fresh uuid with
+        /// no durable row — the bytes live on the shared `user_message` whose
+        /// id is carried here, so attachment pulls fall back to this
+        /// coordinate. Never rendered; purely the pull address.
+        in_reply_to: String,
         /// Design 27 §2.1 / §4.1: when this intent opened a *rotated*
         /// successor session, the handoff note describing the session it
         /// replaced. Persisted as a standalone `system` JSONL row (transcript
@@ -1239,6 +1247,7 @@ impl SessionTask {
                     kind,
                     has_human,
                         chat_attachment_ids,
+                    in_reply_to,
                     handoff_note,
                 }) => {
                     // Design 27 §7.1 / plan D-C/C1: the inbound kind
@@ -1310,6 +1319,15 @@ impl SessionTask {
                     // §5.5.4 answerability for this turn (plan 2b.3); reset
                     // with the turn like the two fields above.
                     agent_loop.chat_has_human = has_human;
+                    // §5.5.4: this turn is the answer to any pause card still
+                    // showing in the same Chat session — close it before the
+                    // new turn's own rows land, so the read-side projection
+                    // never sees "continue?" alongside a running round.
+                    if !source_chat_session_id.is_empty() {
+                        agent_loop
+                            .supersede_pause_cards(&source_chat_session_id)
+                            .await;
+                    }
                     // A rotation (§2.1) hands off with a note describing the
                     // session it replaced. Two deliveries: (a) persist it as a
                     // standalone `system` JSONL row for the transcript/UI, and
@@ -1363,6 +1381,16 @@ impl SessionTask {
                                 .clone()
                                 .unwrap_or_default();
                             let instance = agent_loop.core.config.agent_instance_id.clone();
+                            // Design 27 §5.3.1: a group @ fan-out's per-target
+                            // `message_id` matches no durable row; the shared
+                            // `user_message` (`in_reply_to`) carries the
+                            // attachments. A 1:1 chat message leaves
+                            // `in_reply_to` empty and pulls by `message_id`.
+                            let attach_coord = if in_reply_to.is_empty() {
+                                &message_id
+                            } else {
+                                &in_reply_to
+                            };
                             let mut pulled = Vec::new();
                             for aid in &chat_attachment_ids {
                                 match crate::agent::intent_turn::pull_chat_attachment(
@@ -1371,7 +1399,7 @@ impl SessionTask {
                                     &instance,
                                     &source_chat_session_id,
                                     aid,
-                                    &message_id,
+                                    attach_coord,
                                 )
                                 .await
                                 {
@@ -1445,6 +1473,19 @@ impl SessionTask {
                     agent_loop.pending_intent = None;
                     agent_loop.chat_has_human = None;
                     let ctx = agent_loop.chat_writeback.take();
+                    // §5.5.4 safety net: an approval / ask_question card that
+                    // is still open now belongs to a finished turn and can
+                    // never be answered — close it so the Chat surface drops
+                    // the card instead of offering a dead button forever.
+                    // (`pause` cards are intentionally kept: they outlive the
+                    // turn by design and are closed by the answering turn.)
+                    agent_loop
+                        .close_chat_cards_of_kind(
+                            &["approval", "ask_question"],
+                            Some(&source_chat_session_id),
+                            "turn_ended",
+                        )
+                        .await;
                     // Design 27 §2.1: stamp the routing registry for the next
                     // arrival — reset the T1 idle clock and carry the T2
                     // compaction marker if this turn compacted. Bookkeeping

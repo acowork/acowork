@@ -1038,15 +1038,8 @@ async fn deliver_response(
         ));
     }
 
-    let response_id = uuid::Uuid::new_v4().to_string();
+    let response_id = format!("resp-{request_id}");
     let status = req.status.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| "completed".to_string());
-
-    // §7.1/§13-12: close the request against the fallback sweeper the
-    // moment the real answer is accepted, so a slow chat append or push
-    // never races a `failed` receipt onto the same request.
-    if let Some(mb) = mailbox.as_deref() {
-        let _ = mb.mark_answered(&request_id);
-    }
 
     // Chat row (best-effort like the request path's pair-ensure, but the
     // response IS the durable answer — a failed append on a bound session
@@ -1088,6 +1081,20 @@ async fn deliver_response(
         {
             tracing::warn!(error = %e, session_id, "agent_message chat row append failed");
             chat_append_error = Some(e);
+        }
+    }
+
+    // §7.1/§13-12: close the request against the fallback sweeper once the
+    // answer is actually on the Chat surface. Closing it *before* the append
+    // inverted the failure mode: an append that then failed left a closed
+    // request with no terminal row — an orphaned `turn_started` pointer whose
+    // round never ends for the user, with nobody left to repair it. Leaving
+    // it open costs at most one sweeper tick — and only an append slower
+    // than the sweep interval could interleave with it at all, whereas an
+    // orphan never heals by itself.
+    if chat_append_error.is_none() {
+        if let Some(mb) = mailbox.as_deref() {
+            let _ = mb.mark_answered(&request_id);
         }
     }
 
@@ -1193,6 +1200,14 @@ pub struct MentionRequest {
     /// Optional conversation continuation (empty → new conversation).
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// Design 27 §4.2.1 / §5.3: ids of attachments already uploaded to this
+    /// group Chat session's `files/` dir. The Gateway pins them on the shared
+    /// `user_message` row (so history renders and downloads them) and
+    /// forwards their ids into each mentioned agent's execution turn — the
+    /// Runtime then pulls the bytes over node-auth HTTP against the shared
+    /// row (`in_reply_to`). Empty = a plain text mention.
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
 }
 
 /// `POST /api/intents/mentions` — @Agent fan-out in a group chat (§5):
@@ -1222,8 +1237,12 @@ async fn deliver_mentions(
             "mention sender must match the authenticated user",
         ));
     }
-    if req.text.trim().is_empty() || req.targets.is_empty() {
-        return Err(ApiError::bad_request("a mention needs text and at least one target"));
+    // An @ mention may carry text, attachments, or both — but not neither.
+    // Targets stay mandatory (a mention with no target is not a fan-out).
+    if (req.text.trim().is_empty() && req.attachment_ids.is_empty()) || req.targets.is_empty() {
+        return Err(ApiError::bad_request(
+            "a mention needs text and/or attachments and at least one target",
+        ));
     }
 
     let gw = state.gateway_state.read().await;
@@ -1276,7 +1295,7 @@ async fn deliver_mentions(
             kind: "user_message".to_string(),
             body: req.text.clone(),
             meta,
-            attachment_ids: Vec::new(),
+            attachment_ids: req.attachment_ids.clone(),
         },
     )
     .await
@@ -1340,7 +1359,11 @@ async fn deliver_mentions(
             from_session_id: String::new(),
             target_instance: target.clone(),
             action: "chat".to_string(),
-            params_json: serde_json::json!({ "message": req.text }).to_string(),
+            params_json: serde_json::json!({
+                "message": req.text,
+                "chat_attachment_ids": req.attachment_ids,
+            })
+            .to_string(),
             source_chat_session_id: req.chat_session_id.clone(),
             repo: repo.clone(),
             session_config_json: String::new(),
@@ -1352,7 +1375,9 @@ async fn deliver_mentions(
             status: String::new(),
             // A human wrote the row this delivery answers.
             has_human: Some(true),
-            chat_attachment_ids: Vec::new(),
+            // Forward the attachment ids so the Runtime pulls the bytes
+            // against the shared row (`in_reply_to` = `row_id`).
+            chat_attachment_ids: req.attachment_ids.clone(),
         };
         let outcome = delivery::wake_and_deliver(
             &ctx,

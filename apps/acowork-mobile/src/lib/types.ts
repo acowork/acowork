@@ -312,7 +312,14 @@ export interface ChatMessageRow {
     status?: string
     repo?: string
     notice_type?: string
+    /** Routing-resolved execution session that HANDLED a request — set on the
+     *  `turn_started` pointer and `interaction_request` card. */
     agent_session_id?: string
+    /** The SENDER's execution session (design 27 `source_agent_session_id`) —
+     *  on a 1:1 `agent_message` this is the exec session that produced the
+     *  reply. `closedCardIds` uses it to bind a terminal row to the card of its
+     *  own execution session in a group fan-out. */
+    sender_session_id?: string
     interaction?: {
       kind: string
       request_id: string

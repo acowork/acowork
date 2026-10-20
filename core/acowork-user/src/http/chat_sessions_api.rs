@@ -615,7 +615,13 @@ async fn system_download_message_attachment(
     let (attachment, blob_path) = offload(move || -> Result<_, String> {
         let row = chat_sessions::message_by_id(&dir2, &sid2, &mid2)?
             .ok_or_else(|| "message not found".to_string())?;
-        if row.kind != "user_message" || row.to != target2 || !row.attachments.iter().any(|a| a.id == aid2) {
+        // The shared group `user_message` row is addressed with an empty
+        // `to` and lists its @-targets in `meta.mentions` (§5.3.1). A
+        // mentioned agent may therefore pull the attachment off that shared
+        // row; a non-mentioned agent (whose `dreq.message_id` also matches no
+        // durable row) is still refused — existence is never leaked.
+        let addressed = row.to == target2 || row.meta.mentions.contains(&target2);
+        if row.kind != "user_message" || !addressed || !row.attachments.iter().any(|a| a.id == aid2) {
             return Err("attachment is not pinned to this target message".to_string());
         }
         chat_sessions::load_attachment(&dir2, &sid2, &aid2)?
@@ -1916,6 +1922,126 @@ mod tests {
                 "GET",
                 &format!(
                     "/internal/chat-sessions/{session_id}/files/00000000-0000-0000-0000-000000000000/m-1/agent-1"
+                ),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Design 27 §5.3.1 group @ fan-out: one shared `user_message` row is
+    /// addressed with an empty `to` and lists its @-targets in
+    /// `meta.mentions`. A mentioned agent may therefore pull the attachment
+    /// off that shared row; a non-mentioned agent is still refused (404), so
+    /// existence is never leaked to someone the fan-out did not target.
+    #[tokio::test]
+    async fn internal_attachment_stream_allows_mentioned_target_on_shared_row() {
+        let dir = test_support::temp_dir("chatsessatt2");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, _bob_token) = make_user(&app, &admin, "bob").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let session_id = json(resp).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 9, 8, 7];
+        let boundary = "----testBoundary2";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shot.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&png);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/chat-sessions/{session_id}/files"))
+                    .header("authorization", format!("Bearer {alice_token}"))
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let attachment_id = json(resp).await["id"].as_str().unwrap().to_string();
+
+        // The shared mention row: empty `to`, @-targets in `meta.mentions`.
+        let row_body = serde_json::json!({
+            "session_id": session_id,
+            "message": {
+                "seq": 0,
+                "ts": 0,
+                "from": alice,
+                "to": "",
+                "kind": "user_message",
+                "body": "look at this",
+                "meta": { "message_id": "row-1", "mentions": ["agent-1"] },
+                "attachment_ids": [attachment_id],
+            }
+        })
+        .to_string();
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/messages",
+                Some(&row_body),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The mentioned agent pulls the bytes off the shared row.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/internal/chat-sessions/{session_id}/files/{attachment_id}/row-1/agent-1"
+                ),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        assert_eq!(&bytes[..], &png[..]);
+
+        // A non-mentioned agent is refused — existence is not leaked.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/internal/chat-sessions/{session_id}/files/{attachment_id}/row-1/agent-2"
                 ),
                 None,
                 None,

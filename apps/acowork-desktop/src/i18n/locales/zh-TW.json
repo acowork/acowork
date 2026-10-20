@@ -231,11 +231,13 @@
     "processing": "Agent 處理中 · 點擊查看執行過程",
     "queued": "已送達，等待 Agent 開始處理…",
     "cardAnswered": "已回答",
+    "cardClosed": "已結束",
     "freeAnswer": "自由回答",
     "answer": "回答",
     "replyingTo": "回覆對象",
     "cancelReply": "取消回覆",
     "emptyReply": "已中斷，無輸出",
+    "emptyAnswer": "（無內容）",
     "viewRun": "檢視執行",
     "statusCard": {
       "untitled": "未命名執行",

@@ -86,6 +86,11 @@ interface ChatSessionStore {
  * Runtime for every turn that actually runs, so a group message that
  * @-nobody (no intent, no pointer) never shows a false "in progress" —
  * at the cost of a sub-second quiet gap between send and pointer on 1:1.
+ *
+ * `system_notice` rows are bookkeeping, never a turn's start or end: the walk
+ * skips every one of them (a `turn_started` pointer, an `interaction_resolved`
+ * closure, anything added later), otherwise a notice landing after the live
+ * trigger would read as "the round already finished".
  */
 export function projectInFlight(rows: ChatMessageRow[]): InFlightTurn | null {
   const findPointer = (trigger: string): ChatMessageRow | undefined => {
@@ -102,7 +107,7 @@ export function projectInFlight(rows: ChatMessageRow[]): InFlightTurn | null {
   }
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!
-    if (r.kind === 'system_notice' && r.meta?.notice_type === 'turn_started') continue
+    if (r.kind === 'system_notice') continue
     if (r.kind === 'user_message') {
       const triggerId = r.meta?.message_id ?? ''
       if (!triggerId) return null

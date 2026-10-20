@@ -22,6 +22,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   projectInFlight,
+  closedCardIds,
+  humanAnsweredCardIds,
+  projectLiveTurn,
+  liveTurnActive,
   useChatSessionStore,
   wakeAgentChat,
   type ChatMessageRow,
@@ -52,6 +56,7 @@ async function defaultFetch(url: string, init?: RequestInit): Promise<unknown> {
     };
   }
   if (url.includes("/api/intents/chat-message")) return { ok: true, json: async () => ({}) };
+  if (url.includes("/api/intents/mentions")) return { ok: true, json: async () => ({}) };
   if (url.includes("/messages")) return { ok: true, json: async () => ({ ...PAGE }) };
   if (url.includes("/api/chat-sessions/u1")) {
     return { ok: true, json: async () => [] };
@@ -79,6 +84,12 @@ const pointer = (trigger: string, sid: string) =>
   row("system_notice", { notice_type: "turn_started", in_reply_to: trigger, agent_session_id: sid });
 const terminal = (trigger: string) =>
   row("agent_message", { message_id: `resp-${trigger}`, in_reply_to: trigger });
+const card = (id: string, trigger: string, sid?: string) =>
+  row("interaction_request", {
+    message_id: id,
+    in_reply_to: trigger,
+    ...(sid ? { agent_session_id: sid } : {}),
+  });
 
 describe("projectInFlight (mirrored from mobile — drift guard)", () => {
   it("sees a trailing user_message with its pointer as in flight", () => {
@@ -121,11 +132,69 @@ describe("projectInFlight (mirrored from mobile — drift guard)", () => {
   it("is null for an empty window", () => {
     expect(projectInFlight([])).toBeNull();
   });
+
+  it("skips an interaction_resolved closure notice landing after the live trigger", () => {
+    // A `system_notice` (not just turn_started) is bookkeeping: a closure
+    // receipt trailing the live user_message must NOT read as turn-end.
+    const rows = [
+      user("t1"),
+      pointer("t1", "exec-1"),
+      row("system_notice", { notice_type: "interaction_resolved", in_reply_to: "c0", body: "resolved" }),
+    ];
+    expect(projectInFlight(rows)).toEqual({ triggerId: "t1", execSid: "exec-1" });
+  });
+});
+
+describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + processing dot)", () => {
+  it("closes a card once its turn writes a terminal agent_message", () => {
+    const rows = [
+      user("t1"),
+      pointer("t1", "exec-9"),
+      card("c1", "t1", "exec-9"),
+      row("agent_message", { message_id: "resp-t1", in_reply_to: "t1", sender_session_id: "exec-9" }),
+    ];
+    expect(closedCardIds(rows).has("c1")).toBe(true);
+    expect(projectLiveTurn(rows).pendingCard).toBeNull();
+    expect(liveTurnActive(projectLiveTurn(rows))).toBe(false);
+  });
+
+  it("keeps a card open while its turn ended `waiting` (the pause outcome)", () => {
+    const rows = [
+      user("t1"),
+      pointer("t1", "exec-9"),
+      card("c1", "t1", "exec-9"),
+      row("agent_message", { message_id: "resp-t1", in_reply_to: "t1", sender_session_id: "exec-9", status: "waiting" }),
+    ];
+    expect(closedCardIds(rows).has("c1")).toBe(false);
+    expect(projectLiveTurn(rows).pendingCard?.meta?.message_id).toBe("c1");
+    expect(liveTurnActive(projectLiveTurn(rows))).toBe(true);
+  });
+
+  it("a terminal from a DIFFERENT exec session does not close this agent's card (group fan-out)", () => {
+    const rows = [
+      user("t1"),
+      pointer("t1", "exec-9"),
+      card("c1", "t1", "exec-9"),
+      row("agent_message", { message_id: "resp-x", in_reply_to: "t1", sender_session_id: "exec-other" }),
+    ];
+    expect(closedCardIds(rows).has("c1")).toBe(false);
+  });
+
+  it("a human answer closes the card and counts as answered", () => {
+    const rows = [user("t1"), card("c1", "t1"), row("user_message", { message_id: "t2", in_reply_to: "c1" })];
+    expect(closedCardIds(rows).has("c1")).toBe(true);
+    expect(humanAnsweredCardIds(rows).has("c1")).toBe(true);
+  });
+
+  it("an in-flight turn makes the round live even with no card", () => {
+    const rows = [user("t1"), pointer("t1", "exec-9")];
+    expect(liveTurnActive(projectLiveTurn(rows))).toBe(true);
+  });
 });
 
 describe("chatSessionStore freshness loop", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, inFlight: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, live: {}, sending: {}, draft: {} });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
@@ -193,7 +262,7 @@ describe("chatSessionStore freshness loop", () => {
       return (original as (u: string) => unknown)(url) as never;
     });
     await useChatSessionStore.getState().openAgent("agent-1");
-    expect(useChatSessionStore.getState().inFlight["cs-1"]).toEqual({
+    expect(useChatSessionStore.getState().live["cs-1"].inFlight).toEqual({
       triggerId: "t1",
       execSid: "exec-9",
     });
@@ -202,7 +271,7 @@ describe("chatSessionStore freshness loop", () => {
 
 describe("chatSessionStore seed draft (design 27 §4.5 — backend-persisted, store is a cache)", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, inFlight: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, live: {}, sending: {}, draft: {} });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
@@ -277,5 +346,63 @@ describe("chatSessionStore seed draft (design 27 §4.5 — backend-persisted, st
     });
     await useChatSessionStore.getState().saveDraft("agent-1", { model: "gone" });
     expect(useChatSessionStore.getState().draft["cs-1"]).toEqual({ model: "keep" });
+  });
+});
+
+describe("sendGroupText attachment passthrough (design 27 §4.2.1 / §5.3)", () => {
+  beforeEach(() => {
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, live: {}, sending: {}, draft: {} });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(defaultFetch);
+    useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
+  });
+
+  it("@-fan-out forwards attachment_ids on the mentions request", async () => {
+    const ok = await useChatSessionStore
+      .getState()
+      .sendGroupText("grp-1", "@Bob see this", ["bob"], undefined, ["att-1", "att-2"]);
+    expect(ok).toBe(true);
+    const post = calls("/api/intents/mentions");
+    expect(post.length).toBe(1);
+    const body = JSON.parse((post[0]![1] as RequestInit).body as string);
+    expect(body).toMatchObject({
+      chat_session_id: "grp-1",
+      from_user: "u1",
+      targets: ["bob"],
+      text: "@Bob see this",
+      attachment_ids: ["att-1", "att-2"],
+    });
+  });
+
+  it("archive-only group message forwards attachment_ids on the row write", async () => {
+    const ok = await useChatSessionStore
+      .getState()
+      .sendGroupText("grp-1", "just a pic", [], undefined, ["att-1"]);
+    expect(ok).toBe(true);
+    // The write POSTs to `/messages`; the §5.1 re-read GETs the same path,
+    // so pin the POST by method.
+    const post = calls("/messages").filter((c) => (c[1] as RequestInit)?.method === "POST");
+    expect(post.length).toBe(1);
+    const body = JSON.parse((post[0]![1] as RequestInit).body as string);
+    expect(body).toMatchObject({ body: "just a pic", to: "", attachment_ids: ["att-1"] });
+  });
+
+  it("an attachment-only mention sends with empty text", async () => {
+    const ok = await useChatSessionStore
+      .getState()
+      .sendGroupText("grp-1", "", ["bob"], undefined, ["att-1"]);
+    expect(ok).toBe(true);
+    const body = JSON.parse((calls("/api/intents/mentions")[0]![1] as RequestInit).body as string);
+    expect(body).toMatchObject({ text: "", attachment_ids: ["att-1"] });
+  });
+
+  it("a card answer never carries attachments — the send is refused", async () => {
+    const ok = await useChatSessionStore
+      .getState()
+      .sendGroupText("grp-1", "answer", [], "card-9", ["att-1"]);
+    expect(ok).toBe(false);
+    // Neither the chat-message channel nor the mention channel fired.
+    expect(calls("/api/intents/chat-message").length).toBe(0);
+    expect(calls("/api/intents/mentions").length).toBe(0);
   });
 });

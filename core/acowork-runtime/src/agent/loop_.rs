@@ -458,6 +458,14 @@ pub struct AgentLoop {
     /// orthogonal to the responder role. `None` = unknown → fail open.
     /// Reset at turn end like [`Self::pending_intent`].
     pub(crate) chat_has_human: Option<bool>,
+
+    /// Design 27 §5.5.4: the Chat-session cards this session wrote and has
+    /// not yet closed. Unlike the turn-scoped fields above, this list
+    /// deliberately survives the turn — a `pause` card is answered by the
+    /// NEXT turn, and the turn-end flush needs the remaining entries after
+    /// [`Self::chat_writeback`] has already been taken. Each entry carries
+    /// its own row coordinates for that reason.
+    pub(crate) open_chat_cards: Vec<crate::agent::loop_interaction::OpenChatCard>,
 }
 
 impl AgentLoop {
@@ -529,6 +537,7 @@ impl AgentLoop {
             pending_intent: None,
             chat_writeback: None,
             chat_has_human: None,
+            open_chat_cards: Vec::new(),
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         loop_.session_core.approval_handle = Some(approval_handle.clone());
@@ -601,6 +610,7 @@ impl AgentLoop {
             pending_intent: None,
             chat_writeback: None,
             chat_has_human: None,
+            open_chat_cards: Vec::new(),
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -1154,6 +1164,9 @@ impl AgentLoop {
                             tracing::info!(reason = %reason, "User chose to stop during iteration limit pause");
                             // ADR-014: Paused → Idle
                             self.transition_status(SessionStatus::Idle);
+                            // §7.1: a user stop is `aborted`, not an empty
+                            // `completed` answer written back to Chat.
+                            self.mark_turn_aborted();
                             return Ok(String::new());
                         }
                         Some(InboundMessage::UserOperation(user_op)) => {
@@ -1176,6 +1189,7 @@ impl AgentLoop {
                                 crate::agent::inbound::UserOp::StopLoop { reason } => {
                                     tracing::info!(reason = %reason, "UserOp: stop via fast channel during iteration limit pause");
                                     self.transition_status(SessionStatus::Idle);
+                                    self.mark_turn_aborted();
                                     return Ok(String::new());
                                 }
                                 other_op => {
@@ -1197,6 +1211,7 @@ impl AgentLoop {
                             tracing::warn!(
                                 "Inbound channel closed during iteration limit pause, stopping"
                             );
+                            self.mark_turn_aborted();
                             return Ok(String::new());
                         }
                     }
@@ -1208,6 +1223,8 @@ impl AgentLoop {
                 // ADR-014: Streaming → Idle
                 self.transition_status(SessionStatus::Idle);
                 tracing::info!("Agent loop interrupted by inbound interrupt signal");
+                // §7.1: interrupt/stop ends the turn as `aborted`.
+                self.mark_turn_aborted();
                 return Ok(String::new());
             }
 
@@ -1359,6 +1376,7 @@ impl AgentLoop {
                                         "User stopped during loop detection pause"
                                     );
                                     self.transition_status(SessionStatus::Idle);
+                                    self.mark_turn_aborted();
                                     return Ok(String::new());
                                 }
                                 Some(InboundMessage::UserOperation(user_op)) => {
@@ -1372,6 +1390,7 @@ impl AgentLoop {
                                         "Inbound channel closed during loop detection pause, stopping"
                                     );
                                     self.transition_status(SessionStatus::Idle);
+                                    self.mark_turn_aborted();
                                     return Ok(String::new());
                                 }
                             }
@@ -1537,6 +1556,10 @@ impl AgentLoop {
                     self.poll_stop();
                     // ADR-014: Streaming → Idle (stopped)
                     self.transition_status(SessionStatus::Idle);
+                    // §7.1: the Chat write-back must say `aborted` — recording
+                    // a stop as a `completed` turn with an empty body is what
+                    // let the transcript (and the UI) lie about what happened.
+                    self.mark_turn_aborted();
                     return Ok(content);
                 }
                 IterationResult::ToolCallsExecuted => {

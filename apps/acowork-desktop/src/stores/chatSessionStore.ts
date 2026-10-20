@@ -199,10 +199,15 @@ function sendChatMessage(
 
 /** Archive-only group message: one `user_message` row, no delivery.
  *  (Agents stay silent unless @-mentioned — design 27 §5.3.) */
-function postGroupMessage(chatSessionId: string, text: string): Promise<void> {
+function postGroupMessage(
+  chatSessionId: string,
+  text: string,
+  attachmentIds?: string[],
+): Promise<void> {
   return req<void>("POST", `/api/chat-sessions/${encodeURIComponent(chatSessionId)}/messages`, {
     body: text,
     to: "",
+    attachment_ids: attachmentIds ?? [],
   });
 }
 
@@ -214,12 +219,14 @@ function fanoutMentions(
   chatSessionId: string,
   text: string,
   targets: string[],
+  attachmentIds?: string[],
 ): Promise<void> {
   return req<void>("POST", "/api/intents/mentions", {
     chat_session_id: chatSessionId,
     from_user: me,
     targets,
     text,
+    attachment_ids: attachmentIds ?? [],
   });
 }
 
@@ -303,6 +310,11 @@ export interface InFlightTurn {
  * turn that actually runs, so a group message that @-nobody never shows a
  * false "in progress" — at the cost of a sub-second quiet gap between send
  * and pointer on 1:1.
+ *
+ * `system_notice` rows are bookkeeping, never a turn's start or end: the walk
+ * skips every one of them (a `turn_started` pointer, an `interaction_resolved`
+ * closure, anything added later), otherwise a notice landing after the live
+ * trigger would read as "the round already finished".
  */
 export function projectInFlight(rows: ChatMessageRow[]): InFlightTurn | null {
   const findPointer = (trigger: string): ChatMessageRow | undefined => {
@@ -319,7 +331,7 @@ export function projectInFlight(rows: ChatMessageRow[]): InFlightTurn | null {
   };
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
-    if (r.kind === "system_notice" && r.meta?.notice_type === "turn_started") continue;
+    if (r.kind === "system_notice") continue;
     if (r.kind === "user_message") {
       const triggerId = r.meta?.message_id ?? "";
       if (!triggerId) return null;
@@ -339,9 +351,102 @@ export function projectInFlight(rows: ChatMessageRow[]): InFlightTurn | null {
   return null;
 }
 
-/** §5.5.4: a card is unresolved when no later row answers it. */
-export function answeredCardIds(rows: ChatMessageRow[]): Set<string> {
-  return new Set(rows.map((r) => r.meta?.in_reply_to).filter((s): s is string => !!s));
+/**
+ * §5.5.4: the cards that are no longer answerable.
+ *
+ * A card closes when a later row answers it — a human reply, or the
+ * Runtime's `interaction_resolved` notice. It ALSO closes when the turn that
+ * produced it has already written its terminal `agent_message`: the run is
+ * over, so the request behind the card is dead even if nobody stamped a
+ * closure on it. That second rule is not decoration — it is what makes the
+ * pre-closure transcripts (and any write-back that died before the notice
+ * landed) render correctly, instead of showing a permanent idle status card
+ * with a button that can never work.
+ *
+ * Two facts keep the rule from closing a live card early:
+ * - `status: "waiting"` is the outcome the Runtime writes when a turn ends
+ *   *because* a card is still open (§5.5.4 pause): it releases the slot and
+ *   expects an answer, so such a row does not close anything;
+ * - the terminal row must belong to the same execution session as the card
+ *   (a group fan-out answers one trigger from several agents — one agent
+ *   finishing says nothing about another agent's live request). Missing
+ *   session ids fall back to trigger-only matching so older rows still heal.
+ */
+export function closedCardIds(rows: ChatMessageRow[]): Set<string> {
+  const closed = new Set(rows.map((r) => r.meta?.in_reply_to).filter((s): s is string => !!s));
+  const terminals = rows
+    .map((r, i) => ({ r, i }))
+    .filter(
+      ({ r }) =>
+        r.kind === "agent_message" &&
+        !!r.meta?.in_reply_to &&
+        (r.meta?.status ?? "completed") !== "waiting",
+    );
+  rows.forEach((card, i) => {
+    if (card.kind !== "interaction_request") return;
+    const mid = card.meta?.message_id;
+    if (!mid || closed.has(mid)) return;
+    const sid = card.meta?.agent_session_id;
+    const finished = terminals.some(
+      ({ r, i: t }) =>
+        // Strictly after the card: a terminal row written *before* it belongs
+        // to an earlier round and cannot speak for this request.
+        t > i &&
+        r.meta?.in_reply_to === card.meta?.in_reply_to &&
+        (!sid || !r.meta?.sender_session_id || r.meta.sender_session_id === sid),
+    );
+    if (finished) closed.add(mid);
+  });
+  return closed;
+}
+
+/** Cards a human actually answered — a `user_message` addressed to the card.
+ *  Narrower than [`closedCardIds`]: it exists so a surface can tell "you
+ *  answered this" from "this request is just no longer open". */
+export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
+  return new Set(
+    rows
+      .filter((r) => r.kind === "user_message")
+      .map((r) => r.meta?.in_reply_to)
+      .filter((s): s is string => !!s),
+  );
+}
+
+/**
+ * The live round of a Chat window, as one projection.
+ *
+ * The status card, the tab's processing dot and the group panel all ask the
+ * same question — "is there something happening for this agent right now?" —
+ * and used to answer it from different inputs, which is how a tab could look
+ * idle while its card was still asking for an approval. One function, one
+ * answer: a round is live while a turn is in flight OR a card can still be
+ * answered.
+ */
+export interface LiveTurn {
+  inFlight: InFlightTurn | null;
+  pendingCard: ChatMessageRow | null;
+}
+
+export function projectLiveTurn(rows: ChatMessageRow[]): LiveTurn {
+  const inFlight = projectInFlight(rows);
+  const closed = closedCardIds(rows);
+  let pendingCard: ChatMessageRow | null = null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i]!;
+    if (r.kind === "interaction_request") {
+      const mid = r.meta?.message_id;
+      pendingCard = mid && !closed.has(mid) ? r : null;
+      break;
+    }
+  }
+  return { inFlight, pendingCard };
+}
+
+/** Whether a projected round means "the agent is doing something for me".
+ *  Every processing indicator must answer through this, so a tab dot, a chat
+ *  card and a group panel can never disagree. */
+export function liveTurnActive(live: LiveTurn | undefined): boolean {
+  return !!live && (!!live.inFlight || !!live.pendingCard);
 }
 
 // ── Store ──────────────────────────────────────────────────────────────
@@ -372,7 +477,9 @@ interface Window {
 interface ChatSessionStore {
   byAgent: Record<string, AgentChatState>;
   windows: Record<string, Window>;
-  inFlight: Record<string, InFlightTurn | null>;
+  /** The live round per Chat session — see [`projectLiveTurn`]. Single
+   *  source for the card, the tab dot and any other "is it running" surface. */
+  live: Record<string, LiveTurn>;
   sending: Record<string, boolean>;
   /** Cache of the server-side `session_config` draft, keyed by chat
    *  session id. The session row is the source of truth (design 27 §4.5);
@@ -394,6 +501,7 @@ interface ChatSessionStore {
     text: string,
     targets: string[],
     inReplyTo?: string,
+    attachmentIds?: string[],
   ): Promise<boolean>;
   setMode(agentId: string, mode: "chat" | "exec"): void;
   /** Persist the Chat surface's full seed draft to the session row,
@@ -425,7 +533,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   byAgent: {},
   openGroupIds: {},
   windows: {},
-  inFlight: {},
+  live: {},
   sending: {},
   draft: {},
 
@@ -470,7 +578,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     await get().refresh(chatSessionId);
   },
 
-  sendGroupText: async (chatSessionId, text, targets, inReplyTo) => {
+  sendGroupText: async (chatSessionId, text, targets, inReplyTo, attachmentIds) => {
     const me = useAuthStore.getState().account?.user_id;
     if (!me) return false;
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }));
@@ -479,11 +587,13 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       if (inReplyTo) {
         // Card answer: the intent channel routes it to the card's agent
         // (the gateway resolves the card row; groups accepted per §5.5.4).
+        // Card replies never carry attachments (mirrors the 1:1 channel).
+        if (attachmentIds?.length) throw new Error("card replies cannot include attachments");
         await sendChatMessage(me, chatSessionId, text, inReplyTo);
       } else if (targets.length > 0) {
-        await fanoutMentions(me, chatSessionId, text, targets);
+        await fanoutMentions(me, chatSessionId, text, targets, attachmentIds);
       } else {
-        await postGroupMessage(chatSessionId, text);
+        await postGroupMessage(chatSessionId, text, attachmentIds);
       }
       ok = true;
     } catch (e) {
@@ -542,7 +652,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
             total: page.total,
           },
         },
-        inFlight: { ...s.inFlight, [chatSessionId]: projectInFlight(page.messages) },
+        live: { ...s.live, [chatSessionId]: projectLiveTurn(page.messages) },
       }));
     } catch (e) {
       console.warn("[chatSessionStore] refresh failed:", e);
@@ -585,6 +695,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     try {
       if (inReplyTo && attachmentIds?.length) throw new Error("card replies cannot include attachments");
       await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds);
+      ok = true;
     } catch (e) {
       console.warn("[chatSessionStore] send failed:", e);
     } finally {
