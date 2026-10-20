@@ -63,14 +63,15 @@ pub async fn create(
     Ok(Json(project))
 }
 
-/// The project group chat's participant set: the owner plus whoever the
-/// store recorded as members (MCP face seeds the creator there; REST face
-/// leaves the list at the owner). `sync_group` **converges** the set to
+/// The group chat's participant set: the owner plus whoever the
+/// store recorded as members (both faces seed the creator into `members`;
+/// `owner_id` — set on an ownership transfer — takes precedence over
+/// `created_by` via `Project::owner`). `sync_group` **converges** the set to
 /// exactly this list, so the owner must always be in it — a members-only
 /// list would evict the human owner from the group chat (and flip the
 /// session's `has_human_participant` fact) on the first member add/remove.
 pub(crate) fn group_participants(project: &Project) -> Vec<String> {
-    let mut participants: Vec<String> = std::iter::once(project.created_by.clone())
+    let mut participants: Vec<String> = std::iter::once(project.owner().to_string())
         .chain(project.members.iter().map(|m| m.instance_id.clone()))
         .collect();
     participants.sort();
@@ -256,6 +257,67 @@ pub async fn remove_member(
     Ok(Json(project))
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// POST /projects/:pid/transfer-owner
+// ────────────────────────────────────────────────────────────────────────────
+
+/// `POST /api/pm/projects/:pid/transfer-owner` 请求体。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransferOwner {
+    /// 新群主的 user_id（必须是当前成员里的人类账号）。
+    pub new_owner: String,
+}
+
+/// 转让群主。原群主降级为普通成员（store 层），新群主必须是现有
+/// 人类成员。只有**当前群主**或 **admin** 能发起：调用者身份取自网
+/// 关注入的可信 `X-Actor`，是否 admin 取自可信 `x-actor-admin`（网
+/// 关从 token 推导并覆盖客户端伪造值）。成功后走 `sync_group` 收敛
+/// 群聊参与者（与加/减成员同一条路径）。
+#[tracing::instrument(skip(state, input))]
+pub async fn transfer_owner(
+    State(state): State<ApiState>,
+    Path(pid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<TransferOwner>,
+) -> Result<Json<Project>, crate::error::PmError> {
+    let pid = pid.parse::<ProjectId>()?;
+    let actor = headers
+        .get("x-actor")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+    let actor_admin = headers
+        .get("x-actor-admin")
+        .and_then(|v| v.to_str().ok())
+        == Some("true");
+
+    // 鉴权需要先拿到当前 owner。
+    let current = state
+        .store
+        .get_project(&pid)
+        .await?
+        .ok_or_else(|| crate::error::PmError::ProjectNotFound(pid.to_string()))?;
+    if actor != current.owner() && !actor_admin {
+        return Err(crate::error::PmError::Forbidden(
+            "only the current owner or an admin can transfer group ownership".to_string(),
+        ));
+    }
+
+    let project = state.store.transfer_owner(&pid, &input.new_owner).await?;
+    // Design 27 §8.3: owner moved + old owner demoted to member → converge
+    // the group chat participant set and fire the doorbell (same as add/remove).
+    if let Some((gw_url, token)) = &state.gateway {
+        let provisioner =
+            crate::gateway_client::GatewayClient::new(gw_url.clone(), token.clone());
+        let pid_str = pid.as_str().to_string();
+        let participants = group_participants(&project);
+        tokio::spawn(async move {
+            provisioner.sync_group(&pid_str, &participants).await;
+        });
+    }
+    Ok(Json(project))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +330,7 @@ mod tests {
             description: String::new(),
             status: ProjectStatus::Active,
             created_by: created_by.into(),
+            owner_id: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             metadata: Default::default(),

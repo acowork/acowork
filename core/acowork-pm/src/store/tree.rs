@@ -108,6 +108,17 @@ pub trait PmStore: Send + Sync {
         instance_id: &str,
     ) -> Result<Project>;
 
+    /// 转让群主：把 `owner_id` 设为 `new_owner`，并把**原群主降级**为普通
+    /// 成员（并入 `members`，不丢访问权/历史）。`new_owner` 必须是当前
+    /// 成员里的**人类账号**（`kind: User`）；转让给自己 →
+    /// [`PmError::BadRequest`]；项目不存在 → [`PmError::ProjectNotFound`]。
+    /// 调用者（`X-Actor` == 原 owner，或 admin）的鉴权在 API 层完成。
+    async fn transfer_owner(
+        &self,
+        project_id: &ProjectId,
+        new_owner: &str,
+    ) -> Result<Project>;
+
     // ── Task operations ─────────────────────────────────────────────
 
     async fn create_task(&self, project_id: &ProjectId, input: CreateTask, created_by: &str)
@@ -583,6 +594,7 @@ impl PmStore for TreePmStore {
             description: input.description,
             status: ProjectStatus::Active,
             created_by: created_by.to_string(),
+            owner_id: None,
             created_at: now,
             updated_at: now,
             metadata: input.metadata,
@@ -756,6 +768,56 @@ impl PmStore for TreePmStore {
         project.updated_at = Utc::now();
         atomic_write_json(&path, &project).await?;
         tracing::info!(project_id = %project_id, instance_id, "project member removed");
+        Ok(project)
+    }
+
+    async fn transfer_owner(
+        &self,
+        project_id: &ProjectId,
+        new_owner: &str,
+    ) -> Result<Project> {
+        let path = self.project_json_path(project_id);
+        let mut project: Project = if fs::try_exists(&path).await? {
+            read_json(&path).await?
+        } else {
+            return Err(PmError::ProjectNotFound(project_id.to_string()));
+        };
+
+        let old_owner = project.owner().to_string();
+        if old_owner == new_owner {
+            return Err(PmError::BadRequest(
+                "the new owner is already the group owner".to_string(),
+            ));
+        }
+        // Transfer target must be an existing human member. Agents cannot own
+        // a project group (no inbox / account), and the target must already be
+        // in the project so the transfer never invents membership.
+        let target_is_human_member = project
+            .members
+            .iter()
+            .any(|m| m.instance_id == new_owner && m.kind == MemberKind::User);
+        if !target_is_human_member {
+            return Err(PmError::BadRequest(
+                "the new owner must be an existing human member".to_string(),
+            ));
+        }
+
+        // Demote the old owner to a normal member so they keep access and
+        // history (and can be removed later through the ordinary flow). A
+        // REST-created project whose creator was already removed from
+        // `members` re-enters here; if the old owner is still a member,
+        // leave them be.
+        if !project.members.iter().any(|m| m.instance_id == old_owner) {
+            project.members.push(ProjectMember {
+                instance_id: old_owner,
+                kind: MemberKind::User,
+                added_at: Utc::now(),
+            });
+        }
+        project.owner_id = Some(new_owner.to_string());
+        project.updated_at = Utc::now();
+        atomic_write_json(&path, &project).await?;
+        tracing::info!(project_id = %project_id, new_owner, "project group ownership transferred");
         Ok(project)
     }
 
@@ -2428,6 +2490,53 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, PmError::ProjectNotFound(_)));
+    }
+
+    /// 转让群主：`owner_id` 生效、`owner()` 跟随、老群主降级但保留
+    /// 为成员；向自己 / 非成员 / Agent 成员转让均被拒（BadRequest）。
+    #[tokio::test]
+    async fn transfer_owner_demotes_old_owner_and_moves_owner_id() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        // New owner must be an existing human member.
+        let alice = "a11ce111-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        store.add_project_member(&p.id, alice, MemberKind::User).await.unwrap();
+
+        let updated = store.transfer_owner(&p.id, alice).await.unwrap();
+        assert_eq!(updated.owner_id.as_deref(), Some(alice));
+        assert_eq!(updated.owner(), alice, "owner() must follow owner_id");
+        // Creator ("human") is demoted but stays a member (keeps access/history).
+        assert!(updated.members.iter().any(|m| m.instance_id == "human"));
+        assert!(updated.members.iter().any(|m| m.instance_id == alice));
+        // Participant set includes both the new owner and the demoted old one.
+        let parts = crate::api::projects::group_participants(&updated);
+        assert!(parts.contains(&alice.to_string()), "{parts:?}");
+        assert!(parts.contains(&"human".to_string()), "{parts:?}");
+
+        // Persisted to project.json.
+        let reloaded = store.get_project(&p.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.owner_id.as_deref(), Some(alice));
+
+        // Transfer to the current owner → BadRequest.
+        let err = store.transfer_owner(&p.id, alice).await.unwrap_err();
+        assert!(matches!(err, PmError::BadRequest(_)));
+
+        // Transfer to a non-member → BadRequest.
+        let outsider = "00000000-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let err = store.transfer_owner(&p.id, outsider).await.unwrap_err();
+        assert!(matches!(err, PmError::BadRequest(_)));
+
+        // Transfer to an Agent member → BadRequest (agents cannot own).
+        let bot = "b0tb0000-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        store.add_project_member(&p.id, bot, MemberKind::Agent).await.unwrap();
+        let err = store.transfer_owner(&p.id, bot).await.unwrap_err();
+        assert!(matches!(err, PmError::BadRequest(_)));
     }
 
     /// 联动指派：create/update/claim 的 assignee（非空）必须是项目成员。

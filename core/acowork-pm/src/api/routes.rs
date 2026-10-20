@@ -77,6 +77,10 @@ pub fn pm_router(
             "/projects/{pid}/members/{instance_id}",
             delete(projects::remove_member),
         )
+        .route(
+            "/projects/{pid}/transfer-owner",
+            post(projects::transfer_owner),
+        )
         // ── Tasks ────────────────────────────────────────────────
         .route(
             "/projects/{pid}/tasks",

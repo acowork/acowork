@@ -68,12 +68,17 @@ async fn pm_proxy_handler(
     // identity; under `local` there is no `AuthContext` (the middleware is
     // a no-op) and we fall back to the `human` constant (§决策 12).
     let actor = trusted_rest_actor(auth.as_ref().map(|Extension(c)| c));
+    // Whether the caller holds the admin role — the trusted signal the PM
+    // `transfer-owner` gate reads (PM has no account store of its own). Taken
+    // from the authenticated `AuthContext`, never the client (there is no
+    // `AuthContext` under `local`, so it is `false` there).
+    let actor_admin = auth.as_ref().map(|Extension(c)| c.is_admin()).unwrap_or(false);
     // 读取 PM 进程实际绑定端口 + 身份注入所需状态（supervisor 在 PM ready 后写入）。
     let (port, trusted_headers) = {
         let gw = state.gateway_state.read().await;
         let port = gw.pm_process.as_ref().map(|p| p.port);
         let is_mcp = rest == "mcp" || rest.starts_with("mcp/");
-        let trusted = build_trusted_headers(&headers, is_mcp, &gw, &actor);
+        let trusted = build_trusted_headers(&headers, is_mcp, &gw, &actor, actor_admin);
         (port, trusted)
     };
     let Some(port) = port else {
@@ -156,6 +161,7 @@ fn build_trusted_headers(
     is_mcp: bool,
     gw: &GatewayState,
     actor: &str,
+    actor_admin: bool,
 ) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in headers.iter() {
@@ -167,6 +173,12 @@ fn build_trusted_headers(
         // / `X-Actor` and has no use for it, so the machine token must not
         // travel past the reverse proxy (least privilege).
         if name == acowork_core::auth::NODE_TOKEN_HEADER {
+            continue;
+        }
+        // The admin flag is injected below from the authenticated identity
+        // only; a client-claimed `x-actor-admin` never travels to PM (REST or
+        // MCP), so it cannot spoof the `transfer-owner` authorization gate.
+        if name == "x-actor-admin" {
             continue;
         }
         if is_mcp {
@@ -188,8 +200,14 @@ fn build_trusted_headers(
             }
         }
     }
-    if !is_mcp && let Ok(header) = HeaderValue::from_str(actor) {
-        out.insert("x-actor", header);
+    if !is_mcp {
+        if let Ok(header) = HeaderValue::from_str(actor) {
+            out.insert("x-actor", header);
+        }
+        out.insert(
+            "x-actor-admin",
+            HeaderValue::from_static(if actor_admin { "true" } else { "false" }),
+        );
     }
     out
 }
@@ -582,6 +600,54 @@ mod tests {
             echoed["x-actor"],
             serde_json::json!("u-alice"),
             "multi_user REST actor must be the token identity, got: {echoed}"
+        );
+    }
+
+    /// REST 路径：客户端伪造 `x-actor-admin: true` 被丢弃，改由可信身份
+    /// 推导（`local` 无 `AuthContext` → `false`）——否则任意调用方都能骗
+    /// 过 PM 的 `transfer-owner` 鉴权门。
+    #[tokio::test]
+    async fn rest_path_overrides_forged_admin_flag() {
+        let state = test_app_state();
+        let port = start_echo_pm_server().await;
+        set_pm_process(&state, port).await;
+
+        let echoed =
+            proxy_echo_headers(state, "/api/pm/echo-headers", &[("x-actor-admin", "true")]).await;
+
+        assert_eq!(
+            echoed["x-actor-admin"],
+            serde_json::json!("false"),
+            "forged x-actor-admin must be overridden by the trusted value (false under local), got: {echoed}"
+        );
+    }
+
+    /// ADR-064 Phase 3: under `multi_user` an admin token injects the trusted
+    /// `x-actor-admin: true`, and a client-claimed `false` is dropped.
+    #[tokio::test]
+    async fn rest_path_injects_admin_flag_for_admin_token() {
+        let state = multi_user_app_state();
+        let token = crate::http::test_support::access_token("u-root", "admin");
+        let port = start_echo_pm_server().await;
+        set_pm_process(&state, port).await;
+
+        let router = build_router(state);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/pm/echo-headers")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("x-actor-admin", "false")
+            .body(Body::empty())
+            .expect("build request");
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            echoed["x-actor-admin"],
+            serde_json::json!("true"),
+            "admin token must inject x-actor-admin=true and drop the forged value, got: {echoed}"
         );
     }
 

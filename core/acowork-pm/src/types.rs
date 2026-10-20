@@ -263,6 +263,13 @@ pub struct Project {
     /// `user_id`（ADR-076，REST 面 `X-Actor` 注入）、或 local 模式的哨兵常量
     /// `"human"`。按 [`crate::types::MemberKind::from_actor`] 判别身份。
     pub created_by: String,
+    /// 群主（owner）身份。转让群主时**只改此字段**，`created_by`
+    /// 保留“谁创建了项目”的审计语义（不变）。为 `null`（旧项目 /
+    /// 未转让）时用 [`Project::owner`] 回退到 `created_by`。所有
+    /// “把 owner 折入成员/参与者集合”的地方必须走 `owner()`。
+    /// `#[serde(default)]` → 旧 `project.json` 零迁移。
+    #[serde(default)]
+    pub owner_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// 额外键值对（颜色、图标、标签等 UI 偏好）
@@ -273,6 +280,16 @@ pub struct Project {
     /// 无此字段时读出空数组（零迁移）。
     #[serde(default)]
     pub members: Vec<ProjectMember>,
+}
+
+impl Project {
+    /// The resolved group owner id — `owner_id` when set (post-transfer),
+    /// otherwise the creator `created_by`. The owner is a permanent group
+    /// member; every surface that folds it into the member/participant set
+    /// reads through this so transfer is reflected everywhere at once.
+    pub fn owner(&self) -> &str {
+        self.owner_id.as_deref().unwrap_or(&self.created_by)
+    }
 }
 
 /// `POST /api/pm/projects/:pid/members` 请求体。
