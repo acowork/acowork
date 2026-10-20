@@ -386,6 +386,12 @@ pub struct SessionMeta {
     pub model_ratio: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compaction_offset: Option<u64>,
+    /// Text of the most recent compaction summary, persisted at write time
+    /// (design 27 §4 iron rule: the T2-handoff read must never rescan the
+    /// JSONL). `None` on sessions created before this field existed — the
+    /// reader then falls back to a one-time legacy scan and heals the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compaction_summary: Option<String>,
 
     #[serde(default)]
     pub corrupted: bool,

@@ -272,21 +272,20 @@ async fn list_chats(
 
     // `UserUser` sessions only — the Agent page's conversations live in
     // the same store but are not this surface (design 27 §5.4.4).
-    // The preview is the last row of the log, read one line at a time
-    // through the paging entry (the old sidecar preview has no successor).
+    // The preview is write-time derived state on the session record
+    // (`commit_row` maintains it per append; [`chat_sessions::ensure_preview`]
+    // heals pre-field sessions once), so listing never reads a log.
     let me = user_id.clone();
     let rows = offload(move || {
         let sessions = chat_sessions::list_for(&dir, &me)?;
-        let mut out: Vec<(chat_sessions::ChatSession, Option<chat_sessions::SessionMessage>)> =
-            Vec::new();
-        for s in sessions
+        let mut out: Vec<(chat_sessions::ChatSession, Option<String>)> = Vec::new();
+        for mut s in sessions
             .into_iter()
             .filter(|s| s.kind == SessionKind::UserUser)
         {
-            let last = chat_sessions::read_messages(&dir, &s.session_id, 0, 1)
-                .ok()
-                .and_then(|(page, _)| page.into_iter().next());
-            out.push((s, last));
+            chat_sessions::ensure_preview(&dir, &mut s);
+            let preview = s.last_message_preview.clone();
+            out.push((s, preview));
         }
         Ok(out)
     })
@@ -344,11 +343,7 @@ async fn list_chats(
             let peer_builtin_avatar = meta
                 .and_then(|m| m.builtin_avatar)
                 .map(str::to_string);
-            let last_message_preview = last
-                .as_ref()
-                .map(to_wire)
-                .map(|m| chat::preview(&m))
-                .unwrap_or_default();
+            let last_message_preview = last.unwrap_or_default();
             Some(ChatSummary {
                 chat_id: chat::chat_id(&user_id, &peer_user_id),
                 unread_count: s.unread.get(&user_id).copied().unwrap_or(0),

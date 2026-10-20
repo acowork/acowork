@@ -389,7 +389,8 @@ impl SessionCore {
         if cached > 0 {
             return cached;
         }
-        // Cold start: scan file once to initialize.
+        // Cold start: the log index supplies the count (first touch
+        // reconciles once per session per process, never a full recount).
         let count = self
             .current_work_dir
             .read()
@@ -399,7 +400,7 @@ impl SessionCore {
                 let jsonl_path = std::path::PathBuf::from(wd)
                     .join("conversations")
                     .join(format!("{}.jsonl", session_id));
-                crate::conversation::count_jsonl_lines(&jsonl_path).unwrap_or(0)
+                crate::conversation::physical_line_count(&jsonl_path)
             })
             .unwrap_or(0);
         // compare_exchange prevents overwriting a value the writer thread

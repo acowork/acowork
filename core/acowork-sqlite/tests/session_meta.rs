@@ -76,6 +76,7 @@ fn make_meta(
         }),
         model_ratio: Some(1.0),
         last_compaction_offset: Some(0),
+        last_compaction_summary: None,
         corrupted: false,
         user_id: None,
         visibility: None,
@@ -556,6 +557,7 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              ALTER TABLE sessions DROP COLUMN perf_ttft_ms_sum;
              ALTER TABLE sessions DROP COLUMN perf_ttft_ms_samples;
              ALTER TABLE sessions DROP COLUMN chat_session_id;
+             ALTER TABLE sessions DROP COLUMN last_compaction_summary;
              PRAGMA user_version = 1;",
         )
         .unwrap();

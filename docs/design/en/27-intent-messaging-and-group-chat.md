@@ -415,6 +415,8 @@ The canonical order for one chat is the order accepted and committed by the back
 
 This prevents Runtime processes, PM, and UI from concurrently modifying chat history directly. The queue implementation is up to `acowork-user`, but all writes must pass through the same logical write boundary.
 
+Because the single writer sees every message the moment it is accepted, the write boundary also maintains the derived state that lets reads stay bounded (ADR-096). `append_message` persists `message_count` and `last_message_preview` into `session.json`, and updates the idempotency id index, so that no request path re-opens `messages.jsonl` to count rows, resolve a duplicate `message_id`, or project the list preview. The preview field is therefore **write-time derived state, not a read-path projection**: a session list returns the stored value without touching the log. The only full pass over the log is a once-per-process first-touch reconcile (which also migrates data written before these fields existed).
+
 ### 4.7 Public Interface Inventory
 
 Field-level schemas and error-code enums are deferred to implementation design. What is fixed here is **which interfaces exist, who calls them, and which module owns them**, so that business logic cannot migrate into the Gateway later.

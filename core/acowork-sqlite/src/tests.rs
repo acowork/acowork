@@ -2111,6 +2111,7 @@ fn purge_conversation_state_drops_sessions_and_conversation_nodes_keeps_memory()
                 perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
+                last_compaction_summary: None,
                 last_active_at: "2025-01-01T00:00:00.000Z".to_string(),
                 tokens: None,
                 corrupted: false,

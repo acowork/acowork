@@ -842,6 +842,7 @@ mod tests {
                     perf: None,
                     model_ratio: None,
                     last_compaction_offset: None,
+                    last_compaction_summary: None,
                     last_active_at: chrono::Utc::now().to_rfc3339(),
                     tokens: None,
                     corrupted: false,

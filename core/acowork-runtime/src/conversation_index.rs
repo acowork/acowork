@@ -162,6 +162,22 @@ impl ConversationIndex {
         self.store.mark_indexed(session_id, next_line);
     }
 
+    /// §10: the persisted incremental tail `(next_line, byte_offset)` for
+    /// `session_id`. `(0, 0)` when the session has not been indexed yet — the
+    /// sweeper compares `byte_offset` against the JSONL file size to decide
+    /// whether a log changed at all (zero content reads when it did not).
+    pub fn state_for(&self, session_id: &str) -> (usize, u64) {
+        self.store.state_for(session_id)
+    }
+
+    /// §10: persist the tail pointer after indexing through `next_line`, which
+    /// starts at byte offset `byte_offset`.
+    pub fn record_state(&self, session_id: &str, next_line: usize, byte_offset: u64) {
+        if let Err(e) = self.store.record_state(session_id, next_line, byte_offset) {
+            tracing::warn!(session_id, error = %e, "conversation index: state persist failed");
+        }
+    }
+
     /// Remove every indexed message of a (deleted) session.
     pub fn remove_session(&self, session_id: &str) {
         match self.store.remove_session(session_id) {
@@ -371,15 +387,31 @@ impl ConversationIndexer {
         }
         for sid in &sessions {
             let path = self.conversations_dir.join(format!("{sid}.jsonl"));
-            let total = crate::conversation::count_jsonl_lines(&path).unwrap_or(0);
-            let next = self.index.next_line(sid);
-            if next < total {
-                found_pending = true;
+            // §10: compare the on-disk size against the persisted tail pointer
+            // — an untouched log is skipped without reading any content (not
+            // even a line-count pass).
+            let file_len = match std::fs::metadata(&path) {
+                Ok(m) => m.len(),
+                Err(_) => continue,
+            };
+            let (mut next, mut offset) = self.index.state_for(sid);
+            if file_len < offset {
+                // Truncated / rotated below the tail pointer (the JSONL is
+                // append-only in normal operation, so this is exceptional):
+                // drop the session's index and rebuild from byte 0.
+                self.index.remove_session(sid);
+                next = 0;
+                offset = 0;
             }
-            if next >= total || provider.is_none() {
+            if file_len == offset {
+                // Nothing appended since the last sweep: zero content reads.
                 continue;
             }
-            self.index_session(sid, &path, next, total, provider.as_deref().unwrap())
+            found_pending = true;
+            if provider.is_none() {
+                continue;
+            }
+            self.index_session(sid, &path, next, offset, provider.as_deref().unwrap())
                 .await;
         }
         // Latch the flag: once a cycle finds nothing new, indexing is done.
@@ -391,54 +423,74 @@ impl ConversationIndexer {
         session_id: &str,
         path: &Path,
         mut next: usize,
-        total: usize,
+        start_offset: u64,
         provider: &dyn crate::embedding::EmbeddingProvider,
     ) {
-        let Ok(text) = std::fs::read_to_string(path) else {
+        // §10: read only the bytes appended since the last sweep — seek to the
+        // persisted tail offset and index whole terminated lines from there.
+        // No full-file read. A trailing partial line is left for the next
+        // sweep, once the writer terminates it.
+        let Ok(file) = std::fs::File::open(path) else {
             return;
         };
-        let lines: Vec<&str> = text.split('\n').collect();
-        // Drop a trailing partial line (writer may be mid-append).
-        let bound = if text.ends_with('\n') {
-            lines.len()
-        } else {
-            lines.len().saturating_sub(1)
-        };
-        while next < bound.min(total) {
-            let line = lines[next].trim();
-            let entry: ConversationEntry = match serde_json::from_str(line) {
-                Ok(e) => e,
-                Err(_) => {
-                    // Non-JSON line (shouldn't happen): skip it, don't spin.
-                    self.index.mark_indexed(session_id, next + 1);
-                    next += 1;
-                    continue;
-                }
-            };
-            if !is_indexable(&entry) {
-                self.index.mark_indexed(session_id, next + 1);
-                next += 1;
-                continue;
-            }
-            match provider.embed(&entry.content).await {
-                Ok(emb) => {
-                    if let Err(e) = self.index.index_message(
-                        session_id,
-                        next,
-                        &entry.role,
-                        &entry.content,
-                        &emb,
-                    ) {
-                        tracing::warn!(session_id, line = next, error = %e, "conversation index: store write failed, skipping line");
-                        self.index.mark_indexed(session_id, next + 1);
+        let mut reader = std::io::BufReader::new(file);
+        if start_offset > 0
+            && std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(start_offset)).is_err()
+        {
+            return;
+        }
+        let mut offset = start_offset;
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            buf.clear();
+            match std::io::BufRead::read_until(&mut reader, b'\n', &mut buf) {
+                // EOF.
+                Ok(0) => break,
+                Ok(n) => {
+                    if buf.last() != Some(&b'\n') {
+                        // Partial trailing line — the writer is mid-append.
+                        // Stop and resume once it is terminated; do not advance
+                        // the offset past an incomplete line.
+                        break;
                     }
+                    offset += n as u64;
+                    let body = String::from_utf8_lossy(&buf[..buf.len() - 1]);
+                    let entry: ConversationEntry = match serde_json::from_str(&body) {
+                        Ok(e) => e,
+                        Err(_) => {
+                            // Non-JSON line (shouldn't happen): advance past it.
+                            self.index.record_state(session_id, next + 1, offset);
+                            next += 1;
+                            continue;
+                        }
+                    };
+                    if !is_indexable(&entry) {
+                        self.index.record_state(session_id, next + 1, offset);
+                        next += 1;
+                        continue;
+                    }
+                    match provider.embed(&entry.content).await {
+                        Ok(emb) => {
+                            if let Err(e) = self.index.index_message(
+                                session_id,
+                                next,
+                                &entry.role,
+                                &entry.content,
+                                &emb,
+                            ) {
+                                tracing::warn!(session_id, line = next, error = %e, "conversation index: store write failed, skipping line");
+                            }
+                            self.index.record_state(session_id, next + 1, offset);
+                        }
+                        Err(e) => {
+                            tracing::warn!(session_id, line = next, error = %e, "conversation index: embedding failed, skipping line");
+                            self.index.record_state(session_id, next + 1, offset);
+                        }
+                    }
+                    next += 1;
                 }
-                Err(e) => {
-                    tracing::warn!(session_id, line = next, error = %e, "conversation index: embedding failed, skipping line");
-                    self.index.mark_indexed(session_id, next + 1);
-                }
+                Err(_) => break,
             }
-            next += 1;
         }
     }
 }
@@ -662,11 +714,13 @@ mod tests {
     }
 
     #[test]
-    fn reopen_recovers_watermark_without_duplicating() {
-        // Regression: the watermark is in-memory but the nodes are on disk.
-        // Reopening (a Runtime restart) used to reset every session to line 0,
-        // so the tailer re-embedded the whole JSONL and wrote a second node
-        // per message — duplicate rows, index growth on every restart.
+    fn reopen_recovers_watermark_from_state() {
+        // §10/§11: the incremental tail (next physical line + byte offset) is
+        // persisted in `conversation_state` and restored on reopen in
+        // O(#sessions) — the old per-open node scan plus the `NOT IN`
+        // junk/dedup pass are gone. Duplicate suppression now comes from the
+        // write path itself: the sweeper seeks to the persisted byte offset and
+        // never re-reads a committed line, so a restart cannot double-index.
         let dir = tempfile::tempdir().expect("tempdir");
         let emb = vec_dim(DEFAULT_EMBEDDING_DIM, 5);
         {
@@ -675,41 +729,132 @@ mod tests {
                 .expect("i0");
             idx.index_message("s1", 1, "assistant", "unique beta marker", &emb)
                 .expect("i1");
+            // The indexer commits the tail pointer after the lines (this is
+            // what `index_session` does per line in production).
+            idx.record_state("s1", 2, 1024);
             assert_eq!(idx.next_line("s1"), 2);
+            assert_eq!(idx.state_for("s1"), (2, 1024));
         }
 
         let idx2 = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
-        // Watermark restored from the persisted nodes, not reset to 0.
-        assert_eq!(idx2.next_line("s1"), 2, "watermark recovered on reopen");
+        assert_eq!(idx2.next_line("s1"), 2, "watermark recovered from state");
+        assert_eq!(
+            idx2.state_for("s1"),
+            (2, 1024),
+            "byte offset recovered from state"
+        );
         assert_eq!(
             idx2.search("alpha", None, 10).len(),
             1,
-            "no duplicate rows after reopen"
+            "indexed rows survive reopen untouched (no rebuild, no duplicates)"
         );
+    }
 
-        // Re-indexing the same lines again must not duplicate (a restart that
-        // raced a sweep): overwrite-by-key is not available, so `recover`
-        // purges the strays on the NEXT open — verify the dedup path directly.
-        idx2.index_message("s1", 0, "user", "unique alpha marker", &emb)
-            .expect("dup write");
-        assert_eq!(
-            idx2.search("alpha", None, 10).len(),
-            2,
-            "duplicate present before recovery"
+    /// §10: the tailer reads only the bytes appended since the persisted byte
+    /// offset — an incremental seek, never a re-scan of committed lines. A
+    /// re-run from the current tail indexes nothing; appended lines are picked
+    /// up from the recorded offset and committed in the same pass. Non-indexable
+    /// lines (system noise) still advance the physical tail without a stored row.
+    #[tokio::test]
+    async fn index_session_reads_only_appended_bytes_from_the_tail() {
+        use acowork_core::embedding::{EmbeddingError, EmbeddingProvider};
+        use async_trait::async_trait;
+        use std::io::Write;
+
+        struct StubProvider;
+        #[async_trait]
+        impl EmbeddingProvider for StubProvider {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            async fn embed(&self, _text: &str) -> std::result::Result<Vec<f32>, EmbeddingError> {
+                Ok(vec_dim(DEFAULT_EMBEDDING_DIM, 3))
+            }
+            async fn embed_batch(
+                &self,
+                texts: &[&str],
+            ) -> std::result::Result<Vec<Vec<f32>>, EmbeddingError> {
+                Ok(texts.iter().map(|_| vec_dim(DEFAULT_EMBEDDING_DIM, 3)).collect())
+            }
+            fn dimension(&self) -> usize {
+                DEFAULT_EMBEDDING_DIM
+            }
+            async fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let write_lines = |path: &Path, entries: &[ConversationEntry], append: bool| {
+            let mut f = if append {
+                std::fs::OpenOptions::new().append(true).open(path).unwrap()
+            } else {
+                std::fs::File::create(path).unwrap()
+            };
+            for e in entries {
+                serde_json::to_writer(&mut f, e).unwrap();
+                f.write_all(b"\n").unwrap();
+            }
+            f.flush().unwrap();
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let work = dir.path();
+        let conv = work.join("conversations");
+        std::fs::create_dir_all(&conv).expect("conv dir");
+        let path = conv.join("s1.jsonl");
+        let index = std::sync::Arc::new(open_index(work, DEFAULT_EMBEDDING_DIM));
+        let agent_core: crate::http::SharedAgentCore =
+            std::sync::Arc::new(std::sync::RwLock::new(None));
+        let indexer = ConversationIndexer::new(index.clone(), work, agent_core);
+        let provider = StubProvider;
+
+        // Three indexable lines + one system line (advanced, not stored).
+        write_lines(
+            &path,
+            &[
+                entry("user", "alpha one", None),
+                entry("assistant", "beta two", None),
+                entry("system", "nudge", None),
+                entry("user", "gamma three", None),
+            ],
+            false,
         );
-        // A restart drops the old handle before reopening — the shared
-        // `.sqlite` file holds one live handle at a time.
-        drop(idx2);
-        let idx3 = open_index(dir.path(), DEFAULT_EMBEDDING_DIM);
+        let len1 = std::fs::metadata(&path).unwrap().len();
+        indexer.index_session("s1", &path, 0, 0, &provider).await;
+        assert_eq!(index.message_count(), 3, "only indexable lines are stored");
+        let (next, offset) = index.state_for("s1");
+        assert_eq!(next, 4, "physical tail counts every line");
+        assert_eq!(offset, len1, "byte offset reached end of file");
+
+        // Nothing appended: resuming from the tail stores nothing new.
+        indexer
+            .index_session("s1", &path, next, offset, &provider)
+            .await;
+        assert_eq!(index.message_count(), 3, "no re-index of committed bytes");
+        assert_eq!(index.state_for("s1"), (4, len1), "tail unchanged");
+
+        // Append two more lines and resume from the recorded tail offset only.
+        write_lines(
+            &path,
+            &[
+                entry("assistant", "delta four", None),
+                entry("user", "epsilon five", None),
+            ],
+            true,
+        );
+        let len2 = std::fs::metadata(&path).unwrap().len();
+        indexer.index_session("s1", &path, 4, len1, &provider).await;
+        assert_eq!(index.message_count(), 5, "the two appended lines indexed");
         assert_eq!(
-            idx3.search("alpha", None, 10).len(),
+            index.state_for("s1"),
+            (6, len2),
+            "tail advanced past the appended bytes"
+        );
+        // Line 0 was indexed once — the head was never re-read.
+        assert_eq!(
+            index.search("alpha", None, 10).len(),
             1,
-            "recovery purges duplicates"
-        );
-        assert_eq!(
-            idx3.next_line("s1"),
-            2,
-            "watermark stays correct after purge"
+            "no duplicate re-index of committed lines"
         );
     }
 }

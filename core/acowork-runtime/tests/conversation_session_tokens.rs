@@ -412,6 +412,7 @@ async fn legacy_meta_file_loads_with_tokens_none() {
         llm_call_counter: None,
         perf: None,
         last_compaction_offset: None,
+        last_compaction_summary: None,
         corrupted: false,
     chat_session_id: None,
     };
@@ -575,6 +576,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
         perf: None,
         model_ratio: None,
         last_compaction_offset: Some(1234),
+        last_compaction_summary: None,
         corrupted: false,
     chat_session_id: None,
     };

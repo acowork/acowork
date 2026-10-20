@@ -63,6 +63,7 @@ fn meta(sid: &str, owner: &str, visibility: Option<SessionVisibility>, chat: Opt
         perf: None,
         model_ratio: None,
         last_compaction_offset: None,
+        last_compaction_summary: None,
         corrupted: false,
         chat_session_id: chat.map(str::to_string),
     }

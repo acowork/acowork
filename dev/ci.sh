@@ -181,6 +181,60 @@ run_meta_layout_redline() {
     echo "Session meta layout red line: OK"
 }
 
+# ADR-096 red line: no request path / tool read may take a full read of a
+# session log (`messages.jsonl` / `{sid}.jsonl`) — not a `read_to_string` of
+# the whole file, nor a per-line `count_jsonl_lines` scan to derive a row
+# count, seq, idempotency id or compaction summary. Every such statistic is
+# served from write-time derived state (session meta, the in-memory log index,
+# the `conversation_state` table). A full pass is legitimate only inside a
+# once-per-process first-touch reconcile / open-calibration / migration /
+# startup-backfill function — never per request, never per append.
+#
+# The two log-owner files are scanned. `awk` tracks the enclosing `fn` and the
+# test module, and fails on a `read_to_string` / `count_jsonl_lines` in any
+# other function body. The whitelist is the set of first-touch / migration /
+# sidecar / meta loaders that legitimately read a whole (small) file once;
+# shrinking it is fine, growing it on a request path is the violation.
+SESSION_FULL_READ_WHITELIST='^(reconcile|calibrate|migrate|scan_all_sessions|load_sidecar|rebuild|backfill|read_index|read_participants_index|read_projects_index|load)'
+run_session_full_read_redline() {
+    echo "Checking session full-read red line (ADR-096)..."
+    local root="$SCRIPT_DIR/../core"
+    local failed=0
+    local files=(
+        "acowork-user/src/chat_sessions.rs"
+        "acowork-runtime/src/conversation.rs"
+    )
+    local rel offenders
+    for rel in "${files[@]}"; do
+        offenders=$(awk -v whitelist="$SESSION_FULL_READ_WHITELIST" -v rel="$rel" '
+            { iscomment = ($0 ~ /^[[:space:]]*(\/\/|\/\/\/)/) }
+            /#\[cfg\(test\)\]/ || /^[[:space:]]*mod tests/ { intest = 1 }
+            !iscomment && match($0, /fn[[:space:]]+[A-Za-z0-9_]+/) {
+                fn = substr($0, RSTART, RLENGTH)
+                sub(/^fn[[:space:]]+/, "", fn)
+            }
+            !intest && !iscomment && (/read_to_string/ || /count_jsonl_lines/) {
+                if (fn !~ whitelist) print rel ":" NR ": " $0
+            }
+        ' "$root/$rel" || true)
+        if [ -n "$offenders" ]; then
+            echo "ERROR: full session-log read outside a first-touch/migration function ($rel):"
+            echo "$offenders"
+            failed=1
+        fi
+    done
+    if [ "$failed" -ne 0 ]; then
+        echo ""
+        echo "Request paths must read windowed ranges from derived state"
+        echo "(session meta total, the in-memory log index, conversation_state) —"
+        echo "never a full read_to_string / count_jsonl_lines of the log. Only"
+        echo "once-per-process reconcile / calibrate / migrate / scan functions"
+        echo "may scan the whole file (ADR-096)."
+        exit 1
+    fi
+    echo "Session full-read red line: OK"
+}
+
 # ADR-076 §决策 3/4 (+ADR-084 §决策 7): identity injection has exactly two
 # trusted writers, both deriving the identity from a verified token —
 # `auth_middleware` (`x-user-id`, consumed by the Runtime) and `user_proxy`
@@ -579,6 +633,7 @@ case "$MODE" in
         run_gateway_fs_redline
         run_user_boundary_redline
         run_meta_layout_redline
+        run_session_full_read_redline
         run_gateway_auth_scope_redline
         run_user_auth_mode_redline
         run_user_chat_path_redline
@@ -605,6 +660,7 @@ case "$MODE" in
         run_gateway_fs_redline
         run_user_boundary_redline
         run_meta_layout_redline
+        run_session_full_read_redline
         run_gateway_auth_scope_redline
         run_user_auth_mode_redline
         run_user_chat_path_redline

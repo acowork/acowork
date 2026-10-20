@@ -99,6 +99,8 @@ append 为空            → none（内容级判定，"重新解析但内容未�
 - 上界保证：**任何路径都不再出现 O(全部消息) 的解析/分配**；最坏（翻到最早页）退化为 O(文件字节) 的换行扫描。
 - 实现注记（v2）：行数与 offset 的基准一律为**物理行**（与决策 1/3 一致）；反向分块会切断 UTF-8 多字节字符（中文 body 是常态），块边界的残行必须拼接后再解析——JSONL 只写 `\n`，无 CRLF 歧义。跨块中文消息必须有单测覆盖。
 
+> **ADR-096 后续（契约注记）。** 本决策的 `read_messages` 契约形状不变（反向尾部分块窗口读、`total` 取自 `message_count`）。ADR-096 把同一“禁止全量读会话”纪律推广到 ADR-092 未盖到的*辅助*读，并调整两个频次：① `message_count` / seq 崩溃自愈从“每次写的追加时尾检”改为“每进程一次的首触协调”（进程内首次写入做一次全量 pass，之后追加都是纯增量）；② 幂等 id 成员判定从每次写全量扇描，改为首触 pass + 内存集合，由一个小型 `ids.index` sidecar 做后端；③ 列表预览（`last_message_preview`）从读路径投影改为会话 meta 的写时持久字段。读路径本身不受影响。
+
 ### 决策 5：`chats.index` — list_for 从 O(fleet) 到 O(自己)（v2 修订：用户级 index 锁）
 
 - 每用户维护 `users/{uid}/chats.index.json`：反规范化的线程摘要数组（`chat_id, peer, last_active_at, last_message_preview, unread`）。随每次变更（append / mark_read）同步更新两位参与者的 index。

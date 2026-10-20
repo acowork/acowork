@@ -88,11 +88,16 @@ pub struct ConversationStore {
     store: Arc<SqliteStore>,
     /// Per-session watermark: next JSONL line index to index.
     ///
-    /// Not persisted: it is recovered from the indexed rows at `open`, which is
-    /// what the grafeo version did too. A session whose lines are all filtered
-    /// out by `is_indexable` therefore re-scans from 0 after a restart — wasted
-    /// work, never a duplicate, since the filter is deterministic.
+    /// Persisted in the `conversation_state` table alongside [`Self::byte_offset`]
+    /// (§10) and restored from it at `open` in O(#sessions) — the old boot-time
+    /// full-table `MAX(message_index)` scan plus the `NOT IN` junk/dedup pass
+    /// are gone. The write path is a byte-offset-driven upsert that never
+    /// double-indexes a line, so correctness no longer depends on that pass.
     watermark: Mutex<HashMap<String, usize>>,
+    /// §10: byte offset of `next_line` for each session — the incremental tail
+    /// pointer. Compared against `fs::metadata().len()` by the sweeper so an
+    /// untouched log is skipped with zero content reads.
+    byte_offset: Mutex<HashMap<String, u64>>,
 }
 
 impl ConversationStore {
@@ -117,62 +122,103 @@ impl ConversationStore {
         let this = Self {
             store,
             watermark: Mutex::new(HashMap::new()),
+            byte_offset: Mutex::new(HashMap::new()),
         };
         this.recover_watermarks()?;
         Ok(this)
     }
 
-    /// Rebuild `watermark` from the indexed rows and purge rows that cannot be
-    /// searched (no identifying props) or that duplicate an earlier line of the
-    /// same session. Called once from `open`.
+    /// Rebuild the two in-memory tail-pointer maps from `conversation_state`.
+    ///
+    /// §11: this is an indexed scan over `#sessions` rows, once per process
+    /// open — it does NOT scan the indexed message rows. A database upgraded
+    /// from before schema v5 has rows but no state rows; those are re-derived
+    /// with a one-time full index rebuild (the store is re-derivable by design,
+    /// ADR-081 "可删重建"), which the background sweeper then repopulates.
     fn recover_watermarks(&self) -> Result<()> {
         let conn = self.store.lock();
-        // Nodes without the identifying props are unsearchable garbage; a
-        // duplicate (session_id, message_index) can only come from an earlier
-        // crash between insert and watermark advance. Both are deleted by id so
-        // the FTS entry for the row goes with them.
-        let junk: Vec<i64> = {
-            let mut stmt = conn.prepare(
-                "SELECT id FROM nodes WHERE label = ?1 AND ( \
-                     json_extract(props, '$.session_id') IS NULL \
-                     OR json_extract(props, '$.message_index') IS NULL \
-                     OR id NOT IN ( \
-                         SELECT MIN(id) FROM nodes WHERE label = ?1 \
-                         GROUP BY json_extract(props, '$.session_id'), \
-                                  json_extract(props, '$.message_index')))",
-            )?;
-            stmt.query_map([LABEL], |r| r.get::<_, i64>(0))?
-                .collect::<std::result::Result<_, _>>()?
-        };
-
         let mut watermark: HashMap<String, usize> = HashMap::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT json_extract(props, '$.session_id'), \
-                        MAX(json_extract(props, '$.message_index')) \
-                 FROM nodes WHERE label = ?1 GROUP BY 1",
-            )?;
-            let rows = stmt.query_map([LABEL], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (session_id, max_line) = row?;
-                watermark.insert(session_id, (max_line.max(0) as usize) + 1);
-            }
+        let mut offsets: HashMap<String, u64> = HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, next_line, byte_offset FROM conversation_state",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? as usize,
+                r.get::<_, i64>(2)? as u64,
+            ))
+        })?;
+        for row in rows {
+            let (sid, nl, bo) = row?;
+            watermark.insert(sid.clone(), nl);
+            offsets.insert(sid, bo);
         }
+        drop(stmt);
         drop(conn);
 
-        let mut purged = 0usize;
-        for id in junk {
-            if self.store.delete_node(id as u64).unwrap_or(false) {
-                purged += 1;
+        if watermark.is_empty() {
+            // Fresh index, or a pre-v5 upgrade: indexed rows exist but the
+            // tail pointers they would restore from never were written. Wipe
+            // and rebuild once — after this the state rows are present, so the
+            // pass runs at most once per database.
+            let existing = self.store.node_count_by_label(LABEL).unwrap_or(0);
+            if existing > 0 {
+                tracing::info!(
+                    existing,
+                    "conversation index: pre-v5 state detected, scheduling a one-time rebuild"
+                );
+                self.rebuild()?;
             }
         }
+
         let sessions = watermark.len();
         *self.watermark.lock().unwrap() = watermark;
-        if purged > 0 {
-            tracing::info!(sessions, purged, "conversation index: watermarks recovered");
-        }
+        *self.byte_offset.lock().unwrap() = offsets;
+        tracing::debug!(sessions, "conversation index: watermarks recovered");
+        Ok(())
+    }
+
+    /// §10: the persisted incremental tail for `session_id` — `(next_line,
+    /// byte_offset)`, both `0` when the session has not been indexed yet.
+    pub fn state_for(&self, session_id: &str) -> (usize, u64) {
+        let next = self
+            .watermark
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .copied()
+            .unwrap_or(0);
+        let off = self
+            .byte_offset
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .copied()
+            .unwrap_or(0);
+        (next, off)
+    }
+
+    /// §10: persist the tail pointer (`next_line` + the byte offset it starts
+    /// at) for `session_id`, keeping the in-memory maps in sync. The upsert is
+    /// idempotent, so a crash between the indexed-row write and this one just
+    /// re-reads the same byte range on the next sweep — never a duplicate, because
+    /// the JSONL is append-only and the range is re-derived deterministically.
+    pub fn record_state(&self, session_id: &str, next_line: usize, byte_offset: u64) -> Result<()> {
+        let conn = self.store.lock();
+        conn.execute(
+            "INSERT INTO conversation_state(session_id, next_line, byte_offset) \n             VALUES (?1, ?2, ?3) \n             ON CONFLICT(session_id) DO UPDATE SET \n                 next_line = excluded.next_line, \n                 byte_offset = excluded.byte_offset",
+            rusqlite::params![session_id, next_line as i64, byte_offset as i64],
+        )?;
+        drop(conn);
+        self.watermark
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), next_line);
+        self.byte_offset
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), byte_offset);
         Ok(())
     }
 
@@ -272,6 +318,14 @@ impl ConversationStore {
             }
         }
         self.watermark.lock().unwrap().remove(session_id);
+        self.byte_offset.lock().unwrap().remove(session_id);
+        // Drop the persisted tail pointer too, so a session that comes back is
+        // rebuilt from its (new) JSONL rather than resuming a stale offset.
+        let conn = self.store.lock();
+        let _ = conn.execute(
+            "DELETE FROM conversation_state WHERE session_id = ?1",
+            [session_id],
+        );
         Ok(removed)
     }
 
@@ -286,7 +340,14 @@ impl ConversationStore {
         for id in &ids {
             self.store.delete_node(*id as u64)?;
         }
+        // Clear the persisted tail pointers as well: a rebuild re-derives the
+        // whole index from JSONL byte 0, so old offsets must not survive it.
+        {
+            let conn = self.store.lock();
+            conn.execute("DELETE FROM conversation_state", [])?;
+        }
         self.watermark.lock().unwrap().clear();
+        self.byte_offset.lock().unwrap().clear();
         Ok(ids.len())
     }
 
@@ -483,40 +544,54 @@ mod tests {
                 .unwrap();
             idx.index_message("s1", 1, "assistant", "hi there", &emb(1.0))
                 .unwrap();
+            // §10/§11: the tail pointer is persisted by `record_state` (the
+            // indexer calls it after every indexed line), not by the row write.
+            idx.record_state("s1", 2, 4242).unwrap();
             assert_eq!(idx.next_line("s1"), 2);
+            assert_eq!(idx.state_for("s1"), (2, 4242));
             assert_eq!(idx.next_line("other"), 0);
             idx.close().unwrap();
         }
-        // Reopening must not re-index: the watermark is derived from the rows.
+        // Reopening restores the watermark from `conversation_state` in
+        // O(#sessions) — no row scan, so both the line and byte-offset tail
+        // pointers survive exactly as written.
         let idx = ConversationStore::open(&path, DIM).unwrap();
         assert_eq!(idx.next_line("s1"), 2);
+        assert_eq!(idx.state_for("s1"), (2, 4242));
         assert_eq!(idx.message_count().unwrap(), 2);
         assert_eq!(idx.session_count().unwrap(), 1);
         assert_eq!(idx.embedding_dim(), DIM);
     }
 
+    /// §11 migration path: a database upgraded from before schema v5 has
+    /// indexed rows but no `conversation_state` tail pointers. `open` detects
+    /// the divergence (state empty while rows exist) and drops the stale index
+    /// once so the background sweeper can re-derive it from JSONL byte 0 — the
+    /// old per-open `MAX(message_index)` scan plus the `NOT IN` junk/dedup pass
+    /// are gone. Correctness no longer depends on purging duplicates at open:
+    /// the byte-offset-driven write path never re-indexes a committed line.
     #[test]
-    fn reopen_purges_duplicate_lines_and_keeps_the_first() {
+    fn open_rebuilds_when_state_is_missing_but_rows_exist() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(STORE_FILE);
-        let idx = ConversationStore::open(&path, DIM).unwrap();
-        let first = idx
-            .index_message("s1", 0, "user", "original line zero", &emb(0.0))
-            .unwrap();
-        // Simulate the crash-recovery case: a duplicate line slipped in.
-        idx.index_message("s1", 0, "user", "duplicate line zero", &emb(1.0))
-            .unwrap();
-        assert_eq!(idx.message_count().unwrap(), 2);
-        idx.close().unwrap();
+        {
+            let idx = ConversationStore::open(&path, DIM).unwrap();
+            idx.index_message("s1", 0, "user", "original line zero", &emb(0.0))
+                .unwrap();
+            // Pre-v5 shape: a row present with no `conversation_state` written.
+            assert_eq!(idx.message_count().unwrap(), 1);
+            idx.close().unwrap();
+        }
 
         let idx = ConversationStore::open(&path, DIM).unwrap();
-        assert_eq!(idx.message_count().unwrap(), 1, "duplicate must be purged");
-        let hits = idx.search("line", None, 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].content, "original line zero");
-        assert_eq!(idx.next_line("s1"), 1);
-        // The surviving row is the one that was written first.
-        assert!(idx.store.delete_node(first).is_ok());
+        assert_eq!(
+            idx.message_count().unwrap(),
+            0,
+            "stale index without state must be dropped for a re-derive"
+        );
+        assert_eq!(idx.next_line("s1"), 0);
+        assert_eq!(idx.state_for("s1"), (0, 0));
+        assert_eq!(idx.session_count().unwrap(), 0);
     }
 
     #[test]

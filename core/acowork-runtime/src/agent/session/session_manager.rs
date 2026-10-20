@@ -5304,6 +5304,7 @@ mod tests {
                 perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
+                last_compaction_summary: None,
                 corrupted: false,
             chat_session_id: None,
             },

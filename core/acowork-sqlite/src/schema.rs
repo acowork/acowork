@@ -127,8 +127,9 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// next monotonic version (see [`MIGRATIONS`] for the format).
 ///
 /// History: 1 = `version` / `corrupted` columns; 2 = `user_id` / `visibility`
-/// (ADR-076 §决策 4 session ownership); 3 = `perf_*` LLM speed averages.
-pub const SCHEMA_VERSION: i64 = 4;
+/// (ADR-076 §决策 4 session ownership); 3 = `perf_*` LLM speed averages;
+/// 4 = `chat_session_id`; 5 = `last_compaction_summary` + `conversation_state`.
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -187,6 +188,19 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         4,
         "ALTER TABLE sessions ADD COLUMN chat_session_id TEXT;",
+    ),
+    // Design 27 §4 iron rule (no whole-session reads on request paths):
+    // - `last_compaction_summary`: write-time derived state, so the T2
+    //   handoff read is O(1) instead of a full JSONL scan. Nullable, no
+    //   default: pre-existing rows read as NULL, which the runtime heals
+    //   with one legacy scan + write-back on first touch.
+    // - `conversation_state`: per-session indexer watermark (next physical
+    //   line + byte offset), updated in the same transaction as the indexed
+    //   row. Lets the sweep skip untouched logs via file size alone and
+    //   reopen in O(#sessions) instead of a full-table pass.
+    (
+        5,
+        "ALTER TABLE sessions ADD COLUMN last_compaction_summary TEXT; \n         CREATE TABLE IF NOT EXISTS conversation_state ( \n             session_id  TEXT PRIMARY KEY, \n             next_line   INTEGER NOT NULL DEFAULT 0, \n             byte_offset INTEGER NOT NULL DEFAULT 0 \n         );",
     ),
 ];
 

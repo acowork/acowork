@@ -15,10 +15,20 @@
 //! ```text
 //! {data_dir}/chat-sessions/{session_id}/
 //!   session.json     kind, participants, title, project binding,
-//!                    last_active_at, message_count (physical-line counter)
+//!                    last_active_at, message_count (physical-line counter),
+//!                    last_message_preview (derived at write time)
 //!   messages.jsonl   append-only, each line carries a session-local
 //!                    monotonic `seq` and a globally unique `message_id`
+//!   lines.index      derived byte spans + `message_id` lookup for the log
 //! ```
+//!
+//! The request path NEVER reads the log whole: paging, the `seq` counter,
+//! idempotency and fetch-by-id all resolve through the per-session line
+//! index ([`ensure_index`]). The index is rebuilt from the log once per
+//! session per process (first touch) and maintained incrementally
+//! afterwards; the `lines.index` sidecar keeps a restart from paying the
+//! rebuild. A full pass over the log exists only as that first-touch (or
+//! self-heal) reconciliation — never per request, never per write.
 //!
 //! Concurrency follows the `chat.rs` model (ADR-092): one mutex per session
 //! directory; the whole load → dedup → assign seq → append → save sequence
@@ -27,7 +37,8 @@
 //!
 //! Idempotency: a write carrying a `message_id` already present in the log
 //! returns the existing message instead of appending a duplicate — QoS 1
-//! redelivery and client retries must never double-write (§8-4).
+//! redelivery and client retries must never double-write (§8-4). The
+//! lookup hits the line index by id, not by scanning the log.
 //!
 //! Ordering: the canonical order is the order the backend write entry
 //! accepted and committed, expressed as `seq`; timestamps are for display
@@ -396,13 +407,12 @@ pub struct ChatSession {
     /// the Runtime reads through tools that clear as it goes.
     #[serde(default)]
     pub unread: std::collections::BTreeMap<String, u32>,
-    /// Last-message preview shown in the sidebar's project-group row. This
-    /// is a read-path projection, not durable state: [`skip_serializing_if`]
-    /// keeps it out of `session.json` (it is always `None` when a session is
-    /// saved), and only the project-group list handlers populate it by
-    /// reading the tail of `messages.jsonl`. Mirrors how `chat_api` derives
-    /// `last_message_preview` for one-to-one chats.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Last-message preview shown in the sidebar rows. Write-time derived
+    /// state: [`commit_row`] recomputes it on every append and persists it
+    /// in `session.json`, so the list surfaces never touch
+    /// `messages.jsonl` to derive it. Sessions written before the field
+    /// existed self-heal once through [`ensure_preview`].
+    #[serde(default)]
     pub last_message_preview: Option<String>,
 }
 
@@ -639,13 +649,13 @@ pub fn append_message(
         return Err("a system_notice must carry meta.notice_type".to_string());
     }
 
-    // Idempotency scan. ponytail: O(messages) per intent write — chat logs
-    // stay small by design (§6.5 R4 caps a conversation at 6 requests) and
-    // the scan shares the per-session lock with the append anyway; move to
-    // an id index file if a session ever grows past tens of thousands.
-    let path = messages_path(&dir);
+    // Idempotency: resolve the submitted `message_id` through the line
+    // index — O(1), never a scan of the log. `ensure_index` is also what
+    // reconciles the derived state with the physical file once per process
+    // (crash window: a line durable but the metadata save failed).
+    let index = ensure_index(&dir)?;
     if !msg.meta.message_id.is_empty()
-        && let Some(existing) = find_by_message_id(&path, &msg.meta.message_id)?
+        && let Some(existing) = lookup_message(&dir, &mut lock(&index), &msg.meta.message_id)?
     {
         return Ok((existing, false));
     }
@@ -662,7 +672,9 @@ pub fn append_message(
 
     // Reconcile the counter before allocating a seq (crash window: a line
     // durable but metadata save failed must not hand out a used seq).
-    let physical = count_lines(&path)?;
+    // `ensure_index` just brought the index in sync with the log, so
+    // `spans.len()` is the physical line count.
+    let physical = lock(&index).spans.len() as u64;
     if session.message_count < physical {
         session.message_count = physical;
     }
@@ -691,18 +703,6 @@ pub fn append_message(
         attachment_ids: Vec::new(),
         attachments,
     };
-    let mut line = serde_json::to_string(&stored).map_err(|e| format!("serialize message: {e}"))?;
-    line.push('\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    file.write_all(line.as_bytes())
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-
-    session.message_count = seq;
-    session.last_active_at = stored.ts;
     // §4.6 (plan 3.6): every participant except the sender gains one
     // unread. Keyed by id, never by position — same rule as `chat.rs`.
     for p in &session.participants {
@@ -710,7 +710,11 @@ pub fn append_message(
             *session.unread.entry(p.id.clone()).or_insert(0) += 1;
         }
     }
-    save(&dir, &session)?;
+    session.last_active_at = stored.ts;
+    // Durable append + derived counters + `session.json` in one step —
+    // the same entry the migration replay uses, so the log, the line
+    // index, the preview and the metadata can never drift apart.
+    commit_row(&dir, &mut session, &mut lock(&index), &stored)?;
     // Wave 5 (§6.1): wake every human surface viewing this session. Same
     // content-free doorbell the old chat domain uses (design 25 §8) — the
     // Desktop bridge already forwards it and the chat view re-reads over
@@ -774,6 +778,10 @@ pub fn delete_session(data_dir: &Path, session_id: &str, caller: &str) -> Result
         }
     }
     fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    // Drop the derived line index with the directory — the id can never
+    // come back (session ids are server UUIDs), so a cached entry would
+    // be leaked memory.
+    let _ = lock(&LINE_INDEXES).remove(&dir);
     reindex(data_dir, session_id, Some(&session.participants), &[])?;
     Ok(())
 }
@@ -1117,12 +1125,13 @@ fn migrate_one_pair(data_dir: &Path, staged: &Path, lo: &str, hi: &str) -> Resul
     // resolved attachments, `kind` in the text/image/document vocabulary);
     // human↔human rows are all speech, so they land as `user_message` with
     // the attachment metadata kept on the row exactly as `append_message`
-    // would have resolved it.
+    // would have resolved it. Reading the legacy source whole is fine —
+    // this is the one-time startup migration, not a request path.
     let old_lines = fs::read_to_string(staged.join("messages.jsonl")).unwrap_or_default();
-    let path = messages_path(&sess_dir);
     let tlock = session_lock(&sess_dir);
     let _g = lock(&tlock);
     let mut session = load(data_dir, &session.session_id)?;
+    let index = ensure_index(&sess_dir)?;
     let mut appended = 0usize;
     for (i, line) in old_lines.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         let m: crate::chat::ChatMessage = match serde_json::from_str(line) {
@@ -1133,12 +1142,17 @@ fn migrate_one_pair(data_dir: &Path, staged: &Path, lo: &str, hi: &str) -> Resul
             continue; // sender not in the pair: refuse to forge attribution
         }
         let message_id = format!("migrated:{lo}{}{hi}:{i}", crate::chat::SEP);
-        if find_by_message_id(&path, &message_id)?.is_some() {
-            continue;
-        }
-        let physical = count_lines(&path)?;
-        if session.message_count < physical {
-            session.message_count = physical;
+        {
+            let idx = lock(&index);
+            if idx.ids.contains_key(&message_id) {
+                continue; // crash-replay: the deterministic id is already durable
+            }
+            // Counter reconciliation before allocating a seq, same rule as
+            // `append_message`.
+            let physical = idx.spans.len() as u64;
+            if session.message_count < physical {
+                session.message_count = physical;
+            }
         }
         let seq = session.message_count + 1;
         let row = SessionMessage {
@@ -1155,19 +1169,12 @@ fn migrate_one_pair(data_dir: &Path, staged: &Path, lo: &str, hi: &str) -> Resul
             attachment_ids: Vec::new(),
             attachments: m.attachments.clone(),
         };
-        let mut out = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| format!("{path:?}: {e}"))?;
-        let mut json = serde_json::to_string(&row).map_err(|e| e.to_string())?;
-        json.push('\n');
-        out.write_all(json.as_bytes())
-            .map_err(|e| format!("{path:?}: {e}"))?;
-        session.message_count = seq;
         if m.ts > session.last_active_at {
             session.last_active_at = m.ts;
         }
+        // Same durable entry the live write path uses: log line, line
+        // index, preview, counter — one step, one `session.json` write.
+        commit_row(&sess_dir, &mut session, &mut lock(&index), &row)?;
         appended += 1;
     }
     // The sidecar unread map is the last durable badge state; adopt it only
@@ -1209,10 +1216,10 @@ fn write_index(
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Scan the log for a message id. Returns the parsed message.
-/// Single-row fetch by the stable `message_id` (design 27 §5.5.4 answer
+/// Fetch one durable row by its stable `message_id` (design 27 §5.5.4 answer
 /// channel: resolving the `interaction_request` card a human's
-/// `in_reply_to` points at). `Ok(None)` when no row carries the id.
+/// `in_reply_to` points at). Resolved through the line index — one seek,
+/// never a scan. `Ok(None)` when no row carries the id.
 pub fn message_by_id(
     data_dir: &Path,
     session_id: &str,
@@ -1220,38 +1227,358 @@ pub fn message_by_id(
 ) -> Result<Option<SessionMessage>, String> {
     validate_session_id(session_id)?;
     let dir = session_dir(data_dir, session_id);
-    find_by_message_id(&messages_path(&dir), message_id)
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let index = ensure_index(&dir)?;
+    lookup_message(&dir, &mut lock(&index), message_id)
 }
 
-fn find_by_message_id(path: &Path, message_id: &str) -> Result<Option<SessionMessage>, String> {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return Ok(None); // no log yet
+// ── The line index (no-whole-log reads) ───────────────────────────────
+//
+// Paging, `seq` allocation, idempotency and fetch-by-id all resolve
+// against this derived state instead of the log body. One entry per
+// non-blank physical line: its byte span, plus a `message_id` lookup.
+// Rebuilt from the log on first touch per process, maintained
+// incrementally after; the `lines.index` sidecar (one `offset\tlen\tid`
+// row per newline-terminated line) keeps a restart from paying the
+// rebuild. A half-written trailing line (crash mid-append) is indexed in
+// memory for counter parity but never persisted.
+
+/// Byte span of one physical line in `messages.jsonl` (`len` excludes
+/// the terminating newline).
+#[derive(Debug, Clone, Copy)]
+struct LineSpan {
+    offset: u64,
+    len: u64,
+}
+
+#[derive(Debug, Default)]
+struct LineIndex {
+    /// Every non-blank physical line, in file order. When `last_partial`
+    /// is set, the final entry is the unterminated tail of a crashed
+    /// append (in memory only, never in the sidecar).
+    spans: Vec<LineSpan>,
+    /// `message_id` of each indexed line, parallel to `spans` (empty for
+    /// pre-Wave-2a.1 rows and for lines whose JSON does not parse).
+    line_ids: Vec<Option<String>>,
+    /// `message_id` → position in `spans` (stale positions from a popped
+    /// partial line are guarded at lookup, never cleaned).
+    ids: HashMap<String, u32>,
+    last_partial: bool,
+    /// The sidecar has been read in this process.
+    loaded: bool,
+}
+
+static LINE_INDEXES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<LineIndex>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn line_index_path(dir: &Path) -> PathBuf {
+    dir.join("lines.index")
+}
+
+/// First touch for a session: load the sidecar and reconcile it against
+/// the log's current length. The reconciliation reads only the bytes
+/// appended since the last scan; a full pass over the log happens only
+/// when the sidecar is missing or lying (the file shrank under it) — the
+/// one sanctioned whole-log read, once per session per process. Callers
+/// hold the per-session lock so the index and the log never interleave.
+fn ensure_index(dir: &Path) -> Result<Arc<Mutex<LineIndex>>, String> {
+    let arc = {
+        let mut reg = lock(&LINE_INDEXES);
+        reg.entry(dir.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(LineIndex::default())))
+            .clone()
+    };
+    let mut idx = lock(&arc);
+    if !idx.loaded {
+        load_sidecar(dir, &mut idx);
+        idx.loaded = true;
+    }
+    let path = messages_path(dir);
+    let file_len = match fs::metadata(&path) {
+        Ok(m) => m.len(),
+        // A brand-new session legitimately has no log yet. Any *other*
+        // metadata error must not be read as "empty file": a transient error
+        // treated as length 0 would take the shrink branch below and rewrite an
+        // empty sidecar, permanently wiping the idempotency id index.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let covered = covered_end(&idx);
+    if covered > file_len {
+        // The log shrank under the sidecar (crash mid-line, truncation,
+        // copied directory): self-heal with one full pass.
+        idx.spans.clear();
+        idx.line_ids.clear();
+        idx.ids.clear();
+        idx.last_partial = false;
+        scan_range(dir, &mut idx, 0, file_len, false)?;
+        rewrite_sidecar(dir, &idx)?;
+    } else if covered < file_len {
+        if idx.last_partial {
+            // The half-written line has since been completed (or extended)
+            // on disk: drop the provisional entry and re-index from its
+            // start.
+            idx.spans.pop();
+            idx.line_ids.pop();
+            idx.last_partial = false;
+        }
+        let resume = covered_end(&idx);
+        scan_range(dir, &mut idx, resume, file_len, true)?;
+    }
+    drop(idx);
+    Ok(arc)
+}
+
+/// First byte not covered by the index. With `last_partial` the covered
+/// end is the partial line's start — it must be re-scanned, its newline
+/// may have arrived.
+fn covered_end(idx: &LineIndex) -> u64 {
+    match idx.spans.last() {
+        Some(last) if !idx.last_partial => last.offset + last.len + 1,
+        Some(last) => last.offset,
+        None => 0,
+    }
+}
+
+fn load_sidecar(dir: &Path, idx: &mut LineIndex) {
+    let Ok(raw) = fs::read_to_string(line_index_path(dir)) else {
+        return; // pre-index data dir: the reconcile below rebuilds once
     };
     for line in raw.lines() {
-        if !line.contains(message_id) {
-            continue; // cheap prefilter before the parse
-        }
-        if let Ok(m) = serde_json::from_str::<SessionMessage>(line)
-            && m.meta.message_id == message_id
-        {
-            return Ok(Some(m));
-        }
+        let mut cols = line.splitn(3, '\t');
+        let offset = cols.next().and_then(|v| v.parse::<u64>().ok());
+        let len = cols.next().and_then(|v| v.parse::<u64>().ok());
+        let (Some(offset), Some(len)) = (offset, len) else {
+            // A malformed sidecar row means the whole file is untrusted:
+            // drop it and let the reconcile rebuild from the log.
+            idx.spans.clear();
+            idx.line_ids.clear();
+            idx.ids.clear();
+            return;
+        };
+        push_entry(idx, LineSpan { offset, len }, cols.next().unwrap_or(""));
     }
-    Ok(None)
 }
 
-fn count_lines(path: &Path) -> Result<u64, String> {
-    let Ok(raw) = fs::read_to_string(path) else {
-        return Ok(0);
+/// Record one line at the end of the index (sidecar load, scans and
+/// commits all enter here, so `spans` / `line_ids` / `ids` stay aligned).
+fn push_entry(idx: &mut LineIndex, span: LineSpan, id: &str) {
+    let pos = idx.spans.len() as u32;
+    idx.spans.push(span);
+    if id.is_empty() {
+        idx.line_ids.push(None);
+    } else {
+        idx.line_ids.push(Some(id.to_string()));
+        idx.ids.insert(id.to_string(), pos);
+    }
+}
+
+/// Index every non-blank line whose bytes lie in `[from, to)` (`to` must
+/// be the current file length). A trailing segment without `\n` becomes
+/// the provisional `last_partial` entry and is never persisted. With
+/// `persist`, terminated entries are appended to the sidecar (the delta
+/// reconcile); a full rebuild rewrites the sidecar instead.
+fn scan_range(dir: &Path, idx: &mut LineIndex, from: u64, to: u64, persist: bool) -> Result<(), String> {
+    idx.last_partial = false;
+    if from >= to {
+        return Ok(());
+    }
+    let path = messages_path(dir);
+    let mut bytes = vec![0u8; (to - from) as usize];
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file =
+            fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        file.seek(SeekFrom::Start(from))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        file.read_exact(&mut bytes)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    let mut pos = from;
+    for seg in bytes.split_inclusive(|b| *b == b'\n') {
+        let terminated = seg.last() == Some(&b'\n');
+        let body = if terminated { &seg[..seg.len() - 1] } else { seg };
+        let text = String::from_utf8_lossy(body).into_owned();
+        pos += seg.len() as u64;
+        if text.trim().is_empty() {
+            continue; // blank line: occupies bytes, not a message number
+        }
+        let id = serde_json::from_str::<SessionMessage>(&text)
+            .ok()
+            .map(|m| m.meta.message_id)
+            .unwrap_or_default();
+        let span = LineSpan {
+            offset: pos - seg.len() as u64,
+            len: body.len() as u64,
+        };
+        push_entry(idx, span, &id);
+        if terminated {
+            if persist {
+                sidecar_append(dir, span, &id)?;
+            }
+        } else {
+            idx.last_partial = true;
+        }
+    }
+    Ok(())
+}
+
+fn sidecar_append(dir: &Path, span: LineSpan, id: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    let path = line_index_path(dir);
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    writeln!(f, "{}\t{}\t{}", span.offset, span.len, id)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Rewrite the sidecar from the index, skipping any provisional partial
+/// tail (only terminated lines are ever persisted).
+fn rewrite_sidecar(dir: &Path, idx: &LineIndex) -> Result<(), String> {
+    let path = line_index_path(dir);
+    let n = idx.spans.len().saturating_sub(if idx.last_partial { 1 } else { 0 });
+    let mut buf = String::new();
+    for i in 0..n {
+        let id = idx.line_ids[i].as_deref().unwrap_or("");
+        buf.push_str(&format!("{}\t{}\t{}\n", idx.spans[i].offset, idx.spans[i].len, id));
+    }
+    fs::write(&path, buf).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Read one indexed line. `Ok(None)` covers a vanished span (the log
+/// changed under the index since the reconcile — the next
+/// `ensure_index` heals it) and a missing log.
+fn read_span(path: &Path, span: LineSpan) -> Result<Option<String>, String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    Ok(raw.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+    file.seek(SeekFrom::Start(span.offset))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    read_current_line(&mut file, span)
+}
+
+/// Read the line at the file handle's current position. Shared by
+/// `read_span` and the windowed `read_messages` (one open per page).
+fn read_current_line(file: &mut fs::File, span: LineSpan) -> Result<Option<String>, String> {
+    use std::io::Read as _;
+    let mut buf = vec![0u8; span.len as usize];
+    // `File::read` may return fewer bytes than requested (a tail still being
+    // appended, a network share, a filter driver); keep filling until the whole
+    // span is present, matching the reader on the runtime side. A read that
+    // reaches EOF before the span is complete means the log truncated under the
+    // index — skip the row.
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    if filled < buf.len() {
+        return Ok(None); // truncated under the index — skip the row
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
+/// Resolve a `message_id` through the index: one seek to the recorded
+/// span, never a scan of the log.
+fn lookup_message(
+    dir: &Path,
+    idx: &mut LineIndex,
+    message_id: &str,
+) -> Result<Option<SessionMessage>, String> {
+    let Some(span) = idx
+        .ids
+        .get(message_id)
+        .and_then(|&p| idx.spans.get(p as usize).copied())
+    else {
+        return Ok(None);
+    };
+    let Some(raw) = read_span(&messages_path(dir), span)? else {
+        return Ok(None);
+    };
+    // Trust the id→position index only as far as it agrees with the log: if the
+    // recorded span parses to a *different* message_id (a stale or copied
+    // sidecar), treat it as a miss rather than handing the wrong body to the
+    // idempotency gate — the next `ensure_index` heals the drift with one
+    // reconcile pass.
+    Ok(serde_json::from_str::<SessionMessage>(&raw)
+        .ok()
+        .filter(|m| m.meta.message_id == message_id))
+}
+
+/// Durably commit one message row. This is the ONLY place a chat log
+/// grows: the `messages.jsonl` append, the line index and its sidecar,
+/// the derived counters in the session record (`message_count`,
+/// `last_message_preview`) and the `session.json` rewrite happen in one
+/// step under the caller's per-session lock, so the log and its derived
+/// state can never drift apart. `last_active_at` and `unread` stay
+/// caller-owned — the write entry and the migration replay set them by
+/// different rules.
+fn commit_row(
+    dir: &Path,
+    session: &mut ChatSession,
+    idx: &mut LineIndex,
+    stored: &SessionMessage,
+) -> Result<(), String> {
+    let path = messages_path(dir);
+    let mut line = serde_json::to_string(stored).map_err(|e| format!("serialize message: {e}"))?;
+    line.push('\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // The append offset is the file's size *before* this write. A metadata
+    // failure must abort, not default to 0 — a span recorded at offset 0 would
+    // collide with line 0 and be persisted into the sidecar as a permanent
+    // corruption the next open cannot distinguish from real data.
+    let offset = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+
+    if idx.last_partial {
+        // The append landed on the half-written line the last scan saw:
+        // re-index from that line's start (the merged row is corrupt and
+        // unparseable exactly as the whole-log reader left it).
+        let from = idx.spans.last().map(|s| s.offset).unwrap_or(0);
+        idx.spans.pop();
+        idx.line_ids.pop();
+        idx.last_partial = false;
+        let to = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?.len();
+        scan_range(dir, idx, from, to, true)?;
+    } else {
+        let span = LineSpan {
+            offset,
+            len: line.len() as u64 - 1,
+        };
+        push_entry(idx, span, &stored.meta.message_id);
+        sidecar_append(dir, span, &stored.meta.message_id)?;
+    }
+
+    session.message_count = stored.seq;
+    session.last_message_preview = Some(preview_of_message(stored));
+    save(dir, session)
 }
 
 // ── Reads ─────────────────────────────────────────────────────────────
 
 /// A page of messages plus the total count. `offset` counts from the
 /// newest message backwards (the chat UI reads its tail), `limit` is
-/// capped by the caller.
+/// capped by the caller. The window resolves through the line index and
+/// the log is read by byte spans only — a page never costs more than
+/// the page.
 pub fn read_messages(
     data_dir: &Path,
     session_id: &str,
@@ -1260,25 +1587,45 @@ pub fn read_messages(
 ) -> Result<(Vec<SessionMessage>, u64), String> {
     validate_session_id(session_id)?;
     let dir = session_dir(data_dir, session_id);
+    // Serialize with the write path: the window plan and the log bytes
+    // must come from the same state, and `ensure_index` may extend the
+    // index from appended bytes.
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
     let path = messages_path(&dir);
-    let raw = match fs::read_to_string(&path) {
-        Ok(r) => r,
+    let index = ensure_index(&dir)?;
+    let window: Vec<LineSpan> = {
+        let idx = lock(&index);
+        let total = idx.spans.len();
+        let end = total.saturating_sub(offset);
+        let start = end.saturating_sub(limit.max(1));
+        idx.spans[start..end].to_vec()
+    };
+    let total = window_total(&index);
+    // A missing log is an empty conversation (same rule as the old
+    // whole-file read).
+    let mut file = match fs::File::open(&path) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
-    let total = lines.len() as u64;
-    let end = total.saturating_sub(offset as u64) as usize;
-    let start = end.saturating_sub(limit.max(1));
     // Plan D-A/A1: old `intent_*` rows are re-labelled at this single
     // read path (write new, read old). The writer's identity type comes
     // from the session; a session that cannot be read (or a writer not
     // listed in it) reads as the agent side.
     let participants = load(data_dir, session_id).map(|s| s.participants).unwrap_or_default();
-    let mut out = Vec::with_capacity(end - start);
-    for line in &lines[start..end] {
+    let mut out = Vec::with_capacity(window.len());
+    use std::io::{Seek, SeekFrom};
+    for span in &window {
         // One corrupt line must not brick the history (same rule as chat.rs).
-        match serde_json::from_str::<SessionMessage>(line) {
+        file.seek(SeekFrom::Start(span.offset))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let raw = match read_current_line(&mut file, *span) {
+            Ok(Some(r)) => r,
+            Ok(None) => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        match serde_json::from_str::<SessionMessage>(&raw) {
             Ok(mut m) => {
                 if m.kind == "intent_request" || m.kind == "intent_response" {
                     let human = participants
@@ -1296,16 +1643,23 @@ pub fn read_messages(
     Ok((out, total))
 }
 
-/// `last_message_preview` length, in characters — kept identical to
-/// `chat.rs` `PREVIEW_CHARS` so the group list and the one-to-one list
-/// truncate their meta line the same way.
+/// The total physical line count behind a paging answer. Kept as a
+/// helper so the count is taken under the index lock in one place.
+fn window_total(index: &Arc<Mutex<LineIndex>>) -> u64 {
+    lock(index).spans.len() as u64
+}
+
+/// `last_message_preview` length, in characters — kept identical to the
+/// old `chat.rs` one-to-one list preview (ADR-076 §决策 8) so the group
+/// list and the one-to-one list truncate their meta line the same way.
 const GROUP_PREVIEW_CHARS: usize = 80;
 
 /// The sidebar's last-message preview for a session's tail row: the body, or
 /// a kind-appropriate stand-in when the row carries no text (an
 /// attachment-only message, an interaction card, a bare system notice).
-/// Truncated on a char boundary so multi-byte content cannot panic — the same
-/// rule as `chat::preview`.
+/// Truncated on a char boundary so multi-byte content cannot panic — the
+/// rules the old `chat::preview` applied to the one-to-one list, kept
+/// byte-identical on the wire.
 fn preview_of_message(msg: &SessionMessage) -> String {
     let source = if !msg.body.trim().is_empty() {
         msg.body.clone()
@@ -1333,11 +1687,44 @@ fn preview_of_message(msg: &SessionMessage) -> String {
     s
 }
 
-/// Fill `last_message_preview` for every `project_group` session in place by
-/// reading its tail row. Other kinds are left untouched — their lists derive
-/// the preview elsewhere (`chat_api` for one-to-one). Best-effort: a session
-/// whose log cannot be read, or that has no messages, keeps `None` so the
-/// sidebar row just shows an empty meta line rather than failing the list.
+/// Ensure a session's stored `last_message_preview` is usable. The
+/// preview is write-time derived state ([`commit_row`]), so the normal
+/// path is a pure metadata read with no log access at all. A session
+/// written before the field existed self-heals here exactly once: one
+/// indexed seek to the tail line, preview derived, persisted back into
+/// `session.json`. Best-effort — a session whose log cannot be read, or
+/// that has no messages, keeps `None` so the sidebar row just shows an
+/// empty meta line rather than failing the list.
+pub fn ensure_preview(data_dir: &Path, s: &mut ChatSession) {
+    if s.last_message_preview.is_some() || s.message_count == 0 {
+        return;
+    }
+    let dir = session_dir(data_dir, &s.session_id);
+    // Serialize with the write path: `ensure_index` may extend the index
+    // from appended bytes, and the healed preview is persisted below.
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let Ok(index) = ensure_index(&dir) else { return };
+    let tail = lock(&index).spans.last().copied();
+    let Some(span) = tail else { return };
+    let Ok(Some(raw)) = read_span(&messages_path(&dir), span) else {
+        return;
+    };
+    let Ok(m) = serde_json::from_str::<SessionMessage>(&raw) else {
+        return; // corrupt tail: same answer as the old paging read — no preview
+    };
+    let preview = preview_of_message(&m);
+    s.last_message_preview = Some(preview.clone());
+    if let Ok(mut session) = load(data_dir, &s.session_id) {
+        session.last_message_preview = Some(preview);
+        let _ = save(&dir, &session);
+    }
+}
+
+/// Fill `last_message_preview` for every `project_group` session in place.
+/// Other kinds are left untouched — their lists derive the preview
+/// elsewhere (`chat_api` for one-to-one, both through [`ensure_preview`],
+/// which is a no-op once the write path has stored the field).
 ///
 /// Read-path only, so it must be driven from inside an `offload` closure (it
 /// touches the filesystem synchronously).
@@ -1346,11 +1733,7 @@ pub fn attach_group_previews(data_dir: &Path, sessions: &mut [ChatSession]) {
         .iter_mut()
         .filter(|s| s.kind == SessionKind::ProjectGroup)
     {
-        if let Ok((mut page, _)) = read_messages(data_dir, &s.session_id, 0, 1)
-            && let Some(last) = page.pop()
-        {
-            s.last_message_preview = Some(preview_of_message(&last));
-        }
+        ensure_preview(data_dir, s);
     }
 }
 
@@ -1494,12 +1877,40 @@ pub fn list_for(data_dir: &Path, participant: &str) -> Result<Vec<ChatSession>, 
 /// account joined. Read is granted project-group-wide in the message path;
 /// posting stays gated on participation. Newest activity first.
 pub fn list_project_groups(data_dir: &Path) -> Vec<ChatSession> {
-    let mut out: Vec<ChatSession> = scan_all_sessions(data_dir)
-        .into_iter()
-        .filter(|s| s.kind == SessionKind::ProjectGroup)
-        .collect();
-    out.sort_by_key(|s| std::cmp::Reverse(s.last_active_at));
-    out
+    // Served from the project → session index: one index read plus one
+    // `session.json` per group, never a directory scan on the request
+    // path. A missing index file (pre-projects-index data dir) gets one
+    // backfill scan that also writes the index, then never again.
+    let groups = if !projects_index_path(data_dir).exists() {
+        let mut groups: Vec<ChatSession> = scan_all_sessions(data_dir)
+            .into_iter()
+            .filter(|s| s.kind == SessionKind::ProjectGroup)
+            .collect();
+        let mut index = read_projects_index(data_dir);
+        for g in &groups {
+            if let Some(pid) = &g.project_id {
+                index.insert(pid.clone(), g.session_id.clone());
+            }
+        }
+        let _ = write_projects_index(data_dir, &index);
+        groups.sort_by_key(|s| std::cmp::Reverse(s.last_active_at));
+        groups
+    } else {
+        let index = read_projects_index(data_dir);
+        let mut out = Vec::with_capacity(index.len());
+        for sid in index.values() {
+            // Load failures (deleted session) and kind drift are filtered
+            // here — the same stale-row rule as `list_for`.
+            if let Ok(s) = load(data_dir, sid)
+                && s.kind == SessionKind::ProjectGroup
+            {
+                out.push(s);
+            }
+        }
+        out.sort_by_key(|s| std::cmp::Reverse(s.last_active_at));
+        out
+    };
+    groups
 }
 
 /// Design 27 §8.3: sync a project group's participant set to exactly
@@ -2375,6 +2786,10 @@ mod tests {
 
     #[test]
     fn group_previews_derive_from_last_message() {
+        // The list surfaces hand rows straight from `session.json` (the
+        // `load` below mirrors `list_for`): the preview is write-time
+        // derived state, and a pre-field session self-heals once through
+        // `ensure_preview`.
         let dir = temp_dir();
         let g = create_session(
             &dir,
@@ -2388,10 +2803,11 @@ mod tests {
             1,
         )
         .unwrap();
+        let fresh = |dir: &Path| vec![load(dir, &g.session_id).unwrap()];
 
         // No messages yet → no preview (the sidebar row shows an empty meta
         // line rather than a placeholder).
-        let mut empty = vec![g.clone()];
+        let mut empty = fresh(&dir);
         attach_group_previews(&dir, &mut empty);
         assert_eq!(empty[0].last_message_preview, None);
 
@@ -2409,8 +2825,8 @@ mod tests {
             3,
         )
         .unwrap();
-        // The newest row wins, trimmed.
-        let mut rows = vec![g.clone()];
+        // The newest row wins, trimmed — and the log is not read for it.
+        let mut rows = fresh(&dir);
         attach_group_previews(&dir, &mut rows);
         assert_eq!(
             rows[0].last_message_preview.as_deref(),
@@ -2421,7 +2837,7 @@ mod tests {
         let long = "话".repeat(GROUP_PREVIEW_CHARS + 10);
         append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, &long, "m3"), 4)
             .unwrap();
-        let mut rows = vec![g.clone()];
+        let mut rows = fresh(&dir);
         attach_group_previews(&dir, &mut rows);
         let p = rows[0].last_message_preview.clone().unwrap();
         assert_eq!(p.chars().count(), GROUP_PREVIEW_CHARS + 1); // body + ellipsis
@@ -2965,5 +3381,191 @@ mod tests {
         let (rows, total) = read_messages(&dir, &session.session_id, 0, 10).unwrap();
         assert_eq!(total, 4);
         assert_eq!(rows[3].body, "post-migration");
+    }
+
+    // ── The line index (no-whole-log reads) ───────────────────────
+
+    #[test]
+    fn windowed_reads_cover_long_corrupt_and_blank_lines() {
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[Participant::new("u1", ParticipantIdentity::Human)],
+            "w",
+            None,
+            1,
+        )
+        .unwrap();
+        // Empty log: an empty page, not an error.
+        let (rows, total) = read_messages(&dir, &g.session_id, 0, 10).unwrap();
+        assert!(rows.is_empty() && total == 0);
+
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "first", "w-1"), 2)
+            .unwrap();
+        // A line well past any chunk size reads back exactly through its span.
+        let long = "x".repeat(100 * 1024);
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, &long, "w-2"), 3)
+            .unwrap();
+
+        // A corrupt line and a blank line land in the log behind the
+        // write entry's back (an operator edit, a torn write): the corrupt
+        // line keeps a physical number but is skipped from pages, the
+        // blank one keeps neither.
+        {
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(messages_path(&session_dir(&dir, &g.session_id)))
+                .unwrap();
+            f.write_all(b"{ not json}\n\n").unwrap();
+        }
+        let (stored, _) = append_message(
+            &dir,
+            &g.session_id,
+            &msg("u1", KIND_USER_MESSAGE, "tail", "w-3"),
+            4,
+        )
+        .unwrap();
+        // The counter reconciled from the index, not from a stale meta:
+        // the corrupt line consumed seq 3, so the new row lands on 4.
+        assert_eq!(stored.seq, 4);
+
+        let (rows, total) = read_messages(&dir, &g.session_id, 0, 10).unwrap();
+        assert_eq!(total, 4, "corrupt line counts, blank line does not");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].body, long, "the long span survives byte-exactly");
+
+        // Middle window: two oldest rows, newest-back offset honoured.
+        let (rows, _) = read_messages(&dir, &g.session_id, 2, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].body, "first");
+        assert_eq!(rows[1].body, long);
+
+        // Offset past the end: empty window, total still reported.
+        let (rows, total) = read_messages(&dir, &g.session_id, 50, 5).unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(total, 4);
+
+        // The corrupt line holds its seq slot but no id; neighbours stay
+        // fetchable through the same index.
+        let tail = message_by_id(&dir, &g.session_id, "w-3").unwrap();
+        assert_eq!(tail.map(|m| m.seq), Some(4));
+    }
+
+    #[test]
+    fn idempotency_and_lookup_survive_a_restart() {
+        // Evicting the in-memory index simulates a fresh process: the
+        // sidecar alone must serve idempotency, fetch-by-id and the
+        // counter — without a whole-log pass (the file is complete, so
+        // the reconcile only compares lengths).
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[Participant::new("u1", ParticipantIdentity::Human)],
+            "r",
+            None,
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "first", "r-1"), 2)
+            .unwrap();
+        let sess = session_dir(&dir, &g.session_id);
+        assert!(line_index_path(&sess).exists(), "the sidecar is persisted");
+
+        lock(&LINE_INDEXES).remove(&sess);
+        let (again, fresh) =
+            append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "first", "r-1"), 3)
+                .unwrap();
+        assert!(!fresh, "the redelivered id is not appended twice");
+        assert_eq!(again.seq, 1);
+        let (rows, total) = read_messages(&dir, &g.session_id, 0, 10).unwrap();
+        assert_eq!((rows.len(), total as u64), (1, 1));
+
+        lock(&LINE_INDEXES).remove(&sess);
+        assert_eq!(message_by_id(&dir, &g.session_id, "r-1").unwrap().map(|m| m.seq), Some(1));
+    }
+
+    #[test]
+    fn list_previews_never_read_the_log() {
+        // The stored preview answers the list even when the log lies:
+        // deleting the tail line must not change what the sidebar shows
+        // (the write path derived it once, at commit time).
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "p",
+            Some("proj-1"),
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "old tail", "l-1"), 2)
+            .unwrap();
+
+        let sess = session_dir(&dir, &g.session_id);
+        // The tail line is gone from the log entirely (rotation, operator
+        // edit) — the stored preview is unaffected.
+        fs::write(messages_path(&sess), "").unwrap();
+        lock(&LINE_INDEXES).remove(&sess);
+
+        let mut rows = vec![load(&dir, &g.session_id).unwrap()];
+        attach_group_previews(&dir, &mut rows);
+        assert_eq!(rows[0].last_message_preview.as_deref(), Some("old tail"));
+    }
+
+    #[test]
+    fn pre_field_sessions_self_heal_the_preview_once() {
+        // A session written before the preview field existed: the first
+        // list read derives it from the indexed tail line and persists
+        // it; from then on the answer is pure metadata (log removal
+        // cannot take it away).
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "h",
+            Some("proj-1"),
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "first", "h-1"), 2)
+            .unwrap();
+        append_message(
+            &dir,
+            &g.session_id,
+            &msg("ag", KIND_AGENT_MESSAGE, "second tail", "h-2"),
+            3,
+        )
+        .unwrap();
+
+        let sess = session_dir(&dir, &g.session_id);
+        let mut stale = load(&dir, &g.session_id).unwrap();
+        stale.last_message_preview = None;
+        save(&sess, &stale).unwrap();
+        lock(&LINE_INDEXES).remove(&sess);
+
+        let mut rows = vec![load(&dir, &g.session_id).unwrap()];
+        attach_group_previews(&dir, &mut rows);
+        assert_eq!(
+            rows[0].last_message_preview.as_deref(),
+            Some("second tail"),
+            "derived from the tail line once"
+        );
+        // The heal was persisted, and the second read takes the no-log
+        // path even after the log is gone entirely.
+        fs::write(messages_path(&sess), "").unwrap();
+        lock(&LINE_INDEXES).remove(&sess);
+        let mut rows = vec![load(&dir, &g.session_id).unwrap()];
+        attach_group_previews(&dir, &mut rows);
+        assert_eq!(rows[0].last_message_preview.as_deref(), Some("second tail"));
     }
 }

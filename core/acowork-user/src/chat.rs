@@ -47,9 +47,6 @@ use serde::{Deserialize, Serialize};
 /// Separator inside `chat_id` (`min__max`).
 pub const SEP: &str = "__";
 
-/// `last_message_preview` length, in characters (ADR-076 §决策 8).
-const PREVIEW_CHARS: usize = 80;
-
 /// Upload ceilings, in bytes (ADR-076 §决策 9: images 25 MB, documents
 /// 100 MB, no virus scan).
 pub const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
@@ -527,29 +524,10 @@ pub(crate) fn resolve_attachments(dir: &Path, ids: &[String]) -> Result<Vec<Atta
         .collect()
 }
 
-/// What the conversation list shows for this message: the body, or the first
-/// attachment's name when there is no body (an image with no caption still
-/// needs a row in the list). Truncated on a char boundary so a multi-byte
-/// string cannot panic.
-pub(crate) fn preview(message: &ChatMessage) -> String {
-    let source = if message.body.trim().is_empty() {
-        match message.attachments.first() {
-            Some(a) if a.kind() == "image" => format!("[image] {}", a.filename),
-            Some(a) => format!("[file] {}", a.filename),
-            None => String::new(),
-        }
-    } else {
-        message.body.clone()
-    };
-    let trimmed = source.trim();
-    if trimmed.chars().count() <= PREVIEW_CHARS {
-        return trimmed.to_string();
-    }
-    let mut s: String = trimmed.chars().take(PREVIEW_CHARS).collect();
-    s.push('…');
-    s
-}
-
+/// The conversation-list preview is no longer derived here: the one-to-one
+/// list surface serves `ChatSession::last_message_preview`, maintained at
+/// write time by `chat_sessions::commit_row` (the 80-char body /
+/// `[image]`/`[file]` stand-in rules moved with it).
 
 #[cfg(test)]
 mod tests {
@@ -709,53 +687,6 @@ mod tests {
         // formatter must not be the only thing standing between them and a
         // response header.
         assert!(!content_disposition("a\"b\r\nX: 1").contains("\r\n"));
-    }
-
-    #[test]
-    fn a_bodyless_message_previews_its_attachment() {
-        let att = Attachment {
-            id: "1".into(),
-            filename: "shot.png".into(),
-            mime: "image/png".into(),
-            size: 1,
-            thumb: None,
-        };
-        let doc = Attachment {
-            filename: "spec.pdf".into(),
-            mime: "application/pdf".into(),
-            ..att.clone()
-        };
-        let img_row = ChatMessage {
-            seq: 1,
-            ts: 0,
-            from: A.into(),
-            kind: "image".into(),
-            body: String::new(),
-            attachments: vec![att],
-        };
-        assert_eq!(preview(&img_row), "[image] shot.png");
-        let doc_row = ChatMessage {
-            kind: "document".into(),
-            attachments: vec![doc],
-            ..img_row
-        };
-        assert_eq!(preview(&doc_row), "[file] spec.pdf");
-    }
-
-    #[test]
-    fn preview_truncates_on_char_boundaries() {
-        let long = "话".repeat(200);
-        let row = ChatMessage {
-            seq: 1,
-            ts: 0,
-            from: A.into(),
-            kind: "text".into(),
-            body: long,
-            attachments: Vec::new(),
-        };
-        let p = preview(&row);
-        assert_eq!(p.chars().count(), PREVIEW_CHARS + 1);
-        assert!(p.ends_with('…'));
     }
 
     #[test]

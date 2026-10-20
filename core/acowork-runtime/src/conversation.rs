@@ -4,10 +4,10 @@
 //! and `ConversationWriter` for channel-based single-writer thread architecture.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Seek, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -304,6 +304,13 @@ pub struct ConversationWriter {
     /// disk write so `read_messages_since` never sees a count ahead of
     /// the actual file.
     committed_lines: Arc<AtomicUsize>,
+    /// Path of the JSONL file (for post-write log-index reconciliation).
+    log_path: PathBuf,
+    /// Shared line index for this log. The writer advances it after every
+    /// successful write and BEFORE incrementing `committed_lines`, so a
+    /// reader that observes `committed_lines = N` is guaranteed to find an
+    /// index covering at least N lines (ADR-022 ordering invariant).
+    log: Arc<Mutex<LogIndex>>,
 }
 
 impl ConversationWriter {
@@ -313,12 +320,45 @@ impl ConversationWriter {
         receiver: mpsc::UnboundedReceiver<WriterCommand>,
         last_compaction_offset: Arc<std::sync::Mutex<Option<u64>>>,
         committed_lines: Arc<AtomicUsize>,
+        log_path: PathBuf,
+        log: Arc<Mutex<LogIndex>>,
     ) -> Self {
         Self {
             file,
             receiver,
             last_compaction_offset,
             committed_lines,
+            log_path,
+            log,
+        }
+    }
+
+    /// §6/§7 fast path: fold the line just written into the log index without
+    /// re-reading the file. The writer is the sole appender while a session is
+    /// active, so the appended `(offset, len)` always continues the index; the
+    /// rare desync (an external writer truncated or rotated the log) falls back
+    /// to a full reconcile so the shared index never drifts from disk. Called
+    /// before `committed_lines` advances (ADR-022): a reader that sees the new
+    /// count can always resolve it against the index.
+    fn commit_appended_line(&self, offset: u64, len: u64) {
+        let mut idx = match self.log.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let continues = offset == idx.end && idx.spans.last().map_or(true, |s| s.terminated);
+        if continues {
+            let data_index = idx.total_data;
+            idx.total_data += 1;
+            idx.spans.push(LogSpan {
+                offset,
+                len,
+                terminated: true,
+                kind: LogLineKind::Data,
+                data_index: Some(data_index),
+            });
+            idx.end = offset + len;
+        } else if let Err(e) = reconcile_log(&self.log_path, &mut idx) {
+            tracing::warn!("conversation writer: log index reconcile failed: {e}");
         }
     }
 
@@ -341,20 +381,23 @@ impl ConversationWriter {
                     } else {
                         None
                     };
-                    if let Err(e) = self.write_entry(&entry, abs_offset.is_some()) {
-                        tracing::error!("Failed to write conversation entry: {}", e);
-                    } else {
-                        // ADR-022: Increment committed_lines AFTER the entry
-                        // is physically written to disk.  This guarantees
-                        // that read_messages_since never sees a line count
-                        // ahead of the actual file contents.
-                        self.committed_lines.fetch_add(1, Ordering::Relaxed);
-                        if let Some(abs) = abs_offset {
-                            // ADR-024: absolute offset (no header to subtract from).
-                            if let Ok(mut guard) = self.last_compaction_offset.lock() {
-                                *guard = Some(abs);
+                    match self.write_entry(&entry, abs_offset.is_some()) {
+                        Err(e) => tracing::error!("Failed to write conversation entry: {}", e),
+                        Ok((start, len)) => {
+                            // ADR-022: advance the log index, then committed_lines,
+                            // AFTER the entry is physically written to disk. This
+                            // guarantees read_messages_since never sees a line count
+                            // ahead of the actual file contents, and the index always
+                            // backs a count a reader resolves against it.
+                            self.commit_appended_line(start, len);
+                            self.committed_lines.fetch_add(1, Ordering::Relaxed);
+                            if let Some(abs) = abs_offset {
+                                // ADR-024: absolute offset (no header to subtract from).
+                                if let Ok(mut guard) = self.last_compaction_offset.lock() {
+                                    *guard = Some(abs);
+                                }
+                                tracing::debug!(abs_offset = abs, "Recorded compaction offset");
                             }
-                            tracing::debug!(abs_offset = abs, "Recorded compaction offset");
                         }
                     }
                 }
@@ -372,15 +415,17 @@ impl ConversationWriter {
                             None
                         }
                     };
-                    if let Err(e) = self.write_entry(&entry, abs_offset.is_some()) {
-                        tracing::error!("Failed to write compaction entry: {}", e);
-                    } else {
-                        self.committed_lines.fetch_add(1, Ordering::Relaxed);
-                        if let Some(abs) = abs_offset {
-                            if let Ok(mut guard) = self.last_compaction_offset.lock() {
-                                *guard = Some(abs);
+                    match self.write_entry(&entry, abs_offset.is_some()) {
+                        Err(e) => tracing::error!("Failed to write compaction entry: {}", e),
+                        Ok((start, len)) => {
+                            self.commit_appended_line(start, len);
+                            self.committed_lines.fetch_add(1, Ordering::Relaxed);
+                            if let Some(abs) = abs_offset {
+                                if let Ok(mut guard) = self.last_compaction_offset.lock() {
+                                    *guard = Some(abs);
+                                }
+                                tracing::debug!(abs_offset = abs, "Recorded compaction offset (sync)");
                             }
-                            tracing::debug!(abs_offset = abs, "Recorded compaction offset (sync)");
                         }
                     }
                     // Always reply, even on failure, so the caller never
@@ -424,24 +469,324 @@ impl ConversationWriter {
     ///
     /// If `already_positioned` is `true`, the file cursor is already at the
     /// end (set by the caller who captured the pre-write absolute offset).
+    ///
+    /// Returns the absolute `(start_offset, byte_len)` of the line actually
+    /// written (including the trailing newline) so the caller can fold it into
+    /// the log index in O(1) without a read-back.
     fn write_entry(
         &mut self,
         entry: &ConversationEntry,
         already_positioned: bool,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<(u64, u64)> {
         if !already_positioned {
             // Seek to end for append; handles resume where file position may be at 0
             self.file.seek(std::io::SeekFrom::End(0))?;
         }
+        let start = self.file.stream_position()?;
         // Build the complete line in memory first to ensure atomic write
         let mut line = serde_json::to_string(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
+        let len = line.len() as u64;
         // Single write_all call — OS-level atomicity for small writes
         self.file.write_all(line.as_bytes())?;
         self.file.sync_data()?;
-        Ok(())
+        Ok((start, len))
     }
+}
+
+// ── Log index: request paths never read the whole JSONL ──────────────
+//
+// Design iron rule: no request / tool-read path may load or count every line
+// of a session log. Line counts, pagination windows, and incremental tails
+// are served from a small in-memory index per log path. A full byte scan
+// happens at most once per session per process (first-touch reconciliation,
+// see `calibrate_open`); afterwards the index only reads bytes appended
+// since the previous scan.
+
+/// Classification of one physical JSONL line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogLineKind {
+    /// A conversation entry (possibly corrupt JSON — it still counts as a
+    /// line, matching the pre-index pagination `total` semantics).
+    Data,
+    /// Whitespace-only line — skipped by pagination.
+    Blank,
+    /// Legacy v1 metadata header on line 0 — skipped by pagination.
+    Header,
+}
+
+/// Byte extent of one physical line in the log.
+#[derive(Debug, Clone, Copy)]
+struct LogSpan {
+    /// Absolute byte offset of the line's first byte.
+    offset: u64,
+    /// Byte length including the trailing newline.
+    len: u64,
+    /// Whether the line ended with a newline on disk.
+    terminated: bool,
+    kind: LogLineKind,
+    /// Position among the `Data` lines (pagination / ADR-050 coordinates).
+    data_index: Option<u64>,
+}
+
+/// Incremental index over one JSONL log file.
+#[derive(Debug, Default)]
+struct LogIndex {
+    /// Physical lines in file order. `read_messages_since*` numbering matches
+    /// `BufRead::lines().enumerate()` exactly — blanks and a final
+    /// unterminated line are counted, nothing else.
+    spans: Vec<LogSpan>,
+    /// Number of `Data` lines: the pagination `total`.
+    total_data: u64,
+    /// Byte length of the file at the last scan; equal to the file size when
+    /// the index is up to date.
+    end: u64,
+}
+
+/// Process-wide registry of per-log-path indexes.
+static LOG_INDEXES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<LogIndex>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Get (or register) the shared index for `path`.
+fn log_index_for(path: &Path) -> Arc<Mutex<LogIndex>> {
+    let mut map = LOG_INDEXES.lock().unwrap();
+    map.entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(LogIndex::default())))
+        .clone()
+}
+
+/// Drop any scanned state for `path` (fresh / truncated file).
+fn reset_log_index(path: &Path) {
+    let index = log_index_for(path);
+    if let Ok(mut idx) = index.lock() {
+        *idx = LogIndex::default();
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn is_blank_bytes(body: &[u8]) -> bool {
+    body.iter().all(u8::is_ascii_whitespace)
+}
+
+/// The marker pair legacy readers used to recognise the v1 metadata header
+/// line. Only checked against line 0 (a mid-file data line whose *content*
+/// happens to mention both markers must not vanish from pagination).
+///
+/// A genuine data line always serializes a `ConversationEntry`, which carries
+/// both `role` and `content`; the v1 metadata header carries neither. Requiring
+/// their absence keeps a first message whose body happens to embed the two
+/// marker tokens from being misread as a header — and, in
+/// `strip_legacy_header_line`, from being physically deleted.
+fn looks_like_meta_header(body: &[u8]) -> bool {
+    contains_bytes(body, b"\"version\"")
+        && contains_bytes(body, b"\"session_id\"")
+        && !contains_bytes(body, b"\"role\"")
+        && !contains_bytes(body, b"\"content\"")
+}
+
+/// Bring `idx` up to date with the bytes currently on disk.
+///
+/// Cost is O(bytes appended since the last scan): only the new tail is read
+/// and no JSON parsing happens beyond line classification. A truncated or
+/// rotated file resets the index and forces one full re-scan. A previously
+/// unterminated tail is re-scanned because the writer may have completed it.
+fn reconcile_log(path: &Path, idx: &mut LogIndex) -> std::io::Result<()> {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            *idx = LogIndex::default();
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    let file_len = file.metadata()?.len();
+    if file_len < idx.end {
+        // External truncation / rotation — rebuild from scratch.
+        *idx = LogIndex::default();
+    }
+    let mut scan_from = idx.end;
+    if let Some(last) = idx.spans.last().copied() {
+        if !last.terminated {
+            // Re-scan the unterminated tail: bytes may have been appended.
+            idx.spans.pop();
+            if last.kind == LogLineKind::Data {
+                idx.total_data -= 1;
+            }
+            scan_from = last.offset;
+        }
+    }
+    if scan_from == file_len {
+        idx.end = file_len;
+        return Ok(());
+    }
+    let mut reader = BufReader::new(file);
+    reader.seek(std::io::SeekFrom::Start(scan_from))?;
+    let mut pos = scan_from;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        let terminated = buf.last() == Some(&b'\n');
+        let body = if terminated {
+            &buf[..buf.len() - 1]
+        } else {
+            &buf[..]
+        };
+        let kind = if is_blank_bytes(body) {
+            LogLineKind::Blank
+        } else if pos == 0 && looks_like_meta_header(body) {
+            LogLineKind::Header
+        } else {
+            LogLineKind::Data
+        };
+        let data_index = if kind == LogLineKind::Data {
+            let i = idx.total_data;
+            idx.total_data += 1;
+            Some(i)
+        } else {
+            None
+        };
+        idx.spans.push(LogSpan {
+            offset: pos,
+            len: buf.len() as u64,
+            terminated,
+            kind,
+            data_index,
+        });
+        pos += buf.len() as u64;
+        if !terminated {
+            break;
+        }
+    }
+    idx.end = pos;
+    Ok(())
+}
+
+/// Read the raw text of one indexed span (without the line terminator).
+///
+/// Returns `None` when the byte range is no longer on disk (a concurrent
+/// truncate raced the scan) — callers treat that like the corrupt lines the
+/// legacy readers skipped. Invalid UTF-8 is lossily decoded; the subsequent
+/// JSON parse then fails and the line is skipped, like before.
+fn read_log_span_text(
+    file: &mut std::fs::File,
+    span: &LogSpan,
+) -> std::io::Result<Option<String>> {
+    let mut buf = vec![0u8; span.len as usize];
+    file.seek(std::io::SeekFrom::Start(span.offset))?;
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    if filled == 0 {
+        return Ok(None);
+    }
+    buf.truncate(filled);
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
+
+/// Cold-path physical line count for `read_messages_since`-style coordinates
+/// when the writer's `committed_lines` counter is not yet populated.
+///
+/// Backed by the log index: the first call per session per process performs
+/// one full scan (first-touch reconciliation); later calls only read appended
+/// bytes. Replaces the old per-request `count_jsonl_lines` full pass.
+pub fn physical_line_count(path: &Path) -> usize {
+    let index = log_index_for(path);
+    let mut idx = match index.lock() {
+        Ok(g) => g,
+        Err(_) => return 0,
+    };
+    if reconcile_log(path, &mut idx).is_err() {
+        return 0;
+    }
+    idx.spans.len()
+}
+
+/// Open-time calibration (design iron rule 3: the ONE allowed full pass,
+/// once per session per process).
+///
+/// 1. Strip a legacy v1 metadata header line from line 0 (rewrite-once).
+/// 2. Full reconcile of the log index.
+/// 3. Drop an unterminated tail line left by a crashed writer: the resume
+///    path would otherwise append onto it and glue two entries together.
+///
+/// Returns the physical line count after calibration. MUST be called before
+/// the writer opens the file handle: on Windows, renaming over a file with
+/// open handles fails.
+fn calibrate_open(path: &Path) -> std::io::Result<usize> {
+    strip_legacy_header_line(path)?;
+    let index = log_index_for(path);
+    let mut idx = index.lock().unwrap();
+    reconcile_log(path, &mut idx)?;
+    if let Some(last) = idx.spans.last().copied() {
+        if !last.terminated {
+            let file = std::fs::OpenOptions::new().write(true).open(path)?;
+            file.set_len(last.offset)?;
+            idx.spans.pop();
+            if last.kind == LogLineKind::Data {
+                idx.total_data -= 1;
+            }
+            idx.end = last.offset;
+            tracing::warn!(
+                offset = last.offset,
+                "conversation: truncated unterminated tail line (crash repair)"
+            );
+        }
+    }
+    Ok(idx.spans.len())
+}
+
+/// Remove a legacy metadata header line at line 0 (v1 files, or hand-edited
+/// JSONL). One-time migration rewrite — the read paths no longer classify
+/// every line against the header markers.
+fn strip_legacy_header_line(path: &Path) -> std::io::Result<()> {
+    let mut file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut first = Vec::new();
+    {
+        let mut reader = BufReader::new(&mut file);
+        reader.read_until(b'\n', &mut first)?;
+    }
+    let body = if first.last() == Some(&b'\n') {
+        &first[..first.len() - 1]
+    } else {
+        &first[..]
+    };
+    if first.is_empty() || !looks_like_meta_header(body) {
+        return Ok(());
+    }
+    // Read everything after the header line and rewrite the file without it.
+    file.seek(std::io::SeekFrom::Start(first.len() as u64))?;
+    let mut rest = Vec::new();
+    file.read_to_end(&mut rest)?;
+    drop(file);
+    let tmp = {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(".header-strip.tmp");
+        PathBuf::from(name)
+    };
+    std::fs::write(&tmp, &rest)?;
+    std::fs::rename(&tmp, path)?;
+    reset_log_index(path);
+    tracing::info!("conversation: stripped legacy metadata header line at open");
+    Ok(())
 }
 
 /// Initial configuration for creating a new `ConversationSession`.
@@ -577,6 +922,12 @@ pub struct ConversationSession {
     /// `meta.last_compaction_offset` so the next restore can use O(1)
     /// offset skip instead of falling back to the O(N) rposition scan.
     last_compaction_offset: Arc<std::sync::Mutex<Option<u64>>>,
+    /// §8 (write-time derived state): text of the most recent compaction
+    /// summary, mirrored into `SessionMeta.last_compaction_summary`.
+    /// Set by [`Self::append_compaction_event`] before its `write_meta()`,
+    /// so the T2-handoff reader is O(1) instead of a full JSONL scan.
+    /// Initialized from meta on `resume()`.
+    last_compaction_summary: std::sync::Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for ConversationSession {
@@ -631,6 +982,11 @@ impl ConversationSession {
         // value is fresh as long as compaction writes are awaited
         // (see `append_compaction_event`).
         let last_compaction_offset = self.last_compaction_offset.lock().ok().and_then(|g| *g);
+        let last_compaction_summary = self
+            .last_compaction_summary
+            .lock()
+            .ok()
+            .and_then(|s| s.clone());
         SessionMeta {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: self.session_id.clone(),
@@ -655,6 +1011,7 @@ impl ConversationSession {
             perf: self.perf.lock().ok().and_then(|p| p.clone()),
             model_ratio: self.model_ratio.lock().ok().and_then(|r| *r),
             last_compaction_offset,
+            last_compaction_summary,
             corrupted: false,
         }
     }
@@ -872,10 +1229,22 @@ impl ConversationSession {
         // has occurred yet.
         let last_compaction_offset = Arc::new(std::sync::Mutex::new(None));
 
+        // The truncate above emptied the file; drop any stale index a
+        // previous holder of this path (e.g. an older session with the same
+        // id) registered.
+        reset_log_index(&file_path);
+        let log = log_index_for(&file_path);
+
         // ADR-024: no JSONL header — file starts at line 0.
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer =
-            ConversationWriter::new(file, rx, last_compaction_offset.clone(), committed_lines);
+        let writer = ConversationWriter::new(
+            file,
+            rx,
+            last_compaction_offset.clone(),
+            committed_lines,
+            file_path.clone(),
+            log,
+        );
         std::thread::spawn(move || writer.run());
 
         // Meta-change notification channel. The receiver is consumed by the
@@ -925,6 +1294,7 @@ impl ConversationSession {
             last_context_usage: std::sync::Mutex::new(String::new()),
             last_context_usage_sections: std::sync::Mutex::new(None),
             last_compaction_offset,
+            last_compaction_summary: std::sync::Mutex::new(None),
         };
 
         // ADR-082 §4 step 3: write the initial meta row through the
@@ -960,6 +1330,26 @@ impl ConversationSession {
         let conversations_dir = work_dir.join("conversations");
         let file_path = conversations_dir.join(format!("{}.jsonl", session_id));
 
+        // §9 open calibration: the one allowed full pass per session per
+        // process — reconciles the log index, strips a legacy v1 header
+        // line, and truncates an unterminated tail left by a crash. It
+        // runs BEFORE the writer takes the file handle because on Windows
+        // the header-strip rename cannot replace a file with open handles.
+        //
+        // Initialize committed_lines to the actual number of existing lines
+        // in the JSONL file. Without this, the counter stays at 0 (the
+        // value passed by callers like `SessionManager::open`), which causes
+        // the delivery cursor (ADR-025) to be reset to {0, 0} during
+        // full-load — and the first incremental poll re-delivers all
+        // historical messages.
+        // A calibration failure is a hard open error, not a silent 0: swallowing
+        // it would (a) skip the crash-tail repair, letting the next append glue
+        // onto a torn line, and (b) reset the ADR-025 delivery cursor to {0, 0},
+        // redelivering all history on the first incremental poll. `resume`
+        // already returns `Result`, so fail the open rather than mis-initialize.
+        let existing_lines = calibrate_open(&file_path)?;
+        committed_lines.store(existing_lines, Ordering::Relaxed);
+
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -970,16 +1360,6 @@ impl ConversationSession {
             std::io::Error::new(e.kind(), format!("Failed to read session meta: {}", e))
         })?;
 
-        // ADR-024: no JSONL header, meta_end is always 0.
-
-        // Initialize committed_lines to the actual number of existing lines in
-        // the JSONL file. Without this, the counter stays at 0 (the value
-        // passed by callers like `SessionManager::open`), which causes the
-        // delivery cursor (ADR-025) to be reset to {0, 0} during full-load —
-        // and the first incremental poll re-delivers all historical messages.
-        let existing_lines = count_jsonl_lines(&file_path).unwrap_or(0);
-        committed_lines.store(existing_lines, Ordering::Relaxed);
-
         // ADR-024: restore the absolute byte offset of the most recent
         // compaction marker from meta, so the next restore (or any code
         // path that reads `build_meta()` immediately) sees the persisted
@@ -987,8 +1367,14 @@ impl ConversationSession {
         let last_compaction_offset = Arc::new(std::sync::Mutex::new(meta.last_compaction_offset));
 
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
-        let writer =
-            ConversationWriter::new(file, rx, last_compaction_offset.clone(), committed_lines);
+        let writer = ConversationWriter::new(
+            file,
+            rx,
+            last_compaction_offset.clone(),
+            committed_lines,
+            file_path.clone(),
+            log_index_for(&file_path),
+        );
         std::thread::spawn(move || writer.run());
 
         let (config_tx, config_rx) = mpsc::unbounded_channel::<ConfigChange>();
@@ -1029,6 +1415,7 @@ impl ConversationSession {
                 last_context_usage: std::sync::Mutex::new(String::new()),
                 last_context_usage_sections: std::sync::Mutex::new(None),
                 last_compaction_offset,
+                last_compaction_summary: std::sync::Mutex::new(meta.last_compaction_summary.clone()),
             },
             config_rx,
             state_rx,
@@ -1158,6 +1545,15 @@ impl ConversationSession {
                 "Compaction writer dropped its done channel before reply: {}",
                 e
             ),
+        }
+
+        // §8: persist the summary text itself into the derived meta state
+        // (mirrored by `build_meta` into the row below). Matches the legacy
+        // scan semantics: empty summaries never become the handoff source.
+        if !summary.trim().is_empty()
+            && let Ok(mut guard) = self.last_compaction_summary.lock()
+        {
+            *guard = Some(summary.to_string());
         }
 
         // ADR-024 / ADR-060 v2 §5.4: persist the freshly-recorded
@@ -2156,6 +2552,9 @@ impl Clone for ConversationSession {
             // the parent does. This matches the comment above that the
             // sender is shared for the same reason.
             last_compaction_offset: self.last_compaction_offset.clone(),
+            last_compaction_summary: std::sync::Mutex::new(
+                self.last_compaction_summary.lock().ok().and_then(|s| s.clone()),
+            ),
         }
     }
 }
@@ -2773,11 +3172,11 @@ fn build_session_page(
 /// boundaries — a hidden coupling that reintroduces the partial-cut
 /// bug family (a mega-explore group straddling a window boundary).
 ///
-/// Implementation: read the whole JSONL once into memory in one pass.
-/// Sessions are expected to stay in the low-megabyte range; this
-/// trades raw-IO efficiency for a one-pass, branch-free paging
-/// implementation that needs no direction-aware codepath and no
-/// byte-offset cursors.
+/// Implementation: a per-path line index (see the "Log index" section) maps
+/// the requested window to byte spans, and only those spans are read with
+/// seek + positional reads. The index is reconciled incrementally — the one
+/// full byte pass happens at first touch per session per process (open
+/// calibration), never per request.
 ///
 /// Returns messages in chronological order (oldest → newest within
 /// the page).
@@ -2787,11 +3186,12 @@ pub fn read_messages_paginated(
     limit: u32,
     from_tail: bool,
 ) -> Result<PaginatedMessages> {
-    // ADR-024: no metadata header line on disk; data lives in a sidecar
-    // file (see `<sid>.json`).  We still defensively skip any header
-    // line that contains both `"version"` and `"session_id"` so legacy
-    // files (or hand-edited JSONLs) cannot leak metadata into message
-    // lists.
+    // ADR-024: no metadata header line on new files; data lives in a
+    // sidecar (see `<sid>.json`). A legacy v1 header line at line 0 is
+    // classified (and stripped at open calibration) so it never enters
+    // pagination; unlike the old reader we do NOT re-test every line for
+    // the markers, so a data line whose content mentions `"version"` /
+    // `"session_id"` now correctly counts toward `total`.
     //
     // ADR-050: pagination uses **forward** (oldest-end) offsets by default.
     //   `offset = 0`  → the OLDEST `limit` entries.
@@ -2809,30 +3209,12 @@ pub fn read_messages_paginated(
         });
     }
 
-    let content = std::fs::read_to_string(path)?;
-    let mut raw_lines: Vec<String> = Vec::new();
-    for raw in content.split('\n') {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.contains("\"version\"") && trimmed.contains("\"session_id\"") {
-            continue;
-        }
-        raw_lines.push(trimmed.to_owned());
-    }
-    drop(content); // release the big string as soon as possible
+    let index = log_index_for(path);
+    let mut idx = index.lock().unwrap();
+    // Incremental tail scan; a full pass only happens on first touch.
+    reconcile_log(path, &mut idx)?;
 
-    let total = raw_lines.len() as u64;
-
-    let mut entries: Vec<ConversationEntry> = Vec::with_capacity(raw_lines.len());
-    for s in &raw_lines {
-        match serde_json::from_str::<ConversationEntry>(s) {
-            Ok(e) => entries.push(e),
-            Err(e) => tracing::warn!("Skipping invalid JSONL line: {}", e),
-        }
-    }
-    drop(raw_lines); // release the per-line Strings after parsing
+    let total = idx.total_data;
 
     // If `offset` skips past the end, the page is empty (harmless boundary).
     // `from_tail` is rejected for empty files — total=0 means there's nothing
@@ -2875,7 +3257,27 @@ pub fn read_messages_paginated(
         });
     }
 
-    let messages = entries[start_idx as usize..end_idx as usize].to_vec();
+    // Map the data-coordinate window onto byte spans and read ONLY those.
+    let mut messages: Vec<ConversationEntry> = Vec::new();
+    let mut file = std::fs::File::open(path)?;
+    for span in idx.spans.iter() {
+        let Some(di) = span.data_index else { continue };
+        if di < start_idx {
+            continue;
+        }
+        if di >= end_idx {
+            break;
+        }
+        let Some(text) = read_log_span_text(&mut file, span)? else {
+            continue;
+        };
+        match serde_json::from_str::<ConversationEntry>(&text) {
+            Ok(e) => messages.push(e),
+            Err(e) => tracing::warn!("Skipping invalid JSONL line: {}", e),
+        }
+    }
+    drop(idx); // release the index before the (allocating) return path
+
     let actual_limit = messages.len() as u32;
 
     Ok(PaginatedMessages {
@@ -2888,34 +3290,32 @@ pub fn read_messages_paginated(
 
 // ── ADR-021: Incremental read with line-number coordinates ─────────────────
 
-/// Count the total number of lines in a JSONL file.
-///
-/// Line 0 is the metadata header. Returns 0 for empty/non-existent files.
-pub fn count_jsonl_lines(path: &Path) -> std::io::Result<usize> {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e),
-    };
-    let reader = BufReader::new(file);
-    let mut count = 0usize;
-    for line in reader.lines() {
-        if line.is_ok() {
-            count += 1;
-        }
+/// Design 27 §2.1 T2 handoff source: the LAST persisted compaction summary
+/// of a session. Read from the write-time derived state in the session meta
+/// row (§8) — O(1), no JSONL scan. Sessions persisted before the field
+/// existed fall back to a one-time legacy line scan whose result is written
+/// back, healing the row for every later read. `None` when the session has
+/// no meta row or no compaction was ever recorded.
+pub fn last_compaction_summary(work_dir: &Path, session_id: &str) -> Option<String> {
+    let conversations_dir = work_dir.join("conversations");
+    let mut meta = read_session_meta(&conversations_dir, session_id).ok()?;
+    if meta.last_compaction_summary.is_some() {
+        return meta.last_compaction_summary;
     }
-    Ok(count)
+    // One-time self-heal for pre-field rows. Low frequency by construction:
+    // exactly one scan per legacy session, then the row carries the value.
+    let path = conversations_dir.join(format!("{session_id}.jsonl"));
+    let found = scan_last_compaction_summary_legacy(&path);
+    if found.is_some() {
+        meta.last_compaction_summary = found.clone();
+        let _ = write_session_meta(&conversations_dir, &meta);
+    }
+    found
 }
 
-/// Design 27 §2.1 T2 handoff source: the LAST persisted compaction summary
-/// of a session (`kind == "compaction"` entries carry the LLM-distilled
-/// summary as `content`). Scanned from disk so it works whether or not the
-/// old session is still resident. `None` when the file is missing/unreadable
-/// or no compaction ever persisted.
-pub fn last_compaction_summary(work_dir: &Path, session_id: &str) -> Option<String> {
-    let path = work_dir
-        .join("conversations")
-        .join(format!("{session_id}.jsonl"));
+/// The pre-§8 O(N) full-file scan. Only reachable as the one-time legacy
+/// self-heal above — do NOT call it from request-path code.
+fn scan_last_compaction_summary_legacy(path: &Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let mut last: Option<String> = None;
     for line in BufReader::new(file).lines() {
@@ -2967,11 +3367,13 @@ pub fn read_messages_since(
     // thread) as the authoritative count.  Unlike the old `total_lines`
     // which was incremented before the async disk write, `committed_lines`
     // is only incremented AFTER the write — so it never lies about what's
-    // actually on disk.
+    // actually on disk. On cold paths (counter not yet populated) the log
+    // index provides the count — first touch reconciles once per session
+    // per process, later calls only scan appended bytes.
     let total_lines = if cached_total_lines > 0 {
         cached_total_lines
     } else {
-        count_jsonl_lines(path).unwrap_or(0)
+        physical_line_count(path)
     };
 
     // Clamp line_number to total_lines (defensive against external truncation)
@@ -2979,20 +3381,21 @@ pub fn read_messages_since(
 
     // Read new complete lines from JSONL (lines with index >= line_number).
     // line_number is a COUNT (number of lines already read by the frontend),
-    // so the first unread line is at index line_number (0-based).
+    // so the first unread line is at index line_number (0-based). Like the
+    // old reader this is unbounded above: lines the writer committed after
+    // `total_lines` was sampled are still delivered in this pass.
     let mut messages: Vec<ConversationEntry> = Vec::new();
-    if line_number < total_lines
-        && let Ok(file) = std::fs::File::open(path)
+    let index = log_index_for(path);
+    if let Ok(mut idx) = index.lock()
+        && reconcile_log(path, &mut idx).is_ok()
+        && line_number < idx.spans.len()
+        && let Ok(mut file) = std::fs::File::open(path)
     {
-        let reader = BufReader::new(file);
-        for (idx, line) in reader.lines().enumerate() {
-            // Skip lines the frontend has already read (indices 0..line_number-1)
-            if idx < line_number {
+        for span in &idx.spans[line_number..] {
+            let Ok(Some(text)) = read_log_span_text(&mut file, span) else {
                 continue;
-            }
-            if let Ok(content) = line
-                && let Ok(entry) = serde_json::from_str::<ConversationEntry>(&content)
-            {
+            };
+            if let Ok(entry) = serde_json::from_str::<ConversationEntry>(&text) {
                 messages.push(entry);
             }
         }
@@ -3086,30 +3489,30 @@ pub fn read_messages_since_cursor(
     let total_lines = if cached_total_lines > 0 {
         cached_total_lines
     } else {
-        count_jsonl_lines(path).unwrap_or(0)
+        physical_line_count(path)
     };
 
     // Clamp cursor.line_number to total_lines (defensive against truncation).
     let start = cursor.line_number.min(total_lines);
     let end = (start + limit).min(total_lines);
 
-    // Read complete lines [start..end).
+    // Read complete lines [start..end) via the log index (seek per span,
+    // no head-skip enumeration).
     let mut messages: Vec<ConversationEntry> = Vec::new();
-    if start < end
-        && let Ok(file) = std::fs::File::open(path)
-    {
-        let reader = BufReader::new(file);
-        for (idx, line) in reader.lines().enumerate() {
-            if idx < start {
-                continue;
-            }
-            if idx >= end {
-                break;
-            }
-            if let Ok(content) = line
-                && let Ok(entry) = serde_json::from_str::<ConversationEntry>(&content)
-            {
-                messages.push(entry);
+    if start < end {
+        let index = log_index_for(path);
+        if let Ok(mut idx) = index.lock()
+            && reconcile_log(path, &mut idx).is_ok()
+            && let Ok(mut file) = std::fs::File::open(path)
+        {
+            let upper = end.min(idx.spans.len());
+            for span in &idx.spans[start.min(upper)..upper] {
+                let Ok(Some(text)) = read_log_span_text(&mut file, span) else {
+                    continue;
+                };
+                if let Ok(entry) = serde_json::from_str::<ConversationEntry>(&text) {
+                    messages.push(entry);
+                }
             }
         }
     }
@@ -3183,7 +3586,20 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn last_compaction_summary_picks_the_latest_compaction_line() {
+    fn meta_header_detector_never_matches_a_real_entry() {
+        // The v1 metadata header carries both marker tokens and neither of the
+        // fields a real `ConversationEntry` always serializes.
+        assert!(looks_like_meta_header(br#"{"version":1,"session_id":"sess-1"}"#));
+        // A genuine first message whose *body* happens to embed both marker
+        // tokens must NOT be classified as a header: `strip_legacy_header_line`
+        // physically rewrites the file, so a false positive would delete a real
+        // row (the data-loss guard for ADR-096 open calibration).
+        let real = r#"{"id":"x","ts":"2026-01-01T00:00:00.000Z","role":"assistant","content":"{\"version\":1,\"session_id\":\"sess-1\"}","metadata":null}"#;
+        assert!(!looks_like_meta_header(real.as_bytes()));
+    }
+
+    #[test]
+    fn last_compaction_summary_reads_meta_and_self_heals_legacy_rows() {
         let dir = TempDir::new().unwrap();
         let conv = dir.path().join("conversations");
         std::fs::create_dir_all(&conv).unwrap();
@@ -3195,27 +3611,113 @@ mod tests {
             metadata: None,
             kind: kind.map(str::to_string),
         };
+        let seed_meta = |sid: &str, summary: Option<&str>| {
+            let meta = SessionMeta {
+                version: 1,
+                session_id: sid.to_string(),
+                agent_id: "com.test.agent".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                user_id: None,
+                visibility: None,
+                title: None,
+                workspace_id: None,
+                model: None,
+                provider: None,
+                account_id: None,
+                reasoning_effort: None,
+                temperature: None,
+                context_window: None,
+                todos: None,
+                message_count: 0,
+                last_active_at: "2026-01-01T00:00:00Z".to_string(),
+                tokens: None,
+                llm_call_counter: None,
+                perf: None,
+                model_ratio: None,
+                last_compaction_offset: None,
+                last_compaction_summary: summary.map(str::to_string),
+                corrupted: false,
+                chat_session_id: None,
+            };
+            write_session_meta(&conv, &meta).unwrap();
+        };
+
+        // §8 O(1) read: a meta row that already carries the summary wins and
+        // the JSONL is never opened. The stored value differs from the only
+        // compaction line on disk, so a hit here proves the meta path.
+        seed_meta("s-0", Some("FROM META"));
+        std::fs::write(
+            conv.join("s-0.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&entry(
+                    "system",
+                    "SCANNED",
+                    Some(ENTRY_KIND_COMPACTION)
+                ))
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            last_compaction_summary(dir.path(), "s-0").as_deref(),
+            Some("FROM META")
+        );
+
+        // Legacy self-heal: a pre-field meta row (`summary = None`) with
+        // compaction lines on disk. The first read scans once, keeps the latest
+        // summary, and writes it back; the JSONL is then no longer consulted.
         std::fs::write(
             conv.join("s-1.jsonl"),
             format!(
                 "{}\n{}\n{}\n",
                 serde_json::to_string(&entry("user", "hi", None)).unwrap(),
-                serde_json::to_string(&entry("system", "FIRST SUMMARY", Some(ENTRY_KIND_COMPACTION))).unwrap(),
-                serde_json::to_string(&entry("system", "SECOND SUMMARY", Some(ENTRY_KIND_COMPACTION))).unwrap(),
+                serde_json::to_string(&entry(
+                    "system",
+                    "FIRST SUMMARY",
+                    Some(ENTRY_KIND_COMPACTION)
+                ))
+                .unwrap(),
+                serde_json::to_string(&entry(
+                    "system",
+                    "SECOND SUMMARY",
+                    Some(ENTRY_KIND_COMPACTION)
+                ))
+                .unwrap(),
             ),
         )
         .unwrap();
+        seed_meta("s-1", None);
         assert_eq!(
             last_compaction_summary(dir.path(), "s-1").as_deref(),
             Some("SECOND SUMMARY")
         );
-        // No compaction yet / missing file -> None, never a panic.
+        // The write-back healed the row...
+        assert_eq!(
+            read_session_meta(&conv, "s-1")
+                .unwrap()
+                .last_compaction_summary
+                .as_deref(),
+            Some("SECOND SUMMARY")
+        );
+        // ...so emptying the JSONL afterwards still yields the healed value —
+        // proof the request path reads meta, not the log.
+        std::fs::write(conv.join("s-1.jsonl"), "").unwrap();
+        assert_eq!(
+            last_compaction_summary(dir.path(), "s-1").as_deref(),
+            Some("SECOND SUMMARY")
+        );
+
+        // No compaction line -> None (and nothing written back).
         std::fs::write(
             conv.join("s-2.jsonl"),
             serde_json::to_string(&entry("user", "hi", None)).unwrap(),
         )
         .unwrap();
+        seed_meta("s-2", None);
         assert_eq!(last_compaction_summary(dir.path(), "s-2"), None);
+
+        // No meta row -> None, never a panic.
         assert_eq!(last_compaction_summary(dir.path(), "nope"), None);
     }
 
@@ -3476,6 +3978,7 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
+            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
         };
@@ -3692,6 +4195,7 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
+            last_compaction_summary: None,
                 corrupted: false,
             chat_session_id: None,
             };
@@ -3811,6 +4315,87 @@ mod tests {
         assert!(empty.messages.is_empty());
     }
 
+    /// §6: the seek/`data_index` windowing must be a faithful re-implementation
+    /// of the old forward-parse reader. On a 10k-line log every data window
+    /// equals the matching slice of one full sequential read, and a `from_tail`
+    /// window equals the last `limit` entries with the correct echoed offset.
+    #[test]
+    fn read_messages_paginated_forward_tail_equivalence_large() {
+        let dir = TempDir::new().unwrap();
+        const N: u64 = 10_000;
+        let entries: Vec<ConversationEntry> = (0..N)
+            .map(|i| make_entry(&format!("msg-{i}"), "user", &format!("Message {i}")))
+            .collect();
+        let path = write_test_jsonl(&dir, "big", &entries);
+
+        // Ground truth: one full forward read (bounded by total, not the log).
+        let all = read_messages_paginated(&path, 0, N as u32, false).unwrap();
+        assert_eq!(all.total, N);
+        assert_eq!(all.messages.len() as u64, N);
+        let contents: Vec<String> = all.messages.iter().map(|m| m.content.clone()).collect();
+
+        // Forward windows at assorted (offset, limit) equal the ground slice.
+        for (off, lim) in [
+            (0u64, 1u32),
+            (0, 100),
+            (9_999, 1),
+            (4_990, 20),
+            (9_000, 2_000), // clamps to the last 1_000
+            (12_000, 50),   // past the end -> empty
+        ] {
+            let page = read_messages_paginated(&path, off, lim, false).unwrap();
+            let start = off.min(N) as usize;
+            let end = (off + lim as u64).min(N) as usize;
+            let got: Vec<String> = page.messages.iter().map(|m| m.content.clone()).collect();
+            assert_eq!(got, contents[start..end], "forward off={off} lim={lim}");
+            assert_eq!(page.total, N);
+        }
+
+        // `from_tail` windows equal the last `lim` entries; the echoed offset
+        // is the forward offset the caller "should have asked for".
+        for lim in [1u32, 20, 500, 10_000, 20_000] {
+            let page = read_messages_paginated(&path, 0, lim, true).unwrap();
+            let want_start = N.saturating_sub(lim as u64) as usize;
+            let got: Vec<String> = page.messages.iter().map(|m| m.content.clone()).collect();
+            assert_eq!(got, contents[want_start..], "from_tail lim={lim}");
+            assert_eq!(page.offset as usize, want_start);
+            assert_eq!(page.total, N);
+        }
+    }
+
+    /// §7: the incremental tail reader resolves line-number coordinates against
+    /// the byte-offset index rather than re-scanning from the head. The cold
+    /// path (writer counter absent) reconciles once via the log index; the warm
+    /// path uses the caller's cached count. Both return the identical trailing
+    /// window, and a coordinate past the end clamps to empty.
+    #[test]
+    fn read_messages_since_uses_byte_cursor_cold_and_warm() {
+        let dir = TempDir::new().unwrap();
+        const N: usize = 50;
+        let entries: Vec<ConversationEntry> = (0..N)
+            .map(|i| make_entry(&format!("m{i}"), "user", &format!("Message {i}")))
+            .collect();
+        let path = write_test_jsonl(&dir, "tail", &entries);
+        let empty_map: StreamingStateMap = Arc::new(RwLock::new(HashMap::new()));
+
+        for line_number in [0usize, 1, 20, 49, 50, 100] {
+            // Warm (cached count present) and cold (cached = 0) must agree.
+            let warm = read_messages_since(&path, line_number, 0, &empty_map, "tail", N).unwrap();
+            let cold = read_messages_since(&path, line_number, 0, &empty_map, "tail", 0).unwrap();
+            assert_eq!(warm.total_lines, N, "warm physical count");
+            assert_eq!(cold.total_lines, N, "cold physical count via log index");
+
+            let want: Vec<String> = (line_number.min(N)..N)
+                .map(|i| format!("Message {i}"))
+                .collect();
+            let warm_got: Vec<String> = warm.messages.iter().map(|m| m.content.clone()).collect();
+            assert_eq!(warm_got, want, "warm window from line {line_number}");
+            let cold_got: Vec<String> = cold.messages.iter().map(|m| m.content.clone()).collect();
+            assert_eq!(cold_got, want, "cold window from line {line_number}");
+            assert!(warm.streaming.is_none(), "no active streaming line");
+        }
+    }
+
     #[test]
     fn test_session_resume() {
         let temp_dir = TempDir::new().unwrap();
@@ -3901,6 +4486,7 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
+            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
         };
@@ -4505,6 +5091,7 @@ mod tests {
             }),
             model_ratio: None,
             last_compaction_offset: None,
+            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
         };
@@ -4830,6 +5417,7 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
+            last_compaction_summary: None,
                 corrupted: false,
             chat_session_id: None,
             };
@@ -6629,6 +7217,7 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
+            last_compaction_summary: None,
         chat_session_id: None,
         };
 
@@ -6705,6 +7294,7 @@ mod tests {
                 perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
+            last_compaction_summary: None,
                 corrupted: false,
             }
         }
@@ -6802,6 +7392,7 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
+            last_compaction_summary: None,
             chat_session_id: None,
             }
         };
