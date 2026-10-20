@@ -1637,3 +1637,49 @@ describe("ADR-083: compaction cancellation", () => {
     expect(ss.isCompacting).toBe(false);
   });
 });
+
+// ── Design 27 §2.1/§4.1: rotation handoff note ─────────────────────────
+
+// The Runtime persists the "[intent rotation] ..." note so a rotated session
+// can still find its predecessor's history. It is context for the model, not
+// for the user: loading history must drop it, or it renders as a grey system
+// bubble mid-transcript (design 27 §2.1 keeps it out of the User message, but
+// the JSONL entry itself survives and comes back through HTTP).
+describe("rotation_handoff entries stay out of the transcript", () => {
+  beforeEach(() => clearTestState());
+  afterEach(() => clearTestState());
+
+  it("drops the handoff note but keeps the user turn that carried it", async () => {
+    seedSessionState([]);
+    const entries: ConversationEntry[] = [
+      {
+        id: "handoff:msg-1",
+        ts: "2026-01-01T00:00:00Z",
+        role: "system",
+        content: '[intent rotation] The previous execution session for this context (session id "s-old") was rotated...',
+        metadata: { rotation_handoff: true },
+      },
+      {
+        id: "msg-1",
+        ts: "2026-01-01T00:00:01Z",
+        role: "user",
+        content: "提交本地修改的代码",
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ offset: 0, limit: 50, total: 2, messages: entries }),
+        }),
+      ),
+    );
+
+    await useChatStore.getState().loadSessionMessages(AGENT, SESSION, undefined, 50, true);
+
+    const ss = useChatStore.getState().agentStates[AGENT]!.sessionStates[SESSION]!;
+    expect(ss.messages.map((m) => m.id)).toEqual(["msg-1"]);
+  });
+});

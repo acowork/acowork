@@ -3260,6 +3260,12 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
   // the JSONL history-load path.
   if (entry.metadata?.internal === true) return null;
 
+  // Intent-rotation handoff note (design 27 §2.1/§4.1): the Runtime persists
+  // it so a rotated session knows its predecessor's history lives under the
+  // old session id. That is context for the model, never for the user — the
+  // entry stays in the JSONL but must not become a chat bubble.
+  if (entry.metadata?.rotation_handoff === true) return null;
+
   // Compaction events: rendered as a folded summary card. Mirrors the
   // backend `kind="compaction"` JSONL marker. Detected BEFORE role-based
   // mapping because the underlying role is "system" but we render it

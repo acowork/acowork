@@ -467,7 +467,7 @@
     "contextPermissions": "権限",
     "nodePermissions": "ノードの権限",
     "noAccess": "アクセス権がありません",
-    "projectGroupsBanner": "プロジェクトグループチャット"
+    "projectGroupsBanner": "プロジェクトグループ"
   },
   "cloneDialog": {
     "skeleton": "スケルトン",
