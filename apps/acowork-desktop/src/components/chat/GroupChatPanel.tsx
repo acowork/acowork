@@ -23,9 +23,9 @@
  * mentions channel carries `session_config`.
  */
 
-import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Send, Paperclip, ExternalLink } from "lucide-react";
+import { Send, Paperclip, ExternalLink, Loader2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -39,6 +39,7 @@ import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { detectPaste } from "./pasteDetect";
@@ -425,11 +426,13 @@ export function detectMention(
 }
 
 /** Case-insensitive substring filter on the display name (wechat-style: a
- *  name inside another word still matches — same rule as resolveMentions). */
-export function filterMentionCandidates(
-  candidates: Array<{ id: string; name: string }>,
+ *  name inside another word still matches — same rule as resolveMentions).
+ *  Generic so the caller's extra fields (e.g. `isAgent`, used to pick the
+ *  row avatar) survive the filter. */
+export function filterMentionCandidates<T extends { id: string; name: string }>(
+  candidates: T[],
   query: string,
-): Array<{ id: string; name: string }> {
+): T[] {
   const q = query.toLowerCase();
   if (!q) return candidates;
   return candidates.filter((c) => c.name.toLowerCase().includes(q));
@@ -481,11 +484,13 @@ export function GroupChatPanel() {
   // row is highlighted (keyboard nav). `null` = caret is not inside a mention.
   const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
   const [mentionActive, setMentionActive] = useState(0);
+  const pickerRef = useRef<HTMLDivElement>(null);
 
   const { ref: scrollRef, stickNow } = useStickToBottom(
     [win?.tail.length ?? 0, activeGroupId],
     activeGroupId,
     () => {},
+    win?.older.length ?? 0,
   );
 
   // Directory for human sender names — best-effort, once per mount.
@@ -503,6 +508,16 @@ export function GroupChatPanel() {
       (r) => !(r.kind === "system_notice" && (r.meta?.notice_type === "turn_started" || !r.body)),
     );
   }, [win]);
+  const hasMore = (win?.total ?? 0) > rows.length;
+  // Auto-pagination: scrolling into the top band fires the next older page —
+  // no click. Guarded by `hasMore` + the in-flight `loadingOlder` flag; the
+  // prepend-anchoring in `useStickToBottom` holds the reading position as the
+  // new page lands above (48px = the top "load earlier" status band).
+  const handleStreamScroll = (event: UIEvent<HTMLDivElement>) => {
+    if (activeGroupId && hasMore && !win?.loadingOlder && event.currentTarget.scrollTop <= 48) {
+      void useChatSessionStore.getState().loadOlder(activeGroupId);
+    }
+  };
   const closed = useMemo(() => (win?.tail ? closedCardIds(win.tail) : new Set<string>()), [win]);
   const answered = useMemo(
     () => (win?.tail ? humanAnsweredCardIds(win.tail) : new Set<string>()),
@@ -517,13 +532,38 @@ export function GroupChatPanel() {
       .filter((p) => nameOf(p.id).isAgent);
   }, [group, me, nameOf]);
 
-  // Candidates for the open popup: mentionable agents narrowed by the typed
-  // query. Only agents fan out (humans are archived silently, §5.3), so the
-  // picker lists exactly the ids `resolveMentions` will act on.
+  // Everything the @ picker lists. Design 27 §5.3.1: @-ing an Agent wakes it,
+  // @-ing a person is a mention that triggers nothing — but both are pickable,
+  // so the picker shows every participant, not just agents. The fan-out
+  // targets (`resolveMentions`) still run over `agentParticipants` alone.
+  const mentionParticipants = useMemo(() => {
+    if (!group?.participants) return [];
+    return group.participants
+      .filter((p) => p.id !== me)
+      .map((p) => {
+        const who = nameOf(p.id);
+        return { id: p.id, name: who.name, isAgent: who.isAgent };
+      })
+      .filter((p) => p.name);
+  }, [group, me, nameOf]);
+
+  // Candidates for the open popup: mentionable participants narrowed by the
+  // typed query.
   const mentionCandidates = useMemo(
-    () => (mention ? filterMentionCandidates(agentParticipants, mention.query) : []),
-    [mention, agentParticipants],
+    () => (mention ? filterMentionCandidates(mentionParticipants, mention.query) : []),
+    [mention, mentionParticipants],
   );
+
+  // Keyboard nav changes the highlight index without the browser scrolling
+  // the overflow container — follow the active row into view. `block:nearest`
+  // is a no-op when the row is already visible, so mouse-wheel browsing is
+  // untouched.
+  useEffect(() => {
+    if (!mention || mentionCandidates.length === 0) return;
+    pickerRef.current
+      ?.querySelector<HTMLElement>(`[data-mention-index="${mentionActive}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [mentionActive, mention, mentionCandidates.length]);
 
   const syncMention = useCallback((value: string, caret: number) => {
     setMention(detectMention(value, caret));
@@ -697,14 +737,22 @@ export function GroupChatPanel() {
         </span>
       </header>
 
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto py-2">
-        {(win?.total ?? 0) > rows.length && (
-          <button
-            onClick={() => void useChatSessionStore.getState().loadOlder(activeGroupId)}
-            className="mx-auto mb-2 block rounded px-3 py-1 text-10 text-text-tertiary hover:bg-nav-item-hover"
-          >
-            {t("groupChat.loadEarlier")}
-          </button>
+      <OverlayScrollbar
+        ref={scrollRef}
+        className="py-2 [overflow-anchor:none]"
+        onViewportScroll={handleStreamScroll}
+      >
+        {hasMore && (
+          <div className="py-2 text-center text-10 text-text-tertiary">
+            {win?.loadingOlder ? (
+              <span className="inline-flex items-center justify-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t("chatHistory.loadingEarlier")}
+              </span>
+            ) : (
+              <span>{t("chatHistory.scrollForEarlier")}</span>
+            )}
+          </div>
         )}
         {rows.length === 0 && !inFlight && (
           <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
@@ -728,7 +776,7 @@ export function GroupChatPanel() {
         {inFlight && (
           <div className="px-6 py-1 text-10 text-text-tertiary">{t("groupChat.working")}</div>
         )}
-      </div>
+      </OverlayScrollbar>
 
       <div className="shrink-0">
         {!canPost ? (
@@ -770,18 +818,42 @@ export function GroupChatPanel() {
                 focused so selecting a row does not blur it first. */}
             {mention && mentionCandidates.length > 0 && (
               <div
-                role="listbox"
-                aria-label={t("groupChat.mentionLabel")}
                 onMouseDown={(e) => e.preventDefault()}
-                className="absolute bottom-full left-3 z-20 mb-2 max-h-56 w-64 overflow-y-auto rounded-lg border border-border-outer bg-modal-surface py-1 shadow-xl"
+                className="absolute bottom-full left-3 z-20 mb-2 w-64 overflow-hidden rounded-lg border border-border-outer bg-modal-surface shadow-xl"
               >
+                <OverlayScrollbar
+                  ref={pickerRef}
+                  role="listbox"
+                  aria-label={t("groupChat.mentionLabel")}
+                  className="py-1"
+                  maxHeight={224}
+                >
                 {mentionCandidates.map((c, i) => {
-                  const meta = agentsMap[c.id]?.meta;
+                  const meta = c.isAgent ? agentsMap[c.id]?.meta : undefined;
+                  const avatar = c.isAgent ? (
+                    <AgentAvatar
+                      agentId={c.id}
+                      displayName={c.name}
+                      avatarUrl={meta?.avatar ?? null}
+                      builtinAvatarId={meta?.builtin_avatar ?? null}
+                      size={20}
+                      className="shrink-0"
+                    />
+                  ) : (
+                    <UserAvatar
+                      displayName={c.name}
+                      avatarUrl={null}
+                      builtinAvatarId={null}
+                      size={20}
+                      className="shrink-0"
+                    />
+                  );
                   return (
                     <button
                       key={c.id}
                       type="button"
                       role="option"
+                      data-mention-index={i}
                       aria-selected={i === mentionActive}
                       onClick={() => pickMention(c.name)}
                       onMouseEnter={() => setMentionActive(i)}
@@ -792,18 +864,12 @@ export function GroupChatPanel() {
                           : "text-text-secondary",
                       )}
                     >
-                      <AgentAvatar
-                        agentId={c.id}
-                        displayName={c.name}
-                        avatarUrl={meta?.avatar ?? null}
-                        builtinAvatarId={meta?.builtin_avatar ?? null}
-                        size={20}
-                        className="shrink-0"
-                      />
+                      {avatar}
                       <span className="min-w-0 flex-1 truncate">{c.name}</span>
                     </button>
                   );
                 })}
+                </OverlayScrollbar>
               </div>
             )}
             <div className="flex items-end gap-2 px-3 pb-2 pt-1">

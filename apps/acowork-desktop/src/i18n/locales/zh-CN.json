@@ -404,7 +404,9 @@
     "untitled": "未命名"
   },
   "chatHistory": {
-    "loadEarlier": "加载更早消息"
+    "loadEarlier": "加载更早消息",
+    "loadingEarlier": "加载更早消息…",
+    "scrollForEarlier": "继续上滑加载更早消息"
   },
   "contextUsage": {
     "ariaLabel": "上下文用量",

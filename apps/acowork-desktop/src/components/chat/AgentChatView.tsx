@@ -31,18 +31,20 @@
 // The status card is the drill-down INTO the execution view (plan 5.3):
 // click → `chatStore.openSession(agentId, execSid)` + mode flip.
 
-import { Children, isValidElement, useEffect, useMemo, useRef, useState } from "react";
+import { Children, isValidElement, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, ExternalLink, Paperclip } from "lucide-react";
+import { Send, ExternalLink, Paperclip, Loader2 } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
 import { toolbarIconButton } from "../../lib/ui-styles";
+import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { UserAvatar } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { detectPaste } from "./pasteDetect";
@@ -329,6 +331,10 @@ interface AgentChatViewProps {
  *  on every store tick with a fresh literal). */
 const EMPTY_DRAFT: ChatSessionConfig = {};
 
+/** How close to the top (px) trips auto-pagination. The "load earlier" status
+ *  band sits here; scrolling into it fires the next older page. */
+const AUTO_LOAD_TOP_PX = 48;
+
 export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const { t } = useTranslation();
   const win = useChatSessionStore((s) => s.windows[sessionId]);
@@ -348,7 +354,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentMeta[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastCompositionEndRef = useRef(0);
 
@@ -390,16 +395,24 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // so nothing lingers in the stream (§ 5.5.4: answer-then-done).
   const pendingCard = live.pendingCard;
 
-  // Stick to the bottom when new rows land (same simple rule the IM view
-  // uses; the execution view's scroll controller is session-stream shaped
-  // and does not apply to HTTP windows).
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [rows.length, inFlight]);
+  // Follow rule shared by every chat surface (AgentChatView / GroupChatPanel /
+  // InboxPanel): stick to the newest row only while pinned, and never let a
+  // refresh (poll tick, re-render with a fresh object) yank an upward-scrolling
+  // reader back down. Deps key on `tail.length` — the appended newest page —
+  // NOT the total rows, so `loadOlder` (which prepends into `older`) leaves the
+  // trigger unchanged and does not jump to the bottom; browser scroll
+  // anchoring (`overflow-anchor: auto` on the viewport) holds the visible rows
+  // put as older content appears above them, recomputing only the thumb.
+  const { ref: scrollRef, stickNow } = useStickToBottom(
+    [win?.tail.length ?? 0, sessionId],
+    sessionId,
+    undefined,
+    win?.older.length ?? 0,
+  );
 
   const handleAnswer = (card: ChatMessageRow, text: string, immediate: boolean) => {
     if (immediate && text) {
+      stickNow();
       void sendText(sessionId, text, card.meta?.message_id);
       return;
     }
@@ -419,6 +432,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     setInput("");
     setAnswerTarget(null);
     setPendingAttachments([]);
+    stickNow();
     void sendText(sessionId, text, replyTo, sessionConfig, attachmentIds);
   };
 
@@ -557,19 +571,35 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const reasoningEffort =
     draft.reasoning_effort ?? currentModelEntry?.default_reasoning_effort ?? null;
 
+  // Auto-pagination: reaching the top band triggers the next older page — no
+  // click. Guarded by `hasMore` and the in-flight `loadingOlder` flag so it
+  // can neither run past the oldest row nor overlap a request. The
+  // prepend-anchoring in `useStickToBottom` then holds the reading position
+  // as the new page lands above.
+  const handleStreamScroll = (event: UIEvent<HTMLDivElement>) => {
+    if (hasMore && !win?.loadingOlder && event.currentTarget.scrollTop <= AUTO_LOAD_TOP_PX) {
+      void loadOlder(sessionId);
+    }
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Message stream */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto py-2">
+      <OverlayScrollbar
+        ref={scrollRef}
+        className="py-2 [overflow-anchor:none]"
+        onViewportScroll={handleStreamScroll}
+      >
         {hasMore && (
-          <div className="py-2 text-center">
-            <button
-              onClick={() => void loadOlder(sessionId)}
-              disabled={win?.loadingOlder}
-              className="rounded btn-solid px-3 py-1 text-xs disabled:opacity-50"
-            >
-              {t("chatHistory.loadEarlier")}
-            </button>
+          <div className="py-2 text-center text-10 text-text-tertiary">
+            {win?.loadingOlder ? (
+              <span className="inline-flex items-center justify-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t("chatHistory.loadingEarlier")}
+              </span>
+            ) : (
+              <span>{t("chatHistory.scrollForEarlier")}</span>
+            )}
           </div>
         )}
         {rows.length === 0 && (
@@ -623,7 +653,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               />
             );
           })()}
-      </div>
+      </OverlayScrollbar>
 
       {/* Composer — same chrome as the execution view (plan 5.4). */}
       <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg">

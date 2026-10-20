@@ -310,7 +310,9 @@
     "untitled": "Untitled"
   },
   "chatHistory": {
-    "loadEarlier": "Load earlier"
+    "loadEarlier": "Load earlier",
+    "loadingEarlier": "Loading earlier…",
+    "scrollForEarlier": "Scroll up to load earlier"
   },
   "contextUsage": {
     "ariaLabel": "Context usage",

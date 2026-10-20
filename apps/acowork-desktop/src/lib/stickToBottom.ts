@@ -25,7 +25,7 @@
  * desktop inbox renders one newest page and has no `load earlier`, so that
  * half is left behind rather than stubbed out.
  */
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 /** Distance from the bottom that still counts as "at the bottom". */
 export const STICK_PX = 80;
@@ -107,6 +107,17 @@ export function useStickToBottom(
   deps: readonly unknown[],
   forceKey?: string | null,
   onBecamePinned?: () => void,
+  /** Number of prepended (older) rows currently shown. When this increases the
+   *  commit inserted content ABOVE the viewport, so the hook compensates
+   *  `scrollTop` by the height delta to keep the reader exactly where they
+   *  were — the newly loaded rows and the "load earlier" control move up out
+   *  of view and are reached again by scrolling up. This replaces the browser's
+   *  native `overflow-anchor`, which mis-anchors to the top control (it keeps
+   *  the button pinned and shoves the reading position down). Pass `undefined`
+   *  on surfaces with no upward pagination. The caller must also set
+   *  `overflow-anchor: none` on the viewport so the two mechanisms do not both
+   *  compensate. */
+  prependSignal?: number,
 ): {
   ref: (el: HTMLDivElement | null) => void;
   stickNow: () => void;
@@ -123,10 +134,40 @@ export function useStickToBottom(
 
   // Callback ref, not a ref object: screens swap the scroll container across
   // early-return branches, and the listener must always sit on the element
-  // that is actually mounted.
+  // that is actually mounted. `elRef` mirrors it so the prepend-anchoring
+  // layout effect can read/write the scroll offset directly.
+  const elRef = useRef<HTMLDivElement | null>(null);
   const ref = useCallback((el: HTMLDivElement | null) => {
+    elRef.current = el;
     ctrl.current!.bind(el, () => pinnedRef.current?.());
   }, []);
+
+  // Prepend anchoring: remember the last committed scroll height so the next
+  // time `prependSignal` grows we can shift the viewport by exactly the height
+  // added above it.
+  const lastScrollHeightRef = useRef(0);
+  const lastPrependRef = useRef<number | undefined>(undefined);
+
+  useLayoutEffect(() => {
+    const el = elRef.current;
+    if (!el) return;
+    const prevPrepend = lastPrependRef.current;
+    const prevHeight = lastScrollHeightRef.current;
+    if (
+      prependSignal !== undefined &&
+      prevPrepend !== undefined &&
+      prependSignal > prevPrepend &&
+      prevHeight > 0
+    ) {
+      const delta = el.scrollHeight - prevHeight;
+      // Only shift when the container actually grew (content added above the
+      // viewport); a transient shrink (images settling) must not pull the
+      // reader up. Runs before paint, so there is no visible flash.
+      if (delta > 0) el.scrollTop += delta;
+    }
+    lastPrependRef.current = prependSignal;
+    lastScrollHeightRef.current = el.scrollHeight;
+  });
 
   useEffect(() => {
     ctrl.current!.refresh(forceKey);
