@@ -312,7 +312,19 @@
   "chatHistory": {
     "loadEarlier": "Load earlier",
     "loadingEarlier": "Loading earlier…",
-    "scrollForEarlier": "Scroll up to load earlier"
+    "loadingNewer": "Loading newer…",
+    "scrollForEarlier": "Scroll up to load earlier",
+    "title": "Chat history",
+    "close": "Close",
+    "tabText": "Text",
+    "tabImage": "Images",
+    "tabFile": "Files",
+    "searchTextPlaceholder": "Search messages in this conversation",
+    "searchFilePlaceholder": "Search by file name",
+    "loading": "Loading…",
+    "empty": "No matches",
+    "error": "Search failed",
+    "jumpToLatest": "Jump to latest"
   },
   "contextUsage": {
     "ariaLabel": "Context usage",

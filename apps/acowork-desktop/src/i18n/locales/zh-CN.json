@@ -406,7 +406,19 @@
   "chatHistory": {
     "loadEarlier": "加载更早消息",
     "loadingEarlier": "加载更早消息…",
-    "scrollForEarlier": "继续上滑加载更早消息"
+    "loadingNewer": "加载更新消息…",
+    "scrollForEarlier": "继续上滑加载更早消息",
+    "title": "聊天记录",
+    "close": "关闭",
+    "tabText": "文本",
+    "tabImage": "图片",
+    "tabFile": "文件",
+    "searchTextPlaceholder": "在当前对话中搜索消息",
+    "searchFilePlaceholder": "按文件名搜索",
+    "loading": "加载中…",
+    "empty": "无匹配结果",
+    "error": "搜索失败",
+    "jumpToLatest": "回到最新"
   },
   "contextUsage": {
     "ariaLabel": "上下文用量",

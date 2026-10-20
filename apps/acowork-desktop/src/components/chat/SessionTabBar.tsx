@@ -385,8 +385,6 @@ interface SessionTabBarProps {
   chatTab?: {
     label: string;
     active: boolean;
-    /** In-flight turn → breathing icon on the pinned tab. */
-    processing: boolean;
     onSelect: () => void;
   };
 }
@@ -695,9 +693,11 @@ export function SessionTabBar({ agentId, chatTab }: SessionTabBarProps) {
       >
         {/* Pinned Chat tab — the pair's single conversation (WeChat model:
             label = agent name, no close button, no rename, no context
-            menu). Its icon mirrors the exec tabs' four-state matrix;
-            `processing` (an in-flight chat turn) makes it breathe even
-            when it is not the active tab. */}
+            menu). Two icon states only: filled accent when active, outline
+            when not. It deliberately does NOT breathe on an in-flight
+            turn — a chat turn always runs in an exec session, and that
+            tab's brain icon already breathes; two pulsing icons side by
+            side read as noise, not as status. */}
         {chatTab && (
           <TabItem
             data-chat-tab="pinned"
@@ -706,14 +706,7 @@ export function SessionTabBar({ agentId, chatTab }: SessionTabBarProps) {
             active={chatTab.active}
           >
             {chatTab.active ? (
-              <FilledChatIcon
-                className={cn(
-                  "h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]",
-                  chatTab.processing && "animate-pulse",
-                )}
-              />
-            ) : chatTab.processing ? (
-              <FilledChatIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary " />
+              <FilledChatIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
             ) : (
               <OutlineChatIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
             )}

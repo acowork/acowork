@@ -144,11 +144,15 @@ function patchChatSessionConfig(
   );
 }
 
+/** One paging page — the newest window, an older/newer step, and a locate
+ *  jump all fetch exactly this many rows (ADR-097 locate math assumes it). */
+const PAGE = 50;
+
 /** One page of a Chat session. `offset` counts BACK from the newest row,
  *  so `offset=0` is the newest window in ascending order and
  *  `offset=loaded` is the next-older page (same semantics as the runtime's
  *  `read_messages`). */
-function fetchChatMessages(id: string, offset: number, limit = 50): Promise<ChatMessagesPage> {
+function fetchChatMessages(id: string, offset: number, limit = PAGE): Promise<ChatMessagesPage> {
   return req<ChatMessagesPage>(
     "GET",
     `/api/chat-sessions/${encodeURIComponent(id)}/messages?offset=${offset}&limit=${limit}`,
@@ -442,13 +446,6 @@ export function projectLiveTurn(rows: ChatMessageRow[]): LiveTurn {
   return { inFlight, pendingCard };
 }
 
-/** Whether a projected round means "the agent is doing something for me".
- *  Every processing indicator must answer through this, so a tab dot, a chat
- *  card and a group panel can never disagree. */
-export function liveTurnActive(live: LiveTurn | undefined): boolean {
-  return !!live && (!!live.inFlight || !!live.pendingCard);
-}
-
 // ── Store ──────────────────────────────────────────────────────────────
 
 interface AgentChatState {
@@ -465,13 +462,23 @@ interface AgentChatState {
 }
 
 interface Window {
-  /** Older pages, ascending, prepended by `loadOlder`. */
+  /** Older pages, ascending, prepended by `loadOlder` / a mid-history jump. */
   older: ChatMessageRow[];
-  /** Newest window, replaced wholesale on refresh. */
+  /** Newest segment of the loaded span; the tail when `atTail`. */
   tail: ChatMessageRow[];
-  tailLoaded: number;
   total: number;
+  /** Inclusive physical-line positions the loaded span `[older, tail]`
+   *  covers — the row cursor that lets the window sit in the MIDDLE of a
+   *  conversation (ADR-097 locate), not just flush against the newest page.
+   *  `firstPos` is the oldest loaded row's position, `lastPos` the newest.
+   *  An empty window is the degenerate range `firstPos = 0, lastPos = -1`. */
+  firstPos: number;
+  lastPos: number;
   loadingOlder: boolean;
+  loadingNewer: boolean;
+  /** `seq` of a row the panels must scroll to + flash (set by
+   *  `jumpToMessage`, cleared by the panel once located or after the fade). */
+  pendingLocateSeq: number | null;
 }
 
 interface ChatSessionStore {
@@ -507,8 +514,18 @@ interface ChatSessionStore {
   /** Persist the Chat surface's full seed draft to the session row,
    *  optimistically showing it locally; reverts on a failed write. */
   saveDraft(agentId: string, draft: ChatSessionConfig): Promise<void>;
-  refresh(chatSessionId: string): Promise<void>;
+  refresh(chatSessionId: string, force?: boolean): Promise<void>;
   loadOlder(chatSessionId: string): Promise<void>;
+  /** Page back toward the newest from a mid-history window (no-op at tail).
+   *  Enabled by ADR-097 locate: a jump can land in the middle, and the reader
+   *  must be able to walk back down without losing the loaded span above. */
+  loadNewer(chatSessionId: string): Promise<void>;
+  /** Jump the window to a search hit's physical line so the panels scroll to
+   *  and flash it (ADR-097). `linePos` is the hit's `line_pos`, `seq` its row
+   *  identity (set as `pendingLocateSeq` for the panel effect to consume). */
+  jumpToMessage(chatSessionId: string, linePos: number, seq: number): Promise<void>;
+  /** Clear a pending locate once the panel has scrolled to it. */
+  clearLocate(chatSessionId: string): void;
   sendText(
     chatSessionId: string,
     text: string,
@@ -524,10 +541,18 @@ interface ChatSessionStore {
 const emptyWindow = (): Window => ({
   older: [],
   tail: [],
-  tailLoaded: 0,
   total: 0,
+  firstPos: 0,
+  lastPos: -1,
   loadingOlder: false,
+  loadingNewer: false,
+  pendingLocateSeq: null,
 });
+
+/** Whether the loaded span reaches the newest row. Only an at-tail window may
+ *  be reset to the newest page by a background `refresh` — a mid-history window
+ *  (after a locate jump) keeps the reader's place. */
+const atTail = (w: Window): boolean => w.lastPos >= w.total - 1;
 
 export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   byAgent: {},
@@ -564,7 +589,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
         // defaults by the toolbar chips.
         draft: { ...s.draft, [def.session_id]: def.session_config ?? {} },
       }));
-      await get().refresh(def.session_id);
+      await get().refresh(def.session_id, true);
     } catch (e) {
       console.warn("[chatSessionStore] openAgent failed:", e);
       set((s) => ({
@@ -575,7 +600,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
 
   openGroup: async (chatSessionId) => {
     set((s) => ({ openGroupIds: { ...s.openGroupIds, [chatSessionId]: true } }));
-    await get().refresh(chatSessionId);
+    await get().refresh(chatSessionId, true);
   },
 
   sendGroupText: async (chatSessionId, text, targets, inReplyTo, attachmentIds) => {
@@ -600,7 +625,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       console.warn("[chatSessionStore] group send failed:", e);
     }
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: false } }));
-    if (ok) await get().refresh(chatSessionId);
+    if (ok) await get().refresh(chatSessionId, true);
     return ok;
   },
 
@@ -614,7 +639,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     });
     // Coming back to the Chat surface: the doorbell only wakes sessions
     // the store knows about, so re-read once on the flip.
-    if (mode === "chat" && chatSessionId) void get().refresh(chatSessionId);
+    if (mode === "chat" && chatSessionId) void get().refresh(chatSessionId, true);
   },
 
   saveDraft: async (agentId, draft) => {
@@ -639,17 +664,34 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     }
   },
 
-  refresh: async (chatSessionId) => {
+  refresh: async (chatSessionId, force = false) => {
     try {
       const page = await fetchChatMessages(chatSessionId, 0);
+      const cur = get().windows[chatSessionId];
+      // A reader parked mid-history (after a locate jump) must not be yanked
+      // back to the newest page by a doorbell wake — only an at-tail window,
+      // or an explicit `force` (open / send / tab flip), resets to the tail.
+      // We still fold in the new `total` so the "newer" affordance stays true.
+      if (cur && !force && !atTail(cur)) {
+        set((s) => ({
+          windows: { ...s.windows, [chatSessionId]: { ...cur, total: page.total } },
+          // The newest page is still the doorbell's payload: project the
+          // in-flight turn from it so a parked reader's group header does
+          // not freeze on "working…" until they walk back to the tail.
+          live: { ...s.live, [chatSessionId]: projectLiveTurn(page.messages) },
+        }));
+        return;
+      }
+      const n = page.messages.length;
       set((s) => ({
         windows: {
           ...s.windows,
           [chatSessionId]: {
             ...emptyWindow(),
             tail: page.messages,
-            tailLoaded: page.messages.length,
             total: page.total,
+            firstPos: page.total - n,
+            lastPos: page.total - 1,
           },
         },
         live: { ...s.live, [chatSessionId]: projectLiveTurn(page.messages) },
@@ -661,12 +703,14 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
 
   loadOlder: async (chatSessionId) => {
     const w = get().windows[chatSessionId];
-    if (!w || w.loadingOlder || w.tailLoaded + w.older.length >= w.total) return;
+    // `offset` counts back from the newest; the oldest loaded row sits at
+    // `firstPos`, so the next-older page starts `total - firstPos` rows up.
+    if (!w || w.loadingOlder || w.firstPos <= 0) return;
     set((s) => ({
       windows: { ...s.windows, [chatSessionId]: { ...w, loadingOlder: true } },
     }));
     try {
-      const page = await fetchChatMessages(chatSessionId, w.tailLoaded + w.older.length);
+      const page = await fetchChatMessages(chatSessionId, w.total - w.firstPos);
       const cur = get().windows[chatSessionId] ?? w;
       set((s) => ({
         windows: {
@@ -674,6 +718,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
           [chatSessionId]: {
             ...cur,
             older: [...page.messages, ...cur.older],
+            firstPos: cur.firstPos - page.messages.length,
             loadingOlder: false,
           },
         },
@@ -685,6 +730,95 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
         windows: { ...s.windows, [chatSessionId]: { ...cur, loadingOlder: false } },
       }));
     }
+  },
+
+  loadNewer: async (chatSessionId) => {
+    const w = get().windows[chatSessionId];
+    if (!w || w.loadingNewer || atTail(w)) return;
+    set((s) => ({
+      windows: { ...s.windows, [chatSessionId]: { ...w, loadingNewer: true } },
+    }));
+    try {
+      // Fetch the block just above `lastPos`: it ends at position
+      // `min(total-1, lastPos + PAGE)`, so `offset` leaves exactly that many
+      // newer rows to append (`take`). `older` is untouched — the span grows
+      // downward toward the tail.
+      const topPos = Math.min(w.total - 1, w.lastPos + PAGE);
+      const take = topPos - w.lastPos;
+      const page = await fetchChatMessages(chatSessionId, w.total - 1 - topPos, take);
+      const cur = get().windows[chatSessionId] ?? w;
+      set((s) => ({
+        windows: {
+          ...s.windows,
+          [chatSessionId]: {
+            ...cur,
+            tail: [...cur.tail, ...page.messages],
+            lastPos: cur.lastPos + page.messages.length,
+            loadingNewer: false,
+          },
+        },
+        live: { ...s.live, [chatSessionId]: projectLiveTurn([...cur.tail, ...page.messages]) },
+      }));
+    } catch (e) {
+      console.warn("[chatSessionStore] loadNewer failed:", e);
+      const cur = get().windows[chatSessionId] ?? w;
+      set((s) => ({
+        windows: { ...s.windows, [chatSessionId]: { ...cur, loadingNewer: false } },
+      }));
+    }
+  },
+
+  jumpToMessage: async (chatSessionId, linePos, seq) => {
+    let total = get().windows[chatSessionId]?.total ?? 0;
+    if (total <= 0) {
+      // No window yet (e.g. the dialog opened before the first refresh): pull
+      // one page so `total` is authoritative before doing the locate math.
+      await get().refresh(chatSessionId, true);
+      total = get().windows[chatSessionId]?.total ?? 0;
+    }
+    if (total <= 0) return;
+    // Center the target: aim to land it mid-viewport by pulling `LEAD` rows
+    // above it, clamped so the page never runs off the newest end.
+    const lead = Math.floor(PAGE / 2);
+    let topPos = Math.min(total - 1, linePos + lead);
+    try {
+      let page = await fetchChatMessages(chatSessionId, total - 1 - topPos);
+      // The response is authoritative: a row landing between our count read
+      // and the fetch shifts every offset (they count back from the newest
+      // row), so re-anchor once instead of describing a different span.
+      if (page.total !== total) {
+        total = page.total;
+        topPos = Math.min(total - 1, linePos + lead);
+        page = await fetchChatMessages(chatSessionId, total - 1 - topPos);
+      }
+      const n = page.messages.length;
+      if (n === 0) return;
+      const bottom = topPos - n + 1;
+      set((s) => ({
+        windows: {
+          ...s.windows,
+          [chatSessionId]: {
+            ...emptyWindow(),
+            tail: page.messages,
+            total,
+            firstPos: bottom,
+            lastPos: topPos,
+            pendingLocateSeq: seq,
+          },
+        },
+        live: { ...s.live, [chatSessionId]: projectLiveTurn(page.messages) },
+      }));
+    } catch (e) {
+      console.warn("[chatSessionStore] jumpToMessage failed:", e);
+    }
+  },
+
+  clearLocate: (chatSessionId) => {
+    const w = get().windows[chatSessionId];
+    if (!w || w.pendingLocateSeq == null) return;
+    set((s) => ({
+      windows: { ...s.windows, [chatSessionId]: { ...w, pendingLocateSeq: null } },
+    }));
   },
 
   sendText: async (chatSessionId, text, inReplyTo, sessionConfig, attachmentIds) => {
@@ -703,8 +837,9 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     }
     // The durable row exists before the delivery returns (§5.1), so one
     // re-read right after the response is enough — the doorbell covers
-    // everything the sender's own device did not render.
-    if (ok) await get().refresh(chatSessionId);
+    // everything the sender's own device did not render. `force`: sending
+    // re-claims the tail even if the reader had parked mid-history.
+    if (ok) await get().refresh(chatSessionId, true);
     return ok;
   },
 
@@ -713,8 +848,8 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   wake: async () => {
     // The doorbell names nothing (no subscription ACL on the broker). The
     // chat session is pinned — even while the exec surface is shown its
-    // in-flight turn drives the chat tab's breathing icon, so refresh
-    // regardless of `mode`.
+    // in-flight turn drives the chat tab's status, so refresh regardless of
+    // `mode`.
     for (const st of Object.values(get().byAgent)) {
       if (st.chatSessionId) await get().refresh(st.chatSessionId);
     }

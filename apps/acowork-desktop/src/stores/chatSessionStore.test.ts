@@ -25,7 +25,6 @@ import {
   closedCardIds,
   humanAnsweredCardIds,
   projectLiveTurn,
-  liveTurnActive,
   useChatSessionStore,
   wakeAgentChat,
   type ChatMessageRow,
@@ -155,7 +154,6 @@ describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + pro
     ];
     expect(closedCardIds(rows).has("c1")).toBe(true);
     expect(projectLiveTurn(rows).pendingCard).toBeNull();
-    expect(liveTurnActive(projectLiveTurn(rows))).toBe(false);
   });
 
   it("keeps a card open while its turn ended `waiting` (the pause outcome)", () => {
@@ -167,7 +165,6 @@ describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + pro
     ];
     expect(closedCardIds(rows).has("c1")).toBe(false);
     expect(projectLiveTurn(rows).pendingCard?.meta?.message_id).toBe("c1");
-    expect(liveTurnActive(projectLiveTurn(rows))).toBe(true);
   });
 
   it("a terminal from a DIFFERENT exec session does not close this agent's card (group fan-out)", () => {
@@ -188,7 +185,7 @@ describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + pro
 
   it("an in-flight turn makes the round live even with no card", () => {
     const rows = [user("t1"), pointer("t1", "exec-9")];
-    expect(liveTurnActive(projectLiveTurn(rows))).toBe(true);
+    expect(projectLiveTurn(rows).inFlight?.execSid).toBe("exec-9");
   });
 });
 

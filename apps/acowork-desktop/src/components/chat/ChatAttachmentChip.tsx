@@ -79,7 +79,7 @@ export function ChatAttachmentChip({
           type="button"
           onClick={onRemove}
           aria-label={removeLabel}
-          className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/50 text-[10px] leading-none text-white transition-colors hover:bg-black/70"
+          className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/50 text-[8px] leading-none text-white transition-colors hover:bg-black/70"
         >
           ×
         </button>

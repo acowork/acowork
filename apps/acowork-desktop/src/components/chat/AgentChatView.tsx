@@ -36,7 +36,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, ExternalLink, Paperclip, Loader2 } from "lucide-react";
+import { Send, Paperclip, Loader2, History, ChevronDown } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
 import { toolbarIconButton } from "../../lib/ui-styles";
@@ -44,6 +44,7 @@ import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { UserAvatar } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
+import { OutlineBrainIcon } from "../common/BrainIcon";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
@@ -52,6 +53,8 @@ import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/mar
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ExecSessionStatusCard } from "./ExecSessionStatusCard";
+import { ChatHistoryDialog } from "./ChatHistoryDialog";
+import { useLocateMessage } from "../../lib/useLocateMessage";
 import { useChatSessionStore, projectLiveTurn, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -255,7 +258,10 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec }: RowP
               {/* Drill-into-exec affordance — a discrete control, not a
                   whole-bubble click, so selecting the reply text never fires a
                   jump. Present on every agent message with a resolved exec
-                  session, empty body included. */}
+                  session, empty body included. The brain glyph (design 27
+                  §6.1) is the same one the exec tabs wear, so the button and
+                  its destination read as the same thing; outline variant
+                  because at 11px the two filled lobes smear into a blob. */}
               {execSid && (
                 <button
                   type="button"
@@ -263,7 +269,7 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec }: RowP
                   title={t("chatView.viewRun")}
                   className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
                 >
-                  <ExternalLink size={11} />
+                  <OutlineBrainIcon className="h-[11px] w-[11px] shrink-0" />
                   {t("chatView.viewRun")}
                 </button>
               )}
@@ -339,12 +345,18 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const { t } = useTranslation();
   const win = useChatSessionStore((s) => s.windows[sessionId]);
   const sending = !!useChatSessionStore((s) => s.sending[sessionId]);
+  const pendingLocateSeq = useChatSessionStore(
+    (s) => s.windows[sessionId]?.pendingLocateSeq ?? null,
+  );
   // The seed draft is the CACHE of the session row's `session_config`
   // (design 27 §4.5, backend-persisted): hydrated by `openAgent`, updated
   // by `saveDraft`'s PATCH response. Stable ref so the selector never
   // re-renders on an absent draft.
   const draft = useChatSessionStore((s) => s.draft[sessionId] ?? EMPTY_DRAFT);
-  const { sendText, loadOlder, setMode, saveDraft, upload } = useChatSessionStore.getState();
+  const { sendText, loadOlder, loadNewer, clearLocate, setMode, saveDraft, upload } =
+    useChatSessionStore.getState();
+
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [input, setInput] = useState("");
   const [answerTarget, setAnswerTarget] = useState<ChatMessageRow | null>(null);
@@ -356,6 +368,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastCompositionEndRef = useRef(0);
+  // The scroll viewport, captured alongside `useStickToBottom`'s callback ref
+  // so the locate effect can query `[data-seq]` rows within it.
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   // The agent's current model, read-only here (see header comment).
   const [agentModel, setAgentModel] = useState<{ model: string; provider: string } | null>(null);
@@ -408,6 +423,14 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     sessionId,
     undefined,
     win?.older.length ?? 0,
+  );
+
+  // Locate-and-flash for history jumps (ADR-097): declared AFTER the follow
+  // hook so the center-scroll wins over follow-to-bottom on the jump commit.
+  const highlightSeq = useLocateMessage(
+    () => containerRef.current,
+    pendingLocateSeq,
+    () => clearLocate(sessionId),
   );
 
   const handleAnswer = (card: ChatMessageRow, text: string, immediate: boolean) => {
@@ -550,7 +573,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     setMode(agentId, "exec");
   };
 
-  const hasMore = win ? win.tailLoaded + win.older.length < win.total : false;
+  const hasMoreOlder = win ? win.firstPos > 0 : false;
+  // A locate can park the window mid-history; `!atTail` then opens the
+  // downward path back to the newest page.
+  const hasMoreNewer = win ? win.lastPos < win.total - 1 : false;
   const availableModels = useChatStore((s) => s.availableModels);
   const providerAccounts = useChatStore((s) => s.providerAccounts);
 
@@ -577,20 +603,45 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // prepend-anchoring in `useStickToBottom` then holds the reading position
   // as the new page lands above.
   const handleStreamScroll = (event: UIEvent<HTMLDivElement>) => {
-    if (hasMore && !win?.loadingOlder && event.currentTarget.scrollTop <= AUTO_LOAD_TOP_PX) {
+    const el = event.currentTarget;
+    if (hasMoreOlder && !win?.loadingOlder && el.scrollTop <= AUTO_LOAD_TOP_PX) {
       void loadOlder(sessionId);
+    }
+    if (hasMoreNewer && !win?.loadingNewer && el.scrollHeight - el.scrollTop - el.clientHeight <= AUTO_LOAD_TOP_PX) {
+      void loadNewer(sessionId);
     }
   };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {/* Top bar — the 1:1 chat surface has no tab-strip header of its own
+          (the tabs live in `AgentPage`), so the history entry sits in a slim
+          right-aligned row above the stream, mirroring `GroupChatPanel`'s. */}
+      <div className="flex h-9 shrink-0 items-center justify-end gap-1 px-3">
+        <Tooltip content={t("chatHistory.title")} variant="plain">
+          <button
+            type="button"
+            className={toolbarIconButton}
+            onClick={() => setHistoryOpen(true)}
+            aria-label={t("chatHistory.title")}
+          >
+            <History size={16} />
+          </button>
+        </Tooltip>
+      </div>
       {/* Message stream */}
       <OverlayScrollbar
-        ref={scrollRef}
+        ref={(el) => {
+          containerRef.current = el;
+          // `useStickToBottom` hands back a callback ref in production, but a
+          // plain object ref is a valid React ref too — forward only the former
+          // so a merged container capture never calls a non-function.
+          if (typeof scrollRef === "function") scrollRef(el);
+        }}
         className="py-2 [overflow-anchor:none]"
         onViewportScroll={handleStreamScroll}
       >
-        {hasMore && (
+        {hasMoreOlder && (
           <div className="py-2 text-center text-10 text-text-tertiary">
             {win?.loadingOlder ? (
               <span className="inline-flex items-center justify-center gap-1.5">
@@ -606,16 +657,24 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           <div className="py-10 text-center text-sm text-text-tertiary">{t("chatView.empty")}</div>
         )}
         {rows.map((r, i) => (
-          <RowView
+          <div
             key={`${r.seq}`}
-            row={r}
-            agentId={agentId}
-            chatSessionId={sessionId}
-            showHeader={
-              r.kind === "agent_message" && rows[i - 1]?.kind !== "agent_message"
-            }
-            onJumpToExec={(sid) => void jumpToExec(sid)}
-          />
+            data-seq={r.seq}
+            className={cn(
+              "scroll-mt-2 transition-colors",
+              highlightSeq === r.seq && "bg-[var(--color-accent)]/10",
+            )}
+          >
+            <RowView
+              row={r}
+              agentId={agentId}
+              chatSessionId={sessionId}
+              showHeader={
+                r.kind === "agent_message" && rows[i - 1]?.kind !== "agent_message"
+              }
+              onJumpToExec={(sid) => void jumpToExec(sid)}
+            />
+          </div>
         ))}
         {/* Status card — the one live row the Chat surface owns (§5.5.5:
             pointer durable, state projected). It renders both the in-flight
@@ -653,6 +712,25 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               />
             );
           })()}
+        {hasMoreNewer && (
+          <div className="py-2 text-center text-10 text-text-tertiary">
+            {win?.loadingNewer ? (
+              <span className="inline-flex items-center justify-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t("chatHistory.loadingNewer")}
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 hover:text-text-secondary"
+                onClick={() => void loadNewer(sessionId)}
+              >
+                <ChevronDown size={12} />
+                {t("chatHistory.jumpToLatest")}
+              </button>
+            )}
+          </div>
+        )}
       </OverlayScrollbar>
 
       {/* Composer — same chrome as the execution view (plan 5.4). */}
@@ -777,6 +855,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           </div>
         </div>
       </div>
+
+      <ChatHistoryDialog
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        chatSessionId={sessionId}
+      />
     </div>
   );
 }

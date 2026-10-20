@@ -26,7 +26,7 @@ import { ChatPanel } from "./ChatPanel";
 import { SessionTabBar } from "./SessionTabBar";
 import { AgentChatView } from "./AgentChatView";
 import { useAgentStore } from "../../stores/agentStore";
-import { useChatSessionStore, liveTurnActive } from "../../stores/chatSessionStore";
+import { useChatSessionStore } from "../../stores/chatSessionStore";
 
 /** Same shell the ChatPanel root uses — the two surfaces are one pane. */
 const SHELL_CN = cn(CAPSULE_PANE_CN, "min-w-[338px] flex-1 bg-chat-body");
@@ -38,12 +38,6 @@ export function AgentPage() {
   );
   const st = useChatSessionStore((s) =>
     selectedAgentId ? s.byAgent[selectedAgentId] : undefined,
-  );
-  // The same projection the status card uses — a tab dot that only follows
-  // the in-flight turn went quiet while the agent was still waiting for an
-  // approval on the card below it.
-  const live = useChatSessionStore((s) =>
-    st?.chatSessionId ? s.live[st.chatSessionId] : undefined,
   );
   const alive = !!agentMeta?.alive;
 
@@ -101,7 +95,6 @@ export function AgentPage() {
         chatTab={{
           label: agentName,
           active: st.mode === "chat",
-          processing: liveTurnActive(live),
           onSelect: () => useChatSessionStore.getState().setMode(selectedAgentId, "chat"),
         }}
       />

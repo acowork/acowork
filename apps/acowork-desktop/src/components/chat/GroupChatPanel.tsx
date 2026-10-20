@@ -25,7 +25,7 @@
 
 import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Send, Paperclip, ExternalLink, Loader2 } from "lucide-react";
+import { Send, Paperclip, Loader2, History, ChevronDown } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -39,6 +39,7 @@ import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
+import { OutlineBrainIcon } from "../common/BrainIcon";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
@@ -56,6 +57,8 @@ import {
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
+import { ChatHistoryDialog } from "./ChatHistoryDialog";
+import { useLocateMessage } from "../../lib/useLocateMessage";
 
 // Same markdown shell as AgentChatView's bubbles (kept local on purpose:
 // extracting a shared component would touch two surfaces for one class
@@ -78,7 +81,7 @@ const chatMarkdownComponents = {
     return <pre>{children}</pre>;
   },
   code: ({ children }: { children?: React.ReactNode }) => (
-    <code className="rounded bg-black/10 px-1 py-0.5 text-[13px] dark:bg-white/10">
+    <code className="rounded bg-black/10 px-1 py-0.5 text-xs dark:bg-white/10">
       {children}
     </code>
   ),
@@ -363,7 +366,9 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
                 surface's button: a discrete control under the bubble, not a
                 whole-bubble click, so selecting the reply text never fires a
                 jump. Present on every local agent reply with a resolved exec
-                session, empty body included. */}
+                session, empty body included. Same brain glyph as the exec
+                tabs (design 27 §6.1) — the button and its destination are
+                the same thing. */}
             {!own && who.isAgent && row.kind === "agent_message" && execSid && (
               <button
                 type="button"
@@ -371,7 +376,7 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
                 title={t("chatView.viewRun")}
                 className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
               >
-                <ExternalLink size={11} />
+                <OutlineBrainIcon className="h-[11px] w-[11px] shrink-0" />
                 {t("chatView.viewRun")}
               </button>
             )}
@@ -467,6 +472,14 @@ export function GroupChatPanel() {
     activeGroupId ? (s.live[activeGroupId]?.inFlight ?? null) : null,
   );
   const sending = useChatSessionStore((s) => (activeGroupId ? s.sending[activeGroupId] : false));
+  const pendingLocateSeq = useChatSessionStore((s) =>
+    activeGroupId ? (s.windows[activeGroupId]?.pendingLocateSeq ?? null) : null,
+  );
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // Scroll viewport, captured alongside `useStickToBottom`'s callback ref so
+  // the locate effect can query `[data-seq]` rows within it.
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   const [draft, setDraft] = useState("");
   const [directory, setDirectory] = useState<DirectoryUser[]>([]);
@@ -493,6 +506,14 @@ export function GroupChatPanel() {
     win?.older.length ?? 0,
   );
 
+  // Locate-and-flash for history jumps (ADR-097) — declared AFTER the follow
+  // hook so the center-scroll wins over follow-to-bottom on the jump commit.
+  const highlightSeq = useLocateMessage(
+    () => containerRef.current,
+    pendingLocateSeq,
+    () => activeGroupId && useChatSessionStore.getState().clearLocate(activeGroupId),
+  );
+
   // Directory for human sender names — best-effort, once per mount.
   useEffect(() => {
     const token = useAuthStore.getState().accessToken;
@@ -508,14 +529,20 @@ export function GroupChatPanel() {
       (r) => !(r.kind === "system_notice" && (r.meta?.notice_type === "turn_started" || !r.body)),
     );
   }, [win]);
-  const hasMore = (win?.total ?? 0) > rows.length;
-  // Auto-pagination: scrolling into the top band fires the next older page —
-  // no click. Guarded by `hasMore` + the in-flight `loadingOlder` flag; the
-  // prepend-anchoring in `useStickToBottom` holds the reading position as the
-  // new page lands above (48px = the top "load earlier" status band).
+  const hasMoreOlder = win ? win.firstPos > 0 : false;
+  const hasMoreNewer = win ? win.lastPos < win.total - 1 : false;
+  // Auto-pagination: scrolling into the top band fires the next older page;
+  // reaching the bottom band (only after a locate parks the window mid-history)
+  // pages back toward the newest. `useStickToBottom`'s prepend-anchoring holds
+  // the reading position as older rows land above.
   const handleStreamScroll = (event: UIEvent<HTMLDivElement>) => {
-    if (activeGroupId && hasMore && !win?.loadingOlder && event.currentTarget.scrollTop <= 48) {
+    const el = event.currentTarget;
+    if (!activeGroupId || !win) return;
+    if (hasMoreOlder && !win.loadingOlder && el.scrollTop <= 48) {
       void useChatSessionStore.getState().loadOlder(activeGroupId);
+    }
+    if (hasMoreNewer && !win.loadingNewer && el.scrollHeight - el.scrollTop - el.clientHeight <= 48) {
+      void useChatSessionStore.getState().loadNewer(activeGroupId);
     }
   };
   const closed = useMemo(() => (win?.tail ? closedCardIds(win.tail) : new Set<string>()), [win]);
@@ -735,14 +762,30 @@ export function GroupChatPanel() {
         <span className="shrink-0 font-normal text-text-tertiary">
           {t("groupChat.members", { count: participants.length })}
         </span>
+        <Tooltip content={t("chatHistory.title")} variant="plain">
+          <button
+            type="button"
+            className={cn(toolbarIconButton, "ml-auto h-6 w-6")}
+            onClick={() => setHistoryOpen(true)}
+            aria-label={t("chatHistory.title")}
+          >
+            <History size={14} />
+          </button>
+        </Tooltip>
       </header>
 
       <OverlayScrollbar
-        ref={scrollRef}
+        ref={(el) => {
+          containerRef.current = el;
+          // `useStickToBottom` hands back a callback ref in production, but a
+          // plain object ref is a valid React ref too — forward only the former
+          // so a merged container capture never calls a non-function.
+          if (typeof scrollRef === "function") scrollRef(el);
+        }}
         className="py-2 [overflow-anchor:none]"
         onViewportScroll={handleStreamScroll}
       >
-        {hasMore && (
+        {hasMoreOlder && (
           <div className="py-2 text-center text-10 text-text-tertiary">
             {win?.loadingOlder ? (
               <span className="inline-flex items-center justify-center gap-1.5">
@@ -760,21 +803,48 @@ export function GroupChatPanel() {
           </div>
         )}
         {rows.map((row) => (
-          <GroupRowView
+          <div
             key={`${row.seq}-${row.meta?.message_id ?? ""}`}
-            row={row}
-            me={me}
-            chatSessionId={activeGroupId}
-            nameOf={nameOf}
-            closed={closed}
-            answered={answered}
-            onAnswer={onAnswer}
-            onJumpToExec={(aid, sid) => void jumpToExec(aid, sid)}
-            readOnly={!canPost}
-          />
+            data-seq={row.seq}
+            className={cn(
+              "scroll-mt-2 transition-colors",
+              highlightSeq === row.seq && "bg-[var(--color-accent)]/10",
+            )}
+          >
+            <GroupRowView
+              row={row}
+              me={me}
+              chatSessionId={activeGroupId}
+              nameOf={nameOf}
+              closed={closed}
+              answered={answered}
+              onAnswer={onAnswer}
+              onJumpToExec={(aid, sid) => void jumpToExec(aid, sid)}
+              readOnly={!canPost}
+            />
+          </div>
         ))}
         {inFlight && (
           <div className="px-6 py-1 text-10 text-text-tertiary">{t("groupChat.working")}</div>
+        )}
+        {hasMoreNewer && (
+          <div className="py-2 text-center text-10 text-text-tertiary">
+            {win?.loadingNewer ? (
+              <span className="inline-flex items-center justify-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t("chatHistory.loadingNewer")}
+              </span>
+            ) : (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 hover:text-text-secondary"
+                onClick={() => activeGroupId && void useChatSessionStore.getState().loadNewer(activeGroupId)}
+              >
+                <ChevronDown size={12} />
+                {t("chatHistory.jumpToLatest")}
+              </button>
+            )}
+          </div>
         )}
       </OverlayScrollbar>
 
@@ -962,6 +1032,15 @@ export function GroupChatPanel() {
           </div>
         )}
       </div>
+
+      {activeGroupId && (
+        <ChatHistoryDialog
+          open={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          chatSessionId={activeGroupId}
+          resolveName={(id) => nameOf(id).name}
+        />
+      )}
     </div>
   );
 }
