@@ -958,11 +958,41 @@ export function WorkspaceExplorer() {
                                             onMouseDown={(e) => e.preventDefault()}
                                             onMouseEnter={() => setFocusedIdx(idx)}
                                             onClick={() => handleSearchSelect(f.relPath)}
-                                            // Names truncate on narrow panes, so the
+                                            // Names clip on very narrow panes, so the
                                             // full path stays reachable on hover.
                                             title={f.relPath}
                                             className={cn(
-                                                "group flex items-center gap-2 px-3 py-1.5 transition-colors cursor-pointer",
+                                                // Three-column grid:
+                                                //   col 1 — icon (auto)
+                                                //   col 2 — name + dir (minmax(0, 1fr);
+                                                //           overflow-hidden is on the
+                                                //           inner wrapper below, so only
+                                                //           the text region clips)
+                                                //   col 3 — "add to chat" button (auto)
+                                                // Why grid instead of flex row: a flat
+                                                // flex row with `ml-auto` on the button
+                                                // depends on free space in the row to pin
+                                                // the button to the trailing edge. With
+                                                // `shrink-0` on the name, the row would
+                                                // push wider than the pane on long names,
+                                                // the dir span would absorb the overflow
+                                                // down to zero, and `ml-auto` would lose
+                                                // its free space — the button rides out
+                                                // past the dropdown's right edge and only
+                                                // reappears once the pane is dragged
+                                                // wide enough. Putting the button in its
+                                                // own auto column decouples it from that
+                                                // race: it always sits in column 3,
+                                                // regardless of name length. The text
+                                                // column is the only thing that gets
+                                                // squeezed, and within it `shrink-0`
+                                                // on the name pins it at content width
+                                                // while the dir absorbs the rest. The
+                                                // full path is still recoverable from
+                                                // `title={f.relPath}` even when the
+                                                // name itself clips.
+                                                "group grid items-center gap-2 overflow-hidden px-3 py-1.5 transition-colors cursor-pointer",
+                                                "grid-cols-[auto_minmax(0,1fr)_auto]",
                                                 focused
                                                     ? `${listRowSelected} text-text `
                                                     : listRowHover,
@@ -971,43 +1001,14 @@ export function WorkspaceExplorer() {
                                             <div className="h-3.5 w-3.5 shrink-0 flex items-center justify-center">
                                                 <SetiIcon {...getFileIcon(f.name)} size={14} />
                                             </div>
-                                            {/* The trailing action button must stay
-                                                pinned to the END OF THE ROW, not to
-                                                the end of the file name.
-
-                                                Why the previous classes broke that:
-                                                the name was `shrink-0`, so a long
-                                                name could never shrink below its
-                                                content width and pushed the row
-                                                wider than the pane. A `shrink-0`
-                                                item does not shrink below content
-                                                width, so the dir span absorbed
-                                                the squeeze down to 0 and `ml-auto`
-                                                on the button had no free space to
-                                                consume — the button rode out past
-                                                the name and only reappeared once
-                                                the pane was wide enough.
-
-                                                Contract that fixes it (shrink
-                                                factors decide who yields):
-                                                  name  shrink-[3] — yields 3x
-                                                        faster than the dir, so the
-                                                        identifying name survives
-                                                        longest, but still yields.
-                                                  dir   shrink (1)    — secondary.
-                                                  button shrink-0 + ml-auto — never
-                                                        yields; `ml-auto` now has
-                                                        free space again and pins it
-                                                        to the row's trailing edge.
-                                                `min-w-0` on both text spans is
-                                                required for `truncate` to have
-                                                anything to shrink against. */}
-                                            <span className="min-w-0 shrink-[3] truncate text-xs text-text-secondary ">
-                                                {f.name}
-                                            </span>
-                                            <span className="ml-3 min-w-0 shrink truncate text-10 text-text-tertiary ">
-                                                {abbreviatePath(f.dir)}
-                                            </span>
+                                            <div className="flex items-center min-w-0 overflow-hidden">
+                                                <span className="shrink-0 whitespace-nowrap text-xs text-text-secondary ">
+                                                    {f.name}
+                                                </span>
+                                                <span className="ml-3 min-w-0 truncate text-10 text-text-tertiary ">
+                                                    {abbreviatePath(f.dir)}
+                                                </span>
+                                            </div>
                                             {/* Hover/focus-reveal "add to chat" button.
                                                 Mirrors the floating button on the editor
                                                 selection (handleTabAddToChat) so the two
@@ -1016,7 +1017,10 @@ export function WorkspaceExplorer() {
                                                 focus on the search input (matches the
                                                 outer row); `e.stopPropagation()` on click
                                                 prevents the row's onClick from also
-                                                opening the file. */}
+                                                opening the file. `ml-auto` is no longer
+                                                needed — the grid places the button in
+                                                column 3 regardless of how much content
+                                                the text column holds. */}
                                             <Tooltip
                                                 content={
                                                     addDisabled
@@ -1035,7 +1039,7 @@ export function WorkspaceExplorer() {
                                                         handleSearchAddToChat(f);
                                                     }}
                                                     className={cn(
-                                                        "ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-secondary",
+                                                        "flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-secondary",
                                                         "opacity-0 transition-opacity hover:bg-bg-hover hover:text-text",
                                                         // Reveal on hover or when the row is
                                                         // keyboard-focused (ArrowUp/Down
