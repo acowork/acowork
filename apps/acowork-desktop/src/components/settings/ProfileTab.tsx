@@ -22,6 +22,7 @@ import type { UserAvatarConfig } from "../../lib/avatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ExpandableRow, ListBox } from "../common/list";
 import i18n from "../../i18n";
 import { log } from "../../lib/logger";
@@ -331,9 +332,14 @@ export function ProfileTab() {
                   onClick={() => setAvatarPopupOpen(false)}
                 />
                 <div
-                  className="fixed z-50 w-72 rounded-lg border border-border-outer bg-modal-surface p-3 shadow-lg max-h-[min(calc(100vh-120px),460px)] overflow-y-auto overscroll-contain"
+                  className="fixed z-50"
                   style={{ top: avatarPopupPos?.top ?? 0, left: avatarPopupPos?.left ?? 0 }}
                 >
+                  <OverlayScrollbar
+                    maxHeight="min(calc(100vh-120px),460px)"
+                    className="p-3 overscroll-contain"
+                    containerClassName="w-72 overflow-hidden rounded-lg border border-border-outer bg-modal-surface shadow-lg"
+                  >
                   {/* Tabs */}
                   <div className="mb-3 flex gap-1 border-b border-border-divider">
                     <button
@@ -424,6 +430,7 @@ export function ProfileTab() {
                       })}
                     </div>
                   )}
+                  </OverlayScrollbar>
                 </div>
                 </>,
                 document.body,

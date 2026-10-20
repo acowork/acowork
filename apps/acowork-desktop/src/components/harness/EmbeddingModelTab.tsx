@@ -12,6 +12,7 @@ import type { EmbeddingTestResponse } from "../../lib/types";
 import { Download, Check, Loader2, Cpu, Languages, Zap, CheckCircle2, XCircle, Trash2, Cloud, KeyRound, HardDrive, Plus, RefreshCw } from "lucide-react";
 import { Badge, EmptyState, ExpandableRow, ListBox, ListRow } from "../common/list";
 import { Tooltip } from "../common/Tooltip";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 export function EmbeddingModelTab() {
     const { t } = useTranslation();
@@ -1600,7 +1601,7 @@ function AddCustomEmbeddingProviderDialog({
                 </div>
 
                 {/* Scrollable content */}
-                <div className="flex-1 overflow-y-auto px-6 pb-2 space-y-3">
+                <OverlayScrollbar fill="flex" className="px-6 pb-2 space-y-3">
                     {/* Provider Name */}
                     <div>
                         <label className="mb-1 block text-xs text-text-tertiary">
@@ -1742,7 +1743,7 @@ function AddCustomEmbeddingProviderDialog({
                             {error}
                         </div>
                     )}
-                </div>
+                </OverlayScrollbar>
 
                 {/* Footer */}
                 <div className="shrink-0 flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">

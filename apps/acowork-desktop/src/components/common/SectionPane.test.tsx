@@ -87,9 +87,14 @@ describe("SectionPane", () => {
     expect(header.className).toContain("border-b");
     expect(header.className).toContain("shrink-0");
 
+    // The list is now wrapped in OverlayScrollbar: the outer wrapper is the
+    // flex-fill region (`flex-1`), and the actual `overflow-y-auto` scroll
+    // surface is its inner viewport.
     const list = aside.children[1] as HTMLElement;
-    expect(list.className).toContain("overflow-y-auto");
+    expect(list.className).toContain("overlay-scrollbar");
     expect(list.className).toContain("flex-1");
+    const viewport = list.querySelector(".overlay-scrollbar-viewport") as HTMLElement;
+    expect(viewport.className).toContain("overflow-y-auto");
   });
 
   it("selects a section and marks the current one", () => {

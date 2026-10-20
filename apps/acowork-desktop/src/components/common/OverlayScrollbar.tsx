@@ -11,7 +11,23 @@ interface OverlayScrollbarProps {
   onViewportPointerDown?: (event: PointerEvent<HTMLDivElement>) => void;
   dataTabScroll?: boolean;
   containerClassName?: string;
-  maxHeight?: number;
+  /** Cap the viewport height. A plain number is treated as px; a string is
+   *  passed straight to CSS (`maxHeight`), so vh / `min(...)` caps also work.
+   *  When set, the built-in `flex-1` / `h-full` fill is dropped and the
+   *  viewport scrolls at this fixed cap instead — for dialog/list boxes that
+   *  are not themselves flex children. */
+  maxHeight?: number | string;
+  /** How the viewport fills its container when no `maxHeight` cap is given.
+   *  - `"height"` (default): viewport is `h-full`. This is the original
+   *    behaviour and what the chat message list / AgentList / RightPanel
+   *    rely on; it resolves correctly wherever the ancestor chain has a
+   *    definite height.
+   *  - `"flex"`: outer becomes a flex column and the viewport `flex-1
+   *    min-h-0`. Use this only inside a `max-h-*` dialog body, where the
+   *    container height is indefinite and `height:100%` would not resolve
+   *    (the content would overflow unscrolled). Never the default, so
+   *    existing definite-height consumers are untouched. */
+  fill?: "height" | "flex";
   onContextMenu?: (event: MouseEvent<HTMLDivElement>) => void;
   onViewportWheel?: (event: WheelEvent<HTMLDivElement>) => void;
 }
@@ -33,7 +49,7 @@ export function getOverlayThumbMetrics(clientHeight: number, scrollHeight: numbe
 }
 
 export const OverlayScrollbar = forwardRef<HTMLDivElement, OverlayScrollbarProps>(function OverlayScrollbar(
-  { children, className, role, "aria-label": ariaLabel, viewportRef, onViewportScroll, onViewportPointerDown, dataTabScroll, containerClassName, maxHeight, onContextMenu, onViewportWheel },
+  { children, className, role, "aria-label": ariaLabel, viewportRef, onViewportScroll, onViewportPointerDown, dataTabScroll, containerClassName, maxHeight, fill = "height", onContextMenu, onViewportWheel },
   forwardedRef,
 ) {
   const innerViewportRef = useRef<HTMLDivElement>(null);
@@ -109,12 +125,23 @@ export const OverlayScrollbar = forwardRef<HTMLDivElement, OverlayScrollbarProps
   };
 
   return (
-    <div className={cn("overlay-scrollbar relative min-h-0 flex-1", containerClassName)} style={maxHeight !== undefined ? { maxHeight, flex: "none" } : undefined}>
+    <div
+      className={cn(
+        "overlay-scrollbar relative min-h-0 flex-1",
+        maxHeight === undefined && fill === "flex" && "flex flex-col",
+        containerClassName,
+      )}
+      style={maxHeight !== undefined ? { maxHeight, flex: "none" } : undefined}
+    >
       <div
         id={viewportId}
         ref={setViewportRef}
         data-tab-scroll={dataTabScroll ? "" : undefined}
-        className={cn("overlay-scrollbar-viewport overflow-y-auto overflow-x-hidden", maxHeight === undefined && "h-full", className)}
+        className={cn(
+          "overlay-scrollbar-viewport overflow-y-auto overflow-x-hidden",
+          maxHeight === undefined && (fill === "flex" ? "min-h-0 flex-1" : "h-full"),
+          className,
+        )}
         style={maxHeight !== undefined ? { maxHeight } : undefined}
         role={role}
         aria-label={ariaLabel}

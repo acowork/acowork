@@ -24,6 +24,7 @@ import { Tooltip } from "../common/Tooltip";
 import { ErrorBox } from "../common/ErrorBox";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { SectionPane } from "../common/SectionPane";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 type HarnessTab = "providers" | "mcp" | "embedding" | "lsp";
 
@@ -509,7 +510,7 @@ function ProvidersTab() {
             </div>
 
             {/* Body */}
-            <div className="flex-1 space-y-2 overflow-y-auto px-5 py-4">
+            <OverlayScrollbar fill="flex" className="space-y-2 px-5 py-4">
               {!isLocalProvider(showEditDialog) && (
                 <div>
                   <div className="mb-1 flex items-baseline justify-between">
@@ -518,7 +519,7 @@ function ProvidersTab() {
                       {t("harness.accountLabel", { defaultValue: "alias" })}
                     </span>
                   </div>
-                  <div className="max-h-[200px] space-y-1.5 overflow-y-auto pr-1">
+                  <OverlayScrollbar className="space-y-1.5 pr-1" maxHeight={200}>
                     {/* Existing accounts — editable inline. Remove from
                         this list drops the account on save. Empty key
                         leaves the stored value untouched; non-empty
@@ -597,7 +598,7 @@ function ProvidersTab() {
                         </button>
                       </div>
                     ))}
-                  </div>
+                  </OverlayScrollbar>
                   <button
                     type="button"
                     onClick={() => setEditKeyEntries([...editKeyEntries, { alias: "", key: "" }])}
@@ -652,7 +653,7 @@ function ProvidersTab() {
                   />
                 );
               })()}
-            </div>
+            </OverlayScrollbar>
 
             {/* Footer */}
             <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
@@ -1019,7 +1020,11 @@ export function McpTab() {
           locked in edit mode; everything else is freely editable. */}
       {showAddForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
-          <div className="w-[440px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
+          <OverlayScrollbar
+            maxHeight="85vh"
+            className="p-6"
+            containerClassName="w-[440px] overflow-hidden rounded-md bg-modal-surface shadow-xl"
+          >
             <h3 className="mb-3 text-sm font-semibold">
               {editingName ? t("harnessMcp.editCustomMcpServer") : t("harnessMcp.addCustomMcpServer")}
             </h3>
@@ -1182,7 +1187,7 @@ export function McpTab() {
                 {editingName ? t("harnessMcp.save") : t("harnessMcp.addServer")}
               </button>
             </div>
-          </div>
+          </OverlayScrollbar>
         </div>
       )}
 

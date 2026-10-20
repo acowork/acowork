@@ -44,6 +44,7 @@ import {
 import { ErrorBox } from "../common/ErrorBox";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { Tooltip } from "../common/Tooltip";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 /**
  * Module-level cache of LSP install-status results, keyed by relay URL.
@@ -697,7 +698,11 @@ export function LspTab() {
       {/* Install script dialog */}
       {scriptDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
-          <div className="w-[600px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
+          <OverlayScrollbar
+            maxHeight="85vh"
+            className="p-6"
+            containerClassName="w-[600px] overflow-hidden rounded-md bg-modal-surface shadow-xl"
+          >
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold">
                 {t("harnessLsp.scriptContent")} — {LANGUAGE_LABELS[scriptDialog.name] ?? scriptDialog.name}
@@ -726,7 +731,7 @@ export function LspTab() {
                 {t("harnessLsp.runInstall")}
               </button>
             </div>
-          </div>
+          </OverlayScrollbar>
         </div>
       )}
 
@@ -1130,7 +1135,11 @@ function LspServerFormDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay" role="dialog" aria-modal="true">
-      <div className="w-[560px] max-h-[85vh] overflow-y-auto rounded-md bg-modal-surface p-6 shadow-xl">
+      <OverlayScrollbar
+        maxHeight="85vh"
+        className="p-6"
+        containerClassName="w-[560px] overflow-hidden rounded-md bg-modal-surface shadow-xl"
+      >
         <h3 className="text-sm font-semibold mb-4">
           {mode === "add" ? t("harnessLsp.addServer") : t("harnessLsp.editServer")}
         </h3>
@@ -1257,7 +1266,7 @@ function LspServerFormDialog({
             {t("common.confirm")}
           </button>
         </div>
-      </div>
+      </OverlayScrollbar>
 
       {/* Gate on the restart cost (§5.6-2): a note the user scrolls past is
           not a confirmation. */}

@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 export interface UrlComboBoxProps {
   value: string;
@@ -96,31 +97,33 @@ export function UrlComboBox({
         <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-180")} />
       </button>
       {open && items.length > 0 && (
-        <ul
-          role="listbox"
-          className="absolute left-0 right-0 top-full z-20 mt-1 max-h-60 overflow-auto rounded-md border border-border-outer bg-page-bg shadow-lg"
+        <OverlayScrollbar
+          maxHeight={240}
+          containerClassName="absolute left-0 right-0 top-full z-20 mt-1 overflow-hidden rounded-md border border-border-outer bg-page-bg shadow-lg"
         >
-          {items.map((url) => (
-            <li
-              key={url}
-              role="option"
-              aria-selected="false"
-              onMouseDown={(e) => {
-                // Use mousedown so we beat the input's blur-driven commit.
-                e.preventDefault();
-              }}
-              onClick={() => {
-                onChange(url);
-                setOpen(false);
-                onCommit?.();
-              }}
-              className="cursor-pointer truncate px-3 py-1.5 font-mono text-xs hover:bg-panel-inset"
-              title={url}
-            >
-              {url}
-            </li>
-          ))}
-        </ul>
+          <ul role="listbox">
+            {items.map((url) => (
+              <li
+                key={url}
+                role="option"
+                aria-selected="false"
+                onMouseDown={(e) => {
+                  // Use mousedown so we beat the input's blur-driven commit.
+                  e.preventDefault();
+                }}
+                onClick={() => {
+                  onChange(url);
+                  setOpen(false);
+                  onCommit?.();
+                }}
+                className="cursor-pointer truncate px-3 py-1.5 font-mono text-xs hover:bg-panel-inset"
+                title={url}
+              >
+                {url}
+              </li>
+            ))}
+          </ul>
+        </OverlayScrollbar>
       )}
     </div>
   );

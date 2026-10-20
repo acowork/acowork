@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry } from "../../lib/types";
 import { StyledInput } from "../common/StyledInput";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { needsApiKey, keyPlaceholder, isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels, discoverModels, fetchProviders } from "../../lib/gateway-api";
 import { ModelMultiSelect } from "./ModelMultiSelect";
@@ -431,7 +432,7 @@ export function AddProviderFlow({
         </div>
 
         {/* Scrollable content */}
-        <div className="flex-1 overflow-y-auto px-5 py-4">
+        <OverlayScrollbar fill="flex" className="px-5 py-4">
 
           {/* ── Step: Picker ── */}
           {step === "picker" && (
@@ -465,7 +466,7 @@ export function AddProviderFlow({
                       {t("harness.accountLabel", { defaultValue: "alias" })}
                     </span>
                   </div>
-                  <div className="max-h-[200px] space-y-1.5 overflow-y-auto pr-1">
+                  <OverlayScrollbar className="space-y-1.5 pr-1" maxHeight={200}>
                     {newKeyEntries.map((entry, idx) => (
                       <div key={idx} className="flex items-center gap-1.5">
                         <StyledInput
@@ -501,7 +502,7 @@ export function AddProviderFlow({
                         </button>
                       </div>
                     ))}
-                  </div>
+                  </OverlayScrollbar>
                   <button
                     type="button"
                     onClick={() =>
@@ -616,7 +617,7 @@ export function AddProviderFlow({
                     {t("harness.accountLabel", { defaultValue: "alias" })}
                   </span>
                 </div>
-                <div className="max-h-[200px] space-y-1.5 overflow-y-auto pr-1">
+                <OverlayScrollbar className="space-y-1.5 pr-1" maxHeight={200}>
                   {customKeyEntries.map((entry, idx) => (
                     <div key={idx} className="flex items-center gap-1.5">
                       <StyledInput
@@ -652,7 +653,7 @@ export function AddProviderFlow({
                       </button>
                     </div>
                   ))}
-                </div>
+                </OverlayScrollbar>
                 <button
                   type="button"
                   onClick={() =>
@@ -755,7 +756,7 @@ export function AddProviderFlow({
               )}
             </div>
           )}
-        </div>
+        </OverlayScrollbar>
 
         {/* Footer */}
         <div className="shrink-0 flex items-center justify-between gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">

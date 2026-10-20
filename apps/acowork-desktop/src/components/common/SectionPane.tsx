@@ -26,6 +26,7 @@
 import type { ReactNode } from "react";
 import { CAPSULE_PANE_CN } from "./capsule";
 import { SplitHandle } from "./SplitHandle";
+import { OverlayScrollbar } from "./OverlayScrollbar";
 import { useDragResize } from "../../hooks/useDragResize";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
@@ -104,7 +105,7 @@ export function SectionPane({
             {title}
           </span>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-1">
+        <OverlayScrollbar className="px-1.5 py-1">
           {items.map((item, index) => {
             const active = item.id === selected;
             const isLast = index === items.length - 1;
@@ -146,7 +147,7 @@ export function SectionPane({
               </button>
             );
           })}
-        </div>
+        </OverlayScrollbar>
       </aside>
 
       <SplitHandle onMouseDown={list.onHandleMouseDown} ariaLabel={listLabel ?? title} />
@@ -169,9 +170,9 @@ export function SectionPane({
         className={cn(CAPSULE_PANE_CN, "h-full min-w-0 flex-1 bg-right-panel")}
         role="tabpanel"
       >
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <OverlayScrollbar>
           <div className={cn("p-4", detailBodyClassName)}>{children}</div>
-        </div>
+        </OverlayScrollbar>
       </div>
     </div>
   );

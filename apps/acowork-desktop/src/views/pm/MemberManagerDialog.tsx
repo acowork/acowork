@@ -25,6 +25,7 @@ import { usePmUserDirectoryStore } from "../../stores/pmUserDirectoryStore";
 import { AgentAvatar } from "../../components/common/AgentAvatar";
 import { UserAvatar } from "../../components/common/UserAvatar";
 import { showToast } from "../../components/common/ToastProvider";
+import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { PmApiError } from "../../lib/pm-api";
 import type { PmMemberKind, PmProject } from "../../lib/pm-types";
@@ -201,7 +202,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
           {t("pm.memberManagerHint")}
         </p>
 
-        <div className="flex-1 overflow-y-auto px-5 py-3">
+        <OverlayScrollbar fill="flex" className="px-5 py-3">
           {/* 当前成员 */}
           <div className="mb-1 text-11 font-medium text-text-tertiary ">
             {t("pm.members")}（{currentMembers.length}）
@@ -309,7 +310,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
               ))}
             </ul>
           )}
-        </div>
+        </OverlayScrollbar>
       </div>
     </div>
   );

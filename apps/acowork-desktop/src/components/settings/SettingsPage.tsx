@@ -24,6 +24,7 @@ import { ServicesPanel } from "./ServicesPanel";
 import { SectionPane } from "../common/SectionPane";
 import { OutlineSettingsIcon as SettingsIcon } from "../common/SettingsIcon";
 import { Tooltip } from "../common/Tooltip";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { log } from "../../lib/logger";
 
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -800,7 +801,8 @@ function RecentEventsLog() {
     );
   }
   return (
-    <ul className="max-h-48 overflow-y-auto divide-y divide-border-divider">
+    <OverlayScrollbar maxHeight={192}>
+      <ul className="divide-y divide-border-divider">
       {entries
         .slice()
         .reverse()
@@ -833,7 +835,8 @@ function RecentEventsLog() {
             </li>
           );
         })}
-    </ul>
+      </ul>
+    </OverlayScrollbar>
   );
 }
 

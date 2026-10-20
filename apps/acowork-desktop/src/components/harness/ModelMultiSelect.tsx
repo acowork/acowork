@@ -4,6 +4,7 @@ import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ModelCapEditor } from "./ModelCapEditor";
 import { useTranslation } from "../../i18n/useTranslation";
 
@@ -279,7 +280,10 @@ export function ModelMultiSelect({
       />
 
       {/* Model list */}
-      <div className="mt-1 max-h-40 overflow-y-auto rounded border border-border-outer">
+      <OverlayScrollbar
+        maxHeight={160}
+        containerClassName="mt-1 overflow-hidden rounded border border-border-outer"
+      >
         {loading ? (
           <div className="px-3 py-2 text-xs text-text-tertiary">{t("harness.loadingModels")}</div>
         ) : visibleModels.length === 0 ? (
@@ -315,7 +319,7 @@ export function ModelMultiSelect({
             </label>
           ))
         )}
-      </div>
+      </OverlayScrollbar>
 
       {/* Free-text custom model input */}
       {showCustomInput && (
