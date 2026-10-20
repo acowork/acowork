@@ -28,6 +28,7 @@ const MOCK_PEER_ID = "9b3d44cc-1f2e-4a5b-8c9d-0e7f6a5b4c3d";
 const mocks = vi.hoisted(() => ({
   addMember: vi.fn(async () => {}),
   removeMember: vi.fn(async () => {}),
+  transferOwner: vi.fn(async () => {}),
   fetchAgents: vi.fn(async () => {}),
   agents: {} as Record<string, { meta: { instance_id: string; display_name?: string; name?: string; avatar?: string | null; builtin_avatar?: string | null } }>,
   directoryUsers: [] as Array<{ user_id: string; username: string; display_name: string; avatar?: string | null; builtin_avatar?: string | null }>,
@@ -45,7 +46,11 @@ vi.mock("../../stores/agentStore", () => ({
 
 vi.mock("../../stores/pm/projectStore", () => ({
   usePmProjectStore: (selector: (state: Record<string, unknown>) => unknown) =>
-    selector({ addMember: mocks.addMember, removeMember: mocks.removeMember }),
+    selector({
+      addMember: mocks.addMember,
+      removeMember: mocks.removeMember,
+      transferOwner: mocks.transferOwner,
+    }),
 }));
 
 vi.mock("../../stores/authStore", () => {
@@ -126,23 +131,83 @@ function rowFor(instanceId: string): HTMLElement {
 }
 
 describe("MemberManagerDialog — user-member wiring", () => {
-  it("renders a kind:user member by its account name, with no '?' placeholder", () => {
-    // Only the creator (user member) is present; agentStore is empty so the
-    // old `agents[id]?.meta` join would resolve to nothing and draw "?".
+  it("marks the creator as owner (no remove) and keeps a normal member removable", () => {
+    // The creator is a permanent group member (the backend folds
+    // `created_by` into the participant set), so the dialog lists them with
+    // an owner badge and no remove affordance — while a normal member row
+    // stays fully actionable. Regression for "removing the owner left her
+    // back in the panel": the dialog used to hide the owner entirely, so the
+    // panel (owner ∪ members) and the dialog (members only) disagreed on the
+    // count.
     render(
       <MemberManagerDialog
-        project={projectWith([member(MOCK_USER_ID, "user")])}
+        project={projectWith([member(MOCK_USER_ID, "user"), member(MOCK_PEER_ID, "user")])}
         onClose={vi.fn()}
       />,
     );
 
-    const row = rowFor(MOCK_USER_ID);
-    expect(within(row).queryByText("?")).toBeNull();
-    // Plain DOM check; no @testing-library/jest-dom in this project on
-    // purpose — adding a dep just for `toBeInTheDocument` is not worth it.
-    expect(within(row).getByText("admin")).toBeTruthy();
-    // The remove button is enabled — the row is fully actionable, not a stub.
-    expect(within(row).getByText("pm.removeMember").hasAttribute("disabled")).toBe(false);
+    // Creator row: resolves to the account name (no "?" placeholder), shows
+    // the owner badge, and has NO remove / make-owner affordance.
+    const ownerRow = rowFor(MOCK_USER_ID);
+    expect(within(ownerRow).queryByText("?")).toBeNull();
+    expect(within(ownerRow).getByText("admin")).toBeTruthy();
+    expect(within(ownerRow).getByText("pm.owner")).toBeTruthy();
+    expect(within(ownerRow).queryByText("pm.removeMember")).toBeNull();
+    expect(within(ownerRow).queryByText("pm.makeOwner")).toBeNull();
+
+    // Normal member row (caller is admin): removable AND transferable.
+    const memberRow = rowFor(MOCK_PEER_ID);
+    expect(within(memberRow).queryByText("pm.owner")).toBeNull();
+    expect(within(memberRow).getByText("pm.removeMember").hasAttribute("disabled")).toBe(false);
+    expect(within(memberRow).getByText("pm.makeOwner")).toBeTruthy();
+    fireEvent.click(within(memberRow).getByText("pm.makeOwner"));
+    expect(mocks.transferOwner).toHaveBeenCalledWith("p-test", MOCK_PEER_ID);
+  });
+
+  it("hides the transfer affordance for a caller who is neither owner nor admin", () => {
+    // The backend gates transfer on `X-Actor == owner || admin`; the dialog
+    // mirrors it so a plain member cannot even see "Make owner". Here the
+    // signed-in account is a `user`-role non-creator.
+    (globalThis as unknown as { __authAccount: unknown }).__authAccount = {
+      user_id: "cccc0000-0000-0000-0000-000000000000",
+      username: "bob",
+      display_name: "Bob",
+      role: "user",
+      language: "zh-CN",
+      timezone: "Asia/Shanghai",
+      avatar: null,
+      builtin_avatar: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    render(
+      <MemberManagerDialog
+        project={projectWith([member(MOCK_USER_ID, "user"), member(MOCK_PEER_ID, "user")])}
+        onClose={vi.fn()}
+      />,
+    );
+
+    // Owner row still badges; the other member row is removable but NOT
+    // transferable for this caller.
+    expect(within(rowFor(MOCK_USER_ID)).getByText("pm.owner")).toBeTruthy();
+    const peerRow = rowFor(MOCK_PEER_ID);
+    expect(within(peerRow).getByText("pm.removeMember")).toBeTruthy();
+    expect(within(peerRow).queryByText("pm.makeOwner")).toBeNull();
+
+    // Restore the admin account so later tests (which rely on the default
+    // `__authAccount` from the mock factory) stay independent of this one.
+    (globalThis as unknown as { __authAccount: unknown }).__authAccount = {
+      user_id: MOCK_USER_ID,
+      username: "admin",
+      display_name: "admin",
+      role: "admin",
+      language: "zh-CN",
+      timezone: "Asia/Shanghai",
+      avatar: null,
+      builtin_avatar: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
   });
 
   it("renders an agent member via agentStore, and the '?' fallback for unloaded ones", () => {

@@ -48,6 +48,8 @@ interface PmProjectState {
   addMember: (pid: string, instanceId: string, kind?: PmMemberKind) => Promise<boolean>;
   /** 移除项目成员。成员名下有未完成任务时服务端返回 409 */
   removeMember: (pid: string, instanceId: string) => Promise<boolean>;
+  /** 转让群主。`newOwner` 须为当前人类成员；仅当前群主或 admin 可发起（否则服务端 403） */
+  transferOwner: (pid: string, newOwner: string) => Promise<boolean>;
   deleteProject: (pid: string) => Promise<boolean>;
   refreshCounts: () => Promise<void>;
   clear: () => void;
@@ -164,6 +166,23 @@ export const usePmProjectStore = create<PmProjectState>((set, get) => ({
       log.warn("[pm:project] removeMember failed:", e);
       set({ error: e instanceof Error ? e.message : String(e) });
       // re-throw：调用方据此区分 409 member_has_open_tasks 等场景
+      throw e;
+    }
+  },
+
+  transferOwner: async (pid, newOwner) => {
+    try {
+      const updated = await pmApi.transferProjectOwner(pid, newOwner);
+      set((s) => ({
+        projects: s.projects.map((p) => (p.id === pid ? updated : p)),
+        selected: s.selected?.id === pid ? updated : s.selected,
+        updatedAt: Date.now(),
+      }));
+      return true;
+    } catch (e) {
+      log.warn("[pm:project] transferOwner failed:", e);
+      set({ error: e instanceof Error ? e.message : String(e) });
+      // re-throw：调用方（MemberManagerDialog）据此拿到 PmApiError 并映射本地化文案
       throw e;
     }
   },

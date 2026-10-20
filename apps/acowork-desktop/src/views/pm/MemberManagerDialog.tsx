@@ -34,6 +34,7 @@ import {
   usePmDirectoryUsers,
   useResolvedMembers,
   useSelfAccount,
+  withOwner,
 } from "./pmMembers";
 
 interface MemberManagerDialogProps {
@@ -47,6 +48,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
   const fetchAgents = useAgentStore((s) => s.fetchAgents);
   const addMember = usePmProjectStore((s) => s.addMember);
   const removeMember = usePmProjectStore((s) => s.removeMember);
+  const transferOwner = usePmProjectStore((s) => s.transferOwner);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   // 用户候选数据源：登录账号（自己）+ 账号目录里的其他账号（仅多用户
@@ -60,9 +62,20 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
   const status = useAuthStore((s) => s.status);
   const loadDirectory = usePmUserDirectoryStore((s) => s.loadDirectory);
 
+  // The full display set — the owner folded in (see `withOwner`) so this
+  // dialog agrees with the members panel / chat header on who is in the
+  // group. The owner (`owner_id ?? created_by`) is a permanent member: it is
+  // listed but not removable, and never offered as a candidate.
+  const ownerId = project.owner_id ?? project.created_by;
+  // Ownership transfer is gated by the backend on `X-Actor == owner` OR admin.
+  // Mirror that here so the "Make owner" affordance only shows for callers who
+  // can actually perform it (the backend still enforces it on the request).
+  const isAdmin = self?.role === "admin";
+  const canTransfer = isAdmin || (!!self && self.user_id === ownerId);
+  const displayMembers = useMemo(() => withOwner(project), [project]);
   const memberIds = useMemo(
-    () => new Set(project.members.map((m) => m.instance_id)),
-    [project.members],
+    () => new Set(displayMembers.map((m) => m.instance_id)),
+    [displayMembers],
   );
 
   // 打开时确保 agent 列表已加载（成员候选来自 agentStore）
@@ -127,6 +140,25 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
     }
   };
 
+  const handleTransfer = async (instanceId: string) => {
+    setBusyId(instanceId);
+    try {
+      await transferOwner(project.id, instanceId);
+      showToast({ type: "success", message: t("pm.ownerTransferred") });
+    } catch (e) {
+      const code = e instanceof PmApiError ? e.code : "";
+      const message =
+        code === "forbidden"
+          ? t("pm.transferForbidden")
+          : code === "bad_request"
+            ? t("pm.transferTargetInvalid")
+            : t("pm.transferFailed");
+      showToast({ type: "error", message });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   // 可添加候选：agentStore 中存在、且还不是成员（按显示名排序）
   const candidates = useMemo(
     () =>
@@ -173,7 +205,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
   }, [memberIds, directoryUsers, self?.user_id]);
 
   // 已是成员：解析得出名字 → 显示；解析不出（Agent 已卸载）→ 占位
-  const currentMembers = useResolvedMembers(project.members);
+  const currentMembers = useResolvedMembers(displayMembers);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -211,28 +243,58 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
             <p className="mb-4 text-xs italic text-text-tertiary">{t("pm.noMembers")}</p>
           ) : (
             <ul className="mb-4 space-y-1">
-              {currentMembers.map((m) => (
-                <li
-                  key={m.instance_id}
-                  className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
-                >
-                  <MemberAvatar member={m} size={24} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs text-text ">
-                      {m.displayName ?? t("pm.memberNotFound")}
-                    </div>
-                    <div className="truncate text-10 text-text-tertiary">{m.instance_id}</div>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={busyId === m.instance_id}
-                    onClick={() => handleRemove(m.instance_id)}
-                    className="shrink-0 rounded-md px-2 py-1 text-11 text-red-600 hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
+              {currentMembers.map((m) => {
+                const isOwner = m.instance_id === ownerId;
+                // Only a human member can own the group (the backend rejects
+                // agents and non-members), and only the owner/admin can start
+                // a transfer.
+                const canSetOwner = canTransfer && !isOwner && m.kind === "user";
+                return (
+                  <li
+                    key={m.instance_id}
+                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
                   >
-                    {t("pm.removeMember")}
-                  </button>
-                </li>
-              ))}
+                    <MemberAvatar member={m} size={24} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-xs text-text ">
+                        {m.displayName ?? t("pm.memberNotFound")}
+                      </div>
+                      <div className="truncate text-10 text-text-tertiary">{m.instance_id}</div>
+                    </div>
+                    {isOwner ? (
+                      // The group owner is a permanent member (the backend
+                      // folds `owner()` into the participant set), so it is
+                      // shown as the owner with no remove affordance. To
+                      // remove the old owner, transfer first — they demote to
+                      // a normal member and become removable.
+                      <span className="shrink-0 rounded-md bg-accent-strong/10 px-2 py-1 text-11 font-medium text-[var(--color-accent)]">
+                        {t("pm.owner")}
+                      </span>
+                    ) : (
+                      <div className="flex shrink-0 items-center gap-1">
+                        {canSetOwner && (
+                          <button
+                            type="button"
+                            disabled={busyId === m.instance_id}
+                            onClick={() => handleTransfer(m.instance_id)}
+                            className="rounded-md px-2 py-1 text-11 font-medium text-[var(--color-accent)] hover:bg-accent-strong/10 disabled:opacity-40"
+                          >
+                            {t("pm.makeOwner")}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={busyId === m.instance_id}
+                          onClick={() => handleRemove(m.instance_id)}
+                          className="rounded-md px-2 py-1 text-11 text-red-600 hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
+                        >
+                          {t("pm.removeMember")}
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
 

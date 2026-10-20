@@ -86,6 +86,14 @@ export interface PmProject {
   description: string;
   status: ProjectStatus;
   created_by: string;
+  /**
+   * 群主（owner）身份。转让群主时后端**只改此字段**，`created_by`
+   * 保留“谁创建了项目”的审计语义（不变）。旧项目 / 未转让时为 `null`
+   * （后端 `#[serde(default)]`，零迁移），解析时回退 `created_by`。
+   * 所有“把 owner 折入成员集合”的地方（`withOwner`）必须走
+   * `owner_id ?? created_by`，而非直接读 `created_by`。
+   */
+  owner_id?: string | null;
   created_at: string;
   updated_at: string;
   metadata: Record<string, unknown>;

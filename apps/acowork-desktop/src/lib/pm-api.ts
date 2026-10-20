@@ -129,6 +129,18 @@ export function removeProjectMember(pid: string, instanceId: string) {
   ).then(normalizeProject);
 }
 
+/**
+ * 转让群主。`newOwner` 必须是当前成员里的人类账号（服务端 store 层校验）。
+ * 只有当前群主或 admin 能发起（服务端读可信 `X-Actor` / `x-actor-admin`）：
+ * 不符 → 403。成功后原群主降级为普通成员，群聊参与者随之收敛。
+ */
+export function transferProjectOwner(pid: string, newOwner: string) {
+  return request<PmProject>(
+    `/projects/${encodeURIComponent(pid)}/transfer-owner`,
+    { method: "POST", body: JSON.stringify({ new_owner: newOwner }) },
+  ).then(normalizeProject);
+}
+
 // ── Tasks ─────────────────────────────────────────────────────────────
 
 /** 项目任务列表 — 返回 TaskResponse[]（含 parent_id/depth/is_blocked 派生字段） */

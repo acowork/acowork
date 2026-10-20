@@ -16,7 +16,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { AgentAvatar } from "../../components/common/AgentAvatar";
 import { UserAvatar } from "../../components/common/UserAvatar";
-import type { PmProjectMember } from "../../lib/pm-types";
+import type { PmProject, PmProjectMember } from "../../lib/pm-types";
 import type { DirectoryUser, UserAccount } from "../../lib/types";
 import { usePmUserDirectoryStore } from "../../stores/pmUserDirectoryStore";
 
@@ -299,4 +299,38 @@ export function useResolvedMembers(
     () => resolveMembers(members ?? [], agents, self, localProfile, directory),
     [members, agents, self, localProfile, directory],
   );
+}
+
+/**
+ * The group's full member set for display — the project owner PLUS the
+ * recorded members, deduplicated. This mirrors the backend's participant
+ * convergence (`acowork-pm` `group_participants`): a `project_group` chat's
+ * members are the owner and whoever the store recorded, so the chat header
+ * counts the owner. A REST-created project keeps the owner out of `members`
+ * (only the MCP face seeds the creator there), so listing `project.members`
+ * alone undercounts the group by one against the header. Folding the owner in
+ * keeps every surface — chat header, members panel, manager dialog — in
+ * agreement on who is in the group.
+ *
+ * The owner is a permanent member: it is shown for context but is not
+ * removable through the manager dialog (see `MemberManagerDialog`). Shared
+ * here so the panel and the dialog read from one definition.
+ *
+ * The resolved owner id is `owner_id ?? created_by` — the backend's
+ * `Project::owner()` — so a transferred ownership is reflected here too
+ * (`created_by` stays the immutable creator). This mirrors the backend
+ * `group_participants`, which folds `owner()` (not `created_by`) in.
+ */
+export function withOwner(
+  project: Pick<PmProject, "created_by" | "owner_id" | "created_at" | "members"> | null | undefined,
+): PmProjectMember[] {
+  if (!project) return [];
+  const ownerId = project.owner_id ?? project.created_by;
+  if (project.members.some((m) => m.instance_id === ownerId)) {
+    return project.members;
+  }
+  return [
+    { instance_id: ownerId, kind: "user", added_at: project.created_at },
+    ...project.members,
+  ];
 }
