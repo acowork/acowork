@@ -524,10 +524,10 @@ pub(crate) fn resolve_attachments(dir: &Path, ids: &[String]) -> Result<Vec<Atta
         .collect()
 }
 
-/// The conversation-list preview is no longer derived here: the one-to-one
-/// list surface serves `ChatSession::last_message_preview`, maintained at
-/// write time by `chat_sessions::commit_row` (the 80-char body /
-/// `[image]`/`[file]` stand-in rules moved with it).
+// The conversation-list preview is no longer derived here: the one-to-one
+// list surface serves `ChatSession::last_message_preview`, maintained at
+// write time by `chat_sessions::commit_row` (the 80-char body /
+// `[image]`/`[file]` stand-in rules moved with it).
 
 #[cfg(test)]
 mod tests {

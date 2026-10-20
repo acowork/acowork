@@ -39,6 +39,7 @@ use crate::chat_sessions::{
     SessionMessage,
 };
 use crate::error::ApiError;
+use crate::search_index::{Category, SearchHit};
 use crate::state::AppState;
 
 /// Same body cap as the user↔user chat endpoint (ADR-076 §决策 8).
@@ -65,6 +66,10 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/api/chat-sessions/{session_id}/messages",
             get(list_messages).post(post_message),
         )
+        // WeChat-style in-conversation history search (文本 / 图片 / 文件).
+        // Participation is the permission (same §5.3 rule as `messages`);
+        // the read hits the disposable `search.sqlite` sidecar, never the log.
+        .route("/api/chat-sessions/{session_id}/search", get(search_messages_route))
         // Design 27 §4.5: the Chat surface's seed draft is durable on the
         // session record, not in the client — the frontend copy is a cache
         // of this row. Whole-record replace; participation is the
@@ -211,6 +216,35 @@ pub struct SessionConfigRequest {
 pub struct MessagePage {
     pub messages: Vec<SessionMessage>,
     pub total: u64,
+}
+
+/// `GET /api/chat-sessions/{session_id}/search` — in-conversation
+/// categorized search (WeChat-style).
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    /// `text` | `image` | `file`; defaults to `text`.
+    #[serde(default)]
+    pub category: String,
+    /// Keyword for the `text` tab, filename substring for the `file` tab.
+    /// Ignored by the `image` tab. Empty = browse the whole category.
+    #[serde(default)]
+    pub q: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// `line_pos` cursor: return only rows strictly older than this.
+    /// Absent = start from the newest.
+    #[serde(default)]
+    pub before_line: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchPage {
+    pub hits: Vec<SearchHit>,
+    /// Total physical line count in the session (lets the frontend convert
+    /// a hit's `line_pos` into a `read_messages` offset).
+    pub total_lines: u64,
+    /// Cursor to continue toward older rows (`None` at the oldest end).
+    pub next_before_line: Option<i64>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -405,6 +439,81 @@ async fn list_messages(
         let _ = offload(move || chat_sessions::mark_read(&dir, &session_id, &who)).await;
     }
     Ok(Json(MessagePage { messages, total }))
+}
+
+/// `GET /api/chat-sessions/{session_id}/search` — in-conversation
+/// categorized search. Participation is the permission (a non-member gets
+/// the same hidden 404 as `list_messages`); an admin may search a project
+/// group they never joined. The query reads the disposable `search.sqlite`
+/// sidecar only — never `messages.jsonl`.
+async fn search_messages_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<SearchPage>, ApiError> {
+    let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+    let category = Category::from_param(&q.category);
+    let dir = data_dir(&state)?;
+    let who = ctx.effective_user_id().to_string();
+    let admin_inspection = ctx.is_admin();
+    let req = SearchReq {
+        category,
+        q: q.q.clone(),
+        before_line: q.before_line,
+        limit,
+    };
+    let (hits, total_lines) = offload(move || {
+        search_messages_guarded(&dir, &session_id, &who, admin_inspection, req)
+    })
+    .await?;
+    // A full page implies older rows remain; the oldest returned row's
+    // `line_pos` is the cursor for the next (older) page.
+    let next_before_line = if hits.len() == limit {
+        hits.last().map(|h| h.line_pos)
+    } else {
+        None
+    };
+    Ok(Json(SearchPage {
+        hits,
+        total_lines,
+        next_before_line,
+    }))
+}
+
+/// One search request's parameters, bundled so the guarded helper stays
+/// under clippy's argument ceiling.
+struct SearchReq {
+    category: Category,
+    q: String,
+    before_line: Option<i64>,
+    limit: usize,
+}
+
+/// Participation guard mirroring [`read_messages_guarded`], then the
+/// storage-level search. Non-participant and unknown session both surface
+/// as `not_a_participant` / "not found" so `offload` maps them to a 404.
+fn search_messages_guarded(
+    dir: &std::path::Path,
+    session_id: &str,
+    who: &str,
+    admin_inspection: bool,
+    req: SearchReq,
+) -> Result<(Vec<SearchHit>, u64), String> {
+    let session = chat_sessions::load(dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who)
+        && !(admin_inspection && session.kind == SessionKind::ProjectGroup)
+    {
+        return Err("not_a_participant".to_string());
+    }
+    chat_sessions::search_messages(
+        dir,
+        session_id,
+        req.category,
+        &req.q,
+        req.before_line,
+        req.limit,
+    )
 }
 
 /// Plan 5.2: delete a non-default Chat session. Guards (default pair
@@ -1324,6 +1433,111 @@ mod tests {
                 "POST",
                 &format!("/api/chat-sessions/{session_id}/messages"),
                 Some(r#"{"body":"sneak in"}"#),
+                Some(&carol_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn search_endpoint_pages_by_cursor_and_hides_membership() {
+        // ADR-097 D6/D7⑦: the search route shares the read path's
+        // participation guard, pages toward older rows with `before_line`,
+        // and reports the authoritative line count for locate math.
+        let dir = test_support::temp_dir("chatsess-search");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, _bob_token) = make_user(&app, &admin, "bob").await;
+        let (_carol, carol_token) = make_user(&app, &admin, "carol").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"search"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+        for body in ["shared alpha", "shared beta", "shared gamma"] {
+            let resp = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    &format!("/api/chat-sessions/{session_id}/messages"),
+                    Some(&format!(r#"{{"body":"{body}"}}"#)),
+                    Some(&alice_token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+
+        // First page: newest first, a cursor when the page is full, and the
+        // physical line count the frontend turns `line_pos` into `offset`.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/search?q=shared&limit=2"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let page = json(resp).await;
+        assert_eq!(page["total_lines"].as_u64(), Some(3));
+        assert_eq!(page["hits"].as_array().unwrap().len(), 2);
+        assert_eq!(page["hits"][0]["body"].as_str(), Some("shared gamma"));
+        let cursor = page["next_before_line"].as_i64().expect("cursor on a full page");
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/api/chat-sessions/{session_id}/search?q=shared&limit=2&before_line={cursor}"
+                ),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let older = json(resp).await;
+        assert_eq!(older["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(older["hits"][0]["body"].as_str(), Some("shared alpha"));
+        assert!(older["next_before_line"].is_null(), "no cursor at the oldest end");
+
+        // An unrecognized category falls back to the text tab (browse mode).
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/search?category=bogus"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json(resp).await["hits"].as_array().unwrap().len(), 3);
+
+        // A non-participant sees the same hidden 404 as every other read.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/search?q=shared"),
+                None,
                 Some(&carol_token),
             ))
             .await

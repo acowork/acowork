@@ -426,6 +426,7 @@ Field-level schemas and error-code enums are deferred to implementation design. 
 | `POST /chat-sessions` | acowork-user | Gateway forwards | Create a Chat session (including unblocking the `user_agent` kind) |
 | `GET /chat-sessions?participant=` | acowork-user | Gateway forwards | List a participant's sessions; non-participants get 403 |
 | `GET /chat-sessions/{id}/messages` | acowork-user | Gateway forwards | Paged history read (append-only snapshot) |
+| `GET /chat-sessions/{id}/search` | acowork-user | Gateway forwards | In-conversation categorized history search (text / image / file, cursor paging; ADR-097) |
 | `POST /chat-sessions/{id}/messages` | acowork-user | Runtime / Gateway | **The single writer**; assigns `message_id` + `seq` |
 | `GET /chat-sessions/default?pair=` | acowork-user | Gateway forwards | Resolve a pair's default session (§5.4.4) |
 | `POST /intent` | acowork-gateway | Frontend / Runtime / PM | Intent delivery entry point; communication and resource management only |
@@ -829,7 +830,7 @@ Precise rules (v2.1 WeChat model), so that "cannot be closed" is not over-read:
 | **Execution-session tabs** | Ordinary tabs, **open and close freely**; closing the last one falls back to the Chat tab | Parallel sessions are carried by the execution layer (ADR-086 decision 8) |
 | **The two surfaces coexist** | Switching surfaces only changes the active tab; **neither side's tabs are destroyed** | The old mutually exclusive model — "opening chat closes all execution tabs" — is revoked in v2.1 |
 | **Single focus** | At any moment exactly **one** tab in the strip is highlighted: whichever surface is in front owns the focus. While the chat surface is in front, the execution layer's recorded active session is unchanged (it restores on flip-back), but its tab is **not highlighted** | Two layers each driving their own highlight produced double focus — fixed in v2.1 |
-| **Icon distinction** | Chat tab (and the NavBar) = the chat bubble; execution-session tabs (history dropdown rows included) = a **brain icon**; the four-state matrix (outline/filled/breathing/accent) keeps its shape, only the glyph changes | A shared bubble gave the two surfaces no visual distinction; the bubble is now exclusive to the Chat surface, and the brain reads as "the agent is thinking/executing" |
+| **Icon distinction** | Chat tab (and the NavBar) = the chat bubble with **two states only** (filled accent when selected, outline when not) and **no breathing**; execution-session tabs (history dropdown rows included) = a **brain icon**, whose four-state matrix (outline/filled/breathing/accent) keeps its shape, only the glyph changes | A shared bubble gave the two surfaces no visual distinction; the bubble is now exclusive to the Chat surface, and the brain reads as "the agent is thinking/executing"; a chat turn always runs inside an execution session whose brain icon already breathes, so a breathing Chat tab next to it is just noise |
 | **Agent not started** | The Agent page keeps the legacy start-screen interaction (big Play button over the empty chat shell); the unified tab strip and the Chat session are **not shown** — the strip appears once the agent runs | Chat messages cannot be answered without a live Runtime, so showing the session while stopped is pointless |
 | **A second Chat session of the same pair** | **Does not exist** | Exactly one per (user, agent) pair; no create or list entry point |
 
@@ -875,9 +876,19 @@ When it cannot be clicked, grey it out rather than hiding it — cards are visib
 
 Mobile (ADR-086) shares the same view model as desktop. Differences are presentational only: status cards collapse to a one-line summary and expand on tap; decision cards appear as a bottom sheet to avoid mis-taps.
 
-### 6.6 i18n
+### 6.6 In-Conversation History Search and Message Locate (ADR-097)
 
-Existing keys are reused directly: `sessionTabBar.closeChat` / `closeOtherChats` / `deleteSession` / `openNewSession`, and the `sessionHistory` entry point. The `chatHistory` keys become obsolete together with the Chat history button (v2.1; the implementation removes the orphan keys). New keys are limited to card and status copy; no new entry-point keys are introduced.
+**Entry point and shape.** The agent single chat and the group panel each expose a “Chat history” entry point opening the same `ChatHistoryDialog`: the three tabs `Text / Image / File` all use `GET /chat-sessions/{id}/search`. Text goes through FTS trigram (short words fall back to `LIKE`); image / file rows are filtered by the `cat` bit mask, and the file tab additionally matches a filename substring.
+
+**Queries read the sidecar only.** The dialog reads `search.sqlite` only (ADR-097 D4/D5). `before_line` is the cursor toward older rows and a full page returns `next_before_line`; `total_lines` is the authoritative physical line count the frontend uses to convert a hit's `line_pos` into a `read_messages` offset. Opening and paging therefore never scan `messages.jsonl`.
+
+**Locate is a window re-anchor, not a whole-history load.** On a hit, the frontend fetches one page anchored above `line_pos` (`PAGE/2` rows of lead), switches the window model from a tail page to the two-way `firstPos/lastPos` cursor, scrolls to the row's `data-seq` anchor, and briefly highlights it. While a reader is parked mid-history, a doorbell `refresh` only folds in `total` and the in-flight projection — it never yanks them back to the tail; sending a message or reopening the session uses a forced refresh, which does return to the tail. Scrolling to either edge triggers `loadOlder` / `loadNewer`, whose loading copy is “Loading earlier…” / “Loading newer…” respectively.
+
+**Boundaries.** Desktop comes first in this iteration: mobile still loads toward the tail only and follows up under ADR-086's mobile interaction rules. Search shares the read path's participation check, so a non-participant and an unknown session both answer a hidden 404.
+
+### 6.7 i18n
+
+Existing keys are reused directly: `sessionTabBar.closeChat` / `closeOtherChats` / `deleteSession` / `openNewSession`, and the `sessionHistory` entry point. The `chatHistory` namespace is reinstated together with the §6.6 history dialog (`title` / `close` / `tabText` / `tabImage` / `tabFile` / `loading` / `loadingEarlier` / `loadingNewer` / `empty` / `error`, etc.); new entry-point keys stay inside that namespace, and the Chinese and English locale files must be updated in the same batch.
 
 ## 7. Architecture Boundaries and Existing Implementation
 

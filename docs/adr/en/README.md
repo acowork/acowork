@@ -115,6 +115,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 87 | [ADR-094](./ADR-094-progressive-skill-auto-load-and-load-skill-tool.md) | Per-Agent Skills Auto-Load (Progressive Default) + `load_skill` Built-in Tool | Accepted (2026-10 revision) | [zh](../zh/ADR-094-progressive-skill-auto-load-and-load-skill-tool.md) |
 | 88 | [ADR-095](./ADR-095-global-search-conversation-memory-retrieval-and-summary-candidates.md) | Global Search: Conversation and Memory Retrieval, and Summary Candidate Selection | Draft (pending review) | [zh](../zh/ADR-095-global-search-conversation-memory-retrieval-and-summary-candidates.md) |
 | 89 | [ADR-096](./ADR-096-no-full-session-reads.md) | No Full Session-File Reads on Request Paths — Write-Time Derived State and Bounded Reads | Accepted | [zh](../zh/ADR-096-no-full-session-reads.md) |
+| 90 | [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) | In-Conversation History Search — Per-Session Disposable Search Index | Accepted | [zh](../zh/ADR-097-in-conversation-history-search-disposable-index.md) |
 
 ---
 

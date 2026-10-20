@@ -83,6 +83,14 @@ zeroize = "1"
 # so the two services' thumbnails look the same.
 image = "0.25"
 
+# Per-session chat-history search index (`search_index.rs`) — a disposable
+# SQLite sidecar (`search.sqlite`) maintained at write time. `bundled` so
+# FTS5 + the `trigram` tokenizer are always available, the same build
+# posture as acowork-sqlite (ADR-082 D3). It is only ever read by the
+# search endpoint, never by the chat paging path, so a corrupt index
+# degrades search alone.
+rusqlite.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 # `ServiceExt::oneshot` — driving the ported router tests (Gateway dev-dep).

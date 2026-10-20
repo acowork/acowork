@@ -715,6 +715,17 @@ pub fn append_message(
     // the same entry the migration replay uses, so the log, the line
     // index, the preview and the metadata can never drift apart.
     commit_row(&dir, &mut session, &mut lock(&index), &stored)?;
+    // Best-effort incremental index of this row into the session's
+    // disposable `search.sqlite` (per-session search index). Runs inside
+    // the same `session_lock`, so no new global serial point. A failure here
+    // must never fail the durable message — the log is the source of truth
+    // and the lazy rebuild on next search heals the index.
+    {
+        let line_pos = lock(&index).spans.len().saturating_sub(1) as i64;
+        if let Err(e) = crate::search_index::index_append(&dir, line_pos, &stored) {
+            tracing::warn!(session_id, error = %e, "chat search index write failed (will self-heal on next search)");
+        }
+    }
     // Wave 5 (§6.1): wake every human surface viewing this session. Same
     // content-free doorbell the old chat domain uses (design 25 §8) — the
     // Desktop bridge already forwards it and the chat view re-reads over
@@ -777,6 +788,13 @@ pub fn delete_session(data_dir: &Path, session_id: &str, caller: &str) -> Result
             return Err("the default pair session cannot be deleted".to_string());
         }
     }
+    // Release the disposable search handle BEFORE deleting the directory:
+    // SQLite opens its file without `FILE_SHARE_DELETE` on Windows, so a
+    // cached `Connection` (created by any append or search in this process)
+    // makes `remove_dir_all` fail with a sharing violation. We hold
+    // `session_lock`, so the registry's `Arc` is the only strong reference
+    // and dropping the entry closes the connection.
+    crate::search_index::forget(&dir);
     fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     // Drop the derived line index with the directory — the id can never
     // come back (session ids are server UUIDs), so a cached entry would
@@ -1649,6 +1667,36 @@ fn window_total(index: &Arc<Mutex<LineIndex>>) -> u64 {
     lock(index).spans.len() as u64
 }
 
+/// In-conversation categorized search (WeChat-style 文本 / 图片 / 文件).
+/// Reads ONLY the session's disposable `search.sqlite` sidecar — never
+/// `messages.jsonl` — so it honors the "no whole-log read on the request
+/// path" rule. The sidecar is reconciled with the authoritative line count
+/// here (a mismatch triggers the one sanctioned full rebuild).
+///
+/// `before_line` is a `line_pos` cursor (rows strictly older than it);
+/// `None` starts from the newest. Returns the hits plus the total line
+/// count so the caller can convert a `line_pos` into a paging offset.
+pub fn search_messages(
+    data_dir: &Path,
+    session_id: &str,
+    category: crate::search_index::Category,
+    q: &str,
+    before_line: Option<i64>,
+    limit: usize,
+) -> Result<(Vec<crate::search_index::SearchHit>, u64), String> {
+    validate_session_id(session_id)?;
+    let dir = session_dir(data_dir, session_id);
+    // Serialize with the write path: the search index is maintained under
+    // the same lock, and `ensure_index` may reconcile the log first.
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let index = ensure_index(&dir)?;
+    let total = window_total(&index);
+    let conn = crate::search_index::ensure(&dir, total)?;
+    let hits = crate::search_index::query(&lock(&conn), category, q, before_line, limit)?;
+    Ok((hits, total))
+}
+
 /// `last_message_preview` length, in characters — kept identical to the
 /// old `chat.rs` one-to-one list preview (ADR-076 §决策 8) so the group
 /// list and the one-to-one list truncate their meta line the same way.
@@ -1881,7 +1929,7 @@ pub fn list_project_groups(data_dir: &Path) -> Vec<ChatSession> {
     // `session.json` per group, never a directory scan on the request
     // path. A missing index file (pre-projects-index data dir) gets one
     // backfill scan that also writes the index, then never again.
-    let groups = if !projects_index_path(data_dir).exists() {
+    if !projects_index_path(data_dir).exists() {
         let mut groups: Vec<ChatSession> = scan_all_sessions(data_dir)
             .into_iter()
             .filter(|s| s.kind == SessionKind::ProjectGroup)
@@ -1909,8 +1957,7 @@ pub fn list_project_groups(data_dir: &Path) -> Vec<ChatSession> {
         }
         out.sort_by_key(|s| std::cmp::Reverse(s.last_active_at));
         out
-    };
-    groups
+    }
 }
 
 /// Design 27 §8.3: sync a project group's participant set to exactly
@@ -2108,6 +2155,99 @@ mod tests {
         }
     }
 
+    use crate::search_index::Category;
+
+    fn pair_session(dir: &Path) -> ChatSession {
+        let human = Participant::new("human-1", ParticipantIdentity::Human);
+        let agent = Participant::new("agent-1", ParticipantIdentity::Agent);
+        ensure_pair(dir, human, agent, SessionKind::UserAgent, 100).expect("pair")
+    }
+
+    #[test]
+    fn search_categorizes_text_image_and_file() {
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let sid = &s.session_id;
+        // Text rows (newest appended last → higher line_pos).
+        append_message(&dir, sid, &msg("human-1", KIND_USER_MESSAGE, "hello wide world", ""), 1)
+            .unwrap();
+        append_message(&dir, sid, &msg("agent-1", KIND_AGENT_MESSAGE, "another note here", ""), 2)
+            .unwrap();
+        // An image row and a file row (attachments resolved from the dir).
+        let img = store_attachment(&dir, sid, "human-1", "shot.png", "image/png", b"fakepng").unwrap();
+        let mut im = msg("human-1", KIND_USER_MESSAGE, "see the picture", "");
+        im.attachment_ids = vec![img.id.clone()];
+        append_message(&dir, sid, &im, 3).unwrap();
+        let doc =
+            store_attachment(&dir, sid, "human-1", "report.pdf", "application/pdf", b"fakepdf")
+                .unwrap();
+        let mut dm = msg("human-1", KIND_USER_MESSAGE, "", "");
+        dm.attachment_ids = vec![doc.id.clone()];
+        append_message(&dir, sid, &dm, 4).unwrap();
+
+        // Text tab: trigram MATCH (>=3 chars) finds the body substring.
+        let (hits, total) =
+            search_messages(&dir, sid, Category::Text, "wide world", None, 50).unwrap();
+        assert_eq!(total, 4, "four physical lines");
+        assert_eq!(hits.len(), 1, "one text match");
+        assert_eq!(hits[0].line_pos, 0, "first line is the oldest");
+        assert!(hits[0].body.contains("wide world"));
+
+        // Short query (< trigram min) falls back to LIKE on the body.
+        let (hits, _) = search_messages(&dir, sid, Category::Text, "lo", None, 50).unwrap();
+        assert!(hits.iter().any(|h| h.body.contains("hello")), "LIKE fallback matched");
+
+        // Image tab returns only the image-carrying row; file tab only the
+        // document row — the two never cross over on mime.
+        let (imgs, _) = search_messages(&dir, sid, Category::Image, "", None, 50).unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert!(imgs[0].attachments.iter().any(|a| a.mime == "image/png"));
+        let (files, _) = search_messages(&dir, sid, Category::File, "", None, 50).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].attachments[0].mime, "application/pdf");
+
+        // File tab filename substring query.
+        let (files, _) = search_messages(&dir, sid, Category::File, "report", None, 50).unwrap();
+        assert_eq!(files.len(), 1);
+        let (none, _) = search_messages(&dir, sid, Category::File, "zzz", None, 50).unwrap();
+        assert!(none.is_empty());
+
+        // Cursor: only rows strictly older than `before_line`.
+        let (older, _) = search_messages(&dir, sid, Category::Text, "", Some(2), 50).unwrap();
+        assert!(older.iter().all(|h| h.line_pos < 2), "cursor bounds line_pos");
+    }
+
+    #[test]
+    fn search_rebuilds_from_log_when_sidecar_missing_or_corrupt() {
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let sid = &s.session_id;
+        append_message(&dir, sid, &msg("human-1", KIND_USER_MESSAGE, "alpha message", ""), 1)
+            .unwrap();
+        append_message(&dir, sid, &msg("human-1", KIND_USER_MESSAGE, "beta message", ""), 2)
+            .unwrap();
+
+        let (before, _) = search_messages(&dir, sid, Category::Text, "beta", None, 50).unwrap();
+        assert_eq!(before.len(), 1);
+
+        // Simulate a corrupt sidecar + a process restart (fresh handle
+        // registry): overwrite `search.sqlite` with junk, drop the cached
+        // connection, append a new row, then search. The write entry must
+        // still land the message, and search must self-heal to cover every
+        // line — proving the log, not the index, is the source of truth.
+        let sess = session_dir(&dir, sid);
+        fs::write(sess.join("search.sqlite"), b"this is not a database").unwrap();
+        crate::search_index::forget(&sess);
+        append_message(&dir, sid, &msg("human-1", KIND_USER_MESSAGE, "gamma message", ""), 3)
+            .unwrap();
+
+        let (rows, total) = search_messages(&dir, sid, Category::Text, "", None, 50).unwrap();
+        assert_eq!(total, 3, "all three lines present after self-heal");
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().any(|h| h.body == "gamma message"));
+        assert!(rows.iter().any(|h| h.body == "alpha message"));
+    }
+
     #[test]
     fn agent_reinstall_leaves_old_pair_readable_not_silent() {
         // Plan 6.3 / design §10.19: instance ids change on reinstall (ADR-073)
@@ -2191,6 +2331,73 @@ mod tests {
         assert!(delete_session(&dir, &free.session_id, "stranger").is_err());
         assert!(load(&dir, &free.session_id).is_ok(), "outsider must not delete");
         delete_session(&dir, &free.session_id, "human-1").expect("member delete");
+    }
+
+    #[test]
+    fn delete_session_releases_search_sidecar_before_removing_dir() {
+        // Regression (ADR-097 D1): the cached `search.sqlite` handle created
+        // by the write-time index must be dropped before the directory is
+        // removed — Windows refuses to delete an open SQLite file.
+        let dir = temp_dir();
+        let human = Participant::new("human-1", ParticipantIdentity::Human);
+        let agent = Participant::new("agent-1", ParticipantIdentity::Agent);
+        ensure_pair(&dir, human.clone(), agent.clone(), SessionKind::UserAgent, 100)
+            .expect("pair");
+        let extra = create_session(
+            &dir,
+            SessionKind::UserAgent,
+            &[human, agent],
+            "second",
+            None,
+            101,
+        )
+        .expect("create");
+        append_message(
+            &dir,
+            &extra.session_id,
+            &msg("human-1", KIND_USER_MESSAGE, "searchable words", ""),
+            102,
+        )
+        .expect("append");
+        // Both paths cache the connection: the write-time index above and
+        // the search below. Deletion must still succeed.
+        let (hits, _) = search_messages(&dir, &extra.session_id, Category::Text, "searchable", None, 10)
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+
+        delete_session(&dir, &extra.session_id, "human-1").expect("delete with a live search handle");
+        assert!(!session_dir(&dir, &extra.session_id).exists());
+        assert!(load(&dir, &extra.session_id).is_err());
+    }
+
+    #[test]
+    fn search_index_write_failure_never_fails_the_message() {
+        // ADR-097 D7⑥: the sidecar is best-effort. A directory squatting on
+        // the sidecar path makes every open fail (and cannot be removed by
+        // the open-failure retry), yet the durable row must still land.
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let sid = &s.session_id;
+        let sess = session_dir(&dir, sid);
+        fs::create_dir_all(sess.join("search.sqlite")).unwrap();
+
+        let (stored, written) = append_message(
+            &dir,
+            sid,
+            &msg("human-1", KIND_USER_MESSAGE, "durable despite index", "m-1"),
+            1,
+        )
+        .expect("append must not fail on a search-index error");
+        assert!(written);
+        assert_eq!(stored.body, "durable despite index");
+
+        let (rows, total) = read_messages(&dir, sid, 0, 10).expect("read");
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].body, "durable despite index");
+
+        // Leave the temp dir cleanable (Windows cannot remove a non-empty
+        // dir through the sidecar path retry).
+        fs::remove_dir_all(sess.join("search.sqlite")).unwrap();
     }
 
     #[test]
@@ -3480,7 +3687,7 @@ mod tests {
         assert!(!fresh, "the redelivered id is not appended twice");
         assert_eq!(again.seq, 1);
         let (rows, total) = read_messages(&dir, &g.session_id, 0, 10).unwrap();
-        assert_eq!((rows.len(), total as u64), (1, 1));
+        assert_eq!((rows.len(), total), (1, 1));
 
         lock(&LINE_INDEXES).remove(&sess);
         assert_eq!(message_by_id(&dir, &g.session_id, "r-1").unwrap().map(|m| m.seq), Some(1));
