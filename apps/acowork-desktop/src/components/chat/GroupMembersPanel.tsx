@@ -14,51 +14,31 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Search, X } from "lucide-react";
+import { Plus, Search } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
-import { MemberAvatar, useResolvedMembers, type ResolvedMember } from "../../views/pm/pmMembers";
+import {
+  MemberAvatar,
+  useResolvedMembers,
+  withOwner,
+  type ResolvedMember,
+} from "../../views/pm/pmMembers";
 import { MemberManagerDialog } from "../../views/pm/MemberManagerDialog";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
-import type { PmProject, PmProjectMember } from "../../lib/pm-types";
 
-/**
- * The group's full member set for display — the project owner PLUS the
- * recorded members, deduplicated. This mirrors the backend's participant
- * convergence (`acowork-pm` `group_participants`): a `project_group` chat's
- * members are the owner and whoever the store recorded, so the chat header
- * counts the owner. A REST-created project keeps the owner out of `members`
- * (only the MCP face seeds the creator there), so listing `project.members`
- * here undercounts the group by one against the header. Folding the owner in
- * keeps the two in agreement. Exported as a pure function so the rule is
- * unit-testable without the panel's store graph.
- *
- * Display-only: membership is still managed through `project.members`, so the
- * owner tile is not individually removable via the manager dialog.
- */
-export function withOwner(
-  project: Pick<PmProject, "created_by" | "created_at" | "members"> | null | undefined,
-): PmProjectMember[] {
-  if (!project) return [];
-  if (project.members.some((m) => m.instance_id === project.created_by)) {
-    return project.members;
-  }
-  return [
-    { instance_id: project.created_by, kind: "user", added_at: project.created_at },
-    ...project.members,
-  ];
-}
+// `withOwner` lives in `pmMembers` (shared with `MemberManagerDialog`, which
+// this panel imports — a direct import back would form a cycle). Re-exported
+// here so existing callers/tests keep the panel as the entry point.
+export { withOwner };
 
 interface GroupMembersPanelProps {
   width: number;
   onResizeStart?: (e: React.MouseEvent) => void;
-  /** Collapse the panel (the rail toggle owns the same action). */
-  onClose: () => void;
 }
 
-export function GroupMembersPanel({ width, onResizeStart, onClose }: GroupMembersPanelProps) {
+export function GroupMembersPanel({ width, onResizeStart }: GroupMembersPanelProps) {
   const { t } = useTranslation();
   const group = useProjectGroupStore(
     (s) => s.groups.find((g) => g.session_id === s.activeGroupId) ?? null,
@@ -101,19 +81,11 @@ export function GroupMembersPanel({ width, onResizeStart, onClose }: GroupMember
       <div className={cn(CAPSULE_PANE_CN, "flex-1 bg-right-panel")}>
         {/* Header — same line-box height contract as RightPanel's tab title
             so the hairline lines up with the chat pane's header divider. */}
-        <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center justify-between border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary">
+        <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary">
           <span>
             {t("groupMembers.title")}
             {project ? `（${members.length}）` : ""}
           </span>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t("common.close")}
-            className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-          >
-            <X size={14} />
-          </button>
         </div>
 
         {/* Search filter */}

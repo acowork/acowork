@@ -1147,7 +1147,7 @@ export function AppLayout() {
                 same width / resize handle / collapse state, only shown when
                 a group is open and no agent session takes the pane. */}
             {!rightPanelCollapsed && !selectedAgentId && activeGroupId && (
-              <GroupMembersPanel width={rightWidth} onResizeStart={handleMouseDownRight} onClose={toggleRightPanel} />
+              <GroupMembersPanel width={rightWidth} onResizeStart={handleMouseDownRight} />
             )}
           </div>
         )}
