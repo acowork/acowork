@@ -25,7 +25,7 @@
 
 import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Send, Paperclip } from "lucide-react";
+import { Send, Paperclip, ExternalLink } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -54,6 +54,7 @@ import {
   type ChatMessageRow,
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
+import { useChatStore } from "../../stores/chatStore";
 
 // Same markdown shell as AgentChatView's bubbles (kept local on purpose:
 // extracting a shared component would touch two surfaces for one class
@@ -160,12 +161,15 @@ interface RowProps {
    *  anything else that closed (turn ended, timeout, stop) says "Closed". */
   answered: Set<string>;
   onAnswer: (row: ChatMessageRow, text: string) => void;
+  /** Drill into the exec session that produced an agent reply — jumps to that
+   *  agent's 1:1 page and opens the exec tab (mirrors AgentChatView.jumpToExec). */
+  onJumpToExec: (agentId: string, execSid: string) => void;
   /** Admin viewing a group they never joined: cards are shown, never
    *  answered — posting into someone else's project stays forbidden. */
   readOnly?: boolean;
 }
 
-function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, readOnly }: RowProps) {
+function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
@@ -246,6 +250,11 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
     : nameOf(row.from);
   const failed = !!row.meta?.status && row.meta.status !== "completed";
   const agentMeta = who.isAgent ? agentsMap[row.from]?.meta : undefined;
+  // The exec session behind an agent reply — a group / routed reply carries
+  // `sender_session_id` (the answering agent's own session; `agent_session_id`
+  // on turn pointers). Same formula as AgentChatView, so finished / failed /
+  // empty-bodied replies are all drillable.
+  const execSid = row.meta?.agent_session_id || row.meta?.sender_session_id || "";
 
   // Avatar is a 40px side column (left for others, right for own) — the same
   // primitive the user↔user inbox (`MessageRow`) and user↔agent thread
@@ -348,9 +357,27 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
             )}
           </div>
           )}
-          <span className="mt-1 text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
-            {formatBubbleTime(row.ts * 1000)}
-          </span>
+          <div className="mt-1 flex items-center gap-2">
+            {/* Drill-into-exec affordance — the group twin of the 1:1 chat
+                surface's button: a discrete control under the bubble, not a
+                whole-bubble click, so selecting the reply text never fires a
+                jump. Present on every local agent reply with a resolved exec
+                session, empty body included. */}
+            {!own && who.isAgent && row.kind === "agent_message" && execSid && (
+              <button
+                type="button"
+                onClick={() => onJumpToExec(row.from, execSid)}
+                title={t("chatView.viewRun")}
+                className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
+              >
+                <ExternalLink size={11} />
+                {t("chatView.viewRun")}
+              </button>
+            )}
+            <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
+              {formatBubbleTime(row.ts * 1000)}
+            </span>
+          </div>
         </div>
       </div>
       {own && avatar}
@@ -642,6 +669,16 @@ export function GroupChatPanel() {
     [activeGroupId, stickNow],
   );
 
+  // Jump to the exec session behind a group agent reply: select that agent
+  // (closes the group in the middle pane, same as picking it in the sidebar),
+  // cold-load the exec tab, flip the surface to exec. Mirrors AgentChatView.
+  const jumpToExec = useCallback(async (agentId: string, execSid: string) => {
+    if (!agentId || !execSid) return;
+    useAgentStore.getState().selectAgent(agentId);
+    await useChatStore.getState().openSession(agentId, execSid);
+    useChatSessionStore.getState().setMode(agentId, "exec");
+  }, []);
+
   if (!activeGroupId) return null;
 
   const title = group?.title || activeGroupId.slice(0, 8);
@@ -684,6 +721,7 @@ export function GroupChatPanel() {
             closed={closed}
             answered={answered}
             onAnswer={onAnswer}
+            onJumpToExec={(aid, sid) => void jumpToExec(aid, sid)}
             readOnly={!canPost}
           />
         ))}
