@@ -783,6 +783,7 @@
     "added": "追加済み",
     "requires": "必要：",
     "addCustomMcpServer": "カスタムMCPサーバーを追加",
+    "findServers": "MCPサーバーはここで探せます：",
     "name": "名前",
     "transport": "トランスポート",
     "command": "コマンド",

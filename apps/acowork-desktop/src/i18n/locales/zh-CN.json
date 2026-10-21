@@ -858,6 +858,7 @@
     "added": "已添加",
     "requires": "需要：",
     "addCustomMcpServer": "添加自定义 MCP 服务器",
+    "findServers": "在这里查找 MCP 服务器：",
     "name": "名称",
     "transport": "传输方式",
     "command": "命令",

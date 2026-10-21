@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, McpServerConfigDef, McpCatalogEntryResponse, McpTransportDef, McpPresetDef } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { inputBase } from "../../lib/ui-styles";
@@ -683,6 +684,14 @@ const MCP_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> 
 };
 const MCP_FALLBACK_ICON = Package;
 
+/** Public MCP server directory surfaced in the add-server dialog. Opened
+ *  through plugin-shell `open` (already registered + `shell:allow-open`
+ *  granted) rather than a plain `<a target="_blank">`: a bare anchor click
+ *  routes through the webview's new-window path, which is the one under
+ *  suspicion for the link-click webview crash (see the temporary probe in
+ *  main.tsx). The URL itself is a constant — only the label is translated. */
+const MCP_DIR_URL = "https://mcpdir.dev";
+
 // Parse the free-text `KEY=VALUE, ...` (env, sep "=") and `Name: value, ...`
 // (headers, sep ":") fields into a map. Splits on the FIRST separator only so
 // a value may itself contain the separator (Windows paths, `Bearer` tokens,
@@ -1025,9 +1034,23 @@ export function McpTab() {
             className="p-6"
             containerClassName="w-[440px] overflow-hidden rounded-md bg-modal-surface shadow-xl"
           >
-            <h3 className="mb-3 text-sm font-semibold">
+            <h3 className="mb-1 text-sm font-semibold">
               {editingName ? t("harnessMcp.editCustomMcpServer") : t("harnessMcp.addCustomMcpServer")}
             </h3>
+            {/* Where to find servers to add — the catalog only ships the
+                built-in presets, so without this the dialog looks like the
+                only place a server can come from. */}
+            <p className="mb-3 text-10 text-text-tertiary">
+              {t("harnessMcp.findServers")}{" "}
+              <button
+                type="button"
+                onClick={() => { void open(MCP_DIR_URL).catch(() => {}); }}
+                data-testid="mcp-find-servers-link"
+                className="text-[var(--color-accent)] hover:underline"
+              >
+                {MCP_DIR_URL}
+              </button>
+            </p>
             <div className="space-y-2">
               {/* Paste-to-normalize: drop in a vendor `mcpServers` JSON block
                   or a CLI `mcp add` line and it fills the fields below. It

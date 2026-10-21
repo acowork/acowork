@@ -1132,6 +1132,7 @@
     "added": "Added",
     "requires": "Requires: ",
     "addCustomMcpServer": "Add Custom MCP Server",
+    "findServers": "Find MCP servers here:",
     "name": "Name",
     "transport": "Transport",
     "command": "Command",
