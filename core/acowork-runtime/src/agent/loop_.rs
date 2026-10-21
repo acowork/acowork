@@ -1930,7 +1930,16 @@ impl AgentLoop {
         // overflowing the window when appended, which would cause the
         // FIFO/emergency trim to delete ALL messages including the
         // results themselves, crashing the session with "context depleted".
-        let truncated = self.trim_tool_results_for_context(&mut tool_contents, current_model);
+        // ADR-094 follow-up: a `load_skill` body is the procedure the model is
+        // mid-way through executing, not output it can re-fetch with narrower
+        // parameters. Exempt it from the equal-share cut (its size would
+        // otherwise be set by how many unrelated tools ran in the same turn).
+        let trim_exempt: Vec<bool> = deduped_calls
+            .iter()
+            .map(|tc| tc.function.name == crate::tools::builtin::load_skill::TOOL_NAME)
+            .collect();
+        let truncated =
+            self.trim_tool_results_for_context(&mut tool_contents, current_model, &trim_exempt);
         if truncated > 0 {
             tracing::warn!(
                 truncated,

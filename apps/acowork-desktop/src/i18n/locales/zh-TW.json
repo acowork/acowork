@@ -241,6 +241,7 @@
     "emptyReply": "已中斷，無輸出",
     "emptyAnswer": "（無內容）",
     "viewRun": "檢視執行",
+    "execSessionGone": "該執行工作階段已被刪除，無法檢視",
     "statusCard": {
       "untitled": "未命名執行",
       "detail": "詳情",
@@ -783,6 +784,7 @@
     "added": "已新增",
     "requires": "需要：",
     "addCustomMcpServer": "新增自訂 MCP 伺服器",
+    "findServers": "在這裡尋找 MCP 伺服器：",
     "name": "名稱",
     "transport": "傳輸方式",
     "command": "命令",

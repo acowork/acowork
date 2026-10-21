@@ -241,6 +241,7 @@
     "emptyReply": "中断、出力なし",
     "emptyAnswer": "（内容なし）",
     "viewRun": "実行を表示",
+    "execSessionGone": "この実行セッションは削除されたため表示できません",
     "statusCard": {
       "untitled": "無題の実行",
       "detail": "詳細",
@@ -784,6 +785,7 @@
     "added": "追加済み",
     "requires": "必要：",
     "addCustomMcpServer": "カスタムMCPサーバーを追加",
+    "findServers": "MCPサーバーはここで探せます：",
     "name": "名前",
     "transport": "トランスポート",
     "command": "コマンド",

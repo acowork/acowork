@@ -20,7 +20,7 @@ use std::sync::Arc;
 use acowork_core::protocol::ProtocolType;
 #[cfg(test)]
 use acowork_core::providers::traits::ChatRequest;
-use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider};
+use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider, ToolCall};
 
 use crate::agent::compression_constants::SUMMARY_TOKEN_BUDGET;
 use crate::error::RuntimeError;
@@ -199,13 +199,21 @@ pub struct HistoryManager {
     protocol_type: ProtocolType,
     /// Tiered token counter for unified token estimation.
     counter: TokenCounter,
-    /// ADR-060 v2 §5.4: tool_call `id` of the most recent todo_write round
-    /// spliced by `inject_todo_write_round_after_marker`. Used to enforce
-    /// JSONL-side idempotency on consecutive compressions — if the next
-    /// compression finds the same round again (because level 8 already
-    /// stripped our previous inject), we skip re-injecting and re-persisting
-    /// to avoid duplicate synthetic rows on disk.
-    last_injected_todo_call_id: Option<String>,
+    /// ADR-060 v2 §5.4: tool_call `id`s of rounds already spliced after a
+    /// compaction marker by [`Self::inject_round_after_marker`].
+    ///
+    /// Used to enforce JSONL-side idempotency on consecutive compressions —
+    /// if the next compression finds a round again here (because level 8
+    /// already stripped our previous splice), we skip re-injecting and
+    /// re-persisting it to avoid duplicate synthetic rows on disk.
+    ///
+    /// A *set*, not the former single `Option<String>`: skill-body
+    /// preservation recalls one round per distinct skill, so a single
+    /// compression can inject N rounds and each must be individually
+    /// remembered. Widening it also fixes a latent hole in the single-slot
+    /// version, where injecting round B silently forgot that round A had
+    /// already been persisted.
+    injected_round_call_ids: HashSet<String>,
     /// ADR-067: byte length of `serde_json::to_string(&self.messages)` —
     /// i.e. the exact JSON array serialization of the whole history.
     ///
@@ -216,6 +224,24 @@ pub struct HistoryManager {
     /// the `messages` section byte size **without** re-serializing the
     /// entire history on every LLM call.
     messages_json_bytes: usize,
+    /// Byte length of all `load_skill` Tool messages currently in history
+    /// — i.e. the full `SKILL.md` bodies the LLM pulled on demand and that
+    /// still occupy the context window.
+    ///
+    /// Same accounting contract as [`Self::messages_json_bytes`] (O(1)
+    /// incremental on `append`/`extend`, full recompute at every
+    /// structural-mutation site via [`Self::recompute_byte_counters`]).
+    /// They MUST stay reconciled through the same single method: the two
+    /// counters are recomputed from the same buffer, and having two
+    /// separate recompute calls that can be independently forgotten is
+    /// exactly the `clear_round` bug class (see the note on
+    /// [`Self::recompute_byte_counters`]).
+    ///
+    /// Deliberately **not** deduplicated by skill name: loading the same
+    /// skill twice puts two copies of the body in the prompt, so it costs
+    /// twice. This counter answers "how many bytes of skill body are in
+    /// context right now", not "how many skills were used".
+    skills_loaded_bytes: usize,
 }
 
 // ── ADR-061 v3 §20.3: round-primitive report types ────────────────────
@@ -275,8 +301,9 @@ impl HistoryManager {
             current_tokens: 0,
             protocol_type: ProtocolType::default(),
             counter: TokenCounter::new(),
-            last_injected_todo_call_id: None,
+            injected_round_call_ids: HashSet::new(),
             messages_json_bytes: Self::EMPTY_JSON_ARRAY_BYTES,
+            skills_loaded_bytes: 0,
         }
     }
 
@@ -290,13 +317,47 @@ impl HistoryManager {
         self.messages_json_bytes
     }
 
-    /// Recompute `messages_json_bytes` from scratch (O(n) serialization).
+    /// Byte length of the `load_skill` Tool messages currently in history
+    /// (the `SKILL.md` bodies still occupying the context window). O(1) —
+    /// maintained incrementally by [`Self::append`] / [`Self::extend`].
+    ///
+    /// Feeds the `skills_loaded` context-usage section, which the frontend
+    /// folds into the *skills* category alongside the always-present
+    /// Progressive-mode summary (`skill_instructions`).
+    pub fn skills_loaded_bytes(&self) -> usize {
+        self.skills_loaded_bytes
+    }
+
+    /// True when `msg` is the Tool result of a `load_skill` call — i.e. its
+    /// `content` is a full `SKILL.md` body sitting in the context window.
+    ///
+    /// The `name` field is stamped by the agent loop when it appends tool
+    /// results (`loop_.rs`, `ChatMessage { name: Some(tc.function.name…) }`),
+    /// so this is a reliable discriminator and costs one string compare.
+    fn is_skill_load_msg(msg: &ChatMessage) -> bool {
+        matches!(msg.role, MessageRole::Tool)
+            && msg.name.as_deref() == Some(crate::tools::builtin::load_skill::TOOL_NAME)
+    }
+
+    /// Recompute BOTH byte counters from scratch (O(n) scan, plus a full
+    /// serialization for `messages_json_bytes`).
+    ///
     /// Used by the rare structural mutations that don't go through
-    /// [`Self::append`] / [`Self::extend`].
-    fn recompute_messages_json_bytes(&mut self) {
+    /// [`Self::append`] / [`Self::extend`]. The two counters are folded into
+    /// one method on purpose: every structural site must refresh both, and
+    /// the `clear_round` precedent (folds Tool content, refreshes nothing)
+    /// shows that separate recompute calls drift. If a future site only
+    /// needs one of them, it still calls this.
+    fn recompute_byte_counters(&mut self) {
         self.messages_json_bytes = serde_json::to_string(&*self.messages)
             .map(|s| s.len())
             .unwrap_or(Self::EMPTY_JSON_ARRAY_BYTES);
+        self.skills_loaded_bytes = self
+            .messages
+            .iter()
+            .filter(|m| Self::is_skill_load_msg(m))
+            .map(Self::single_json_bytes)
+            .sum();
     }
 
     /// Byte length of a single message's JSON serialization.
@@ -474,9 +535,13 @@ impl HistoryManager {
         self.current_tokens += tokens;
         let was_empty = self.messages.is_empty();
         let msg_bytes = Self::single_json_bytes(&message);
+        let is_skill_load = Self::is_skill_load_msg(&message);
         self.messages_mut().push(message);
         // ADR-067: `[]` → `[a]` adds json(a); `[...,a]` adds json(a) + 1 comma.
         self.messages_json_bytes += if was_empty { msg_bytes } else { msg_bytes + 1 };
+        if is_skill_load {
+            self.skills_loaded_bytes += msg_bytes;
+        }
     }
 
     /// Append multiple messages
@@ -486,6 +551,11 @@ impl HistoryManager {
         }
         let prev_len = self.messages.len();
         let extra_bytes: usize = messages.iter().map(Self::single_json_bytes).sum();
+        let skill_bytes: usize = messages
+            .iter()
+            .filter(|m| Self::is_skill_load_msg(m))
+            .map(Self::single_json_bytes)
+            .sum();
         let separators = if prev_len == 0 {
             // `[]` → `[a,b]` adds (n-1) commas
             messages.len().saturating_sub(1)
@@ -495,6 +565,7 @@ impl HistoryManager {
         };
         self.messages_mut().extend(messages);
         self.messages_json_bytes += extra_bytes + separators;
+        self.skills_loaded_bytes += skill_bytes;
     }
 
     /// Bulk-load a pre-built message sequence from session resume.
@@ -507,29 +578,29 @@ impl HistoryManager {
     /// input (the restorer guarantees tool_call/tool_result pairing and
     /// system/compaction-marker ordering invariants).
     ///
-    /// `last_injected_todo_call_id` is the tool_call_id of the most recent
-    /// *synthetic* todo_write round found in the JSONL (see
-    /// [`RestoreOutcome::last_injected_todo_call_id`]). It restores the
-    /// ADR-060 v2 §5.4 idempotency key across process restarts: without it a
-    /// second compression after restart would re-inject a round that a prior
-    /// compaction already persisted, duplicating synthetic rows on disk.
+    /// `injected_round_call_ids` are the tool_call_ids of every *synthetic*
+    /// round found in the JSONL (see [`RestoreOutcome::injected_round_call_ids`]).
+    /// It restores the ADR-060 v2 §5.4 idempotency keys across process
+    /// restarts: without them a compression after restart would re-inject
+    /// rounds that a prior compaction already persisted, duplicating
+    /// synthetic rows on disk.
     pub fn load_restored(
         &mut self,
         messages: Vec<ChatMessage>,
-        last_injected_todo_call_id: Option<String>,
+        injected_round_call_ids: HashSet<String>,
     ) {
         self.messages = Arc::new(messages);
-        self.last_injected_todo_call_id = last_injected_todo_call_id;
+        self.injected_round_call_ids = injected_round_call_ids;
         self.current_tokens = self
             .messages
             .iter()
             .map(|m| self.counter.count_message(m, Some(&self.protocol_type)))
             .sum();
-        self.recompute_messages_json_bytes();
+        self.recompute_byte_counters();
         tracing::info!(
             count = self.messages.len(),
             tokens = self.current_tokens,
-            injected_todo_call_id = ?self.last_injected_todo_call_id,
+            injected_rounds = self.injected_round_call_ids.len(),
             "HistoryManager: loaded restored history"
         );
     }
@@ -539,6 +610,7 @@ impl HistoryManager {
         self.messages = Arc::new(Vec::new());
         self.current_tokens = 0;
         self.messages_json_bytes = Self::EMPTY_JSON_ARRAY_BYTES;
+        self.skills_loaded_bytes = 0;
     }
 
     /// Get message count
@@ -567,7 +639,7 @@ impl HistoryManager {
             .iter()
             .map(|m| self.counter.count_message(m, Some(&self.protocol_type)))
             .sum();
-        self.recompute_messages_json_bytes();
+        self.recompute_byte_counters();
         tracing::info!(
             target_len,
             new_token_count = self.current_tokens,
@@ -884,6 +956,19 @@ impl HistoryManager {
 
         let bytes_reclaimed: usize = cleared.iter().filter_map(|id| per_id_bytes.get(id)).sum();
 
+        // Folding replaced Tool `content` with short placeholders, so both
+        // the token estimate and the byte counters computed from the old
+        // bytes are now stale. `abandon_tool_result` documents this as the
+        // caller's job ("Caller is responsible for `recalibrate_tokens()`
+        // after a batch of folds") and `fix_round` — which wraps this
+        // method — was doing it; this method returning without it meant the
+        // `messages` / `skills_loaded` usage sections kept reporting bytes
+        // that are no longer in the prompt.
+        if !cleared.is_empty() {
+            self.recalibrate_tokens();
+            self.recompute_byte_counters();
+        }
+
         ClearRoundReport {
             cleared_tool_ids: cleared,
             bytes_reclaimed,
@@ -932,7 +1017,7 @@ impl HistoryManager {
         // Collect ids the assistant currently claims (after clear_round,
         // these are the same ids it originally had — clear_round only
         // touched tool message contents, not the assistant's tool_calls).
-        let claimed_ids: std::collections::HashSet<String> = self.messages[assistant_idx]
+        let claimed_ids: HashSet<String> = self.messages[assistant_idx]
             .tool_calls
             .as_ref()
             .map(|tcs| tcs.iter().map(|tc| tc.id.clone()).collect())
@@ -954,7 +1039,7 @@ impl HistoryManager {
         // Pass B: find orphan tool_call ids (assistant claims id but no
         // matching Tool message exists in the round slice). Record ids
         // for in-place removal.
-        let present_tool_ids: std::collections::HashSet<String> = (start..end)
+        let present_tool_ids: HashSet<String> = (start..end)
             .filter(|&i| matches!(self.messages[i].role, MessageRole::Tool))
             .filter_map(|i| self.messages[i].tool_call_id.clone())
             .collect();
@@ -987,7 +1072,7 @@ impl HistoryManager {
 
         // Recalibrate once after the sweep.
         self.recalibrate_tokens();
-        self.recompute_messages_json_bytes();
+        self.recompute_byte_counters();
 
         FixReport {
             cleared,
@@ -1130,7 +1215,7 @@ impl HistoryManager {
             .count_message(&summary_msg, Some(&self.protocol_type));
         self.messages_mut().insert(system_count, summary_msg);
         self.current_tokens += summary_tokens;
-        self.recompute_messages_json_bytes();
+        self.recompute_byte_counters();
 
         tracing::debug!(
             removed = removed_count,
@@ -1173,7 +1258,7 @@ impl HistoryManager {
     ///
     /// The returned pair is the canonical "current todo state" — Block C's
     /// old role is now played by these clones, which can survive compaction
-    /// via [`Self::inject_todo_write_round_after_marker`].
+    /// via [`Self::inject_round_after_marker`].
     pub fn find_last_todo_write_round(&self) -> Option<(ChatMessage, ChatMessage)> {
         // Reverse-scan for the most recent Assistant with a todo_write call.
         let assistant_idx = self.messages.iter().rposition(|m| {
@@ -1213,7 +1298,7 @@ impl HistoryManager {
     /// not write a duplicate line.
     pub fn find_last_todo_write_round_excluding_injected(
         &self,
-        excluded_ids: &std::collections::HashSet<String>,
+        excluded_ids: &HashSet<String>,
     ) -> Option<(ChatMessage, ChatMessage)> {
         // Reverse-scan for the most recent Assistant with a todo_write call
         // whose call id is NOT in `excluded_ids`.
@@ -1248,8 +1333,161 @@ impl HistoryManager {
         Some((assistant, self.messages[tool_idx].clone()))
     }
 
-    /// Insert a preserved `todo_write` round right after the last compaction
-    /// summary marker.
+    // ── ADR-094 follow-up: load_skill body preservation through compression ──
+
+    /// Skill name behind a `load_skill` tool_call, if the arguments parse.
+    ///
+    /// The name is what makes recall **per-skill** rather than per-round: a
+    /// second `load_skill("code-review")` supersedes the first copy, so
+    /// keeping both would spend the budget twice on identical instructions.
+    /// (Byte accounting deliberately has no such dedup —
+    /// [`Self::skills_loaded_bytes`] reports what is physically in the
+    /// prompt, which is two copies. Selection is about what is *worth*
+    /// keeping; accounting is about what is *there*.)
+    fn skill_name_of_call(tc: &ToolCall) -> Option<String> {
+        if tc.function.name != crate::tools::builtin::load_skill::TOOL_NAME {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+            .ok()?
+            .get("name")?
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// The Tool message answering `call_id`, searching forward from
+    /// `assistant_idx` then wrapping back (some providers reorder). Same
+    /// bidirectional rule as [`Self::find_last_todo_write_round`].
+    fn find_tool_result(&self, assistant_idx: usize, call_id: &str) -> Option<ChatMessage> {
+        let idx = (assistant_idx + 1..self.messages.len())
+            .chain(0..assistant_idx)
+            .find(|&i| {
+                self.messages[i].role == MessageRole::Tool
+                    && self.messages[i].tool_call_id.as_deref() == Some(call_id)
+            })?;
+        Some(self.messages[idx].clone())
+    }
+
+    /// Every loaded skill's most recent round, newest-first, one per
+    /// distinct skill name.
+    ///
+    /// Unlike [`Self::find_last_todo_write_round`] the returned Assistant is
+    /// **synthesized to carry exactly the one `tool_call` whose result is
+    /// retained**. That is not cosmetic: a single assistant turn can load
+    /// several skills in parallel, and re-inserting the original Assistant
+    /// once per skill would emit duplicate `tool_call` ids plus calls with no
+    /// matching Tool message — which `sanitize_messages` then prunes,
+    /// silently undoing the recall we just paid for.
+    pub fn find_latest_skill_rounds(&self) -> Vec<(ChatMessage, ChatMessage)> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out = Vec::new();
+        for (idx, msg) in self.messages.iter().enumerate().rev() {
+            if msg.role != MessageRole::Assistant {
+                continue;
+            }
+            let Some(tcs) = msg.tool_calls.as_ref() else {
+                continue;
+            };
+            for tc in tcs {
+                let Some(skill) = Self::skill_name_of_call(tc) else {
+                    continue;
+                };
+                if !seen.insert(skill) {
+                    continue;
+                }
+                let Some(tool) = self.find_tool_result(idx, &tc.id) else {
+                    continue;
+                };
+                let mut assistant = msg.clone();
+                if let Some(list) = assistant.tool_calls.as_mut() {
+                    list.retain(|c| c.id == tc.id);
+                }
+                out.push((assistant, tool));
+            }
+        }
+        out
+    }
+
+    /// Token cost of splicing one `(assistant, tool)` round back in.
+    fn round_token_cost(&self, assistant: &ChatMessage, tool: &ChatMessage) -> u64 {
+        self.counter
+            .count_message(assistant, Some(&self.protocol_type))
+            + self
+                .counter
+                .count_message(tool, Some(&self.protocol_type))
+    }
+
+    /// Choose which snapshotted skill rounds fit a recall budget.
+    ///
+    /// Split out from [`Self::find_latest_skill_rounds`] because the two
+    /// halves run at different moments in the compaction: candidates must be
+    /// snapshotted **before** `apply_compression` (which is what deletes
+    /// them), while the budget is only knowable **after** it (the freed space
+    /// is what we are spending). `candidates` is expected to come from
+    /// [`Self::find_latest_skill_rounds`], already newest-first.
+    ///
+    /// Policy:
+    /// 1. `budget_tokens == 0` → preserve nothing (the caller's explicit
+    ///    "no room" signal).
+    /// 2. Otherwise take rounds until the budget is exhausted, **but always
+    ///    take at least one** — even when that single SKILL.md alone exceeds
+    ///    the whole budget.
+    ///
+    /// Why the floor: a SKILL.md is the procedure the model is *mid-way
+    /// through executing*, not a fact it might wish to recall. Amputating it
+    /// breaks the workflow in progress, which is strictly worse than the
+    /// temporary over-budget it causes; the next compaction re-evaluates
+    /// against the headroom of the moment.
+    ///
+    /// Recall is monotone. A round dropped here is removed from `messages`
+    /// outright, so [`Self::find_latest_skill_rounds`] can never surface it
+    /// again and no later compression can resurrect it — the only way a skill
+    /// comes back is the model calling `load_skill` again, which is also the
+    /// evidence that it still needs it. That is what makes this safe to run on
+    /// a *dynamic* budget: a shrinking budget prunes old skills once, and a
+    /// later roomier budget cannot re-add them, so there is no inject/drop
+    /// oscillation across consecutive compressions.
+    pub fn apply_skill_recall_budget(
+        &self,
+        candidates: &[(ChatMessage, ChatMessage)],
+        budget_tokens: u64,
+    ) -> Vec<(ChatMessage, ChatMessage)> {
+        if budget_tokens == 0 {
+            return Vec::new();
+        }
+        let mut picked: Vec<(ChatMessage, ChatMessage)> = Vec::new();
+        let mut spent = 0u64;
+        for (assistant, tool) in candidates {
+            let cost = self.round_token_cost(assistant, tool);
+            if !picked.is_empty() && spent + cost > budget_tokens {
+                break;
+            }
+            spent += cost;
+            picked.push((assistant.clone(), tool.clone()));
+        }
+        picked
+    }
+
+    /// Convenience composition of find + budget, for callers that can do both
+    /// in one step (and for tests). The live compaction path uses the two
+    /// halves separately — see [`Self::apply_skill_recall_budget`].
+    pub fn select_skill_rounds_to_preserve(
+        &self,
+        budget_tokens: u64,
+    ) -> Vec<(ChatMessage, ChatMessage)> {
+        let candidates = self.find_latest_skill_rounds();
+        self.apply_skill_recall_budget(&candidates, budget_tokens)
+    }
+
+    /// Splice a preserved round right after the last compaction summary marker.
+    ///
+    /// Tool-agnostic by design: the caller decides which round to hand over
+    /// ([`Self::find_last_todo_write_round`] for todo state,
+    /// [`Self::select_skill_rounds_to_preserve`] for `load_skill` bodies).
+    /// Both are "state the model still needs, stored as a real tool round in
+    /// Block B", and ADR-060 v2 §5.4's splice is the shared mechanism.
     ///
     /// ADR-060 v2 §5.4: todos live in Block B as real `todo_write` tool
     /// results. After `apply_compression` replaces the middle with a summary,
@@ -1278,7 +1516,7 @@ impl HistoryManager {
     /// compressions — without this gate, every compression would re-write
     /// the same synthetic round even though `in_tail` correctly skipped
     /// the in-memory splice.
-    pub fn inject_todo_write_round_after_marker(
+    pub fn inject_round_after_marker(
         &mut self,
         assistant: ChatMessage,
         tool: ChatMessage,
@@ -1293,7 +1531,7 @@ impl HistoryManager {
         //   accumulates duplicate synthetic rows.
         //
         //   The first time a round is injected, we record its tool_call_id in
-        //   `last_injected_todo_call_id`. On every subsequent call we short-
+        //   `injected_round_call_ids`. On every subsequent call we short-
         //   circuit: the same round was already injected in a previous
         //   compression, so we must not append it again. The trade-off is
         //   that on the second compression Block B has no todo_write tool
@@ -1303,12 +1541,19 @@ impl HistoryManager {
         //   state for that turn, which is an accepted degradation: the
         //   alternative (re-inject on every compression) creates unbounded
         //   JSONL duplication that downstream consumers cannot tolerate.
+        //
+        //   The same gate serves skill-body recall. Because it is keyed on
+        //   tool_call_id and a dropped round is removed from `self.messages`
+        //   outright (so the finder can never surface it again), recall is
+        //   monotonically shrinking: a skill compressed away stays away and
+        //   is only restored when the model explicitly calls `load_skill`
+        //   again. There is no inject/drop oscillation across compressions.
         if let Some(tcid) = tool.tool_call_id.as_deref()
-            && self.last_injected_todo_call_id.as_deref() == Some(tcid)
+            && self.injected_round_call_ids.contains(tcid)
         {
             tracing::debug!(
                 tool_call_id = %tcid,
-                "ADR-060 v2 §5.4: todo_write round already injected by prior \
+                "ADR-060 v2 §5.4: round already injected by prior \
                  compression — skip (JSONL holds the synthetic row for restart)"
             );
             return (self.current_tokens, false);
@@ -1383,7 +1628,7 @@ impl HistoryManager {
         // walks all messages — the only side effect, but it's the source of
         // truth (avoids manual `count_message` arithmetic that could drift).
         self.recalibrate_tokens();
-        self.recompute_messages_json_bytes();
+        self.recompute_byte_counters();
 
         if self.current_tokens > self.max_tokens {
             tracing::warn!(
@@ -1397,7 +1642,7 @@ impl HistoryManager {
         // ADR-060 v2 §5.4 idempotency: remember the call id we spliced so the
         // next compression recognizes this round and skips re-injection.
         if let Some(tcid) = injected_tool_call_id.as_deref() {
-            self.last_injected_todo_call_id = Some(tcid.to_string());
+            self.injected_round_call_ids.insert(tcid.to_string());
         }
 
         (self.current_tokens, true)
@@ -1406,7 +1651,7 @@ impl HistoryManager {
     // ── ADR-061 v3 §20.3.2: recall_todo_round ──────────────────────────
     //
     // v2 contract: find the last todo_write round, splice it after the
-    // compaction marker. `inject_todo_write_round_after_marker` already
+    // compaction marker. `inject_round_after_marker` already
     // implements this; `recall_todo_round` is the v3 facade that returns
     // a structured result instead of a `(tokens, injected_bool)` tuple,
     // so callers can branch on skip reasons cleanly.
@@ -1423,12 +1668,10 @@ impl HistoryManager {
     #[allow(dead_code)]
     pub(crate) fn recall_todo_round(&mut self) -> RecallResult {
         // Fast path: same round already injected by a prior compression.
-        if let Some(ref last_id) = self.last_injected_todo_call_id
-            && let Some((asst, _)) = self.find_last_todo_write_round()
-            && asst
-                .tool_calls
-                .as_ref()
-                .is_some_and(|tcs| tcs.iter().any(|tc| tc.id == *last_id))
+        if let Some((asst, _)) = self.find_last_todo_write_round()
+            && asst.tool_calls.as_ref().is_some_and(|tcs| {
+                tcs.iter().any(|tc| self.injected_round_call_ids.contains(&tc.id))
+            })
         {
             return RecallResult::SkippedAlreadyInjected;
         }
@@ -1454,7 +1697,7 @@ impl HistoryManager {
 
         // Delegate to the existing injector. It handles the in-tail skip
         // and idempotency bookkeeping.
-        let (_, injected) = self.inject_todo_write_round_after_marker(assistant, tool);
+        let (_, injected) = self.inject_round_after_marker(assistant, tool);
 
         if injected {
             RecallResult::Injected { todo_call_id }
@@ -1791,7 +2034,7 @@ impl HistoryManager {
         let removed_messages = self.messages.len().saturating_sub(new_msgs.len());
         *self.messages_mut() = new_msgs;
         self.recalibrate_tokens();
-        self.recompute_messages_json_bytes();
+        self.recompute_byte_counters();
 
         tracing::info!(
             level = plan.level,
@@ -1871,7 +2114,7 @@ mod tests {
             })
             .collect();
         let count = msgs.len();
-        hm.load_restored(msgs, None);
+        hm.load_restored(msgs, std::collections::HashSet::new());
         hm.restore_anchor(Some(167_098), Some(3.5));
 
         assert_eq!(hm.len(), count, "restore must not drop any message");
@@ -1981,7 +2224,7 @@ mod tests {
             make_message(MessageRole::User, "fresh"),
             make_message(MessageRole::Assistant, "fresh reply"),
         ];
-        hm.load_restored(new_msgs, None);
+        hm.load_restored(new_msgs, std::collections::HashSet::new());
         assert_eq!(hm.len(), 3);
         assert!(matches!(hm.messages()[0].role, MessageRole::System));
         // Token count must be recomputed (not stale "old data" + new).
@@ -3439,7 +3682,7 @@ mod tests {
     /// Insert a synthetic compaction summary marker into history.
     ///
     /// We bypass `apply_compression` to keep the unit tests focused on
-    /// `inject_todo_write_round_after_marker`'s contract rather than the
+    /// `inject_round_after_marker`'s contract rather than the
     /// compression pipeline. The marker contract is what matters: any
     /// `User` message with `name == COMPACTION_SUMMARY_NAME` will be
     /// detected by `last_compaction_index()`.
@@ -3526,7 +3769,7 @@ mod tests {
 
         // Inject the SAME round — should be a no-op (already in tail).
         let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
-        let (new_tokens, injected) = hm.inject_todo_write_round_after_marker(assistant, tool);
+        let (new_tokens, injected) = hm.inject_round_after_marker(assistant, tool);
 
         assert_eq!(
             hm.messages().len(),
@@ -3560,7 +3803,7 @@ mod tests {
         let removed_tool = make_todo_write_tool("tc_removed");
 
         let (_, injected) =
-            hm.inject_todo_write_round_after_marker(removed_assistant, removed_tool);
+            hm.inject_round_after_marker(removed_assistant, removed_tool);
         assert!(injected, "splice path must signal injected=true");
 
         let msgs = hm.messages();
@@ -3629,7 +3872,7 @@ mod tests {
         let len_before = hm.messages().len();
 
         let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
-        let (new_tokens, injected) = hm.inject_todo_write_round_after_marker(assistant, tool);
+        let (new_tokens, injected) = hm.inject_round_after_marker(assistant, tool);
 
         assert_eq!(
             hm.messages().len(),
@@ -3661,7 +3904,7 @@ mod tests {
 
         let len_before = hm.messages().len();
         let (assistant, tool) = hm.find_last_todo_write_round().unwrap();
-        let (new_tokens, injected) = hm.inject_todo_write_round_after_marker(assistant, tool);
+        let (new_tokens, injected) = hm.inject_round_after_marker(assistant, tool);
 
         assert_eq!(
             hm.messages().len(),
@@ -3692,7 +3935,7 @@ mod tests {
         let new_assistant = make_todo_write_assistant("tc_injected");
         let new_tool = make_todo_write_tool("tc_injected");
         let (returned_tokens, injected) =
-            hm.inject_todo_write_round_after_marker(new_assistant, new_tool);
+            hm.inject_round_after_marker(new_assistant, new_tool);
 
         assert!(
             returned_tokens > tokens_before,
@@ -3778,7 +4021,7 @@ mod tests {
         let new_assistant = make_todo_write_assistant("tc_injected");
         let new_tool = make_todo_write_tool("tc_injected");
         let (_tokens_1, injected_1) =
-            hm.inject_todo_write_round_after_marker(new_assistant, new_tool);
+            hm.inject_round_after_marker(new_assistant, new_tool);
         assert!(injected_1, "first injection must succeed");
         let len_after_first = hm.messages().len();
 
@@ -3797,10 +4040,10 @@ mod tests {
         let again_assistant = make_todo_write_assistant("tc_injected");
         let again_tool = make_todo_write_tool("tc_injected");
         let (_tokens_2, injected_2) =
-            hm.inject_todo_write_round_after_marker(again_assistant, again_tool);
+            hm.inject_round_after_marker(again_assistant, again_tool);
         assert!(
             !injected_2,
-            "second injection of the same round must be skipped (last_injected_todo_call_id gate)"
+            "second injection of the same round must be skipped (injected_round_call_ids gate)"
         );
         assert_eq!(
             hm.messages().len(),
@@ -3814,7 +4057,7 @@ mod tests {
         let fresh_assistant = make_todo_write_assistant("tc_fresh");
         let fresh_tool = make_todo_write_tool("tc_fresh");
         let (_tokens_3, injected_3) =
-            hm.inject_todo_write_round_after_marker(fresh_assistant, fresh_tool);
+            hm.inject_round_after_marker(fresh_assistant, fresh_tool);
         assert!(
             injected_3,
             "a NEW todo_write call (different id) must still inject — gate is per-id"
@@ -3884,5 +4127,380 @@ mod tests {
             2,
             "cleared history serializes as `[]`"
         );
+    }
+
+    // ── skills_loaded_bytes: same accounting contract, skill bodies ───
+
+    /// The counter must equal a fresh O(n) scan of the buffer, after every
+    /// mutation. Mirrors [`assert_json_bytes_matches`]: the incremental
+    /// hot-path accounting is only trustworthy if it is pinned against the
+    /// recomputed ground truth at each step.
+    fn assert_skills_bytes_matches(hm: &HistoryManager) {
+        let expected: usize = hm
+            .messages()
+            .iter()
+            .filter(|m| {
+                matches!(m.role, MessageRole::Tool)
+                    && m.name.as_deref()
+                        == Some(crate::tools::builtin::load_skill::TOOL_NAME)
+            })
+            .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
+            .sum();
+        assert_eq!(
+            hm.skills_loaded_bytes(),
+            expected,
+            "incremental skills_loaded_bytes must equal a full scan"
+        );
+    }
+
+    /// A `load_skill` Tool result carrying a plausible SKILL.md body.
+    fn make_skill_load_msg(tool_call_id: &str, skill: &str) -> ChatMessage {
+        let body = format!(
+            "{{\"name\":\"{skill}\",\"description\":\"does a thing\",\
+             \"instructions\":\"## steps\\n1. do\\n2. thing\\n\"}}"
+        );
+        let mut m = ChatMessage::tool(tool_call_id, body);
+        m.name = Some(crate::tools::builtin::load_skill::TOOL_NAME.to_string());
+        m
+    }
+
+    fn make_skill_load_call(tool_call_id: &str, skill: &str) -> ChatMessage {
+        ChatMessage::assistant_with_tools(
+            "loading the skill",
+            vec![make_tool_call(
+                tool_call_id,
+                crate::tools::builtin::load_skill::TOOL_NAME,
+                &format!(r#"{{"name":"{skill}"}}"#),
+            )],
+        )
+    }
+
+    #[test]
+    fn skills_loaded_counts_only_load_skill_tool_results() {
+        let mut hm = HistoryManager::new(10_000);
+        assert_eq!(hm.skills_loaded_bytes(), 0, "empty history has no skills");
+
+        hm.append(make_message(MessageRole::User, "review this PR"));
+        hm.append(make_skill_load_call("tc_sk1", "code-review"));
+        hm.append(make_skill_load_msg("tc_sk1", "code-review"));
+        let after_load = hm.skills_loaded_bytes();
+        assert!(after_load > 0, "the load_skill result must be counted");
+        assert_skills_bytes_matches(&hm);
+
+        // A large non-skill tool result must not leak into the skills bucket.
+        hm.append(ChatMessage::assistant_with_tools(
+            "reading",
+            vec![make_tool_call("tc_r", "file_read", "{}")],
+        ));
+        let mut read_result = ChatMessage::tool("tc_r", "x".repeat(4_000));
+        read_result.name = Some("file_read".to_string());
+        hm.append(read_result);
+        assert_eq!(
+            hm.skills_loaded_bytes(),
+            after_load,
+            "other tools' results must not count as skills"
+        );
+        assert_skills_bytes_matches(&hm);
+    }
+
+    #[test]
+    fn skills_loaded_double_counts_a_repeated_load() {
+        // Deliberate policy, not an oversight: loading the same skill twice
+        // puts two copies of the body in the prompt, so it costs twice. The
+        // metric answers "how many skill bytes are in context", not
+        // "how many distinct skills were used".
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(make_skill_load_call("tc_a", "code-review"));
+        hm.append(make_skill_load_msg("tc_a", "code-review"));
+        let once = hm.skills_loaded_bytes();
+
+        hm.append(make_skill_load_call("tc_b", "code-review"));
+        hm.append(make_skill_load_msg("tc_b", "code-review"));
+        assert_eq!(
+            hm.skills_loaded_bytes(),
+            once * 2,
+            "a second copy of the same skill is a second copy of tokens"
+        );
+        assert_skills_bytes_matches(&hm);
+    }
+
+    #[test]
+    fn skills_loaded_shrinks_when_the_round_is_compacted_away() {
+        // The self-correction property the whole design leans on: usage is
+        // reconciled at every structural mutation, so a skill dropped by
+        // compaction stops being reported without any extra bookkeeping.
+        let mut hm = HistoryManager::new(100_000);
+        for i in 1..=6 {
+            hm.append(make_message(
+                MessageRole::User,
+                &format!("question {i} with enough words to carry weight"),
+            ));
+            hm.append(make_skill_load_call(&format!("tc_{i}"), "debugging"));
+            hm.append(make_skill_load_msg(&format!("tc_{i}"), "debugging"));
+            hm.append(make_message(MessageRole::Assistant, &format!("answer {i}")));
+        }
+        let before = hm.skills_loaded_bytes();
+        assert!(before > 0);
+        assert_skills_bytes_matches(&hm);
+
+        let removed = hm.replace_middle_with_summary("Earlier rounds summarized.", 1);
+        assert!(removed > 0, "test premise: something must be compacted");
+        assert_skills_bytes_matches(&hm);
+        assert!(
+            hm.skills_loaded_bytes() < before,
+            "compacted-away skill bodies must stop being reported ({} -> {})",
+            before,
+            hm.skills_loaded_bytes()
+        );
+    }
+
+    #[test]
+    fn skills_loaded_recomputed_on_restore_clear_and_truncate() {
+        let mut hm = HistoryManager::new(10_000);
+        let restored = vec![
+            make_message(MessageRole::User, "hi"),
+            make_skill_load_call("tc_r", "testing"),
+            make_skill_load_msg("tc_r", "testing"),
+        ];
+        let expected = restored[2..]
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap().len())
+            .sum::<usize>();
+
+        // load_restored bypasses append/extend — the recompute site must catch it.
+        hm.load_restored(restored, std::collections::HashSet::new());
+        assert_eq!(hm.skills_loaded_bytes(), expected);
+        assert_skills_bytes_matches(&hm);
+
+        hm.truncate_to(2);
+        assert_eq!(
+            hm.skills_loaded_bytes(),
+            0,
+            "truncating away the tool result must drop the count"
+        );
+        assert_skills_bytes_matches(&hm);
+
+        hm.append(make_skill_load_msg("tc_x", "testing"));
+        assert!(hm.skills_loaded_bytes() > 0);
+        hm.clear();
+        assert_eq!(hm.skills_loaded_bytes(), 0, "clear resets both counters");
+    }
+
+    #[test]
+    fn folding_a_skill_result_to_a_placeholder_releases_its_bytes() {
+        // The `clear_round` / `abandon_tool_result` path replaces Tool
+        // content with a short placeholder. The counters must follow, or the
+        // skills bucket would report bodies that are no longer there.
+        let mut hm = HistoryManager::new(10_000);
+        hm.append(make_skill_load_call("tc_a", "code-review"));
+        hm.append(make_skill_load_msg("tc_a", "code-review"));
+        let before = hm.skills_loaded_bytes();
+        assert!(before > 0);
+
+        let idx = hm
+            .messages()
+            .iter()
+            .position(|m| matches!(m.role, MessageRole::Assistant))
+            .expect("assistant round present");
+        hm.clear_round(idx);
+
+        let after = hm.skills_loaded_bytes();
+        assert!(
+            after < before,
+            "folded skill body must shrink the skills bucket ({before} -> {after})"
+        );
+        assert_skills_bytes_matches(&hm);
+        assert_json_bytes_matches(&hm);
+    }
+
+    // ─── Module B: skill round recall ────────────────────────────────
+
+    #[test]
+    fn find_latest_skill_rounds_dedups_by_skill_newest_first() {
+        let mut hm = HistoryManager::new(100_000);
+        // architecture-design loaded twice (early + late) — only the latest
+        // occurrence may be recalled; debugging loaded once.
+        hm.append(make_skill_load_call("c_arch_1", "architecture-design"));
+        hm.append(make_skill_load_msg("c_arch_1", "architecture-design"));
+        hm.append(make_skill_load_call("c_dbg", "debugging"));
+        hm.append(make_skill_load_msg("c_dbg", "debugging"));
+        let mut late = make_skill_load_call("c_arch_2", "architecture-design");
+        late.content = "LATE architecture body".to_string();
+        hm.append(late);
+        let mut late_res = make_skill_load_msg("c_arch_2", "architecture-design");
+        late_res.content = "LATE architecture body".to_string();
+        hm.append(late_res);
+
+        let rounds = hm.find_latest_skill_rounds();
+        let ids: Vec<String> = rounds
+            .iter()
+            .map(|(a, _)| a.tool_calls.as_ref().unwrap()[0].id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["c_arch_2".to_string(), "c_dbg".to_string()],
+            "one round per distinct skill, newest load first; the superseded \
+             early architecture load must not appear"
+        );
+
+        let (arch_assistant, arch_tool) = &rounds[0];
+        assert_eq!(
+            arch_assistant.tool_calls.as_ref().unwrap().len(),
+            1,
+            "the synthesized assistant must carry ONLY this round's call, so the \
+             round is self-contained and its tool_call_ids stay unique"
+        );
+        assert!(
+            !arch_tool.content.contains("does a thing"),
+            "the superseded early body must not be recalled"
+        );
+        assert!(arch_tool.content.contains("LATE"));
+    }
+
+    #[test]
+    fn find_latest_skill_rounds_splits_parallel_calls_into_separate_rounds() {
+        let mut hm = HistoryManager::new(100_000);
+        // One assistant turn loading two skills in parallel.
+        hm.append(ChatMessage::assistant_with_tools(
+            "loading two skills",
+            vec![
+                make_tool_call(
+                    "c_x",
+                    crate::tools::builtin::load_skill::TOOL_NAME,
+                    r#"{"name":"skill-x"}"#,
+                ),
+                make_tool_call(
+                    "c_y",
+                    crate::tools::builtin::load_skill::TOOL_NAME,
+                    r#"{"name":"skill-y"}"#,
+                ),
+            ],
+        ));
+        hm.append(make_skill_load_msg("c_x", "skill-x"));
+        hm.append(make_skill_load_msg("c_y", "skill-y"));
+
+        let rounds = hm.find_latest_skill_rounds();
+        assert_eq!(
+            rounds.len(),
+            2,
+            "parallel loads are two distinct skills and must become two rounds, \
+             each with its own assistant turn"
+        );
+        for (assistant, _) in &rounds {
+            assert_eq!(
+                assistant.tool_calls.as_ref().unwrap().len(),
+                1,
+                "splitting must not duplicate the sibling call into both rounds"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_recall_budget_zero_selects_nothing() {
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_skill_load_call("c", "a"));
+        hm.append(make_skill_load_msg("c", "a"));
+        let candidates = hm.find_latest_skill_rounds();
+        assert_eq!(candidates.len(), 1, "sanity: one candidate exists");
+        assert!(
+            hm.apply_skill_recall_budget(&candidates, 0).is_empty(),
+            "budget 0 is the caller's explicit 'no room' signal"
+        );
+    }
+
+    #[test]
+    fn skill_recall_budget_floor_keeps_most_recent_even_when_over_budget() {
+        let mut hm = HistoryManager::new(100_000);
+        // newest = huge, older = tiny. A byte/token budget that only fits the
+        // tiny one must STILL take the huge one: the floor is the most recent
+        // load, not a cheaper older one.
+        hm.append(make_skill_load_call("c_old", "older"));
+        hm.append(make_skill_load_msg("c_old", "older"));
+        hm.append(make_skill_load_call("c_new", "newest"));
+        let mut big = make_skill_load_msg("c_new", "newest");
+        big.content = "B".repeat(20_000);
+        hm.append(big);
+
+        let candidates = hm.find_latest_skill_rounds();
+        assert_eq!(candidates.len(), 2);
+        let older_cost = hm.round_token_cost(&candidates[1].0, &candidates[1].1);
+        let newest_cost = hm.round_token_cost(&candidates[0].0, &candidates[0].1);
+        assert!(
+            newest_cost > older_cost,
+            "test setup: newest round must be the expensive one"
+        );
+
+        let chosen = hm.apply_skill_recall_budget(&candidates, older_cost);
+        assert_eq!(
+            chosen.len(),
+            1,
+            "floor: exactly one round even though it alone exceeds the budget"
+        );
+        assert_eq!(
+            chosen[0].0.tool_calls.as_ref().unwrap()[0].id,
+            "c_new",
+            "the floor must be the MOST RECENT load"
+        );
+    }
+
+    #[test]
+    fn skill_recall_budget_stops_at_first_round_that_does_not_fit() {
+        let mut hm = HistoryManager::new(100_000);
+        for i in 0..4 {
+            hm.append(make_skill_load_call(&format!("c{i}"), &format!("s{i}")));
+            hm.append(make_skill_load_msg(&format!("c{i}"), &format!("s{i}")));
+        }
+        let candidates = hm.find_latest_skill_rounds();
+        assert_eq!(candidates.len(), 4);
+        let one = hm.round_token_cost(&candidates[0].0, &candidates[0].1);
+        let chosen = hm.apply_skill_recall_budget(&candidates, one * 2 + one / 2);
+        assert_eq!(
+            chosen.len(),
+            2,
+            "a budget of two-and-a-half rounds must buy two, never a partial round"
+        );
+    }
+
+    #[test]
+    fn skill_recall_reaccumulates_the_usage_counter_after_compaction() {
+        // The scenario the user asked for: a load_skill body discarded by
+        // compaction is spliced back after the marker, and the usage counter
+        // tracks it both ways.
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(make_message(MessageRole::User, "review my code please"));
+        hm.append(make_skill_load_call("c_sk", "code-review"));
+        let mut body = make_skill_load_msg("c_sk", "code-review");
+        body.content = "FULL SKILL BODY ".repeat(50);
+        hm.append(body);
+        assert_skills_bytes_matches(&hm);
+        let before = hm.skills_loaded_bytes();
+        assert!(before > 0, "the loaded skill is counted in context");
+
+        // Snapshot candidates BEFORE the structural change (that is exactly the
+        // order the live compaction path must use).
+        let candidates = hm.find_latest_skill_rounds();
+        assert_eq!(candidates.len(), 1);
+
+        // Compaction drops the middle: the skill round leaves the context.
+        hm.truncate_to(1);
+        assert_eq!(
+            hm.skills_loaded_bytes(),
+            0,
+            "the loaded skill left the context with the discarded round"
+        );
+        assert_skills_bytes_matches(&hm);
+
+        // ...and recall re-injects it right after the marker.
+        append_marker(&mut hm);
+        let (assistant, tool) = candidates[0].clone();
+        let (_, injected) = hm.inject_round_after_marker(assistant, tool);
+        assert!(injected, "the round is absent from the tail, so the splice must happen");
+        assert_eq!(
+            hm.skills_loaded_bytes(),
+            before,
+            "the body is back in context and must be counted again"
+        );
+        assert_skills_bytes_matches(&hm);
+        assert_json_bytes_matches(&hm);
     }
 }

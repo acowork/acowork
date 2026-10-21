@@ -46,6 +46,44 @@ describe("computeContextUsageBreakdown", () => {
     expect(result.reduce((sum, category) => sum + category.percentage, 0)).toBeCloseTo(55.3, 10);
   });
 
+  it("bills load_skill bodies to the skills category, not messages or system", () => {
+    // `skills_loaded` is the byte size of the SKILL.md bodies the model
+    // pulled in via the `load_skill` tool. Those bytes physically live in
+    // history (so `messages` also carries them), but the user-facing
+    // question is "how much of my context is skill content" — which was
+    // invisible before this key existed.
+    //
+    // Guard against the fallback: `categoryForSection` returns "system" for
+    // any unrecognized key, so a missing entry here silently mislabels the
+    // whole bucket instead of failing loudly.
+    const withSkills = computeContextUsageBreakdown(
+      [
+        mockSection("system_prompt", 1_000),
+        mockSection("skill_instructions", 100),
+        mockSection("skills_loaded", 900),
+        mockSection("messages", 8_000),
+      ],
+      100,
+    );
+    const skills = percentagesByKey(withSkills).skills;
+
+    const withoutLoaded = computeContextUsageBreakdown(
+      [
+        mockSection("system_prompt", 1_000),
+        mockSection("skill_instructions", 100),
+        mockSection("messages", 8_000),
+      ],
+      100,
+    );
+    const summaryOnly = percentagesByKey(withoutLoaded).skills;
+
+    expect(skills).toBeGreaterThan(summaryOnly);
+    // skills share of total bytes: 1000 / 10000 → 10% of a 100% billed total.
+    expect(skills).toBeCloseTo(10, 5);
+    // And it must NOT have leaked into `system` (the unknown-key fallback).
+    expect(percentagesByKey(withSkills).system).toBeCloseTo(10, 5);
+  });
+
   it("uses byte sizes as the share denominator (not the per-section token heuristic)", () => {
     // Regression guard: this is the whole reason we switched the helper
     // off `token_estimate`. Section A's per-section `count_text` over-

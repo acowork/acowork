@@ -1,10 +1,14 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentChatView } from "./AgentChatView";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
 const AGENT = "agent-1";
 const SESSION = "chat-1";
+
+// Drill collaborators — the 查看执行 path asserts against these.
+let setModeMock: ReturnType<typeof vi.fn>;
+let openSessionMock: ReturnType<typeof vi.fn>;
 
 // ── chat-session store ────────────────────────────────────────────────
 // `windows` / `sending` / `draft` are read through the hook; the composer
@@ -24,7 +28,9 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
         getState: () => ({
           sendText: vi.fn().mockResolvedValue(undefined),
           loadOlder: vi.fn().mockResolvedValue(undefined),
-          setMode: vi.fn(),
+          loadNewer: vi.fn().mockResolvedValue(undefined),
+          clearLocate: vi.fn(),
+          setMode: (...a: unknown[]) => setModeMock(...(a as [])),
           saveDraft: vi.fn().mockResolvedValue(undefined),
           upload: vi.fn().mockResolvedValue({ id: "a1", filename: "f", mime: "image/png", size: 1 }),
         }),
@@ -37,7 +43,7 @@ vi.mock("../../stores/chatStore", () => ({
   useChatStore: Object.assign(
     (selector: (state: unknown) => unknown) =>
       selector({ availableModels: [], providerAccounts: [] }),
-    { getState: () => ({ openSession: vi.fn().mockResolvedValue(undefined) }) },
+    { getState: () => ({ openSession: (...a: unknown[]) => openSessionMock(...(a as [])) }) },
   ),
 }));
 
@@ -134,6 +140,8 @@ function askCardRow(seq: number): ChatMessageRow {
 describe("AgentChatView unified-card wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setModeMock = vi.fn();
+    openSessionMock = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal(
       "fetch",
       vi.fn().mockRejectedValue(new Error("no network in test")),
@@ -188,5 +196,62 @@ describe("AgentChatView unified-card wiring", () => {
     expect(screen.queryByText("Pick one")).toBeNull();
     // The answer itself is just a normal user bubble.
     expect(screen.getByText("B")).toBeTruthy();
+  });
+
+  describe("查看执行 drill", () => {
+    function agentRow(seq: number, body: string, extra?: Record<string, unknown>): ChatMessageRow {
+      return {
+        seq,
+        ts: seq,
+        from: "agent",
+        kind: "agent_message",
+        body,
+        to: "user",
+        meta: { message_id: `a${seq}`, ...(extra ?? {}) },
+      };
+    }
+
+    beforeEach(() => {
+      windows = {
+        [SESSION]: {
+          older: [],
+          tail: [userRow(1, "ping"), agentRow(2, "pong", { sender_session_id: "exec-7" })],
+          tailLoaded: 2,
+          total: 2,
+          loadingOlder: false,
+        },
+      };
+    });
+
+    it("toasts instead of jumping when the existence probe answers 404", async () => {
+      // A deleted exec session must not cold-open an empty exec tab with the
+      // load-error + retry banner: the drill probes `GET /sessions/{sid}`
+      // first, and a definitive 404 is answered with a toast and no navigation.
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ status: 404 }));
+      const toasts: Event[] = [];
+      const listener = (e: Event) => toasts.push(e);
+      window.addEventListener("acowork:toast", listener);
+      try {
+        render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+        fireEvent.click(screen.getByText("chatView.viewRun"));
+        await waitFor(() => expect(toasts.length).toBe(1));
+        expect(openSessionMock).not.toHaveBeenCalled();
+        expect(setModeMock).not.toHaveBeenCalled();
+        const detail = (toasts[0] as CustomEvent<{ message: string }>).detail;
+        expect(detail.message).toBe("chatView.execSessionGone");
+      } finally {
+        window.removeEventListener("acowork:toast", listener);
+      }
+    });
+
+    it("jumps when the probe is inconclusive (agent stopped / no network)", async () => {
+      // Non-404 outcomes (a rejected fetch here) must fall through to the
+      // existing best-effort open — a probe hiccup never blocks a live session.
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
+      render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+      fireEvent.click(screen.getByText("chatView.viewRun"));
+      await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7"));
+      await waitFor(() => expect(setModeMock).toHaveBeenCalledWith(AGENT, "exec"));
+    });
   });
 });

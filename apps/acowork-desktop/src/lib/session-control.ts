@@ -115,6 +115,31 @@ export function openSession(agentId: string, sessionId: string): Promise<void> {
 }
 
 /**
+ * `GET /api/agents/{id}/sessions/{sid}` — is this session still there?
+ *
+ * Used by the Chat surfaces before a "view run" drill: the message's exec
+ * pointer outlives the session it names (design 27 §5.5.5), and opening a
+ * deleted session cold would strand the user on an empty exec tab whose
+ * every load fails into the retry banner.
+ *
+ * Only a definitive 404 answers `false`. The Runtime returns 404 exactly
+ * when the session has neither persisted meta nor a live snapshot — i.e. it
+ * was deleted — while a stopped/booting agent yields 503s and network
+ * failures yield none, and those are inconclusive: they answer `true` so a
+ * probe hiccup can never block a drill into a session that does exist.
+ */
+export async function sessionExists(agentId: string, sessionId: string): Promise<boolean> {
+  try {
+    const resp = await fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions/${sessionId}`);
+    return resp.status !== 404;
+  } catch {
+    // Inconclusive (no connection / Gateway still booting) — let the jump
+    // proceed on the existing best-effort path.
+    return true;
+  }
+}
+
+/**
  * `POST /api/agents/{id}/sessions/{sid}/close` — graceful close.
  *
  * Idempotent on the Runtime side (an already-closed session is a no-op),

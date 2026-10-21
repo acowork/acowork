@@ -37,12 +37,15 @@ use crate::util::text::TextPreview;
 /// Panel.
 ///
 /// ADR-067: the helper is the **only** place that maps section keys to
-/// their source strings — both this function and the always-on emission
-/// path (`process_llm_response_usage`) MUST agree on the key list, but
-/// only the DevMode path needs the full content. Returns `None` for
-/// keys that don't have a single source string (`tool_definitions` and
-/// `messages` are handled specially by the caller because they need
-/// additional JSON / SHA-256 work).
+/// their source strings. The always-on emission path
+/// (`process_llm_response_usage`) is free to carry *byte-size-only* keys
+/// that have no single source string at all — `skills_loaded` is the first,
+/// and a key added there without a content arm here is deliberately dropped
+/// from the Debug Panel rather than warned about. Every other key MUST
+/// agree across the two paths, because only the DevMode path needs the full
+/// content. Returns `None` for keys that don't have a single source string
+/// (`tool_definitions` and `messages` are handled specially by the caller
+/// because they need additional JSON / SHA-256 work).
 fn section_text_from_builder(key: &str, builder: &ContextBuilder) -> Option<String> {
     match key {
         "system_prompt" => Some(builder.system_prompt().to_string()),
@@ -61,6 +64,20 @@ fn section_text_from_builder(key: &str, builder: &ContextBuilder) -> Option<Stri
                 .unwrap_or_else(|| crate::agent::context::detect_environment_text().to_string()),
         ),
         "workspace_prompt_file" => builder.workspace_prompt_file().map(|s| s.to_string()),
+        // Byte-size-only section: the caller handles these specially.
+        //
+        // `skills_loaded` is deliberately NOT re-materialized. Its content
+        // is N `load_skill` Tool results scattered through history, not one
+        // string, so there is nothing to render here; the Debug Panel keeps
+        // showing those bodies where they actually live — inside the
+        // lazily-loaded `messages` section. The size still ships on the
+        // always-on usage path, which reads it straight off
+        // `HistoryManager`.
+        //
+        // This arm exists to keep the key out of the `other =>` branch
+        // below, which warns. Without it every context build with a loaded
+        // skill logs a spurious "unknown section key".
+        "skills_loaded" => None,
         // Caller handles these specially.
         "tool_definitions" | "messages" => None,
         other => {

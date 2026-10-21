@@ -57,6 +57,8 @@ import {
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
+import { sessionExists } from "../../lib/session-control";
+import { showToast } from "../common/ToastProvider";
 import { ChatHistoryDialog } from "./ChatHistoryDialog";
 import { OutlineChatHistoryIcon } from "../common/ChatHistoryIcon";
 import { useLocateMessage } from "../../lib/useLocateMessage";
@@ -756,12 +758,19 @@ export function GroupChatPanel() {
   // Jump to the exec session behind a group agent reply: select that agent
   // (closes the group in the middle pane, same as picking it in the sidebar),
   // cold-load the exec tab, flip the surface to exec. Mirrors AgentChatView.
+  // A deleted exec session is answered with a toast and no navigation — the
+  // same probe AgentChatView.jumpToExec runs (the message's exec pointer
+  // outlives the session it names, §5.5.5).
   const jumpToExec = useCallback(async (agentId: string, execSid: string) => {
     if (!agentId || !execSid) return;
+    if (!(await sessionExists(agentId, execSid))) {
+      showToast({ type: "info", message: t("chatView.execSessionGone") });
+      return;
+    }
     useAgentStore.getState().selectAgent(agentId);
     await useChatStore.getState().openSession(agentId, execSid);
     useChatSessionStore.getState().setMode(agentId, "exec");
-  }, []);
+  }, [t]);
 
   if (!activeGroupId) return null;
 

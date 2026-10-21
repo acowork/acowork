@@ -1833,7 +1833,7 @@ impl SessionManager {
         if let Some(outcome) = restored {
             session_state
                 .history_mut()
-                .load_restored(outcome.messages, outcome.last_injected_todo_call_id);
+                .load_restored(outcome.messages, outcome.injected_round_call_ids);
 
             // Restore the token-counting scene from meta: the last
             // API-counted input (authoritative anchor for the resumed

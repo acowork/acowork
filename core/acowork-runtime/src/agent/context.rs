@@ -542,7 +542,7 @@ impl ContextBuilder {
     /// sent to the LLM, so re-pushing it at the tail is a pure duplicate
     /// (extra tokens + makes the model see the same user turn twice). The
     /// only legitimate "copy from history to tail" case is compaction's
-    /// `inject_todo_write_round_after_marker`, which restores a round the
+    /// `inject_round_after_marker`, which restores a round the
     /// summary replaced — that is a recovery, not a duplicate, and lives
     /// in `loop_context.rs::compact_history_if_needed`, independent of
     /// `build`.
@@ -645,7 +645,7 @@ impl ContextBuilder {
         // would shift position every turn as Block B grows, never hitting
         // the prompt cache. Todos now live in Block B (real `todo_write`
         // tool results in history) and survive compaction via the
-        // `inject_todo_write_round_after_marker` post-step.
+        // `inject_round_after_marker` post-step.
 
         // ADR-060 §5.5 erratum: the former "Block D" (a caller-passed
         // duplicate of the current user message pushed at the tail) is
@@ -1649,6 +1649,63 @@ mod tests {
         assert!(lookup(&sections, "messages") > 0);
     }
 
+    #[test]
+    fn compute_section_sizes_reports_skill_bodies_separately_from_the_summary() {
+        // The attribution gap this section exists to close: a `load_skill`
+        // result is a Tool message, so before `skills_loaded` its bytes were
+        // billed to *messages* and the popover's *skills* category stayed
+        // flat no matter how much SKILL.md the model pulled in.
+        use acowork_core::providers::traits::ChatMessage;
+        let mut history = HistoryManager::new(10_000);
+        history.append(ChatMessage::user("review this PR"));
+
+        let mut load = ChatMessage::tool("tc_1", "{\"instructions\":\"step 1\nstep 2\"}");
+        load.name = Some("load_skill".to_string());
+        let load_json_len = serde_json::to_string(&load).unwrap().len() as u64;
+        history.append(load);
+
+        let mut read = ChatMessage::tool("tc_2", "x".repeat(900));
+        read.name = Some("file_read".to_string());
+        history.append(read);
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        // Progressive summary present at the same time — the two keys must
+        // stay separate and both non-zero.
+        builder.set_skill_summary("## Available Skills\n- **code-review**: review".to_string());
+        let mcp_tools: Vec<serde_json::Value> = vec![];
+
+        let sections = compute_section_sizes(&builder, &history, &mcp_tools, "gpt-4");
+
+        assert_eq!(
+            lookup(&sections, "skills_loaded"),
+            load_json_len,
+            "only the load_skill result counts, not the file_read one"
+        );
+        assert!(lookup(&sections, "skill_instructions") > 0);
+        assert!(
+            lookup(&sections, "messages") > load_json_len,
+            "the body is still billed to messages too — skills_loaded is an \
+             attribution view, not a re-partition"
+        );
+    }
+
+    #[test]
+    fn compute_section_sizes_omits_skills_loaded_when_nothing_was_pulled() {
+        // Matches the convention of every other optional section: absent,
+        // not zero, so the frontend's skills bucket doesn't grow a phantom
+        // sub-row in the common case.
+        let mut history = HistoryManager::new(10_000);
+        history.append(ChatMessage::user("hi"));
+        let builder = ContextBuilder::new("Kernel".to_string());
+        let mcp_tools: Vec<serde_json::Value> = vec![];
+
+        let sections = compute_section_sizes(&builder, &history, &mcp_tools, "gpt-4");
+        assert!(
+            !sections.iter().any(|s| s.key == "skills_loaded"),
+            "no load_skill in history must emit no skills_loaded section"
+        );
+    }
+
     // ── ADR-094: skills summary vs per-turn skill are separate slots ──
     //
     // They used to share one `ContextBuilder` field, so the per-turn
@@ -1923,6 +1980,27 @@ pub fn compute_section_sizes(
         out.push(ContextUsageSection {
             key: "skill_instructions".to_string(),
             size_bytes: skills.len() as u64,
+        });
+    }
+
+    // 2.6b Skill bodies pulled in by the `load_skill` tool this session.
+    //
+    // Separate key rather than folded into `skill_instructions`: the two
+    // have different lifecycles (system-prompt section vs. Tool messages in
+    // history) and the Debug panel can only render a section whose content
+    // it can re-materialize as one string. The frontend groups both keys
+    // into the *skills* category (`contextUsageBreakdown.ts`
+    // SKILL_SECTION_KEYS), so the user-visible number is the sum.
+    //
+    // O(1): reads the incremental counter maintained by `HistoryManager`.
+    // This function runs on every LLM request, so it MUST NOT scan history
+    // — see the accounting contract on
+    // [`HistoryManager::skills_loaded_bytes`].
+    let skills_loaded = history.skills_loaded_bytes() as u64;
+    if skills_loaded > 0 {
+        out.push(ContextUsageSection {
+            key: "skills_loaded".to_string(),
+            size_bytes: skills_loaded,
         });
     }
 

@@ -40,7 +40,13 @@ const CATEGORY_ORDER: ContextUsageCategoryKey[] = [
   "skills",
 ];
 const TOOL_SECTION_KEYS = new Set(["tool_definitions", "tools"]);
-const SKILL_SECTION_KEYS = new Set(["skill_instructions", "skills"]);
+// `skill_instructions` = the Progressive-mode summary (+ any skill the user
+// explicitly picked for this turn) injected into the system prompt.
+// `skills_loaded` = full SKILL.md bodies the model pulled via the
+// `load_skill` tool; they arrive as Tool messages in history but belong to
+// the skills category, not messages — without this key
+// `categoryForSection` would silently fall through to "system".
+const SKILL_SECTION_KEYS = new Set(["skill_instructions", "skills", "skills_loaded"]);
 const MESSAGE_SECTION_KEYS = new Set(["messages", "message_history", "todo_context"]);
 const CONNECTOR_SECTION_KEYS = new Set([
   "connectors",

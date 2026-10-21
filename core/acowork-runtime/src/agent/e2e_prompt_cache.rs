@@ -845,7 +845,7 @@ async fn compression_idempotent_across_multiple_compacts() {
     assert_block_v2_layout(msgs, "Fourth turn");
     // ADR-060 v2 §5.4 idempotency trade-off: after the SECOND compression
     // (level 5 strips both the prior marker AND our prior splice), the
-    // `last_injected_todo_call_id` gate refuses re-injecting the same
+    // `injected_round_call_ids` gate refuses re-injecting the same
     // round. Block B therefore does NOT carry a todo_write tool result on
     // this turn — the JSONL still holds the synthetic row from the FIRST
     // injection, and the restorer rebuilds Block B from JSONL on process

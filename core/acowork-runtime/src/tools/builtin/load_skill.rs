@@ -43,6 +43,14 @@ use serde_json::Value;
 
 use crate::skills::parser::SkillRegistry;
 
+/// Canonical tool name. Single source of truth: the spec below, the
+/// `name` stamped on the resulting Tool message in history, and the
+/// history-side byte accounting
+/// ([`crate::agent::history::HistoryManager::skills_loaded_bytes`]) all
+/// read this constant. A literal copy at any of those sites can drift
+/// silently and would zero out the usage section without any error.
+pub const TOOL_NAME: &str = "load_skill";
+
 /// `load_skill` builtin tool.
 ///
 /// Loads the full Markdown body of a single skill by name, on LLM
@@ -67,7 +75,7 @@ impl LoadSkillTool {
 
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
-            name: "load_skill".to_string(),
+            name: TOOL_NAME.to_string(),
             description: "Load the full instructions for a named skill. \
                 Use this AFTER the system prompt summary (in Progressive skill mode) \
                 has identified a relevant skill: the summary only carries the name + \

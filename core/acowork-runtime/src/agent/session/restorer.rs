@@ -62,16 +62,21 @@ pub struct RestoreOutcome {
     /// Number of JSONL entries that were skipped (corrupt, orphaned tool
     /// results, pre-compaction noise, or `thought` filter).
     pub skipped_entry_count: usize,
-    /// ADR-060 v2 §5.4: the `tool_call_id` of the most recent *synthetic*
-    /// todo_write round found in the JSONL (entry ids prefixed `inject-call-`
-    /// / `inject-result-`). `HistoryManager` re-derives
-    /// `last_injected_todo_call_id` from this on restart so a subsequent
-    /// compression skips re-injecting the same round (idempotency across
-    /// process restarts, not just within one process).
+    /// ADR-060 v2 §5.4: the `tool_call_id`s of every *synthetic* round found
+    /// in the JSONL (entry ids prefixed `inject-call-` / `inject-result-`).
+    /// `HistoryManager` re-derives [`HistoryManager::injected_round_call_ids`]
+    /// from this on restart so a subsequent compression skips re-injecting a
+    /// round it already persisted (idempotency across process restarts, not
+    /// just within one process).
     ///
-    /// `None` when the JSONL holds no injected round (fresh session, or a
-    /// session whose only todo_write rounds are genuine user invocations).
-    pub last_injected_todo_call_id: Option<String>,
+    /// A set rather than the former single `Option<String>`: skill-body
+    /// recall persists one round per distinct skill, so a session can legitimately
+    /// hold several injected rounds at once and each needs its own gate.
+    ///
+    /// Empty when the JSONL holds no injected round (fresh session, or a
+    /// session whose only todo_write / load_skill rounds are genuine
+    /// invocations).
+    pub injected_round_call_ids: std::collections::HashSet<String>,
 }
 
 /// Errors that abort restoration (caller should fall back to empty history).
@@ -268,14 +273,15 @@ pub fn restore_history_from_jsonl(
     let mut messages: Vec<ChatMessage> = Vec::new();
     let mut replayed = 0usize;
     let mut pending_reasoning: Option<String> = None;
-    // ADR-060 v2 §5.4: most recent *synthetic* (injected) todo_write round's
-    // tool_call_id seen in the JSONL. Entry ids for injected rows are
-    // prefixed `inject-call-` / `inject-result-` by the compact-and-inject
-    // path (loop_context.rs), so we can distinguish them from genuine user
-    // todo_write rounds — HistoryManager must only remember injected ids for
-    // cross-restart idempotency; treating a genuine round as already-injected
-    // would wrongly suppress its injection after the next compression.
-    let mut last_injected_todo_call_id: Option<String> = None;
+    // ADR-060 v2 §5.4: tool_call_ids of *synthetic* (injected) rounds seen in
+    // the JSONL. Entry ids for injected rows are prefixed `inject-call-` /
+    // `inject-result-` by the compact-and-inject path (loop_context.rs), so we
+    // can distinguish them from genuine user todo_write / load_skill rounds —
+    // HistoryManager must only remember injected ids for cross-restart
+    // idempotency; treating a genuine round as already-injected would wrongly
+    // suppress its injection after the next compression.
+    let mut injected_round_call_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for (entry_idx, entry) in working.iter().enumerate() {
         // Compaction event → synthetic assistant marker (only honored once;
@@ -400,11 +406,11 @@ pub fn restore_history_from_jsonl(
                     continue;
                 }
 
-                // ADR-060 v2 §5.4: remember the most recent injected round's
+                // ADR-060 v2 §5.4: remember every injected round's
                 // tool_call_id so HistoryManager can restore its
-                // `last_injected_todo_call_id` across process restarts.
+                // `injected_round_call_ids` across process restarts.
                 if entry.id.starts_with("inject-call-") {
-                    last_injected_todo_call_id = Some(tool_call_id.clone());
+                    injected_round_call_ids.insert(tool_call_id.clone());
                 }
 
                 let new_call = ToolCall {
@@ -498,7 +504,7 @@ pub fn restore_history_from_jsonl(
         had_compaction: last_compaction_idx.is_some(),
         replayed_entry_count: replayed,
         skipped_entry_count: skipped,
-        last_injected_todo_call_id,
+        injected_round_call_ids,
     })
 }
 
@@ -1176,13 +1182,18 @@ mod tests {
     }
 
     #[test]
-    fn restore_recovers_last_injected_todo_call_id() {
-        // ADR-060 v2 §5.4 cross-restart idempotency: a synthetic todo_write
-        // round persisted by the compact-and-inject path (entry ids prefixed
+    fn restore_recovers_all_injected_round_call_ids() {
+        // ADR-060 v2 §5.4 cross-restart idempotency: a synthetic round
+        // persisted by the compact-and-inject path (entry ids prefixed
         // `inject-call-` / `inject-result-`) must surface its tool_call_id so
-        // HistoryManager can restore `last_injected_todo_call_id`. Without
+        // HistoryManager can restore `injected_round_call_ids`. Without
         // it, the next compression after restart would re-inject the same
         // round and accumulate duplicate rows.
+        //
+        // Two injected rounds now (todo_write + load_skill): skill recall
+        // persists one round per distinct skill, so the restore path must
+        // collect *all* of them, not just the most recent — the former
+        // single-slot field could only remember one.
         let work = temp_workdir("inject-id");
         let session_id = "sess-inject-id";
         let (session, _config_rx, _state_rx) = ConversationSession::new(
@@ -1236,6 +1247,29 @@ mod tests {
             Some("inject-result-22222222-2222-2222-2222-222222222222".to_string()),
         );
 
+        // A second injected round, this one a preserved load_skill body —
+        // the case the old single-slot field silently forgot.
+        let sk_call_meta = serde_json::json!({
+            "tool_name": "load_skill",
+            "tool_call_id": "toolu_inj_sk9",
+        });
+        session.append_message_with_id(
+            "tool_call",
+            r#"{"name":"debugging"}"#,
+            Some(sk_call_meta),
+            Some("inject-call-55555555-5555-5555-5555-555555555555".to_string()),
+        );
+        let sk_result_meta = serde_json::json!({
+            "tool_call_id": "toolu_inj_sk9",
+            "tool_name": "load_skill",
+        });
+        session.append_message_with_id(
+            "tool_result",
+            r#"{"name":"debugging","instructions":"1. reproduce 2. isolate"}"#,
+            Some(sk_result_meta),
+            Some("inject-result-66666666-6666-6666-6666-666666666666".to_string()),
+        );
+
         // A later, genuine todo_write round must NOT be mistaken for an
         // injected one.
         let real_call_meta = serde_json::json!({
@@ -1265,12 +1299,20 @@ mod tests {
             .join(format!("{}.jsonl", session_id));
         let outcome = restore_history_from_jsonl(&path, None).unwrap();
 
-        // The most recent *synthetic* injected round is `toolu_inj_42`; the
-        // later genuine `toolu_real_1` round must not clobber it.
+        // BOTH synthetic rounds are collected; the later genuine
+        // `toolu_real_1` round must not be mistaken for an injected one.
+        let expected: std::collections::HashSet<String> =
+            ["toolu_inj_42".to_string(), "toolu_inj_sk9".to_string()]
+                .into_iter()
+                .collect();
         assert_eq!(
-            outcome.last_injected_todo_call_id.as_deref(),
-            Some("toolu_inj_42"),
-            "restorer must surface the injected round's tool_call_id, ignoring later genuine rounds"
+            outcome.injected_round_call_ids, expected,
+            "restorer must surface every injected round's tool_call_id, ignoring genuine rounds"
+        );
+        assert!(
+            !outcome.injected_round_call_ids.contains("toolu_real_1"),
+            "a genuine round must never enter the idempotency set — it would \
+             suppress its own injection after the next compression"
         );
         // Sanity: both todo rounds are present in the restored messages.
         let tool_ids: Vec<_> = outcome

@@ -57,6 +57,8 @@ import { useLocateMessage } from "../../lib/useLocateMessage";
 import { useChatSessionStore, projectInFlight, projectLiveTurn, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
+import { sessionExists } from "../../lib/session-control";
+import { showToast } from "../common/ToastProvider";
 import { useAuthStore } from "../../stores/authStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { getGatewayUrl } from "../../lib/config";
@@ -575,8 +577,15 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // drill the in-flight status card does, but for a resolved turn (finished,
   // failed or empty). openSession cold-loads the exec tab; the pointer stays
   // valid after rotation because the old JSONL remains in Agent home (§5.5.5).
+  // A DELETED session would otherwise cold-open as an empty exec tab whose
+  // every load fails into the retry banner, so probe existence first: a
+  // definitive 404 is answered with a toast and no navigation.
   const jumpToExec = async (execSid: string) => {
     if (!execSid) return;
+    if (!(await sessionExists(agentId, execSid))) {
+      showToast({ type: "info", message: t("chatView.execSessionGone") });
+      return;
+    }
     await useChatStore.getState().openSession(agentId, execSid);
     setMode(agentId, "exec");
   };
