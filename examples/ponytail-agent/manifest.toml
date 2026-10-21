@@ -1,7 +1,7 @@
 # Senior Software Engineer Agent
 # A multi-skilled senior engineer for code review, architecture, debugging, refactoring, testing, and documentation.
 
-agent_id = "com.acowork.ponytail"
+agent_id = "github.ponytail"
 version = "1.0.0"
 name = "Ponytail"
 display_name = "Ponytail"
