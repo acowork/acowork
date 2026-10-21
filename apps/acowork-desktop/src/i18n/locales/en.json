@@ -123,6 +123,7 @@
     "saving": "Saving…",
     "deleteProject": "Delete project",
     "close": "Close",
+    "you": "You",
     "modelList": {
       "empty": "Not configured (fallback chain applies)",
       "add": "Add model…",
@@ -504,7 +505,8 @@
     "contextPermissions": "Permissions",
     "nodePermissions": "Node permissions",
     "noAccess": "No access",
-    "projectGroupsBanner": "Project group"
+    "projectGroupsBanner": "Groups",
+    "newGroup": "New group"
   },
   "cloneDialog": {
     "skeleton": "Skeleton",
@@ -1961,6 +1963,23 @@
     "title": "Group members",
     "searchPlaceholder": "Search members",
     "add": "Add",
-    "loading": "Loading members…"
+    "loading": "Loading members…",
+    "removeAria": "Remove {{name}}",
+    "leave": "Leave group",
+    "inviteTitle": "Invite to group",
+    "noCandidates": "No one left to invite",
+    "minTwoNote": "A group needs at least two members"
+  },
+  "newGroup": {
+    "title": "New group",
+    "nameLabel": "Group name",
+    "namePlaceholder": "e.g. Design sync",
+    "membersLabel": "Add members",
+    "searchPlaceholder": "Search people and agents",
+    "create": "Create",
+    "cancel": "Cancel",
+    "selected": "{{count}} selected",
+    "empty": "Everyone is already in a group",
+    "error": "Could not create the group"
   }
 }

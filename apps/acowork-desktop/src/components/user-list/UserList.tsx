@@ -7,13 +7,16 @@
  * not shown.
  *
  * Selection semantics:
- * - Single click (any role): opens a 1:1 inbox thread with that peer via
- *   `useUserChatStore.openChat`. The middle panel renders
- *   [InboxPanel](../../views/InboxPanel.tsx) once `activePeerId` is set.
+ * - Single click (any role): opens / focuses the 1:1 DM session with that
+ *   peer via `useProjectGroupStore.openDm`, which resolves (idempotently
+ *   creating) the `user_user` pair through `GET /default?kind=user_user` and
+ *   sets `activeGroupId`. The middle panel renders
+ *   [GroupChatPanel](../chat/GroupChatPanel.tsx) — a DM is the smallest group
+ *   (two people), so it shares the group surface, pipeline, and history search.
  * - Admin right-click: opens the management menu (reset password / role /
  *   disable / view-as-user). "View as user" is the new home for the
  *   `viewAsUserId` toggle that previously lived on single-click; moving it
- *   keeps the inbox row click a uniform "open conversation" gesture.
+ *   keeps the row click a uniform "open conversation" gesture.
  *
  * Row visuals mirror `AgentList`'s agent row (h-14, avatar 40, two-line
  * `display_name / last_message_preview`, accent active state) so the two
@@ -24,7 +27,7 @@ import { useCallback, useEffect, useState, type MouseEvent, forwardRef, useImper
 import { listen } from "@tauri-apps/api/event";
 import { ChevronRight, Eye, KeyRound, MessageSquare, ShieldCheck, ShieldOff, Users, UserX, X } from "lucide-react";
 import { useAuthStore } from "../../stores/authStore";
-import { useUserChatStore } from "../../stores/userChatStore";
+import { useProjectGroupStore, dmPeerOf } from "../../stores/projectGroupStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -192,15 +195,15 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
       ? rows.find((a) => a.user_id === viewAsUserId)?.display_name ?? viewAsUserId
       : null;
 
-  // Single-click gesture: open / focus the inbox thread with this peer.
+  // Single-click gesture: open / focus the 1:1 DM with this peer.
   const openThread = (account: UserAccount) => {
-    // Clear the active agent selection: AppLayout renders <ChatPanel /> when
-    // `selectedAgentId` is set and falls through to <InboxPanel /> only when
-    // it is null. Without this clear, opening a 1:1 thread while an agent
-    // is selected would set `activePeerId` underneath the unchanged ChatPanel
-    // — the user sees "nothing happens" even though the store did the work.
+    // Clear the active agent selection: AppLayout renders <AgentPage /> when
+    // `selectedAgentId` is set and falls through to <GroupChatPanel /> only
+    // when it is null. Without this clear, opening a DM while an agent is
+    // selected would set `activeGroupId` underneath the unchanged AgentPage —
+    // the user sees "nothing happens" even though the store did the work.
     useAgentStore.getState().selectAgent(null);
-    void useUserChatStore.getState().openChat(account.user_id, account.display_name);
+    void useProjectGroupStore.getState().openDm(account.user_id);
   };
 
   // Admin-only: toggle the "view sessions as this user" lens.
@@ -465,12 +468,17 @@ function UserRow({
   onContextMenu: (e: MouseEvent) => void;
 }) {
   const { t } = useTranslation();
-  const activePeerId = useUserChatStore((s) => s.activePeerId);
-  const chatPreview = useUserChatStore((s) =>
-    s.chats.find((c) => c.peer_user_id === account.user_id),
+  const me = useAuthStore((s) => s.account?.user_id);
+  const activeGroupId = useProjectGroupStore((s) => s.activeGroupId);
+  // This peer's DM session, located by peer id (the participant that is not
+  // `me`). Carries the unread badge + preview line the old inbox read from
+  // `userChatStore.chats` — now it comes straight off the `user_user` chat
+  // session, so the sidebar row and the middle pane share one source of truth.
+  const dm = useProjectGroupStore((s) =>
+    s.dms.find((d) => dmPeerOf(d, me ?? "") === account.user_id),
   );
-  const active = account.user_id === activePeerId;
-  const unread = chatPreview?.unread_count ?? 0;
+  const active = dm != null && dm.session_id === activeGroupId;
+  const unread = (me ? dm?.unread?.[me] : 0) ?? 0;
   // Operator-precedence trap: written as one expression below, this reads as
   //   (preview ?? roleAdmin-flag) ? "admin" : "user"
   // — i.e. ANY non-empty preview string (truthy) flips every row to
@@ -478,7 +486,7 @@ function UserRow({
   // parenthesise the role-based default so it only applies when `??` falls
   // through (null / undefined preview), the way the surrounding code reads.
   const preview =
-    chatPreview?.last_message_preview ??
+    dm?.last_message_preview ??
     (account.role === "admin" ? t("userList.roleAdmin") : t("userList.roleUser"));
 
   return (

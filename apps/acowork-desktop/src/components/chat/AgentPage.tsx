@@ -19,12 +19,13 @@
 // renders the pre-Wave-5 ChatPanel — its own tab bar, its own shell —
 // without a feature flag.
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { ChatPanel } from "./ChatPanel";
 import { SessionTabBar } from "./SessionTabBar";
 import { AgentChatView } from "./AgentChatView";
+import { ChatHistoryDialog } from "./ChatHistoryDialog";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatSessionStore } from "../../stores/chatSessionStore";
 
@@ -40,6 +41,10 @@ export function AgentPage() {
     selectedAgentId ? s.byAgent[selectedAgentId] : undefined,
   );
   const alive = !!agentMeta?.alive;
+  // In-conversation history dialog (ADR-097): state lives here so the trigger
+  // can render in `SessionTabBar`'s title cluster while `AgentChatView` keeps
+  // the locate/scroll effect. Declared before the early returns (rules of hooks).
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => {
     // Resolve the Chat session only once the agent runs. While it is
@@ -97,12 +102,22 @@ export function AgentPage() {
           active: st.mode === "chat",
           onSelect: () => useChatSessionStore.getState().setMode(selectedAgentId, "chat"),
         }}
+        onOpenChatHistory={() => setHistoryOpen(true)}
       />
       {st.mode === "chat" ? (
         <AgentChatView agentId={selectedAgentId} sessionId={chatSessionId} />
       ) : (
         <ChatPanel embedded />
       )}
+      {/* In-conversation history dialog (ADR-097). Owned at the page level so
+          its trigger can live in `SessionTabBar`'s title cluster while the
+          locate effect stays in `AgentChatView` (which subscribes to the
+          window's `pendingLocateSeq`). Only meaningful on the Chat surface. */}
+      <ChatHistoryDialog
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        chatSessionId={chatSessionId}
+      />
     </div>
   );
 }

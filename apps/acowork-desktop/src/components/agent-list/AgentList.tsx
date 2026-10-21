@@ -2,7 +2,6 @@ import { useEffect, useState, useRef, useMemo, useCallback, Fragment } from "rea
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
-import { useUserChatStore } from "../../stores/userChatStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
@@ -26,6 +25,7 @@ import { fetchNodes } from "../../lib/gateway-api";
 import { partitionAgentsByNode, nodeDisplayName } from "./partitionAgentsByNode";
 import { UserList, type UserListHandle } from "../user-list/UserList";
 import { GroupAvatarStack } from "../chat/GroupAvatarStack";
+import { NewGroupDialog } from "../chat/NewGroupDialog";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { useAuthStore } from "../../stores/authStore";
 import {
@@ -564,6 +564,7 @@ export function AgentList({ width }: AgentListProps) {
   const selectGroup = useProjectGroupStore((s) => s.selectGroup);
   const selfUserId = useAuthStore((s) => s.account?.user_id ?? "");
   const [groupsCollapsed, setGroupsCollapsed] = useState(false);
+  const [newGroupOpen, setNewGroupOpen] = useState(false);
   useEffect(() => {
     void fetchGroups();
   }, [fetchGroups]);
@@ -864,10 +865,12 @@ export function AgentList({ width }: AgentListProps) {
             </div>
           )}
 
-        {/* Project group chats — one row per project's group chat
-            (design 27 §4.4). Between the agent groups and the account
-            group: agents are things you run, groups are places you talk. */}
-        {visibleGroupsChats.length > 0 && (
+        {/* Project group chats + user-created `user_group`s (design 27 §4.4,
+            ADR-098 P1): one row per group session, plus a create affordance.
+            Shown whenever an account is present (multi-user) — including when
+            the list is empty, so the first group can be created. Local mode
+            (no account) hides the whole section. */}
+        {selfUserId && (
           <div data-testid="project-group-section">
             <div className="flex h-6 items-center border-y border-nav-divider/40 bg-panel-block dark:border-zinc-600/40">
               <button
@@ -885,6 +888,19 @@ export function AgentList({ width }: AgentListProps) {
                 <span className="truncate">{t("agentList.projectGroupsBanner")}</span>
                 <span className="ml-auto text-xs font-normal opacity-60">{visibleGroupsChats.length}</span>
               </button>
+              {/* Create a user-defined group (P1). A sibling of the collapse
+                  toggle (a button cannot nest inside one); opens the New-group
+                  dialog. Kept visible even when the list is empty. */}
+              <button
+                type="button"
+                onClick={() => setNewGroupOpen(true)}
+                aria-label={t("agentList.newGroup")}
+                title={t("agentList.newGroup")}
+                data-testid="new-group-button"
+                className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
+              >
+                <Plus className="h-3.5 w-3.5" aria-hidden />
+              </button>
             </div>
             {!groupsCollapsed && visibleGroupsChats.map((g, index) => {
               const unread = selfUserId ? (g.unread?.[selfUserId] ?? 0) : 0;
@@ -897,9 +913,10 @@ export function AgentList({ width }: AgentListProps) {
                   title={g.title}
                   onClick={() => {
                     // Middle-pane exclusivity (see projectGroupStore docs):
-                    // drop any agent selection and inbox peer first.
+                    // drop any agent selection first — `activeGroupId` is the
+                    // single active chat session (group or DM), so selecting a
+                    // group replaces any open DM underneath it.
                     if (selectedAgentId) selectAgent(null);
-                    useUserChatStore.getState().closeChat();
                     selectGroup(g.session_id);
                   }}
                   className={cn(
@@ -959,6 +976,8 @@ export function AgentList({ width }: AgentListProps) {
             })}
           </div>
         )}
+
+        {newGroupOpen && <NewGroupDialog onClose={() => setNewGroupOpen(false)} />}
 
         {/* ADR-076 §决策 7: account group, below the agent groups. */}
         <UserList ref={userListRef} />

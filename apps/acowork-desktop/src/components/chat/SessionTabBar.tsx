@@ -13,6 +13,7 @@ import {
 import { Plus, Clock, X, Trash2, ChevronLeft, ChevronRight, Search, TriangleAlert, XSquare, Pencil } from "lucide-react";
 import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
 import { OutlineBrainIcon, FilledBrainIcon } from "../common/BrainIcon";
+import { OutlineChatHistoryIcon } from "../common/ChatHistoryIcon";
 import { StyledInput } from "../common/StyledInput";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
@@ -387,9 +388,15 @@ interface SessionTabBarProps {
     active: boolean;
     onSelect: () => void;
   };
+  /** Opens the in-conversation history dialog (ADR-097) for the pair's Chat
+   *  session. Rendered as a tile just LEFT of the `+` button, shown only while
+   *  the Chat tab is the active surface — the entry targets the durable Chat
+   *  transcript, so it is meaningless over an execution session. When omitted
+   *  (local mode / chat surface unreachable) the bar renders no history tile. */
+  onOpenChatHistory?: () => void;
 }
 
-export function SessionTabBar({ agentId, chatTab }: SessionTabBarProps) {
+export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTabBarProps) {
   const { t } = useTranslation();
   const agent = useChatStore((s) => s.agentStates[agentId]);
   const openSessionIds = agent?.openSessionIds ?? [];
@@ -839,6 +846,24 @@ export function SessionTabBar({ agentId, chatTab }: SessionTabBarProps) {
           🕐 button only 6px from the right edge and left the two +/🕐
           buttons visually closer than their FileEditorPanel cousins. */}
       <div className="flex items-center gap-1 pr-2 shrink-0">
+        {/* Chat-history entry (ADR-097) — sits LEFT of the `+` button and only
+            while the Chat surface is active. Wraps in the same `relative
+            inline-flex` + `h-6 w-6` geometry as the `+`/🕐 siblings so all
+            three tiles share one baseline. */}
+        {chatTab?.active && onOpenChatHistory && (
+          <div className="relative inline-flex">
+            <Tooltip content={t("chatHistory.title")} variant="plain">
+              <button
+                onClick={onOpenChatHistory}
+                aria-label={t("chatHistory.title")}
+                className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+              >
+                <OutlineChatHistoryIcon size={14} />
+              </button>
+            </Tooltip>
+          </div>
+        )}
+
         {/* New session button. Wrapped in `relative inline-flex` to exactly
             match the +/🕐 siblings below — without the parity, the un-wrapped
             Tooltip wrapper (itself `relative inline-flex`) sits at a slightly

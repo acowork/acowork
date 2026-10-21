@@ -25,7 +25,7 @@
 
 import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Send, Paperclip, Loader2, History, ChevronDown } from "lucide-react";
+import { Send, Paperclip, Loader2, ChevronDown } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -58,6 +58,7 @@ import {
 } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { ChatHistoryDialog } from "./ChatHistoryDialog";
+import { OutlineChatHistoryIcon } from "../common/ChatHistoryIcon";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 
 // Same markdown shell as AgentChatView's bubbles (kept local on purpose:
@@ -461,8 +462,13 @@ export function applyMention(
 export function GroupChatPanel() {
   const { t } = useTranslation();
   const activeGroupId = useProjectGroupStore((s) => s.activeGroupId);
+  // The active session may be a project group OR a 1:1 `user_user` DM — both
+  // live in the shared `chat_sessions` store and render through this surface.
   const group = useProjectGroupStore(
-    (s) => s.groups.find((g) => g.session_id === s.activeGroupId) ?? null,
+    (s) =>
+      s.groups.find((g) => g.session_id === s.activeGroupId) ??
+      s.dms.find((d) => d.session_id === s.activeGroupId) ??
+      null,
   );
   const me = useAuthStore((s) => s.account?.user_id ?? "");
   const win = useChatSessionStore(
@@ -563,8 +569,14 @@ export function GroupChatPanel() {
   // @-ing a person is a mention that triggers nothing — but both are pickable,
   // so the picker shows every participant, not just agents. The fan-out
   // targets (`resolveMentions`) still run over `agentParticipants` alone.
+  //
+  // A `user_user` DM opts out entirely: with two people and no agent there is
+  // nothing to wake and the only @-able target is the peer themselves, so an
+  // autocomplete popup would be pure noise. Returning an empty candidate set
+  // hides the picker and makes every send archive-only (see `submit`).
   const mentionParticipants = useMemo(() => {
     if (!group?.participants) return [];
+    if (group.kind === "user_user") return [];
     return group.participants
       .filter((p) => p.id !== me)
       .map((p) => {
@@ -748,8 +760,15 @@ export function GroupChatPanel() {
 
   if (!activeGroupId) return null;
 
-  const title = group?.title || activeGroupId.slice(0, 8);
   const participants = group?.participants ?? [];
+  // A `user_user` pair is the smallest group — two people. Render it as a DM:
+  // the header shows the peer's name (not the empty session title) and drops
+  // the "N members" chip, which is noise for a conversation of exactly two.
+  const isDm = group?.kind === "user_user";
+  const peerId = isDm ? participants.find((p) => p.id !== me)?.id : undefined;
+  const title = isDm
+    ? (peerId ? nameOf(peerId).name : activeGroupId.slice(0, 8))
+    : group?.title || activeGroupId.slice(0, 8);
   // Admin cross-account view: the panel lists groups the admin never joined.
   // Reading is allowed (server-side admin bypass), posting is not — hide the
   // composer and card actions for anyone who isn't a participant.
@@ -759,19 +778,29 @@ export function GroupChatPanel() {
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border-outer bg-chat-body">
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-border-divider px-4 text-xs font-semibold text-text-secondary">
         <span className="truncate">{title}</span>
-        <span className="shrink-0 font-normal text-text-tertiary">
-          {t("groupChat.members", { count: participants.length })}
-        </span>
-        <Tooltip content={t("chatHistory.title")} variant="plain">
-          <button
-            type="button"
-            className={cn(toolbarIconButton, "ml-auto h-6 w-6")}
-            onClick={() => setHistoryOpen(true)}
-            aria-label={t("chatHistory.title")}
-          >
-            <History size={14} />
-          </button>
-        </Tooltip>
+        {!isDm && (
+          <span className="shrink-0 font-normal text-text-tertiary">
+            {t("groupChat.members", { count: participants.length })}
+          </span>
+        )}
+        {/* The history tile must sit in the header's TOP-RIGHT corner. The
+            auto-margin belongs on the flex item — and `Tooltip` renders its
+            own `relative inline-flex` wrapper as that flex item, so `ml-auto`
+            on the nested button does nothing. Wrap the tile in a flex-item
+            `div` carrying `ml-auto` (same shape as `SessionTabBar`'s action
+            cluster) to push it to the right edge. */}
+        <div className="ml-auto inline-flex items-center">
+          <Tooltip content={t("chatHistory.title")} variant="plain">
+            <button
+              type="button"
+              className={cn(toolbarIconButton, "h-6 w-6")}
+              onClick={() => setHistoryOpen(true)}
+              aria-label={t("chatHistory.title")}
+            >
+              <OutlineChatHistoryIcon size={14} />
+            </button>
+          </Tooltip>
+        </div>
       </header>
 
       <OverlayScrollbar

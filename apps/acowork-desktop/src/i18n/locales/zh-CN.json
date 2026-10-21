@@ -217,6 +217,7 @@
     "saving": "保存中…",
     "deleteProject": "删除项目",
     "close": "关闭",
+    "you": "你",
     "modelList": {
       "empty": "未配置（按回退链执行）",
       "add": "添加模型…",
@@ -504,7 +505,8 @@
     "contextPermissions": "权限",
     "nodePermissions": "节点权限",
     "noAccess": "无访问权限",
-    "projectGroupsBanner": "项目群"
+    "projectGroupsBanner": "群组",
+    "newGroup": "新建群组"
   },
   "cloneDialog": {
     "skeleton": "骨架",
@@ -1978,6 +1980,23 @@
     "title": "群成员",
     "searchPlaceholder": "搜索成员",
     "add": "添加",
-    "loading": "加载成员…"
+    "loading": "加载成员…",
+    "removeAria": "移除 {{name}}",
+    "leave": "退出群组",
+    "inviteTitle": "邀请加入群组",
+    "noCandidates": "没有可邀请的人",
+    "minTwoNote": "群组至少需要保留两名成员"
+  },
+  "newGroup": {
+    "title": "新建群组",
+    "nameLabel": "群组名称",
+    "namePlaceholder": "例如：设计同步",
+    "membersLabel": "添加成员",
+    "searchPlaceholder": "搜索用户和 agent",
+    "create": "创建",
+    "cancel": "取消",
+    "selected": "已选 {{count}} 人",
+    "empty": "没有可添加的成员",
+    "error": "创建群组失败"
   }
 }

@@ -6,7 +6,6 @@ import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
 import { AgentPage } from "../chat/AgentPage";
 import { EmptyChatPane } from "../chat/EmptyChatPane";
-import { InboxPanel } from "../../views/InboxPanel";
 import { GroupChatPanel } from "../chat/GroupChatPanel";
 import { GroupMembersPanel } from "../chat/GroupMembersPanel";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
@@ -57,7 +56,6 @@ import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
 import { useLayoutStore } from "../../stores/layoutStore";
-import { useUserChatStore } from "../../stores/userChatStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useSearchStore, isGlobalSearchShortcut } from "../../stores/searchStore";
 import { GlobalSearchDialog } from "../search/GlobalSearchDialog";
@@ -299,10 +297,16 @@ export function AppLayout() {
   // selectedAgentId`) — counting it while it is not mounted would clamp the
   // file pane against ~340px that nothing is using.
   const rightPaneWidth = !rightPanelCollapsed && selectedAgentId ? rightWidth : 0;
-  // Middle-panel routing: agent session wins; otherwise an open inbox thread
-  // takes the pane. An explicit empty state at the bottom handles "neither".
-  const activePeerId = useUserChatStore((s) => s.activePeerId);
+  // Middle-panel routing: agent session wins; otherwise an open group / DM
+  // chat session takes the pane. An explicit empty state at the bottom
+  // handles "neither".
   const activeGroupId = useProjectGroupStore((s) => s.activeGroupId);
+  // A `user_user` pair (the smallest group) renders through GroupChatPanel but
+  // has no members surface to manage — hide the group right-panel / settings
+  // tile for it and keep the 40px rail as an empty placeholder.
+  const activeIsDm = useProjectGroupStore(
+    (s) => s.activeGroupId != null && s.dms.some((d) => d.session_id === s.activeGroupId),
+  );
   // ADR-009 §V-Q: the name is server-side (Runtime `.overrides.json`,
   // mirrored into the Gateway's list view) — no local override.
   const agentDisplayName = selectedAgent
@@ -1049,10 +1053,11 @@ export function AppLayout() {
               <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
             </div>
 
-            {/* Middle panel — agent session takes priority; an open inbox
-                thread falls back to the user chat composer. Empty state is
-                handled by the panel components themselves. */}
-            {selectedAgentId ? <AgentPage /> : activeGroupId ? <GroupChatPanel /> : activePeerId ? <InboxPanel /> : <EmptyChatPane />}
+            {/* Middle panel — agent session takes priority; an open group or
+                DM chat session renders through GroupChatPanel (a `user_user`
+                pair is the smallest group). Empty state is handled by the
+                panel components themselves. */}
+            {selectedAgentId ? <AgentPage /> : activeGroupId ? <GroupChatPanel /> : <EmptyChatPane />}
 
             {/* File editor panel — shown when files are open */}
             {hasOpenFiles && (
@@ -1146,7 +1151,7 @@ export function AppLayout() {
                 (WeChat-style grid + add). Mirrors the agent RightPanel slot:
                 same width / resize handle / collapse state, only shown when
                 a group is open and no agent session takes the pane. */}
-            {!rightPanelCollapsed && !selectedAgentId && activeGroupId && (
+            {!rightPanelCollapsed && !selectedAgentId && activeGroupId && !activeIsDm && (
               <GroupMembersPanel width={rightWidth} onResizeStart={handleMouseDownRight} />
             )}
           </div>
@@ -1173,16 +1178,18 @@ export function AppLayout() {
               agentRunning={selectedAgent?.alive ?? false}
               collapsed={rightPanelCollapsed}
             />
-          ) : activeGroupId ? (
+          ) : activeGroupId && !activeIsDm ? (
             // Group chat: a single settings tile toggles the members panel.
             // Shares the agent panel's collapse state + width so the 40px
-            // rail reads identically across the two right-panel surfaces.
+            // rail reads identically across the two right-panel surfaces. A
+            // DM (`user_user`) is excluded — two people have no members to
+            // manage, so it falls through to the empty placeholder below.
             <GroupRightNavBar
               expanded={!rightPanelCollapsed}
               onToggle={toggleRightPanel}
             />
           ) : (
-            // User-chat / EmptyChatPane: no RightNavBar items yet (the
+            // DM (`user_user`) / EmptyChatPane: no RightNavBar items yet (the
             // agent-config tabs are gated on a selected agent), but keep
             // the 40px column reserved so the chat pane doesn't bleed to
             // the window's right edge and break visual symmetry with the

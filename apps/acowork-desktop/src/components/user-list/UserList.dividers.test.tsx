@@ -19,7 +19,7 @@ import { resolve } from "node:path";
 import { render, screen, act } from "@testing-library/react";
 import { UserList } from "./UserList";
 import { useAuthStore } from "../../stores/authStore";
-import { useUserChatStore } from "../../stores/userChatStore";
+import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import type { Role, UserAccount } from "../../lib/types";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -100,7 +100,7 @@ describe("UserList rows carry the agent-list hairline", () => {
         text: async () => "{}",
       })),
     );
-    useUserChatStore.setState({ activePeerId: null, activePeerLabel: null, chats: [], messages: [] });
+    useProjectGroupStore.setState({ groups: [], dms: [], activeGroupId: null });
   });
 
   it("divides every pair of rows but leaves the last row undecorated", async () => {

@@ -27,6 +27,7 @@ import {
 import { MemberManagerDialog } from "../../views/pm/MemberManagerDialog";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
+import { UserGroupMembersPanel } from "./UserGroupMembersPanel";
 
 // `withOwner` lives in `pmMembers` (shared with `MemberManagerDialog`, which
 // this panel imports — a direct import back would form a cycle). Re-exported
@@ -38,7 +39,29 @@ interface GroupMembersPanelProps {
   onResizeStart?: (e: React.MouseEvent) => void;
 }
 
-export function GroupMembersPanel({ width, onResizeStart }: GroupMembersPanelProps) {
+/** Dispatcher. A `user_group` is governed by its chat-session participants
+ *  (managed through the user-side member routes), so it renders a distinct
+ *  surface; a `project_group` — or a session still resolving — keeps the
+ *  PM-project member path (its roster is PM-owned and synced server-side).
+ *  One hook then branch, so React's hook order stays stable across the two
+ *  sub-surfaces. */
+export function GroupMembersPanel(props: GroupMembersPanelProps) {
+  const group = useProjectGroupStore(
+    (s) => s.groups.find((g) => g.session_id === s.activeGroupId) ?? null,
+  );
+  if (group?.kind === "user_group") {
+    return (
+      <UserGroupMembersPanel
+        group={group}
+        width={props.width}
+        onResizeStart={props.onResizeStart}
+      />
+    );
+  }
+  return <ProjectGroupMembersPanel {...props} />;
+}
+
+function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelProps) {
   const { t } = useTranslation();
   const group = useProjectGroupStore(
     (s) => s.groups.find((g) => g.session_id === s.activeGroupId) ?? null,

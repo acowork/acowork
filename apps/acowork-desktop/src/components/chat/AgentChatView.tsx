@@ -36,7 +36,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Paperclip, Loader2, History, ChevronDown } from "lucide-react";
+import { Send, Paperclip, Loader2, ChevronDown } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
 import { toolbarIconButton } from "../../lib/ui-styles";
@@ -53,7 +53,6 @@ import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/mar
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ExecSessionStatusCard } from "./ExecSessionStatusCard";
-import { ChatHistoryDialog } from "./ChatHistoryDialog";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 import { useChatSessionStore, projectLiveTurn, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -356,8 +355,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const { sendText, loadOlder, loadNewer, clearLocate, setMode, saveDraft, upload } =
     useChatSessionStore.getState();
 
-  const [historyOpen, setHistoryOpen] = useState(false);
-
   const [input, setInput] = useState("");
   const [answerTarget, setAnswerTarget] = useState<ChatMessageRow | null>(null);
   // Composer attachments — uploaded into the Chat session's `files/` dir
@@ -614,21 +611,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Top bar — the 1:1 chat surface has no tab-strip header of its own
-          (the tabs live in `AgentPage`), so the history entry sits in a slim
-          right-aligned row above the stream, mirroring `GroupChatPanel`'s. */}
-      <div className="flex h-9 shrink-0 items-center justify-end gap-1 px-3">
-        <Tooltip content={t("chatHistory.title")} variant="plain">
-          <button
-            type="button"
-            className={toolbarIconButton}
-            onClick={() => setHistoryOpen(true)}
-            aria-label={t("chatHistory.title")}
-          >
-            <History size={16} />
-          </button>
-        </Tooltip>
-      </div>
       {/* Message stream */}
       <OverlayScrollbar
         ref={(el) => {
@@ -855,12 +837,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           </div>
         </div>
       </div>
-
-      <ChatHistoryDialog
-        open={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        chatSessionId={sessionId}
-      />
     </div>
   );
 }

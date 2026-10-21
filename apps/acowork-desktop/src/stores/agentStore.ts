@@ -9,7 +9,6 @@ import { useChatStore } from "./chatStore";
 import { useAuthStore } from "./authStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useFileTreeStore } from "./fileTree";
-import { useUserChatStore } from "./userChatStore";
 import { useProjectGroupStore } from "./projectGroupStore";
 import { log } from "../lib/logger";
 import { with503Retry } from "../lib/httpRetry";
@@ -588,9 +587,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         // remount does on the fetch below when the user switches back to
         // the chat tab. Only claim the pane when nothing else has it.
         let selId = state.selectedAgentId;
-        const paneOwnedByPeer =
-          useProjectGroupStore.getState().activeGroupId != null ||
-          useUserChatStore.getState().activePeerId != null;
+        const paneOwnedByPeer = useProjectGroupStore.getState().activeGroupId != null;
         if (!selId && !paneOwnedByPeer && list.length > 0) {
           let bestId: string | null = null;
           let bestTs = -1;
@@ -638,29 +635,23 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   selectAgent: (id) => {
     if (!id) {
-      // Clearing the active agent is a legitimate action — opening a
-      // 1:1 inbox thread from the user list relies on AppLayout
-      // falling through from <ChatPanel /> (selectedAgentId != null)
-      // to <InboxPanel /> (activePeerId != null). Abort any agent-
-      // scoped fetches that would otherwise leak back into a dead
-      // tree, then drop the selection.
+      // Clearing the active agent is a legitimate action — opening a group /
+      // DM from the sidebar relies on AppLayout falling through from
+      // <AgentPage /> (selectedAgentId != null) to <GroupChatPanel />
+      // (activeGroupId != null). Abort any agent-scoped fetches that would
+      // otherwise leak back into a dead tree, then drop the selection.
       set({ selectedAgentId: null });
       useFileTreeStore.getState().abortAll();
       return;
     }
     set({ selectedAgentId: id });
 
-    // Project group chats share the middle pane: picking an agent closes
-    // an open group (mirror of `AgentList`'s group row clearing agents).
+    // Group and DM chat sessions share the middle pane (both are `activeGroupId`
+    // chat sessions): picking an agent closes an open group / DM (mirror of
+    // `AgentList`'s group row and `UserList.openThread`, which clear
+    // `selectedAgentId` to fall through to <GroupChatPanel />). Without this the
+    // stale session id would re-appear the next time the user clears the agent.
     useProjectGroupStore.getState().clearSelection();
-
-    // Mirror of the reverse direction in `UserList.openThread`, which clears
-    // `selectedAgentId` so AppLayout falls through to <InboxPanel />. Picking
-    // an agent while a user row is the active inbox peer would otherwise leave
-    // `activePeerId` set: the user row stays highlighted in the sidebar and
-    // AppLayout still prefers <InboxPanel /> (selectedAgentId wins, but the
-    // next time the user clears the agent the stale peer re-appears).
-    useUserChatStore.getState().closeChat();
 
     // The file-tree cache is keyed per (agent, workspace) so an old
     // agent's in-flight fetches can never contaminate the new agent's

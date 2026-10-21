@@ -8,7 +8,6 @@ import { useAgentStore } from "./agentStore";
 import { useGatewayStore, stopGatewayDeathWatch } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useAuthStore } from "./authStore";
-import { setChatPushChannel, useUserChatStore } from "./userChatStore";
 import { wakeAgentChat } from "./chatSessionStore";
 import { useProjectGroupStore } from "./projectGroupStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -1266,16 +1265,17 @@ function applyConnectionTransition(
       : {}),
   });
 
-  // The inbox rides the same bridge. Two consequences, both keyed on this
-  // edge and nowhere else (design doc 25 §8.0): while the connection is up the
-  // doorbell replaces the user-chat fallback poll, so the timer stands down —
-  // and when it comes back up, the doorbells that fired while we were
-  // unsubscribed are gone for good (non-retained), so the inbox re-reads once
-  // to converge, exactly like `inventoryVersion` above. ADR-092 decision 6 puts
-  // that catch-up re-read *inside* `setChatPushChannel`'s `down → up` edge, so
-  // this line is the only call — no separate `wake()` that could double-fire or
-  // drift out of sync with the channel state.
-  setChatPushChannel(nextEffective === "connected");
+  // The group / DM chat surface rides the same bridge. On the `down → up`
+  // edge the doorbells that fired while we were unsubscribed are gone for
+  // good (non-retained), so the sidebar lists + open chat windows re-read
+  // once to converge — exactly like the `inventoryVersion` bump above. (This
+  // replaces the retired user-chat `setChatPushChannel` catch-up: the unified
+  // chat surface has no fallback poll loop, so the connect edge is the only
+  // proactive trigger and the doorbell carries everything after it.)
+  if (nextEffective === "connected") {
+    void useProjectGroupStore.getState().fetchGroups();
+    wakeAgentChat();
+  }
 }
 
 /**
@@ -1493,12 +1493,12 @@ async function doInitMqttListener(): Promise<void> {
     (event) => {
       const me = useAuthStore.getState().account?.user_id;
       if (!me || event.payload.user_id !== me) return;
-      void useUserChatStore.getState().wake();
       // Design 27 Wave 5: the same doorbell lands on agent Chat sessions —
       // the user service publishes it after every append, human or agent.
       wakeAgentChat();
-      // ...and on the sidebar's project-group list (a new project's group
-      // appears without reopening the app).
+      // ...and on the sidebar's group + DM list (a new message bumps the
+      // unread badge / preview, a new project's group appears without
+      // reopening the app).
       void useProjectGroupStore.getState().fetchGroups();
     },
   );
@@ -1567,9 +1567,6 @@ export function disposeMqttListener(): void {
     _userChatUnlisten();
     _userChatUnlisten = null;
   }
-  // No bridge, so the inbox's fallback timer has to carry freshness again —
-  // and a listener torn down here must not leave a stale `true` behind.
-  setChatPushChannel(false);
   useChatStore.setState({
     mqttConnected: false,
     lastMqttError: null,
