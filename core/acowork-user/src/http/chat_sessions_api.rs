@@ -3,7 +3,7 @@
 //! ```text
 //! POST   /api/chat-sessions                          create a session
 //! GET    /api/chat-sessions/{participant}            sessions of one participant
-//! GET    /api/chat-sessions/default?pair=<agent_id>  caller's default agent chat
+//! GET    /api/chat-sessions/default?pair=<id>&kind=<..>  caller's default 1:1 chat
 //! GET    /api/chat-sessions/{session_id}/messages?offset&limit
 //! POST   /api/chat-sessions/{session_id}/messages    append a user_message
 //! ```
@@ -84,6 +84,19 @@ pub fn chat_session_routes() -> Router<AppState> {
         // refuses two different param names at one path position — the
         // segment is the SESSION id for DELETE, the participant for GET.
         .route("/api/chat-sessions/{participant}", delete(delete_session_route))
+        // P1 user-side member management for `user_group` sessions (ADR-098
+        // D3). The participant relation is the permission (any current member
+        // may invite or remove, including themselves); `project_group` stays
+        // PM-mediated through the `/internal` sync route and the 1:1 pair
+        // kinds cannot hold a third member — both are refused 422.
+        .route(
+            "/api/chat-sessions/{session_id}/participants",
+            post(add_participants_route),
+        )
+        .route(
+            "/api/chat-sessions/{session_id}/participants/{participant_id}",
+            delete(remove_participant_route),
+        )
         // §4.2.1 (plan 3.5): attachments live in the session's `files/`
         // dir; upload before the first message is normal. The per-route
         // body limit covers the multipart envelope of the largest class
@@ -167,6 +180,15 @@ pub struct PostMessageRequest {
     pub attachment_ids: Vec<String>,
 }
 
+/// `POST /api/chat-sessions/{session_id}/participants` — invite one or more
+/// members to a `user_group` (P1). Ids are typed server-side (an account is
+/// Human, anything else an Agent instance); the body never carries identity,
+/// mirroring `create_session`.
+#[derive(Debug, Deserialize)]
+pub struct AddParticipantsRequest {
+    pub participant_ids: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PageQuery {
     #[serde(default)]
@@ -188,10 +210,18 @@ pub struct ListQuery {
     pub agent: Option<String>,
 }
 
-/// `GET /api/chat-sessions/default?pair=<agent_id>` (§5.4.4).
+/// `GET /api/chat-sessions/default?pair=<id>&kind=<user_agent|user_user>`
+/// (§5.4.4).
 #[derive(Debug, Deserialize)]
 pub struct DefaultQuery {
+    /// The peer id: an agent instance id for `user_agent`, another account's
+    /// user id for `user_user`.
     pub pair: String,
+    /// Pair-session kind. Absent / empty = `user_agent` (the Agent page's
+    /// 1:1 chat, the original behavior); `user_user` resolves a human↔human
+    /// DM. Every other kind is rejected — only 1:1 pairs are pair-addressed.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// `PATCH /api/chat-sessions/{session_id}/session-config` — store the
@@ -268,7 +298,18 @@ async fn create_session(
     // channel to one agent. `agent_agent` / `project_group` stay
     // system-created — a human token cannot even be a participant of one.
     match kind {
-        SessionKind::UserUser | SessionKind::UserGroup => {}
+        SessionKind::UserUser => {}
+        // A `user_group` is the standard group; a lone founder is not a group.
+        // Enforce the same ≥2 floor the removal route guards, so a group can
+        // never be created in the degenerate one-member state whose "leave"
+        // would then be refused by that floor (a dead end).
+        SessionKind::UserGroup => {
+            if req.participants.len() < 2 {
+                return Err(ApiError::unprocessable_entity(
+                    "a user_group needs at least two participants",
+                ));
+            }
+        }
         SessionKind::UserAgent => {
             if req.participants.len() != 2 {
                 return Err(ApiError::unprocessable_entity(
@@ -381,9 +422,12 @@ async fn list_all_project_groups(
     Ok(Json(groups))
 }
 
-/// `GET /api/chat-sessions/default?pair=<agent_id>` — resolve the caller's
-/// default Chat session with an agent (design 27 §5.4.4): the Agent page
-/// opens it in one request, idempotently creating the pair on first use.
+/// `GET /api/chat-sessions/default?pair=<id>&kind=<...>` — resolve the
+/// caller's default 1:1 Chat session (design 27 §5.4.4), idempotently
+/// creating the pair on first use. Two kinds are pair-addressed by a user
+/// token: `user_agent` (self + one agent, the default) and `user_user`
+/// (self + one other account) — both ride the same idempotent
+/// [`crate::chat_sessions::ensure_pair`]; nothing else is a 1:1 pair.
 async fn default_session(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -391,19 +435,38 @@ async fn default_session(
 ) -> Result<Json<ChatSession>, ApiError> {
     let pair = q.pair.trim().to_string();
     if pair.is_empty() {
-        return Err(ApiError::unprocessable_entity("pair must be the agent instance id"));
+        return Err(ApiError::unprocessable_entity("pair must be the peer's id"));
     }
+    let kind = match q.kind.as_deref() {
+        None | Some("") | Some("user_agent") => SessionKind::UserAgent,
+        Some("user_user") => SessionKind::UserUser,
+        Some(other) => {
+            return Err(ApiError::unprocessable_entity(&format!(
+                "a default pair session is user_agent or user_user, not '{other}'"
+            )));
+        }
+    };
     let caller = ctx.effective_user_id().to_string();
     let dir = data_dir(&state)?;
     let auth = state.auth_service.clone();
     let session = offload(move || {
         let ids = [caller.clone(), pair.clone()];
         let participants = typed_participants(auth.as_ref(), &ids, Some(&caller));
+        // A `user_user` pair is two people. Identity types are resolved
+        // server-side (§8.1), so refuse when the peer id did not name a known
+        // account — an agent id must never open a human DM.
+        if kind == SessionKind::UserUser
+            && participants
+                .iter()
+                .any(|p| p.identity != Some(ParticipantIdentity::Human))
+        {
+            return Err("a user_user pair needs two human participants".to_string());
+        }
         chat_sessions::ensure_pair(
             &dir,
             participants[0].clone(),
             participants[1].clone(),
-            SessionKind::UserAgent,
+            kind,
             now_unix(),
         )
     })
@@ -528,6 +591,102 @@ async fn delete_session_route(
     offload(move || chat_sessions::delete_session(&dir, &session_id, &who))
         .await
         .map(|()| StatusCode::NO_CONTENT)
+}
+
+/// P1 (design 27 §8.3, the user-managed half): invite members to a
+/// `user_group`. Permission is the participant relation — any current member
+/// may add, and outsiders get the same hidden 404 the read paths use (§5.3).
+/// `project_group` is governed by PM via the `/internal` sync route and the
+/// 1:1 pair kinds cannot hold a third member, so both are refused 422.
+/// Idempotent: an already-listed id is a no-op and fires no doorbell.
+async fn add_participants_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+    Json(req): Json<AddParticipantsRequest>,
+) -> Result<Json<ChatSession>, ApiError> {
+    let dir = data_dir(&state)?;
+    let caller = ctx.effective_user_id().to_string();
+    let auth = state.auth_service.clone();
+    let ids = req.participant_ids;
+    let (session, changed) = offload(move || {
+        let s = chat_sessions::load(&dir, &session_id)?;
+        if !s.participants.iter().any(|p| p.id == caller) {
+            return Err("not_a_participant".to_string());
+        }
+        if s.kind != SessionKind::UserGroup {
+            return Err("only user_group sessions are user-managed".to_string());
+        }
+        let start = s.participants.len();
+        let participants = typed_participants(auth.as_ref(), &ids, None);
+        let mut cur = s;
+        for p in participants {
+            cur = chat_sessions::add_participant(&dir, &session_id, &p, now_unix())?;
+        }
+        let changed = cur.participants.len() != start;
+        Ok((cur, changed))
+    })
+    .await?;
+    if changed {
+        // §6.1 doorbell (same rule as `sync_group`): a member-set change is a
+        // backend-driven refresh — every human surface viewing the group
+        // re-reads (the header member count, and a newcomer's composer
+        // unlocks). Typed agents are skipped (no listener).
+        for p in session
+            .participants
+            .iter()
+            .filter(|p| p.identity != Some(ParticipantIdentity::Agent))
+        {
+            crate::mqtt_publisher::notify_chat_changed(&p.id);
+        }
+    }
+    Ok(Json(session))
+}
+
+/// P1: remove a member from a `user_group`, or leave it. Permission is the
+/// participant relation; any member may remove anyone, including themselves.
+/// Refused once the group would drop below two members (a one-person group is
+/// meaningless). Idempotent no-op for an unknown id.
+async fn remove_participant_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((session_id, participant_id)): Path<(String, String)>,
+) -> Result<Json<ChatSession>, ApiError> {
+    let dir = data_dir(&state)?;
+    let caller = ctx.effective_user_id().to_string();
+    let notify_id = participant_id.clone();
+    let (session, removed) = offload(move || {
+        let s = chat_sessions::load(&dir, &session_id)?;
+        if !s.participants.iter().any(|p| p.id == caller) {
+            return Err("not_a_participant".to_string());
+        }
+        if s.kind != SessionKind::UserGroup {
+            return Err("only user_group sessions are user-managed".to_string());
+        }
+        if !s.participants.iter().any(|p| p.id == participant_id) {
+            return Ok((s, false));
+        }
+        if s.participants.len() <= 2 {
+            return Err("a group must keep at least two members".to_string());
+        }
+        let s2 = chat_sessions::remove_participant(&dir, &session_id, &participant_id)?;
+        Ok((s2, true))
+    })
+    .await?;
+    if removed {
+        // Notify the remaining humans, and the removed party themselves so
+        // their surface drops the row (an unknown id is a no-op, so firing at
+        // a removed agent is harmless — it has no listener).
+        for p in session
+            .participants
+            .iter()
+            .filter(|p| p.identity != Some(ParticipantIdentity::Agent))
+        {
+            crate::mqtt_publisher::notify_chat_changed(&p.id);
+        }
+        crate::mqtt_publisher::notify_chat_changed(&notify_id);
+    }
+    Ok(Json(session))
 }
 
 async fn post_message(
@@ -1303,6 +1462,313 @@ mod tests {
         let page = json(resp).await;
         assert_eq!(page["total"].as_u64(), Some(1));
         assert_eq!(page["messages"][0]["body"].as_str(), Some("hello team"));
+    }
+
+    #[tokio::test]
+    async fn user_user_default_pair_is_idempotent_and_two_humans() {
+        // P0: a human↔human DM is a `user_user` pair session, resolved through
+        // the same `GET /default` the Agent page uses. It must be idempotent,
+        // order-independent (pair_key), participation-gated on both sides, and
+        // refuse an agent id (a DM is two people).
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/default?pair={bob}&kind=user_user"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json(resp).await;
+        let session_id = body["session_id"].as_str().unwrap().to_string();
+        assert_eq!(body["kind"].as_str(), Some("user_user"));
+
+        // Idempotent + order-independent: the same request returns the same
+        // session, and Bob opening Alice lands on the SAME pair session.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/default?pair={bob}&kind=user_user"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            json(resp).await["session_id"].as_str(),
+            Some(session_id.as_str())
+        );
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/default?pair={alice}&kind=user_user"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            json(resp).await["session_id"].as_str(),
+            Some(session_id.as_str())
+        );
+
+        // Post through the participation-gated human write, read back by Bob.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{session_id}/messages"),
+                Some(r#"{"body":"hey bob"}"#),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/messages"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json(resp).await["messages"][0]["body"].as_str(), Some("hey bob"));
+
+        // A non-participant is hidden (404); an agent id cannot open a DM (422).
+        let (_carol, carol_token) = make_user(&app, &admin, "carol").await;
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/messages"),
+                None,
+                Some(&carol_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/api/chat-sessions/default?pair=ag-1&kind=user_user",
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn user_group_member_add_and_remove_is_participant_gated() {
+        // P1: `user_group` is user-managed. Any member may invite or remove
+        // (the participant relation is the permission), outsiders get the
+        // hidden 404, ids are typed server-side, the add is idempotent, and a
+        // removal past the two-member floor is refused 422.
+        use acowork_core::mqtt_proto::user_chat_changed_topic;
+
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+        let (carol, _carol_token) = make_user(&app, &admin, "carol").await;
+        let (mallory, mallory_token) = make_user(&app, &admin, "mallory").await;
+
+        let participants_of = |v: &serde_json::Value, id: &str| -> Option<String> {
+            v["participants"]
+                .as_array()?
+                .iter()
+                .find(|p| p["id"].as_str() == Some(id))
+                .and_then(|p| p["identity"].as_str().map(|s| s.to_string()))
+        };
+
+        // A two-person user_group seeded by Alice.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let sid = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // Alice invites Carol (an account → Human) and an agent id (→ Agent).
+        let before = crate::mqtt_publisher::test_signals().len();
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/participants"),
+                Some(&format!(r#"{{"participant_ids":["{carol}","ag-1"]}}"#)),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json(resp).await;
+        assert_eq!(participants_of(&body, &carol).as_deref(), Some("human"));
+        assert_eq!(participants_of(&body, "ag-1").as_deref(), Some("agent"));
+        // Doorbell: the human newcomer is woken (uuid topic — only this test
+        // can emit it, so the window assertion is concurrency-safe).
+        let window = &crate::mqtt_publisher::test_signals()[before..];
+        assert!(window.contains(&user_chat_changed_topic(&carol)), "the newcomer is woken");
+
+        // Idempotent re-add leaves Carol once and wakes nobody.
+        let before = crate::mqtt_publisher::test_signals().len();
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/participants"),
+                Some(&format!(r#"{{"participant_ids":["{carol}"]}}"#)),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json(resp).await;
+        let carols = body["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["id"].as_str() == Some(carol.as_str()))
+            .count();
+        assert_eq!(carols, 1, "re-add is a no-op");
+        let window = &crate::mqtt_publisher::test_signals()[before..];
+        assert!(!window.contains(&user_chat_changed_topic(&carol)), "no change, no doorbell");
+
+        // Any member may invite: Bob (not the creator) adds an agent.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/participants"),
+                Some(r#"{"participant_ids":["ag-2"]}"#),
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "any member can invite");
+
+        // An outsider cannot touch the roster — hidden 404, never a 403.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/participants"),
+                Some(&format!(r#"{{"participant_ids":["{mallory}"]}}"#)),
+                Some(&mallory_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Removing an agent works while ≥ 2 humans remain.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{sid}/participants/ag-1"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A fresh two-person group cannot drop below two.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"duo"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let duo = json(resp).await["session_id"].as_str().unwrap().to_string();
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{duo}/participants/{bob}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a group keeps at least two members"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_group_create_requires_two_members() {
+        // ADR-098 D3: a lone founder is not a group. The create route enforces
+        // the same ≥2 floor the removal route guards, so a group can never be
+        // born in the one-member state whose "leave" would then be refused.
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, _bob_token) = make_user(&app, &admin, "bob").await;
+
+        let solo = format!(r#"{{"kind":"user_group","participants":["{alice}"],"title":"me-only"}}"#);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&solo),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a one-person user_group is refused"
+        );
+
+        // The two-person boundary is accepted.
+        let duo = format!(r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"ok"}}"#);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&duo),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]
