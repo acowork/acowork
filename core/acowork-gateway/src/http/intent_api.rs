@@ -436,7 +436,14 @@ async fn chat_history_read(
     let port = user_port
         .ok_or_else(|| ApiError::service_unavailable("chat history requires the user service"))?;
     // Hard caps (§9): the tool description states them, the server enforces
-    // them. Byte budget is approximate (whole rows dropped past the cap).
+    // them. The byte budget is approximate and is spent **from the newest row
+    // backwards**: the store returns a page oldest-first (it is the tail window
+    // of the conversation), and the rows no reader can afford to lose are the
+    // most recent ones. Budgeting from the front would hand the Chat Router a
+    // page that silently stops before the message it is being asked to route —
+    // a short page is strictly better than a stale one. The newest row is kept
+    // even when it alone exceeds the budget, so one oversized message can never
+    // degrade into an empty page.
     const MAX_COUNT: usize = 50;
     const MAX_BYTES: usize = 32 * 1024;
     let count = q.count.clamp(1, MAX_COUNT);
@@ -444,20 +451,10 @@ async fn chat_history_read(
     let page = chat_client::read_messages(port, &q.session_id, &q.sender, offset, count)
         .await
         .map_err(|e| ApiError::unprocessable_entity(&e))?;
-    let mut bytes = 0usize;
-    let mut kept: Vec<serde_json::Value> = Vec::new();
-    let mut truncated = false;
-    if let Some(arr) = page.get("messages").and_then(|v| v.as_array()) {
-        for m in arr {
-            let len = serde_json::to_string(m).map(|s| s.len()).unwrap_or(0);
-            if bytes + len > MAX_BYTES {
-                truncated = true;
-                break;
-            }
-            bytes += len;
-            kept.push(m.clone());
-        }
-    }
+    let (kept, truncated) = apply_page_budget(
+        page.get("messages").and_then(|v| v.as_array()),
+        MAX_BYTES,
+    );
     Ok(Json(serde_json::json!({
         "session_id": q.session_id,
         "offset": offset,
@@ -465,6 +462,38 @@ async fn chat_history_read(
         "truncated": truncated,
         "messages": kept,
     })))
+}
+
+/// Spend a chat-history page's byte budget from the **newest** row backwards
+/// and report whether older rows had to be dropped.
+///
+/// `messages` arrives oldest-first (it is the tail window of the conversation),
+/// so the front of the slice is the oldest context and the back is what the
+/// reader is actually asking about. Budgeting from the front would silently
+/// remove the newest rows — for the Chat Router that means routing a message
+/// whose own row was dropped (ADR-099). The newest row is always kept, even if
+/// it alone exceeds `max_bytes`: one oversized message must never degrade into
+/// an empty page. The output stays chronological.
+pub(crate) fn apply_page_budget(
+    messages: Option<&Vec<serde_json::Value>>,
+    max_bytes: usize,
+) -> (Vec<serde_json::Value>, bool) {
+    let mut kept: Vec<serde_json::Value> = Vec::new();
+    let mut truncated = false;
+    if let Some(arr) = messages {
+        let mut bytes = 0usize;
+        for m in arr.iter().rev() {
+            let len = serde_json::to_string(m).map(|s| s.len()).unwrap_or(0);
+            if !kept.is_empty() && bytes + len > max_bytes {
+                truncated = true;
+                break;
+            }
+            bytes += len;
+            kept.push(m.clone());
+        }
+        kept.reverse();
+    }
+    (kept, truncated)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1092,10 +1121,10 @@ async fn deliver_response(
     // it open costs at most one sweeper tick — and only an append slower
     // than the sweep interval could interleave with it at all, whereas an
     // orphan never heals by itself.
-    if chat_append_error.is_none() {
-        if let Some(mb) = mailbox.as_deref() {
-            let _ = mb.mark_answered(&request_id);
-        }
+    if chat_append_error.is_none()
+        && let Some(mb) = mailbox.as_deref()
+    {
+        let _ = mb.mark_answered(&request_id);
     }
 
     // Design 27 §9-8: a PM task response is *relayed*, not pushed — the
@@ -1262,6 +1291,9 @@ async fn deliver_mentions(
     if !session.participants.iter().any(|p| p.id() == req.from_user) {
         return Err(ApiError::forbidden("mention sender is not a participant"));
     }
+    // ADR-099: the surface travels with the delivery — the receiving router
+    // picks its prompt variant from it and must never infer it.
+    let chat_kind = session.kind.clone();
     let repo = session.repo.unwrap_or_default();
 
     let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
@@ -1362,6 +1394,7 @@ async fn deliver_mentions(
             params_json: serde_json::json!({
                 "message": req.text,
                 "chat_attachment_ids": req.attachment_ids,
+                "chat_kind": chat_kind,
             })
             .to_string(),
             source_chat_session_id: req.chat_session_id.clone(),
@@ -1795,6 +1828,7 @@ async fn deliver_chat_message(
         params_json: serde_json::json!({
             "message": req.text,
             "chat_attachment_ids": req.attachment_ids,
+            "chat_kind": session.kind,
         }).to_string(),
         source_chat_session_id: req.chat_session_id.clone(),
         repo: repo.clone(),
@@ -1898,6 +1932,51 @@ async fn intent_enforce_permissions(state: &AppState) -> bool {
 #[cfg(test)]
 mod card_answer_tests {
     use super::*;
+
+    /// ADR-099: a page over the byte budget loses its OLDEST rows, never its
+    /// newest. The Chat Router reads the tail window to decide where a message
+    /// belongs, and the message that triggered the turn is the last row of that
+    /// window — dropping it from the back would make the router decide without
+    /// the thing it is supposed to route.
+    #[test]
+    fn a_history_page_over_budget_drops_the_oldest_rows_and_stays_chronological() {
+        let rows: Vec<serde_json::Value> = (0..6)
+            .map(|i| serde_json::json!({ "seq": i, "body": "x".repeat(100) }))
+            .collect();
+        // Three rows cost well over 350 bytes, six rows over 700.
+        let (kept, truncated) = apply_page_budget(Some(&rows), 350);
+        assert!(truncated, "rows were dropped, and the reader is told");
+        let seqs: Vec<i64> = kept.iter().map(|m| m["seq"].as_i64().unwrap()).collect();
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "the page stays oldest-first on the wire: {seqs:?}"
+        );
+        assert_eq!(
+            *seqs.last().unwrap(),
+            5,
+            "the newest row survives: {seqs:?}"
+        );
+        assert!(!seqs.contains(&0), "the oldest row is the one that pays");
+
+        // Fits: nothing dropped, nothing reported as truncated.
+        let (all, truncated) = apply_page_budget(Some(&rows), 100_000);
+        assert_eq!(all.len(), 6);
+        assert!(!truncated);
+
+        // One oversized newest row is still delivered — an empty page would
+        // degrade a readable conversation into an unreadable one.
+        let big = vec![
+            serde_json::json!({ "seq": 0, "body": "small" }),
+            serde_json::json!({ "seq": 1, "body": "y".repeat(5_000) }),
+        ];
+        let (kept, truncated) = apply_page_budget(Some(&big), 100);
+        assert_eq!(kept.len(), 1, "the oversized tail row is kept");
+        assert_eq!(kept[0]["seq"], 1);
+        assert!(truncated, "the older row was dropped, and that is reported");
+
+        // No `messages` array at all is an empty page, not an error.
+        assert_eq!(apply_page_budget(None, 100), (Vec::new(), false));
+    }
 
     #[test]
     fn ask_question_routes_to_answer_endpoint() {
