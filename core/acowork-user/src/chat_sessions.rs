@@ -2064,10 +2064,19 @@ pub fn add_participant(
 /// session becomes unreachable for them *immediately*, because the read
 /// check consults this very participant list (via the Gateway-injected
 /// `x-acowork-chat-scope`), not a materialised grant.
+///
+/// `min_participants` is the floor the removal must not breach: when the id
+/// is present and dropping it would leave fewer than this many members, the
+/// whole check-and-remove fails atomically *inside the session lock* (an
+/// error the caller maps to 4xx) rather than on a lock-free snapshot — so two
+/// concurrent removals can never interleave past the floor. `0` disables the
+/// floor (the PM-mediated `/internal` path governs membership by other rules
+/// and may shrink a roster below two).
 pub fn remove_participant(
     data_dir: &Path,
     session_id: &str,
     participant_id: &str,
+    min_participants: usize,
 ) -> Result<ChatSession, String> {
     validate_session_id(session_id)?;
     let dir = session_dir(data_dir, session_id);
@@ -2078,6 +2087,9 @@ pub fn remove_participant(
     s.participants.retain(|p| p.id != participant_id);
     if s.participants.len() == before.len() {
         return Ok(s);
+    }
+    if s.participants.len() < min_participants {
+        return Err("a group must keep at least two members".to_string());
     }
     save(&dir, &s)?;
     reindex(data_dir, session_id, Some(&before), &s.participants)?;
@@ -3181,14 +3193,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(again.participants.len(), 2, "repeat add is a no-op");
-        // Remove: listed id goes, unknown id is a no-op.
-        let s = remove_participant(&dir, &s.session_id, "ag1").unwrap();
+        // Remove: listed id goes, unknown id is a no-op. `0` disables the
+        // floor here, exercising the raw store path independent of the
+        // user_group ≥2 policy (which the HTTP route enforces via min=2).
+        let s = remove_participant(&dir, &s.session_id, "ag1", 0).unwrap();
         assert_eq!(s.participants.len(), 1);
-        let again = remove_participant(&dir, &s.session_id, "ag1").unwrap();
+        let again = remove_participant(&dir, &s.session_id, "ag1", 0).unwrap();
         assert_eq!(again.participants.len(), 1, "repeat remove is a no-op");
         // The removal is durable — the revoked id must not reappear on load.
         let s = load(&dir, &s.session_id).unwrap();
         assert!(s.participants.iter().all(|p| p.id != "ag1"));
+    }
+
+    #[test]
+    fn remove_participant_enforces_the_min_floor_atomically() {
+        // The ≥2 floor lives in the store's locked RMW, not the route's
+        // lock-free snapshot, so a removal that would breach it fails closed.
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("u2", ParticipantIdentity::Human),
+            ],
+            "g",
+            None,
+            1,
+        )
+        .unwrap();
+        // min=2: dropping one of two would leave one → refused, roster intact.
+        let err = remove_participant(&dir, &s.session_id, "u2", 2).unwrap_err();
+        assert!(err.contains("at least two members"), "{err}");
+        assert_eq!(load(&dir, &s.session_id).unwrap().participants.len(), 2);
+        // min=0: the same removal is allowed (the PM path has no floor).
+        let s = remove_participant(&dir, &s.session_id, "u2", 0).unwrap();
+        assert_eq!(s.participants.len(), 1);
     }
 
     /// Regression for the §8 atomic-RMW rule: `sync_group` /

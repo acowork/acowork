@@ -666,10 +666,12 @@ async fn remove_participant_route(
         if !s.participants.iter().any(|p| p.id == participant_id) {
             return Ok((s, false));
         }
-        if s.participants.len() <= 2 {
-            return Err("a group must keep at least two members".to_string());
-        }
-        let s2 = chat_sessions::remove_participant(&dir, &session_id, &participant_id)?;
+        // The ≥2 floor is enforced atomically *inside* the store's session
+        // lock (`min_participants = 2`), not on this lock-free snapshot — so
+        // two concurrent removals can never each pass a `<= 2` check and
+        // interleave the group down to one member. A breach returns the error
+        // the offload maps to 422.
+        let s2 = chat_sessions::remove_participant(&dir, &session_id, &participant_id, 2)?;
         Ok((s2, true))
     })
     .await?;
@@ -1157,7 +1159,9 @@ async fn system_remove_participant(
 ) -> Result<Json<ChatSession>, ApiError> {
     let dir = data_dir_any(&state).await;
     let session = offload(move || {
-        chat_sessions::remove_participant(&dir, &session_id, &participant_id)
+        // PM-mediated removal — no user_group floor; a project roster may
+        // shrink below two humans.
+        chat_sessions::remove_participant(&dir, &session_id, &participant_id, 0)
     })
     .await?;
     Ok(Json(session))
