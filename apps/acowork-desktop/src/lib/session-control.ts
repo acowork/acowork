@@ -94,10 +94,17 @@ async function controlRequest(
   }
 }
 
-/** `POST /api/agents/{id}/sessions` — the new session is owned by the caller. */
+/**
+ * `POST /api/agents/{id}/sessions` — the new session is owned by the caller.
+ *
+ * `chat_session_id` (ADR-099) binds the session to a Chat session, the same
+ * pair the router's `dispatch(new)` stamps. The Runtime checks it against the
+ * caller's Gateway-injected Chat membership and skips the binding (never the
+ * creation) when the caller is not a member of that chat.
+ */
 export function createSession(
   agentId: string,
-  body: { workspace_id?: string } = {},
+  body: { workspace_id?: string; chat_session_id?: string } = {},
 ): Promise<void> {
   return controlRequest("POST", `/api/agents/${agentId}/sessions`, body);
 }

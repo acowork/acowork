@@ -536,14 +536,23 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
           // openSession path (UI + backend).
           void openSession(agentId, otherSession.session_id);
         } else {
+          // No Chat tab on this agent (legacy exec-only surface), so the
+          // creation has no conversation to belong to — deliberately
+          // unbound (ADR-099).
           createSession(agentId);
         }
       }
     });
   };
 
+  // `+` is the deterministic "new task" entry: when this agent has a Chat
+  // session the new execution session is bound to it, so the user works in
+  // the exec view (which never consults the Chat Router) and the session
+  // still shows up as a candidate when they later refer to that task from
+  // the chat. Binding is mode-agnostic on purpose — the pinned chat tab is
+  // the agent's conversation whether or not it is on screen.
   const handleNew = () => {
-    createSession(agentId);
+    createSession(agentId, { bindToChat: true });
     showExecSurface();
   };
 
@@ -618,7 +627,7 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
   };
 
   const handleContextOpenNewSession = () => {
-    createSession(agentId);
+    createSession(agentId, { bindToChat: true });
     showExecSurface();
   };
 

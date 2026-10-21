@@ -47,6 +47,11 @@ export interface ChatMessageRow {
     status?: string;
     repo?: string;
     notice_type?: string;
+    /** ADR-099: reserved producer label (`chat_router`). No writer emits it
+     *  yet — the router's plain-text answer says "nothing to open" by
+     *  carrying an empty `agent_session_id` (design 29 §7.2), which is what
+     *  the existing drill-down already keys on. */
+    origin?: string;
     /** Routing-resolved execution session that HANDLED a request — set on
      *  the `turn_started` pointer and `interaction_request` card. */
     agent_session_id?: string;
@@ -297,6 +302,20 @@ export interface InFlightTurn {
   triggerId: string;
   /** execution session id from the `turn_started` pointer, if it arrived. */
   execSid: string | null;
+  /** ADR-099: delivered, but no `turn_started` pointer yet — the window in
+   *  which the Chat Router decides where the message goes. Only ever set on
+   *  a surface where the turn is guaranteed (a 1:1 chat). */
+  assigning?: boolean;
+}
+
+/** Projection options for [`projectInFlight`]. */
+export interface ProjectInFlightOptions {
+  /** `true` (default): a trailing `user_message` without its `turn_started`
+   *  pointer is not in flight — the message may have been addressed to nobody
+   *  (a group @-nobody), and no pointer will ever arrive. `false` on a 1:1
+   *  surface, where every message reaches the agent: the same row is the
+   *  assigning window and comes back with `assigning: true`. */
+  awaitPointer?: boolean;
 }
 
 /**
@@ -323,7 +342,11 @@ export interface InFlightTurn {
  * closure, anything added later), otherwise a notice landing after the live
  * trigger would read as "the round already finished".
  */
-export function projectInFlight(rows: ChatMessageRow[]): InFlightTurn | null {
+export function projectInFlight(
+  rows: ChatMessageRow[],
+  opts?: ProjectInFlightOptions,
+): InFlightTurn | null {
+  const awaitPointer = opts?.awaitPointer ?? true;
   const findPointer = (trigger: string): ChatMessageRow | undefined => {
     for (let i = rows.length - 1; i >= 0; i--) {
       const p = rows[i]!;
@@ -351,7 +374,15 @@ export function projectInFlight(rows: ChatMessageRow[]): InFlightTurn | null {
         );
         if (card?.meta?.in_reply_to) pointer = findPointer(card.meta.in_reply_to);
       }
-      return pointer ? { triggerId, execSid: pointer.meta?.agent_session_id || null } : null;
+      return pointer
+        ? { triggerId, execSid: pointer.meta?.agent_session_id || null }
+        : // A card answer never passes through the router (§5.5.4 decision:
+          // the Gateway resolves it to the card's own agent), so its bubble
+          // is never the assigning window — a stale card falls through as a
+          // plain message, not as "assigning…".
+          awaitPointer || r.meta?.in_reply_to
+          ? null
+          : { triggerId, execSid: null, assigning: true };
     }
     return null;
   }

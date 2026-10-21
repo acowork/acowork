@@ -230,6 +230,8 @@
     "empty": "該聊天暫無訊息",
     "processing": "Agent 處理中 · 點擊查看執行過程",
     "queued": "已送達，等待 Agent 開始處理…",
+    "assigning": "正在分配 Agent…",
+    "routerFallback": "已自動分配",
     "cardAnswered": "已回答",
     "cardClosed": "已結束",
     "freeAnswer": "自由回答",

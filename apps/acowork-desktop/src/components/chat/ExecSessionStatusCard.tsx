@@ -41,6 +41,10 @@ interface ExecSessionStatusCardProps {
    *  message is delivered but the Runtime has not yet resolved (or created)
    *  the execution session — the queued state, no live detail to mirror. */
   execSid: string | null;
+  /** ADR-099: delivered but not yet routed — the Chat Router is deciding
+   *  which execution session takes the message. Only meaningful while
+   *  `execSid` is null; it changes the caption, not the shape. */
+  assigning?: boolean;
   /** Drill into the execution view (open the exec tab + flip the surface). */
   onDrill?: () => void;
   /** The durable Chat-session `interaction_request` card this mirror is the
@@ -69,7 +73,7 @@ function workspaceDisplayName(id: string | undefined, alias: string | null | und
   return base || id;
 }
 
-export function ExecSessionStatusCard({ agentId, execSid, onDrill, card, onAnswerCard }: ExecSessionStatusCardProps) {
+export function ExecSessionStatusCard({ agentId, execSid, assigning, onDrill, card, onAnswerCard }: ExecSessionStatusCardProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const agentName = agent?.display_name ?? agent?.name ?? "";
@@ -248,7 +252,9 @@ export function ExecSessionStatusCard({ agentId, execSid, onDrill, card, onAnswe
     return shell(
       <div className="flex items-center gap-2 rounded-md border border-border-outer bg-panel-block px-3 py-2 text-xs">
         <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-zinc-400 dark:bg-zinc-500" />
-        <span className="min-w-0 flex-1 truncate text-text-secondary">{t("chatView.queued")}</span>
+        <span className="min-w-0 flex-1 truncate text-text-secondary">
+          {t(assigning ? "chatView.assigning" : "chatView.queued")}
+        </span>
       </div>
     );
   }

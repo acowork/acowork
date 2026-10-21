@@ -142,6 +142,27 @@ describe("projectInFlight (mirrored from mobile — drift guard)", () => {
     ];
     expect(projectInFlight(rows)).toEqual({ triggerId: "t1", execSid: "exec-1" });
   });
+
+  it("ADR-099: awaitPointer=false turns a pointerless trigger into the assigning window", () => {
+    // A 1:1 surface: every message reaches the agent, so the gap before the
+    // router's `turn_started` pointer is "assigning…", not a dead row.
+    expect(projectInFlight([user("t1")], { awaitPointer: false })).toEqual({
+      triggerId: "t1",
+      execSid: null,
+      assigning: true,
+    });
+  });
+
+  it("ADR-099: a card answer is never the assigning window", () => {
+    // Card answers bypass the router (§5.5.4), so even a stale one that fell
+    // through to a fresh turn must not paint "assigning…".
+    const rows = [
+      user("t1"),
+      row("interaction_request", { message_id: "c1", in_reply_to: "t1" }),
+      row("user_message", { message_id: "t2", in_reply_to: "c1" }),
+    ];
+    expect(projectInFlight(rows, { awaitPointer: false })).toBeNull();
+  });
 });
 
 describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + processing dot)", () => {

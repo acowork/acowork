@@ -10,6 +10,7 @@ import { useAuthStore } from "./authStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { useFileTreeStore } from "./fileTree";
 import { useProjectGroupStore } from "./projectGroupStore";
+import { useChatSessionStore } from "./chatSessionStore";
 import { log } from "../lib/logger";
 import { with503Retry } from "../lib/httpRetry";
 import * as sessionControl from "../lib/session-control";
@@ -424,7 +425,14 @@ interface AgentStoreState {
   activateNewlyCreatedSession: (sessionId: string, agentId: string) => Promise<void>;
   /** Remember the last selected session for an agent (survives remount). */
   saveSessionForAgent: (agentId: string, sessionId: string) => void;
-  createSession: (agentId: string) => Promise<void>;
+  /**
+   * Create a new execution session. `bindToChat` (ADR-099) additionally binds
+   * it to this agent's Chat session, so the fresh session enters the Chat
+   * Router's candidate list — the `+` on the Chat surface means "start a new
+   * task line I can later refer to from this chat", while the automatic
+   * creations (first open, closing the last exec tab) stay unbound.
+   */
+  createSession: (agentId: string, opts?: { bindToChat?: boolean }) => Promise<void>;
   deleteSession: (agentId: string, sessionId: string) => Promise<void>;
   /**
    * Clear every conversation of this agent the caller owns: the Runtime
@@ -1165,7 +1173,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     // it fresh on mount / agent switch.
   },
 
-  createSession: async (agentId: string) => {
+  createSession: async (agentId: string, opts: { bindToChat?: boolean } = {}) => {
     try {
       const lastActiveWs =
         useWorkspaceStore
@@ -1179,6 +1187,17 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // — that violates the display-only principle.
       const body: Record<string, string> = {};
       if (lastActiveWs) body.workspace_id = lastActiveWs;
+
+      // ADR-099: a `+` pressed on the Chat surface creates a session that
+      // belongs to that conversation. The id is read off the store's mirror
+      // of the server row (never invented client-side), and the Runtime
+      // re-checks the caller's chat membership before stamping the pair —
+      // so a stale or forged id degrades to "unbound", not to access.
+      if (opts.bindToChat) {
+        const chatSessionId =
+          useChatSessionStore.getState().byAgent[agentId]?.chatSessionId;
+        if (chatSessionId) body.chat_session_id = chatSessionId;
+      }
 
       // ADR-076 §决策 4: over HTTP, so the Gateway authenticates the
       // caller and the Runtime records the session's owner.

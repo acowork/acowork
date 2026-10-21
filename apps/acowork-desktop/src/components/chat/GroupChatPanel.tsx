@@ -182,11 +182,16 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
   if (row.kind === "system_notice") {
     // Bookkeeping rows — a pointer or a card closure carries no text of its
     // own, so it never paints a line in the stream.
-    if (row.meta?.notice_type === "turn_started" || !row.body) return null;
+    if (row.meta?.notice_type === "turn_started") return null;
+    // ADR-099: the router degraded to the deterministic route. The message
+    // itself still went through — a receipt, not an error.
+    const text =
+      row.meta?.notice_type === "router_fallback"
+        ? t("chatView.routerFallback")
+        : row.body || row.meta?.status || "";
+    if (!text) return null;
     return (
-      <div className="py-1 text-center text-10 text-text-tertiary">
-        {row.body || row.meta?.status || ""}
-      </div>
+      <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>
     );
   }
 

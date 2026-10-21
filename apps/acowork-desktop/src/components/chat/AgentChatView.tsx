@@ -54,7 +54,7 @@ import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ExecSessionStatusCard } from "./ExecSessionStatusCard";
 import { useLocateMessage } from "../../lib/useLocateMessage";
-import { useChatSessionStore, projectLiveTurn, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
+import { useChatSessionStore, projectInFlight, projectLiveTurn, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useAuthStore } from "../../stores/authStore";
@@ -155,10 +155,14 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec }: RowP
     // `turn_started` is rendered as the status card, never as a row; other
     // notices (receipts) are a quiet centered line.
     if (row.meta?.notice_type === "turn_started") return null;
+    // ADR-099: the router degraded to the deterministic route. The message
+    // itself still went through — a receipt, not an error.
+    const text =
+      row.meta?.notice_type === "router_fallback"
+        ? t("chatView.routerFallback")
+        : row.body || row.meta?.status || "";
     return (
-      <div className="py-1 text-center text-10 text-text-tertiary">
-        {row.body || row.meta?.status || ""}
-      </div>
+      <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>
     );
   }
 
@@ -400,7 +404,14 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // rows themselves so the card reacts to the window the user is looking at
   // rather than to the last refresh tick (§5.5.5).
   const live = useMemo(() => projectLiveTurn(rows), [rows]);
-  const inFlight = live.inFlight;
+  // ADR-099: this is a 1:1 surface — every message reaches the agent, so a
+  // trailing `user_message` whose pointer has not landed yet is the router's
+  // assigning window, not a dead row. The card paints "assigning…" for it and
+  // switches to the live mirror the moment `turn_started` arrives.
+  const inFlight = useMemo(
+    () => projectInFlight(rows, { awaitPointer: false }) ?? live.inFlight,
+    [rows, live.inFlight],
+  );
   // The latest `interaction_request` card, if it is still answerable — this
   // is the execute-session projection the unified status card mirrors live
   // (ask_question / approval / pause). A closed card (or none) yields `null`,
@@ -672,6 +683,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               <ExecSessionStatusCard
                 agentId={agentId}
                 execSid={cardExecSid}
+                assigning={inFlight?.assigning}
                 onDrill={
                   cardExecSid
                     ? () =>

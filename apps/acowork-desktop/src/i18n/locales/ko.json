@@ -230,6 +230,8 @@
     "empty": "채팅에 메시지가 없습니다",
     "processing": "Agent 처리 중 · 클릭하면 실행 과정 보기",
     "queued": "전달됨, Agent 시작을 기다리는 중…",
+    "assigning": "Agent 배정 중…",
+    "routerFallback": "자동으로 배정됨",
     "cardAnswered": "답변됨",
     "cardClosed": "종료됨",
     "freeAnswer": "직접 답변",

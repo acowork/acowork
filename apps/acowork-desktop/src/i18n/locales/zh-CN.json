@@ -231,6 +231,8 @@
     "empty": "该聊天暂无消息",
     "processing": "Agent 处理中 · 点击查看执行过程",
     "queued": "已送达，等待 Agent 开始处理…",
+    "assigning": "正在分配 Agent…",
+    "routerFallback": "已自动分配",
     "cardAnswered": "已回答",
     "cardClosed": "已结束",
     "freeAnswer": "自由回答",

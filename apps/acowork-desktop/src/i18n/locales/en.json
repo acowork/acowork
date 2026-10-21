@@ -137,6 +137,8 @@
     "empty": "No messages yet",
     "processing": "Agent working · click to view the run",
     "queued": "Delivered — waiting for the Agent to start…",
+    "assigning": "Assigning an Agent…",
+    "routerFallback": "Assigned automatically",
     "cardAnswered": "Answered",
     "cardClosed": "Closed",
     "freeAnswer": "Free answer",
