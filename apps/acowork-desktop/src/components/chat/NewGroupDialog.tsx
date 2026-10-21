@@ -166,7 +166,7 @@ export function NewGroupDialog({ onClose }: NewGroupDialogProps) {
             onChange={(e) => setName(e.target.value)}
             placeholder={t("newGroup.namePlaceholder")}
             aria-label={t("newGroup.nameLabel")}
-            className="h-9 w-full rounded-md border border-border-outer bg-panel-block px-3 text-sm text-text outline-none placeholder:text-text-disabled focus:border-[var(--color-accent)]/50"
+            className="h-9 w-full rounded-md border border-border-outer bg-panel-block px-3 text-xs text-text outline-none placeholder:text-text-disabled focus:border-[var(--color-accent)]/50"
           />
           <div className="flex items-center gap-2 rounded-md border border-border-outer bg-panel-block px-2">
             <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />

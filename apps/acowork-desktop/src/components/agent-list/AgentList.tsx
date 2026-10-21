@@ -567,7 +567,13 @@ export function AgentList({ width }: AgentListProps) {
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   useEffect(() => {
     void fetchGroups();
-  }, [fetchGroups]);
+    // `fetchGroups` reads the signed-in user from the store and bails (empty
+    // list) when it is still unknown. On a cold start — including the
+    // window reload after logout/switchAccount — authStore restores the
+    // session asynchronously, so the first run races an empty `selfUserId`.
+    // Depending on it re-fetches once the account lands; without it the
+    // group list and DM unread badges stay blank until a nav switch.
+  }, [fetchGroups, selfUserId]);
   const visibleGroupsChats = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return q
@@ -866,7 +872,9 @@ export function AgentList({ width }: AgentListProps) {
           )}
 
         {/* Project group chats + user-created `user_group`s (design 27 §4.4,
-            ADR-098 P1): one row per group session, plus a create affordance.
+            ADR-098 P1): one row per group session. Creating a group lives in
+            the bottom `+` menu (entry unification) — the banner itself is
+            just the collapse toggle + count.
             Shown whenever an account is present (multi-user) — including when
             the list is empty, so the first group can be created. Local mode
             (no account) hides the whole section. */}
@@ -887,19 +895,6 @@ export function AgentList({ width }: AgentListProps) {
                 <MessagesSquare className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
                 <span className="truncate">{t("agentList.projectGroupsBanner")}</span>
                 <span className="ml-auto text-xs font-normal opacity-60">{visibleGroupsChats.length}</span>
-              </button>
-              {/* Create a user-defined group (P1). A sibling of the collapse
-                  toggle (a button cannot nest inside one); opens the New-group
-                  dialog. Kept visible even when the list is empty. */}
-              <button
-                type="button"
-                onClick={() => setNewGroupOpen(true)}
-                aria-label={t("agentList.newGroup")}
-                title={t("agentList.newGroup")}
-                data-testid="new-group-button"
-                className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
-              >
-                <Plus className="h-3.5 w-3.5" aria-hidden />
               </button>
             </div>
             {!groupsCollapsed && visibleGroupsChats.map((g, index) => {
@@ -1076,6 +1071,22 @@ export function AgentList({ width }: AgentListProps) {
                   >
                     <Plus className="h-3.5 w-3.5" />
                     {t("account.createAccount")}
+                  </button>
+                )}
+                {/* ADR-098 P1: group creation rides the same `+` menu as the
+                    other creations (agent / account). Multi-user only —
+                    local mode has no groups section at all. */}
+                {selfAccount && (
+                  <button
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      setNewGroupOpen(true);
+                    }}
+                    data-testid="add-menu-new-group"
+                    className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
+                  >
+                    <MessagesSquare className="h-3.5 w-3.5" />
+                    {t("agentList.newGroup")}
                   </button>
                 )}
               </>

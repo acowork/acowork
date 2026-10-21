@@ -10,7 +10,9 @@
  *   2. the user-side member actions — `createGroup` (self is always added and
  *      deduped, the caller opens the fresh row), `addMembers` / `removeMember`
  *      (sync the local roster from the response; removing self drops the row
- *      and releases the pane).
+ *      and releases the pane; removing the owner throws so the panel can
+ *      surface "transfer first"), and the ADR-098 governance writes
+ *      `renameGroup` / `transferOwner` (backfill `title` / `owner`).
  *
  * `fetch` is the seam (the store hits the Gateway directly); the message
  * pipeline (`chatSessionStore.openGroup`) is stubbed because selecting a group
@@ -171,5 +173,47 @@ describe("removeMember", () => {
     await useProjectGroupStore.getState().removeMember("ug-1", ME);
     expect(useProjectGroupStore.getState().groups).toEqual([]);
     expect(useProjectGroupStore.getState().activeGroupId).toBeNull();
+  });
+
+  it("refusing to remove the owner throws and leaves the roster untouched", async () => {
+    // The backend refuses an owner removal before the ≥2 floor (ADR-098);
+    // the store surfaces the failure instead of patching local state.
+    useProjectGroupStore.setState({
+      groups: [session({ session_id: "ug-1", kind: "user_group", owner: "u-bob", participants: [{ id: ME }, { id: "u-bob" }] })],
+    });
+    stubFetch({
+      "DELETE /api/chat-sessions/ug-1/participants/u-bob": () =>
+        jsonResp({ error: "a group must keep an owner" }, 422),
+    });
+    await expect(useProjectGroupStore.getState().removeMember("ug-1", "u-bob")).rejects.toThrow(
+      /422/,
+    );
+    expect(useProjectGroupStore.getState().groups[0].participants).toEqual([{ id: ME }, { id: "u-bob" }]);
+  });
+});
+
+describe("renameGroup / transferOwner (ADR-098 governance)", () => {
+  it("rename PATCHes the title route and backfills the local row", async () => {
+    useProjectGroupStore.setState({
+      groups: [session({ session_id: "ug-1", kind: "user_group", title: "old" })],
+    });
+    stubFetch({
+      "PATCH /api/chat-sessions/ug-1/title": () =>
+        jsonResp(session({ session_id: "ug-1", kind: "user_group", title: "new" })),
+    });
+    await useProjectGroupStore.getState().renameGroup("ug-1", "new");
+    expect(useProjectGroupStore.getState().groups[0].title).toBe("new");
+  });
+
+  it("transfer POSTs the owner route and backfills the local owner", async () => {
+    useProjectGroupStore.setState({
+      groups: [session({ session_id: "ug-1", kind: "user_group", owner: ME })],
+    });
+    stubFetch({
+      "POST /api/chat-sessions/ug-1/owner": () =>
+        jsonResp(session({ session_id: "ug-1", kind: "user_group", owner: "u-bob" })),
+    });
+    await useProjectGroupStore.getState().transferOwner("ug-1", "u-bob");
+    expect(useProjectGroupStore.getState().groups[0].owner).toBe("u-bob");
   });
 });

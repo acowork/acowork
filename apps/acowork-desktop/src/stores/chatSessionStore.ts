@@ -78,6 +78,9 @@ export interface ChatSessionInfo {
   last_active_at: number;
   message_count: number;
   participants?: Array<{ id: string; identity?: string }>;
+  /** Group owner for a `user_group` (ADR-098 governance) — the founder is
+   *  the first owner; absent for every other kind. */
+  owner?: string;
   /** `participant_id -> unread count` (design 27 §4.6). Only the list
    *  endpoint carries it; reading a session's messages clears mine
    *  server-side. */

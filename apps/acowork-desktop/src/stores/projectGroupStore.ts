@@ -108,8 +108,16 @@ interface ProjectGroupStore {
   /** Invite `ids` to an existing `user_group` (any member may). Syncs the
    *  local roster from the response; peers are refreshed by the doorbell. */
   addMembers: (sessionId: string, ids: string[]) => Promise<void>;
-  /** Remove `pid` from a `user_group` (or leave it when `pid` is self). */
+  /** Remove `pid` from a `user_group` (or leave it when `pid` is self).
+   *  Throws when the backend refuses — removing the owner needs a transfer
+   *  first (ADR-098 governance); the caller surfaces the message. */
   removeMember: (sessionId: string, pid: string) => Promise<void>;
+  /** Rename a `user_group` — owner-or-admin gated server-side; backfills the
+   *  local row's `title` from the response. */
+  renameGroup: (sessionId: string, title: string) => Promise<void>;
+  /** Transfer a `user_group`'s ownership to another (human) member — same
+   *  gate; backfills the local row's `owner`. */
+  transferOwner: (sessionId: string, newOwner: string) => Promise<void>;
   clearSelection: () => void;
 }
 
@@ -232,6 +240,28 @@ export const useProjectGroupStore = create<ProjectGroupStore>((set, get) => ({
       groups: st.groups.map((g) =>
         g.session_id === sessionId ? { ...g, participants: s.participants } : g,
       ),
+    }));
+  },
+
+  renameGroup: async (sessionId, title) => {
+    const s = await authRequest<ChatSessionInfo>(
+      "PATCH",
+      `/api/chat-sessions/${encodeURIComponent(sessionId)}/title`,
+      { title },
+    );
+    set((st) => ({
+      groups: st.groups.map((g) => (g.session_id === sessionId ? { ...g, title: s.title } : g)),
+    }));
+  },
+
+  transferOwner: async (sessionId, newOwner) => {
+    const s = await authRequest<ChatSessionInfo>(
+      "POST",
+      `/api/chat-sessions/${encodeURIComponent(sessionId)}/owner`,
+      { owner: newOwner },
+    );
+    set((st) => ({
+      groups: st.groups.map((g) => (g.session_id === sessionId ? { ...g, owner: s.owner } : g)),
     }));
   },
 }));

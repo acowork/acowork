@@ -4,11 +4,13 @@
  * Why this file exists:
  *   These classes replaced hand-rolled `bg-zinc-200` / `border-zinc-300`
  *   button surfaces (globals.css "Button surface variants"), and the app
- *   settled on two tones — a neutral fill for secondary actions, the
- *   accent fill for the one primary/confirm action in a dialog. Two other
- *   variants had drifted in (`btn-outline`, `btn-option`); after the
- *   ProfileTab row switched to the standard trailing-action grammar they
- *   had zero callers, and their CSS was deleted.
+ *   settled on solid fills — a neutral tone for secondary actions and the
+ *   accent fill for the one primary/confirm action in a dialog (including
+ *   a destructive confirm like leave-group, which reuses the accent fill
+ *   rather than a bespoke red tone). Two other variants had drifted in
+ *   (`btn-outline`, `btn-option`); after the ProfileTab row switched to the
+ *   standard trailing-action grammar they had zero callers, and their CSS
+ *   was deleted.
  *
  *   The failure mode this pins is a third tone creeping back in at a new
  *   call site: nothing about `btn-outline` looked wrong in isolation, it
@@ -16,14 +18,20 @@
  *   That is a visual bug jsdom cannot see and no type error catches, so
  *   the spec is the class name itself.
  *
+ *   Registering a tone here is the design decision; creeping one in at a
+ *   call site without registering it is what this file refuses. An earlier
+ *   `btn-danger` tone was removed by request — destructive confirms use the
+ *   global accent fill for a consistent look, not a red-only tone.
+ *
  * Why source scanning:
  *   Same reason as capsule.test.tsx / globalFontSize.test.ts — these are
  *   stylesheet and class-string contracts. Nothing renders them.
  *
  * What it deliberately does NOT police: which tone a given action picks.
- * Danger-red for destructive actions is a per-component decision
- * (AccountMenu's 注销, the delete buttons); "red is not a button variant"
- * is the rule, not "nothing may ever be red".
+ * Inline red text for destructive actions stays a per-component choice
+ * (AccountMenu's 注销, ghost delete links); the rule is that a solid
+ * button may only use a registered tone, not that everything destructive
+ * must be red.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
