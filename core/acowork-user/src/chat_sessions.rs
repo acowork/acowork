@@ -379,6 +379,13 @@ pub struct ChatSession {
     pub participants: Vec<Participant>,
     #[serde(default)]
     pub title: String,
+    /// Group owner for a `user_group` (ADR-098 governance). The founder is
+    /// the first owner; ownership moves only via [`transfer_owner`]. `None`
+    /// for every other kind and for sessions written before the field
+    /// existed, so a legacy row deserialises without an owner rather than
+    /// failing to load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// The Chat surface's last seed pick, persisted server-side (design 27
     /// §4.5). `None` = the user never chose one on this pair's surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -467,6 +474,7 @@ pub fn create_session(
     kind: SessionKind,
     participants: &[Participant],
     title: &str,
+    owner: Option<&str>,
     project_id: Option<&str>,
     now: i64,
 ) -> Result<ChatSession, String> {
@@ -494,12 +502,12 @@ pub fn create_session(
         {
             return Ok(s);
         }
-        let s = write_new(data_dir, kind, participants, title, Some(&pid), now)?;
+        let s = write_new(data_dir, kind, participants, title, owner, Some(&pid), now)?;
         index.insert(pid, s.session_id.clone());
         write_projects_index(data_dir, &index)?;
         return Ok(s);
     }
-    write_new(data_dir, kind, participants, title, None, now)
+    write_new(data_dir, kind, participants, title, owner, None, now)
 }
 
 fn write_new(
@@ -507,6 +515,7 @@ fn write_new(
     kind: SessionKind,
     participants: &[Participant],
     title: &str,
+    owner: Option<&str>,
     project_id: Option<&str>,
     now: i64,
 ) -> Result<ChatSession, String> {
@@ -527,6 +536,7 @@ fn write_new(
         kind,
         participants: participants.to_vec(),
         title: title.to_string(),
+        owner: owner.map(str::to_string),
         session_config: None,
         project_id: project_id.map(str::to_string),
         repo: None,
@@ -923,6 +933,81 @@ pub fn set_session_config(
     Ok(session)
 }
 
+/// Rename a `user_group` (ADR-098 governance). The permission is ownership:
+/// only the current owner or an admin may rename. Checked on the locked
+/// snapshot so a concurrent transfer cannot flip the gate mid-write. The
+/// caller (route) has already hidden non-participants with the `not_a_participant`
+/// 404 vocabulary; a member who is neither owner nor admin gets the
+/// `not_authorized` string the route maps to 403.
+pub fn rename_session(
+    data_dir: &Path,
+    session_id: &str,
+    new_title: &str,
+    who: &str,
+    is_admin: bool,
+) -> Result<ChatSession, String> {
+    validate_session_id(session_id)?;
+    let title = new_title.trim().to_string();
+    if title.is_empty() {
+        return Err("a group name cannot be empty".to_string());
+    }
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let mut session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    if session.kind != SessionKind::UserGroup {
+        return Err("only user_group sessions are user-managed".to_string());
+    }
+    if !(is_admin || session.owner.as_deref() == Some(who)) {
+        return Err("not_authorized".to_string());
+    }
+    session.title = title;
+    save(&dir, &session)?;
+    Ok(session)
+}
+
+/// Transfer ownership of a `user_group` to another member (ADR-098). Only the
+/// current owner or an admin may transfer, and the target must be a *human*
+/// participant — an agent cannot own a group, and a non-member cannot be made
+/// owner (invite first). The new owner stays a permanent member until they
+/// transfer again (see [`remove_participant`] with `protect_owner`).
+pub fn transfer_owner(
+    data_dir: &Path,
+    session_id: &str,
+    new_owner: &str,
+    who: &str,
+    is_admin: bool,
+) -> Result<ChatSession, String> {
+    validate_session_id(session_id)?;
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let mut session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    if session.kind != SessionKind::UserGroup {
+        return Err("only user_group sessions are user-managed".to_string());
+    }
+    if !(is_admin || session.owner.as_deref() == Some(who)) {
+        return Err("not_authorized".to_string());
+    }
+    let target = session
+        .participants
+        .iter()
+        .find(|p| p.id == new_owner)
+        .ok_or_else(|| "the new owner is not a member of this group".to_string())?;
+    if !target.is_human() {
+        return Err("an agent cannot own a group".to_string());
+    }
+    session.owner = Some(new_owner.to_string());
+    save(&dir, &session)?;
+    Ok(session)
+}
+
 /// Pair index file: sorted participant-pair key → agent-agent session id.
 fn pairs_index_path(data_dir: &Path) -> PathBuf {
     data_dir.join("chat-sessions.pairs.json")
@@ -980,7 +1065,7 @@ pub fn ensure_pair(
     } else {
         [b, a]
     };
-    let s = write_new(data_dir, kind, &participants, "", None, now)?;
+    let s = write_new(data_dir, kind, &participants, "", None, None, now)?;
     index.insert(key, s.session_id.clone());
     write_index(data_dir, &index, pairs_index_path(data_dir))?;
     Ok(s)
@@ -1985,6 +2070,7 @@ pub fn sync_group(
                 SessionKind::ProjectGroup,
                 participants,
                 "",
+                None,
                 Some(project_id),
                 now,
             );
@@ -2072,11 +2158,26 @@ pub fn add_participant(
 /// concurrent removals can never interleave past the floor. `0` disables the
 /// floor (the PM-mediated `/internal` path governs membership by other rules
 /// and may shrink a roster below two).
+///
+/// `protect_owner` makes the current `user_group` owner a permanent member:
+/// dropping the id that holds `owner` fails atomically with a distinct error
+/// (the caller must transfer ownership first, ADR-098). The `/internal` PM
+/// path passes `false` — its roster is synced from the project, whose own
+/// owner semantics are enforced there, not here.
+///
+/// `actor` is the `(who, is_admin)` identity for the governance gate (ADR-098,
+/// revised): removing ANOTHER member is owner-or-admin only, while anyone may
+/// remove themselves (leave). Checked on the same locked snapshot as the
+/// removal, so a concurrent transfer cannot flip the gate mid-write. `None`
+/// disables it — the PM-mediated `/internal` path governs membership by the
+/// project's own rules and carries no user actor.
 pub fn remove_participant(
     data_dir: &Path,
     session_id: &str,
     participant_id: &str,
     min_participants: usize,
+    protect_owner: bool,
+    actor: Option<(&str, bool)>,
 ) -> Result<ChatSession, String> {
     validate_session_id(session_id)?;
     let dir = session_dir(data_dir, session_id);
@@ -2084,10 +2185,27 @@ pub fn remove_participant(
     let _g = lock(&tlock);
     let mut s = load(data_dir, session_id)?;
     let before = s.participants.clone();
-    s.participants.retain(|p| p.id != participant_id);
-    if s.participants.len() == before.len() {
+    if !s.participants.iter().any(|p| p.id == participant_id) {
         return Ok(s);
     }
+    // Governance before permanence: a member who cannot remove anyone should
+    // hear "not allowed" (403), not learn that the target happens to be the
+    // owner (422). Self-removal (leave) skips the gate.
+    if let Some((who, is_admin)) = actor
+        && participant_id != who
+        && !(is_admin || s.owner.as_deref() == Some(who))
+    {
+        return Err("not_authorized".to_string());
+    }
+    // Owner permanence, checked on the locked snapshot so a concurrent
+    // transfer cannot interleave a removal that drops the group's owner.
+    if protect_owner
+        && s.kind == SessionKind::UserGroup
+        && s.owner.as_deref() == Some(participant_id)
+    {
+        return Err("a group must keep an owner - transfer ownership first".to_string());
+    }
+    s.participants.retain(|p| p.id != participant_id);
     if s.participants.len() < min_participants {
         return Err("a group must keep at least two members".to_string());
     }
@@ -2314,6 +2432,7 @@ mod tests {
             &[human.clone(), agent.clone()],
             "second",
             None,
+            None,
             101,
         )
         .expect("create");
@@ -2325,6 +2444,7 @@ mod tests {
             SessionKind::ProjectGroup,
             &[human.clone(), Participant::untyped("u2")],
             "proj",
+            None,
             Some("p-1"),
             102,
         )
@@ -2336,6 +2456,7 @@ mod tests {
             SessionKind::UserGroup,
             &[human.clone(), Participant::untyped("u2")],
             "team",
+            None,
             None,
             103,
         )
@@ -2360,6 +2481,7 @@ mod tests {
             SessionKind::UserAgent,
             &[human, agent],
             "second",
+            None,
             None,
             101,
         )
@@ -2467,8 +2589,16 @@ mod tests {
 
     #[test]
     fn create_and_load_roundtrip() {        let dir = temp_dir();
-        let s = create_session(&dir, SessionKind::UserGroup, &["u1".into(), "u2".into()], "team", None, 100)
-            .expect("create");
+        let s = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &["u1".into(), "u2".into()],
+            "team",
+            None,
+            None,
+            100,
+        )
+        .expect("create");
         let loaded = load(&dir, &s.session_id).expect("load");
         assert_eq!(s, loaded);
         assert_eq!(loaded.kind, SessionKind::UserGroup);
@@ -2482,6 +2612,7 @@ mod tests {
             SessionKind::ProjectGroup,
             &["owner".into()],
             "p",
+            None,
             Some("proj-1"),
             1,
         )
@@ -2491,6 +2622,7 @@ mod tests {
             SessionKind::ProjectGroup,
             &["owner".into()],
             "p",
+            None,
             Some("proj-1"),
             2,
         )
@@ -2502,11 +2634,11 @@ mod tests {
     fn rejects_duplicate_participants_and_bad_project_group() {
         let dir = temp_dir();
         assert!(
-            create_session(&dir, SessionKind::UserGroup, &["u".into(), "u".into()], "", None, 1)
+            create_session(&dir, SessionKind::UserGroup, &["u".into(), "u".into()], "", None, None, 1)
                 .is_err()
         );
         assert!(
-            create_session(&dir, SessionKind::ProjectGroup, &["u".into()], "", None, 1).is_err()
+            create_session(&dir, SessionKind::ProjectGroup, &["u".into()], "", None, None, 1).is_err()
         );
     }
 
@@ -2514,7 +2646,7 @@ mod tests {
     fn append_assigns_monotonic_seq_and_validates_participation() {
         let dir = temp_dir();
         let s =
-            create_session(&dir, SessionKind::UserUser, &["a".into(), "b".into()], "", None, 1)
+            create_session(&dir, SessionKind::UserUser, &["a".into(), "b".into()], "", None, None, 1)
                 .unwrap();
         let (m1, wrote) = append_message(&dir, &s.session_id, &msg("a", KIND_USER_MESSAGE, "hi", ""), 10)
             .unwrap();
@@ -2541,6 +2673,7 @@ mod tests {
             SessionKind::AgentAgent,
             &["inst-a".into(), "inst-b".into()],
             "",
+            None,
             None,
             1,
         )
@@ -2569,6 +2702,7 @@ mod tests {
                 Participant::new("ag", ParticipantIdentity::Agent),
             ],
             "",
+            None,
             None,
             1,
         )
@@ -2624,6 +2758,7 @@ mod tests {
                 Participant::new("ag", ParticipantIdentity::Agent),
             ],
             "",
+            None,
             None,
             1,
         )
@@ -2698,7 +2833,7 @@ mod tests {
         // the server fills it in; a repeated submitted id writes no second
         // row.
         let dir = temp_dir();
-        let s = create_session(&dir, SessionKind::UserUser, &["a".into(), "b".into()], "", None, 1)
+        let s = create_session(&dir, SessionKind::UserUser, &["a".into(), "b".into()], "", None, None, 1)
             .unwrap();
         let (m, wrote) = append_message(&dir, &s.session_id, &msg("a", KIND_USER_MESSAGE, "hi", ""), 2)
             .unwrap();
@@ -2724,7 +2859,7 @@ mod tests {
         // Simulate: JSONL line durable, session.json save failed → counter
         // behind. The next append must reconcile, not reuse the seq.
         let dir = temp_dir();
-        let s = create_session(&dir, SessionKind::UserUser, &["a".into(), "b".into()], "", None, 1)
+        let s = create_session(&dir, SessionKind::UserUser, &["a".into(), "b".into()], "", None, None, 1)
             .unwrap();
         append_message(&dir, &s.session_id, &msg("a", KIND_USER_MESSAGE, "one", ""), 2).unwrap();
         let mut stale = load(&dir, &s.session_id).unwrap();
@@ -2738,9 +2873,9 @@ mod tests {
     #[test]
     fn list_for_filters_by_participant() {
         let dir = temp_dir();
-        let s1 = create_session(&dir, SessionKind::UserGroup, &["x".into(), "y".into()], "", None, 1)
+        let s1 = create_session(&dir, SessionKind::UserGroup, &["x".into(), "y".into()], "", None, None, 1)
             .unwrap();
-        let _s2 = create_session(&dir, SessionKind::UserGroup, &["y".into(), "z".into()], "", None, 2)
+        let _s2 = create_session(&dir, SessionKind::UserGroup, &["y".into(), "z".into()], "", None, None, 2)
             .unwrap();
         let xs = list_for(&dir, "x").unwrap();
         assert_eq!(xs.len(), 1);
@@ -2830,6 +2965,7 @@ mod tests {
             ],
             "",
             None,
+            None,
             1,
         )
         .unwrap();
@@ -2856,7 +2992,7 @@ mod tests {
         // §8.1 carries bare-string participants; membership is still
         // enforced, the type check is skipped.
         let dir = temp_dir();
-        let s = create_session(&dir, SessionKind::UserGroup, &["a".into(), "b".into()], "", None, 1)
+        let s = create_session(&dir, SessionKind::UserGroup, &["a".into(), "b".into()], "", None, None, 1)
             .unwrap();
         assert!(
             append_message(&dir, &s.session_id, &msg("a", KIND_USER_MESSAGE, "hi", ""), 2).is_ok()
@@ -2873,6 +3009,7 @@ mod tests {
             SessionKind::ProjectGroup,
             &["u".into()],
             "",
+            None,
             Some("proj-9"),
             1,
         )
@@ -2900,6 +3037,7 @@ mod tests {
                 Participant::new("ag", ParticipantIdentity::Agent),
             ],
             "",
+            None,
             None,
             1,
         )
@@ -3018,6 +3156,7 @@ mod tests {
                 Participant::new("ag", ParticipantIdentity::Agent),
             ],
             "P",
+            None,
             Some("proj-1"),
             1,
         )
@@ -3173,6 +3312,7 @@ mod tests {
             &[Participant::new("u1", ParticipantIdentity::Human)],
             "g",
             None,
+            None,
             1,
         )
         .unwrap();
@@ -3196,9 +3336,9 @@ mod tests {
         // Remove: listed id goes, unknown id is a no-op. `0` disables the
         // floor here, exercising the raw store path independent of the
         // user_group ≥2 policy (which the HTTP route enforces via min=2).
-        let s = remove_participant(&dir, &s.session_id, "ag1", 0).unwrap();
+        let s = remove_participant(&dir, &s.session_id, "ag1", 0, false, None).unwrap();
         assert_eq!(s.participants.len(), 1);
-        let again = remove_participant(&dir, &s.session_id, "ag1", 0).unwrap();
+        let again = remove_participant(&dir, &s.session_id, "ag1", 0, false, None).unwrap();
         assert_eq!(again.participants.len(), 1, "repeat remove is a no-op");
         // The removal is durable — the revoked id must not reappear on load.
         let s = load(&dir, &s.session_id).unwrap();
@@ -3219,16 +3359,148 @@ mod tests {
             ],
             "g",
             None,
+            None,
             1,
         )
         .unwrap();
         // min=2: dropping one of two would leave one → refused, roster intact.
-        let err = remove_participant(&dir, &s.session_id, "u2", 2).unwrap_err();
+        let err = remove_participant(&dir, &s.session_id, "u2", 2, false, None).unwrap_err();
         assert!(err.contains("at least two members"), "{err}");
         assert_eq!(load(&dir, &s.session_id).unwrap().participants.len(), 2);
         // min=0: the same removal is allowed (the PM path has no floor).
-        let s = remove_participant(&dir, &s.session_id, "u2", 0).unwrap();
+        let s = remove_participant(&dir, &s.session_id, "u2", 0, false, None).unwrap();
         assert_eq!(s.participants.len(), 1);
+    }
+
+    #[test]
+    fn remove_participant_refuses_the_owner() {
+        // `protect_owner` makes the current owner permanent: even the GOVERNING
+        // actor (the owner themselves) cannot drop the owner id until
+        // ownership moves, checked on the locked snapshot.
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("u2", ParticipantIdentity::Human),
+                Participant::new("u3", ParticipantIdentity::Human),
+            ],
+            "g",
+            Some("u1"),
+            None,
+            1,
+        )
+        .unwrap();
+        let err = remove_participant(&dir, &s.session_id, "u1", 2, true, Some(("u1", false)))
+            .unwrap_err();
+        assert!(err.contains("keep an owner"), "{err}");
+        assert_eq!(load(&dir, &s.session_id).unwrap().participants.len(), 3);
+        // A plain member removes fine for the owner (3 → 2, floor respected).
+        let s = remove_participant(&dir, &s.session_id, "u2", 2, true, Some(("u1", false))).unwrap();
+        assert_eq!(s.participants.len(), 2);
+    }
+
+    #[test]
+    fn remove_participant_gates_removals_of_others_on_owner_or_admin() {
+        // ADR-098 governance (revised): a plain member may only remove
+        // themselves (leave); removing anyone else is owner-or-admin, checked
+        // atomically in the lock — and BEFORE owner-permanence, so a plain
+        // member probing an owner removal hears `not_authorized` (403), not
+        // the transfer hint (422).
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human), // owner
+                Participant::new("u2", ParticipantIdentity::Human),
+                Participant::new("u3", ParticipantIdentity::Human),
+                Participant::new("u4", ParticipantIdentity::Human),
+            ],
+            "g",
+            Some("u1"),
+            None,
+            1,
+        )
+        .unwrap();
+        let sid = s.session_id.clone();
+        // 1. Plain member u2 removing another member u3 → refused, roster 4.
+        let err = remove_participant(&dir, &sid, "u3", 2, true, Some(("u2", false))).unwrap_err();
+        assert_eq!(err, "not_authorized");
+        assert_eq!(load(&dir, &sid).unwrap().participants.len(), 4);
+        // 2. The same plain member may leave (self-removal skips the gate).
+        let s = remove_participant(&dir, &sid, "u2", 2, true, Some(("u2", false))).unwrap();
+        assert_eq!(s.participants.len(), 3, "u1,u3,u4");
+        // 3. The owner may remove another member (gate passes, floor respected).
+        let s = remove_participant(&dir, &sid, "u3", 2, true, Some(("u1", false))).unwrap();
+        assert_eq!(s.participants.len(), 2, "u1,u4");
+        // 4. An admin caller clears the gate, but owner-permanence still
+        //    refuses to drop the owner — proving the gate ran, not blocked.
+        let err = remove_participant(&dir, &sid, "u1", 2, true, Some(("u4", true))).unwrap_err();
+        assert!(err.contains("keep an owner"), "{err}");
+        assert_eq!(load(&dir, &sid).unwrap().participants.len(), 2);
+    }
+
+    #[test]
+    fn rename_session_requires_owner_or_admin() {
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("u2", ParticipantIdentity::Human),
+            ],
+            "team",
+            Some("u1"),
+            None,
+            1,
+        )
+        .unwrap();
+        // Owner renames — persisted.
+        let s = rename_session(&dir, &s.session_id, "renamed", "u1", false).unwrap();
+        assert_eq!(s.title, "renamed");
+        assert_eq!(load(&dir, &s.session_id).unwrap().title, "renamed");
+        // A non-owner member is refused.
+        let err = rename_session(&dir, &s.session_id, "hijack", "u2", false).unwrap_err();
+        assert_eq!(err, "not_authorized");
+        // An outsider is hidden as a non-participant.
+        let err = rename_session(&dir, &s.session_id, "nope", "zz", false).unwrap_err();
+        assert_eq!(err, "not_a_participant");
+        // An admin may rename even without owning.
+        rename_session(&dir, &s.session_id, "by admin", "u2", true).unwrap();
+    }
+
+    #[test]
+    fn transfer_owner_requires_a_human_member() {
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("u2", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "g",
+            Some("u1"),
+            None,
+            1,
+        )
+        .unwrap();
+        // Owner transfers to a human member.
+        let s = transfer_owner(&dir, &s.session_id, "u2", "u1", false).unwrap();
+        assert_eq!(s.owner.as_deref(), Some("u2"));
+        // The old owner can no longer transfer (not_authorized).
+        let err = transfer_owner(&dir, &s.session_id, "u1", "u1", false).unwrap_err();
+        assert_eq!(err, "not_authorized");
+        // The new owner may not hand the group to an agent.
+        let err = transfer_owner(&dir, &s.session_id, "ag", "u2", false).unwrap_err();
+        assert!(err.contains("agent cannot own"), "{err}");
+        // ...nor to a non-member.
+        let err = transfer_owner(&dir, &s.session_id, "zz", "u2", false).unwrap_err();
+        assert!(err.contains("not a member"), "{err}");
     }
 
     /// Regression for the §8 atomic-RMW rule: `sync_group` /
@@ -3246,6 +3518,7 @@ mod tests {
                 Participant::new("ag2", ParticipantIdentity::Agent),
             ],
             "g",
+            None,
             Some("proj-lock"),
             1,
         )
@@ -3641,6 +3914,7 @@ mod tests {
             &[Participant::new("u1", ParticipantIdentity::Human)],
             "w",
             None,
+            None,
             1,
         )
         .unwrap();
@@ -3712,6 +3986,7 @@ mod tests {
             &[Participant::new("u1", ParticipantIdentity::Human)],
             "r",
             None,
+            None,
             1,
         )
         .unwrap();
@@ -3747,6 +4022,7 @@ mod tests {
                 Participant::new("ag", ParticipantIdentity::Agent),
             ],
             "p",
+            None,
             Some("proj-1"),
             1,
         )
@@ -3780,6 +4056,7 @@ mod tests {
                 Participant::new("ag", ParticipantIdentity::Agent),
             ],
             "h",
+            None,
             Some("proj-1"),
             1,
         )

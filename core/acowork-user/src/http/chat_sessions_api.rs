@@ -97,6 +97,18 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/api/chat-sessions/{session_id}/participants/{participant_id}",
             delete(remove_participant_route),
         )
+        // ADR-098 governance: rename / transfer owner of a `user_group`. Both
+        // are owner-or-admin gated, checked atomically in the store. The
+        // participant relation is still the entry permission (§5.3): a stranger
+        // gets the hidden 404, a non-owner member gets 403.
+        .route(
+            "/api/chat-sessions/{session_id}/title",
+            patch(rename_session_route),
+        )
+        .route(
+            "/api/chat-sessions/{session_id}/owner",
+            post(transfer_owner_route),
+        )
         // §4.2.1 (plan 3.5): attachments live in the session's `files/`
         // dir; upload before the first message is normal. The per-route
         // body limit covers the multipart envelope of the largest class
@@ -187,6 +199,21 @@ pub struct PostMessageRequest {
 #[derive(Debug, Deserialize)]
 pub struct AddParticipantsRequest {
     pub participant_ids: Vec<String>,
+}
+
+/// `PATCH /api/chat-sessions/{session_id}/title` — rename a `user_group`
+/// (ADR-098 governance). Owner-or-admin gated in the store.
+#[derive(Debug, Deserialize)]
+pub struct RenameSessionRequest {
+    pub title: String,
+}
+
+/// `POST /api/chat-sessions/{session_id}/owner` — transfer ownership of a
+/// `user_group` to another (human) member (ADR-098). Owner-or-admin gated in
+/// the store; the target must already be a participant.
+#[derive(Debug, Deserialize)]
+pub struct TransferOwnerRequest {
+    pub owner: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,6 +352,9 @@ async fn create_session(
     }
     let dir = data_dir(&state)?;
     let auth = state.auth_service.clone();
+    // A `user_group`'s founder is its first owner (ADR-098); every other kind
+    // is system-created and carries no user-side owner.
+    let owner = (kind == SessionKind::UserGroup).then(|| caller.clone());
     let session = offload(move || {
         let participants = typed_participants(auth.as_ref(), &req.participants, Some(&caller));
         chat_sessions::create_session(
@@ -332,6 +362,7 @@ async fn create_session(
             kind,
             &participants,
             &req.title,
+            owner.as_deref(),
             req.project_id.as_deref(),
             now_unix(),
         )
@@ -643,10 +674,13 @@ async fn add_participants_route(
     Ok(Json(session))
 }
 
-/// P1: remove a member from a `user_group`, or leave it. Permission is the
-/// participant relation; any member may remove anyone, including themselves.
-/// Refused once the group would drop below two members (a one-person group is
-/// meaningless). Idempotent no-op for an unknown id.
+/// P1 (governance revised): remove a member from a `user_group`, or leave it.
+/// Inviting stays open to every member, but removing ANOTHER member is
+/// owner-or-admin only (the store gate runs atomically under the session
+/// lock); anyone may remove themselves. The owner is a permanent member
+/// either way — they must transfer ownership before being removed or leaving.
+/// Refused once the group would drop below two members. Idempotent no-op for
+/// an unknown id.
 async fn remove_participant_route(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -654,6 +688,7 @@ async fn remove_participant_route(
 ) -> Result<Json<ChatSession>, ApiError> {
     let dir = data_dir(&state)?;
     let caller = ctx.effective_user_id().to_string();
+    let is_admin = ctx.is_admin();
     let notify_id = participant_id.clone();
     let (session, removed) = offload(move || {
         let s = chat_sessions::load(&dir, &session_id)?;
@@ -669,9 +704,20 @@ async fn remove_participant_route(
         // The ≥2 floor is enforced atomically *inside* the store's session
         // lock (`min_participants = 2`), not on this lock-free snapshot — so
         // two concurrent removals can never each pass a `<= 2` check and
-        // interleave the group down to one member. A breach returns the error
-        // the offload maps to 422.
-        let s2 = chat_sessions::remove_participant(&dir, &session_id, &participant_id, 2)?;
+        // interleave the group down to one member. `protect_owner = true` also
+        // makes the current owner a permanent member (ADR-098): they must
+        // transfer ownership before they can be removed or leave. The
+        // `Some((caller, is_admin))` actor gates removals of OTHER members on
+        // owner-or-admin (self-removal is always allowed); both refusals reach
+        // the offload vocabulary (`not_authorized` → 403, floors → 422).
+        let s2 = chat_sessions::remove_participant(
+            &dir,
+            &session_id,
+            &participant_id,
+            2,
+            true,
+            Some((&caller, is_admin)),
+        )?;
         Ok((s2, true))
     })
     .await?;
@@ -687,6 +733,64 @@ async fn remove_participant_route(
             crate::mqtt_publisher::notify_chat_changed(&p.id);
         }
         crate::mqtt_publisher::notify_chat_changed(&notify_id);
+    }
+    Ok(Json(session))
+}
+
+/// ADR-098 governance: rename a `user_group`. Only the owner (or an admin) may
+/// rename — the store checks this atomically under the session lock, so a
+/// concurrent transfer cannot flip the gate mid-write. Participation is still
+/// the entry permission (a stranger hits the store's `not_a_participant` →
+/// hidden 404). On success every human surface gets a doorbell so its header
+/// re-reads the new title.
+async fn rename_session_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+    Json(req): Json<RenameSessionRequest>,
+) -> Result<Json<ChatSession>, ApiError> {
+    let dir = data_dir(&state)?;
+    let caller = ctx.effective_user_id().to_string();
+    let is_admin = ctx.is_admin();
+    let title = req.title;
+    let session =
+        offload(move || chat_sessions::rename_session(&dir, &session_id, &title, &caller, is_admin))
+            .await?;
+    for p in session
+        .participants
+        .iter()
+        .filter(|p| p.identity != Some(ParticipantIdentity::Agent))
+    {
+        crate::mqtt_publisher::notify_chat_changed(&p.id);
+    }
+    Ok(Json(session))
+}
+
+/// ADR-098 governance: transfer a `user_group`'s ownership to another human
+/// member. Same permission shape as [`rename_session_route`] (owner-or-admin,
+/// checked under the lock; a non-owner member gets `not_authorized` → 403, a
+/// non-member target gets 422). A doorbell refreshes every human surface so the
+/// owner badge and the permanent-member guard update live.
+async fn transfer_owner_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+    Json(req): Json<TransferOwnerRequest>,
+) -> Result<Json<ChatSession>, ApiError> {
+    let dir = data_dir(&state)?;
+    let caller = ctx.effective_user_id().to_string();
+    let is_admin = ctx.is_admin();
+    let new_owner = req.owner;
+    let session = offload(move || {
+        chat_sessions::transfer_owner(&dir, &session_id, &new_owner, &caller, is_admin)
+    })
+    .await?;
+    for p in session
+        .participants
+        .iter()
+        .filter(|p| p.identity != Some(ParticipantIdentity::Agent))
+    {
+        crate::mqtt_publisher::notify_chat_changed(&p.id);
     }
     Ok(Json(session))
 }
@@ -1038,6 +1142,7 @@ async fn system_ensure_group(
             SessionKind::ProjectGroup,
             &participants,
             &req.title,
+            None,
             Some(&req.project_id),
             now_unix(),
         )
@@ -1161,7 +1266,7 @@ async fn system_remove_participant(
     let session = offload(move || {
         // PM-mediated removal — no user_group floor; a project roster may
         // shrink below two humans.
-        chat_sessions::remove_participant(&dir, &session_id, &participant_id, 0)
+        chat_sessions::remove_participant(&dir, &session_id, &participant_id, 0, false, None)
     })
     .await?;
     Ok(Json(session))
@@ -1338,6 +1443,11 @@ where
                 // A non-participant must not learn whether the session
                 // exists (§5.3): same 404 either way.
                 ApiError::not_found("chat session not found")
+            } else if m == "not_authorized" {
+                // A member who lacks the governance right (rename / transfer
+                // owner is owner-or-admin only, ADR-098). Distinct from the
+                // hidden 404: the caller IS a participant, just not the owner.
+                ApiError::forbidden("you are not allowed to perform this action")
             } else {
                 ApiError::unprocessable_entity(&m)
             }
@@ -1579,10 +1689,12 @@ mod tests {
 
     #[tokio::test]
     async fn user_group_member_add_and_remove_is_participant_gated() {
-        // P1: `user_group` is user-managed. Any member may invite or remove
-        // (the participant relation is the permission), outsiders get the
-        // hidden 404, ids are typed server-side, the add is idempotent, and a
-        // removal past the two-member floor is refused 422.
+        // P1 (governance revised): `user_group` is user-managed. Any member may
+        // INVITE (the participant relation is the permission), but removing
+        // ANOTHER member is owner-or-admin only — a plain member gets 403;
+        // anyone may remove themselves. Outsiders get the hidden 404, ids are
+        // typed server-side, the add is idempotent, and a removal past the
+        // two-member floor is refused 422.
         use acowork_core::mqtt_proto::user_chat_changed_topic;
 
         let dir = test_support::temp_dir("chatsessapi");
@@ -1590,7 +1702,7 @@ mod tests {
         let admin = login(&app, "root", test_support::PWD).await;
         let (alice, alice_token) = make_user(&app, &admin, "alice").await;
         let (bob, bob_token) = make_user(&app, &admin, "bob").await;
-        let (carol, _carol_token) = make_user(&app, &admin, "carol").await;
+        let (carol, carol_token) = make_user(&app, &admin, "carol").await;
         let (mallory, mallory_token) = make_user(&app, &admin, "mallory").await;
 
         let participants_of = |v: &serde_json::Value, id: &str| -> Option<String> {
@@ -1688,7 +1800,38 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-        // Removing an agent works while ≥ 2 humans remain.
+        // Governance (P1 revised): a plain member cannot remove ANOTHER member
+        // — Bob (not the owner) removing Carol gets 403, not a hidden 404.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{sid}/participants/{carol}"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "only owner/admin may remove another member"
+        );
+
+        // Anyone may remove themselves (leave) — Carol leaves her own seat.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{sid}/participants/{carol}"),
+                None,
+                Some(&carol_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "self-leave is always allowed");
+
+        // Removing an agent works while ≥ 2 humans remain (Alice is the owner).
         let resp = app
             .clone()
             .oneshot(req(
@@ -1773,6 +1916,249 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn user_group_create_sets_caller_as_owner() {
+        // ADR-098: the founder is the group's first owner, surfaced on the
+        // create response.
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, _bob_token) = make_user(&app, &admin, "bob").await;
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = json(resp).await;
+        assert_eq!(body["owner"].as_str(), Some(alice.as_str()));
+    }
+
+    #[tokio::test]
+    async fn user_group_rename_is_owner_gated() {
+        // Owner (or admin) renames; a non-owner member gets 403, an outsider
+        // the hidden 404 (§5.3).
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+        let (_mallory, mallory_token) = make_user(&app, &admin, "mallory").await;
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let sid = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // Owner renames — persisted on the returned row.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/chat-sessions/{sid}/title"),
+                Some(r#"{"title":"renamed"}"#),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json(resp).await["title"].as_str(), Some("renamed"));
+
+        // A non-owner member is refused 403 (a participant, just not the owner).
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/chat-sessions/{sid}/title"),
+                Some(r#"{"title":"hijack"}"#),
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // An outsider gets the hidden 404, never a signal that it exists.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PATCH",
+                &format!("/api/chat-sessions/{sid}/title"),
+                Some(r#"{"title":"nope"}"#),
+                Some(&mallory_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn user_group_transfer_owner_flow() {
+        // Owner transfers to a human member; a non-owner cannot transfer; an
+        // agent or non-member target is refused 422.
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+        let (carol, _carol_token) = make_user(&app, &admin, "carol").await;
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}","{carol}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let sid = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // Alice (owner) transfers to Bob.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/owner"),
+                Some(&format!(r#"{{"owner":"{bob}"}}"#)),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json(resp).await["owner"].as_str(), Some(bob.as_str()));
+
+        // Alice is now a plain member — she can no longer transfer.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/owner"),
+                Some(&format!(r#"{{"owner":"{alice}"}}"#)),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The owner (Bob) may not hand the group to an agent.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/owner"),
+                Some(r#"{"owner":"ag-1"}"#),
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // ...nor to a non-member.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/owner"),
+                Some(r#"{"owner":"stranger"}"#),
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn user_group_owner_is_permanent_until_transfer() {
+        // The current owner cannot be removed (or leave) until ownership moves
+        // (ADR-098). After transferring, the ex-owner is an ordinary member and
+        // the removal is allowed while ≥2 members remain.
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+        let (carol, _carol_token) = make_user(&app, &admin, "carol").await;
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}","{carol}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let sid = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // The owner cannot even leave their own group while they hold it: the
+        // self-removal path skips the governance gate but still hits the
+        // owner-permanence floor (422) — they must transfer first.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{sid}/participants/{alice}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // After transferring to Bob, Alice becomes removable (3 members, so the
+        // ≥2 floor allows the removal).
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{sid}/owner"),
+                Some(&format!(r#"{{"owner":"{bob}"}}"#)),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{sid}/participants/{alice}"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json(resp).await;
+        let alices = body["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["id"].as_str() == Some(alice.as_str()))
+            .count();
+        assert_eq!(alices, 0, "the ex-owner is now removable");
     }
 
     #[tokio::test]
