@@ -294,6 +294,85 @@ pub struct AgentConfig {
     // must not change retrieval (ADR-095 D6 / §7 rollback).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<crate::search::policy::SearchPolicyConfig>,
+
+    // ── Chat Router (ADR-099 / design 29) ────────────────────────────
+    //
+    // Layer 1 of the router config chain; `None` = the ADR-099 defaults
+    // (enabled, compact model, 8 s timeout, 24-message window, 10
+    // candidates). Every field is optional so an existing
+    // `agent_config.json` keeps working untouched, and tests can switch
+    // the router off without touching a code path.
+    /// Chat Router tuning knobs. `None` = design defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_router: Option<ChatRouterConfig>,
+}
+
+/// Chat Router configuration (ADR-099 / design 29).
+///
+/// Model resolution chain: `model` -> the agent's compact-model chain
+/// (`default_compact_models` -> first provider model) -> the agent's
+/// default model. `enabled = false` is the kill switch: a Chat message is
+/// routed by the deterministic rule of ADR-098 §6.1 (registry key → mapped
+/// session → create-on-miss) inline on the inbound task, never queued, which
+/// is what the E2E suites rely on. It is not byte-identical to that era:
+/// T3 (config-conflict rotation) is retired by ADR-099 D3, so an incoming
+/// `session_config` now updates the mapped session — effective from its next
+/// turn — instead of forcing a new one.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatRouterConfig {
+    /// Master switch. `None` = enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Explicit router model id. `None` = compact model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Explicit router provider. `None` = whichever provider serves `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Router call timeout in ms. `None` = 8,000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Chat messages projected into the router context. `None` = 24.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_window: Option<usize>,
+    /// Maximum candidates shown to the router. `None` = 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_candidates: Option<usize>,
+}
+
+impl ChatRouterConfig {
+    pub const DEFAULT_TIMEOUT_MS: u64 = 8_000;
+    pub const DEFAULT_HISTORY_WINDOW: usize = 24;
+    pub const DEFAULT_MAX_CANDIDATES: usize = 10;
+
+    /// Master switch, defaulting to on.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    /// Clamped call timeout; a zero / absurd value must never disable the
+    /// router by making every call time out instantly.
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+            .unwrap_or(Self::DEFAULT_TIMEOUT_MS)
+            .clamp(1_000, 60_000)
+    }
+
+    /// Clamped history window. The lower bound keeps enough turns for a
+    /// follow-up to be recognisable; the upper bound keeps one router turn
+    /// cheap regardless of what a hand-edited config says.
+    pub fn history_window(&self) -> usize {
+        self.history_window
+            .unwrap_or(Self::DEFAULT_HISTORY_WINDOW)
+            .clamp(4, 200)
+    }
+
+    /// Clamped candidate count.
+    pub fn max_candidates(&self) -> usize {
+        self.max_candidates
+            .unwrap_or(Self::DEFAULT_MAX_CANDIDATES)
+            .clamp(1, 50)
+    }
 }
 
 // ADR-094 note: there is no `skills_auto_load` field on
@@ -310,6 +389,11 @@ impl AgentConfig {
         {
             self.distiller_models = Some(vec![legacy]);
         }
+    }
+
+    /// Effective Chat Router config: the stored block or the design defaults.
+    pub fn chat_router_config(&self) -> ChatRouterConfig {
+        self.chat_router.clone().unwrap_or_default()
     }
 }
 
@@ -1345,6 +1429,64 @@ pub fn save_agent_provider_config_from_available(
 mod tests {
     use super::*;
     use acowork_core::protocol::{McpServerConfigDef, McpTransportDef};
+
+    // ── ChatRouterConfig (ADR-099) ────────────────────────────────────
+
+    #[test]
+    fn chat_router_config_defaults_are_the_design_values() {
+        let cfg = ChatRouterConfig::default();
+        assert!(cfg.is_enabled(), "the router is on unless explicitly disabled");
+        assert_eq!(cfg.timeout_ms(), ChatRouterConfig::DEFAULT_TIMEOUT_MS);
+        assert_eq!(
+            cfg.history_window(),
+            ChatRouterConfig::DEFAULT_HISTORY_WINDOW
+        );
+        assert_eq!(
+            cfg.max_candidates(),
+            ChatRouterConfig::DEFAULT_MAX_CANDIDATES
+        );
+    }
+
+    #[test]
+    fn chat_router_config_clamps_instead_of_drifting() {
+        // A zero timeout and an empty window would make every turn fall back;
+        // a 500-candidate prompt would be unaffordable. All three clamp.
+        let cfg = ChatRouterConfig {
+            timeout_ms: Some(0),
+            history_window: Some(1),
+            max_candidates: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(cfg.timeout_ms(), 1_000);
+        assert_eq!(cfg.history_window(), 4);
+        assert_eq!(cfg.max_candidates(), 1);
+
+        let cfg = ChatRouterConfig {
+            timeout_ms: Some(u64::MAX),
+            history_window: Some(usize::MAX),
+            max_candidates: Some(usize::MAX),
+            ..Default::default()
+        };
+        assert_eq!(cfg.timeout_ms(), 60_000);
+        assert_eq!(cfg.history_window(), 200);
+        assert_eq!(cfg.max_candidates(), 50);
+    }
+
+    #[test]
+    fn chat_router_config_missing_block_means_defaults() {
+        let cfg = AgentConfig::default();
+        assert!(cfg.chat_router_config().is_enabled());
+        assert!(cfg.chat_router.is_none());
+
+        let cfg = AgentConfig {
+            chat_router: Some(ChatRouterConfig {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!cfg.chat_router_config().is_enabled());
+    }
 
     // ── AgentMcpConfig struct ────────────────────────────────────────
 

@@ -90,6 +90,11 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
         "distiller-merge.md",
         "distiller merge-decision system prompt (ADR-071)",
     ),
+    // ADR-099 — Chat Router persona. Replaces ONLY the persona section of
+    // the chat-layer system prompt; the Runtime-owned role/tool/decision
+    // kernel is not overridable. Excluded from the execute system prompt by
+    // the same `is_overridable_prompt` rule as the entries above.
+    ("chat.md", "chat router persona (ADR-099)"),
 ];
 
 /// O(1) lookup set of overridable filenames. Built lazily on first access
@@ -225,6 +230,9 @@ pub fn reload_prompts_into_core(
             }
             "distiller-merge.md" => {
                 *core.distiller_merge_prompt.write().unwrap() = loaded;
+            }
+            "chat.md" => {
+                *core.chat_persona.write().unwrap() = loaded;
             }
             other => {
                 return Err(format!(
@@ -620,10 +628,10 @@ Be friendly and welcoming.
     }
 
     #[test]
-    fn test_reload_prompts_into_core_with_all_5_overrides_writes_each_field() {
+    fn test_reload_prompts_into_core_with_all_overrides_writes_each_field() {
         let core = make_test_agent_core();
         let dir = std::env::temp_dir().join(format!(
-            "acowork-test-reload-prompts-all5-{}",
+            "acowork-test-reload-prompts-all6-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
@@ -637,12 +645,14 @@ Be friendly and welcoming.
             ("compact-template.md", "compact-template-from-disk"),
             ("title.md", "title-from-disk"),
             ("abstention.md", "abstention-from-disk"),
+            ("distiller-merge.md", "distiller-merge-from-disk"),
+            ("chat.md", "chat-persona-from-disk"),
         ];
         for (file, content) in fixtures {
             fs::write(dir.join("prompts").join(file), content).unwrap();
         }
 
-        reload_prompts_into_core(&dir, &core).expect("all-5 reload must succeed");
+        reload_prompts_into_core(&dir, &core).expect("full reload must succeed");
 
         // Every field must equal the disk content — proves the
         // dispatch table wires each filename to the correct
@@ -663,6 +673,14 @@ Be friendly and welcoming.
             core.abstention_prompt.read().unwrap().as_deref(),
             Some("abstention-from-disk")
         );
+        assert_eq!(
+            core.distiller_merge_prompt.read().unwrap().as_deref(),
+            Some("distiller-merge-from-disk")
+        );
+        assert_eq!(
+            core.chat_persona.read().unwrap().as_deref(),
+            Some("chat-persona-from-disk")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -677,7 +695,7 @@ Be friendly and welcoming.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
 
-        // Only seed 3 of the 5. The remaining 2 must come back as `None`.
+        // Only seed 3 of the 6. The remaining 3 must come back as `None`.
         // ADR-068: total was 8 before removing 3 grafeo overrides.
         fs::write(dir.join("prompts").join("summary.md"), "summary-only").unwrap();
         fs::write(dir.join("prompts").join("title.md"), "title-only").unwrap();
@@ -703,7 +721,7 @@ Be friendly and welcoming.
     }
 
     #[test]
-    fn test_overridable_prompts_stays_at_5_entries() {
+    fn test_overridable_prompts_stays_at_6_entries() {
         // Sanity check: the closed-set invariant holds. A future
         // maintainer who adds an entry to `OVERRIDABLE_PROMPTS` without
         // teaching `reload_prompts_into_core` about the matching field
@@ -717,11 +735,12 @@ Be friendly and welcoming.
         // History: 8 -> 5 (ADR-068 dropped the three grafeo overrides),
         // 5 -> 7 (ADR-071 added distiller-extraction.md + distiller-judge.md),
         // 7 -> 6 (web-search removal), 6 -> 5 (projection + merge rewrite
-        // collapsed the two distiller slots into distiller-merge.md).
+        // collapsed the two distiller slots into distiller-merge.md),
+        // 5 -> 6 (ADR-099 added the chat router persona).
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            5,
-            "OVERRIDABLE_PROMPTS must stay at 5 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
+            6,
+            "OVERRIDABLE_PROMPTS must stay at 6 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
         );
     }
 
@@ -898,13 +917,14 @@ Be friendly and welcoming.
     /// ADR-071 D7/D9: count was 7 (5 + distiller-extraction.md +
     /// distiller-judge.md); the built-in web-search removal dropped
     /// `search.md` to 6, and the projection + merge rewrite collapsed the two
-    /// distiller slots into one, so it is now 5.
+    /// distiller slots into one, so it was 5 again.
+    /// ADR-099: `chat.md` (Chat Router persona) brought it to 6.
     #[test]
-    fn test_overridable_prompts_count_is_5() {
+    fn test_overridable_prompts_count_is_6() {
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            5,
-            "OVERRIDABLE_PROMPTS must have 5 entries: 1 compaction (ADR-053) + 2 prompt.rs + 1 memory abstention + 1 distiller merge prompt (ADR-071). Update AgentCore fields, LLM call sites, and Debug panel list together."
+            6,
+            "OVERRIDABLE_PROMPTS must have 6 entries: 1 compaction (ADR-053) + 2 prompt.rs + 1 memory abstention + 1 distiller merge prompt (ADR-071) + 1 chat router persona (ADR-099). Update AgentCore fields, LLM call sites, and Debug panel list together."
         );
     }
 

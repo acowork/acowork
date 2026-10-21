@@ -383,6 +383,10 @@ pub(crate) async fn phase_b_init_session(
         // starts (see `start_consolidation_pipeline` / `apply_runtime_config`).
         *c.distiller_merge_prompt.write().unwrap() = ctx.distiller_merge_prompt.clone();
 
+        // ADR-099: chat router persona (prompts/chat.md). Read only by the
+        // chat-layer prompt builder; never folded into the execute prompt.
+        *c.chat_persona.write().unwrap() = ctx.chat_persona.clone();
+
         // Provider list is loaded from agent_provider.json (persisted by the
         // MQTT handler on receiving acowork/global/providers).
         let providers_for_init = ctx.provider_config.as_ref().map(|c| &c.providers);

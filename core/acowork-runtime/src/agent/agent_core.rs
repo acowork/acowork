@@ -258,6 +258,14 @@ pub struct AgentCore {
     /// remains.
     pub(crate) distiller_merge_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
+    /// ADR-099: optional Chat Router persona (`prompts/chat.md`). Replaces
+    /// ONLY the persona section of the chat-layer system prompt — the
+    /// Runtime-owned role / tool contract / decision rules stay built-in.
+    /// `None` falls back to the manifest's `display_name` / `role` /
+    /// `description`. Populated in Phase B and hot-reloadable via
+    /// `reload_prompts_into_core`; never folded into the execute prompt.
+    pub(crate) chat_persona: Arc<std::sync::RwLock<Option<String>>>,
+
     /// Memory store (SQLite, shared across all sessions of this agent).
     /// ADR-051 P4: Primary field is `memory_provider` (trait object).
     /// `memory_admin` is the admin interface for HTTP endpoints and
@@ -498,6 +506,14 @@ impl AgentCore {
         self.distiller_merge_prompt.read().unwrap().clone()
     }
 
+    /// ADR-099: Chat Router persona (`prompts/chat.md`), if the package
+    /// ships one. Only the persona section of the chat prompt is replaced;
+    /// the kernel (role boundary, dispatch contract, decision rules) is not
+    /// overridable.
+    pub fn chat_persona(&self) -> Option<String> {
+        self.chat_persona.read().unwrap().clone()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_observer(
         config: RuntimeConfig,
@@ -570,6 +586,9 @@ impl AgentCore {
             // pattern, populated in Phase B / cli.rs standalone path and
             // hot-reloadable via `reload_prompts_into_core`.
             distiller_merge_prompt: Arc::new(std::sync::RwLock::new(None)),
+            // ADR-099: chat router persona — same lazy-fill pattern; the
+            // fallback (manifest metadata) is resolved at prompt build time.
+            chat_persona: Arc::new(std::sync::RwLock::new(None)),
             memory_provider: None,
             memory_admin: None,
             sqlite_store: None,
@@ -2080,6 +2099,7 @@ impl Clone for AgentCore {
             title_prompt: Arc::clone(&self.title_prompt),
             abstention_prompt: Arc::clone(&self.abstention_prompt),
             distiller_merge_prompt: Arc::clone(&self.distiller_merge_prompt),
+            chat_persona: Arc::clone(&self.chat_persona),
             memory_provider: self.memory_provider.clone(),
             memory_admin: self.memory_admin.clone(),
             sqlite_store: self.sqlite_store.clone(),

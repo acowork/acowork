@@ -131,8 +131,15 @@ pub(crate) async fn phase_d_run(
             ));
         };
 
+    // ADR-099: per-chat router state (one slot per Chat session). Lives as
+    // long as the Runtime process: dropping it would only cost one rebuilt
+    // history window per chat, but the per-chat serialization is what keeps
+    // two turns of one chat from racing on the same anchor.
+    let chat_sessions = Arc::new(crate::agent::chat_router::ChatSessionManager::new());
+
     let result = mqtt_only_loop(
         &session_manager,
+        &chat_sessions,
         &lifecycle_publisher,
         &config_publisher,
         mqtt_dispatch_rx,
@@ -230,6 +237,7 @@ fn control_action_to_inbound(
 #[allow(clippy::too_many_arguments)]
 async fn mqtt_only_loop(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    chat_sessions: &Arc<crate::agent::chat_router::ChatSessionManager>,
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     config_publisher: &crate::mqtt::MqttAgentConfigPublisher,
     mut mqtt_dispatch_rx: tokio::sync::mpsc::UnboundedReceiver<(
@@ -281,10 +289,12 @@ async fn mqtt_only_loop(
                     Some((session_id, msg)) => {
                         if let Err(e) = dispatch_inbound(
                             session_manager,
+                            chat_sessions,
                             lifecycle_publisher,
                             session_id,
                             msg,
                             &work_dir,
+                            node_token.unwrap_or(""),
                         ).await {
                             tracing::warn!(error = %e, "MQTT dispatch failed");
                         }
@@ -481,10 +491,12 @@ async fn mqtt_only_loop(
 /// capability is unrepresentable rather than checked.
 async fn dispatch_inbound(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    chat_sessions: &Arc<crate::agent::chat_router::ChatSessionManager>,
     lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
     session_id: String,
     msg: crate::agent::inbound::InboundMessage,
     work_dir: &std::path::Path,
+    node_token: &str,
 ) -> crate::error::Result<()> {
     use crate::agent::inbound::InboundMessage;
     use crate::agent::loop_::CompressionAction;
@@ -501,7 +513,8 @@ async fn dispatch_inbound(
                 // Route it through the receiver-private registry (chat /
                 // conv / one-shot message key) so it gets an execution
                 // session instead of being dropped.
-                route_intent_inbound(session_manager, "", msg).await
+                route_intent_inbound(session_manager, chat_sessions, "", msg, work_dir, node_token)
+                    .await
             }
             // ── ADR-052 §3.5: agent-level config mutations are
             //    GLOBAL, not per-session. Route through SessionManager
@@ -751,7 +764,15 @@ async fn dispatch_inbound(
         // the wire addresses the intent context; which execution session
         // answers is the receiving agent's private decision).
         msg @ InboundMessage::IntentMessage { .. } => {
-            route_intent_inbound(session_manager, &session_id, msg).await
+            route_intent_inbound(
+                session_manager,
+                chat_sessions,
+                &session_id,
+                msg,
+                work_dir,
+                node_token,
+            )
+            .await
         }
 
         // ── ADR-034 §8 Phase 2 control commands ───────────────────────
@@ -989,15 +1010,22 @@ async fn dispatch_inbound(
 /// Delivery is always `SessionMessage::Intent` — unlike a bare
 /// `InboundMessage`, it starts a turn even when the session task is idle
 /// (a mid-turn injection would otherwise sit unread in the loop channel).
+///
+/// ADR-099: a human `user_message` from a Chat session is a router turn, and a
+/// router turn is never executed here — this function only queues it (see
+/// [`spawn_chat_router_drain`]). Everything else, and every Chat message while
+/// the router is switched off, goes straight through
+/// [`route_intent_legacy`] on this task.
+#[allow(clippy::too_many_arguments)]
 async fn route_intent_inbound(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    chat_sessions: &Arc<crate::agent::chat_router::ChatSessionManager>,
     designated_session_id: &str,
     msg: crate::agent::inbound::InboundMessage,
+    work_dir: &std::path::Path,
+    node_token: &str,
 ) -> crate::error::Result<()> {
-    use crate::agent::inbound::{InboundMessage, IntentEnvelope};
-    use crate::agent::intent_turn::render_intent_message;
-    use crate::agent::session::intent_routing::routing_key;
-    use crate::agent::session::SessionMessage;
+    use crate::agent::inbound::InboundMessage;
     use crate::error::RuntimeError;
 
     let InboundMessage::IntentMessage(env) = msg else {
@@ -1005,6 +1033,139 @@ async fn route_intent_inbound(
             "route_intent_inbound called with a non-intent message".to_string(),
         ));
     };
+
+    // A router turn is an LLM call plus a couple of HTTP hops. Running it here
+    // would stop this agent from receiving *anything* — including a `Stop` —
+    // for as long as it takes, so it is queued and this loop keeps reading
+    // MQTT. The enable switch is checked inline (a few-KB file read, no lock)
+    // so a disabled router takes exactly the pre-ADR-099 path instead of
+    // paying a queue hop only to be handed back.
+    if crate::agent::chat_router::runner::is_chat_turn(&env)
+        && crate::agent::chat_router::runner::router_enabled(work_dir)
+    {
+        let chat_id = env.source_chat_session_id.clone();
+        let turn = crate::agent::chat_router::PendingTurn {
+            envelope: env,
+            designated_session_id: designated_session_id.to_string(),
+            node_token: node_token.to_string(),
+        };
+        if chat_sessions.push_turn(&chat_id, turn) {
+            spawn_chat_router_drain(
+                Arc::clone(session_manager),
+                Arc::clone(chat_sessions),
+                chat_id,
+            );
+        }
+        return Ok(());
+    }
+
+    route_intent_legacy(session_manager, designated_session_id, env).await
+}
+
+/// Run one chat's router turns, strictly in arrival order, on a task of its
+/// own (ADR-099 §5, design 27 §5.4.4).
+///
+/// The per-chat claim (`ChatSessionManager::push_turn` / `finish_drain`) is
+/// what guarantees exactly one drainer per chat — two turns of one chat must
+/// not read the same history anchor and then race on the write-back, while a
+/// slow model in one chat may not stall another chat or this agent's inbound
+/// loop. When the router does not own a turn (`PassThrough` / `Fallback`) the
+/// deterministic route finishes it here, so a router failure costs latency,
+/// never the message.
+///
+/// Each turn runs in a task of its own: a panic inside one turn is observed as
+/// an `Err` and the loop still reaches `finish_drain`, so no chat can be left
+/// claimed with a queue nobody will drain.
+fn spawn_chat_router_drain(
+    session_manager: Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    chat_sessions: Arc<crate::agent::chat_router::ChatSessionManager>,
+    chat_id: String,
+) {
+    tokio::spawn(async move {
+        loop {
+            let Some(turn) = chat_sessions.take_turn(&chat_id) else {
+                // `false` = nobody is waiting on this chat any more; `true`
+                // means a message arrived while we were finishing, so this
+                // drainer keeps the claim and takes it next round.
+                if chat_sessions.finish_drain(&chat_id) {
+                    continue;
+                }
+                return;
+            };
+            let sm = Arc::clone(&session_manager);
+            let cs = Arc::clone(&chat_sessions);
+            let envelope = turn.envelope;
+            let designated = turn.designated_session_id;
+            let token = turn.node_token;
+            let turn_result = tokio::spawn(async move {
+                let outcome =
+                    crate::agent::chat_router::runner::handle_intent(&sm, &cs, &envelope, &token)
+                        .await;
+                finish_chat_turn(&sm, outcome, &designated, envelope)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+            .await;
+            match turn_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(chat_id = %chat_id, error = %e, "chat router fallback route failed");
+                }
+                Err(e) => {
+                    tracing::error!(chat_id = %chat_id, error = %e, "chat router turn task failed");
+                }
+            }
+        }
+    });
+}
+
+/// Deliver a queued turn according to what the router decided.
+///
+/// The router owns a turn it `Handled` — it either answered it or dispatched it,
+/// and a failure it degraded on its own already left a visible notice. Every
+/// other outcome is finished by [`route_intent_legacy`] on this task, so a
+/// router that cannot decide costs the chat latency and never the message
+/// (ADR-099 §5). A fallback must not re-enter the queue: it is the same
+/// envelope, already claimed.
+pub(crate) async fn finish_chat_turn(
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    outcome: crate::agent::chat_router::runner::Outcome,
+    designated_session_id: &str,
+    envelope: Box<crate::agent::inbound::IntentEnvelope>,
+) -> crate::error::Result<()> {
+    use crate::agent::chat_router::runner::Outcome;
+
+    match outcome {
+        Outcome::Handled => Ok(()),
+        Outcome::PassThrough => {
+            route_intent_legacy(session_manager, designated_session_id, envelope).await
+        }
+        Outcome::Fallback { reason } => {
+            tracing::info!(
+                reason = %reason,
+                "Chat Router fell back to the deterministic route"
+            );
+            route_intent_legacy(session_manager, designated_session_id, envelope).await
+        }
+    }
+}
+
+/// The deterministic route that existed before ADR-099: registry key →
+/// execution session → `SessionMessage::Intent`.
+///
+/// Also the degraded path of a Chat turn the router could not decide, which is
+/// why the router's own result is not consulted here — a fallback must never
+/// re-enter the queue.
+async fn route_intent_legacy(
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    designated_session_id: &str,
+    env: Box<crate::agent::inbound::IntentEnvelope>,
+) -> crate::error::Result<()> {
+    use crate::agent::inbound::IntentEnvelope;
+    use crate::agent::intent_turn::render_intent_message;
+    use crate::agent::session::intent_routing::routing_key;
+    use crate::agent::session::SessionMessage;
+
     let IntentEnvelope {
         from,
         action,
@@ -1048,16 +1209,23 @@ async fn route_intent_inbound(
         Some(t) => (t, None),
         None => {
             let key = routing_key(&source_chat_session_id, &conversation_id, &message_id);
-            // The initiator's session-config suggestion (§4) is consumed
-            // here, at execution-session creation only — a reused session
-            // keeps its own config; responses never carry one.
+            // The initiator's session-config suggestion (§4) is consumed on
+            // whichever branch the routing takes: at creation here, or applied
+            // to the session the message was routed into (ADR-099).
             let seed = crate::agent::session::intent_routing::SessionSeed::from_json(
                 &session_config_json,
             );
             session_manager
                 .lock()
                 .await
-                .route_intent_session(&key, seed)
+                .route_intent_session(
+                    &key,
+                    seed,
+                    // ADR-099: a PM task dispatched from a group chat binds
+                    // that session to the group, so follow-ups there can find
+                    // it. Empty for agent-to-agent and cron intents.
+                    Some(source_chat_session_id.as_str()),
+                )
                 .await?
         }
     };
@@ -1215,5 +1383,203 @@ mod tests {
             InboundMessage::IntentMessage(env) => assert!(env.params.is_object()),
             other => panic!("expected IntentMessage, got {other:?}"),
         }
+    }
+
+    // ── ADR-099 §5: where a Chat turn runs ─────────────────────────
+
+    use crate::agent::chat_router::ChatSessionManager;
+    use crate::agent::inbound::IntentEnvelope;
+
+    /// A human Chat message — the one Intent shape the Chat Router takes.
+    fn chat_envelope(chat_id: &str, text: &str) -> Box<IntentEnvelope> {
+        Box::new(IntentEnvelope {
+            from: "user:u-1".into(),
+            action: "user_message".into(),
+            params: serde_json::json!({ "message": text, "chat_kind": "dm" }),
+            message_id: "m-1".into(),
+            conversation_id: String::new(),
+            source_chat_session_id: chat_id.into(),
+            repo: String::new(),
+            session_config_json: String::new(),
+            kind: "user_message".into(),
+            in_reply_to: String::new(),
+            status: String::new(),
+            has_human: Some(true),
+            chat_attachment_ids: Vec::new(),
+        })
+    }
+
+    fn chat_user_message(chat_id: &str, text: &str) -> InboundMessage {
+        InboundMessage::IntentMessage(chat_envelope(chat_id, text))
+    }
+
+    /// A `SessionManager` + `ChatSessionManager` pair over `work_dir`, with the
+    /// Gateway host pointed at a non-routable address.
+    ///
+    /// That last part is not cosmetic: these tests exercise the hand-off, not a
+    /// full router turn, and a stray `await` must never let a drain task talk to
+    /// the Gateway that happens to be running on the developer's machine.
+    fn chat_router_test_pair(
+        work_dir: &std::path::Path,
+    ) -> (
+        Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+        Arc<ChatSessionManager>,
+    ) {
+        use crate::agent::agent_core::AgentCore;
+        use crate::agent::session::SessionManager;
+        use crate::tools::workspace_resolver::WorkspaceResolver;
+
+        let config = crate::config::RuntimeConfig {
+            work_dir: work_dir.to_string_lossy().to_string(),
+            gateway_host: Some("240.0.0.1".into()),
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.chat_router_route"
+            version = "1.0.0"
+            name = "Test chat router route"
+            description = "Pin where a Chat turn is executed"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, Default::default());
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+        (Arc::new(tokio::sync::Mutex::new(manager)), Default::default())
+    }
+
+    /// The head-of-line fix (ADR-099 §5): a Chat message is queued for a
+    /// per-chat drain task and the inbound loop returns immediately — it must
+    /// not run an LLM call plus two HTTP hops on the task that reads MQTT, or
+    /// the agent would stop receiving everything, `Stop` included.
+    ///
+    /// The queueing path has no await point, so on this current-thread runtime
+    /// the spawned drain is never polled; the runtime teardown drops it. That
+    /// is exactly what lets the test observe the hand-off itself.
+    #[tokio::test]
+    async fn a_chat_turn_is_queued_instead_of_running_on_the_inbound_loop() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, chat_sessions) = chat_router_test_pair(dir.path());
+
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            chat_user_message("cs-queue", "hello"),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("queueing a chat turn cannot fail");
+
+        assert!(
+            chat_sessions.chat_is_busy("cs-queue"),
+            "the chat must hold a drain claim"
+        );
+        assert_eq!(
+            chat_sessions.pending_turns("cs-queue"),
+            1,
+            "the message waits in the queue, it is never dropped"
+        );
+        assert!(
+            sm.try_lock()
+                .expect("the inbound loop must not hold the manager")
+                .active_sessions()
+                .is_empty(),
+            "nothing may be routed inline while the router is on"
+        );
+    }
+
+    /// ADR-099 D8 kill switch: with `chat_router.enabled = false` a Chat message
+    /// takes the pre-ADR-099 path — inline, deterministic, never queued — so
+    /// switching the feature off cannot turn into a message-loss mode, and the
+    /// suites that assert on immediate routing keep working.
+    #[tokio::test]
+    async fn a_disabled_router_routes_a_chat_message_inline() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        std::fs::create_dir_all(dir.path().join("config")).expect("config dir");
+        std::fs::write(
+            dir.path().join("config").join("agent_config.json"),
+            r#"{"chat_router":{"enabled":false}}"#,
+        )
+        .expect("write agent_config");
+        let (sm, chat_sessions) = chat_router_test_pair(dir.path());
+
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            chat_user_message("cs-off", "hello"),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("the deterministic route must deliver inline");
+
+        assert!(
+            !chat_sessions.chat_is_busy("cs-off"),
+            "a disabled router must not pay the queue hop"
+        );
+        assert_eq!(
+            sm.try_lock()
+                .expect("lock is free once routed")
+                .active_sessions()
+                .len(),
+            1,
+            "the message reached an execution session"
+        );
+    }
+
+    /// ADR-099 §5: the router's failure mode is latency, never message loss.
+    /// A turn the router declined or could not decide is finished by the
+    /// deterministic route on the drain task; a turn it `Handled` is left alone
+    /// — delivering it again would run the user's message twice.
+    #[tokio::test]
+    async fn a_degraded_router_turn_is_still_delivered() {
+        use crate::agent::chat_router::runner::Outcome;
+
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, _) = chat_router_test_pair(dir.path());
+        let sessions = || sm.try_lock().expect("lock free").active_sessions().len();
+
+        finish_chat_turn(&sm, Outcome::Handled, "", chat_envelope("cs-handled", "hello"))
+            .await
+            .expect("a handled turn is already complete");
+        assert_eq!(sessions(), 0, "the drainer must not re-deliver a handled turn");
+
+        for outcome in [
+            Outcome::PassThrough,
+            Outcome::Fallback {
+                reason: "stub: model unavailable".to_string(),
+            },
+        ] {
+            let chat = match &outcome {
+                Outcome::PassThrough => "cs-passthrough",
+                _ => "cs-fallback",
+            };
+            finish_chat_turn(&sm, outcome, "", chat_envelope(chat, "hello"))
+                .await
+                .expect("the deterministic route must deliver a declined turn");
+        }
+        assert_eq!(
+            sessions(),
+            2,
+            "a degraded router turn costs latency, never the message"
+        );
     }
 }

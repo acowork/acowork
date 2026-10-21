@@ -4,6 +4,7 @@ pub mod agent_core;
 pub mod attachment_to_image;
 pub mod bootstrap_autobio;
 pub mod budget_guard;
+pub mod chat_router;
 pub mod compression_constants;
 pub mod context;
 

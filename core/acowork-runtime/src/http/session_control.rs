@@ -49,6 +49,16 @@ pub(crate) struct CreateSessionBody {
     /// ADR-076 §决策 4: omit (or `null`) for the public default.
     #[serde(default)]
     pub(crate) visibility: Option<SessionVisibility>,
+    /// ADR-099: bind the new session to this Chat session — the same
+    /// `chat_session_id` + `Members` pair the router's `dispatch(new)`
+    /// stamps (design 27 §8.2). The Chat surface's `+` button uses it: the
+    /// session the user just opened is then a router candidate, so a later
+    /// chat message can be handed to it instead of starting a third line.
+    /// Silently ignored when the caller's injected Chat membership does not
+    /// name the id — creation must not fail over a binding, and an unbound
+    /// session is merely not a chat candidate.
+    #[serde(default)]
+    pub(crate) chat_session_id: Option<String>,
 }
 
 /// Body of `PUT /sessions/{sid}/visibility`.
@@ -247,6 +257,66 @@ async fn publish_lifecycle(
     }
 }
 
+/// ADR-099: may this caller bind a freshly created session to `chat_id`?
+///
+/// Membership comes from the Gateway-injected `x-acowork-chat-scope` — the
+/// same set the `Members` read check uses, and the same trust rule (the
+/// middleware strips any client-supplied copy). `Unfiltered` (administrator,
+/// or `AUTH_MODE=local` where there is no account system at all) has nothing
+/// to check against and binds directly.
+///
+/// A `false` answer skips the binding; it never rejects the creation. The
+/// header is best-effort injection, and an unbound session is merely not a
+/// chat candidate — a valid request must not fail over it.
+fn may_bind_chat(scope: &SessionScope, chat_id: &str) -> bool {
+    match scope {
+        SessionScope::Unfiltered => true,
+        SessionScope::User { chats, .. } => chats.iter().any(|c| c == chat_id),
+    }
+}
+
+/// What a create request's `visibility` resolves to once the chat binding is
+/// taken into account (ADR-099).
+#[derive(Debug, PartialEq, Eq)]
+struct VisibilityDecision {
+    /// Visibility to write now. `None` = nothing to write: the binding already
+    /// stamped the value, or the caller expressed no preference.
+    apply: Option<SessionVisibility>,
+    /// Visibility to report back — what is actually on disk, not what was ask
+    /// for. A binding skipped by the scope check is echoed as `None` too, so
+    /// the surface never renders a state that did not happen.
+    effective: Option<SessionVisibility>,
+    /// Requested value that was dropped because the binding owns it.
+    ignored: Option<SessionVisibility>,
+}
+
+/// The (`chat_session_id`, `Members`) pair is what the group read check depends
+/// on (design 27 §8.2) and `stamp_chat_binding` writes both together, so a body
+/// field must not be able to turn a group-bound session back to `public` (leaks
+/// it to other chats' readers) or `private` (the group stops seeing its own
+/// task). Without a binding, the request is the creation-time override of
+/// ADR-076 §决策 4 and applies as given.
+///
+/// Binding itself stays fail-soft: a non-member gets no binding and keeps its
+/// own visibility choice.
+fn visibility_with_binding(
+    bound_chat: Option<&str>,
+    requested: Option<SessionVisibility>,
+) -> VisibilityDecision {
+    if bound_chat.is_none() {
+        return VisibilityDecision {
+            apply: requested,
+            effective: requested,
+            ignored: None,
+        };
+    }
+    VisibilityDecision {
+        apply: None,
+        effective: Some(SessionVisibility::Members),
+        ignored: requested.filter(|v| *v != SessionVisibility::Members),
+    }
+}
+
 /// `POST /sessions` — create a session owned by the caller.
 pub(crate) async fn post_create_session(
     State(state): State<HttpState>,
@@ -270,14 +340,50 @@ pub(crate) async fn post_create_session(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // ADR-099: a Chat-surface creation carries its chat id. Membership is
+    // checked against the Gateway-injected `x-acowork-chat-scope` (the same
+    // set the `Members` read check uses); `Unfiltered` — administrator or
+    // local mode, where no account system exists to check against — binds
+    // directly. A non-member gets no binding and no error: the header is
+    // best-effort injection, and refusing here would break session creation
+    // for a request that is otherwise valid.
+    let chat_id = body
+        .chat_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut bound_chat: Option<String> = None;
+    if let Some(chat_id) = chat_id {
+        if may_bind_chat(&scope, chat_id) {
+            sm.lock().await.stamp_chat_binding(Some(chat_id), &sid);
+            bound_chat = Some(chat_id.to_string());
+        } else {
+            tracing::warn!(
+                session_id = %sid,
+                chat_session_id = %chat_id,
+                "chat binding skipped: caller is not a member of that chat session"
+            );
+        }
+    }
+
     // ADR-076 §决策 4: a session created by an identified account is
     // private from birth (stamped in `create_frontend_session`); an
     // ownerless one (local mode) stays public. An explicit `visibility` in
-    // the body still wins — this is the creation-time override.
-    if let Some(visibility) = body.visibility {
+    // the body wins — this is the creation-time override — **except** over a
+    // chat binding; see [`visibility_with_binding`].
+    let decision = visibility_with_binding(bound_chat.as_deref(), body.visibility);
+    if let Some(visibility) = decision.apply {
         sm.lock()
             .await
             .set_session_visibility(&sid, Some(visibility));
+    }
+    if let Some(ignored) = decision.ignored {
+        tracing::warn!(
+            session_id = %sid,
+            chat_session_id = ?bound_chat,
+            requested_visibility = ?ignored,
+            "explicit visibility ignored on a chat-bound session — the binding owns it"
+        );
     }
 
     let created_at = chrono::Utc::now().to_rfc3339();
@@ -302,7 +408,8 @@ pub(crate) async fn post_create_session(
             "session_id": sid,
             "created_at": created_at,
             "owner": scope.user_id(),
-            "visibility": body.visibility,
+            "visibility": decision.effective,
+            "chat_session_id": bound_chat,
         })),
     ))
 }
@@ -902,6 +1009,111 @@ mod tests {
         assert!(
             may_change_visibility(&meta(None), &SessionScope::Unfiltered),
             "admin / local mode is never blocked"
+        );
+    }
+
+    /// ADR-099: `POST /sessions` may bind a new session to a Chat session the
+    /// caller belongs to. The check is the Gateway-injected membership set, so
+    /// a caller cannot adopt someone else's conversation — and a failed check
+    /// costs the binding only, never the creation.
+    #[test]
+    fn only_a_chat_member_may_bind_a_new_session_to_that_chat() {
+        let member = SessionScope::User {
+            uid: "u-alice".to_string(),
+            chats: vec!["cs-a".to_string(), "cs-b".to_string()],
+        };
+        assert!(may_bind_chat(&member, "cs-b"), "listed membership binds");
+        assert!(
+            !may_bind_chat(&member, "cs-other"),
+            "someone else's chat does not"
+        );
+
+        // A signed-in caller with no injected scope (user service down, or a
+        // chat-less account) fails closed — empty is "no membership".
+        let no_chats = SessionScope::user("u-alice");
+        assert!(!may_bind_chat(&no_chats, "cs-a"));
+
+        // Local mode / admin: no account system to check against.
+        assert!(may_bind_chat(&SessionScope::Unfiltered, "cs-a"));
+    }
+
+    /// ADR-099 / design 27 §8.2: the (`chat_session_id`, `Members`) pair *is*
+    /// the group read contract, so a creation request cannot bind a session to
+    /// a chat and unilaterally change what that binding means — `public` would
+    /// leak the group's task to other chats' readers, `private` would hide it
+    /// from the group that owns it. Without a binding the body still wins, and
+    /// the response echoes what actually took effect rather than what was asked.
+    #[test]
+    fn a_chat_binding_outranks_the_requested_visibility() {
+        // Bound: nothing to write, `Members` reported, the request dropped.
+        for asked in [SessionVisibility::Public, SessionVisibility::Private] {
+            let d = visibility_with_binding(Some("cs-a"), Some(asked));
+            assert_eq!(d.apply, None, "the binding already stamped Members");
+            assert_eq!(d.effective, Some(SessionVisibility::Members));
+            assert_eq!(
+                d.ignored,
+                Some(asked),
+                "a refused override must be visible in the log, not silent"
+            );
+        }
+
+        // Bound with the value the binding implies: a no-op, not a refusal.
+        let d = visibility_with_binding(Some("cs-a"), Some(SessionVisibility::Members));
+        assert_eq!(d.apply, None);
+        assert_eq!(d.effective, Some(SessionVisibility::Members));
+        assert_eq!(d.ignored, None);
+
+        // Not bound (creation-time override of ADR-076 §决策 4): as asked.
+        let d = visibility_with_binding(None, Some(SessionVisibility::Public));
+        assert_eq!(
+            d,
+            VisibilityDecision {
+                apply: Some(SessionVisibility::Public),
+                effective: Some(SessionVisibility::Public),
+                ignored: None,
+            }
+        );
+
+        // No preference at all: no write, and nothing claimed in the echo.
+        assert_eq!(
+            visibility_with_binding(None, None),
+            VisibilityDecision {
+                apply: None,
+                effective: None,
+                ignored: None,
+            }
+        );
+        // A binding, on the other hand, *is* a state worth echoing.
+        assert_eq!(
+            visibility_with_binding(Some("cs-a"), None).effective,
+            Some(SessionVisibility::Members)
+        );
+    }
+
+    /// The wire contract: `chat_session_id` is additive — an old client body
+    /// still deserialises, and whitespace counts as absent.
+    #[test]
+    fn create_session_body_chat_field_is_optional() {
+        let legacy: CreateSessionBody =
+            serde_json::from_value(serde_json::json!({ "workspace_id": "w-1" })).unwrap();
+        assert_eq!(legacy.chat_session_id, None);
+
+        let with_chat: CreateSessionBody = serde_json::from_value(serde_json::json!({
+            "chat_session_id": "cs-a"
+        }))
+        .unwrap();
+        assert_eq!(with_chat.chat_session_id.as_deref(), Some("cs-a"));
+
+        // The handler trims then filters empty, so `"  "` binds nothing.
+        let blank: CreateSessionBody =
+            serde_json::from_value(serde_json::json!({ "chat_session_id": "  " })).unwrap();
+        assert_eq!(
+            blank
+                .chat_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            None
         );
     }
 

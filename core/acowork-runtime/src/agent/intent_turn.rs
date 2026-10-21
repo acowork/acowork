@@ -10,8 +10,22 @@
 //! struct, the user-visible rendering of an envelope, and the Gateway
 //! write-back call.
 
+use std::time::Duration;
+
 use acowork_core::defaults::GATEWAY_HTTP_PORT;
 use serde_json::Value;
+
+/// Bound on the best-effort Gateway writes. All three calls below are
+/// contractually fire-and-forget — a lost row degrades a surface, it never
+/// loses the conversation — so an unbounded hang is strictly worse than a
+/// logged failure: the Chat Router's write-back runs on a per-chat drain task,
+/// and a stalled Gateway would otherwise park that chat's queue (and its
+/// anchor) forever. Generous for a localhost hop, finite for a hung one.
+const GATEWAY_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Same bound for an attachment pull, scaled up for bytes over the loopback
+/// relay rather than a JSON row.
+const GATEWAY_PULL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The request a responder turn must answer. Built when a `request`
 /// IntentMessage starts a turn; consumed at turn end for the write-back.
@@ -163,7 +177,10 @@ pub async fn append_chat_row(
         "body": body,
         "meta": meta,
     });
-    let mut req = reqwest::Client::new().post(&url).json(&payload);
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .timeout(GATEWAY_WRITE_TIMEOUT)
+        .json(&payload);
     if !node_token.is_empty() {
         req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, node_token);
     }
@@ -206,11 +223,17 @@ pub async fn post_intent_response(
         "in_reply_to": ctx.request_id,
         "status": ctx.outcome,
     });
-    let mut req = reqwest::Client::new().post(&url).json(&payload);
+    let mut req = reqwest::Client::new()
+        .post(&url)
+        .timeout(GATEWAY_WRITE_TIMEOUT)
+        .json(&payload);
     if !node_token.is_empty() {
         req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, node_token);
     }
-    let resp = req.send().await.map_err(|e| format!("gateway write-back failed: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("gateway write-back failed: {e}"))?;
     let status = resp.status();
     if status.is_success() {
         Ok(())
@@ -242,7 +265,9 @@ pub async fn pull_chat_attachment(
     let url = format!(
         "http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/chat-attachments/{target_instance}/{chat_session_id}/{attachment_id}/{message_id}"
     );
-    let mut req = reqwest::Client::new().get(&url);
+    let mut req = reqwest::Client::new()
+        .get(&url)
+        .timeout(GATEWAY_PULL_TIMEOUT);
     if !node_token.is_empty() {
         req = req.header(acowork_core::auth::NODE_TOKEN_HEADER, node_token);
     }

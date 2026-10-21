@@ -50,19 +50,17 @@ pub struct IntentSessionEntry {
 /// Why a mapped session must be rotated (§2.1). Checked at routing time —
 /// the rotation point ("after the result was written back") has passed by
 /// the moment the next intent arrives.
+///
+/// ADR-099 removed the former T3 (config conflict): an explicit
+/// `session_config` choice no longer forces a new physical session. The
+/// Chat Router decides whether a message continues an existing task or
+/// starts a new one, and a config change alone is not a new task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RotateReason {
     /// T1: idle interval since last activity exceeds the threshold.
     T1Idle,
     /// T2: the previous turn compacted at least once (long-running task).
     T2Compaction,
-    /// T3 (design 27 §4.5, chat config surface): the inbound intent carries
-    /// a `session_config` seed that differs from the mapped session's own
-    /// config. Reuse would silently ignore the initiator's explicit choice
-    /// ("send this task with model X"), so the context rotates to a fresh
-    /// session created under the seed instead. Handoff is the pointer form
-    /// (like T1 — no distilled summary exists for a config change).
-    T3Config,
 }
 
 /// Idle threshold for T1 rotation. Layer 1 = `AgentConfig::intent_idle_rotate_hours`
@@ -123,6 +121,13 @@ impl IntentSessionMap {
 
     pub fn get(&self, key: &str) -> Option<&IntentSessionEntry> {
         self.entries.get(key)
+    }
+
+    /// Every live mapping. Used by the Chat Router to read the routing table
+    /// backwards: which session the chat currently points at, and which
+    /// sessions belong to a PM task chain (`origin` in the candidate list).
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &IntentSessionEntry)> {
+        self.entries.iter()
     }
 
     pub fn insert(&mut self, key: String, session_id: String) -> Result<()> {
@@ -216,6 +221,107 @@ impl IntentSessionMap {
         let json = serde_json::to_string(&shape)
             .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))?;
         // Atomic rewrite (temp + rename), same contract as the mailbox.
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)
+            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))?;
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))
+    }
+}
+
+/// One execution session whose PM task reached a terminal state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalSession {
+    pub session_id: String,
+    /// RFC3339 close stamp.
+    pub closed_at: String,
+}
+
+/// Cap on the persisted list. A terminal id only ever costs one candidate
+/// slot, so the cap exists to keep the file cheap to read on every router
+/// turn — an id old enough to fall off is far past idle eviction.
+const MAX_TERMINAL_SESSIONS: usize = 200;
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct TerminalFile {
+    #[serde(default)]
+    sessions: Vec<TerminalSession>,
+}
+
+/// Session ids whose PM task reached a terminal state (design 27 §4.1 T2-a,
+/// ADR-099 D5): the Chat Router's candidate list must never offer a finished
+/// task again — routing a follow-up into a closed context answers into a
+/// conversation nobody reads.
+///
+/// Written by `SessionManager::close_intent_context`, which the Gateway calls
+/// exactly once on the task's terminal transition; read by the candidate
+/// builder. The PM service stays the authority on task status — this file
+/// only mirrors the one event the Runtime observes. A missing or corrupt file
+/// starts empty: a stale id costs one candidate slot, never a wrong route.
+pub struct TerminalSessions {
+    path: PathBuf,
+    sessions: Vec<TerminalSession>,
+}
+
+impl TerminalSessions {
+    /// Load from `dir/terminal-sessions.json`; absent / corrupt starts empty.
+    pub fn load(dir: &Path) -> Self {
+        let path = dir.join("terminal-sessions.json");
+        let sessions = std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<TerminalFile>(&b).ok())
+            .map(|f| f.sessions)
+            .unwrap_or_default();
+        Self { path, sessions }
+    }
+
+    pub fn contains(&self, session_id: &str) -> bool {
+        self.sessions.iter().any(|s| s.session_id == session_id)
+    }
+
+    /// Set form for the candidate query.
+    pub fn ids(&self) -> std::collections::HashSet<String> {
+        self.sessions.iter().map(|s| s.session_id.clone()).collect()
+    }
+
+    /// Record a terminal session. Idempotent and bounded (oldest dropped
+    /// first).
+    pub fn record(&mut self, session_id: &str) -> Result<()> {
+        if session_id.is_empty() || self.contains(session_id) {
+            return Ok(());
+        }
+        self.sessions.push(TerminalSession {
+            session_id: session_id.to_string(),
+            closed_at: chrono::Utc::now().to_rfc3339(),
+        });
+        if self.sessions.len() > MAX_TERMINAL_SESSIONS {
+            let excess = self.sessions.len() - MAX_TERMINAL_SESSIONS;
+            self.sessions.drain(0..excess);
+        }
+        self.flush()
+    }
+
+    /// Drop an id that came back to life (a task reopened by the PM service,
+    /// or a rotation successor that reuses a planned id).
+    pub fn forget(&mut self, session_id: &str) -> Result<()> {
+        let before = self.sessions.len();
+        self.sessions.retain(|s| s.session_id != session_id);
+        if self.sessions.len() == before {
+            return Ok(());
+        }
+        self.flush()
+    }
+
+    fn flush(&self) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let shape = TerminalFile {
+            sessions: self.sessions.clone(),
+        };
+        let json = serde_json::to_string(&shape)
+            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))?;
+        // Atomic rewrite (temp + rename), same contract as the routing table.
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json)
             .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))?;
@@ -353,29 +459,6 @@ impl SessionSeed {
             && self.workspace.is_none()
             && self.reasoning_effort.is_none()
     }
-
-    /// T3 rotation trigger (design 27 §4.5, chat config surface): the
-    /// initiator explicitly pinned a config the mapped session does not
-    /// already carry. Reuse would silently drop that choice ("send this
-    /// task with model X"), so the context rotates to a fresh session
-    /// created under the seed instead. A seed field left `None` expresses
-    /// no opinion and never conflicts; only a `Some` value that differs
-    /// from the session's current config counts.
-    pub fn conflicts_with(
-        &self,
-        current_model: Option<&str>,
-        current_provider: Option<&str>,
-        current_workspace: Option<&str>,
-        current_reasoning: Option<&str>,
-    ) -> bool {
-        let differs = |want: &Option<String>, have: Option<&str>| {
-            want.as_deref().is_some_and(|w| Some(w) != have)
-        };
-        differs(&self.model, current_model)
-            || differs(&self.provider, current_provider)
-            || differs(&self.workspace, current_workspace)
-            || differs(&self.reasoning_effort, current_reasoning)
-    }
 }
 
 /// Derive the routing key from an inbound intent envelope. Preference:
@@ -424,10 +507,6 @@ pub fn rotation_handoff(
         ),
         RotateReason::T2Compaction => format!(
             "[intent rotation] The previous execution session for this context (session id \"{old}\") was rotated after an in-turn compaction (T2: long-running task).",
-            old = old_session_id
-        ),
-        RotateReason::T3Config => format!(
-            "[intent rotation] The previous execution session for this context (session id \"{old}\") was rotated because this inbound intent carried an explicit session-config choice that differs from that session's own config; the new session starts under the requested config. Its full history stays available under that session id.",
             old = old_session_id
         ),
     };
@@ -681,36 +760,6 @@ mod tests {
     }
 
     #[test]
-    fn seed_conflicts_only_on_pinned_fields_that_differ() {
-        // T3 rotation trigger (§4.5): a pinned value that differs from the
-        // mapped session's own config; a `None` field expresses no opinion.
-        let seed = SessionSeed {
-            model: Some("m1".into()),
-            provider: Some("p1".into()),
-            workspace: None,
-            reasoning_effort: None,
-        };
-        assert!(
-            !seed.conflicts_with(Some("m1"), Some("p1"), Some("w"), None),
-            "matching config -> reuse, no rotation"
-        );
-        assert!(seed.conflicts_with(Some("m2"), Some("p1"), Some("w"), None));
-        // Unpinned fields never conflict, even when the session has none.
-        assert!(!seed.conflicts_with(Some("m1"), Some("p1"), None, None));
-        // A differently-pinned provider also conflicts (the pair is explicit).
-        assert!(seed.conflicts_with(Some("m1"), Some("p2"), None, None));
-    }
-
-    #[test]
-    fn t3_config_handoff_is_pointer_only() {
-        // Like T1: a config change has no distilled summary to carry.
-        let t3 = rotation_handoff(RotateReason::T3Config, "s-old", Some("summary"), 1500);
-        assert!(!t3.contains("distilled handoff"), "T3 carries no summary");
-        assert!(t3.contains("session-config"), "{t3}");
-        assert!(t3.contains("s-old"), "predecessor id kept");
-    }
-
-    #[test]
     fn t2_handoff_carries_distilled_summary_t1_stays_pointer() {
         let summary = "Goal: ship X. Decisions: A, B. Open: C.";
         let t2 = rotation_handoff(RotateReason::T2Compaction, "s-old", Some(summary), 1500);
@@ -757,6 +806,49 @@ mod tests {
         cfg.intent_idle_rotate_hours = Some(0);
         crate::agent_config::save_agent_config(&dir, &cfg).unwrap();
         assert_eq!(idle_rotate_threshold(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_sessions_persist_dedupe_and_forget() {
+        let dir = std::env::temp_dir().join(format!("intent-terminal-{}", uuid::Uuid::new_v4()));
+        let mut terminal = TerminalSessions::load(&dir);
+        assert!(terminal.ids().is_empty(), "absent file starts empty");
+
+        terminal.record("s-1").unwrap();
+        terminal.record("s-2").unwrap();
+        terminal.record("s-1").unwrap(); // idempotent
+        assert!(terminal.contains("s-1"));
+        assert!(terminal.contains("s-2"));
+        assert_eq!(terminal.ids().len(), 2);
+
+        // The mirror survives a restart — that is the point of the file.
+        let reloaded = TerminalSessions::load(&dir);
+        assert!(reloaded.contains("s-1") && reloaded.contains("s-2"));
+
+        // A task that comes back must leave the list again.
+        terminal.forget("s-1").unwrap();
+        assert!(!terminal.contains("s-1"));
+        assert!(!TerminalSessions::load(&dir).contains("s-1"));
+        assert!(TerminalSessions::load(&dir).contains("s-2"));
+
+        // An empty id is a no-op, not an entry that swallows every warning.
+        terminal.record("").unwrap();
+        assert_eq!(terminal.ids().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_sessions_drop_the_oldest_beyond_the_cap() {
+        let dir = std::env::temp_dir().join(format!("intent-termcap-{}", uuid::Uuid::new_v4()));
+        let mut terminal = TerminalSessions::load(&dir);
+        for i in 0..(MAX_TERMINAL_SESSIONS + 5) {
+            terminal.record(&format!("s-{i}")).unwrap();
+        }
+        assert_eq!(terminal.ids().len(), MAX_TERMINAL_SESSIONS);
+        assert!(!terminal.contains("s-0"), "oldest dropped first");
+        assert!(terminal.contains(&format!("s-{}", MAX_TERMINAL_SESSIONS + 4)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

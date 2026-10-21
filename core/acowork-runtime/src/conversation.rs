@@ -345,7 +345,7 @@ impl ConversationWriter {
             Ok(g) => g,
             Err(_) => return,
         };
-        let continues = offset == idx.end && idx.spans.last().map_or(true, |s| s.terminated);
+        let continues = offset == idx.end && idx.spans.last().is_none_or(|s| s.terminated);
         if continues {
             let data_index = idx.total_data;
             idx.total_data += 1;
@@ -610,15 +610,15 @@ fn reconcile_log(path: &Path, idx: &mut LogIndex) -> std::io::Result<()> {
         *idx = LogIndex::default();
     }
     let mut scan_from = idx.end;
-    if let Some(last) = idx.spans.last().copied() {
-        if !last.terminated {
-            // Re-scan the unterminated tail: bytes may have been appended.
-            idx.spans.pop();
-            if last.kind == LogLineKind::Data {
-                idx.total_data -= 1;
-            }
-            scan_from = last.offset;
+    if let Some(last) = idx.spans.last().copied()
+        && !last.terminated
+    {
+        // Re-scan the unterminated tail: bytes may have been appended.
+        idx.spans.pop();
+        if last.kind == LogLineKind::Data {
+            idx.total_data -= 1;
         }
+        scan_from = last.offset;
     }
     if scan_from == file_len {
         idx.end = file_len;
@@ -732,20 +732,20 @@ fn calibrate_open(path: &Path) -> std::io::Result<usize> {
     let index = log_index_for(path);
     let mut idx = index.lock().unwrap();
     reconcile_log(path, &mut idx)?;
-    if let Some(last) = idx.spans.last().copied() {
-        if !last.terminated {
-            let file = std::fs::OpenOptions::new().write(true).open(path)?;
-            file.set_len(last.offset)?;
-            idx.spans.pop();
-            if last.kind == LogLineKind::Data {
-                idx.total_data -= 1;
-            }
-            idx.end = last.offset;
-            tracing::warn!(
-                offset = last.offset,
-                "conversation: truncated unterminated tail line (crash repair)"
-            );
+    if let Some(last) = idx.spans.last().copied()
+        && !last.terminated
+    {
+        let file = std::fs::OpenOptions::new().write(true).open(path)?;
+        file.set_len(last.offset)?;
+        idx.spans.pop();
+        if last.kind == LogLineKind::Data {
+            idx.total_data -= 1;
         }
+        idx.end = last.offset;
+        tracing::warn!(
+            offset = last.offset,
+            "conversation: truncated unterminated tail line (crash repair)"
+        );
     }
     Ok(idx.spans.len())
 }

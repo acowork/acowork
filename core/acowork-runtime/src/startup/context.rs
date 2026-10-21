@@ -155,6 +155,12 @@ pub(crate) struct AgentBootContext {
     /// `acowork_memory::consolidation::distiller` is used.
     pub distiller_merge_prompt: Option<String>,
 
+    /// ADR-099: optional Chat Router persona (package file:
+    /// `prompts/chat.md`). Replaces only the persona section of the
+    /// chat-layer system prompt; `None` falls back to the manifest's
+    /// `display_name` / `role` / `description`.
+    pub chat_persona: Option<String>,
+
     // Shared handles
     pub memory_session: Arc<crate::memory::MemorySessionHandle>,
     pub mcp_notifier: Arc<crate::mcp_notify::McpConfigNotifier>,

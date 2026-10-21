@@ -643,6 +643,10 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let distiller_merge_prompt =
         load_or_trace("distiller-merge.md", "distiller merge-decision prompt");
 
+    // ADR-099: optional chat router persona. Replaces only the persona
+    // section of the chat-layer system prompt; the kernel stays built-in.
+    let chat_persona = load_or_trace("chat.md", "chat router persona");
+
     // ── Step 3.5: Load skill registry ───────────────────────────────
     // Kept alive on the boot context (not discarded) so Phase B injects it
     // into AgentCore — the runtime resolves per-turn chat `command` (skill
@@ -1333,6 +1337,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         // above). They ride the same `AgentBootContext` → `AgentCore`
         // injection chain as the ADR-063 fields.
         distiller_merge_prompt,
+        chat_persona,
         memory_session,
         mcp_notifier,
         workspace_resolver,
