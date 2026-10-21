@@ -1,0 +1,196 @@
+# ADR-099: LLM Semantic Routing for Chat Sessions (Chat Router)
+
+- **Number**: ADR-099
+- **Status**: Accepted
+- **Date**: 2026-10-21
+- **Deciders**: ACowork Architecture Group
+- **Related**: Design 27 (Intent Messaging and Group Chat), Design 29 (Chat Session Context Orchestration), ADR-060 (Prompt-Cache-Friendly Context Block Reorganization), ADR-063 (Package-Level Prompt Override), ADR-066 (Provider Cache Tokens), ADR-076 (Multi-User Account System), ADR-085 (Agent Lifecycle State Machine), ADR-092 (User Message Identity and Bounded Reads), ADR-096 (No Full Session Reads), ADR-098 (Unified Standard Group Model)
+
+## Summary
+
+A chat session is not currently an LLM context: which execute session receives a user message is decided entirely by code rules (`routing_key` + T1 idle / T2 compaction / T3 config conflict). Those rules answer two different questions at once — "which task should semantically continue this work" and "should the physical context window be replaced" — and therefore produce three unreasonable behaviours:
+
+1. Changing model/workspace in the chat forces a new execute session;
+2. With no parameter change, the message always reuses the current working session regardless of semantic relevance;
+3. A T2 rotation carries the old task's summary into the new task; the summary tokens far exceed the user input, and the new session keeps working on the old job.
+
+This ADR decides on a layered approach: **the chat layer introduces one restricted-tool LLM turn (Chat Router) for the semantic decision; the execution layer keeps physical rotation as a context safety valve**. T3 is deleted, T1 is demoted from a hard rule to a prompt signal, and T2 only happens inside the same logical task chosen by the router, so summaries no longer pollute unrelated tasks.
+
+The routing carrier is `ChatSessionManager` (isolated per `chat_session_id`; in a group chat each agent is naturally separate), the router has exactly one tool `dispatch`, and the context is orchestrated as "stable prefix + append at the tail" (see Design 29).
+
+## Background
+
+### 1. Current state: routing_key and three rotation triggers
+
+The `routing_key` namespace priority is `task:` > `chat:` > `conv:` > `msg:` ([intent_routing.rs](../../../core/acowork-runtime/src/agent/session/intent_routing.rs)). 1:1 chats and group @Agent mentions have an empty `conversation_id`, so both fall into `chat:{chat_session_id}`; a PM dispatch is `conv:task:{project}:{task}`. `route_intent_session` checks, in order:
+
+- whether the mapped session hits T1 (idle beyond `intent_idle_rotate_hours`) or T2 (a compaction happened);
+- whether the `SessionSeed` (model/provider/workspace/reasoning from the chat draft) conflicts with the mapped session (T3);
+- any hit creates a new session and writes a handoff pointer or summary into it.
+
+### 2. Three unreasonable behaviours
+
+| Behaviour | Root cause |
+|---|---|
+| Parameter change forces a new session | Parameter consistency is treated as task identity (T3) |
+| Semantically unrelated input reuses the session | "Same chat" is treated as "same task" |
+| Rotation summary pollutes a new task | T1/T2 are physical-window events carrying "task switch" semantics |
+
+### 3. Group chat and PM amplify the problem
+
+- In a group chat every @ of the same agent enters the same `chat:{group}` chain: multiple users and topics are forced into one sequence, and latecomers inherit the previous topic's context and summary.
+- PM dispatch is deterministic by `task:{project}:{task}`, but the task session is not bound to the project group chat, so a user following up in the group cannot be routed to it; nothing prevents a terminal task from being "revived".
+- Agent-agent conversations are bounded by `conversation_id`, naturally isolated, and need no semantic routing.
+
+### 4. Why more code rules will not fix it
+
+"Is this message semantically related to a task" requires understanding natural language and conversation history. It is a model judgement, not an enumerable rule. Adding more conditions (keywords, time windows, parameter fingerprints) only piles unmaintainable heuristics into the delivery chain.
+
+## Decisions
+
+### D1 — Layering: semantic routing in the chat layer, physical rotation in the execution layer
+
+- Chat layer: every human `user_message` (1:1 and group @) first goes through a router turn that produces "answer / hand off to an existing session / create a new session".
+- Execution layer: T1/T2 remain as physical safety valves, but only inside the same logical task chosen by the router; T3 is deleted.
+- Card answers, PM dispatch, and agent-agent messages do not pass through the router.
+
+### D2 — Stateless router turns, ChatSessionManager isolated per chat
+
+Each turn rebuilds its context from chat history; no hidden resident session is created (avoiding dual-history forks and extra rotation). `ChatSessionManager` is keyed by `chat_session_id`; a 1:1 chat is naturally unique per (user, agent), and in a group chat each agent has its own Runtime, so isolation per agent is inherent. The manager only owns the per-chat serial queue, window anchor, candidate construction, and the decision log.
+
+**A router turn never runs on the MQTT inbound loop.** The inbound loop does exactly one thing: push the message onto that chat's FIFO queue, and spawn a drain task only when `push_turn` reports that nobody was draining it. There is always at most one drainer per chat, and `finish_drain` keeps the claim while the queue is non-empty, which closes the "check empty → message enqueued → claim released → message stranded forever" race. Two invariants justify the shape: two turns of one chat must not read the same history anchor concurrently and then race on the write-back, and a slow model must not stall this agent's receive side — `Stop` included. Each turn is wrapped in one more `spawn` inside the drain task, so a panic surfaces as a `JoinErr` and the loop still reaches `finish_drain`; no chat can be left claimed with a queue nobody consumes. An outcome the router hands back (`PassThrough` / `Fallback`) is finished by that same drain task running the deterministic route, so a degradation costs latency, never the message, and never re-enters the queue.
+
+### D3 — Single `dispatch` tool and the tool visibility matrix
+
+`dispatch(target = "<candidate alias>" | "new", message?, session_config?)`; no tool call means a plain-text answer. Candidates use short `S1/S2` aliases mapped to real session ids at runtime.
+
+| Tool | chat router turn | execute turn |
+|---|---|---|
+| `dispatch` | the only tool | not exposed |
+| `intent_send` | not exposed | available (hidden in the responder role) |
+| `chat_history_read` | not exposed (history is injected) | available |
+| `ask_user_question` | not exposed (clarify in text) | available (hidden in human-free sessions) |
+
+`dispatch` selects a session inside this agent only; `intent_send` is what crosses agents. The router must not @ another agent on the human's behalf — `@` is a user action.
+
+### D4 — Candidate rules and multi-user isolation
+
+- 1:1: the currently mapped session + historical sessions with `meta.chat_session_id == this chat` + hand-made sessions owned by the current user with an empty `chat_session_id`.
+- Group chat: only sessions with `meta.chat_session_id == this group` (including bound PM task sessions); never any personal 1:1 session.
+- Excluded: sessions bound to another chat, sessions owned by someone else (1:1), and terminal PM task sessions. At most 10, ordered by `last_active_at`; only title/status/last activity/source are exposed, never JSONL bodies (ADR-096).
+
+### D5 — Context orchestration: stable prefix + append at the tail
+
+Apply the ADR-060 block model to the chat layer:
+
+- Block A: router system prompt (base + persona + scenario section), byte-stable;
+- Block B: chat history projected deterministically by seq, append-only; the window anchor `anchor_seq` moves forward in batches only when `max_history + slack` is exceeded;
+- Block C: candidate list, draft config, current time and other dynamic information after the history, so changes only invalidate themselves;
+- Anthropic gets one `cache_control: ephemeral` breakpoint at the end of A and B; OpenAI/DeepSeek rely on automatic prefix caching.
+
+See Design 29 for details.
+
+### D6 — Chat prompt strictly separated from the execute prompt
+
+The execute prompt (`prompts/system.md` + `constraints.md` + other `prompts/*.md` + skills) carries the execution identity, tool rules, and engineering conventions; it must not be copied to the router. The chat prompt has three layers:
+
+1. Runtime built-in base (role boundary, `dispatch` contract, decision and safety rules, **not overridable**);
+2. Persona section: optional `prompts/chat.md`, falling back to the manifest's `name`/`role`/`description`, capped at 4KB;
+3. Scenario section: two stable variants for 1:1 and group chat.
+
+`chat.md` joins the ADR-063 package-level override list and is therefore also excluded from execute prompt assembly; `POST /agents/{id}/prompts/reload` refreshes it. The router loads no skills, workspace prompt file, or retrieved memory.
+
+### D7 — Group chat and PM dispatch boundaries
+
+- Group @Agent: `@` only picks the agent; the router picks the execution session. Different topics in the same group can run in parallel sessions.
+- PM dispatch: keeps the deterministic `conversation_id = task:{project}:{task}` mapping and does not pass through the router. The task session is bound to the project group chat (`chat_session_id` + Members visibility) so it enters the group's candidates; `close_intent_context` records the session in the terminal list, which candidates exclude.
+- Agent-agent: deterministic `conv:{conversation_id}` mapping, no chat binding, never a candidate.
+- The per-target `message_id` and `in_reply_to` (the shared `user_message` row id) of a group @ fan-out are preserved verbatim when the router forwards.
+
+### D8 — T1/T2/T3 semantics, execution location, and failure fallback
+
+- T3 is deleted;
+- T1 is used only on the fallback path; the normal path treats "idle duration" as a prompt signal;
+- T2 remains a physical rotation on the execution side;
+- router timeout/error/two consecutive invalid tool calls → fall back to `route_intent_session` and write `system_notice(router_fallback)`; the fallback runs on that chat's drain task, so the message is not lost;
+- every Gateway HTTP call on the router path is bounded: reading chat history uses `chat_router.timeout_ms` (default 8 s, clamped to 1–60 s), write-back 15 s, attachment pull 60 s. A stalled Gateway costs that one turn a degradation instead of parking the chat's drainer indefinitely;
+- scanning the candidate list happens **outside** the `SessionManager` lock; the lock only covers mapping resolution (one global lock must never span disk IO);
+- `chat_router.enabled=false` in `agent_config.json` is the kill switch: the inbound loop does **not** queue, and a Chat message takes the deterministic route inline (the same execution location as ADR-098). It is not byte-identical to that point in time — T3 is deleted per D1, so with the router off a `session_config` updates the session the message was routed into (effective next turn) instead of forcing a new one. The observable behaviour E2E relies on, immediate inline delivery, keeps its existing assertions.
+
+### D9 — Explicit "new task" reuses the tab-bar `+`
+
+The deterministic escape hatch adds no composer button; it reuses the `+` already present in the Agent page's session bar:
+
+- When `+` is pressed, `POST /api/agents/{id}/sessions` carries the current `chat_session_id`, and the Runtime — after checking the caller's chat membership — stamps exactly the same binding pair as `dispatch(new)` (`chat_session_id` + `Members`);
+- On success the UI switches to the exec view, where messages go straight to that session and never pass through the router: the binding plus the view switch *is* the escape hatch, so no new wire field such as `target_session_id` is needed;
+- The Gateway needs no change (`POST /sessions` is forwarded transparently);
+- Automatic creations (the session opened on first visit, the successor spawned when the last exec tab closes) stay unbound — "the system needs a tab" is not "the user started a task in this conversation". A binding is a hard gate for group-chat candidates (D4: a group lists only sessions bound to it); in 1:1 the speaker's own unbound sessions still appear as candidates under D4's third clause, and the router judges their relevance by title and recent activity;
+- A failed check skips only the binding, never the creation: chat membership is injected best-effort by the Gateway, so "new task" must still work when the user service is degraded (fail-soft on binding, fail-closed on access);
+- once a binding exists the binding owns `visibility`: the (`chat_session_id`, `Members`) pair is the contract the group read check depends on, so a request body may not turn a bound session back to `public` (leaking it to other chats' readers) or `private` (hiding the group's own task from it). A dropped request value is logged at WARN, and the response echoes what actually took effect rather than what was asked.
+
+Known trade-off: the composer draft does not follow into the new session.
+
+## Routing flow
+
+```mermaid
+graph TD
+    U["Human user_message"] -->|1:1 / group @| R["Chat Router turn<br/>stateless · single dispatch tool"]
+    U -->|card answer| C["Gateway resolve_card_answer"]
+    U -->|PM dispatch kind=request| T["conv:task:{project}:{task}"]
+    U -->|agent-agent conv:id| A["conv:{id}"]
+    R -->|plain text| W["agent_message written back to chat"]
+    R -->|dispatch existing| S["target execute session"]
+    R -->|dispatch new| N["new execute session<br/>bound to chat"]
+    P["tab-bar + (Chat surface)"] -->|"POST /sessions with chat_session_id<br/>bypasses the router"| N
+    S --> E["execute + write back"]
+    N --> E
+    T --> E
+    A --> E
+```
+
+## Acceptance criteria
+
+Mapped to the three behaviours in the background:
+
+1. **Parameter changes no longer force a new session**: when the router judges "same task + config change", it reuses the session; only a new task creates a new one. On a reuse the draft's model / provider / reasoning_effort must reach the session that was routed to, through `ConversationSession::apply_config` (ADR-047's single config entry point: persists immediately, bumps `config_version`, and the SessionTask applies it at the next turn boundary) — that is what "effective from the next turn" means. `workspace` is the one exception: moving a live task's working directory is not a config tweak and must go through `route_workspace_switch` (ADR-034 §8, the single entry point, with its per-agent-default side effect), so a workspace suggestion only takes effect when a session is created; on a reuse the divergence is logged instead of silently dropped.
+2. **Unrelated input no longer reuses a session**: the router chooses `dispatch(new)`.
+3. **Summaries no longer pollute a new task**: a new task starts from an empty session; T2 only happens inside the same task chosen by the router.
+
+Additional acceptance:
+
+- Two users' different topics in a group chat land in different execution sessions;
+- A bound PM task can be followed up in the project group, and terminal tasks no longer appear in candidates;
+- With the router disabled, all existing E2E assertions hold.
+
+## Compatibility and migration
+
+- `chat_router.enabled` defaults to true; when disabled a Chat message goes back to ADR-098's inline deterministic route, the only difference being that T3 is retired (see D8).
+- Moving a router turn onto a per-chat drain task changes no external contract: MQTT payloads, `routing_key`, `intent-sessions.json` and the write-back channels are all as before.
+- Existing packages need no new file: without `prompts/chat.md` the persona falls back to manifest metadata.
+- Existing `intent-sessions.json` mappings remain valid; candidates include the current mapping, so first run needs no migration.
+- The terminal list is a sidecar `terminal-sessions.json`; no SQLite schema change.
+
+## Non-goals
+
+- Do not rewrite execution-side compaction (ADR-061).
+- Do not let the router execute tasks or read execute-session bodies.
+- Do not change the PM dispatch endpoint `POST /api/intents/task-dispatch`.
+- Do not change the authorization or write-back paths of card answers or @ fan-out.
+
+## Relationship to existing ADRs
+
+| Existing ADR | Relationship |
+|---|---|
+| Design 27 / ADR-098 | Revises where chat-layer routing decisions come from; the two-layer session model and chat storage are unchanged |
+| ADR-060 | Reuses the Block A/B caching principle, adds Block C and the window anchor |
+| ADR-063 | `prompts/chat.md` is a new package-level override file |
+| ADR-066 | Reuses cache token accounting and hit-rate semantics |
+| ADR-076 / ADR-092 | Candidate and write-back identity filtering reuse envelope `from` and chat scope |
+| ADR-096 | Candidates read metadata only, never JSONL bodies |
+
+## Tests
+
+- Unit: candidate filtering, dispatch parsing, prompt layering, tool visibility, deterministic projection and prefix stability, fallback; the queue invariants (one drainer per chat, FIFO, a turn arriving while the drainer finishes is not left behind, an idle queue is dropped and reclaimed); the kill switch neither queues nor fails to deliver inline; a turn the router hands back (`PassThrough` / `Fallback`) is still delivered while a `Handled` one is not delivered twice; `session_config` applies on both reuse branches (target is the mapped session / target is another live session); a chat binding outranks the requested `visibility`.
+- Integration: MockProvider drives the four paths (answer/hand off/create/fallback); T2 still happens inside the chosen session; parallel topics in a group chat; PM tasks appear in group candidates and disappear when terminal; agent-agent mappings unaffected.
+- E2E: router disabled keeps existing assertions; enabled verifies `agent_message` and `turn_started` for 1:1 and group @; PM task-dispatch still lands on `conv:task:`.
+- Regression: `cargo clippy --all-targets -- -D warnings`, `cargo test`, desktop `npm test`.

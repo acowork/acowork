@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 86 / 86 documents translated.
+**Coverage**: 88 / 88 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -116,6 +116,8 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 88 | [ADR-095](./ADR-095-global-search-conversation-memory-retrieval-and-summary-candidates.md) | Global Search: Conversation and Memory Retrieval, and Summary Candidate Selection | Draft (pending review) | [zh](../zh/ADR-095-global-search-conversation-memory-retrieval-and-summary-candidates.md) |
 | 89 | [ADR-096](./ADR-096-no-full-session-reads.md) | No Full Session-File Reads on Request Paths — Write-Time Derived State and Bounded Reads | Accepted | [zh](../zh/ADR-096-no-full-session-reads.md) |
 | 90 | [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) | In-Conversation History Search — Per-Session Disposable Search Index | Accepted | [zh](../zh/ADR-097-in-conversation-history-search-disposable-index.md) |
+| 91 | [ADR-098](./ADR-098-unified-standard-group-model.md) | Unified Standard Group Model — Every Chat Surface Converges on `kind`-Typed `chat_sessions` | Accepted | [zh](../zh/ADR-098-unified-standard-group-model.md) |
+| 92 | [ADR-099](./ADR-099-chat-session-llm-router.md) | LLM Semantic Routing for Chat Sessions (Chat Router) | Accepted | [zh](../zh/ADR-099-chat-session-llm-router.md) |
 
 ---
 
