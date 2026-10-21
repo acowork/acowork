@@ -52,15 +52,17 @@ graph LR
     U1["user-A"] --> MSG["user_message"]
     U2["user-B"] --> MSG
     MSG --> GC["Chat session<br/>kind=user_group / project_group"]
-    GC -->|"only explicit @Agent"| ES1["Execution session<br/>agent-X"]
-    GC -->|"@ another Agent"| ES2["Execution session<br/>agent-Y"]
+    GC -->|"only explicit @Agent (one copy per target)"| R1["Chat Router<br/>agent-X"]
+    GC -->|"@ another Agent"| R2["Chat Router<br/>agent-Y"]
+    R1 -->|"reuse / create"| ES1["Execution session<br/>agent-X"]
+    R2 -->|"reuse / create"| ES2["Execution session<br/>agent-Y"]
     ES1 -->|"write back"| GC
     ES2 -->|"write back"| GC
     GC -->|"push to all participants"| U1
     GC --> U2
 ```
 
-Plain group messages are archived only and trigger nothing; @ performs directed delivery. When several Agents are @-ed they execute independently and write back independently.
+Plain group messages are archived only and trigger nothing; @ performs directed delivery, and @ decides **which Agent to wake**, not which execution session receives the message. Each @-ed Agent runs its own Chat Router turn (ADR-099) and reuses or creates a session inside the candidates bound to this group (including this group's PM task sessions); different topics in the same group can therefore run in parallel across different execution sessions instead of all queuing into one `chat:{group}` chain. When several Agents are @-ed they execute independently and write back independently.
 
 #### 2.1.3 Agent-Agent
 
@@ -81,14 +83,19 @@ graph TB
     subgraph CHAT["Chat session layer (acowork-user chat domain)"]
         A["user_message / agent_message / interaction_request / system_notice"]
     end
+    subgraph ROUTER["Chat Router layer (Runtime, stateless LLM turn per message)"]
+        R["recent-history projection + candidate execute sessions + draft config<br/>-> reply / hand off / create"]
+    end
     subgraph EXEC["Execution session layer (Agent home)"]
         B["thinking - tool calls - file edits - full context"]
     end
-    A -->|"Intent delivery: one chat message = one execution input"| B
+    A -->|"deliver one by one (same message_id and envelope coordinates)"| R
+    R -->|"dispatch: which task should continue this"| B
+    R -->|"plain-text reply (no tool call)"| A
     B -->|"write back at turn end: one agent_message"| A
 ```
 
-The boundary invariant is stated in §2.3: a Chat session records the conversation, an execution session records the work, Intent routes one chat message into the latter's input, and the reply is written back into the former.
+The boundary invariant is stated in §2.3: a Chat session records the conversation, an execution session records the work, and the Chat Router decides which execution session a given message belongs to. The router is a **stateless turn** — it reads a projection of the Chat session, owns no persistent session, and writes no execution trace; its only outputs are a user-facing reply or a targeted dispatch decision.
 
 ### 2.4 Glossary
 
@@ -100,6 +107,8 @@ The boundary invariant is stated in §2.3: a Chat session records the conversati
 | **Intent** | A set of addressing and reply **fields** on a message (`conversation_id`, `in_reply_to`, `agent_session_id`, `repo`, `status`) | Not a message kind; not a task orchestration protocol |
 | **Initiator / Responder** | The role in one turn, decided by the **inbound message kind**, never declared by the model | Not a model-selectable attribute |
 | **routing key** | Runtime-side logical execution mapping key: `task:` > `chat:` > `conv:` > `msg:` | Not a physical session id; it can rotate |
+| **Chat Router** | Semantic routing of human messages: a stateless LLM turn per message that only replies or emits a `dispatch` decision (v2.2) | Not a resident session, not an executor, owns no context |
+| **Candidate set** | The execution sessions a router may target, hard-filtered by chat binding and owner (≤ 10) | Not the full session list, not a permission grant |
 | **Rotation** | The logical mapping starts pointing at a successor physical execution session | Not a change of the Chat session |
 | **Decision card** | `interaction_request`: a human decision is required; blocking | Not a progress display |
 | **Status card** | `system_notice` / `turn_started`: the turn has begun; non-blocking | Not a persisted live state |
@@ -114,9 +123,12 @@ The boundary invariant is stated in §2.3: a Chat session records the conversati
 | Authoritative storage | Corresponding Agent home / Runtime, existing format | `acowork-user` chat domain |
 | Content | Existing execution history: user inputs, model outputs, reasoning, tool calls, etc. | Fixed types: `user_message` / `agent_message` / `interaction_request` / `system_notice`, including attachments |
 | Writer | Corresponding Agent Runtime / existing session API | Single chat write entry point in `acowork-user` |
+| Has an LLM | Yes (execution turn, full tool set) | Yes (Chat Router: stateless per message, read-only projection, tool set is `dispatch` only) |
 | UI entry | Execution-session tabs in the Agent page's unified tab strip + Session history | Pinned Chat tab on the Agent page (one session per pair, v2.1) |
 
 Never copy Chat-session messages into Agent reasoning or tool calls, and never write private Agent reasoning or tool calls into any Chat session. Chat messages and execution history are two distinct view domains (v2.1: the Chat view of a user-Agent 1:1 chat is the pinned tab; execution history is reached via Session history and execution tabs).
+
+**v2.2: a Chat session becomes an LLM input, but never an LLM store.** With the Chat Router there really is an LLM reading this history, but it is a **projection rebuilt every turn**: no router session is persisted, no reasoning is written, no router-side context accumulates — the chat history stays the single source of truth (ADR-099). The division of labour above is therefore unchanged; what is new is only *who decides which execution session receives a message*: a semantic judgement instead of `routing_key` plus T1/T2/T3 key arithmetic.
 
 **Cards are the only exception, and they are a semantic exception rather than a hole.** An `interaction_request` does refer to an in-execution event (a pending tool call, a paused state), but what enters the Chat session is **the communication fact that someone must decide**, not that tool call itself: a card carries the summary needed to make the decision, not the tool payload, command line, internal error detail, or reasoning. The approval outcome lands back in the execution session and execution continues; the Chat session records only "who answered what, when" (section 7.4). The test is: **does this message's content matter to the other participants of the conversation?** If yes it belongs in the Chat session; if it is only the Agent's own progress it stays in the execution session.
 
@@ -163,20 +175,19 @@ The following are settled conclusions from the discussion and are normative for 
 
 1. **A Chat session stores fixed-type messages only.** No Agent reasoning, tool calls, or tool execution details.
 2. **Chat messages and execution records are two independent view domains.** The Chat view of a user-Agent 1:1 chat is the Agent page's pinned tab (not entered through a list); execution records are reachable via Session history and execution tabs. Group Chat sessions are entered from business views such as the project (v2.1 revision; the former "two entry points" wording is obsolete).
-3. **There is exactly one rotation point for an Intent execution session.** Rotation may be considered only after the Intent execution ends and its result has been written back to the source Chat session; after rotation the Chat session is unchanged and the new execution session's routing key points at the same Chat session.
-4. **T1 idle interval plus T2 task concluded.** T1 defaults to 24 hours (configurable); T2 is a PM task reaching a terminal state or a compaction having occurred in that session. They are ANDed and evaluated only after write-back. T2 alone is never a rotation reason. A separate, independent T3 trigger also rotates: when an inbound Intent's `session_config` conflicts with the mapped session's own config, the context rotates at the same post-write-back evaluation point to a successor created under the suggestion (§4.1 / §4.5.2).
-5. **The Agent page opens a user-Agent Chat session by default.** Opening an Agent enters its **one and only** Chat session (exactly one per (user, agent) pair, created idempotently on first open, v2.1); group chat, single chat, and agent-agent chat share one session model, message vocabulary, and write entry point. The Agent's execution sessions are not migrated and remain in Session history and execution tabs (§5.4.4).
-6. **The Chat session is the durable conversation record; the in-flight execution turn is the transient view of the current turn.** Frontend = history rendered from the Chat session + the in-flight turn rendered from the execution-session event stream; when the turn ends and the `agent_message` is persisted, the durable row replaces the transient view.
-7. **Conversation ownership follows a C/S model.** The initiator owns the conversation and is responsible for ending it; the responder has no right to open the next round; each conversation has a server-configurable request cap (default 6); when a third party's information is needed, the question goes back to the initiator rather than being relayed by the responder.
-8. **Responder turns have a trimmed tool set.** `intent_send` and `ask_user_question` are absent from the responder turn's tool set, enforced by tool visibility rather than by a runtime error.
-9. **`repo` is an optional field and is an address, not a path.** A normalized remote URL; injected server-side when the project has a repository, never filled in by the sender; the receiver reads and writes only inside its own registered / authorized working-directory set, with no automatic clone or worktree; malformed values and out-of-scope access are explicit rejection errors.
-10. **Each chat session is written serially by one backend entry point.** Messages append in time order and `message_id` provides idempotent deduplication.
-11. **The Intent vocabulary is unified into message kinds.** Four kinds: `user_message` / `agent_message` / `interaction_request` / `system_notice`; `conversation_id`, `in_reply_to`, `agent_session_id`, and `status` are demoted to fields and no longer exist as separate message kinds (§4.2).
-12. **A human message is a `user_message`, not an Intent request.** If a user single-chat message were implemented with request semantics, the Runtime would treat that turn as a responder and strip `ask_user_question` / `intent_send`, which would break single chat outright. The transport may reuse the Intent delivery pipeline, but the inbound type must be human input and the role this turn must be initiator (§5.4.4 / §5.4.5).
-13. **Write-back is independent of the turn's role.** Whenever the inbound message carries `source_chat_session_id`, the turn must write back an `agent_message` when it ends — earlier versions wrote back only at the end of responder turns, which would leave single-chat conversations permanently empty (§5.5.1).
-14. **Cards are unified in type and branched in semantics.** `interaction_request` covers ask-question, permission approval, pause-resume, retry, and every other thing needing a human decision; persistence represents "open" as "no `in_reply_to` points at it". But whether the turn is held or ended is decided per card type and cost, and pure agent-agent sessions create nothing that requires a human (§5.5.4 / §5.4.5).
-15. **No history migration.** Existing execution sessions stay in Session history; only new conversations create Chat sessions. The benefit is that the step is fully rollbackable: when the Chat surface is unreachable (no account, user-service failure), the Agent page falls back wholesale to the pre-migration exec form (§6.1).
-
+3. **There is exactly one rotation point for an Intent execution session.** Rotation may be considered only after the Intent execution ends and its result has been written back to the source Chat session; after rotation the Chat session is unchanged and the new execution session's routing key points at the same Chat session. A Chat Router `dispatch(new)` is **not** a rotation: it opens a new execution chain with no predecessor and no handoff (§4.1).
+4. **Only T1 and T2 remain; T3 is removed (v2.2).** T1 defaults to 24 hours (configurable); T2 is a PM task reaching a terminal state or a compaction having occurred in that session. They are ANDed and evaluated only after write-back. T2 alone is never a rotation reason. T3 (rotate whenever an inbound Intent's `session_config` differs from the mapped session's own config) is deleted: configuration differences no longer carry routing meaning — the Chat Router decides semantically whether to continue that session with updated config or to create a new one (§4.1 / §4.5.2 / ADR-099).
+5. **Frontend interaction = semantic auto-assignment + explicit creation (v2.2).** Reuse-or-create is decided by the Chat Router by default; the user can still press the tab-bar `+` to create an execution session directly — the create request carries the current `chat_session_id` and the Runtime stamps the same binding pair as `dispatch(new)`. This deterministic escape hatch bypasses the router: after creation the UI switches to the exec view and messages go straight to that session. Automatically created sessions stay unbound (ADR-099 D9).
+6. **The Agent page opens a user-Agent Chat session by default.** Opening an Agent enters its **one and only** Chat session (exactly one per (user, agent) pair, created idempotently on first open, v2.1); group chat, single chat, and agent-agent chat share one session model, message vocabulary, and write entry point. The Agent's execution sessions are not migrated and remain in Session history and execution tabs (§5.4.4).
+7. **The Chat session is the durable conversation record; the in-flight execution turn is the transient view of the current turn.** Frontend = history rendered from the Chat session + the in-flight turn rendered from the execution-session event stream; when the turn ends and the `agent_message` is persisted, the durable row replaces the transient view.
+8. **Conversation ownership follows a C/S model.** The initiator owns the conversation and is responsible for ending it; the responder has no right to open the next round; each conversation has a server-configurable request cap (default 6); when a third party's information is needed, the question goes back to the initiator rather than being relayed by the responder.
+9. **Responder turns have a trimmed tool set.** `intent_send` and `ask_user_question` are absent from the responder turn's tool set, enforced by tool visibility rather than by a runtime error.
+10. **`repo` is an optional field and is an address, not a path.** A normalized remote URL; injected server-side when the project has a repository, never filled in by the sender; the receiver reads and writes only inside its own registered / authorized working-directory set, with no automatic clone or worktree; malformed values and out-of-scope access are explicit rejection errors.
+11. **Each chat session is written serially by one backend entry point.** Messages append in time order and `message_id` provides idempotent deduplication.
+12. **The Intent vocabulary is unified into message kinds.** Four kinds: `user_message` / `agent_message` / `interaction_request` / `system_notice`; `conversation_id`, `in_reply_to`, `agent_session_id`, and `status` are demoted to fields and no longer exist as separate message kinds (§4.2).
+13. **A human message is a `user_message`, not an Intent request.** If a user single-chat message were implemented with request semantics, the Runtime would treat that turn as a responder and strip `ask_user_question` / `intent_send`, which would break single chat outright. The transport may reuse the Intent delivery pipeline, but the inbound type must be human input and the role this turn must be initiator (§5.4.4 / §5.4.5).
+14. **Write-back is independent of the turn's role.** Whenever the inbound message carries `source_chat_session_id`, the turn must write back an `agent_message` when it ends — earlier versions wrote back only at the end of responder turns, which would leave single-chat conversations permanently empty (§5.5.1).
+15. **Cards are unified in type and branched in semantics.** `interaction_request` covers ask-question, permission approval, pause-resume, retry, and every other thing needing a human decision; persistence represents "open" as "no `in_reply_to` points at it". But whether the turn is held or ended is decided per card type and cost, and pure agent-agent sessions create nothing that requires a human (§5.5.4 / §5.4.5).
 16. **The Chat session is the Agent page's pinned tab and coexists with execution-session tabs.** Opening an Agent always lands on the Chat tab, which is never closable or deletable; execution sessions are ordinary tabs in the same strip that open and close freely — closing the last one simply falls back to the Chat tab, and switching surfaces destroys neither side. `+`, Session history and status cards are all execution-tab entry points — background does not mean hidden (§5.4.4 / §6.1, v2.1 revision).
 
 17. **The execution status card persists a pointer; status is projected at read time.** What is stored is one immutable `system_notice` / `turn_started` row carrying `in_reply_to` + `agent_session_id`; live status comes from the execution session's existing state machine over events and is **never stored in the Chat session**. Storing state would mean dozens of rewrites inside one turn, which must either break section 8's append-only single writer or flood the conversation history with execution detail (section 7.5).
@@ -186,6 +197,22 @@ The following are settled conclusions from the discussion and are normative for 
 19. **An execution session triggered by a group chat is readable by every participant of that group.** The test derives from routing key `chat:{chat_session_id}`, with no separate ACL; **`SessionVisibility::Public` must not be reused**, since it is platform-wide and would expose a group's execution history to non-members. agent-agent execution records stay closed to humans outside that conversation (section 7.5).
 
 20. **`turn_started` is written by the Runtime, sharing section 7.1's write-back origin.** The Gateway is the communication and resource-management boundary and carries no business logic; immediate send-side feedback comes from an optimistic frontend placeholder rather than from writing earlier (section 7.5).
+
+21. **No history migration.** Existing execution sessions stay in Session history; only new conversations create Chat sessions. The benefit is that the step is fully rollbackable: when the Chat surface is unreachable (no account, user-service failure), the Agent page falls back wholesale to the pre-migration exec form (§6.1).
+
+22. **The chat layer gains an LLM semantic router (v2.2, ADR-099).** Every human message (1:1, group-chat @Agent) first passes through the target Agent's Chat Router: one stateless LLM turn whose only tool is `dispatch`, producing "reply / hand off to an existing execution session / create an execution session". PM dispatch, agent-agent traffic and card answers never pass through the router.
+
+23. **The router owns no session.** No hidden resident session is created; the context is rebuilt every turn from chat history + candidate list + draft config. Chat history stays the single source of truth, avoiding forked histories and extra rotation maintenance.
+
+24. **Candidate sets are hard-filtered by chat binding and owner.** 1:1 lists only the current chat mapping, that chat's historical predecessors, and sessions owned by the same user with no chat binding; a group chat lists only sessions whose `meta.chat_session_id` points at that group (PM task sessions included). At most 10 candidates, ordered by last activity, exposing only title / status / activity time / model / workspace / origin — never execution bodies (ADR-096).
+
+25. **In a group chat, @ selects the agent, not the execution session (v2.2).** Different topics in the same group can run in parallel across sessions; the group router creates no decision cards, clarifies in plain text only, and must not restate private chats or other chats' session titles (§5.3.1).
+
+26. **PM dispatch keeps a deterministic mapping.** `conversation_id = task:{project}:{task}` is the task identity and lifecycle boundary, so it bypasses the router; a task session is bound to the project group chat at creation (`chat_session_id` + Members visibility) so it becomes a candidate there, and `close_intent_context` records it in the terminal list to be excluded from candidates — a terminal task is never "revived" (§5.4.2).
+
+27. **The chat prompt is separate from the execute system prompt (v2.2).** Chat prompt = built-in base (not overridable) + optional `prompts/chat.md` persona (falling back to manifest metadata) + a 1:1 / group scenario section; it loads neither `system.md`, `constraints.md`, other prompts, skills, the workspace prompt file, nor retrieved memory. `chat.md` joins the ADR-063 override list and is therefore excluded from execute-prompt assembly; 4 KB cap, persona section only (design 29).
+
+28. **Router failure degrades; availability never regresses.** On timeout (default 8 s), provider error, or two consecutive invalid tool arguments, routing falls back to the existing `routing_key` path and writes a `system_notice` (`notice_type = router_fallback`); the message is already persisted, so a routing failure never loses it (§5.7). Degradation is not the only failure surface that needs bounding: every Gateway HTTP call on the router path is bounded (history read `chat_router.timeout_ms`, write-back 15 s, attachment pull 60 s), and a router turn runs on that chat's drain task rather than on the MQTT inbound loop, so a stalled Gateway or a slow model can only slow down the assignment of that one chat — it cannot stop the Agent's receive side, `Stop` included. With `chat_router.enabled=false` nothing is queued and a Chat message takes the deterministic route inline (ADR-099 D8).
 
 ### 3.5 Defects in the Current Implementation
 
@@ -219,17 +246,18 @@ An execution session may be triggered by a user message or an Intent. Regardless
 
 Intent-driven execution sessions reuse the existing Agent-session context-compaction mechanism; Intent does not introduce a separate token-compaction design. The first release keeps the current thresholds: 70% context usage logs a warning only, 80% triggers LLM compaction, and 95% triggers the `emergency_trim` safety net. The denominator is the effective context window for that session, following the existing per-session override rules. Compaction limits context sent to the model but does not shrink the complete JSONL history file, so physical session rotation is also required.
 
-Logical mappings (for example, a group chat to an Agent) remain stable, while the physical execution session they point to may rotate. This rotation policy applies only to execution sessions managed by Intent logical mappings; it does not change the lifecycle of ordinary sessions used directly from the Agent page. The complete old history remains in the Agent home for the existing Session history UI; do not copy the old JSONL wholesale into the successor or write execution details into the Chat session.
+Logical mappings (for example, a group chat to an Agent) remain stable, while the physical execution session they point to may rotate. Since v2.1 a user's 1:1 chat on the Agent page also goes through the `chat:{chat_session_id}` mapping and is therefore covered by this policy. Since v2.2 a session created explicitly with the tab-bar `+` (ADR-099 D9) is chat-bound as well, but it is its own execution chain — no predecessor, no handoff — so rotation only ever happens inside the same logical task the router selected (§4.1). Sessions with no Chat binding (automatic successors and legacy rows) keep the ordinary lifecycle. The complete old history remains in the Agent home for the existing Session history UI; do not copy the old JSONL wholesale into the successor or write execution details into the Chat session.
 
 **Rotation-timing invariant: there is exactly one rotation point — after the Intent's execution has finished and its result has been written back to the source Chat session.** No matter how many compactions (including `emergency_trim`) occur during execution, the session must never be switched mid-execution. Multiple compactions inside a single Intent are normal for long tasks or small context windows.
 
-Rotation is triggered by the following two scenarios; there is no execution-count limit:
+Rotation is evaluated **after the router has selected a target session**; the fallback path evaluates it after `routing_key` resolution. T3 was removed in v2.2 (§3.4 decision 4): configuration differences no longer trigger a new session directly — the decider is now the router, not T3: changed config + explicit continuation → update config on the selected session; changed config + a new task → `dispatch(new)` (§4.5.2). There is no execution-count limit.
 
-| Trigger | Condition | Default |
-|---|---|---|
-| T1 topic discontinuity | When a new Intent arrives, the idle gap since that mapping's last completed execution exceeds the threshold, indicating the two Intents are unrelated | 24 hours; configurable 1–72 hours; `0` disables |
-| T2 task concluded | Either: the PM task reached a terminal state (`Done` / `Rejected` / `Cancelled`); or at least one compaction happened during this execution, which marks the Intent as a long task whose historical session should not be reused after delivery | Enabled, not disableable (business boundary plus context-cost judgment) |
-| T3 config-choice conflict | An inbound Intent arrives while the mapping points at a still-active session, but this message's `session_config` pins an initial value that differs from that session's own config (§4.5.2) — reusing it would silently drop an explicit choice, so the context rotates to a successor created under the suggestion | Enabled, not disableable (an explicit choice must never be dropped); evaluated only after write-back, before delivering the next Intent |
+| Trigger | Condition | Default | Applies to |
+|---|---|---|---|
+| T1 topic discontinuity | When a new message arrives, the idle gap since that mapping's last completed execution exceeds the threshold | 24 hours; configurable 1–72 hours; `0` disables | **Hard trigger on the fallback path**; on the router path it is only a prompt signal — a long idle gap is evidence for creating a new session, not a rule |
+| T2 task concluded | Either: the PM task reached a terminal state (`Done` / `Rejected` / `Cancelled`); or at least one compaction happened during this execution, which marks the Intent as a long task whose historical session should not be reused after delivery | Enabled, not disableable (business boundary plus context-cost judgment) | Both paths; evaluated after the target session is selected, before delivery |
+
+**`dispatch(new)` is not a rotation.** A rotation replaces the physical context inside one logical task (with a predecessor and a handoff); a router-created session is a different execution chain — no predecessor, no handoff, no handoff-generation path. This is what keeps a new task free of old summaries: a T2 summary only lives inside its own topic chain.
 
 Why there is no execution-count limit: a count is not a measurable physical property, so no value is defensible. The problem a count would address—context polluted by unrelated Intents—is already covered directly by the compaction threshold: accumulated unrelated content eventually triggers compaction, which triggers T2. File and disk size are protected by the existing JSONL hard limit. Both boundaries therefore close, leaving no path of unbounded growth.
 
@@ -241,9 +269,10 @@ A rotated successor carries only a concise handoff whose content depends on the 
 
 | Trigger | Handoff content | Ceiling |
 |---|---|---|
-| T1 idle gap | Open items, key decisions, and reference IDs only; omit entirely when nothing is open; no conversation summary | 500 tokens (fixed by design, not configurable) |
+| T1 idle gap (fallback path only) | Open items, key decisions, and reference IDs only; omit entirely when nothing is open; no conversation summary | 500 tokens (fixed by design, not configurable) |
 | T2 compaction condition | Current goal, key decisions, open items, and reference IDs | Target 1,500 tokens, configurable 500–4,000 |
-| T3 config-choice conflict | A pointer note naming the predecessor only; no conversation summary — a config switch has no executable context to distill | 500 tokens (same as T1, fixed by design, not configurable) |
+
+The T3 row was removed together with T3 (v2.2). A router-created execution chain has no handoff: its only context is the owning Chat session's conversation record, never a distilled summary of an unrelated topic.
 
 A handoff must never contain hidden reasoning, and the ceiling is only a target: it must also fit the successor's effective input budget. Ask the Compact Model to reduce oversized handoffs; if it still cannot fit, retain the most important actionable summary and log a warning.
 
@@ -366,6 +395,8 @@ Remote or local Runtime processes, PM, and Desktop operate on chat history throu
 
 Field names and the wire schema will be determined during protocol implementation; this table defines semantics, not the final serialization contract.
 
+**The delivery envelope additionally carries `chat_kind` (`user_agent` / `user_group` / `project_group`), filled in by the Gateway from the source Chat session's `kind`.** It is not part of the message body and is never persisted in the Chat session; it exists only so the Runtime can tell 1:1 from group routing: when a card has expired and the message falls through as an ordinary message, `in_reply_to` is non-empty, and only `chat_kind` identifies it as a group chat rather than a 1:1 chat (§5.1, ADR-099).
+
 #### 4.5.1 The `repo` Field and Receiver-Side Boundaries
 
 `repo` is an optional field carrying the code repository this work concerns, expressed as a normalized remote URL (scheme and credentials stripped, host lowercased, no `.git` suffix). It means "which repository is this task about" — **not "which folder to use"**.
@@ -391,13 +422,15 @@ The first version supports 0 or 1 repository per project; multi-repository proje
 
 An Intent may carry initial target-Agent session settings — model / provider / reasoning-effort / working directory. Omitted fields use the target Agent's defaults. These settings are not immutable snapshots: an authorized user may change them during the session lifecycle, including the session's working directory.
 
-**The initial values are a suggestion, not a command.** `session_config` is applied only at the moment an execution session is **created** — a fresh routing mapping, or a §4.1 T1/T2/T3 rotation successor; a reused active session keeps its own configuration and is not rewritten by a later message's initial values. Before applying, the suggestion is clamped to the **receiving Agent's own allowed set**: model / provider must fall within that Agent's provider list, the working directory within its registered directories; an out-of-range field is dropped and falls back to the Agent default, so a single invalid suggestion never fails the whole delivery. reasoning-effort is not part of the provider allowed set and is parsed against the existing enum — an unparseable value is dropped at parse time so it can never persist and resolve to `None` on every later read.
+**The initial values are a suggestion, not a command — but they are never silently dropped.** `session_config` is applied at the moment an execution session is **created** — a router `dispatch(new)`, or a §4.1 T1/T2 rotation successor. T3 config-conflict rotation was removed in v2.2, so when a session is **reused** the suggestion still has to land: model / provider / reasoning-effort are applied to the session the message was routed into through `ConversationSession::apply_config` (ADR-047's single config entry point), persisted immediately and effective from that session's next turn — the session is not reset to the draft, and an unavailable target is not an excuse to ignore it. **The working directory is the one exception**: moving a live task to execute under a different directory is not a config tweak, and every directory switch must go through the single `route_workspace_switch` entry point (§8 red line, with its per-agent-default side effect), so a workspace suggestion only takes effect when a session is created; on a reuse the divergence is logged (to change directory, `dispatch(new)`).
+
+Before applying, the suggestion is clamped to the **receiving Agent's own allowed set**: model / provider must fall within that Agent's provider list, the working directory within its registered directories; an out-of-range field is dropped and falls back to the Agent default, so a single invalid suggestion never fails the whole delivery. reasoning-effort is not part of the provider allowed set and is parsed against the existing enum — an unparseable value is dropped at parse time so it can never persist and resolve to `None` on every later read.
 
 **The Chat surface sets these initial values before sending.** The user picks model / reasoning-effort / working directory directly on the Chat tab and sends them with the `user_message` — because once the task is sent the Agent immediately begins executing the execution session, and by the time the user switches to the running exec tab to change it the model may already have run several turns, too late for the configuration to take effect. The chosen values are a per-message draft initial value and do not change the Chat session itself. Skills are **not shown** on the Chat surface: they are loaded automatically by the model, are not a session-level initial value, and the chat-message channel has no matching field — there is nothing this surface could write, so the skill chip is hidden rather than shown disabled with a "can't use this" tooltip.
 
 **The draft is stored on the server-side Chat session row, not as frontend-local state.** Under "the backend is the single source of truth", the model / provider / workspace / reasoning-effort pick is persisted on the session record (`ChatSession.session_config`, written via `PATCH /api/chat-sessions/{id}/session-config` as a whole-record replace; participation is the permission, outsiders get the §5.3 hidden 404), so the last pick survives tab switches, reloads and device changes. The frontend's draft is only a **cache and optimistic display** of that row: a pick fires the PATCH immediately, the PATCH response carries the server-normalized value back into the cache, and a failed write rolls back — it never holds a draft the backend does not have (v2.1 revision).
 
-**An explicit choice is never silently dropped.** When an inbound Intent's `session_config` pins an initial value and the mapping points at an active session whose own config differs, this triggers the §4.1 T3 rotation: a successor is created under the suggestion (pointer handoff) and this Intent executes on the new session; a field left absent in `session_config` expresses no opinion and never constitutes a conflict. Once accepted, a configuration change applies to subsequent messages / subsequent execution. An operation already in progress uses the configuration snapshot resolved when that operation started, so changing the working directory cannot redirect an ongoing file operation midway. The service must verify that the user may modify the corresponding target Agent session setting; unauthorized changes fail clearly rather than being silently ignored. A working-directory change may only select from directories already registered on that Agent; arbitrary paths are not accepted.
+**An explicit choice is never silently dropped, but it is no longer implemented as "conflict means create" (v2.2).** `session_config` is only an initial value at execution-session creation; for an existing session, a config difference is no longer a routing signal — it goes to the router's semantic judgement: changed settings plus an explicit "continue" → `dispatch` to that session with the authorized change applied; changed settings describing a new task → `dispatch(new)` with the values used for the new session. A field left absent in `session_config` expresses no opinion and never constitutes a conflict. Once accepted, a configuration change applies to subsequent messages / subsequent execution. An operation already in progress uses the configuration snapshot resolved when that operation started, so changing the working directory cannot redirect an ongoing file operation midway. The service must verify that the user may modify the corresponding target Agent session setting; unauthorized changes fail clearly rather than being silently ignored. A working-directory change may only select from directories already registered on that Agent; arbitrary paths are not accepted.
 
 ### 4.6 Serialized Chat Session Writes
 
@@ -452,18 +485,25 @@ sequenceDiagram
     GW->>GW: identity check / participant validation / budget check
     GW->>CU: append user_message (assign message_id + seq)
     CU-->>GW: persisted
-    GW->>RT: MQTT delivery (carries source_chat_session_id)
-    RT->>RT: resolve routing key -> reuse or create execution session
+    GW->>RT: MQTT delivery (source_chat_session_id + chat_kind)
+    alt human message (kind=user_message, action=chat)
+        RT->>RT: Chat Router turn (history projection + candidates + draft)
+        RT-->>CU: plain-text reply -> agent_message (no execution session)
+        RT->>RT: dispatch -> reuse / create execution session
+    else PM dispatch / agent-agent / card answer
+        RT->>RT: resolve routing key -> reuse or create execution session
+    end
     RT->>RT: run turn (thinking / tools / cards)
     RT->>CU: write back agent_message at turn end
     CU-->>FE: push new message
 ```
 
-Three hard constraints on this pipeline:
+Four hard constraints on this pipeline:
 
 1. **Persist before deliver** — the row must exist in the Chat session before execution is allowed to start; otherwise a Runtime crash makes the message vanish.
 2. **Deliver carries the source session** — the write-back trigger looks only at whether `source_chat_session_id` is present, independent of this turn's role (§5.5.1).
 3. **Write back through the single writer** — the Runtime does not write files directly and the Gateway does not write business facts on its behalf (§7.1).
+4. **Routing a human message is a semantic decision (v2.2)** — `routing_key` no longer doubles as the answer to "which task should continue this"; the router picks a target inside the candidate set and hands off the same `message_id` and envelope coordinates, rewriting neither the body nor the persisted row (ADR-099).
 
 ### 5.2 Per-Form Sequences
 
@@ -526,6 +566,8 @@ An ordinary user message in a group chat is written only to the Chat session; it
 
 Mention parsing must produce an explicit list of target Agent instances, rather than requiring each Runtime to guess the target from message text. When multiple Agents are mentioned, each is routed independently and maintains its own execution session; the request and replies are recorded as associated Intent messages in the same Chat session.
 
+**@ picks the agent; the router picks the session (v2.2).** Each mentioned Agent runs one Chat Router turn in its own Runtime: the candidate set contains only execution sessions whose `meta.chat_session_id` points at this group (including that group's PM task sessions) plus the "create" option, never a private 1:1 session or another group's session. When different users raise different topics in one group, the router prefers creating over chaining them into one session, so topics can run in parallel; follow-ups on the same topic reuse the same session. The group router has no `ask_user_question`; when clarification is needed it simply speaks (§5.4.5).
+
 In the group-chat case the conversation owner is that human message: an Agent's response is written back to the group Chat session and rendered to people, **and it @mentions nobody, so it wakes no Agent**. Hand-off between Agents is not performed by Intent — a human decides whether to @ the next one (the corollary of §5.4.5 R5).
 
 #### 5.3.2 Group-Chat History
@@ -545,19 +587,19 @@ Users and Agents participating in the same group chat can see public messages in
 
 ### 5.4 Creating and Reusing the Receiving Agent Execution Session
 
-The sender provides the source Chat session and business context; the system determines whether to create or reuse the target execution session based on the chat type.
+The sender provides the source Chat session and business context; the system determines whether to create or reuse the target execution session based on the chat type: human messages are resolved semantically by the Chat Router inside the candidate set, while PM dispatch and agent-agent use a deterministic mapping (ADR-099).
 
-#### 5.4.1 @Agent in a Group Chat: Fixed Session per Group
+#### 5.4.1 @Agent in a Group Chat: Group-Local Candidates + Router Choice
 
-When Agent B is mentioned in a group chat, use `(chat_session_id, target_agent_instance_id)` to find B's logical execution conversation and its current physical execution session:
+When Agent B is mentioned in a group chat, @ only wakes B's Runtime; which execution session receives the message is decided by B's Chat Router, over the candidates **bound to that group chat**:
 
-- On the first @B, create the mapping and Agent B execution session;
-- Later messages that @B in the same group use the physical session currently pointed to by the mapping; after that Intent's execution finishes and its result is written back, subsequent queued / arriving messages use a successor session if the T1 or T2 condition in §4.1 is met;
-- After rotation, the logical mapping remains stable and points to the new successor session;
-- Each Agent in the same group has an independent execution-session chain;
-- Append B's Intent response to the group Chat session.
+- First @B (no candidates) → `dispatch(new)`, creating B's execution session with `chat_session_id = group chat id`;
+- Later @B → candidates include the sessions bound to that group (rotation predecessors included, marked current) and PM task sessions; the router reuses semantically, or creates for an unrelated topic;
+- Different topics in one group can therefore run in parallel across sessions instead of being forced into one `chat:{group}` chain;
+- T2 is evaluated only after the router has selected a target; when satisfied, rotation happens inside that logical chain and the logical mapping stays stable;
+- B's Intent reply is appended to the group Chat session with `in_reply_to` pointing at the triggering `user_message`.
 
-“Fixed group-chat session” means a stable logical execution-conversation mapping, not one physical JSONL file that grows forever.
+Group candidates are derived from the `chat_session_id` binding only, **never inferred from `conversation_id`**: one group may host several parallel execution chains. An empty candidate set is a normal initial state, not an error.
 
 #### 5.4.2 PM Tasks: One Logical Execution Context per Task
 
@@ -567,7 +609,10 @@ When PM creates a task and dispatches it to an Agent, the task defines the execu
 - Later Intents to the same Agent for the same task continue in that logical context, rotating its physical execution session under the T1 / T2 conditions of §4.1;
 - When the task reaches a terminal state (`Done` / `Rejected` / `Cancelled`), that logical execution context ends: close the current execution session without creating a successor, and use a new mapping for a later new task;
 - Different tasks create different logical execution contexts;
-- The Intent's source Chat session / reply address is the project group chat; the Agent's reply returns to that group chat and is correlated with the dispatch message.
+- The Intent's source Chat session / reply address is the project group chat; the Agent's reply returns to that group chat and is correlated with the dispatch message;
+- A task session is bound to the project group chat at creation (`chat_session_id` + `SessionVisibility::Members`), so it appears in that group's router candidates and users can follow up on the task there (§8.2);
+- When the task reaches a terminal state, `close_intent_context` records it in the terminal list, which candidate construction excludes — a terminal task is never "revived" by the router; creating under the same task identity means a new task, not reopening the old one;
+- **PM dispatch itself bypasses the router**: `conversation_id = task:{project}:{task}` is both the idempotency key and the lifecycle boundary, and semantic routing would break both.
 
 A task logical execution context maps to an Agent execution-session chain, not a Chat session. The group chat owns the visible project conversation; the PM task ID selects the target Agent execution context.
 
@@ -590,7 +635,7 @@ The first creation of an Agent-Agent Chat session is triggered by an explicit ch
 A user's one-to-one conversation with an Agent on the Agent page **is a Chat session** (`kind = user_agent`), sharing the same storage, vocabulary, single write entry point, and frontend session model as group chat and agent-agent chat. It is not the Agent's execution session and it does not replace the execution session:
 
 - Open the Agent → resolve the default Chat session for that (user, agent) pair, created idempotently if absent;
-- The user types a message → append one `user_message` row → deliver it to that Agent → into its execution session;
+- The user types a message → append one `user_message` row → deliver it to that Agent → the Chat Router chooses within this chat's candidates (reply / reuse / create) → into the corresponding execution session;
 - The Agent's turn ends → append one `agent_message` row back into the same Chat session;
 - Exactly one Chat session per (user, agent) pair (v2.1): no entry point creates a second session of the same pair, and there is no session list. Parallel multi-session work remains a business fact (ADR-086 decision 8 already rejected "one active session per Agent"), but it is carried by the **execution-session layer** — the tab strip's `+` opens a new execution-session tab, not a second Chat session.
 
@@ -627,6 +672,8 @@ Role is decided by the type of inbound message, not declared by the model:
 | reply (someone answered me) | Initiator, continuing its own conversation | Available | Reuse |
 
 R1 is enforced through tool visibility: the responder's turn has no `intent_send` in its tool set, and `ask_user_question` is removed too. The model cannot see these tools, so it never tries them and never spends tokens looking for a workaround. That is cheaper and stricter than failing at call time.
+
+**A Chat Router turn is neither of the roles above (v2.2).** Its tool set holds exactly one tool, `dispatch`: no `intent_send` (it must not @ another Agent on a human's behalf — @ is a user action, and doing it for them would bypass "who may wake whom"), no `ask_user_question` (cards carry ownership, timeout and answer state machines; the router clarifies in plain text), and no file or execution tools (it does not do the task, it only decides who does). The execution turn is the mirror image: it never sees `dispatch`, while `intent_send` / `chat_history_read` / `ask_user_question` are trimmed by the existing responder / answerability rules. The three visibility layers never overlap, and all of them are enforced by visibility rather than runtime errors (design 29).
 
 **The condition for removing `ask_user_question` is whether an answerer exists, not who the message came from.** The original wording — "nobody is behind that turn to answer" — is weaker than the rule needs: in a group chat, the person who just @-ed this Agent *is* an answerer. So the rule is now stated against the fact: **if the Chat session has a human participant, the card may be created; in a pure agent-agent session with no human, the tool is not created and §5.5.1's fallback receipt applies instead** (§5.4.4 / §5.5.4). The cost gate (R4 request counting) and loop prevention are unaffected, because a card creates no new conversation and adds no request to the count.
 
@@ -840,8 +887,11 @@ The Execution session is no longer the default conversation entry point, but it 
 
 A status card's visual state is a **read-time projection** of the execution session's `live_state` and is never persisted (§5.5.5).
 
-| Runtime `SessionStatus` | Card state | Tone |
+v2.2 adds a **pre-state that is not a `SessionStatus`**: the window between "row persisted" and "`turn_started` arrived" (the router is deciding, or the message was delivered but the target session has not started its turn). The frontend shows a local "assigning…" placeholder in the message stream, never persisted; when `turn_started` arrives it is replaced by the target session's status card. When the router answers in plain text there is no `turn_started`, and the placeholder is replaced directly by the terminal message when the `agent_message` arrives.
+
+| State source | Card state | Tone |
 |---|---|---|
+| (no `turn_started`, row persisted) | Assigning | Sent; deciding who handles it (frontend-local, never persisted) |
 | `LlmAwaitingFirstChunk` | Queued | Sent, waiting for a response |
 | `Thinking` | Running | The Agent is thinking |
 | `LlmStreaming` | Streaming | The Agent is producing output |
@@ -852,6 +902,8 @@ A status card's visual state is a **read-time projection** of the execution sess
 | A terminal `agent_message` row exists | **Card disappears, replaced by the terminal message** | The chat terminal row is the completion criterion |
 
 Completion is decided by the **chat-side terminal row**, not by the Runtime's `Idle` event: write-back happens after the final event, so `Idle` only means "execution ended", not "the result is stored". State is **subscribed, never polled**.
+
+A `system_notice` with `notice_type = router_fallback` renders as a light system row ("assigned automatically"), carrying no execution detail just like `turn_started`: it states the fact that semantic routing was skipped this time, without exposing the internal reason for the fallback (§5.7).
 
 ### 6.3 Card Specification
 
@@ -896,8 +948,8 @@ Existing keys are reused directly: `sessionTabBar.closeChat` / `closeOtherChats`
 
 - **`acowork-user`**: owns Chat sessions of all four kinds (including user-Agent single chat), participant relationships, fixed-type chat messages, and the single serialized write entry point; provides paged chat-history queries. Conversation records belong to the chat domain for every kind and are never split by path per kind — storing single chat under a `userId/chats/{peerId}` layout, one directory per initiator, would coexist with the Chat-session UUID-per-session + IntentMeta layout as two systems with two authorities over the same semantics, which is exactly what this design removes.
 - **PM service**: owns project and task data (a project may optionally be linked to one code repository); requests project-chat creation at project creation; provides validated owner / project / task associations and the project repository address at dispatch.
-- **Gateway / trusted routing boundary**: validates Runtime / PM identity, resolves targets, injects and validates the `repo` address, routes Intents, counts requests per `conversation_id` and refuses those over the cap, routes each response back to the initiator's execution session by push, and coordinates user chat with Node / Runtime; it does not directly access Node-local Agent home files.
-- **Agent Runtime**: determines the role of the current turn from the inbound message type (initiator / responder) and trims the tool set accordingly (§5.4.5); treats an incoming request as user input in the designated Agent execution session; preserves the existing session format in the Agent home; reads and writes only inside its own registered / authorized working directories and never clones or creates a worktree because of a `repo` value; on turn end, generates the response through the system (including aborted and failed fallbacks) and submits it to the trusted message write entry point, without relying on the model calling a reply tool.
+- **Gateway / trusted routing boundary**: validates Runtime / PM identity, resolves targets, injects and validates the `repo` address plus `chat_kind`, routes Intents, counts requests per `conversation_id` and refuses those over the cap, routes each response back to the initiator's execution session by push, and coordinates user chat with Node / Runtime; it does not directly access Node-local Agent home files, nor does it carry the semantic judgement of "which execution session should answer" (v2.2, ADR-099).
+- **Agent Runtime**: determines the role of the current turn from the inbound message type (initiator / responder) and trims the tool set accordingly (§5.4.5); for human messages it first runs the Chat Router (stateless, `dispatch` only, falling back to the legacy routing on failure) to choose reply / reuse / create inside the candidate set; treats the chosen message as user input in the designated Agent execution session; preserves the existing session format in the Agent home; reads and writes only inside its own registered / authorized working directories and never clones or creates a worktree because of a `repo` value; on turn end, generates the response through the system (including aborted and failed fallbacks) and submits it to the trusted message write entry point, without relying on the model calling a reply tool.
 - **Desktop**: the Agent page's pinned Chat tab presents the pair's one and only user-Agent Chat session, with execution-session tabs coexisting in the same strip; execution history is shown via Session history; it does not assemble or persist business history itself.
 
 ### 7.2 Transport and ACP
@@ -933,6 +985,8 @@ Three scopes, narrowest to widest:
 | **platform-wide `Public`** | Any authenticated user may read | Explicitly public content |
 
 Key distinction: **group visibility is not `Public`**. `Public` in `session_meta` is a platform-wide scope; applying it literally to group chats would let any logged-in user read the group's execution history. The correct test for a group-triggered execution session is derived from the routing key `chat:{chat_session_id}` — read permission equals the participant set of that chat session, and **no new ACL table is introduced** (§5.4.2).
+
+**v2.2: the candidate set is part of the permission boundary.** A router can only see and choose execution sessions inside the candidate set, and that set is hard-filtered by `chat_session_id` binding and owner: 1:1 contains only that user's own sessions, a group chat only sessions bound to that group. Visibility and routability therefore share one source — there is no path by which the router delivers a group message into a member's private 1:1 session, and no path by which a candidate title probes someone else's session (ADR-099). A PM task session bound to the project group chat is Members-visible, consistent with the revocation rule in §8.3: a member removed from the group simultaneously loses read access to it.
 
 ### 8.3 Permission Revocation
 
@@ -982,6 +1036,16 @@ A member removed from a group loses access to that group's **past** execution se
 - Provide `chat_history_read(offset, count)` with hard server-side limits;
 - Do not add a Chat history entry point to the Agent page (v2.1 revokes the v2.0 item); keep the existing Session history. Chat sessions of other kinds are entered from their own business views.
 
+### Phase 4: Chat Router and Semantic Routing (v2.2)
+
+- Add a `chat_router` module and a `ChatSessionManager` (serial queue per chat) to the Runtime; human messages run a stateless router turn whose only tool is `dispatch`;
+- Build candidates with two filter rules (1:1 / group), based on chat binding + owner + terminal exclusion; cap at 10 and read session meta only, never JSONL (ADR-096);
+- Implement the three-part context layout (Block A / B / C), the window anchor, and cache breakpoints per design 29;
+- Delete T3; T1 becomes a prompt signal (hard trigger only on the fallback path); T2 is evaluated after the router selects a target;
+- Route group-chat @Agent through that agent's router so multiple topics can run in parallel; bind PM task sessions to the project group chat so they become candidates, excluding terminal ones;
+- Fall back to the legacy `routing_key` path on failure and write a `router_fallback` receipt; keep `chat-router-decisions.jsonl` auditable;
+- Frontend: origin marker and the "assigning…" pre-state; explicit new-task creation reuses the tab-bar `+` (created bound to the chat, ADR-099 D9) rather than adding a composer button.
+
 ---
 
 **Summary of core decisions:**
@@ -990,7 +1054,8 @@ A member removed from a group loses access to that group's **past** execution se
 - Chat message types are fixed to user messages and Intent messages; reasoning, tool calls, and tool results exist only in Agent execution sessions.
 - Agent-Agent communication has three sessions: one shared Chat session and separate Agent execution sessions for A and B.
 - Ordinary group messages do not trigger Agents; @Agent sends an Intent. Group @Agent uses a stable logical mapping per Agent and group, switching physical execution sessions on rotation; PM tasks use a dedicated logical execution context per task and Agent and follow the same rotation rules.
-- Intent execution sessions reuse 70% warning, 80% LLM compaction, and 95% emergency trim; the number of compactions during execution is never a rotation condition. There is exactly one rotation point — after the Intent's execution finishes and its result is written back to the Chat session. Rotation triggers are T1 idle gap (default 24 hours) and T2 task concluded (PM task terminal state, or at least one compaction during the execution marking it a long task). No execution-count limit exists: context pollution is covered directly by the compaction threshold, and file size is protected by the existing 100,000-line / 50 MiB hard limit.
+- Intent execution sessions reuse 70% warning, 80% LLM compaction, and 95% emergency trim; the number of compactions during execution is never a rotation condition. There is exactly one rotation point — after the Intent's execution finishes and its result is written back to the Chat session. Rotation triggers are T1 idle gap (default 24 hours) and T2 task concluded (PM task terminal state, or at least one compaction during the execution marking it a long task). No execution-count limit exists: context pollution is covered directly by the compaction threshold, and file size is protected by the existing 100,000-line / 50 MiB hard limit. v2.2 removed T3 (a config conflict no longer forces a new session).
+- **Routing of human messages is an LLM semantic decision (v2.2, ADR-099)**: every 1:1 / group @ message first goes through the target Agent's Chat Router (stateless, `dispatch` only), producing reply / hand off to an existing session / create a session; router turns run sequentially on a per-chat drain task and never occupy the MQTT inbound loop; T3 is removed, T1 is downgraded to a prompt signal, and T2 remains as execution-side rotation; a reused session also receives the draft configuration (§4.5). PM dispatch and agent-agent stay on deterministic mappings and bypass the router.
 - Handoff content is tiered by trigger: T1 carries only open items and key decisions (500-token ceiling, possibly empty); a T2 compaction-triggered rotation targets 1,500 tokens. The Session Settings card exposes only the idle-gap threshold and the handoff target to authorized users; compaction thresholds, the T2 condition, and the JSONL hard limit are not exposed.
 - `acowork-user` stores project group chats; project / group-chat lifecycle linkage is deferred.
 - Each Chat session is serialized through one backend write entry point; Intent configuration is an initial value and may later be changed by authorized users.
@@ -1028,10 +1093,14 @@ Core semantics are confirmed. The following are implementation details rather th
 17. **Attachments and unread counts**: the chat-session store has neither attachment storage with sidecar nor per-participant unread counts, both of which single-chat UX needs. Decide whether to reuse the legacy `chat.rs` `files/` + sidecar and `BTreeMap<uid,u32>` approach or build new.
 18. **Concrete card timeout values** and the execution-side behaviour on timeout (auto-reject vs. stay paused); plus the table mapping each card type to hold-the-turn vs. end-the-turn.
 19. **Orphaned Chat sessions after an Agent reinstall changes its instance id**: `session_id` is a server UUID rather than participant-derived, so history survives, but the stale instance id in `participants` needs rebinding or marking.
-20. **Modeling participant-level visibility for group execution sessions**: the test derives from routing key `chat:{chat_session_id}` (already in `intent-sessions.json`), but `SessionMeta` today only carries an owner plus the two-state `Public` / `Private`, and `Public` is platform-wide and not reusable. Decide between storing the owning `chat_session_id` on the execution session and resolving its participant set at read time, versus having the Gateway inject a session-scope token; and define how access to past execution records is revoked when a member leaves the group.
+20. **Modeling participant-level visibility for group execution sessions**: the test derives from routing key `chat:{chat_session_id}` (already in `intent-sessions.json`). v2.2 settles the mechanism: store `chat_session_id` on the execution session and have `set_chat_binding` set `SessionVisibility::Members` (the implementation already exists); both group chats and PM task sessions take this path. What remains is resolving the participant set at read time (or having the Gateway inject a session-scope token), and revoking access to past execution records when a member leaves the group.
 21. **Subscription topology for card status**: the frontend subscribes to the execution session's `SessionStateChanged` channel; under the remote Gateway / Node / Runtime topology this must be confirmed reachable for group participants who are not the session owner, together with the cost of many concurrent card subscriptions.
 22. **The pairing window between `turn_started` and `agent_message`**: a crash can leave a `turn_started` that never completes. Define staleness at read time (beyond the execution session's liveness ceiling, render as interrupted) and confirm it does not double-record alongside section 10's `response_unavailable` fallback.
 23. **Copy for a greyed-out card**: what an unauthorized viewer sees must neither leak whether the session exists (the hidden-404 semantics) nor leave the user thinking the UI is broken.
+24. **Router model and cost accounting (v2.2)**: precedence of `AgentConfig.chat_router.model` → compact model → Agent default; whether a router turn counts against the Agent budget; and the degradation choice for offline deployments with no compact model (disable the router and use the legacy path, or use the main model).
+25. **Cost and consistency of candidate enumeration (v2.2)**: candidates merge `SessionMetadataService::list_sessions` with `intent-sessions.json`, while `list_for` is currently a directory scan (§3.5 P2); the router enumerates once per message, so a per-chat index or short-lived cache is needed or that P2 defect becomes a P1.
+26. **Retention and privacy of the decision log (v2.2)**: `chat-router-decisions.jsonl` records candidate titles and decision reasons, which is Agent-private data reachable only through Runtime HTTP; define the retention window, rotation and export boundaries (never log another chat's titles).
+27. **Semantics of the fallback receipt (v2.2)**: `router_fallback` tells the user only "assigned automatically", but triage needs the reason (timeout / provider error / invalid arguments); define the WARN log fields and whether DevMode surfaces them.
 
 ## 11. Relationship to Existing ADRs
 
@@ -1042,6 +1111,10 @@ Core semantics are confirmed. The following are implementation details rather th
 | **ADR-073** Layered agent identity | `agent_instance_id` addressing is why reinstalling an Agent orphans its old sessions (§10.19); Agent participants in a kind are stored as instance ids, not `agent_id` |
 | **ADR-082** Memory backend moved to SQLite | Chat sessions stay file-based (JSONL) and are not covered by SQLite; the boundary between the two must be settled in implementation design |
 | **ADR-084** Accounts and user chat split into acowork-user | This design converges the chat domain onto the `chat_sessions.rs` layout; the old `users/{min}/chats/{max}` layout in `chat.rs` is an outstanding convergence item (§4.3) |
+| **ADR-060** Prompt-cache-friendly context block reorganization | The direct basis for chat-layer context orchestration: Block A static kernel + Block B append-only history + Block C dynamic tail, with cache breakpoints only at the end of A/B (design 29) |
+| **ADR-063** Package-level prompt override | Adding `prompts/chat.md` to the override list excludes it from execute-prompt assembly; a new override needs the three coordinated changes (§3.4 decision 27) |
+| **ADR-066** Provider cache tokens | The accounting and observation points for cache hit rate (cache_read / cache_write), used to verify the orchestration's effect |
+| **ADR-099** LLM semantic routing for chat sessions | The source of this design's v2.2 decisions: router layering, T3 removal, group / PM boundaries, and separating the chat prompt from the execute prompt |
 | **ADR-086** Mobile app | Source of the mobile interaction constraints in §6.5 |
 | **ADR-091** LSP registry moved down to Node | No direct coupling; it shares the same direction of travel of pushing business state down to Node/Runtime |
 
@@ -1081,6 +1154,8 @@ This version rewrote the 81 citations that point at this file to v2.0 numbering.
 
 ## 13. Change Log
 
+> v2.2 revision (Chat Router): every human message (1:1, group-chat @Agent) first runs the target Agent's **stateless Chat Router turn**, whose only tool is `dispatch`, producing reply / hand off to an existing execution session / create; the T3 config-conflict rotation is removed, T1 becomes a prompt signal (hard trigger only on the fallback path), and T2 is evaluated after the router selects a target; group-chat @ picks the agent and not the execution session, so topics can run in parallel; PM dispatch keeps the deterministic `task:` mapping, but task sessions bind to the project group chat, enter candidates, and are excluded once terminal; the chat prompt is separated from the execute system prompt (built-in base + optional `prompts/chat.md` + scenario section); the new `dispatch` does not replace `intent_send` / `chat_history_read` / `ask_user_question` — visibility is trimmed per turn type. See ADR-099 and design 29; details in §2.2 / §3.4 decisions 22–28 / §4.1 / §5.1 / §5.4.1 / §5.4.5 / §6.2 / §8.2.
+>
 > v2.1 revision (user-Agent 1:1 WeChat model): each (user, agent) pair has exactly one Chat session, shown as the pinned leftmost tab of the Agent page's unified tab strip (titled with the agent's name, never closable or deletable); execution sessions are ordinary tabs in the same strip that open and close freely, the two surfaces coexist and destroy neither side's tabs, and closing the last execution tab falls back to the Chat tab. Revokes v2.0 §5.4.4 "press `+` creates a second session of the same pair" and §5.5.2 "Chat history button"; the single-entry `pairs.json` semantics become correct and the P1 promotion is void; §10.15 closes with the revoked entry point. ADR-086 decision 8's parallel sessions are now carried by the execution-session layer. Details: §5.4.4 / §6 / §6.1.
 >
 > v1.8 revision: an execution session triggered by a group chat is readable by every participant of that group, with the test derived from routing key `chat:{chat_session_id}` rather than a separate ACL, and an explicit prohibition on reusing `SessionVisibility::Public` (its meaning is platform-wide readable, which would leak a group's execution history); `turn_started` is written by the Runtime, sharing section 7.1's write-back origin, since the Gateway carries no business logic, with immediate send-side feedback handled by an optimistic frontend placeholder (section 7.5).
