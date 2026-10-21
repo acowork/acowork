@@ -4,15 +4,16 @@
  * each click locating the source message in the conversation (via
  * `chatSessionStore.jumpToMessage`, which the panels scroll to + flash).
  *
- * Chrome mirrors `GlobalSearchDialog`'s overlay shell (header + tab strip +
- * scrollable result zone), but the data is a single scoped endpoint:
+ * Chrome mirrors `GlobalSearchDialog`'s overlay shell (header + pill tab strip
+ * + scrollable result zone + Close-only footer), but the data is a single scoped
+ * endpoint:
  * `GET /api/chat-sessions/{sid}/search` reads only the disposable
  * `search.sqlite` sidecar. The frontend never caches records — it requests
  * a page, renders it, and pages toward older rows on scroll.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FileText, ImageIcon, Loader2, MessageSquare, Search, X } from "lucide-react";
+import { FileText, Loader2, Search } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
@@ -28,13 +29,20 @@ import {
   chatAttachmentObjectUrl,
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
+import { useAgentStore } from "../../stores/agentStore";
+import { useAuthStore } from "../../stores/authStore";
+import { useUserProfileStore } from "../../stores/userProfileStore";
+import { AgentAvatar } from "../common/AgentAvatar";
+import { UserAvatar } from "../common/UserAvatar";
 
 interface ChatHistoryDialogProps {
   open: boolean;
   onClose: () => void;
   chatSessionId: string;
-  /** Resolve a participant id to a display name (sender line). Optional —
-   *  falls back to the raw id when the surface has no directory at hand. */
+  /** Optional sender-name override. Without it the dialog names rows from
+   *  the local agent registry (keyed by `instance_id`) and the signed-in
+   *  account — a raw id is only shown when nothing resolves. Group surfaces
+   *  pass their own resolver because they also know the human directory. */
   resolveName?: (id: string) => string;
 }
 
@@ -229,13 +237,28 @@ export function ChatHistoryDialog({
     [chatSessionId, onClose],
   );
 
-  const nameOf = resolveName ?? ((id: string) => id);
+  // Sender naming. A session's participant ids are agent INSTANCE ids or
+  // account ids — both opaque. Resolve them through the local agent registry
+  // (`agents` is keyed by instance_id) and the signed-in account; a caller
+  // with a richer directory (group chat) passes `resolveName` and wins.
+  const agentsMap = useAgentStore((s) => s.agents);
+  const account = useAuthStore((s) => s.account);
+  const registryName = useCallback(
+    (id: string) => {
+      const agent = agentsMap[id]?.meta;
+      if (agent) return agent.display_name ?? agent.name ?? id;
+      if (account && id === account.user_id) return account.display_name || account.username;
+      return id;
+    },
+    [agentsMap, account],
+  );
+  const nameOf = resolveName ?? registryName;
 
-  const tabs: Array<{ key: HistoryCategory; label: string; icon: React.ReactNode }> = useMemo(
+  const tabs: Array<{ key: HistoryCategory; label: string }> = useMemo(
     () => [
-      { key: "text", label: t("chatHistory.tabText"), icon: <MessageSquare size={13} /> },
-      { key: "image", label: t("chatHistory.tabImage"), icon: <ImageIcon size={13} /> },
-      { key: "file", label: t("chatHistory.tabFile"), icon: <FileText size={13} /> },
+      { key: "text", label: t("chatHistory.tabText") },
+      { key: "image", label: t("chatHistory.tabImage") },
+      { key: "file", label: t("chatHistory.tabFile") },
     ],
     [t],
   );
@@ -252,65 +275,61 @@ export function ChatHistoryDialog({
         aria-modal="true"
         aria-label={t("chatHistory.title")}
         onMouseDown={(e) => e.stopPropagation()}
-        className="flex h-[min(560px,80vh)] w-[min(680px,92vw)] flex-col overflow-hidden rounded-xl border border-border-outer bg-modal-surface shadow-2xl"
+        className="flex h-[min(560px,80vh)] w-full max-w-2xl flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface text-text shadow-xl"
       >
-        {/* Header */}
-        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border-divider px-4">
-          <Search size={15} className="shrink-0 text-text-tertiary" />
-          <span className="min-w-0 flex-1 truncate text-xs font-semibold text-text-secondary">
+        {/* Header — same zone height / type scale as GlobalSearchDialog, so the
+            two dialogs line up when one replaces the other. No close affordance
+            here: dismissal lives in the footer, like the search dialog. */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
+          <Search className="h-5 w-5 shrink-0 text-text-tertiary" />
+          <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">
             {t("chatHistory.title")}
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t("chatHistory.close")}
-            className="shrink-0 rounded p-1 text-text-tertiary hover:bg-nav-item-hover hover:text-text-secondary"
-          >
-            <X size={15} />
-          </button>
+          </h2>
         </div>
 
-        {/* Tab strip + search row */}
-        <div className="shrink-0 border-b border-border-divider">
-          <div className="flex items-center gap-1 px-3 pt-2">
-            {tabs.map((tab) => (
-              <button
-                key={tab.key}
-                type="button"
-                onClick={() => setCategory(tab.key)}
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs",
-                  category === tab.key
-                    ? "bg-[var(--color-accent)]/12 font-medium text-[var(--color-accent)]"
-                    : "text-text-tertiary hover:bg-nav-item-hover",
-                )}
-              >
-                {tab.icon}
-                {tab.label}
-              </button>
-            ))}
-          </div>
-          {category !== "image" && (
-            <div className="px-3 pb-2 pt-2">
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    submit();
-                  }
-                }}
-                placeholder={
-                  category === "file"
-                    ? t("chatHistory.searchFilePlaceholder")
-                    : t("chatHistory.searchTextPlaceholder")
-                }
-                className="w-full rounded border border-border-outer bg-chat-input-bg px-2.5 py-1.5 text-xs text-text-primary outline-none placeholder:text-text-disabled focus:border-[var(--color-accent)]"
-              />
-            </div>
-          )}
+        {/* Tab strip — centered pills, mirroring GlobalSearchDialog's result
+            tabs (rounded-full; the active one takes the zinc wash and full-
+            strength text rather than accent-colored text). */}
+        <div className="flex shrink-0 items-center justify-center gap-1 border-b border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setCategory(tab.key)}
+              className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                category === tab.key
+                  ? "bg-zinc-200 text-text dark:bg-zinc-700"
+                  : "text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
+
+        {/* Query row — a divider-separated zone like the search dialog's
+            input band: magnifier on the left, borderless input inside. */}
+        {category !== "image" && (
+          <div className="flex shrink-0 items-center gap-1.5 border-b border-border-divider px-5 py-1.5 min-h-[var(--ui-dialog-zone-h)]">
+            <Search className="h-3 w-3 shrink-0 text-text-tertiary" />
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder={
+                category === "file"
+                  ? t("chatHistory.searchFilePlaceholder")
+                  : t("chatHistory.searchTextPlaceholder")
+              }
+              className="flex-1 bg-transparent text-xs text-text-secondary outline-none placeholder:text-text-tertiary"
+            />
+          </div>
+        )}
 
         {/* Result zone
             The zone must be a flex column: `OverlayScrollbar`'s outer box is
@@ -367,12 +386,71 @@ export function ChatHistoryDialog({
             </OverlayScrollbar>
           )}
         </div>
+
+        {/* Footer — dismissal lives here (GlobalSearchDialog's footer shape):
+            a divider-separated zone with one right-aligned Close button, so the
+            header carries no competing X. */}
+        <div className="flex shrink-0 items-center justify-end border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+          >
+            {t("chatHistory.close")}
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
 // ─── Rows ──────────────────────────────────────────────────────────────
+
+/** Sender avatar for one history row. Same resolution order (and the same
+ *  primitives) the chat surfaces use, so a participant looks identical here
+ *  and in the conversation: registry agent -> `AgentAvatar`, the signed-in
+ *  account -> the local profile's avatar, anyone else -> a `UserAvatar`
+ *  seeded by name (the fallback GroupChatPanel draws for peers too). */
+function SenderAvatar({
+  id,
+  name,
+  size = 28,
+  className,
+}: {
+  id: string;
+  name: string;
+  size?: number;
+  className?: string;
+}) {
+  const agent = useAgentStore((s) => s.agents[id]?.meta);
+  const me = useAuthStore((s) => s.account?.user_id);
+  const profile = useUserProfileStore((s) => s.profile);
+
+  if (agent) {
+    return (
+      <AgentAvatar
+        agentId={id}
+        displayName={name}
+        avatarUrl={agent.avatar}
+        version={agent.version}
+        builtinAvatarId={agent.builtin_avatar ?? null}
+        size={size}
+        className={className}
+      />
+    );
+  }
+
+  const own = !!me && id === me;
+  return (
+    <UserAvatar
+      displayName={own ? profile.displayName : name}
+      avatarUrl={own ? (profile.backendAvatarUrl ?? null) : null}
+      builtinAvatarId={own ? (profile.backendBuiltinAvatarId ?? null) : null}
+      size={size}
+      className={className}
+    />
+  );
+}
 
 function TextRow({
   hit,
@@ -385,19 +463,28 @@ function TextRow({
   nameOf: (id: string) => string;
   onJump: () => void;
 }) {
+  const name = nameOf(hit.from);
   return (
     <button
       type="button"
       onClick={onJump}
-      className={cn("flex w-full flex-col gap-0.5 px-4 py-2 text-left", listRowHover)}
+      className={cn("flex w-full items-start gap-2.5 px-4 py-2 text-left", listRowHover)}
     >
-      <div className="flex items-center gap-2 text-10 text-text-tertiary">
-        <span className="min-w-0 truncate font-medium">{nameOf(hit.from)}</span>
-        <span className="shrink-0">{formatBubbleTime(hit.ts * 1000)}</span>
+      <SenderAvatar id={hit.from} name={name} className="mt-0.5 shrink-0" />
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        {/* Sender line is the scan anchor of the row: 12px semibold in the
+            high-contrast text token, with the timestamp demoted to a 10px
+            tertiary hint beside it. */}
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-xs font-semibold text-text">{name}</span>
+          <span className="shrink-0 text-10 text-text-tertiary">
+            {formatBubbleTime(hit.ts * 1000)}
+          </span>
+        </div>
+        <span className="line-clamp-2 text-xs text-text-primary">
+          <Highlight text={hit.body} query={query} />
+        </span>
       </div>
-      <span className="line-clamp-2 text-xs text-text-primary">
-        <Highlight text={hit.body} query={query} />
-      </span>
     </button>
   );
 }
