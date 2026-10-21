@@ -239,6 +239,7 @@
     "emptyReply": "中断、出力なし",
     "emptyAnswer": "（内容なし）",
     "viewRun": "実行を表示",
+    "execSessionGone": "この実行セッションは削除されたため表示できません",
     "statusCard": {
       "untitled": "無題の実行",
       "detail": "詳細",

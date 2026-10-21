@@ -146,6 +146,7 @@
     "emptyReply": "Interrupted, no output",
     "emptyAnswer": "(no content)",
     "viewRun": "View run",
+    "execSessionGone": "This execution session has been deleted",
     "statusCard": {
       "untitled": "Untitled run",
       "detail": "Details",

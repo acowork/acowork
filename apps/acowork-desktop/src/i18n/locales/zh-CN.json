@@ -240,6 +240,7 @@
     "emptyReply": "已中断，无输出",
     "emptyAnswer": "（无内容）",
     "viewRun": "查看执行",
+    "execSessionGone": "该执行会话已被删除，无法查看",
     "statusCard": {
       "untitled": "未命名执行",
       "detail": "详情",

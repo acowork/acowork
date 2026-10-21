@@ -3,9 +3,10 @@
  *
  * The group twin of the 1:1 chat surface's drill: an agent reply carries a
  * resolved exec session (`sender_session_id` / `agent_session_id`), and its
- * button must route through the exact three calls AgentChatView.jumpToExec
- * makes — selectAgent (switch the middle pane to the agent) → openSession
- * (cold-load the exec tab) → setMode('exec') (flip the surface). Rows that
+ * button must route through the exact calls AgentChatView.jumpToExec makes —
+ * existence probe (a definitive 404 is a toast, no navigation) → selectAgent
+ * (switch the middle pane to the agent) → openSession (cold-load the exec
+ * tab) → setMode('exec') (flip the surface). Rows that
  * are the human's own, carry no exec sid, or name a non-local agent (so are
  * not addressable) must NOT show the button.
  */
@@ -149,18 +150,20 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     const btn = screen.getByText("chatView.viewRun");
     fireEvent.click(btn);
 
-    expect(selectAgentMock).toHaveBeenCalledWith(AGENT);
+    // The jump now runs behind the existence probe (a rejected fetch is
+    // inconclusive → proceed), so the whole chain lands a tick later.
+    await waitFor(() => expect(selectAgentMock).toHaveBeenCalledWith(AGENT));
     expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7");
     // setMode runs after the awaited openSession (a microtask later).
     await waitFor(() => expect(setModeMock).toHaveBeenCalledWith(AGENT, "exec"));
   });
 
-  it("prefers agent_session_id when both pointers are present", () => {
+  it("prefers agent_session_id when both pointers are present", async () => {
     tail = [agentRow(1, "pong", { agent_session_id: "exec-router", sender_session_id: "exec-sender" })];
     render(<GroupChatPanel />);
 
     fireEvent.click(screen.getByText("chatView.viewRun"));
-    expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-router");
+    await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-router"));
   });
 
   it("renders on an empty-body reply that still carries a session pointer", () => {
@@ -187,5 +190,28 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     tail = [{ ...agentRow(1, "ghost", { sender_session_id: "exec-1" }), from: "remote-agent" }];
     render(<GroupChatPanel />);
     expect(screen.queryByText("chatView.viewRun")).toBeNull();
+  });
+
+  it("toasts instead of jumping when the exec session has been deleted", async () => {
+    // A definitive 404 from the existence probe (session meta AND live state
+    // gone) must stop the drill: no selectAgent, no tab, no mode flip — just
+    // a toast. The message's exec pointer outlives the session it names.
+    tail = [agentRow(1, "pong", { sender_session_id: "exec-gone" })];
+    (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 404 });
+    const toasts: Event[] = [];
+    const listener = (e: Event) => toasts.push(e);
+    window.addEventListener("acowork:toast", listener);
+    try {
+      render(<GroupChatPanel />);
+      fireEvent.click(screen.getByText("chatView.viewRun"));
+      await waitFor(() => expect(toasts.length).toBe(1));
+      expect(selectAgentMock).not.toHaveBeenCalled();
+      expect(openSessionMock).not.toHaveBeenCalled();
+      expect(setModeMock).not.toHaveBeenCalled();
+      const detail = (toasts[0] as CustomEvent<{ message: string }>).detail;
+      expect(detail.message).toBe("chatView.execSessionGone");
+    } finally {
+      window.removeEventListener("acowork:toast", listener);
+    }
   });
 });

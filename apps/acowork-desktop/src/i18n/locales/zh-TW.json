@@ -239,6 +239,7 @@
     "emptyReply": "已中斷，無輸出",
     "emptyAnswer": "（無內容）",
     "viewRun": "檢視執行",
+    "execSessionGone": "該執行工作階段已被刪除，無法檢視",
     "statusCard": {
       "untitled": "未命名執行",
       "detail": "詳情",
