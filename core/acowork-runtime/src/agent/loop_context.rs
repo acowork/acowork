@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 use acowork_core::providers::traits::Provider;
 
-use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
+use crate::agent::compression_constants::{
+    CONTEXT_SAFETY_FACTOR, MIN_COMPRESSION_RATIO, skill_recall_budget_tokens,
+};
 use crate::agent::context::{
     ContextBuilder, count_chat_request_chars, patch_agent_totals, patch_perf, patch_session_totals,
 };
@@ -936,10 +938,10 @@ impl AgentLoop {
                     // rows land AFTER the compaction offset and the restorer
                     // picks them up on resume). Hoist it out of the apply
                     // match — the inner arm can only mutate it.
-                    let mut injected_round_for_persistence: Option<(
+                    let mut injected_rounds_for_persistence: Vec<(
                         acowork_core::providers::traits::ChatMessage,
                         acowork_core::providers::traits::ChatMessage,
-                    )> = None;
+                    )> = Vec::new();
                     let (level, removed) = match self
                         .session
                         .history
@@ -955,6 +957,15 @@ impl AgentLoop {
                             // retained tail.
                             let pending_todo_write_inject =
                                 self.session.history.find_last_todo_write_round();
+
+                            // Same reason, for `load_skill` bodies: the
+                            // candidates must be read while they are still in
+                            // `messages`. The *budget* cannot be — it is a
+                            // function of the space compression frees, so it is
+                            // computed after `apply_compression` below.
+                            // Newest-first, one per distinct skill name.
+                            let pending_skill_rounds =
+                                self.session.history.find_latest_skill_rounds();
 
                             match self.session.history.apply_compression(
                                 plan,
@@ -983,7 +994,7 @@ impl AgentLoop {
                                     // append_message_with_id commands land
                                     // AFTER it in the JSONL).
                                     //
-                                    // `inject_todo_write_round_after_marker`
+                                    // `inject_round_after_marker`
                                     // returns `(tokens, injected)`: the
                                     // second element is `true` only when the
                                     // splice actually happened. We use it as
@@ -995,8 +1006,8 @@ impl AgentLoop {
                                     if let Some((assistant, tool)) = pending_todo_write_inject {
                                         // ADR-060 v2 §5.4: idempotency is
                                         // enforced inside
-                                        // `inject_todo_write_round_after_marker`
-                                        // by the `last_injected_todo_call_id`
+                                        // `inject_round_after_marker`
+                                        // by the `injected_round_call_ids`
                                         // gate. On the first compression of a
                                         // session with a todo_write round, it
                                         // splices and signals `injected=true`,
@@ -1008,13 +1019,56 @@ impl AgentLoop {
                                         let (_, injected) = self
                                             .session
                                             .history
-                                            .inject_todo_write_round_after_marker(
+                                            .inject_round_after_marker(
                                                 assistant.clone(),
                                                 tool.clone(),
                                             );
                                         if injected {
-                                            injected_round_for_persistence =
-                                                Some((assistant, tool));
+                                            injected_rounds_for_persistence
+                                                .push((assistant, tool));
+                                        }
+                                    }
+
+                                    // ADR-094 follow-up: carry loaded SKILL.md
+                                    // bodies through the compaction too, within
+                                    // the adaptive-then-capped recall budget.
+                                    //
+                                    // The budget is measured on the
+                                    // POST-compression token count — that is
+                                    // the state we are spending against —
+                                    // while `budget` is the usable input budget
+                                    // for this model (`context_trim_budget`).
+                                    let skill_budget = skill_recall_budget_tokens(
+                                        budget,
+                                        self.session.history.token_count(),
+                                    );
+                                    let skill_rounds_to_inject = self
+                                        .session
+                                        .history
+                                        .apply_skill_recall_budget(
+                                            &pending_skill_rounds,
+                                            skill_budget,
+                                        );
+                                    if !pending_skill_rounds.is_empty() {
+                                        tracing::info!(
+                                            candidates = pending_skill_rounds.len(),
+                                            preserved = skill_rounds_to_inject.len(),
+                                            skill_budget,
+                                            "skill recall: carrying load_skill rounds \
+                                             through compaction"
+                                        );
+                                    }
+                                    for (assistant, tool) in skill_rounds_to_inject {
+                                        let (_, injected) = self
+                                            .session
+                                            .history
+                                            .inject_round_after_marker(
+                                                assistant.clone(),
+                                                tool.clone(),
+                                            );
+                                        if injected {
+                                            injected_rounds_for_persistence
+                                                .push((assistant, tool));
                                         }
                                     }
 
@@ -1102,49 +1156,68 @@ impl AgentLoop {
                         // rows become standalone Tool messages whose
                         // `tool_call_id` matches the assistant's tool_calls
                         // (verified by the orphan-tool sanitiser).
-                        if let Some((assistant, tool)) = injected_round_for_persistence.take() {
-                            if let Some(tool_calls) = &assistant.tool_calls {
-                                for tc in tool_calls {
-                                    let call_meta = serde_json::json!({
-                                        "tool_name": tc.function.name,
-                                        "tool_call_id": tc.id,
-                                    });
-                                    let call_id =
-                                        format!("inject-call-{}", uuid::Uuid::new_v4().simple());
-                                    conversation.append_message_with_id(
-                                        "tool_call",
-                                        &tc.function.arguments,
-                                        Some(call_meta),
-                                        Some(call_id),
-                                    );
+                        if !injected_rounds_for_persistence.is_empty() {
+                            for (assistant, tool) in &injected_rounds_for_persistence {
+                                if let Some(tool_calls) = &assistant.tool_calls {
+                                    for tc in tool_calls {
+                                        let call_meta = serde_json::json!({
+                                            "tool_name": tc.function.name,
+                                            "tool_call_id": tc.id,
+                                        });
+                                        let call_id =
+                                            format!("inject-call-{}", uuid::Uuid::new_v4().simple());
+                                        conversation.append_message_with_id(
+                                            "tool_call",
+                                            &tc.function.arguments,
+                                            Some(call_meta),
+                                            Some(call_id),
+                                        );
+                                    }
                                 }
+                                let result_meta = serde_json::json!({
+                                    "tool_call_id": tool
+                                        .tool_call_id
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    // Fall back to the caller's own tool name,
+                                    // never a hardcoded one: this path now
+                                    // carries both todo_write and load_skill
+                                    // rounds, and a mislabelled row would make
+                                    // the restorer fold the result into the
+                                    // wrong assistant.
+                                    "tool_name": tool
+                                        .name
+                                        .clone()
+                                        .or_else(|| {
+                                            assistant
+                                                .tool_calls
+                                                .as_ref()
+                                                .and_then(|tcs| tcs.first())
+                                                .map(|tc| tc.function.name.clone())
+                                        })
+                                        .unwrap_or_default(),
+                                });
+                                let result_id = format!(
+                                    "inject-result-{}",
+                                    uuid::Uuid::new_v4().simple()
+                                );
+                                conversation.append_message_with_id(
+                                    "tool_result",
+                                    &tool.content,
+                                    Some(result_meta),
+                                    Some(result_id),
+                                );
                             }
-                            let result_meta = serde_json::json!({
-                                "tool_call_id": tool
-                                    .tool_call_id
-                                    .clone()
-                                    .unwrap_or_default(),
-                                "tool_name": tool
-                                    .name
-                                    .clone()
-                                    .unwrap_or_else(|| {
-                                        "todo_write".to_string()
-                                    }),
-                            });
-                            let result_id =
-                                format!("inject-result-{}", uuid::Uuid::new_v4().simple());
-                            conversation.append_message_with_id(
-                                "tool_result",
-                                &tool.content,
-                                Some(result_meta),
-                                Some(result_id),
-                            );
+                            injected_rounds_for_persistence.clear();
 
                             // Synchronous flush — blocks until the writer
                             // thread has physically committed the synthetic
                             // rows above. Without this, a process restart
                             // immediately after compaction could race the
-                            // writer and lose the round.
+                            // writer and lose the round. One flush for the
+                            // whole batch: skill recall can persist N rounds,
+                            // and each individual row is already ordered
+                            // behind the compaction offset.
                             if let Err(e) = conversation.flush_pending().await {
                                 tracing::warn!(
                                     error = %e,
@@ -1797,9 +1870,11 @@ impl AgentLoop {
                 // ADR-067: populate the per-section byte sizes so the
                 // input-box context-usage popup's 5-category breakdown
                 // works without DevMode. The helper mirrors the section
-                // list produced by the DevMode Debug Panel (same keys,
-                // same order) — the only differences are the absence of
-                // token estimates / SHA-256 hashes (DebugPanel-only).
+                // list produced by the DevMode Debug Panel — same keys and
+                // order, except for sections that are byte-size-only and
+                // carry no single source string to render
+                // (`skills_loaded`; the Debug Panel drops those), plus the
+                // absence of token estimates / SHA-256 hashes.
                 //
                 // MCP tools come from `self.core.mcp_tools` (the exact set
                 // injected into `ChatRequest.tools`) — NOT `all_tools`
@@ -1929,11 +2004,33 @@ impl AgentLoop {
     /// truncated results carry a detailed marker so the LLM can adapt its
     /// strategy (narrower search, pagination, etc.).
     ///
+    /// `exempt[i]` marks result `i` as un-cuttable — currently only
+    /// `load_skill` bodies (ADR-094 follow-up). The equal-share rule is wrong
+    /// for a SKILL.md: it is the procedure the model is mid-way through
+    /// executing, and the share is set by how many *other* tools happened to
+    /// run in the same turn, so a 3-call turn can amputate a perfectly
+    /// reasonable skill body at a third of its size. The model cannot "re-run
+    /// with narrower parameters" either — `load_skill` has no pagination.
+    ///
+    /// Exempt results are still counted in `n`, so the co-resident results get
+    /// a correspondingly smaller share — but that is the *only* thing exempt
+    /// status buys: it never buys extra space. The exempt results collectively
+    /// draw on what is left of `remaining` after the equal-share split
+    /// (see [`apply_result_budget`]), so the total the model is asked to accept
+    /// still fits the budget this function exists to enforce. Charging the
+    /// exempt result against `remaining` alone would have let N of them claim
+    /// N × the free space.
+    ///
+    /// Exemption is therefore not unconditional: a result that exceeds the
+    /// space still unclaimed is truncated, because a request that cannot be
+    /// sent cannot compact, re-load the skill, or make progress in any way.
+    ///
     /// Returns the number of results that were truncated.
     pub(crate) fn trim_tool_results_for_context(
         &self,
         tool_results: &mut [String],
         current_model: &str,
+        exempt: &[bool],
     ) -> usize {
         let usable_budget = self.context_trim_budget(current_model);
         let current_tokens = self.session.history.token_count();
@@ -1943,7 +2040,12 @@ impl AgentLoop {
         // serialisation overhead. Without this, the trimmed results may
         // fit the remaining space but the follow-up LLM response will
         // immediately overflow again.
-        let safe_budget = (usable_budget as f64 * 0.85) as u64;
+        //
+        // `CONTEXT_SAFETY_FACTOR` is shared with the skill-recall budget
+        // (`compression_constants::skill_recall_budget_tokens`) on purpose:
+        // both paths decide how much of the window counts as "free", and two
+        // independent literals here would let them fight over the same bytes.
+        let safe_budget = (usable_budget as f64 * CONTEXT_SAFETY_FACTOR) as u64;
         let remaining = safe_budget.saturating_sub(current_tokens);
 
         if remaining == 0 || tool_results.is_empty() {
@@ -1978,58 +2080,132 @@ impl AgentLoop {
             "Tool results exceed remaining context budget — truncating"
         );
 
-        let mut truncated = 0;
-        for (i, result) in tool_results.iter_mut().enumerate() {
-            let orig_tokens = result_tokens[i];
+        apply_result_budget(tool_results, &result_tokens, remaining, per_result_budget, exempt)
+    }
+}
+
+/// The pure trimming policy behind
+/// [`AgentLoop::trim_tool_results_for_context`], split out so the three
+/// branches (equal share / exempt pass-through / exempt-but-over-everything)
+/// are testable without constructing an agent loop, a history, or a model.
+///
+/// `remaining` is the space free after the safety margin; `per_result_budget`
+/// is that space split across all results. `exempt[i]` protects result `i` from
+/// the split (see the caller's doc for why), but never from the budget itself.
+///
+/// Exempt results draw from one shared pool — `remaining` minus what the
+/// equal-share split will hand the others — instead of each capping itself at
+/// `remaining`. That is what keeps `Σ kept <= remaining`: with a per-result cap
+/// of `remaining`, N exempt results in a single turn could each claim the whole
+/// free space and the request this trim exists to make fit would go out over
+/// budget. Building the pool up front also makes the outcome independent of the
+/// order the results happen to arrive in.
+fn apply_result_budget(
+    tool_results: &mut [String],
+    result_tokens: &[u64],
+    remaining: u64,
+    per_result_budget: u64,
+    exempt: &[bool],
+) -> usize {
+    let n = tool_results.len() as u64;
+
+    // Space left for the exempt results after the non-exempt ones take their
+    // equal share. Both terms on the right are already-known inputs, so the
+    // whole policy stays order-independent.
+    let mut exempt_left: u64 = remaining;
+    for (i, &tokens) in result_tokens.iter().enumerate() {
+        if exempt.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        exempt_left = exempt_left.saturating_sub(tokens.min(per_result_budget));
+    }
+
+    let mut truncated = 0;
+    for (i, result) in tool_results.iter_mut().enumerate() {
+        let orig_tokens = result_tokens[i];
+        let is_exempt = exempt.get(i).copied().unwrap_or(false);
+
+        // Exempt results skip the equal-share cut, but not the hard limit:
+        // if this result alone exceeds what is still unclaimed, no amount of
+        // trimming elsewhere makes room for it.
+        let result_budget = if is_exempt {
+            let budget = exempt_left;
+            // Reserve what this result keeps (all of it when it fits) so a
+            // later exempt result cannot claim the same bytes again.
+            exempt_left -= orig_tokens.min(exempt_left);
+            if orig_tokens <= budget {
+                continue;
+            }
+            budget
+        } else {
             if orig_tokens <= per_result_budget {
                 continue;
             }
+            per_result_budget
+        };
 
-            let original_bytes = result.len();
-            // Convert token budget to char budget (≈ 4 chars/token for CJK, ≈ 3 for ASCII).
-            // Use 3.5 as a middle-ground multiplier and add 10% padding for safety.
-            let max_chars = ((per_result_budget as f64) * 3.5 * 1.1) as usize;
+        let original_bytes = result.len();
+        // Convert token budget to char budget (≈ 4 chars/token for CJK, ≈ 3 for ASCII).
+        // Use 3.5 as a middle-ground multiplier and add 10% padding for safety.
+        let max_chars = ((result_budget as f64) * 3.5 * 1.1) as usize;
 
-            // Find a UTF-8 safe cut point within budget.
-            // Replaced ad-hoc loop with the project-wide `util::text::truncate_utf8`
-            // so the same character-boundary guarantee lives in exactly one place.
-            let safe = crate::util::text::truncate_utf8(result, max_chars.min(result.len()));
-            let mut cut = safe.len();
+        // Find a UTF-8 safe cut point within budget.
+        // Replaced ad-hoc loop with the project-wide `util::text::truncate_utf8`
+        // so the same character-boundary guarantee lives in exactly one place.
+        let safe = crate::util::text::truncate_utf8(result, max_chars.min(result.len()));
+        let mut cut = safe.len();
 
-            // Try to cut at a newline for readability
-            if let Some(nl_pos) = safe.rfind('\n').filter(|&p| p > cut / 2) {
-                cut = nl_pos;
-            }
+        // Try to cut at a newline for readability
+        if let Some(nl_pos) = safe.rfind('\n').filter(|&p| p > cut / 2) {
+            cut = nl_pos;
+        }
 
-            let kept = &safe[..cut];
-            let dropped_tokens = orig_tokens.saturating_sub(per_result_budget);
+        let kept = &safe[..cut];
+        let dropped_tokens = orig_tokens.saturating_sub(result_budget);
 
-            let truncation_marker = format!(
+        let truncation_marker = if is_exempt {
+            // The generic "re-run with narrower parameters" advice is
+            // meaningless for a skill body, and silently presenting a
+            // partial procedure as if it were complete is worse: the model
+            // would follow the visible steps and never notice the missing
+            // ones. Say exactly what happened.
+            format!(
+                "\n\n[SKILL BODY INCOMPLETE — the full SKILL.md needs ~{orig_tokens} tokens \
+                 but only ~{result_budget} tokens of context budget are available for it at \
+                 this point ({remaining} tokens in total are free, and the other results in \
+                 this turn have already claimed their share), so ~{dropped_tokens} tokens \
+                 were cut. Everything above is verbatim; the steps below this point are MISSING. \
+                 Do NOT assume you know them. Work through what is shown, and re-run `load_skill` \
+                 once the context has compacted if the remaining steps are needed.]",
+            )
+        } else {
+            format!(
                 "\n\n[RESULT TRUNCATED by context budget: original output was {} bytes \
-                 (~{} tokens), but only {per_result_budget} tokens of context budget remain \
+                 (~{} tokens), but only {result_budget} tokens of context budget remain \
                  per result (total remaining: {remaining} tokens across {n} result(s)). \
                  ~{dropped_tokens} tokens of this output were dropped. \
                  SUGGESTION: re-run with narrower parameters (pipe through 'head -N' or \
                  'tail -N' for pagination, use tighter grep patterns to reduce matches, \
                  or search fewer files/directories) to get a complete result.]",
                 original_bytes, orig_tokens,
-            );
+            )
+        };
 
-            *result = format!("{kept}{truncation_marker}");
-            truncated += 1;
+        *result = format!("{kept}{truncation_marker}");
+        truncated += 1;
 
-            tracing::warn!(
-                i,
-                original_bytes,
-                orig_tokens,
-                kept_bytes = cut,
-                per_result_budget,
-                "Tool result #{i} truncated to fit context budget"
-            );
-        }
-
-        truncated
+        tracing::warn!(
+            i,
+            original_bytes,
+            orig_tokens,
+            kept_bytes = cut,
+            result_budget,
+            exempt = is_exempt,
+            "Tool result #{i} truncated to fit context budget"
+        );
     }
+
+    truncated
 }
 
 /// Design 27 §6.5 R1 + §5.5.4 (plan 2b.3): the per-turn wire tool-set
@@ -3198,6 +3374,180 @@ mod tests {
                 .iter()
                 .any(|m| m.name.as_deref() == Some(crate::agent::history::COMPACTION_SUMMARY_NAME)),
             "cancelled compaction must leave history untouched"
+        );
+    }
+
+    // ─── Module D: load_skill exemption from equal-share result trimming ───
+
+    fn big_text(len: usize) -> String {
+        "x".repeat(len)
+    }
+
+    #[test]
+    fn exempt_result_bigger_than_its_equal_share_is_left_whole() {
+        // A SKILL.md that is far larger than the per-result share but still
+        // fits the free space must NOT be amputated — the share is set by how
+        // many unrelated tools ran alongside it.
+        let skill = big_text(6_000);
+        let sibling = "short output".to_string();
+        let mut results = vec![skill.clone(), sibling.clone()];
+        let tokens = [1_000u64, 100];
+        let n = apply_result_budget(&mut results, &tokens, 2_000, 256, &[true, false]);
+        assert_eq!(n, 0, "nothing to cut");
+        assert_eq!(results[0], skill, "the skill body must survive verbatim");
+        assert_eq!(results[1], sibling);
+    }
+
+    #[test]
+    fn non_exempt_sibling_still_gets_the_equal_share_cut() {
+        let skill = big_text(6_000);
+        let noisy = big_text(6_000);
+        let mut results = vec![skill.clone(), noisy];
+        let tokens = [1_000u64, 1_000];
+        // Same sizes, but now neither is exempt.
+        let n = apply_result_budget(&mut results, &tokens, 2_000, 256, &[false, false]);
+        assert_eq!(n, 2, "both exceed the 256-token share");
+        assert!(results[0].contains("RESULT TRUNCATED"));
+        assert!(results[1].contains("RESULT TRUNCATED"));
+    }
+
+    #[test]
+    fn exempt_result_larger_than_all_free_space_is_still_cut_and_says_so() {
+        // Exemption is not immunity: a body that cannot fit even if every
+        // other result were dropped must be cut, or the request cannot be sent
+        // at all — and a session that cannot send cannot compact or re-load.
+        let skill = big_text(60_000);
+        let mut results = vec![skill];
+        let n = apply_result_budget(&mut results, &[20_000], 1_000, 256, &[true]);
+        assert_eq!(n, 1);
+        assert!(
+            results[0].contains("SKILL BODY INCOMPLETE"),
+            "the generic truncation marker tells the model to re-run with \
+             narrower parameters, which load_skill does not support"
+        );
+        assert!(
+            !results[0].contains("SUGGESTION: re-run with narrower parameters"),
+            "the skill marker must not carry the pagination advice"
+        );
+        assert!(
+            results[0].contains("re-run `load_skill`"),
+            "it must instead name the only real recovery: load it again later"
+        );
+    }
+
+    #[test]
+    fn short_exempt_and_short_normal_results_are_untouched() {
+        let mut results = vec!["a".to_string(), "b".to_string()];
+        let before = results.clone();
+        let n = apply_result_budget(&mut results, &[10, 10], 2_000, 256, &[true, false]);
+        assert_eq!(n, 0);
+        assert_eq!(results, before);
+    }
+
+    #[test]
+    fn missing_exempt_flags_default_to_not_exempt() {
+        // A caller that forgets to pass flags for every result must not
+        // silently gain blanket immunity — fail toward the old behaviour.
+        let mut results = vec![big_text(6_000)];
+        let n = apply_result_budget(&mut results, &[1_000], 2_000, 256, &[]);
+        assert_eq!(n, 1, "absent flag must not mean exempt");
+        assert!(results[0].contains("RESULT TRUNCATED"));
+    }
+
+    /// Regression: what the model is actually asked to accept must never
+    /// exceed `remaining`. Token estimates are passed in, so the assertion is
+    /// exact rather than a proxy.
+    #[test]
+    fn exempt_result_cannot_exceed_what_is_left_after_the_others_share() {
+        // Exemption used to cap the skill at `remaining`, so the result kept its
+        // whole body *plus* the siblings' shares — the request went out over the
+        // very budget this function exists to enforce.
+        let skill = big_text(6_000);
+        let sibling = big_text(6_000);
+        let mut results = vec![skill, sibling];
+        let tokens = [900u64, 5_000];
+        let remaining = 1_000;
+        let per_result = 500; // remaining / 2
+        let n = apply_result_budget(&mut results, &tokens, remaining, per_result, &[true, false]);
+
+        assert_eq!(n, 2, "both results exceed what they are entitled to");
+        // The sibling takes its equal share; the skill may only use the 500 left.
+        assert!(results[1].contains("RESULT TRUNCATED"));
+        assert!(
+            results[0].contains("SKILL BODY INCOMPLETE"),
+            "a skill that no longer fits the unclaimed space must be cut, not silently passed"
+        );
+        assert!(
+            !results[0].contains("RESULT TRUNCATED"),
+            "the skill keeps its own marker — the pagination advice is meaningless here"
+        );
+        // Each result is cut to 500 tokens, so together they claim exactly
+        // `remaining` — the sum can no longer exceed the free space.
+        assert!(
+            results[0].contains("~500 tokens"),
+            "the skill's budget is the space the sibling did not claim"
+        );
+        assert!(
+            results[1].contains("500 tokens"),
+            "and the sibling keeps its equal share"
+        );
+    }
+
+    #[test]
+    fn exempt_skill_is_whole_when_the_siblings_leave_it_enough_room() {
+        // The behaviour the exemption exists for: a 400-token skill is not
+        // amputated just because a 200-token sibling happened to run alongside
+        // it. Pool = 1000 - min(200, 500) = 800 >= 400 → verbatim.
+        let skill = big_text(1_600);
+        let sibling = "short output".to_string();
+        let mut results = vec![skill.clone(), sibling.clone()];
+        let n = apply_result_budget(&mut results, &[400, 200], 1_000, 500, &[true, false]);
+        assert_eq!(n, 0);
+        assert_eq!(
+            results[0], skill,
+            "the skill must survive verbatim once the siblings' shares are accounted for"
+        );
+        assert_eq!(results[1], sibling);
+    }
+
+    #[test]
+    fn parallel_exempt_results_share_one_pool() {
+        // Two skills loaded in the same turn (legal: `load_skill` is called per
+        // name). Each is individually under `remaining`, but together they are
+        // not — the second must be cut instead of both claiming the full space.
+        let first = big_text(2_400);
+        let second = big_text(2_400);
+        let mut results = vec![first.clone(), second];
+        let n = apply_result_budget(&mut results, &[600, 600], 1_000, 500, &[true, true]);
+        assert_eq!(n, 1, "only the result the pool ran out on is cut");
+        assert_eq!(results[0], first, "the pool is granted in order, newest first");
+        assert!(results[1].contains("SKILL BODY INCOMPLETE"));
+    }
+
+    #[test]
+    fn exemption_pool_does_not_depend_on_result_order() {
+        // The pool is derived from the token counts up front, so an exempt
+        // result's fate must not change when its siblings move around it — an
+        // order-dependent policy would make the trim depend on which tool the
+        // provider happened to report first.
+        let skill = big_text(6_000);
+        let noisy = big_text(6_000);
+        let mut skill_first = vec![skill.clone(), noisy.clone()];
+        let mut skill_last = vec![noisy, skill];
+        let a = apply_result_budget(&mut skill_first, &[900, 5_000], 1_000, 500, &[true, false]);
+        let b = apply_result_budget(&mut skill_last, &[5_000, 900], 1_000, 500, &[false, true]);
+
+        assert_eq!(a, 2, "both results are over their entitlement either way");
+        assert_eq!(b, 2);
+        assert_eq!(
+            skill_first[0].len(),
+            skill_last[1].len(),
+            "the skill keeps the same number of bytes in either slot"
+        );
+        assert_eq!(
+            skill_first[1].len(),
+            skill_last[0].len(),
+            "and so does the sibling"
         );
     }
 }
