@@ -4,6 +4,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { useFileTreeStore, treeKey, isReadyNode, type TreeEntry, getCachedWorkspaceRoot } from "../../stores/fileTree";
 import { useChatStore } from "../../stores/chatStore";
+import { useChatSessionStore } from "../../stores/chatSessionStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -36,6 +37,22 @@ function abbreviatePath(path: string): string {
     return `…${filename}`;
 }
 
+/**
+ * Workspace the right panel shows. Priority: the active execution
+ * session's workspace (the real working directory) → the Chat surface's
+ * `session_config` draft workspace (the user's expressed pick, design 27
+ * §4.5) → agent home. Exported for its own test — the fallback chain is
+ * the fix for "closing every exec tab blanks the panel".
+ */
+export function resolveExplorerWorkspaceId(
+    activeSessionId: string | null,
+    sessionWorkspaceMap: Record<string, string>,
+    chatDraftWorkspace: string | null | undefined,
+): string {
+    if (activeSessionId) return sessionWorkspaceMap[activeSessionId] ?? "__agent_home__";
+    return chatDraftWorkspace ?? "__agent_home__";
+}
+
 export function WorkspaceExplorer() {
     const { t } = useTranslation();
     const { addToast } = useToast();
@@ -66,9 +83,20 @@ export function WorkspaceExplorer() {
     const activeSessionId = useChatStore((s) =>
         selectedAgentId ? s.getActiveSessionId(selectedAgentId) : null,
     );
-    const currentWorkspaceId = activeSessionId
-        ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
-        : "__agent_home__";
+    // Right-panel fallback (design 27 §4.5, the user-visible half): with no
+    // execution session to mirror, the panel follows the Chat surface's
+    // `session_config` draft — the workspace the user picked on the composer.
+    // Without this the whole tree blanked the moment the last exec tab
+    // closed, even though the chat surface still showed a workspace chip.
+    const chatSessionId = useChatSessionStore((s) =>
+        selectedAgentId ? s.byAgent[selectedAgentId]?.chatSessionId ?? null : null,
+    );
+    const chatDraft = useChatSessionStore((s) =>
+        chatSessionId ? s.draft[chatSessionId] : undefined,
+    );
+    const currentWorkspaceId = resolveExplorerWorkspaceId(
+        activeSessionId, sessionWorkspaceMap, chatDraft?.workspace,
+    );
     // ADR-076: read-only sessions cannot mutate the chat (no new messages, no
     // attached-context edits). Mirrors FileEditorPanel's `addToChatDisabledReason`
     // gating so the search-result "add to chat" affordance behaves identically.
@@ -852,7 +880,21 @@ export function WorkspaceExplorer() {
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-right-panel">
             {/* Workspace selector + action buttons */}
             <div className="flex items-center gap-0.5 border-b border-border-divider px-1.5 py-1.5">
-                <WorkspaceSelector dropDirection="down" />
+                {/* With no execution session the panel mirrors the Chat
+                    surface's draft — the selector edits the draft too
+                    (same whole-draft replace as the composer chip). */}
+                <WorkspaceSelector
+                    dropDirection="down"
+                    {...(!activeSessionId && chatSessionId && selectedAgentId
+                        ? {
+                            value: currentWorkspaceId,
+                            onChange: (id: string) =>
+                                void useChatSessionStore
+                                    .getState()
+                                    .saveDraft(selectedAgentId, { ...(chatDraft ?? {}), workspace: id }),
+                        }
+                        : {})}
+                />
                 <div className="ml-auto flex items-center gap-1 pr-1 shrink-0">
                     {/* Toolbar action buttons. The class string + Tooltip
                         wrap mirror SessionTabBar's session-history button
@@ -1061,8 +1103,11 @@ export function WorkspaceExplorer() {
                 )}
             </div>
 
-            {/* File tree (normal mode, no search filtering) */}
-            {selectedAgentId && activeSessionId && (
+            {/* File tree (normal mode, no search filtering). Rendered even
+                without an execution session — `currentWorkspaceId` falls
+                back to the Chat draft / agent home, so closing the last
+                exec tab no longer blanks the panel. */}
+            {selectedAgentId && (
                 <FileTree
                     key={fontSize}
                     agentId={selectedAgentId}

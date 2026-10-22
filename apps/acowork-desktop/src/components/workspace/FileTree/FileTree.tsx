@@ -28,6 +28,11 @@ export const TREE_ROW_FONT_RATIO = 0.857;
  * `line-height 1.5 + 2 × py-[0.2em]` = 1.9. */
 export const TREE_ROW_LINE_MULTIPLIER = 1.9;
 
+/** Expansion-state bucket used when the tree has no execution session
+ *  (Chat-surface fallback view, design 27 §4.5). A real session id can
+ *  never collide with it (runtime ids are `s-…`/UUID shaped). */
+export const NO_SESSION_TREE_KEY = "__no_session__";
+
 /** Flattened tree node for virtualized rendering */
 interface FlatNode {
     entry: TreeEntry;
@@ -38,7 +43,11 @@ interface FlatNode {
 interface FileTreeProps {
     agentId: string;
     workspaceId: string;
-    sessionId: string;
+    /** Execution session whose expansion state this tree reads/writes.
+     *  `null` = no exec session (the panel is mirroring the Chat surface's
+     *  draft workspace); expansion then lives under `NO_SESSION_TREE_KEY`
+     *  and session-bound actions (Add to Chat) are disabled. */
+    sessionId: string | null;
     /** Currently-selected entry path (controlled by parent). `null` = nothing selected. */
     selectedPath?: string | null;
     /** Notify parent of selection changes. `type` is `null` when `path` is `null` (deselect). */
@@ -221,7 +230,7 @@ export function FileTree({
 
     // Expanded paths from the session — Zustand selector is reactive
     const expandedPathsArr = useChatStore((s) => {
-        const ss = s.agentStates[agentId]?.sessionStates[sessionId];
+        const ss = s.agentStates[agentId]?.sessionStates[sessionId ?? NO_SESSION_TREE_KEY];
         return ss?.treeExpandedPaths ?? EMPTY_ARRAY;
     });
     const expandedPaths = useMemo(() => new Set(expandedPathsArr), [expandedPathsArr]);
@@ -290,7 +299,7 @@ export function FileTree({
         const { relPath } = locateRequest;
 
         // Expand ancestor dirs (synchronous Zustand update).
-        expandTreeToPath(agentId, sessionId, relPath);
+        expandTreeToPath(agentId, sessionId ?? NO_SESSION_TREE_KEY, relPath);
 
         // Lazy-fetch each ancestor dir that isn't already cached so the
         // target node eventually appears in flatNodes.
@@ -332,7 +341,7 @@ export function FileTree({
     const handleToggle = useCallback(
         (relPath: string) => {
             const isCurrentlyExpanded = expandedPaths.has(relPath);
-            toggleTreeExpandedPath(agentId, sessionId, relPath);
+            toggleTreeExpandedPath(agentId, sessionId ?? NO_SESSION_TREE_KEY, relPath);
             // Lazy-load children when expanding
             if (
                 !isCurrentlyExpanded &&
@@ -540,6 +549,7 @@ export function FileTree({
                             depth={node.depth}
                             agentId={agentId}
                             sessionId={sessionId}
+                            workspaceId={workspaceId}
                             relPath={node.relPath}
                             absPath={workspaceRoot ? `${workspaceRoot}/${node.relPath}` : node.relPath}
                             isExpanded={expandedPaths.has(node.relPath)}

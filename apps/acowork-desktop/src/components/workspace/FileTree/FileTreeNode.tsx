@@ -31,7 +31,12 @@ interface FileTreeNodeProps {
   entry: TreeEntry;
   depth: number;
   agentId: string;
-  sessionId: string;
+  /** Execution session this tree belongs to; `null` in the Chat-surface
+   *  fallback view (no exec session). Gates "Add to Chat" only — the node's
+   *  workspace comes from `workspaceId`, never from the session map. */
+  sessionId: string | null;
+  /** Workspace this node lives in (the tree's own workspace). */
+  workspaceId: string;
   relPath: string;
   absPath: string;
   isExpanded: boolean;
@@ -104,6 +109,7 @@ export const FileTreeNode = memo(function FileTreeNode({
   depth,
   agentId,
   sessionId,
+  workspaceId,
   relPath,
   absPath,
   isExpanded,
@@ -272,6 +278,7 @@ export const FileTreeNode = memo(function FileTreeNode({
   }, [isDir, relPath, onContextNewItem]);
 
   const handleAddToChat = useCallback(() => {
+    if (!sessionId) return; // fallback view: no execution session to attach to
     addAttachedContext(agentId, sessionId, {
       id: `${agentId}:${relPath}`,
       type: isDir ? "directory" : "file",
@@ -310,9 +317,8 @@ export const FileTreeNode = memo(function FileTreeNode({
   }, [isDir, relPath, onPaste]);
 
   const handlePreview = useCallback(() => {
-    const workspaceId = useWorkspaceStore.getState().sessionWorkspaceMap[sessionId] ?? "__agent_home__";
     void openPreview(agentId, workspaceId, relPath);
-  }, [agentId, sessionId, relPath, openPreview]);
+  }, [agentId, workspaceId, relPath, openPreview]);
 
   /** Right-click "Reveal in File Explorer" — local-mode only.
    * The corresponding menu item is hidden in remote mode (see the
@@ -325,16 +331,14 @@ export const FileTreeNode = memo(function FileTreeNode({
 
   const handleTogglePromptFile = useCallback(() => {
     const state = useWorkspaceStore.getState();
-    const workspaceId = state.sessionWorkspaceMap[sessionId] ?? "__agent_home__";
     const workspace = state.workspaces.find((ws) => ws.id === workspaceId);
     const isActive = workspace?.prompt_file === entry.name;
     const newPromptFile = isActive ? null : entry.name;
     void state.setPromptFile(agentId, workspaceId, newPromptFile);
-  }, [agentId, sessionId, entry.name]);
+  }, [agentId, workspaceId, entry.name]);
 
   // Check if this file qualifies as a prompt file (CLAUDE.md / AGENTS.md)
   const isPromptFile = !isDir && /^(CLAUDE|AGENTS)\.md$/i.test(entry.name);
-  const workspaceId = useWorkspaceStore((s) => s.sessionWorkspaceMap[sessionId] ?? "__agent_home__");
   const workspace = useWorkspaceStore((s) => s.workspaces.find((ws) => ws.id === workspaceId));
   const isActivePromptFile = workspace?.prompt_file === entry.name;
 
@@ -353,8 +357,9 @@ export const FileTreeNode = memo(function FileTreeNode({
       icon: <MessageSquarePlus size={14} />,
       label: t("workspace.contextMenu.addToChat"),
       // ADR-076: the attachment rides along with the next message, which a
-      // viewer of someone else's session may not send.
-      disabled: readOnlySession,
+      // viewer of someone else's session may not send. In the fallback view
+      // (no execution session) there is nothing to attach to either.
+      disabled: readOnlySession || !sessionId,
       onClick: handleAddToChat,
     });
     if (isPreviewable) {
