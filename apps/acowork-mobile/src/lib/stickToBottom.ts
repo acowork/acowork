@@ -16,6 +16,11 @@
  *     switches session/thread (`forceKey` changed), or sends a message
  *     (`stickNow` — the IM convention that sending re-claims the follow).
  *
+ * The bit is written by a scroll event, a session switch, or a send — never by
+ * binding a container: at startup the page lands after the container mounts,
+ * and a fresh (or re-attached) node sits at `scrollTop === 0` below taller
+ * content, which is a layout fact, not a reader decision (see `bind`).
+ *
  * Screens used to `el.scrollTop = el.scrollHeight` unconditionally on
  * [messages.length, status]; combined with the 2 s snapshot poll that
  * stored a freshly parsed `status` object every tick, it became a timer
@@ -24,7 +29,7 @@
  * controller is what makes the remaining REAL refreshes respect user
  * position.
  */
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useLayoutEffect, useRef } from 'react'
 
 /** Distance from the bottom that still counts as "at the bottom". */
 export const STICK_PX = 80
@@ -87,8 +92,20 @@ export class FollowController {
     this.onBecamePinned = onBecamePinned
     if (el) {
       el.addEventListener('scroll', this.onScroll, { passive: true })
-      // Adopt whatever position a (re)mounted container sits at.
-      this.pinned = isNearBottom(el)
+      // The follow bit is deliberately NOT re-derived from geometry here: a
+      // container's scroll offset carries no reader intent. The startup order is
+      // container-mounts-then-page-arrives, so reading the offset would take the
+      // untouched `scrollTop === 0` under brand-new content for a scroll-up and
+      // veto the follow for the whole session — the reader would open the
+      // conversation on its OLDEST row. Intent is tracked where it exists: the
+      // `onScroll` listener (a browser also fires it for a programmatic jump).
+      //
+      // What attaching DOES do is position a container that appears while the
+      // reader is still following: screens swap the scroll container across
+      // early-return branches, so the page can exist BEFORE this node does and
+      // the refresh that carried it ran against no container at all. A reader
+      // who had scrolled up (`pinned === false`) is left exactly where they are.
+      if (this.pinned) el.scrollTop = el.scrollHeight
     }
   }
 
@@ -142,7 +159,10 @@ export function useStickToBottom(
     ctrl.current!.bind(el, () => topRef.current?.(), () => bottomRef.current?.())
   }, [])
 
-  useEffect(() => {
+  // The follow runs before paint, in the layout phase: the newest page arrives
+  // in the same commit as its bubbles, so a passive effect would first paint the
+  // reader the top of that page (the oldest message) and only then jump.
+  useLayoutEffect(() => {
     ctrl.current!.refresh(forceKey)
     // `deps` is the caller's trigger list — fixed length per call site.
     // eslint-disable-next-line react-hooks/exhaustive-deps

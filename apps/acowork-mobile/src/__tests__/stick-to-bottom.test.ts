@@ -113,16 +113,49 @@ describe('FollowController', () => {
     expect(el.scrollTop).toBe(0) // nothing moved
   })
 
-  it('rebinding adopts the new container position (no scroll-up is lost)', () => {
-    const { c } = bound()
+  it('re-binding the same container keeps the follow bit (startup order)', () => {
+    // The startup shape: the container mounts with the 'loading' placeholder,
+    // then the newest page lands and makes the content overflow. Re-deriving
+    // `pinned` from the node's offset would read that untouched `scrollTop === 0`
+    // as a scroll-up and leave the reader on the OLDEST message of the page.
+    // A re-bind of the same node is what a callback ref whose identity changed
+    // through a re-render does, so the bit must survive it.
+    const { c, el } = bound()
     c.refresh('s1')
-    const el2 = new FakeEl()
-    el2.scrollTop = 0 // a remounted DOM node starts at the top of overflowing content
-    c.bind(el2)
+    expect(el.scrollTop).toBe(el.bottom)
+    el.grow(900) // the page arrives below the pinned viewport
+    c.bind(null) // React detaches the previous callback ref …
+    c.bind(el) // … and re-attaches the very same node
+    expect(c.pinned).toBe(true)
+    c.refresh('s1') // same key, no force
+    expect(el.scrollTop).toBe(el.bottom)
+  })
+
+  it('a container swap preserves the intent a scroll recorded', () => {
+    const { c, el } = bound()
+    c.refresh('s1')
+    el.userScrollTo(0) // a real scroll-up is the only thing that un-pins
     expect(c.pinned).toBe(false)
+    const el2 = new FakeEl() // a fresh node always starts at the top
+    c.bind(el2)
     el2.grow(200)
-    c.refresh('s1') // same key: no force — the adoption stands
+    c.refresh('s1') // same key: the recorded scroll-up stands
     expect(el2.scrollTop).toBe(0)
+    c.stickNow() // and the follow can still be re-claimed
+    expect(el2.scrollTop).toBe(el2.bottom)
+  })
+
+  it('a container attached after the page landed is positioned on arrival', () => {
+    // Screens swap the scroll container across early-return branches, so the
+    // content can exist before the node does and the refresh that carried it
+    // found no container — attaching has to follow then.
+    const c = new FollowController()
+    const el = new FakeEl()
+    el.grow(900)
+    c.refresh('s1') // no container yet: nothing to move
+    expect(el.scrollTop).toBe(0)
+    c.bind(el)
+    expect(el.scrollTop).toBe(el.bottom)
   })
 
   it('fires onNearTop when a user scroll lands in the top band (pagination trigger)', () => {
