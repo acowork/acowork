@@ -846,6 +846,7 @@ mod tests {
                     last_active_at: chrono::Utc::now().to_rfc3339(),
                     tokens: None,
                     corrupted: false,
+                    model_usage: None,
                 })
                 .unwrap();
         }

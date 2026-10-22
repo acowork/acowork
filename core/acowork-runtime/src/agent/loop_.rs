@@ -945,6 +945,11 @@ impl AgentLoop {
                     // (session provider, other-provider model) pair.
                     let resolved_distill = self.resolve_distill_model(title_input);
                     let (provider, compact_model, _tier) = self.distill_provider(&resolved_distill);
+                    // Per-model attribution for the title call: empty
+                    // `provider_id` means "session provider" (same convention
+                    // as `distill_provider`) — resolved against the
+                    // conversation clone inside the spawned task.
+                    let title_provider_id = resolved_distill.provider_id.clone();
                     let session_core_title = self.session_core.title.clone();
                     let conversation_clone = self.session.conversation.clone();
                     // ADR-028: clone the AgentCore so the spawned task can
@@ -987,7 +992,25 @@ impl AgentLoop {
                                 // ADR-027: record raw Provider usage from
                                 // title-generation call.
                                 if let Some(ref conv) = conversation_clone {
-                                    conv.accumulate_llm_usage(&usage);
+                                    let provider_id = if title_provider_id.is_empty() {
+                                        conv.provider()
+                                    } else {
+                                        Some(title_provider_id.clone())
+                                    };
+                                    let caps = core_clone.get_model_capabilities(&compact_model);
+                                    conv.accumulate_llm_usage(
+                                        &usage,
+                                        &crate::conversation::ModelUsageAttribution {
+                                            provider_id: provider_id.as_deref(),
+                                            model_id: Some(&compact_model),
+                                            cost_delta: caps.as_ref().and_then(|c| {
+                                                crate::conversation::estimate_call_cost(
+                                                    c.cost.as_ref(),
+                                                    &usage,
+                                                )
+                                            }),
+                                        },
+                                    );
                                 }
                                 // ADR-028: also feed the agent-scoped
                                 // counters so the agent-total line in the

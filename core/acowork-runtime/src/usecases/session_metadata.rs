@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::conversation::{SessionScope, SessionVisibility};
-use crate::error::Result;
+use crate::error::{Result, RuntimeError};
 
 /// Summary of a single session for list responses (ADR-024 / ADR-028).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +92,19 @@ pub struct MessagesResponse {
     pub count: usize,
 }
 
+/// Response for `token_stats` — agent-scoped per-(provider, model) token
+/// aggregate read straight off the `token_stats` table (O(#models)).
+///
+/// `consistent` is a cheap Σ(aggregate) vs Σ(per-session breakdown)
+/// validation bit: `false` means the derived index has drifted and a
+/// `rebuild_token_stats` is warranted — the numbers are still served so
+/// the UI can show them with a caveat rather than failing the read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenStatsResponse {
+    pub items: Vec<crate::conversation::TokenStatsRow>,
+    pub consistent: bool,
+}
+
 /// Session metadata query methods.
 #[async_trait]
 pub trait SessionMetadataService: Send + Sync {
@@ -125,4 +138,12 @@ pub trait SessionMetadataService: Send + Sync {
         limit: Option<u32>,
         from_tail: bool,
     ) -> Result<MessagesResponse>;
+
+    /// Agent-scoped per-model token statistics (SQLite `token_stats`
+    /// aggregate). Backends without the statistics table return `Err`.
+    async fn token_stats(&self) -> Result<TokenStatsResponse> {
+        Err(RuntimeError::Core(acowork_core::AcoworkError::Memory(
+            "token_stats not supported by this session-metadata backend".to_string(),
+        )))
+    }
 }

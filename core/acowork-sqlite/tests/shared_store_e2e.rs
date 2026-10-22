@@ -41,6 +41,7 @@ fn meta(sid: &str, title: &str) -> SessionMeta {
         last_compaction_summary: None,
         corrupted: false,
     chat_session_id: None,
+        model_usage: None,
     }
 }
 

@@ -81,6 +81,7 @@ fn make_meta(
         user_id: None,
         visibility: None,
     chat_session_id: None,
+        model_usage: None,
     }
 }
 
@@ -558,6 +559,7 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              ALTER TABLE sessions DROP COLUMN perf_ttft_ms_samples;
              ALTER TABLE sessions DROP COLUMN chat_session_id;
              ALTER TABLE sessions DROP COLUMN last_compaction_summary;
+             ALTER TABLE sessions DROP COLUMN model_usage;
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -598,6 +600,321 @@ fn user_version_is_stamped_on_open_and_is_idempotent() -> AcoworkResult<()> {
         .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0))
         .map_err(|e| acowork_core::error::AcoworkError::Memory(format!("sqlite: {e}")))?;
     assert_eq!(row_count, 0, "reopen must not synthesize rows");
+    Ok(())
+}
+
+// ── per-model token statistics (schema v6) ───────────────────────────
+
+use acowork_memory::session_meta::{ModelUsageEntry, TokenStatsRow};
+use std::collections::BTreeMap;
+
+fn usage_entry(input: u64, output: u64, cost: Option<f64>) -> ModelUsageEntry {
+    ModelUsageEntry {
+        input,
+        output,
+        cache_read: 0,
+        cache_write: 0,
+        cost,
+    }
+}
+
+fn usage_map(pairs: &[(&str, ModelUsageEntry)]) -> BTreeMap<String, ModelUsageEntry> {
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), v.clone()))
+        .collect()
+}
+
+/// Σ(`token_stats`) over the four token dimensions, for set-agnostic
+/// assertions (the table's read order is a presentation concern).
+fn stats_totals(sm: &SqliteSessionMetaStore) -> (u64, u64) {
+    let rows = sm.token_stats().unwrap();
+    (
+        rows.iter().map(|r| r.total_input).sum(),
+        rows.iter().map(|r| r.total_output).sum(),
+    )
+}
+
+fn find_stat<'a>(rows: &'a [TokenStatsRow], provider: &str, model: &str) -> &'a TokenStatsRow {
+    rows.iter()
+        .find(|r| r.provider == provider && r.model == model)
+        .unwrap_or_else(|| panic!("no token_stats row for {provider}/{model}"))
+}
+
+/// v5 → v6: legacy rows get an `unknown|unknown` breakdown seeded from
+/// their `token_total_*` columns (never retroactively attributed to the
+/// session's current model), the aggregate table is seeded so
+/// Σ(aggregate) == Σ(breakdowns) from the first open, and reopening the
+/// migrated store is a no-op.
+#[test]
+fn v6_migration_backfills_unknown_breakdown_and_aggregate() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+
+    // Build a current store (all migrations), then roll it back to the v5
+    // shape: no `model_usage` column, no `token_stats` table, version 5.
+    {
+        let (_store, sm) = open_pair(&path);
+        let mut meta = make_meta("legacy", "2026-01-01T00:00:00.000Z", Some("l"), "a");
+        meta.tokens = Some(SessionTokens {
+            last_input: 0,
+            last_output: 0,
+            total_input: 500,
+            total_output: 250,
+            last_cache_read: 0,
+            last_cache_write: 0,
+            total_cache_read: 11,
+            total_cache_write: 7,
+        });
+        meta.model_usage = None;
+        sm.upsert(&meta)?;
+        // Zero-usage rows must NOT get a breakdown (they never consumed
+        // anything; a 0-token `unknown` bucket would be noise in the pie).
+        let mut zero = make_meta("zero", "2026-01-01T00:00:00.000Z", Some("z"), "a");
+        zero.tokens = Some(SessionTokens {
+            last_input: 0,
+            last_output: 0,
+            total_input: 0,
+            total_output: 0,
+            last_cache_read: 0,
+            last_cache_write: 0,
+            total_cache_read: 0,
+            total_cache_write: 0,
+        });
+        zero.model_usage = None;
+        sm.upsert(&zero)?;
+    }
+    open_raw(&path)
+        .execute_batch(
+            "DROP TABLE token_stats;
+             ALTER TABLE sessions DROP COLUMN model_usage;
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
+
+    // Reopen runs the v6 step: column + table + backfill + aggregate seed.
+    let (_store, sm) = open_pair(&path);
+    assert_eq!(stored_user_version(&path), acowork_sqlite::schema_version());
+
+    let got = sm.get("legacy")?.expect("legacy row survives");
+    let usage = got.model_usage.expect("non-zero legacy row gets a breakdown");
+    let entry = usage
+        .get("unknown|unknown")
+        .expect("old totals land in the unknown bucket");
+    assert_eq!((entry.input, entry.output, entry.cache_read, entry.cache_write), (500, 250, 11, 7));
+    assert_eq!(entry.cost, None, "no historical price is ever estimated");
+    assert!(
+        sm.get("zero")?.unwrap().model_usage.is_none(),
+        "a zero-usage row stays without a breakdown"
+    );
+
+    // Σ(aggregate) == Σ(breakdowns) straight after the migration.
+    let rows = sm.token_stats()?;
+    assert_eq!(rows.len(), 1);
+    let row = find_stat(&rows, "unknown", "unknown");
+    assert_eq!((row.total_input, row.total_output), (500, 250));
+    assert_eq!(row.total_cost, None);
+    assert!(sm.token_stats_consistent()?);
+
+    // Reopen is a no-op: the migration must not re-run and double-seed.
+    drop(sm);
+    drop(_store);
+    let (_store2, sm2) = open_pair(&path);
+    assert_eq!(sm2.token_stats()?.len(), 1, "reopen must not duplicate aggregate rows");
+    assert!(sm2.token_stats_consistent()?);
+    Ok(())
+}
+
+/// The `upsert` diff transaction maintains `token_stats` incrementally:
+/// first write adds, same-model re-accumulation replaces the row's
+/// contribution (not adds on top of it), a model switch nets the old key
+/// down and the new key up, and deletes/prunes subtract symmetrically.
+#[test]
+fn upsert_diff_and_delete_maintain_the_aggregate() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let (_store, sm) = open_pair(&path);
+
+    // Fresh rows contribute nothing until they carry a breakdown.
+    let mut a = make_meta("a", "2026-02-01T00:00:00.000Z", Some("A"), "agent");
+    sm.upsert(&a)?;
+    assert!(sm.token_stats()?.is_empty());
+
+    // First breakdown: one key.
+    a.model_usage = Some(usage_map(&[("openai|gpt-a", usage_entry(100, 10, Some(0.01)))]));
+    sm.upsert(&a)?;
+    let rows = sm.token_stats()?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].total_input, rows[0].total_output, rows[0].total_cost), (100, 10, Some(0.01)));
+
+    // Re-upsert the SAME totals — diff is zero, aggregate unchanged
+    // (idempotence: write_meta fires on every persist, not only on change).
+    sm.upsert(&a)?;
+    assert_eq!(stats_totals(&sm), (100, 10));
+
+    // Session grows: new totals replace the old contribution, they are
+    // NOT added on top of it.
+    a.model_usage = Some(usage_map(&[("openai|gpt-a", usage_entry(160, 25, Some(0.02)))]));
+    sm.upsert(&a)?;
+    let rows = sm.token_stats()?;
+    assert_eq!((rows[0].total_input, rows[0].total_output), (160, 25));
+
+    // Model switch: old key nets down, new key appears.
+    let mut b = make_meta("b", "2026-02-02T00:00:00.000Z", Some("B"), "agent");
+    b.model_usage = Some(usage_map(&[("anthropic|claude", usage_entry(50, 5, None))]));
+    sm.upsert(&b)?;
+    a.model_usage = Some(usage_map(&[
+        ("openai|gpt-a", usage_entry(60, 5, Some(0.01))),
+        ("anthropic|claude", usage_entry(100, 20, None)),
+    ]));
+    sm.upsert(&a)?;
+    let rows = sm.token_stats()?;
+    assert_eq!(find_stat(&rows, "openai", "gpt-a").total_input, 60);
+    assert_eq!(find_stat(&rows, "anthropic", "claude").total_input, 150);
+    assert_eq!(find_stat(&rows, "anthropic", "claude").total_output, 25);
+    assert!(sm.token_stats_consistent()?);
+
+    // Delete subtracts the removed row's whole contribution.
+    sm.delete("a")?;
+    let rows = sm.token_stats()?;
+    assert!(find_stat(&rows, "openai", "gpt-a").total_input == 0 || rows.iter().all(|r| r.provider != "openai"));
+    assert_eq!(find_stat(&rows, "anthropic", "claude").total_input, 50);
+    assert_eq!(find_stat(&rows, "anthropic", "claude").total_output, 5);
+    assert!(sm.token_stats_consistent()?);
+
+    // Prune deducts symmetrically: two owned rows, keep the newest one.
+    let mut c = make_meta("c", "2026-01-01T00:00:00.000Z", Some("C"), "agent");
+    c.user_id = Some("u".into());
+    c.model_usage = Some(usage_map(&[("p|m1", usage_entry(10, 1, None))]));
+    sm.upsert(&c)?;
+    let mut d = make_meta("d", "2026-06-01T00:00:00.000Z", Some("D"), "agent");
+    d.user_id = Some("u".into());
+    d.model_usage = Some(usage_map(&[("p|m1", usage_entry(20, 2, None))]));
+    sm.upsert(&d)?;
+    let victims = sm.prune_to(1)?;
+    assert_eq!(victims, vec!["c".to_string()]);
+    let rows = sm.token_stats()?;
+    let row = find_stat(&rows, "p", "m1");
+    // b's claude(50/5) + d's m1(20/2) survive; c's 10/1 is deducted.
+    assert_eq!(row.total_input, 20);
+    assert_eq!(find_stat(&rows, "anthropic", "claude").total_input, 50);
+    assert!(sm.token_stats_consistent()?);
+    Ok(())
+}
+
+/// Deleting (or pruning) a session must subtract its KNOWN cost from the
+/// aggregate, not poison the shared row: a priced key still held by other
+/// priced sessions keeps its price after one contributor is removed.
+#[test]
+fn delete_of_priced_entry_preserves_aggregate_cost() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let (_store, sm) = open_pair(&path);
+
+    let mut a = make_meta("a", "2026-02-01T00:00:00.000Z", Some("A"), "agent");
+    a.model_usage = Some(usage_map(&[("p|m1", usage_entry(100, 10, Some(1.0)))]));
+    sm.upsert(&a)?;
+    let mut b = make_meta("b", "2026-02-02T00:00:00.000Z", Some("B"), "agent");
+    b.model_usage = Some(usage_map(&[("p|m1", usage_entry(40, 4, Some(0.5)))]));
+    sm.upsert(&b)?;
+    assert_eq!(find_stat(&sm.token_stats()?, "p", "m1").total_cost, Some(1.5));
+
+    sm.delete("a")?;
+    let rows = sm.token_stats()?;
+    let row = find_stat(&rows, "p", "m1");
+    assert_eq!((row.total_input, row.total_output), (40, 4));
+    assert_eq!(row.total_cost, Some(0.5), "known-cost removal must not poison the row");
+    assert!(sm.token_stats_consistent()?);
+    Ok(())
+}
+
+/// Disposable derived index (ADR-082 pattern): when the aggregate drifts
+/// from the per-session breakdowns, `token_stats_consistent` says so and
+/// `rebuild_token_stats` re-derives the exact incremental result.
+#[test]
+fn rebuild_heals_a_drifted_aggregate_and_is_idempotent() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let (store, sm) = open_pair(&path);
+
+    let mut a = make_meta("a", "2026-02-01T00:00:00.000Z", Some("A"), "agent");
+    a.model_usage = Some(usage_map(&[("p|m1", usage_entry(100, 10, Some(1.0)))]));
+    sm.upsert(&a)?;
+    let mut b = make_meta("b", "2026-02-02T00:00:00.000Z", Some("B"), "agent");
+    b.model_usage = Some(usage_map(&[("p|m2", usage_entry(7, 3, None))]));
+    sm.upsert(&b)?;
+    assert!(sm.token_stats_consistent()?);
+    let incremental = sm.token_stats()?;
+
+    // Simulate drift: zero the aggregate out from under the store.
+    drop(sm);
+    drop(store);
+    open_raw(&path)
+        .execute_batch("UPDATE token_stats SET total_input = 0, total_output = 0, total_cost = NULL;")
+        .unwrap();
+    let (_store, sm) = open_pair(&path);
+    assert!(
+        !sm.token_stats_consistent()?,
+        "a zeroed aggregate over non-zero breakdowns must read as drift"
+    );
+
+    sm.rebuild_token_stats()?;
+    assert!(sm.token_stats_consistent()?);
+    let mut rebuilt = sm.token_stats()?;
+    let mut want = incremental;
+    rebuilt.sort_by(|x, y| (&x.provider, &x.model).cmp(&(&y.provider, &y.model)));
+    want.sort_by(|x, y| (&x.provider, &x.model).cmp(&(&y.provider, &y.model)));
+    assert_eq!(rebuilt, want, "rebuild must equal the incremental result");
+
+    // The m2 row's cost stays NULL through rebuild (poison rule, never a
+    // fabricated number).
+    assert_eq!(find_stat(&rebuilt, "p", "m2").total_cost, None);
+
+    // Rebuild again: pure function of the breakdowns, so it is idempotent.
+    sm.rebuild_token_stats()?;
+    assert!(sm.token_stats_consistent()?);
+    assert_eq!(sm.token_stats()?.len(), 2);
+    Ok(())
+}
+
+/// The cost dimension follows the aggregate's poison rule: a NULL
+/// aggregate cost over priced details is a real drift (e.g. the table
+/// was wiped), while a poisoned-NULL cost after an unpriced contribution
+/// counts as consistent until a rebuild.
+#[test]
+fn consistency_cost_rule_distinguishes_wipe_from_poison() -> AcoworkResult<()> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let (store, sm) = open_pair(&path);
+
+    let mut a = make_meta("a", "2026-02-01T00:00:00.000Z", Some("A"), "agent");
+    a.model_usage = Some(usage_map(&[("p|m1", usage_entry(10, 1, Some(0.5)))]));
+    sm.upsert(&a)?;
+    assert!(sm.token_stats_consistent()?);
+
+    // Poison: an unpriced contribution lands → cost NULL, still consistent.
+    a.model_usage = Some(usage_map(&[
+        ("p|m1", usage_entry(20, 2, Some(0.5))),
+        ("p|m2", usage_entry(5, 1, None)),
+    ]));
+    sm.upsert(&a)?;
+    let rows = sm.token_stats()?;
+    // Poison is per-row: m1 keeps its priced fold, m2's unpriced
+    // contribution NULLs only its own row's cost.
+    assert_eq!(find_stat(&rows, "p", "m1").total_cost, Some(0.5));
+    assert_eq!(find_stat(&rows, "p", "m2").total_cost, None);
+    assert!(sm.token_stats_consistent()?, "poisoned-NULL cost is not drift");
+
+    // Wipe: details non-zero, aggregate emptied → tokens mismatch → drift.
+    drop(sm);
+    drop(store);
+    open_raw(&path)
+        .execute_batch("DELETE FROM token_stats;")
+        .unwrap();
+    let (_store, sm) = open_pair(&path);
+    assert!(!sm.token_stats_consistent()?);
+    sm.rebuild_token_stats()?;
+    assert!(sm.token_stats_consistent()?);
     Ok(())
 }
 

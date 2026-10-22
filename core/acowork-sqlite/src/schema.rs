@@ -128,8 +128,9 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 ///
 /// History: 1 = `version` / `corrupted` columns; 2 = `user_id` / `visibility`
 /// (ADR-076 §决策 4 session ownership); 3 = `perf_*` LLM speed averages;
-/// 4 = `chat_session_id`; 5 = `last_compaction_summary` + `conversation_state`.
-pub const SCHEMA_VERSION: i64 = 5;
+/// 4 = `chat_session_id`; 5 = `last_compaction_summary` + `conversation_state`;
+/// 6 = `model_usage` breakdown column + `token_stats` aggregate table.
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -201,6 +202,28 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         5,
         "ALTER TABLE sessions ADD COLUMN last_compaction_summary TEXT; \n         CREATE TABLE IF NOT EXISTS conversation_state ( \n             session_id  TEXT PRIMARY KEY, \n             next_line   INTEGER NOT NULL DEFAULT 0, \n             byte_offset INTEGER NOT NULL DEFAULT 0 \n         );",
+    ),
+    // Per-model token statistics. Two pieces:
+    // - `sessions.model_usage`: per-session `"{provider}|{model}"` breakdown
+    //   (JSON object). This is the SOURCE OF TRUTH for the aggregate below;
+    //   the runtime's upsert maintains `token_stats` as a same-transaction
+    //   diff of these maps, and `rebuild_token_stats` can always re-derive
+    //   the aggregate from them (the disposable-derived-index pattern).
+    // - `token_stats`: agent-scoped aggregate, one row per (provider, model).
+    //   Read path for the model-share panel — O(#models), never a session scan.
+    // Backfill: pre-upgrade sessions have cumulative `token_total_*` but no
+    // attribution. Every such row seeds a single `unknown|unknown` entry
+    // carrying its totals (cost NULL — "宁可 miss 也不估计": seeding the
+    // row's current `model` would misbill history written before a model
+    // switch). The aggregate is then seeded by summing the breakdowns, so
+    // Σ(token_stats) == Σ(model_usage) holds from the first open.
+    //
+    // Keys without a `|` are skipped by the seed query (the Rust side always
+    // writes `provider|model`; a hand-edited row degrades to breakdown-only
+    // until `rebuild_token_stats` is called).
+    (
+        6,
+        "ALTER TABLE sessions ADD COLUMN model_usage TEXT; \n         CREATE TABLE IF NOT EXISTS token_stats ( \n             provider              TEXT NOT NULL, \n             model                 TEXT NOT NULL, \n             total_input           INTEGER NOT NULL DEFAULT 0, \n             total_output          INTEGER NOT NULL DEFAULT 0, \n             total_cache_read      INTEGER NOT NULL DEFAULT 0, \n             total_cache_write     INTEGER NOT NULL DEFAULT 0, \n             total_cost            REAL, \n             PRIMARY KEY (provider, model) \n         ); \n         UPDATE sessions SET model_usage = json_object( \n             'unknown|unknown', json_object( \n                 'input', token_total_input, \n                 'output', token_total_output, \n                 'cache_read', token_total_cache_read, \n                 'cache_write', token_total_cache_write, \n                 'cost', NULL \n             ) \n         ) \n         WHERE model_usage IS NULL \n           AND (token_total_input + token_total_output + token_total_cache_read + token_total_cache_write) > 0; \n         INSERT INTO token_stats (provider, model, total_input, total_output, total_cache_read, total_cache_write, total_cost) \n         SELECT substr(j.key, 1, instr(j.key, '|') - 1), \n                substr(j.key, instr(j.key, '|') + 1), \n                SUM(json_extract(j.value, '$.input')), \n                SUM(json_extract(j.value, '$.output')), \n                SUM(json_extract(j.value, '$.cache_read')), \n                SUM(json_extract(j.value, '$.cache_write')), \n                CASE WHEN SUM(CASE WHEN json_extract(j.value, '$.cost') IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL \n                     ELSE SUM(json_extract(j.value, '$.cost')) END \n         FROM sessions s, json_each(s.model_usage) j \n         WHERE s.model_usage IS NOT NULL AND instr(j.key, '|') > 0 \n         GROUP BY j.key;",
     ),
 ];
 

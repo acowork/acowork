@@ -287,6 +287,7 @@ mod tests {
             last_compaction_offset: None,
             last_compaction_summary: None,
             corrupted: false,
+            model_usage: None,
         }
     }
 

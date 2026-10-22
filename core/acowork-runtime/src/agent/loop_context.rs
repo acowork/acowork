@@ -886,7 +886,7 @@ impl AgentLoop {
             let compaction_failed = succeeded.is_none();
 
             match succeeded {
-                Some((_resolved_distill, compact_model, (summary, usage))) => {
+                Some((resolved_distill, compact_model, (summary, usage))) => {
                     // ADR-027 (revised for compaction): record raw Provider
                     // usage from the compaction summary call into the session
                     // token accumulator, but **do not** overwrite `last_input`
@@ -903,7 +903,27 @@ impl AgentLoop {
                     // `replace_middle_with_summary`) re-anchors `last_input`
                     // to the post-compaction `history.token_count()`.
                     if let Some(ref conversation) = self.session.conversation {
-                        conversation.accumulate_compaction_usage(&usage);
+                        // Per-model attribution: the distill target's provider
+                        // wins; an empty `provider_id` means "session
+                        // provider" (same convention as `distill_provider`).
+                        // Cost comes from the compact model's price table —
+                        // `None` (no caps / no price) folds as unknown.
+                        let provider_id = if resolved_distill.provider_id.is_empty() {
+                            conversation.provider()
+                        } else {
+                            Some(resolved_distill.provider_id.clone())
+                        };
+                        let compact_caps = self.get_model_capabilities(&compact_model);
+                        conversation.accumulate_compaction_usage(
+                            &usage,
+                            &crate::conversation::ModelUsageAttribution {
+                                provider_id: provider_id.as_deref(),
+                                model_id: Some(&compact_model),
+                                cost_delta: compact_caps.as_ref().and_then(|c| {
+                                    crate::conversation::estimate_call_cost(c.cost.as_ref(), &usage)
+                                }),
+                            },
+                        );
                     }
                     // ADR-028: also feed the agent-scoped counters so the
                     // agent-total line in Results Panel updates even if
@@ -1841,6 +1861,18 @@ impl AgentLoop {
                         usage,
                         call_perf.and_then(|p| p.tps),
                         call_perf.map(|p| p.ttft_ms),
+                        // Per-model attribution: session provider + dialog
+                        // model; cost estimated from this model's price
+                        // table (cache tokens unbilled — no cache unit
+                        // prices in `ModelCostInfo`).
+                        &crate::conversation::ModelUsageAttribution {
+                            provider_id: conv.provider().as_deref(),
+                            model_id: Some(current_model),
+                            cost_delta: crate::conversation::estimate_call_cost(
+                                caps.cost.as_ref(),
+                                usage,
+                            ),
+                        },
                     ));
                     if let Some(t) = conv.tokens() {
                         // ADR-066 §2 / ADR-066 §7: "compute 只看 per-turn、

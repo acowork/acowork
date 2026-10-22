@@ -19,7 +19,7 @@ use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::UsageInfo;
 use acowork_runtime::agent::context::build_context_usage_from_persisted;
 use acowork_runtime::conversation::{
-    ConversationSession, SessionConfig, SessionMeta, SessionTokens, read_session_meta,
+    ConversationSession, ModelUsageAttribution, SessionConfig, SessionMeta, SessionTokens, read_session_meta,
     write_session_meta,
 };
 use tempfile::TempDir;
@@ -85,9 +85,9 @@ async fn accumulate_then_resume_round_trip_preserves_session_tokens() {
     // Create + accumulate (simulating 3 LLM round-trips, including one
     // Provider fallback where prompt_tokens == 0).
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage(10_000, 800));
-    session.accumulate_llm_usage(&usage(0, 200)); // Provider fallback — must skip total_input
-    session.accumulate_llm_usage(&usage(15_000, 1_500));
+    session.accumulate_llm_usage(&usage(10_000, 800), &ModelUsageAttribution::default());
+    session.accumulate_llm_usage(&usage(0, 200), &ModelUsageAttribution::default()); // Provider fallback — must skip total_input
+    session.accumulate_llm_usage(&usage(15_000, 1_500), &ModelUsageAttribution::default());
 
     let in_memory = session
         .tokens()
@@ -141,7 +141,7 @@ async fn resume_tokens_feed_context_usage_emission() {
     let session_id = "session_tokens_resume_ctx";
 
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage(45_000, 1_200));
+    session.accumulate_llm_usage(&usage(45_000, 1_200), &ModelUsageAttribution::default());
     session.close().await.expect("close");
 
     let resumed =
@@ -193,8 +193,8 @@ async fn resume_tokens_cumulative_totals_diverge_from_per_turn() {
 
     let session = make_session(&dir, session_id);
     // Two LLM rounds with non-zero usage on both.
-    session.accumulate_llm_usage(&usage(12_000, 800));
-    session.accumulate_llm_usage(&usage(18_000, 1_400));
+    session.accumulate_llm_usage(&usage(12_000, 800), &ModelUsageAttribution::default());
+    session.accumulate_llm_usage(&usage(18_000, 1_400), &ModelUsageAttribution::default());
     session.close().await.expect("close");
 
     let resumed =
@@ -258,8 +258,8 @@ async fn provider_fallback_records_raw_zero_in_last_input() {
     let session_id = "session_tokens_fallback";
 
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage(8_000, 500));
-    session.accumulate_llm_usage(&usage(0, 0)); // Provider fallback: full zero
+    session.accumulate_llm_usage(&usage(8_000, 500), &ModelUsageAttribution::default());
+    session.accumulate_llm_usage(&usage(0, 0), &ModelUsageAttribution::default()); // Provider fallback: full zero
 
     let t = session.tokens().unwrap();
     assert_eq!(t.last_input, 0, "raw zero, not a local estimate");
@@ -289,8 +289,8 @@ async fn accumulate_saturates_at_u64_max_without_panic() {
     let session_id = "session_tokens_overflow";
 
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage(u64::MAX, u64::MAX));
-    session.accumulate_llm_usage(&usage(1, 1)); // would overflow naive add
+    session.accumulate_llm_usage(&usage(u64::MAX, u64::MAX), &ModelUsageAttribution::default());
+    session.accumulate_llm_usage(&usage(1, 1), &ModelUsageAttribution::default()); // would overflow naive add
 
     let t = session.tokens().unwrap();
     assert_eq!(t.last_input, 1);
@@ -327,7 +327,7 @@ async fn clone_after_parent_close_still_persists_meta() {
 
     session.close().await.expect("parent close");
 
-    distiller_view.accumulate_llm_usage(&usage(42_000, 7_000));
+    distiller_view.accumulate_llm_usage(&usage(42_000, 7_000), &ModelUsageAttribution::default());
 
     let from_disk = read_session_meta(&dir.path().join("conversations"), session_id)
         .expect("read meta from clone-write");
@@ -357,7 +357,7 @@ async fn consecutive_accumulations_each_reach_disk() {
 
     let session = make_session(&dir, session_id);
     for i in 1..=5 {
-        session.accumulate_llm_usage(&usage(i * 1000, i * 100));
+        session.accumulate_llm_usage(&usage(i * 1000, i * 100), &ModelUsageAttribution::default());
     }
     session.close().await.unwrap();
 
@@ -415,6 +415,7 @@ async fn legacy_meta_file_loads_with_tokens_none() {
         last_compaction_summary: None,
         corrupted: false,
     chat_session_id: None,
+        model_usage: None,
     };
     write_session_meta(&conv_dir, &legacy_meta).expect("write legacy");
 
@@ -515,7 +516,7 @@ async fn compaction_offset_persists_to_meta_after_append() {
     // Need a way to call the private write_meta — instead, read the
     // JSONL directly and verify the meta gets persisted through
     // accumulate_llm_usage, which always calls write_meta().
-    session.accumulate_llm_usage(&usage(100, 20));
+    session.accumulate_llm_usage(&usage(100, 20), &ModelUsageAttribution::default());
 
     let conv_dir = dir.path().join("conversations");
     let on_disk = read_session_meta(&conv_dir, session_id).expect("read meta after compaction");
@@ -579,6 +580,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
         last_compaction_summary: None,
         corrupted: false,
     chat_session_id: None,
+        model_usage: None,
     };
     write_session_meta(&conv_dir, &meta).expect("write meta");
     std::fs::write(conv_dir.join(format!("{session_id}.jsonl")), "").unwrap();
@@ -589,7 +591,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
         ConversationSession::resume(dir.path(), session_id, Arc::new(AtomicUsize::new(0)))
             .expect("resume");
 
-    session.accumulate_llm_usage(&usage(50, 10));
+    session.accumulate_llm_usage(&usage(50, 10), &ModelUsageAttribution::default());
 
     let on_disk = read_session_meta(&conv_dir, session_id).expect("read meta after resume");
     assert_eq!(
@@ -632,7 +634,7 @@ async fn clone_shares_last_compaction_offset_arc() {
 
     // Trigger a meta write via the clone (accumulate_llm_usage always
     // writes meta) so we can read the persisted offset back.
-    clone.accumulate_llm_usage(&usage(10, 1));
+    clone.accumulate_llm_usage(&usage(10, 1), &ModelUsageAttribution::default());
 
     let conv_dir = dir.path().join("conversations");
     let on_disk = read_session_meta(&conv_dir, session_id).expect("read meta");
@@ -656,7 +658,7 @@ async fn model_ratio_round_trips_through_meta_and_resume() {
     let session_id = "ratio_roundtrip";
 
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage(1000, 200));
+    session.accumulate_llm_usage(&usage(1000, 200), &ModelUsageAttribution::default());
     session.set_model_ratio(2.5);
 
     session.close().await.expect("close");
@@ -701,11 +703,11 @@ async fn perf_samples_round_trip_through_meta_resume_and_push() {
     let session_id = "perf_roundtrip";
 
     let session = make_session(&dir, session_id);
-    session.record_llm_round(&usage(1_000, 300), Some(300.0), Some(500.0));
-    session.record_llm_round(&usage(1_000, 0), None, Some(100.0));
-    session.record_llm_round(&usage(1_000, 100), Some(100.0), Some(300.0));
+    session.record_llm_round(&usage(1_000, 300), Some(300.0), Some(500.0), &ModelUsageAttribution::default());
+    session.record_llm_round(&usage(1_000, 0), None, Some(100.0), &ModelUsageAttribution::default());
+    session.record_llm_round(&usage(1_000, 100), Some(100.0), Some(300.0), &ModelUsageAttribution::default());
     // An unmeasurable round must not drag either mean toward a fake 0.
-    session.record_llm_round(&usage(1_000, 50), None, None);
+    session.record_llm_round(&usage(1_000, 50), None, None, &ModelUsageAttribution::default());
 
     let perf = session.perf().expect("perf recorded");
     assert_eq!(perf.tps_samples, 2, "two speed samples");
@@ -762,7 +764,7 @@ async fn record_llm_round_advances_every_accumulator_in_one_call() {
     let session_id = "perf_single_write";
 
     let session = make_session(&dir, session_id);
-    let iteration = session.record_llm_round(&usage(1_000, 200), Some(64.0), Some(420.0));
+    let iteration = session.record_llm_round(&usage(1_000, 200), Some(64.0), Some(420.0), &ModelUsageAttribution::default());
     assert_eq!(iteration, 1, "returns the post-increment 1-based count");
 
     assert_eq!(session.llm_call_counter(), Some(1));
@@ -773,7 +775,7 @@ async fn record_llm_round_advances_every_accumulator_in_one_call() {
     assert_eq!(perf.avg_ttft_ms(), Some(420.0));
 
     // A second round accumulates rather than replaces.
-    assert_eq!(session.record_llm_round(&usage(1_000, 100), Some(32.0), Some(20.0)), 2);
+    assert_eq!(session.record_llm_round(&usage(1_000, 100), Some(32.0), Some(20.0), &ModelUsageAttribution::default()), 2);
     let perf = session.perf().unwrap();
     assert_eq!(perf.avg_tps(), Some(48.0));
     assert_eq!(perf.avg_ttft_ms(), Some(220.0));

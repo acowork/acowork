@@ -27,16 +27,22 @@
 //! `LIKE %x%` (see the note at the bottom of this file) — the FTS table is kept
 //! in sync so the upgrade to `MATCH` is a query change, not a backfill.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use acowork_core::error::{AcoworkError, Result as AcoworkResult};
 use acowork_memory::session_meta::{
-    SessionMeta, SessionMetaStore, SessionVisibility, last_active_at_ms,
+    ModelUsageEntry, SessionMeta, SessionMetaStore, SessionVisibility, TokenStatsRow, last_active_at_ms,
+    split_model_usage_key,
 };
 
 use crate::{Error as SqliteError, Result as SqliteResult, SqliteStore};
+
+/// Per-session `"{provider}|{model}"` breakdown, the decoded form of the
+/// `sessions.model_usage` JSON column. Source of truth for `token_stats`.
+pub(crate) type ModelUsageMap = BTreeMap<String, ModelUsageEntry>;
 
 /// SQLite implementation of `SessionMetaStore`.
 ///
@@ -96,6 +102,12 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     let last_compaction_offset: Option<i64> = row.get("last_compaction_offset")?;
     // §8 write-time derived state: the most recent compaction summary text.
     let last_compaction_summary: Option<String> = row.get("last_compaction_summary")?;
+    // Per-model breakdown (token statistics). An empty/absent map reads as
+    // `None` so a session that never made an LLM call is byte-equivalent in
+    // the API shape to a pre-feature row.
+    let model_usage_json: Option<String> = row.get("model_usage")?;
+    let model_usage_map = parse_model_usage(model_usage_json.as_deref());
+    let model_usage = (!model_usage_map.is_empty()).then_some(model_usage_map);
 
     let token_last_input: i64 = row.get("token_last_input")?;
     let token_last_output: i64 = row.get("token_last_output")?;
@@ -181,6 +193,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         message_count: message_count.max(0) as u64,
         last_active_at,
         tokens,
+        model_usage,
         llm_call_counter: llm_call_counter.map(|c| c.max(0) as u32),
         perf,
         model_ratio,
@@ -219,14 +232,28 @@ impl SessionMetaStore for SqliteSessionMetaStore {
     }
 
     fn upsert(&self, meta: &SessionMeta) -> AcoworkResult<()> {
-        let conn = self.store.lock();
+        // Single transaction: the row replace and the `token_stats` diff
+        // commit together, so a crash between the two can never let the
+        // aggregate drift from the breakdowns. The diff is recomputed
+        // against the PERSISTED old row, which makes the maintenance
+        // idempotent — a lost or replayed delta is corrected by the next
+        // upsert's diff, and `rebuild_token_stats` remains the repair path.
+        let mut conn = self.store.lock();
         let result: SqliteResult<()> = (|| {
-            upsert_row(&conn, meta).map_err(SqliteError::Sqlite)?;
-            conn.execute(
+            let tx = conn.transaction()?;
+            let old_usage: Option<String> = tx
+                .query_row(
+                    "SELECT model_usage FROM sessions WHERE session_id = ?1",
+                    params![meta.session_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            upsert_row(&tx, meta)?;
+            tx.execute(
                 "DELETE FROM fts_sessions WHERE session_id = ?1",
                 params![meta.session_id],
             )?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO fts_sessions(session_id, title, agent_id, workspace_id) \
                  VALUES (?1, ?2, ?3, ?4)",
                 params![
@@ -236,22 +263,41 @@ impl SessionMetaStore for SqliteSessionMetaStore {
                     meta.workspace_id.as_deref().unwrap_or(""),
                 ],
             )?;
+            apply_stats_delta(
+                &tx,
+                &parse_model_usage(old_usage.as_deref()),
+                &meta.model_usage.clone().unwrap_or_default(),
+            )?;
+            tx.commit()?;
             Ok(())
         })();
         result.map_err(to_acowork)
     }
 
     fn delete(&self, session_id: &str) -> AcoworkResult<()> {
-        let conn = self.store.lock();
+        let mut conn = self.store.lock();
         let result: SqliteResult<()> = (|| {
-            conn.execute(
+            let tx = conn.transaction()?;
+            // Subtract the deleted row's breakdown from the aggregate in the
+            // same transaction — symmetric with `upsert`, so pruned sessions
+            // stop weighing on the model-share panel.
+            let old_usage: Option<String> = tx
+                .query_row(
+                    "SELECT model_usage FROM sessions WHERE session_id = ?1",
+                    params![session_id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(None);
+            tx.execute(
                 "DELETE FROM sessions WHERE session_id = ?1",
                 params![session_id],
             )?;
-            conn.execute(
+            tx.execute(
                 "DELETE FROM fts_sessions WHERE session_id = ?1",
                 params![session_id],
             )?;
+            apply_stats_delta(&tx, &parse_model_usage(old_usage.as_deref()), &ModelUsageMap::new())?;
+            tx.commit()?;
             Ok(())
         })();
         result.map_err(to_acowork)
@@ -327,14 +373,15 @@ impl SessionMetaStore for SqliteSessionMetaStore {
     }
 
     fn prune_to(&self, max_sessions: usize) -> AcoworkResult<Vec<String>> {
-        let conn = self.store.lock();
+        let mut conn = self.store.lock();
         let result: SqliteResult<Vec<String>> = (|| {
+            let tx = conn.transaction()?;
             // ADR-076 §决策 4: the cap is **per owner**, not global — one
             // account's busy week must not evict another account's history.
             // `COALESCE(user_id, '')` puts every ownerless (pre-accounts /
             // local-mode) row in a single bucket, which is exactly the
             // pre-ADR-076 behaviour for those rows.
-            let mut stmt = conn.prepare(
+            let mut stmt = tx.prepare(
                 "SELECT session_id FROM sessions \
                  WHERE session_id NOT IN ( \
                        SELECT session_id FROM ( \
@@ -355,17 +402,181 @@ impl SessionMetaStore for SqliteSessionMetaStore {
                 let placeholders = std::iter::repeat_n("?", victims.len())
                     .collect::<Vec<_>>()
                     .join(",");
-                let sql = format!("DELETE FROM sessions WHERE session_id IN ({placeholders})");
+                // Read the victims' breakdowns BEFORE deleting, so the
+                // aggregate subtraction happens in the same transaction
+                // (symmetric with `delete`).
+                let usage_sql =
+                    format!("SELECT model_usage FROM sessions WHERE session_id IN ({placeholders})");
                 let params_vec: Vec<&dyn rusqlite::ToSql> =
                     victims.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-                conn.execute(&sql, params_vec.as_slice())?;
+                let mut usage_stmt = tx.prepare(&usage_sql)?;
+                let usages: Vec<Option<String>> = usage_stmt
+                    .query_map(params_vec.as_slice(), |r| r.get::<_, Option<String>>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(usage_stmt);
+                let sql = format!("DELETE FROM sessions WHERE session_id IN ({placeholders})");
+                tx.execute(&sql, params_vec.as_slice())?;
                 let fts_sql =
                     format!("DELETE FROM fts_sessions WHERE session_id IN ({placeholders})");
-                conn.execute(&fts_sql, params_vec.as_slice())?;
+                tx.execute(&fts_sql, params_vec.as_slice())?;
+                for usage in &usages {
+                    apply_stats_delta(&tx, &parse_model_usage(usage.as_deref()), &ModelUsageMap::new())?;
+                }
             }
+            tx.commit()?;
             Ok(victims)
         })();
         result.map_err(to_acowork)
+    }
+
+    fn token_stats(&self) -> AcoworkResult<Vec<TokenStatsRow>> {
+        // O(#models) — one row per (provider, model) pair, never a session
+        // scan. This is the whole point of maintaining the aggregate.
+        let conn = self.store.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT provider, model, total_input, total_output, \n                 total_cache_read, total_cache_write, total_cost \n                 FROM token_stats ORDER BY (total_input + total_output) DESC",
+            )
+            .map_err(to_acowork_sqlite)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(TokenStatsRow {
+                    provider: r.get(0)?,
+                    model: r.get(1)?,
+                    total_input: r.get::<_, i64>(2)?.max(0) as u64,
+                    total_output: r.get::<_, i64>(3)?.max(0) as u64,
+                    total_cache_read: r.get::<_, i64>(4)?.max(0) as u64,
+                    total_cache_write: r.get::<_, i64>(5)?.max(0) as u64,
+                    total_cost: r.get(6)?,
+                })
+            })
+            .map_err(to_acowork_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(to_acowork_sqlite)
+    }
+
+    fn rebuild_token_stats(&self) -> AcoworkResult<()> {
+        // Repair path (disposable derived index, ADR-082 pattern): drop the
+        // aggregate and re-derive it from the per-session breakdowns. Cost
+        // follows the same poison rule as the incremental diff — any entry
+        // without a known price makes the row's cost NULL.
+        let mut conn = self.store.lock();
+        let result: SqliteResult<()> = (|| {
+            let tx = conn.transaction()?;
+            tx.execute("DELETE FROM token_stats", [])?;
+            let mut stmt =
+                tx.prepare("SELECT model_usage FROM sessions WHERE model_usage IS NOT NULL")?;
+            let jsons: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            /// (provider, model) -> (in, out, cache_read, cache_write, cost)
+            /// fold; cost is `None` once any contribution is unpriced.
+            type Fold = BTreeMap<(String, String), (i64, i64, i64, i64, Option<f64>)>;
+            let mut acc: Fold = BTreeMap::new();
+            for json in &jsons {
+                for (key, entry) in parse_model_usage(Some(json.as_str())) {
+                    let (p, m) = split_model_usage_key(&key);
+                    let slot = acc
+                        .entry((p.to_string(), m.to_string()))
+                        .or_insert((0, 0, 0, 0, Some(0.0)));
+                    slot.0 = slot.0.saturating_add(token_to_i64(entry.input));
+                    slot.1 = slot.1.saturating_add(token_to_i64(entry.output));
+                    slot.2 = slot.2.saturating_add(token_to_i64(entry.cache_read));
+                    slot.3 = slot.3.saturating_add(token_to_i64(entry.cache_write));
+                    slot.4 = match (slot.4, entry.cost) {
+                        (Some(sum), Some(c)) => Some(sum + c),
+                        _ => None,
+                    };
+                }
+            }
+            for ((p, m), (i, o, cr, cw, cost)) in acc {
+                tx.execute(
+                    "INSERT INTO token_stats (provider, model, total_input, total_output, \n                     total_cache_read, total_cache_write, total_cost) \n                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![p, m, i, o, cr, cw, cost],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        result.map_err(to_acowork)
+    }
+
+    fn token_stats_consistent(&self) -> AcoworkResult<bool> {
+        // One pass over each side, no row transport: the aggregate's column
+        // sums vs a `json_each` fold of every session's `model_usage`
+        // breakdown. Cheap enough to run on every token-stats read.
+        //
+        // Cost is not compared token-style: the aggregate poisons a row's
+        // cost to NULL when any contribution is unpriced, and that NULL
+        // stays valid until `rebuild_token_stats` — so NULL aggregate cost
+        // counts as consistent, and a priced aggregate must match Σ details.
+        let conn = self.store.lock();
+        /// One row of eleven scalars: the aggregate's four token sums, its
+        /// cost fold, the same five folded off the per-session breakdowns,
+        /// plus the aggregate row count.
+        type Sums = (
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<f64>,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<f64>,
+            i64,
+        );
+        let (agg_i, agg_o, agg_cr, agg_cw, agg_cost, det_i, det_o, det_cr, det_cw, det_cost, agg_rows): Sums = conn
+            .query_row(
+                r#"SELECT
+                    (SELECT COALESCE(SUM(total_input), 0)  FROM token_stats),
+                    (SELECT COALESCE(SUM(total_output), 0) FROM token_stats),
+                    (SELECT COALESCE(SUM(total_cache_read), 0)  FROM token_stats),
+                    (SELECT COALESCE(SUM(total_cache_write), 0) FROM token_stats),
+                    (SELECT SUM(total_cost) FROM token_stats),
+                    (SELECT COALESCE(SUM(json_extract(j.value, '$.input')), 0)
+                     FROM sessions s, json_each(s.model_usage) j),
+                    (SELECT COALESCE(SUM(json_extract(j.value, '$.output')), 0)
+                     FROM sessions s, json_each(s.model_usage) j),
+                    (SELECT COALESCE(SUM(json_extract(j.value, '$.cache_read')), 0)
+                     FROM sessions s, json_each(s.model_usage) j),
+                    (SELECT COALESCE(SUM(json_extract(j.value, '$.cache_write')), 0)
+                     FROM sessions s, json_each(s.model_usage) j),
+                    (SELECT SUM(json_extract(j.value, '$.cost'))
+                     FROM sessions s, json_each(s.model_usage) j),
+                    (SELECT COUNT(*) FROM token_stats)"#,
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                    ))
+                },
+            )
+            .map_err(to_acowork_sqlite)?;
+        let tokens_ok =
+            agg_i == det_i && agg_o == det_o && agg_cr == det_cr && agg_cw == det_cw;
+        // Empty aggregate with empty details is consistent; empty aggregate
+        // over non-empty details only slips past the token equality when
+        // every detail contribution is zero — guard the cost fold anyway.
+        let cost_ok = match agg_cost {
+            None => agg_rows > 0 || det_i + det_o + det_cr + det_cw == 0,
+            Some(a) => {
+                let d = det_cost.unwrap_or(0.0);
+                (a - d).abs() <= (a.abs() + d.abs()) * 1e-6
+            }
+        };
+        Ok(tokens_ok && cost_ok)
     }
 
 }
@@ -380,7 +591,7 @@ const SELECT_ALL_COLUMNS: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, last_compaction_summary \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, last_compaction_summary, model_usage \
 FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
@@ -391,7 +602,7 @@ const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, last_compaction_summary \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, last_compaction_summary, model_usage \
 FROM sessions";
 
 /// Clamp a `u64` token counter into SQLite's `i64` column.
@@ -423,7 +634,7 @@ fn upsert_row(
             token_last_input, token_last_output, token_total_input, token_total_output, \
             token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
             perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, \
-            version, corrupted, user_id, visibility, chat_session_id, last_compaction_summary \
+            version, corrupted, user_id, visibility, chat_session_id, last_compaction_summary, model_usage \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
             ?5, ?6, ?7, ?8, ?9, ?10, \
@@ -432,7 +643,7 @@ fn upsert_row(
             ?18, ?19, ?20, ?21, \
             ?22, ?23, ?24, ?25, \
             ?26, ?27, ?28, ?29, \
-            ?30, ?31, ?32, ?33, ?34, ?35 \
+            ?30, ?31, ?32, ?33, ?34, ?35, ?36 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
@@ -468,7 +679,8 @@ fn upsert_row(
             user_id = excluded.user_id, \
             visibility = excluded.visibility, \
             chat_session_id = excluded.chat_session_id, \
-            last_compaction_summary = excluded.last_compaction_summary",
+            last_compaction_summary = excluded.last_compaction_summary, \
+            model_usage = excluded.model_usage",
         params![
             meta.session_id,
             meta.agent_id,
@@ -508,8 +720,79 @@ fn upsert_row(
             meta.visibility.map(|v| v.as_str()),
             meta.chat_session_id,
             meta.last_compaction_summary,
+            serialize_model_usage(meta.model_usage.as_ref()),
         ],
     )?;
+    Ok(())
+}
+
+// ── token statistics helpers ────────────────────────────────────────────
+
+/// Decode the `model_usage` JSON column. Corrupt JSON reads as "no
+/// breakdown": the column is derived-adjacent state and a hand-edited row
+/// must not fail the whole listing (same lenience as `visibility`).
+fn parse_model_usage(json: Option<&str>) -> ModelUsageMap {
+    json.and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+/// Encode a breakdown. The empty map is stored as NULL so a session that
+/// never made an LLM call is indistinguishable from a pre-feature row.
+fn serialize_model_usage(map: Option<&ModelUsageMap>) -> Option<String> {
+    map.filter(|m| !m.is_empty())
+        .and_then(|m| serde_json::to_string(m).ok())
+}
+
+/// Fold one row's breakdown change (`delta = new − old`, per key) into the
+/// agent-scoped `token_stats` aggregate.
+///
+/// The diff is computed against the PERSISTED old breakdown, not against
+/// "what this caller thinks was there before" — which is what makes the
+/// maintenance idempotent and self-healing: a lost delta (crash between two
+/// writes) or a replayed one (retry) is corrected by the next upsert, and
+/// the aggregate always equals Σ(breakdowns) after any successful write.
+///
+/// Cost follows the "宁可 miss 也不估计" poison rule: a delta whose cost
+/// cannot be computed (either side lacks a price) sets the aggregate row's
+/// `total_cost` to NULL, where it stays until [`Self::rebuild_token_stats`]
+/// re-derives from rows that individually know their cost. A fabricated 0
+/// would read as "free".
+fn apply_stats_delta(
+    conn: &Connection,
+    old: &ModelUsageMap,
+    new: &ModelUsageMap,
+) -> rusqlite::Result<()> {
+    let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+    for key in keys {
+        let o = old.get(key);
+        let n = new.get(key);
+        let delta = |get: fn(&ModelUsageEntry) -> u64| {
+            token_to_i64(n.map(get).unwrap_or(0)) - token_to_i64(o.map(get).unwrap_or(0))
+        };
+        let (d_in, d_out) = (delta(|e| e.input), delta(|e| e.output));
+        let (d_cr, d_cw) = (delta(|e| e.cache_read), delta(|e| e.cache_write));
+        // Skip no-op keys: re-applying a zero delta would poison the cost
+        // row even where nothing changed.
+        let same_cost = o.map(|e| e.cost) == n.map(|e| e.cost);
+        if d_in == 0 && d_out == 0 && d_cr == 0 && d_cw == 0 && same_cost {
+            continue;
+        }
+        // A cost delta is only computable when both sides carry a price (or
+        // the key is brand new and the previous aggregate never saw it, or
+        // a priced key is removed — delete/prune must subtract the known
+        // cost, not poison the row that other priced sessions still share).
+        let d_cost: Option<f64> = match (o.map(|e| e.cost), n.map(|e| e.cost)) {
+            (Some(Some(oc)), Some(Some(nc))) => Some(nc - oc),
+            (None, Some(Some(nc))) => Some(nc),
+            (Some(Some(oc)), None) => Some(-oc),
+            _ => None,
+        };
+        let (provider, model) = split_model_usage_key(key);
+        conn.execute(
+            "INSERT INTO token_stats (provider, model, total_input, total_output, \n             total_cache_read, total_cache_write, total_cost) \n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \n             ON CONFLICT(provider, model) DO UPDATE SET \n                total_input = total_input + excluded.total_input, \n                total_output = total_output + excluded.total_output, \n                total_cache_read = total_cache_read + excluded.total_cache_read, \n                total_cache_write = total_cache_write + excluded.total_cache_write, \n                total_cost = CASE \n                    WHEN token_stats.total_cost IS NULL OR excluded.total_cost IS NULL THEN NULL \n                    ELSE token_stats.total_cost + excluded.total_cost \n                END",
+            params![provider, model, d_in, d_out, d_cr, d_cw, d_cost],
+        )?;
+    }
     Ok(())
 }
 

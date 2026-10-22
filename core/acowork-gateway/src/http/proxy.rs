@@ -186,6 +186,7 @@ pub fn proxy_routes() -> Router<AppState> {
             put(proxy_put_session_workspace),
         )
         .route("/api/agents/{id}/latest-session", get(proxy_latest_session))
+        .route("/api/agents/{id}/token-stats", get(proxy_token_stats))
         .route(
             "/api/agents/{id}/sessions/{sid}/messages",
             get(proxy_get_messages).post(proxy_post_message),
@@ -826,6 +827,18 @@ async fn proxy_latest_session(
     headers: HeaderMap,
 ) -> Response {
     proxy_to_runtime(&state, &id, "/sessions/latest", "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/token-stats` to Runtime's `GET /sessions/token-stats`.
+///
+/// Per-model token statistics are read off the runtime's own SQLite
+/// aggregate — no Gateway-side filesystem access (redline unchanged).
+async fn proxy_token_stats(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_to_runtime(&state, &id, "/sessions/token-stats", "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/health` to Runtime's `GET /health`.

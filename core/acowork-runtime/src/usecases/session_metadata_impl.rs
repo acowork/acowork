@@ -14,6 +14,7 @@ use crate::error::{Result, RuntimeError};
 use crate::usecases::agent_token::AgentTokenService;
 use crate::usecases::session_metadata::{
     MessagesResponse, SessionDetail, SessionMetadataService, SessionSummary, SessionsListResponse,
+    TokenStatsResponse,
 };
 
 pub struct RuntimeSessionMetadataService {
@@ -204,6 +205,17 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             total: paginated.total,
             count,
         })
+    }
+
+    async fn token_stats(&self) -> Result<TokenStatsResponse> {
+        let store = conversation::session_meta_store(&self.work_dir.join("conversations"))
+            .map_err(RuntimeError::Io)?;
+        let items = store.token_stats().map_err(RuntimeError::Core)?;
+        // Drift is surfaced as a flag, never as a failed read — the panel
+        // shows the numbers with a caveat and a rebuild stays the repair
+        // path (disposable derived index, ADR-082 pattern).
+        let consistent = store.token_stats_consistent().unwrap_or(false);
+        Ok(TokenStatsResponse { items, consistent })
     }
 }
 
