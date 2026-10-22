@@ -6,7 +6,7 @@
 
 ## 1. Goals and Constraints
 
-Every Chat Router turn is a **stateless** LLM call: no resident session is created, and the context is rebuilt from chat history and runtime state. The orchestration must therefore satisfy three properties at once:
+Every Chat Router turn is a **stateless** LLM call (a turn may call the model more than once when it runs information rounds — see ADR-099 D3): no resident session is created, and the context is rebuilt from chat history and runtime state. The orchestration must therefore satisfy three properties at once:
 
 1. **Semantic completeness**: the model sees recent conversation, the current draft config, and the routable execute sessions;
 2. **Prefix stability**: between adjacent turns nothing changes except the tail, maximising provider prompt-cache hits;
@@ -63,9 +63,9 @@ The order is fixed and the separator is fixed (`\n\n`); no content-based sorting
 
 The base is maintained by the Runtime and contains:
 
-1. Role boundary: you are the conversation front desk of `<agent display_name>`; you may only answer, route, or create an execution session;
-2. Tool contract: the only tool is `dispatch`, with its parameter semantics and alias rules;
-3. Decision rules: answer / hand off / create / clarify (aligned with ADR-099's routing guidelines);
+1. Role boundary: you are the conversation front desk of `<agent display_name>`; you may answer, look a fact up, route, or create an execution session;
+2. Tool contract: `dispatch` is the only routing tool, with its parameter semantics and alias rules; two read-only information tools are also exposed (`memory_recall`, `http_request` GET-only); the number of lookup rounds is a prompt-level soft limit ("usually zero, rarely one or two"), never a hard code cap;
+3. Decision rules: answer / hand off / create / clarify (aligned with ADR-099's routing guidelines, whose core is the cost asymmetry of dispatch: a wrong handoff is far more expensive than a missed one — when unsure, ask);
 4. Safety rules: use only information in the candidate list; never restate other chats; never promise execution details; never @ another agent on the human's behalf.
 
 `prompts/chat.md` may **replace only the Persona section**, never the base. Even if an author writes "you can edit code directly", the router has no such tool and cannot act on it.
@@ -167,7 +167,7 @@ The guard test is "two projections of the same input are equal".
 The naive "last N messages" implementation drops the oldest message on every new one, shifting the whole array and changing the prefix hash — cache hits collapse to near zero. This design uses an **anchor + batch trim** to amortise rebuilds:
 
 - `anchor_seq`: the front boundary of the window — the `seq` of the newest row already excluded; every returned row satisfies `seq > anchor_seq`;
-- `max_history`: default 24;
+- `max_history`: default 32 (widened from 24 once the router gained information tools — the think/tool rounds a lookup spends inside one turn eat context, so a few more conversation rows must stay in view to judge relevance well);
 - `slack`: default 8;
 - `retain`: default 16.
 
@@ -258,9 +258,10 @@ The `ChatMessage.cache_control` field already exists (ADR-060); only the flaggin
 Byte-identical across turns:
 
 - `model` / `provider` (from the `chat_router` config, independent of messages);
-- `temperature` (default 0), `max_tokens` (default 512);
-- `tools`: only `dispatch`, with a fixed struct serialisation and fixed field order;
-- `tool_choice`: `auto`, never varying.
+- `temperature` (default 0), `max_tokens` (default 2048 — enough that one `assistant → tool_call → tool_result → assistant` round of think + tool arguments + final text is never cut mid-call);
+- `tools`: `dispatch` plus the read-only information tools the agent has enabled (`memory_recall`, GET-only `http_request`), serialised from fixed literals in fixed field order — byte-stable for a given (binary version, enablement set);
+- `tool_choice`: `auto`, never varying;
+- the `assistant(tool_calls)` / `tool` messages an information round produces live only inside that turn's request — never written back to chat history, never entering Block B.
 
 ### 6.3 Minimum cacheable length
 

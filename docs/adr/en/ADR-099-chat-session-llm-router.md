@@ -1,7 +1,7 @@
 # ADR-099: LLM Semantic Routing for Chat Sessions (Chat Router)
 
 - **Number**: ADR-099
-- **Status**: Accepted
+- **Status**: Accepted (revised 2026-10-22: D3/D6 add read-only information tools to the router; D3 adds the routing-time delivery anchor and the execution-side pending queue, see below)
 - **Date**: 2026-10-21
 - **Deciders**: ACowork Architecture Group
 - **Related**: Design 27 (Intent Messaging and Group Chat), Design 29 (Chat Session Context Orchestration), ADR-060 (Prompt-Cache-Friendly Context Block Reorganization), ADR-063 (Package-Level Prompt Override), ADR-066 (Provider Cache Tokens), ADR-076 (Multi-User Account System), ADR-085 (Agent Lifecycle State Machine), ADR-092 (User Message Identity and Bounded Reads), ADR-096 (No Full Session Reads), ADR-098 (Unified Standard Group Model)
@@ -16,7 +16,7 @@ A chat session is not currently an LLM context: which execute session receives a
 
 This ADR decides on a layered approach: **the chat layer introduces one restricted-tool LLM turn (Chat Router) for the semantic decision; the execution layer keeps physical rotation as a context safety valve**. T3 is deleted, T1 is demoted from a hard rule to a prompt signal, and T2 only happens inside the same logical task chosen by the router, so summaries no longer pollute unrelated tasks.
 
-The routing carrier is `ChatSessionManager` (isolated per `chat_session_id`; in a group chat each agent is naturally separate), the router has exactly one tool `dispatch`, and the context is orchestrated as "stable prefix + append at the tail" (see Design 29).
+The routing carrier is `ChatSessionManager` (isolated per `chat_session_id`; in a group chat each agent is naturally separate), the router's tool surface is `dispatch` plus two read-only information tools (D3), and the context is orchestrated as "stable prefix + append at the tail" (see Design 29).
 
 ## Background
 
@@ -60,18 +60,34 @@ Each turn rebuilds its context from chat history; no hidden resident session is 
 
 **A router turn never runs on the MQTT inbound loop.** The inbound loop does exactly one thing: push the message onto that chat's FIFO queue, and spawn a drain task only when `push_turn` reports that nobody was draining it. There is always at most one drainer per chat, and `finish_drain` keeps the claim while the queue is non-empty, which closes the "check empty → message enqueued → claim released → message stranded forever" race. Two invariants justify the shape: two turns of one chat must not read the same history anchor concurrently and then race on the write-back, and a slow model must not stall this agent's receive side — `Stop` included. Each turn is wrapped in one more `spawn` inside the drain task, so a panic surfaces as a `JoinErr` and the loop still reaches `finish_drain`; no chat can be left claimed with a queue nobody consumes. An outcome the router hands back (`PassThrough` / `Fallback`) is finished by that same drain task running the deterministic route, so a degradation costs latency, never the message, and never re-enters the queue.
 
-### D3 — Single `dispatch` tool and the tool visibility matrix
+### D3 — `dispatch`, read-only information tools, and the tool visibility matrix
 
-`dispatch(target = "<candidate alias>" | "new", message?, session_config?)`; no tool call means a plain-text answer. Candidates use short `S1/S2` aliases mapped to real session ids at runtime.
+`dispatch(target = "<candidate alias>" | "new", message?, session_config?)`; not calling `dispatch` means a plain-text answer. Candidates use short `S1/S2` aliases mapped to real session ids at runtime.
+
+So that "the answer needs a bit of information" no longer degrades into "hand the message to an execution session", the router also exposes two **read-only information tools**:
+
+- `memory_recall`: searches this agent's long-term memory (the same builtin as the execute side; the retrieval strategy is unchanged);
+- `http_request`: **narrowed to GET-only** — the router-side schema carries no `method`/`body`/`content_type`, and at execution time the runtime additionally forces `method = "GET"`, a scheme allowlist (http/https), and an inner timeout below the turn timeout — belt and braces.
 
 | Tool | chat router turn | execute turn |
 |---|---|---|
-| `dispatch` | the only tool | not exposed |
+| `dispatch` | the only routing tool | not exposed |
+| `memory_recall` | available (on-demand recall) | available |
+| `http_request` | available (GET-only) | available |
 | `intent_send` | not exposed | available (hidden in the responder role) |
 | `chat_history_read` | not exposed (history is injected) | available |
 | `ask_user_question` | not exposed (clarify in text) | available (hidden in human-free sessions) |
+| shell / file / other execution tools | not exposed | per manifest/config |
+
+The executor boundary is unchanged: the router has no execution tool, so no package persona can turn it into an executor; information tools only read, they never change anything. Tool instances are resolved by name off `all_tools` (the enabled-builtin subset), so the agent-level toggle governs the router too.
+
+**The round budget is a prompt-level soft limit, not a hard code cap**: information rounds have no fixed maximum (hard-cutting an in-flight lookup lands the failure in a *more* uncontrolled shape); the safety envelope is the per-call model timeout, the per-call tool timeout, and the read-only tool surface. One turn's `user → assistant → tool_call → tool_result → assistant` chain is kept whole inside a single request: the output ceiling `max_tokens` is relaxed to 2048 (think + tool arguments + final text are never cut mid-call), and each tool result is capped at 8KB (UTF-8-boundary truncation with a marker). Tool messages are never written back to chat history, so Block B does not inflate.
 
 `dispatch` selects a session inside this agent only; `intent_send` is what crosses agents. The router must not @ another agent on the human's behalf — `@` is a user action.
+
+**Delivery is anchored at routing time, and a busy target shows a real pending queue.** When a turn is dispatched (or legacy-routed) into an execution session, the `turn_started` pointer is written to the chat as soon as the intent is delivered — not when a possibly-busy session dequeues it minutes later — so the chat surface stops projecting "assigning" while the work is queued. On the execution side, an intent routed into a session that is *already active* is recorded in a small bounded pending list (sender + ≤120-char excerpt + `from_chat` flag, ADR-096) and projected through the existing retained `session_state` snapshot, so the composer's queue box shows the chat-forwarded message that was previously invisible in the inbound channel. It is cleared when the session dequeues the intent to start its turn; an idle session never enqueues. No new write entry point, no persistence.
+
+**The cost asymmetry of dispatch is the core of the decision rules** (written into the non-overridable base prompt): a wrong dispatch is far more expensive than a missed one (a wrong handoff wakes a whole execution session and derails the conversation; not dispatching only costs the user a moment before asking again). Route only when the message clearly belongs to one candidate task or plainly starts new work; questions, greetings, small talk, and factual lookups you can do yourself are always answered directly; when it is unclear whether routing is needed, reply or ask one clarifying question instead of guessing.
 
 ### D4 — Candidate rules and multi-user isolation
 
@@ -98,7 +114,7 @@ The execute prompt (`prompts/system.md` + `constraints.md` + other `prompts/*.md
 2. Persona section: optional `prompts/chat.md`, falling back to the manifest's `name`/`role`/`description`, capped at 4KB;
 3. Scenario section: two stable variants for 1:1 and group chat.
 
-`chat.md` joins the ADR-063 package-level override list and is therefore also excluded from execute prompt assembly; `POST /agents/{id}/prompts/reload` refreshes it. The router loads no skills, workspace prompt file, or retrieved memory.
+`chat.md` joins the ADR-063 package-level override list and is therefore also excluded from execute prompt assembly; `POST /agents/{id}/prompts/reload` refreshes it. The router loads no skills, no workspace prompt file, and does **not auto-inject** retrieved memory — memory is reachable only on demand through `memory_recall` (D3).
 
 ### D7 — Group chat and PM dispatch boundaries
 
@@ -190,7 +206,7 @@ Additional acceptance:
 
 ## Tests
 
-- Unit: candidate filtering, dispatch parsing, prompt layering, tool visibility, deterministic projection and prefix stability, fallback; the queue invariants (one drainer per chat, FIFO, a turn arriving while the drainer finishes is not left behind, an idle queue is dropped and reclaimed); the kill switch neither queues nor fails to deliver inline; a turn the router hands back (`PassThrough` / `Fallback`) is still delivered while a `Handled` one is not delivered twice; `session_config` applies on both reuse branches (target is the mapped session / target is another live session); a chat binding outranks the requested `visibility`.
+- Unit: candidate filtering, dispatch parsing, prompt layering, tool visibility (including the router-side GET-only schema and its runtime enforcement), deterministic projection and prefix stability, fallback, information-tool rounds (a failed lookup comes back as a tool result, oversized results are cut on char boundaries); the queue invariants (one drainer per chat, FIFO, a turn arriving while the drainer finishes is not left behind, an idle queue is dropped and reclaimed); the kill switch neither queues nor fails to deliver inline; a turn the router hands back (`PassThrough` / `Fallback`) is still delivered while a `Handled` one is not delivered twice; `session_config` applies on both reuse branches (target is the mapped session / target is another live session); a chat binding outranks the requested `visibility`. The decision log records `info_rounds` (information-tool rounds this turn ran), the audit surface for "should have routed but answered / should have answered but routed".
 - Integration: MockProvider drives the four paths (answer/hand off/create/fallback); T2 still happens inside the chosen session; parallel topics in a group chat; PM tasks appear in group candidates and disappear when terminal; agent-agent mappings unaffected.
 - E2E: router disabled keeps existing assertions; enabled verifies `agent_message` and `turn_started` for 1:1 and group @; PM task-dispatch still lands on `conv:task:`.
 - Regression: `cargo clippy --all-targets -- -D warnings`, `cargo test`, desktop `npm test`.

@@ -1,7 +1,7 @@
 # ADR-099：Chat Session 的 LLM 语义路由（Chat Router）
 
 - **编号**：ADR-099
-- **状态**：已接受
+- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下）
 - **日期**：2026-10-21
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊）、设计 29（Chat Session 上下文编排）、ADR-060（Prompt Cache 友好的上下文块重排）、ADR-063（包级 Prompt 覆盖）、ADR-066（Provider Cache Tokens）、ADR-076（多用户账号体系）、ADR-085（Agent 生命周期状态机）、ADR-092（用户消息身份与有界读取）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
@@ -16,7 +16,7 @@ Chat session 目前不是 LLM 的上下文：用户消息进哪个 execute sessi
 
 本 ADR 决定分层：**Chat 层引入一次受限工具集的 LLM turn（Chat Router）做语义决策；执行层保留物理轮转作为上下文安全阀**。T3 删除，T1 从硬规则降级为 prompt 信号，T2 只在 router 选定的同一逻辑任务内发生，从而让摘要不再污染无关任务。
 
-路由的载体是 `ChatSessionManager`（按 `chat_session_id` 隔离，群聊中每个 agent 天然独立），router 只有一个工具 `dispatch`，上下文按「稳定前缀 + 末尾追加」三段式编排（详见设计 29）。
+路由的载体是 `ChatSessionManager`（按 `chat_session_id` 隔离，群聊中每个 agent 天然独立），router 的工具面是 `dispatch` 加两个只读信息工具（D3），上下文按「稳定前缀 + 末尾追加」三段式编排（详见设计 29）。
 
 ## 背景
 
@@ -60,18 +60,34 @@ Chat session 目前不是 LLM 的上下文：用户消息进哪个 execute sessi
 
 **router turn 不在 MQTT 入站循环上执行。**入站循环只做一件事：把消息压进该 chat 的 FIFO 队列，`push_turn` 返回「你是第一个」时才起一个 drain task（每条 chat 恰有一个，`finish_drain` 在队列非空时保留占位，消除「查空 → 新消息入队 → 释放占位 → 消息永久滞留」的竞态）。这样做的理由是两条不变量：同一 chat 的两轮不得并发读同一历史锚点再竞写回；一个慢模型不能把这个 agent 的接收面（含 `Stop`）卡住。drain task 内每轮再包一层 `spawn`，turn 里的 panic 表现为 `JoinErr` 后循环仍走到 `finish_drain`，不会留下永久占位却无人消费的队列。router 交还控制权的结果（`PassThrough` / `Fallback`）由同一个 drain task 就地执行确定性路由收尾——降级只花延迟，不丢消息，也绝不重新入队。
 
-### D3 — 单工具 `dispatch` 与工具可见性矩阵
+### D3 — `dispatch` 与只读信息工具、工具可见性矩阵
 
-`dispatch(target = "<候选别名>" | "new", message?, session_config?)`；不调用工具即纯文本回答。候选使用 `S1/S2` 短别名，运行时映射真实 session id。
+`dispatch(target = "<候选别名>" | "new", message?, session_config?)`；不调用 `dispatch` 即纯文本回答。候选使用 `S1/S2` 短别名，运行时映射真实 session id。
+
+为了让「答案需要一点信息」不再退化为「转交给执行会话」，router 同时暴露两个**只读信息工具**：
+
+- `memory_recall`：查本 agent 长期记忆（复用 execute 侧 builtin，检索策略不变）；
+- `http_request`：**收窄为 GET-only**——router 侧 schema 不含 `method`/`body`/`content_type`，执行时运行时再强制 `method = "GET"`、scheme 白名单（http/https）、内层超时小于轮次超时，双保险。
 
 | 工具 | chat router turn | execute turn |
 |---|---|---|
-| `dispatch` | 唯一工具 | 不暴露 |
+| `dispatch` | 唯一路由工具 | 不暴露 |
+| `memory_recall` | 可用（按需检索） | 可用 |
+| `http_request` | 可用（GET-only） | 可用 |
 | `intent_send` | 不暴露 | 可用（responder 角色隐藏） |
 | `chat_history_read` | 不暴露（历史自动注入） | 可用 |
 | `ask_user_question` | 不暴露（澄清用文本） | 可用（无人类会话隐藏） |
+| shell / file / 其它执行工具 | 不暴露 | 按 manifest/配置 |
+
+执行器边界不变：router 没有任何执行工具，包内 persona 无法把它变成执行者；信息工具只读，不改变任何东西。信息工具实例从 `all_tools`（已启用子集）按名解析，agent 级开关同样管住 router。
+
+**轮数约束是提示词软约束，不是代码硬上限**：信息轮次不设硬性次数上限（硬切断正在进行的检索会让结果以更失控的形态落地）；安全边界由逐次模型调用超时、逐次工具超时与只读工具面承担。一个轮次内的 `user → assistant → tool_call → tool_result → assistant` 链完整保留在同一个 request 里：输出预算 `max_tokens` 放宽到 2048（think + 工具参数 + 终稿不被截断），单条工具结果上限 8KB（UTF-8 边界截断加标记）。工具消息不写回 chat 历史，Block B 不膨胀。
 
 `dispatch` 只在本 agent 内选 session；`intent_send` 才跨 agent。router 不得代人类 @ 其他 agent——`@` 是用户行为。
+
+**投递在路由时锁定，正忙的目标会话展示真实 pending 队列。**一个 turn 被 dispatch（或确定性路由）投递入 execution session 后，`turn_started` 指针在意图送达时就写入 chat，而不是等（可能正忙的）会话几分钟后排到它才写，于是排队期间 chat 界面不再投影「正在分配」。执行侧：路由进一个*已经活跃*会话的意图会被记入一份小的有界 pending 清单（发送者 + ≤120 字符摘要 + `from_chat` 标记，ADR-096），经既有的 retained `session_state` 快照推送，于是输入框上方的队列盒能显示之前在入站通道里隐形的 chat 转发消息。会话出队该意图开跑时即清除；idle 会话从不入队。不引入新写入口、不持久化。
+
+**dispatch 的代价不对称是决策规则的核心**（写进不可覆盖的基座提示词）：错误转交的代价远大于漏转交（错发会唤醒整个执行会话、打断对话；不发用户随时可以补一句）。只有当消息与某个候选任务有清晰关联、或明显开启新工作时才 `dispatch`；闲聊、提问、可自查的事实查询一律自己回答；不确定是否需要转交时，回复或问一句澄清，而不是猜测转交。
 
 ### D4 — 候选规则与多用户隔离
 
@@ -98,7 +114,7 @@ execute prompt（`prompts/system.md` + `constraints.md` + 其他 `prompts/*.md` 
 2. Persona 段：可选 `prompts/chat.md`，缺失时回退 manifest 的 `name`/`role`/`description`，上限 4KB；
 3. 场景段：1:1 / 群聊两个稳定变体。
 
-`chat.md` 纳入 ADR-063 的包级 override 清单，因此也从 execute prompt 拼接中排除；`POST /agents/{id}/prompts/reload` 同步刷新。router 不加载 skills、workspace prompt file 或 retrieved memory。
+`chat.md` 纳入 ADR-063 的包级 override 清单，因此也从 execute prompt 拼接中排除；`POST /agents/{id}/prompts/reload` 同步刷新。router 不加载 skills、workspace prompt file，也不**自动注入** retrieved memory——只允许通过 `memory_recall` 按需检索（D3）。
 
 ### D7 — 群聊与 PM 派单边界
 
@@ -190,7 +206,7 @@ graph TD
 
 ## 测试
 
-- 单元：候选过滤、dispatch 解析、prompt 分层、工具可见性、上下文投影确定性与前缀稳定性、降级；队列不变量（单 drainer、FIFO、drainer 收尾时到达的消息不滞留、空闲队列回收）；kill switch 下不排队且内联投递；router 交还控制权（`PassThrough`/`Fallback`）时消息仍被投递且 `Handled` 不重复投递；`session_config` 在两条复用分支（目标是当前映射会话 / 目标是另一活会话）都生效；chat 绑定优先于请求体里的 `visibility`。
+- 单元：候选过滤、dispatch 解析、prompt 分层、工具可见性（含 router 侧 GET-only schema 与运行时强制）、上下文投影确定性与前缀稳定性、降级、信息工具轮次（工具失败作为 tool result 回馈、超长结果边界截断）；队列不变量（单 drainer、FIFO、drainer 收尾时到达的消息不滞留、空闲队列回收）；kill switch 下不排队且内联投递；router 交还控制权（`PassThrough`/`Fallback`）时消息仍被投递且 `Handled` 不重复投递；`session_config` 在两条复用分支（目标是当前映射会话 / 目标是另一活会话）都生效；chat 绑定优先于请求体里的 `visibility`。决策日志记录 `info_rounds`（本轮信息工具轮数），为「该转的没转 / 不该转的转了」提供审计面。
 - 集成：MockProvider 驱动回答/转交/新建/降级四条路径；T2 在选定会话内仍发生；群聊多话题并行；PM 任务进入群聊候选且终态后消失；agent-agent 映射不受影响。
 - E2E：router 关闭保持现有断言；开启后验证 1:1 与群聊 @ 的 `agent_message` 与 `turn_started`；PM task-dispatch 直达 `conv:task:`。
 - 回归：`cargo clippy --all-targets -- -D warnings`、`cargo test`、桌面端 `npm test`。

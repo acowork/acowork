@@ -6,7 +6,7 @@
 
 ## 1. 目标与约束
 
-Chat Router 每轮都是一次**无状态**的 LLM 调用：不建常驻 session，上下文全部从 chat 历史与运行时状态重建。因此编排必须同时满足三件事：
+Chat Router 每轮都是**无状态**的 LLM 调用（一轮内可多次调用模型：信息工具轮次见 ADR-099 D3）：不建常驻 session，上下文全部从 chat 历史与运行时状态重建。因此编排必须同时满足三件事：
 
 1. **语义完整**：模型能看到近期对话、当前草稿配置、可路由的执行会话；
 2. **前缀稳定**：相邻轮次之间，除末尾追加外不改动任何字节，最大化 provider prompt cache 命中；
@@ -63,9 +63,9 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 
 基座由 Runtime 维护，包含：
 
-1. 角色边界：你是 `<agent display_name>` 的对话前台，只能回答、路由或新建执行会话；
-2. 工具契约：唯一工具 `dispatch`，参数语义与别名规则；
-3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致）；
+1. 角色边界：你是 `<agent display_name>` 的对话前台，只能回答、查一个信息、路由或新建执行会话；
+2. 工具契约：路由工具只有 `dispatch`（参数语义与别名规则）；另有两个只读信息工具 `memory_recall` / `http_request`（GET-only），轮数由提示词软约束（"通常零次，最多一两次"），不用代码硬上限；
+3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致，核心是 dispatch 代价不对称：错发远比漏发贵，不确定就问）；
 4. 安全规则：只使用候选清单中的信息；不复述其他 chat 的内容；不承诺执行细节；不代人类 @ 其他 agent。
 
 包内 `prompts/chat.md` **只能替换 Persona 段**，不能替换基座。这样即使 agent 作者写了"你可以直接改代码"，router 也没有对应工具，行为不会被诱导。
@@ -167,7 +167,7 @@ router **不加载**：
 朴素实现「最近 N 条」会在每来一条新消息时丢掉最旧一条，导致整个 messages 数组左移、前缀 hash 全变——缓存命中率接近 0。本设计用**锚点 + 批量裁剪**摊销重建成本：
 
 - `anchor_seq`：窗口前端边界——已排除的最新一条消息的 `seq`，返回的窗口全部满足 `seq > anchor_seq`；
-- `max_history`：默认 24 条；
+- `max_history`：默认 32 条（router 获得信息工具后从 24 放宽：一轮里用于查询的 think/工具轮会占用上下文，需要多留几轮对话才能判准相关性）；
 - `slack`：默认 8 条；
 - `retain`：默认 16 条。
 
@@ -258,9 +258,10 @@ S2           idle     3h  task  Review ADR-098
 跨轮必须逐字节一致：
 
 - `model` / `provider`（来自 `chat_router` 配置，不随消息变化）；
-- `temperature`（默认 0）、`max_tokens`（默认 512）；
-- `tools` 数组：只有 `dispatch`，schema 用固定 struct 序列化，字段顺序固定；
-- `tool_choice`：默认 `auto`，不随轮次变化。
+- `temperature`（默认 0）、`max_tokens`（默认 2048，保证一轮 `assistant → tool_call → tool_result → assistant` 的 think + 工具参数 + 终稿不被截断）；
+- `tools` 数组：`dispatch` + 按启用状态拼接的只读信息工具（`memory_recall`、GET-only `http_request`），schema 用固定字面量序列化，字段顺序固定，对固定的（二进制版本，启用集合）逐字节稳定；
+- `tool_choice`：默认 `auto`，不随轮次变化；
+- 信息轮次产生的 `assistant(tool_calls)` / `tool` 消息只存在于本轮 request 内，不写回 chat 历史，不进入 Block B。
 
 ### 6.3 最小可缓存长度
 
