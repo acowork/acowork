@@ -16,6 +16,8 @@ let openSessionMock: ReturnType<typeof vi.fn>;
 // `closedCardIds`, …) are kept REAL via importOriginal so the view's card +
 // processing-dot wiring is exercised against the actual projection rules.
 let windows: Record<string, unknown>;
+let drafts: Record<string, unknown> = {};
+let availableModels: unknown[] = [];
 
 vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../stores/chatSessionStore")>();
@@ -23,7 +25,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
     ...actual,
     useChatSessionStore: Object.assign(
       (selector: (state: unknown) => unknown) =>
-        selector({ windows, sending: {}, draft: {} }),
+        selector({ windows, sending: {}, draft: drafts }),
       {
         getState: () => ({
           sendText: vi.fn().mockResolvedValue(undefined),
@@ -42,7 +44,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: Object.assign(
     (selector: (state: unknown) => unknown) =>
-      selector({ availableModels: [], providerAccounts: [] }),
+      selector({ availableModels, providerAccounts: [] }),
     { getState: () => ({ openSession: (...a: unknown[]) => openSessionMock(...(a as [])) }) },
   ),
 }));
@@ -253,5 +255,42 @@ describe("AgentChatView unified-card wiring", () => {
       await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7"));
       await waitFor(() => expect(setModeMock).toHaveBeenCalledWith(AGENT, "exec"));
     });
+  });
+});
+
+// Regression: the composer used to resolve the effort label inline as
+// `draft.reasoning_effort ?? default_reasoning_effort ?? null`, skipping the
+// "reasoning-capable -> auto" level that resolveDefaultReasoningEffort (and
+// the backend) apply. A custom-provider model with capabilities but no
+// configured default therefore showed no toggle on the Chat surface while
+// the execution surface showed one.
+describe("AgentChatView reasoning-effort toggle", () => {
+  beforeEach(() => {
+    windows = {};
+    drafts = { [SESSION]: { model: "qwen3.8-flash", provider: "custom-loostone" } };
+    availableModels = [];
+    setModeMock = vi.fn();
+    openSessionMock = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
+  });
+
+  it("shows the toggle for a reasoning-capable model with no default effort", () => {
+    availableModels = [{ name: "qwen3.8-flash", provider: "custom-loostone", reasoning: true }];
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.getByTestId("effort-menu")).toBeTruthy();
+  });
+
+  it("shows the toggle when the model has a configured default effort", () => {
+    availableModels = [
+      { name: "qwen3.8-flash", provider: "custom-loostone", reasoning: true, default_reasoning_effort: "medium" },
+    ];
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.getByTestId("effort-menu")).toBeTruthy();
+  });
+
+  it("hides the toggle for a model that does not support reasoning", () => {
+    availableModels = [{ name: "qwen3.8-flash", provider: "custom-loostone", reasoning: false }];
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.queryByTestId("effort-menu")).toBeNull();
   });
 });

@@ -39,6 +39,20 @@ export function resolveDefaultReasoningEffort(
   provider: string,
 ): string | null {
   const entry = models.find((m) => m.name === model && m.provider === provider);
+  return defaultEffortOf(entry);
+}
+
+/**
+ * Same resolution chain as [`resolveDefaultReasoningEffort`] but for an
+ * already-located model entry (the Chat composer resolves its own
+ * `(name, provider)` match and must not re-implement the chain — that
+ * drift caused reasoning-capable models without an explicit
+ * `default_reasoning_effort` (e.g. custom-provider models) to hide the
+ * effort toggle on the Chat surface while the execution surface showed it).
+ */
+export function defaultEffortOf(
+  entry: Pick<ModelEntry, "reasoning" | "default_reasoning_effort"> | null | undefined,
+): string | null {
   if (!entry) return null;
 
   // Level 1: provider-recommended default.

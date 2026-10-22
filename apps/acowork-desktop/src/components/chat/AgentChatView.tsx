@@ -51,6 +51,7 @@ import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { detectPaste } from "./pasteDetect";
 import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
+import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ExecSessionStatusCard } from "./ExecSessionStatusCard";
 import { useLocateMessage } from "../../lib/useLocateMessage";
@@ -668,18 +669,18 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const currentModelId = draft.model ?? agentModel?.model ?? null;
   const currentProviderId = draft.provider ?? agentModel?.provider ?? null;
   // Reasoning affordance comes from the model inventory (the Chat surface
-  // has no session to read `reasoningEffort` off): show the effort control
-  // only when the selected model supports reasoning, defaulting the label to
-  // that model's own default until the user picks a level.
+  // has no session to read `reasoningEffort` off). The label is resolved
+  // through `defaultEffortOf` — the same three-level chain the execution
+  // surface and the backend use (draft → model default → reasoning-capable
+  // → "auto"), so a reasoning-capable model with no configured default
+  // still shows the toggle here.
   const currentModelEntry =
     availableModels.find(
       (m) => m.name === currentModelId && m.provider === currentProviderId,
     ) ??
     availableModels.find((m) => m.name === currentModelId) ??
     null;
-  const reasoningSupported = !!currentModelEntry?.reasoning;
-  const reasoningEffort =
-    draft.reasoning_effort ?? currentModelEntry?.default_reasoning_effort ?? null;
+  const reasoningEffort = draft.reasoning_effort ?? defaultEffortOf(currentModelEntry);
 
   // Auto-pagination: reaching the top band triggers the next older page — no
   // click. Guarded by `hasMore` and the in-flight `loadingOlder` flag so it
@@ -905,7 +906,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 btnId="model"
               />
             )}
-            {reasoningSupported && reasoningEffort != null && (
+            {reasoningEffort != null && (
               <ReasoningEffortMenu
                 textHidden={false}
                 effort={reasoningEffort}

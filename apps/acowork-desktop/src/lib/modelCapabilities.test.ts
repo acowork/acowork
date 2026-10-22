@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveDefaultReasoningEffort } from "./modelCapabilities";
+import { resolveDefaultReasoningEffort, defaultEffortOf } from "./modelCapabilities";
 import type { ModelEntry } from "./types";
 
 // resolveDefaultReasoningEffort is the single source of truth used by both
@@ -118,5 +118,43 @@ describe("resolveDefaultReasoningEffort", () => {
     expect(
       resolveDefaultReasoningEffort(MODELS, "claude-opus-4-7", ""),
     ).toBeNull();
+  });
+});
+
+// defaultEffortOf is the entry-level chain shared with the Chat composer
+// (AgentChatView), which locates its own model entry and must not
+// re-implement the levels. Regression: the Chat surface used inline
+// `default_reasoning_effort ?? null`, so reasoning-capable models with no
+// configured default (custom providers) hid the effort toggle there while
+// the execution surface showed it.
+describe("defaultEffortOf", () => {
+  it("returns default_reasoning_effort when present", () => {
+    expect(
+      defaultEffortOf({ reasoning: true, default_reasoning_effort: "medium" }),
+    ).toBe("medium");
+  });
+
+  it("returns 'auto' when reasoning-capable with no default (the regression case)", () => {
+    expect(
+      defaultEffortOf({ reasoning: true, default_reasoning_effort: undefined }),
+    ).toBe("auto");
+  });
+
+  it("returns null when reasoning is falsy or absent", () => {
+    expect(defaultEffortOf({ reasoning: false })).toBeNull();
+    expect(defaultEffortOf({})).toBeNull();
+  });
+
+  it("returns null for a null/undefined entry", () => {
+    expect(defaultEffortOf(null)).toBeNull();
+    expect(defaultEffortOf(undefined)).toBeNull();
+  });
+
+  it("agrees with resolveDefaultReasoningEffort for every list entry", () => {
+    for (const m of MODELS) {
+      expect(defaultEffortOf(m)).toBe(
+        resolveDefaultReasoningEffort(MODELS, m.name, m.provider),
+      );
+    }
   });
 });
