@@ -434,11 +434,15 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
     if (renamingSessionId && lastRenamingIdRef.current !== renamingSessionId) {
       // Read the latest session title imperatively so this effect does not
       // re-run (and cancel the focus animation frame) on unrelated session
-      // list updates while the rename input is open.
+      // list updates while the rename input is open. Live overlay first —
+      // that is what the tab itself displays.
+      const live = useChatStore
+        .getState()
+        .getSessionState(agentId, renamingSessionId)?.title;
       const session = useAgentStore
         .getState()
         .agents[agentId]?.sessions.find((s) => s.session_id === renamingSessionId);
-      const seed = session?.title || t("sessionTabBar.untitled");
+      const seed = live || session?.title || t("sessionTabBar.untitled");
       setRenameValue(seed);
       const frame = requestAnimationFrame(() => {
         const input = renameInputRef.current;
@@ -454,10 +458,12 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renamingSessionId, agentId, t]);
 
-  // Get title for a session
+  // Get title for a session — live per-session overlay first (fed by the
+  // config mapper, like model/provider), then the `fetchSessions` snapshot.
   const getTitle = (sessionId: string): string => {
-    const session = sessions.find((s) => s.session_id === sessionId);
-    return session?.title || t("sessionTabBar.untitled");
+    const live = agent?.sessionStates[sessionId]?.title;
+    const snapshot = sessions.find((s) => s.session_id === sessionId)?.title;
+    return live || snapshot || t("sessionTabBar.untitled");
   };
 
   // Get status for a session tab
@@ -569,9 +575,11 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
     renamingSessionIdRef.current = null;
     setRenamingSessionId(null);
     const trimmed = renameValue.trim();
-    // Compare against the *displayed* title, so an untitled tab seeded with
-    // the localized "Untitled" fallback is treated as unchanged on Enter.
+    // Compare against the *displayed* title (live overlay first, same order
+    // as `getTitle`), so an untitled tab seeded with the localized
+    // "Untitled" fallback is treated as unchanged on Enter.
     const current =
+      agent?.sessionStates[sessionId]?.title ||
       sessions.find((s) => s.session_id === sessionId)?.title ||
       t("sessionTabBar.untitled");
     // Empty / unchanged → close without a server roundtrip.

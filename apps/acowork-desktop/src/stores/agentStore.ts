@@ -488,8 +488,6 @@ interface AgentStoreState {
     sessionId: string,
     visibility: "public" | "private",
   ) => Promise<void>;
-  /** Update a session's title locally (no API call). */
-  updateSessionTitle: (sessionId: string, title: string) => void;
 
   // ── Agent lifecycle (MQTT-driven) ──
 
@@ -1425,6 +1423,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       });
     });
 
+    // Also write the live per-session overlay (`chatStore.sessionStates[sid].title`)
+    // — the open tab and the execution status card read that first, so a
+    // manual rename must land there too, not only in the list snapshot.
+    // The backend echoes the persisted title back via `session_config`.
+    useChatStore.getState().setSessionTitleLocal(agentId, sessionId, title);
+
     try {
       // ADR-076 §决策 4: authenticated HTTP write (was MQTT
       // `update_session_title`).
@@ -1469,33 +1473,6 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       log.error("[AgentStore] Failed to set session visibility:", e);
       throw e;
     }
-  },
-
-  updateSessionTitle: (sessionId: string, title: string) => {
-    set((state) => {
-      for (const id of Object.keys(state.agents)) {
-        const storage = state.agents[id];
-        const idx = storage.sessions.findIndex((s) => s.session_id === sessionId);
-        if (idx !== -1) {
-          const sessions = [...storage.sessions];
-          const existing = sessions[idx];
-          if (!existing || (existing.title && existing.title.trim() !== "")) {
-            break; // already has a title, skip
-          }
-          sessions[idx] = { ...existing, title };
-          // Mirror `renameSession`: keep the sidebar's `sessionTitle` in sync
-          // when the updated session is the most recently created one
-          // (same heuristic `fetchSessions` uses to derive it from
-          // `sessions[0]`). Without this, the AgentList keeps showing
-          // "Untitled" until the next `fetchSessions` round-trip.
-          return patchAgent(state, id, {
-            sessions,
-            ...(idx === 0 ? { sessionTitle: title } : {}),
-          });
-        }
-      }
-      return state;
-    });
   },
 
   // ── Agent lifecycle (MQTT-driven) ──

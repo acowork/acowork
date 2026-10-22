@@ -609,7 +609,19 @@ export function AgentList({ width }: AgentListProps) {
     // canonical addressing key (instance_id, with legacy
     // agent_id fallback); `agent.agent_id` is display-only.
     const id = instanceIdOf(agent);
-    const sessionTitle = agentsMap[id]?.sessionTitle;
+    // Sidebar title = the `fetchSessions`/`fetchLatestSession` snapshot
+    // heuristic (`sessions[0]`). The snapshot is only taken at fetch time,
+    // and the Runtime generates a session's title AFTER the row was listed
+    // (or never re-pushes it after `updateSessionTitle`'s removal), so the
+    // overlay mirrors that same latest session when it is the live one —
+    // same `live ?? snapshot` rule the tab strip and status card use. No
+    // overlay for `sessions[0]` → no-op, preserving `fetchLatestSession`
+    // semantics exactly.
+    const latestSid = agentsMap[id]?.sessions[0]?.session_id;
+    const latestLiveTitle = latestSid
+      ? sessionStatesByAgent[id]?.sessionStates[latestSid]?.title
+      : undefined;
+    const sessionTitle = latestLiveTitle?.trim() ? latestLiveTitle : agentsMap[id]?.sessionTitle;
     // ADR-087: set when the Gateway refused this agent's session calls.
     const accessDenied = agentsMap[id]?.accessDenied === true;
 

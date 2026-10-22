@@ -70,8 +70,9 @@ async function initSessionForAgent(agentId: string): Promise<void> {
   // in-memory cache) already resolved. Without this retry the
   // SessionTabBar would mount before `sessions[]` contained the active
   // session and show "Untitled" until the user manually opened the
-  // session dropdown — same symptom as the `updateSessionTitle`
-  // regression pinned in `agentStore.sessionTitle.test.ts`.
+  // session dropdown — same symptom class as the title-refresh regression
+  // pinned in `agentStore.sessionTitle.test.ts` (now covered by the
+  // per-session config-mapper path).
   const targetSessionId = useChatStore.getState().getActiveSessionId(agentId);
   if (!targetSessionId) return;
   for (let i = 0; i < maxRetries; i++) {

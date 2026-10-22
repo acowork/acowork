@@ -14,7 +14,7 @@ import { useWorkspaceStore } from "./workspaceStore";
 import { releaseAdapterSession, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
 import { getGatewayUrl } from "../lib/config";
 import { emitAgentConfigRefresh } from "../lib/refresh";
-import { sessionConfigToPatch, type SessionConfigInput } from "../lib/sessionConfigMapper";
+import { sessionConfigToPatch, deriveSessionTitle, type SessionConfigInput } from "../lib/sessionConfigMapper";
 import { resolveDefaultReasoningEffort } from "../lib/modelCapabilities";
 import { with503Retry } from "../lib/httpRetry";
 import * as sessionControl from "../lib/session-control";
@@ -446,6 +446,15 @@ interface SessionChatState {
    * `null` = the provider's first account (legacy / single-key sessions).
    */
   providerAccountId: string | null;
+  /**
+   * Per-session title — the live mirror of the backend config `title`.
+   * Like `model` / `provider`, it is fed ONLY through `sessionConfigToPatch`
+   * (HTTP `fetchSessionConfig` + MQTT `session_config`), so it lands whether
+   * or not the session has a row in `agentStore.sessions[]`. It is the
+   * display source for the session you are currently viewing; the list /
+   * sidebar fall back to the `sessions[]` snapshot for never-opened rows.
+   */
+  title: string | null;
   /** Current model chars/token ratio from API calibration */
   ratio: number | null;
   /** Per-session reasoning effort override (frontend display only, source of truth is Runtime) */
@@ -533,6 +542,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   model: null,
   provider: null,
   providerAccountId: null,
+  title: null,
   ratio: null,
   reasoningEffort: null,
   temperature: null,
@@ -956,6 +966,17 @@ interface ChatStore {
   setCurrentModel: (model: string, provider: string, agentId: string, accountId?: string) => void;
   /** ADR-076 §决策 4: switch the session's workspace over authenticated HTTP. */
   setSessionWorkspace: (agentId: string, sessionId: string, workspaceId: string) => void;
+  /** Optimistically set a session's live title (manual rename). Writes the
+   *  per-session overlay that the open tab / status card read — same home as
+   *  model/provider. Empty / whitespace-only titles are ignored: the overlay
+   *  shadows the list snapshot for readers, so a blank must never land. */
+  setSessionTitleLocal: (agentId: string, sessionId: string, title: string) => void;
+  /** Seed a provisional title for a session that has none yet (a Chat-Router
+   *  exec session), derived from the triggering user message. No-op once any
+   *  title exists — live overlay OR the `fetchSessions` snapshot (both are
+   *  backend-authoritative and the Runtime generates a title only once, so a
+   *  snapshot title would never be re-pushed to heal a clobber). */
+  seedOptimisticTitle: (agentId: string, sessionId: string, userMessage: string) => void;
   setAvailableModels: (models: ModelEntry[]) => void;
   setProviderAccounts: (accounts: Record<string, ProviderAccount[]>) => void;
   /** Set per-session reasoning effort override (auto/off/low/medium/high) */
@@ -2006,6 +2027,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         model: null,
         provider: null,
         providerAccountId: null,
+        title: null,
         ratio: null,
         reasoningEffort: null,
         temperature: null,
@@ -2449,15 +2471,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch (error) {
       log.error("[ChatStore] Failed to send continue signal:", error);
     }
-  },
-
-  publishUpdateSessionTitle: (agentId: string, sessionId: string, title: string) => {
-    // ADR-076 §决策 4: authenticated HTTP write (was MQTT
-    // `update_session_title`). The Runtime's config `title` branch does the
-    // same truncate + `title_set` + meta rewrite the MQTT handler did.
-    sessionControl
-      .patchSessionConfig(agentId, sessionId, { title })
-      .catch((err: unknown) => log.warn("[ChatStore] update session title failed:", err));
   },
 
   resolveApproval: (agentId: string) => {
@@ -3108,12 +3121,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       set((state) => updateSessionState(state, agentId, sessionId, sessionPatch));
 
-      // ADR-047 P2: Apply title from config snapshot. Title lives in
-      // agentStore (not SessionChatState) because it's displayed in the
-      // sidebar/session list, not the chat panel.
-      if (typeof config.title === "string" && config.title) {
-        useAgentStore.getState().updateSessionTitle(sessionId, config.title);
-      }
+      // Title is applied by the mapper above (`sessionConfigToPatch` reads
+      // `config.title`), exactly like model/provider — no separate write path
+      // into agentStore.
 
       // Workspace selection is owned by workspaceStore, not SessionChatState.
       if (typeof config.workspace_id === "string" && config.workspace_id) {
@@ -3135,6 +3145,30 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       get().fetchSessionState(agentId, sessionId),
       get().fetchSessionConfig(agentId, sessionId),
     ]);
+  },
+
+  setSessionTitleLocal: (agentId: string, sessionId: string, title: string) => {
+    // Guard: the overlay is read live-first by the tab / status card, so an
+    // empty write would shadow the authoritative `sessions[]` snapshot with
+    // the "Untitled" fallback. Title changes are always non-empty.
+    if (!title.trim()) return;
+    set((state) => updateSessionState(state, agentId, sessionId, { title }));
+  },
+
+  seedOptimisticTitle: (agentId: string, sessionId: string, userMessage: string) => {
+    if (getSessionState(get(), agentId, sessionId).title?.trim()) return; // earlier overlay wins
+    // The `sessions[]` snapshot is equally authoritative: the backend
+    // generates a session's title ONCE (first turn) and never re-pushes it,
+    // so after a restart / `clearAgentSessions` wiped the overlay, a titled
+    // snapshot row must block re-seeding — otherwise the truncated latest
+    // message would shadow the real title with no later push to heal it.
+    const snapshot = useAgentStore
+      .getState()
+      .agents[agentId]?.sessions.find((s) => s.session_id === sessionId)?.title;
+    if (snapshot?.trim()) return;
+    const derived = deriveSessionTitle(userMessage);
+    if (!derived) return;
+    set((state) => updateSessionState(state, agentId, sessionId, { title: derived }));
   },
 }));
 
@@ -4055,11 +4089,6 @@ export function handleMessageEvent(
         title: data.title,
       });
       if (!sid) break;
-      // Title goes into the agent-level sessions[] list (used by the
-      // sidebar) so it shows up the moment the retained MQTT message arrives.
-      if (typeof data.title === "string" && data.title) {
-        useAgentStore.getState().updateSessionTitle(sid, data.title);
-      }
       // MQTT session_config envelope uses model_id / provider_id and encodes
       // "no override" as "" for strings / NaN for floats (prost can't
       // encode Option<T>). Normalize to the unified SessionConfigInput
@@ -4078,6 +4107,10 @@ export function handleMessageEvent(
         // ADR-074: prost `optional uint64` presence → `number | null`.
         // `0` is invalid and never emitted; a missing field is null.
         context_window: typeof data.context_window === "number" && data.context_window > 0 ? data.context_window : null,
+        // Title rides the same snapshot; the mapper treats it additively, so
+        // it lands with or without a `sessions[]` row, and a not-yet-generated
+        // empty value never clobbers an optimistic title.
+        title: typeof data.title === "string" && data.title ? data.title : null,
       };
       const patch = sessionConfigToPatch(mqttConfig, { clearOnNull: true });
       if (Object.keys(patch).length > 0) {

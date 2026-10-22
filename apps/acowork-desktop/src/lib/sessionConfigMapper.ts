@@ -56,6 +56,13 @@ export interface SessionConfigInput {
    * `number | null` (missing field → `null`, never `0` — 0 is invalid).
    */
   context_window?: number | null;
+  /**
+   * Per-session title. Both sources deliver it on the same full snapshot:
+   * the HTTP `SessionConfigSnapshot` as `title: string | null`, the MQTT
+   * `session_config` envelope as `title` (`""` = none). Treated additively
+   * by the mapper (see `SessionConfigPatch.title`), never cleared on null.
+   */
+  title?: string | null;
 }
 
 /**
@@ -76,6 +83,14 @@ export interface SessionConfigPatch {
   temperature?: number | null;
   /** ADR-074: `null` = no per-session override. */
   sessionContextWindow?: number | null;
+  /**
+   * Per-session title. Additive only: an absent/null title in a snapshot
+   * means "not generated yet", NOT "clear the value", so it is never emitted
+   * as `null` (unlike model/provider). This lets an optimistic title survive
+   * until the backend's authoritative title arrives over MQTT, at which point
+   * a non-empty snapshot title overwrites it here.
+   */
+  title?: string;
 }
 
 export interface SessionConfigPatchOptions {
@@ -151,5 +166,29 @@ export function sessionConfigToPatch(
     patch.sessionContextWindow = null;
   }
 
+  // -- title --
+  // Additive (see `SessionConfigPatch.title`): only a non-empty snapshot
+  // title writes; `clearOnNull` deliberately does NOT null it out, so an
+  // optimistic or earlier-delivered title survives until the backend pushes
+  // a real one. This is the single path for title — no per-caller special
+  // case, and no dependency on a `sessions[]` list row existing.
+  if (typeof config.title === "string" && config.title) {
+    patch.title = config.title;
+  }
+
   return patch;
+}
+
+/**
+ * Derive a provisional display title from a user message, used for the
+ * optimistic pass (before the backend's generated title arrives over MQTT).
+ * Mirrors the backend's first-message heuristic: collapse whitespace, keep
+ * the leading text, cap by code points (CJK-safe).
+ */
+export function deriveSessionTitle(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  const chars = Array.from(collapsed);
+  const MAX = 24;
+  return chars.length > MAX ? `${chars.slice(0, MAX).join("")}…` : collapsed;
 }

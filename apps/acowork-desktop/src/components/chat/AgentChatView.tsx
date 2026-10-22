@@ -458,6 +458,32 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // so nothing lingers in the stream (§ 5.5.4: answer-then-done).
   const pendingCard = live.pendingCard;
 
+  // ADR-099: optimistic title for a Chat-Router exec session. That session has
+  // no list row and usually no open tab, so its title would otherwise read
+  // "Untitled" until the backend's generated title arrives over MQTT. Seed a
+  // provisional title from the triggering user message the moment
+  // `turn_started` resolves the exec session; `seedOptimisticTitle` no-ops
+  // once any title exists, so the backend's authoritative (possibly
+  // LLM-refined) push always wins afterwards. Guarded per execSid so it
+  // fires at most once per session.
+  const seededTitleRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const execSid = inFlight?.execSid;
+    if (!execSid || seededTitleRef.current.has(execSid)) return;
+    const triggerId = inFlight?.triggerId;
+    const body = triggerId
+      ? rows.find((r) => r.meta?.message_id === triggerId)?.body
+      : undefined;
+    // Only pin the execSid once a body is available — the pointer can land
+    // a window before the trigger row is readable, and marking it early would
+    // permanently skip the seed. `seedOptimisticTitle` itself is idempotent
+    // (no-ops once a title exists), so a re-run on a later `rows` tick is safe.
+    if (!body) return;
+    seededTitleRef.current.add(execSid);
+    useChatStore.getState().seedOptimisticTitle(agentId, execSid, body);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inFlight?.execSid, inFlight?.triggerId, agentId, rows]);
+
   // Follow rule shared by every chat surface (AgentChatView / GroupChatPanel /
   // InboxPanel): stick to the newest row only while pinned, and never let a
   // refresh (poll tick, re-render with a fresh object) yank an upward-scrolling

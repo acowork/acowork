@@ -101,9 +101,19 @@ export function ExecSessionStatusCard({ agentId, execSid, assigning, onDrill, ca
   const pendingQuestions = useChatStore((s) =>
     execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.pendingQuestions ?? EMPTY_QUESTIONS : EMPTY_QUESTIONS,
   );
-  const title = useAgentStore((s) =>
+  // Title is a per-session config field like model/provider: read the live
+  // mirror first (present whether or not a `sessions[]` row exists — the
+  // mapper creates the session state on the first `session_config` push),
+  // falling back to the list snapshot only until the live value lands.
+  const liveTitle = useChatStore((s) =>
+    execSid ? s.agentStates[agentId]?.sessionStates[execSid]?.title ?? null : null,
+  );
+  const snapshotTitle = useAgentStore((s) =>
     execSid ? s.agents[agentId]?.sessions.find((x) => x.session_id === execSid)?.title ?? null : null,
   );
+  // `||` (not `??`) so a blank overlay can never shadow the snapshot — same
+  // fallback order as SessionTabBar.getTitle.
+  const title = liveTitle || snapshotTitle;
   const workspaceName = useWorkspaceStore((s) => {
     if (!execSid) return null;
     const id = s.sessionWorkspaceMap[execSid];
