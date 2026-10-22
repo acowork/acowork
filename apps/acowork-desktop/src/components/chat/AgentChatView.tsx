@@ -31,7 +31,7 @@
 // The status card is the drill-down INTO the execution view (plan 5.3):
 // click → `chatStore.openSession(agentId, execSid)` + mode flip.
 
-import { Children, isValidElement, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
@@ -500,6 +500,22 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     win?.older.length ?? 0,
   );
 
+  // Merged container capture — a STABLE callback on purpose. An inline arrow is
+  // a new identity every render, which makes React detach the ref (`null`) and
+  // re-attach the same node: the follow controller would un-bind/re-bind on
+  // every keystroke in the composer, and `OverlayScrollbar` would rebuild its
+  // own ref setter each time.
+  const setViewport = useCallback(
+    (el: HTMLDivElement | null) => {
+      containerRef.current = el;
+      // `useStickToBottom` hands back a callback ref in production, but a
+      // plain object ref is a valid React ref too — forward only the former so
+      // a merged container capture never calls a non-function.
+      if (typeof scrollRef === "function") scrollRef(el);
+    },
+    [scrollRef],
+  );
+
   // Locate-and-flash for history jumps (ADR-097): declared AFTER the follow
   // hook so the center-scroll wins over follow-to-bottom on the jump commit.
   const highlightSeq = useLocateMessage(
@@ -705,13 +721,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           jumping to the head would page through the whole history. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
       <OverlayScrollbar
-        ref={(el) => {
-          containerRef.current = el;
-          // `useStickToBottom` hands back a callback ref in production, but a
-          // plain object ref is a valid React ref too — forward only the former
-          // so a merged container capture never calls a non-function.
-          if (typeof scrollRef === "function") scrollRef(el);
-        }}
+        ref={setViewport}
         className="py-2 [overflow-anchor:none]"
         onViewportScroll={handleStreamScroll}
       >
