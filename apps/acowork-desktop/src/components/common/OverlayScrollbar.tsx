@@ -28,6 +28,16 @@ interface OverlayScrollbarProps {
    *    (the content would overflow unscrolled). Never the default, so
    *    existing definite-height consumers are untouched. */
   fill?: "height" | "flex";
+  /** Draw a floating overlay thumb for the HORIZONTAL axis as well as the
+   * vertical one. Opt-in: most viewports clip their content
+   * (`overflow-x-hidden`), so an x-thumb would be dead weight — only scrollers
+   * that genuinely overflow on the x-axis (the file tree: long paths) should
+   * request it. The native scrollbar cannot be re-enabled on just that axis:
+   * Chrome 121+ ignores the whole `::-webkit-scrollbar` family whenever the
+   * standard `scrollbar-width`/`scrollbar-color` are non-auto/non-normal (see
+   * the note in globals.css), so the overlay thumb is the only reliable
+   * x-axis affordance. */
+  showXThumb?: boolean;
   onContextMenu?: (event: MouseEvent<HTMLDivElement>) => void;
   onViewportWheel?: (event: WheelEvent<HTMLDivElement>) => void;
 }
@@ -37,6 +47,13 @@ interface ThumbMetrics {
   top: number;
   maxScroll: number;
   maxTop: number;
+}
+
+interface XThumbMetrics {
+  width: number;
+  left: number;
+  maxScroll: number;
+  maxLeft: number;
 }
 
 const MIN_THUMB_HEIGHT = 20;
@@ -49,7 +66,7 @@ export function getOverlayThumbMetrics(clientHeight: number, scrollHeight: numbe
 }
 
 export const OverlayScrollbar = forwardRef<HTMLDivElement, OverlayScrollbarProps>(function OverlayScrollbar(
-  { children, className, role, "aria-label": ariaLabel, viewportRef, onViewportScroll, onViewportPointerDown, dataTabScroll, containerClassName, maxHeight, fill = "height", onContextMenu, onViewportWheel },
+  { children, className, role, "aria-label": ariaLabel, viewportRef, onViewportScroll, onViewportPointerDown, dataTabScroll, containerClassName, maxHeight, fill = "height", showXThumb, onContextMenu, onViewportWheel },
   forwardedRef,
 ) {
   const innerViewportRef = useRef<HTMLDivElement>(null);
@@ -61,15 +78,23 @@ export const OverlayScrollbar = forwardRef<HTMLDivElement, OverlayScrollbarProps
     else if (forwardedRef) forwardedRef.current = node;
   }, [forwardedRef, viewportRef]);
   const dragRef = useRef<{ pointerY: number; scrollTop: number } | null>(null);
+  const dragXRef = useRef<{ pointerX: number; scrollLeft: number } | null>(null);
   const viewportId = useId();
   const [metrics, setMetrics] = useState<ThumbMetrics>({ height: 0, top: 0, maxScroll: 0, maxTop: 0 });
+  const [metricsX, setMetricsX] = useState<XThumbMetrics>({ width: 0, left: 0, maxScroll: 0, maxLeft: 0 });
 
   const updateMetrics = useCallback(() => {
     const viewport = innerViewportRef.current;
     if (!viewport) return;
-    const { clientHeight, scrollHeight, scrollTop } = viewport;
+    const { clientHeight, scrollHeight, scrollTop, clientWidth, scrollWidth, scrollLeft } = viewport;
     setMetrics(getOverlayThumbMetrics(clientHeight, scrollHeight, scrollTop));
-  }, []);
+    if (showXThumb) {
+      // Same geometry math, just fed the horizontal axis; the result is
+      // remapped into width/left field names for readability at the use site.
+      const x = getOverlayThumbMetrics(clientWidth, scrollWidth, scrollLeft);
+      setMetricsX({ width: x.height, left: x.top, maxScroll: x.maxScroll, maxLeft: x.maxTop });
+    }
+  }, [showXThumb]);
 
   useEffect(() => {
     const viewport = innerViewportRef.current;
@@ -98,6 +123,20 @@ export const OverlayScrollbar = forwardRef<HTMLDivElement, OverlayScrollbarProps
     const viewport = innerViewportRef.current;
     if (!drag || !viewport || metrics.maxTop === 0) return;
     viewport.scrollTop = drag.scrollTop + (event.clientY - drag.pointerY) * metrics.maxScroll / metrics.maxTop;
+  };
+
+  const onThumbXPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || metricsX.maxScroll === 0) return;
+    event.preventDefault();
+    dragXRef.current = { pointerX: event.clientX, scrollLeft: innerViewportRef.current?.scrollLeft ?? 0 };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const onThumbXPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const drag = dragXRef.current;
+    const viewport = innerViewportRef.current;
+    if (!drag || !viewport || metricsX.maxLeft === 0) return;
+    viewport.scrollLeft = drag.scrollLeft + (event.clientX - drag.pointerX) * metricsX.maxScroll / metricsX.maxLeft;
   };
 
   const onWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -175,6 +214,24 @@ export const OverlayScrollbar = forwardRef<HTMLDivElement, OverlayScrollbarProps
             aria-valuemax={Math.round(metrics.maxScroll)}
             aria-valuenow={Math.round(innerViewportRef.current?.scrollTop ?? 0)}
             tabIndex={0}
+          />
+        </div>
+      )}
+      {showXThumb && metricsX.maxScroll > 0 && (
+        <div className="overlay-scrollbar-track-x" aria-hidden="true">
+          <div
+            className="overlay-scrollbar-thumb overlay-scrollbar-thumb-x"
+            style={{ width: metricsX.width, transform: `translateX(${metricsX.left}px)` }}
+            onPointerDown={onThumbXPointerDown}
+            onPointerMove={onThumbXPointerMove}
+            onPointerUp={() => { dragXRef.current = null; }}
+            onPointerCancel={() => { dragXRef.current = null; }}
+            role="scrollbar"
+            aria-controls={viewportId}
+            aria-orientation="horizontal"
+            aria-valuemin={0}
+            aria-valuemax={Math.round(metricsX.maxScroll)}
+            aria-valuenow={Math.round(innerViewportRef.current?.scrollLeft ?? 0)}
           />
         </div>
       )}

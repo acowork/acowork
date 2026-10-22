@@ -2155,6 +2155,15 @@ input[type="radio"]:checked {
   width: 0;
   height: 0;
 }
+/* Horizontal counterpart of the vertical overlay thumb, opted-in through
+ * OverlayScrollbar's `showXThumb` (the file tree — long paths overflow on the
+ * x-axis). A CSS-only alternative (re-enabling the native bar on just the
+ * horizontal axis via `::-webkit-scrollbar:horizontal`) does NOT work: Chrome
+ * 121+ ignores the whole `::-webkit-scrollbar` family whenever the standard
+ * `scrollbar-width` / `scrollbar-color` are set to anything other than
+ * auto/normal — and this file sets both globally (`* { scrollbar-width: thin }`)
+ * and on the viewport (`none`). Verified empirically on Chromium 148.
+ * So the overlay thumb is the only reliable x-axis affordance. */
 .overlay-scrollbar-track {
   position: absolute;
   inset: 0 0 0 auto;
@@ -2164,8 +2173,19 @@ input[type="radio"]:checked {
   opacity: 0;
   transition: opacity 160ms ease;
 }
+.overlay-scrollbar-track-x {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 8px;
+  box-sizing: border-box;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
 .overlay-scrollbar:hover .overlay-scrollbar-track,
 .overlay-scrollbar:focus-within .overlay-scrollbar-track,
+.overlay-scrollbar:hover .overlay-scrollbar-track-x,
+.overlay-scrollbar:focus-within .overlay-scrollbar-track-x,
 .overlay-scrollbar-thumb:active {
   opacity: 1;
 }
@@ -2184,4 +2204,11 @@ input[type="radio"]:checked {
 }
 .overlay-scrollbar-thumb:active {
   cursor: grabbing;
+}
+/* Geometry flip for the x-axis thumb — it carries `.overlay-scrollbar-thumb`
+ * for the skin, this class only re-orients it. The inline `style.width` the
+ * component sets beats the base `width: 100%`. */
+.overlay-scrollbar-thumb-x {
+  width: auto;
+  height: 100%;
 }

@@ -506,6 +506,12 @@ export function FileTree({
         <OverlayScrollbar
             viewportRef={scrollRef}
             dataTabScroll
+            /* Long paths overflow the panel on the x-axis (`width: fit-content`
+             * content wrapper) — the overlay x-thumb is the visible affordance,
+             * since the native horizontal scrollbar cannot be re-enabled on just
+             * that axis (Chrome 121+ ignores `::-webkit-scrollbar` while
+             * `scrollbar-width`/`scrollbar-color` are set; globals.css). */
+            showXThumb
             className="file-tree-scroller flex-1 min-h-0 overflow-x-auto"
             containerClassName="flex-1"
             /* Right-click on the empty area (padding / below-the-last-row
