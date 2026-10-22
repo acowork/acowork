@@ -290,6 +290,31 @@ describe("useStickToBottom", () => {
     expect(el.scrollTop).toBe(el.bottom);
   });
 
+  it("exposes a reactive atBottom flag so a screen can show the back-to-bottom arrow", () => {
+    // `atBottom` is the only follow signal a render can read: `isPinned()` is a
+    // plain ref read that never re-renders, so the arrow would not appear on a
+    // scroll. This flag flips on every transition without moving the viewport.
+    const { el, result, rerender } = bindHook({ count: 1, peer: "peer1" });
+    // A content render re-pins and follows to the bottom -> arrow hidden.
+    act(() => rerender({ count: 2, peer: "peer1" }));
+    expect(result.current.atBottom).toBe(true);
+
+    // Scroll up off the tail -> flag flips false (the screen shows the arrow),
+    // and crucially the reader is NOT pulled back down by the re-render.
+    act(() => el.userScrollTo(0));
+    expect(result.current.atBottom).toBe(false);
+
+    // Scroll back into the bottom band -> re-pins -> arrow hides again.
+    act(() => el.userScrollTo(el.bottom - STICK_PX));
+    expect(result.current.atBottom).toBe(true);
+
+    // The send path re-claims the follow via stickNow.
+    act(() => el.userScrollTo(0));
+    expect(result.current.atBottom).toBe(false);
+    act(() => result.current.stickNow());
+    expect(result.current.atBottom).toBe(true);
+  });
+
   it("re-renders keep the latest onBecamePinned closure without stacking listeners", () => {
     // The callback lives in a ref precisely so a screen can pass a fresh
     // closure every render; a re-render must not re-add a scroll listener

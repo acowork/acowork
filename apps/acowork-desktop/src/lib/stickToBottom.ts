@@ -25,7 +25,7 @@
  * desktop inbox renders one newest page and has no `load earlier`, so that
  * half is left behind rather than stubbed out.
  */
-import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /** Distance from the bottom that still counts as "at the bottom". */
 export const STICK_PX = 80;
@@ -56,28 +56,52 @@ export class FollowController {
    *  away when the reader scrolls down to meet their messages, and that is a
    *  scroll, not a render: without this the screen cannot see it. */
   private onBecamePinned: (() => void) | undefined = undefined;
+  /** Fired on EVERY pinned/unpinned flip (both directions, programmatic
+   *  re-pin included). The screen mirrors this into a reactive flag so it can
+   *  show a "back to bottom" affordance while the reader is scrolled up —
+   *  `pinned` itself is a plain field, so reading it never re-renders. */
+  private onPinnedChange: ((pinned: boolean) => void) | undefined = undefined;
   private onScroll = () => {
     if (!this.el) return;
     const was = this.pinned;
-    this.pinned = isNearBottom(this.el);
-    // The auto-scroll a `refresh()` performs while already pinned has `was`
-    // true, so it never re-fires — this only reports a user-driven arrival.
-    if (this.pinned && !was) this.onBecamePinned?.();
+    const next = isNearBottom(this.el);
+    this.setPinned(next);
+    // An arrival is a SCROLL, never a programmatic re-pin: only the reader's
+    // own scroll-down clears the unread badge, so the receipt fires here and
+    // nowhere else (a `refresh`/`stickNow` re-pin or a container adopt must
+    // not fake one).
+    if (next && !was) this.onBecamePinned?.();
   };
 
+  /** Single mutation point for `pinned`: keeps `onBecamePinned` firing only
+   *  on an arrival (unpinned -> pinned, so a scroll-up or an already-pinned
+   *  auto-scroll never emits a receipt) while `onPinnedChange` reports every
+   *  transition. No-op when the bit is unchanged. */
+  private setPinned(next: boolean): void {
+    if (this.pinned === next) return;
+    this.pinned = next;
+    this.onPinnedChange?.(next);
+  }
+
   /** Callback-ref binding: attach the currently mounted container (null detaches). */
-  bind(el: ScrollEl | null, onBecamePinned?: () => void): void {
+  bind(
+    el: ScrollEl | null,
+    onBecamePinned?: () => void,
+    onPinnedChange?: (pinned: boolean) => void,
+  ): void {
     if (this.el === el) {
       this.onBecamePinned = onBecamePinned;
+      this.onPinnedChange = onPinnedChange;
       return;
     }
     if (this.el) this.el.removeEventListener("scroll", this.onScroll);
     this.el = el;
     this.onBecamePinned = onBecamePinned;
+    this.onPinnedChange = onPinnedChange;
     if (el) {
       el.addEventListener("scroll", this.onScroll, { passive: true });
       // Adopt whatever position a (re)mounted container sits at.
-      this.pinned = isNearBottom(el);
+      this.setPinned(isNearBottom(el));
     }
   }
 
@@ -90,7 +114,7 @@ export class FollowController {
     if (!this.el) return;
     if (forceKey !== this.lastKey) {
       this.lastKey = forceKey ?? null;
-      this.pinned = true;
+      this.setPinned(true);
     }
     if (this.pinned) this.el.scrollTop = this.el.scrollHeight;
   }
@@ -98,7 +122,7 @@ export class FollowController {
   /** Re-claim the follow (the send path calls this before the echo lands). */
   stickNow(): void {
     if (!this.el) return;
-    this.pinned = true;
+    this.setPinned(true);
     this.el.scrollTop = this.el.scrollHeight;
   }
 }
@@ -125,12 +149,21 @@ export function useStickToBottom(
    *  to know whether the new bubble landed in view, and a scroll is not a
    *  render, so making this reactive would re-introduce the hijack. */
   isPinned: () => boolean;
+  /** Reactive mirror of `isPinned` — drives the "back to bottom" affordance.
+   *  True while the reader is at (or has never left) the tail; flips false the
+   *  moment they scroll up, so a screen can show the arrow WITHOUT any content
+   *  change re-yanking the viewport (the scroll-hijack the rule forbids). */
+  atBottom: boolean;
 } {
   const ctrl = useRef<FollowController | null>(null);
   if (!ctrl.current) ctrl.current = new FollowController();
   // Keep the latest callback without re-creating the ref binding.
   const pinnedRef = useRef(onBecamePinned);
   pinnedRef.current = onBecamePinned;
+  // Reactive follow flag: the controller reports every pinned flip into this
+  // state so the arrow can appear/disappear. Defaults to pinned (a fresh view
+  // opens at the tail), matching the controller's own initial bit.
+  const [atBottom, setAtBottom] = useState(true);
 
   // Callback ref, not a ref object: screens swap the scroll container across
   // early-return branches, and the listener must always sit on the element
@@ -139,8 +172,8 @@ export function useStickToBottom(
   const elRef = useRef<HTMLDivElement | null>(null);
   const ref = useCallback((el: HTMLDivElement | null) => {
     elRef.current = el;
-    ctrl.current!.bind(el, () => pinnedRef.current?.());
-  }, []);
+    ctrl.current!.bind(el, () => pinnedRef.current?.(), setAtBottom);
+  }, [setAtBottom]);
 
   // Prepend anchoring: remember the last committed scroll height so the next
   // time `prependSignal` grows we can shift the viewport by exactly the height
@@ -181,5 +214,5 @@ export function useStickToBottom(
 
   const isPinned = useCallback(() => ctrl.current!.pinned, []);
 
-  return { ref, stickNow, isPinned };
+  return { ref, stickNow, isPinned, atBottom };
 }

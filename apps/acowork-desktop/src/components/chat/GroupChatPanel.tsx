@@ -25,7 +25,7 @@
 
 import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Send, Paperclip, Loader2, ChevronDown } from "lucide-react";
+import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -512,7 +512,7 @@ export function GroupChatPanel() {
   const [mentionActive, setMentionActive] = useState(0);
   const pickerRef = useRef<HTMLDivElement>(null);
 
-  const { ref: scrollRef, stickNow } = useStickToBottom(
+  const { ref: scrollRef, stickNow, atBottom } = useStickToBottom(
     [win?.tail.length ?? 0, activeGroupId],
     activeGroupId,
     () => {},
@@ -817,6 +817,11 @@ export function GroupChatPanel() {
         </div>
       </header>
 
+      {/* Message stream — a relative box so the "back to bottom" arrow floats
+          over the list (and above the composer), matching the execute-session
+          affordance. No "to top" arrow: a Chat session grows without bound, so
+          jumping to the head would page through the whole history. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
       <OverlayScrollbar
         ref={(el) => {
           containerRef.current = el;
@@ -890,6 +895,19 @@ export function GroupChatPanel() {
           </div>
         )}
       </OverlayScrollbar>
+        {/* Back-to-bottom arrow — visible only while the reader has scrolled
+            up off the tail (and there is content). Same treatment as the
+            execute-session button: default-reduced opacity, full on hover. */}
+        {atBottom === false && rows.length > 0 && (
+          <button
+            onClick={stickNow}
+            className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+            aria-label={t("chatPanel.ariaLabelScrollToBottom")}
+          >
+            <ChevronsDown className="h-4 w-4 text-text-tertiary" />
+          </button>
+        )}
+      </div>
 
       <div className="shrink-0">
         {!canPost ? (
