@@ -171,12 +171,16 @@ interface RowProps {
   /** Drill into the exec session that produced an agent reply — jumps to that
    *  agent's 1:1 page and opens the exec tab (mirrors AgentChatView.jumpToExec). */
   onJumpToExec: (agentId: string, execSid: string) => void;
+  /** For a `router_fallback` receipt: the exec session its trigger message was
+   *  routed into (resolved through the window's `turn_started` pointer). When
+   *  present the receipt is a clickable anchor, not just a line of text. */
+  routerExecSid?: string;
   /** Admin viewing a group they never joined: cards are shown, never
    *  answered — posting into someone else's project stays forbidden. */
   readOnly?: boolean;
 }
 
-function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly }: RowProps) {
+function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, routerExecSid, readOnly }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
@@ -186,11 +190,27 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
     // own, so it never paints a line in the stream.
     if (row.meta?.notice_type === "turn_started") return null;
     // ADR-099: the router degraded to the deterministic route. The message
-    // itself still went through — a receipt, not an error.
-    const text =
-      row.meta?.notice_type === "router_fallback"
-        ? t("chatView.routerFallback")
-        : row.body || row.meta?.status || "";
+    // itself still went through — a receipt, not an error. Once routing
+    // landed the receipt is an anchor: clicking drills into the execution
+    // session the agent assigned the message to.
+    if (row.meta?.notice_type === "router_fallback") {
+      const text = t("chatView.routerFallback");
+      if (!routerExecSid) {
+        return <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>;
+      }
+      return (
+        <div className="py-1 text-center">
+          <button
+            type="button"
+            onClick={() => onJumpToExec(row.from, routerExecSid)}
+            className="text-10 text-text-tertiary underline-offset-2 transition-colors hover:text-text-secondary hover:underline"
+          >
+            {text}
+          </button>
+        </div>
+      );
+    }
+    const text = row.body || row.meta?.status || "";
     if (!text) return null;
     return (
       <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>
@@ -542,6 +562,23 @@ export function GroupChatPanel() {
       (r) => !(r.kind === "system_notice" && (r.meta?.notice_type === "turn_started" || !r.body)),
     );
   }, [win]);
+  // `in_reply_to → agent_session_id` over the raw window's `turn_started`
+  // pointer rows (those are filtered out of `rows` above, so map over the
+  // unfiltered window). A `router_fallback` receipt drills through this.
+  const pointerSid = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
+      if (
+        r.kind === "system_notice" &&
+        r.meta?.notice_type === "turn_started" &&
+        r.meta?.in_reply_to &&
+        r.meta?.agent_session_id
+      ) {
+        m.set(r.meta.in_reply_to, r.meta.agent_session_id);
+      }
+    }
+    return m;
+  }, [win]);
   const hasMoreOlder = win ? win.firstPos > 0 : false;
   const hasMoreNewer = win ? win.lastPos < win.total - 1 : false;
   // Auto-pagination: scrolling into the top band fires the next older page;
@@ -868,6 +905,9 @@ export function GroupChatPanel() {
               answered={answered}
               onAnswer={onAnswer}
               onJumpToExec={(aid, sid) => void jumpToExec(aid, sid)}
+              routerExecSid={
+                row.meta?.in_reply_to ? pointerSid.get(row.meta.in_reply_to) : undefined
+              }
               readOnly={!canPost}
             />
           </div>

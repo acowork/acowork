@@ -339,6 +339,20 @@ export interface QueuedMessage {
   attachedItems: AttachedItem[];
 }
 
+/**
+ * ADR-099 (design 27 §5.5.5): an inbound intent routed into a session while it
+ * was already busy, mirrored from the backend `session_state` push. Unlike the
+ * frontend-only `queuedMessages` (drafts the user parked locally), this is the
+ * real server-side queue — e.g. a chat-forwarded message waiting for the
+ * running execute session to pick it up.
+ */
+export interface PendingIntent {
+  message_id: string;
+  from: string;
+  preview: string;
+  from_chat: boolean;
+}
+
 interface SessionChatState {
   messages: ChatMessage[];
   tokenUsage: TokenUsage | null;
@@ -417,6 +431,12 @@ interface SessionChatState {
   todos: TodoItem[];
   /** Per-session queued messages (typed during streaming, sent when agent becomes idle) */
   queuedMessages: QueuedMessage[];
+  /**
+   * ADR-099 (design 27 §5.5.5): intents routed into this session while it was
+   * busy, mirrored from the backend `session_state` push. Shown in the
+   * execution pending queue alongside the local `queuedMessages`.
+   */
+  pendingIntents: PendingIntent[];
   /** Per-session selected model */
   model: string | null;
   /** Per-session selected provider */
@@ -509,6 +529,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   lastAccessed: 0,
   todos: [],
   queuedMessages: [],
+  pendingIntents: [],
   model: null,
   provider: null,
   providerAccountId: null,
@@ -1981,6 +2002,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sessionStatus: null,
         todos: [],
         queuedMessages: [],
+        pendingIntents: [],
         model: null,
         provider: null,
         providerAccountId: null,
@@ -4119,6 +4141,14 @@ export function handleMessageEvent(
                 data.context_usage as ContextUsageInfo,
               );
             }
+
+            // ADR-099 (design 27 §5.5.5): mirror the backend pending-intent
+            // queue so the execution UI can show chat-forwarded messages that
+            // arrived while the session was busy. The push carries the full
+            // current list, so always replace (empty list clears it).
+            sessionPatch.pendingIntents = Array.isArray(data.pending_intents)
+              ? (data.pending_intents as PendingIntent[])
+              : [];
 
             // ADR-021: Start/stop polling based on status transitions.
             const prev = getSessionState(state, agentId, sid);

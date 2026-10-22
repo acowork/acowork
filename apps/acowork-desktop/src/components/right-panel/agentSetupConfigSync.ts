@@ -41,6 +41,15 @@ export interface ServerConfigEnvelope {
     intent_idle_rotate_hours?: number | null;
     /** Design 27 §2.1: T2 handoff target token cap. */
     intent_handoff_max_tokens?: number | null;
+    /** ADR-099 Chat Router block. The same skip-serializing rule
+     *  applies per sub-field — absent (or the whole block absent)
+     *  means "no opinion", not "cleared". */
+    chat_router?: {
+      enabled?: boolean | null;
+      model?: string | null;
+      provider?: string | null;
+      timeout_ms?: number | null;
+    } | null;
   } | null;
   model?: string | null;
   provider?: string | null;
@@ -130,6 +139,27 @@ export function buildProfilePatchFromServerConfig(
   // optimistic local edit while in-flight).
   if (cfg.session_language !== undefined) {
     patch.sessionLanguage = cfg.session_language;
+  }
+  // ADR-099 Chat Router sub-fields. Race-safe like every other field:
+  // only overwrite when the server returned a concrete value. An
+  // explicit clear (`""` on the PUT wire → `None` on disk) drops the
+  // key from the GET response, and the local `""`/undefined optimistic
+  // value already renders the "auto" option — so no clobbering is
+  // needed to keep the two in agreement.
+  const router = cfg.chat_router;
+  if (router) {
+    if (typeof router.enabled === "boolean") {
+      patch.chatRouterEnabled = router.enabled;
+    }
+    if (typeof router.model === "string" && router.model) {
+      patch.chatRouterModel = router.model;
+    }
+    if (typeof router.provider === "string" && router.provider) {
+      patch.chatRouterProvider = router.provider;
+    }
+    if (typeof router.timeout_ms === "number") {
+      patch.chatRouterTimeoutMs = router.timeout_ms;
+    }
   }
   return patch;
 }

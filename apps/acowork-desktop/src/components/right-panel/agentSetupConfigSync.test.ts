@@ -108,4 +108,41 @@ describe("buildProfilePatchFromServerConfig", () => {
       temperature: 0.5,
     });
   });
+
+  it("syncs the ADR-099 chat_router sub-fields from the nested block", () => {
+    // The Setup "Chat Router" card reads these back after a PUT /
+    // refresh. A concrete on-disk value must reach the profile.
+    const data: ServerConfigEnvelope = {
+      config: {
+        chat_router: {
+          enabled: false,
+          model: "deepseek-flash",
+          provider: "deepseek",
+          timeout_ms: 12000,
+        },
+      },
+    };
+    expect(buildProfilePatchFromServerConfig(data)).toEqual({
+      chatRouterEnabled: false,
+      chatRouterModel: "deepseek-flash",
+      chatRouterProvider: "deepseek",
+      chatRouterTimeoutMs: 12000,
+    });
+  });
+
+  it("treats empty / absent chat_router sub-fields as 'no opinion'", () => {
+    // A cleared model/provider is `None` on disk (the empty-string
+    // sentinel), so GET omits it — the local "" optimistic value already
+    // renders the "auto" option, so the sync must NOT invent a value.
+    const p = buildProfilePatchFromServerConfig({
+      config: { chat_router: { enabled: true, model: "", provider: "" } },
+    });
+    expect(p).toEqual({ chatRouterEnabled: true });
+    expect(p.chatRouterModel).toBeUndefined();
+    expect(p.chatRouterProvider).toBeUndefined();
+
+    // No chat_router block at all → nothing synced (never clobber the
+    // optimistic local edit while the write is in flight).
+    expect(buildProfilePatchFromServerConfig({ config: {} })).toEqual({});
+  });
 });

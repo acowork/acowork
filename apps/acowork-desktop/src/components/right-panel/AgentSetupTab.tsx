@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -14,6 +14,9 @@ import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
+import { Switch } from "../common/Switch";
+import { fetchProviders } from "../../lib/gateway-api";
+import type { VaultKeyEntry } from "../../lib/types";
 import {
   fetchAvatarAssets,
   fetchAvatarConfig,
@@ -83,7 +86,14 @@ type WiredField =
   // driven entirely by the `load_skill` tool switch in the Tools
   // panel — see ADR-094 §4 (single source of truth, no drift).
   | "intentIdleRotateHours"
-  | "intentHandoffMaxTokens";
+  | "intentHandoffMaxTokens"
+  // ADR-099: Chat Router knobs. `chatRouterModel` / `chatRouterProvider`
+  // are written together from the model dropdown; empty string clears
+  // (fall back to the agent's compact-model chain).
+  | "chatRouterEnabled"
+  | "chatRouterModel"
+  | "chatRouterProvider"
+  | "chatRouterTimeoutMs";
 
 const WIRE_FIELD: Record<WiredField, string> = {
   maxTokens: "max_output_tokens",
@@ -97,6 +107,10 @@ const WIRE_FIELD: Record<WiredField, string> = {
   sessionLanguage: "session_language",
   intentIdleRotateHours: "intent_idle_rotate_hours",
   intentHandoffMaxTokens: "intent_handoff_max_tokens",
+  chatRouterEnabled: "chat_router_enabled",
+  chatRouterModel: "chat_router_model",
+  chatRouterProvider: "chat_router_provider",
+  chatRouterTimeoutMs: "chat_router_timeout_ms",
   // ADR-094 note: `skillsAutoLoad` was removed from the
   // `WIRE_FIELD` table. Skill mode lives on the `load_skill`
   // tool entry in `agent_tools.json` (ADR-094 §4) — Toggling it
@@ -118,6 +132,10 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   sessionLanguage: FIELD_DEBOUNCE_MS,
   intentIdleRotateHours: FIELD_DEBOUNCE_MS,
   intentHandoffMaxTokens: FIELD_DEBOUNCE_MS,
+  chatRouterEnabled: FIELD_DEBOUNCE_MS,
+  chatRouterModel: FIELD_DEBOUNCE_MS,
+  chatRouterProvider: FIELD_DEBOUNCE_MS,
+  chatRouterTimeoutMs: FIELD_DEBOUNCE_MS,
   // ADR-094 note: `skillsAutoLoad` was removed from the debounce
   // table. Skill mode toggling goes through the Tools panel
   // (`load_skill` Switch) and uses the built-in tools debounce,
@@ -215,6 +233,63 @@ export function AgentSetupTab() {
   const [agentInfoOpen, setAgentInfoOpen] = useState(true);
   const [sessionParamsOpen, setSessionParamsOpen] = useState(true);
   const [modelParamsOpen, setModelParamsOpen] = useState(true);
+  // ADR-099: Chat Router card. Default collapsed — it is an advanced
+  // knob most users leave on the compact-model chain.
+  const [chatRouterOpen, setChatRouterOpen] = useState(false);
+
+  // ADR-099: (provider, model) options for the router-model dropdown.
+  // Same source as the Harness compact-model card and the distiller
+  // model picker: vault keys define the selectable pairs, `/api/models`
+  // supplies human-readable provider names.
+  const [routerModelOptions, setRouterModelOptions] = useState<
+    { key: string; providerId: string; modelId: string }[]
+  >([]);
+  const [routerProviderNames, setRouterProviderNames] = useState<
+    Map<string, string>
+  >(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const providers = await fetchProviders();
+        if (cancelled) return;
+        const nameMap = new Map<string, string>();
+        for (const p of providers) nameMap.set(p.id, p.name);
+        setRouterProviderNames(nameMap);
+      } catch {
+        // Gateway unreachable — fall back to raw provider ids in labels.
+      }
+      try {
+        const keys = await invoke<VaultKeyEntry[]>("list_keys");
+        if (cancelled) return;
+        const opts: { key: string; providerId: string; modelId: string }[] =
+          [];
+        const seen = new Set<string>();
+        for (const k of keys) {
+          const modelIds =
+            k.models && k.models.length > 0
+              ? k.models
+              : k.default_model
+                ? [k.default_model]
+                : [];
+          for (const modelId of modelIds) {
+            const key = `${k.provider}::${modelId}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            opts.push({ key, providerId: k.provider, modelId });
+          }
+        }
+        setRouterModelOptions(opts);
+      } catch {
+        // Tauri bridge unavailable (web preview) — dropdown stays empty;
+        // any persisted router model still shows via the stale fallback.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Load avatar config + assets on mount and agent switch
   useEffect(() => {
@@ -629,6 +704,62 @@ export function AgentSetupTab() {
   // config omitted `compression_ratio_threshold` showed thumb-at-90%
   // with a "—" badge until the user dragged — see ADR-061 §16).
   const ratioPct = Math.round((profile.compressionRatioThreshold ?? 0.9) * 100);
+
+  // ADR-099: Chat Router model dropdown option list. `""` is the "auto"
+  // entry (fall back to the agent's compact-model chain). A persisted
+  // model that is not (yet) in the vault-derived list is added as a
+  // synthetic option so the current selection never renders blank.
+  const routerModelDropdownOptions = useMemo(() => {
+    const opts: { value: string; label: string }[] = [
+      { value: "", label: t("agentSetup.chatRouterModelAuto") },
+    ];
+    const seen = new Set<string>();
+    for (const o of routerModelOptions) {
+      const providerName = routerProviderNames.get(o.providerId) ?? o.providerId;
+      opts.push({
+        value: o.key,
+        label: `${providerName} · ${o.modelId}`,
+      });
+      seen.add(o.key);
+    }
+    // Show a configured-but-unlisted model (stale vault entry, or the
+    // list is still loading) so the select reflects the real value.
+    const cur = profile.chatRouterModel;
+    if (cur) {
+      const curKey = `${profile.chatRouterProvider ?? ""}::${cur}`;
+      if (!seen.has(curKey)) {
+        opts.unshift({ value: curKey, label: cur });
+      }
+    }
+    return opts;
+  }, [routerModelOptions, routerProviderNames, profile.chatRouterModel, profile.chatRouterProvider, t]);
+
+  // ADR-099: selected model value — prefer an exact provider+model match,
+  // else fall back to a model-id-only match (provider-agnostic entries).
+  const routerModelValue = useMemo(() => {
+    const m = profile.chatRouterModel;
+    if (!m) return "";
+    const p = profile.chatRouterProvider;
+    const exact = routerModelOptions.find(
+      (o) => o.modelId === m && (!p || o.providerId === p),
+    );
+    if (exact) return exact.key;
+    return p ? `${p}::${m}` : m;
+  }, [routerModelOptions, profile.chatRouterModel, profile.chatRouterProvider]);
+
+  const handleRouterModelChange = (value: string) => {
+    if (value === "") {
+      // Auto: clear both model and provider → compact-model chain.
+      saveField("chatRouterModel", "");
+      saveField("chatRouterProvider", "");
+      return;
+    }
+    const opt = routerModelOptions.find((o) => o.key === value);
+    if (opt) {
+      saveField("chatRouterModel", opt.modelId);
+      saveField("chatRouterProvider", opt.providerId);
+    }
+  };
 
   return (
     <OverlayScrollbar dataTabScroll className="flex-1 bg-right-panel p-3">
@@ -1207,6 +1338,86 @@ export function AgentSetupTab() {
               {t("agentSetup.temperatureDesc")}
             </p>
           </div>
+          </div>
+        </ExpandableRow>
+      </ListBox>
+<div className="-mx-3 my-2 border-t border-border-divider" />
+
+      {/* ── Card 4: Chat Router (ADR-099) ──────────────────────
+          Model override for the router LLM turn. The router does NOT
+          follow the session's chat-model selection — by design it uses
+          the agent's compact-model chain. This card lets the user pin
+          an explicit (provider, model) for it, plus the call timeout.
+          The kill switch (`chat_router.enabled`) lives in the title row
+          (default on, matching the `None = enabled` design default). */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={chatRouterOpen}
+          onToggle={() => setChatRouterOpen((v) => !v)}
+          title={t("agentSetup.sectionChatRouter")}
+          ariaLabel={t("agentSetup.sectionChatRouter")}
+          trailing={
+            // ExpandableRow's contract: trailing interactive elements
+            // swallow the click so toggling does not fold the card.
+            <span onClick={(e) => e.stopPropagation()}>
+              <Switch
+                checked={profile.chatRouterEnabled !== false}
+                onChange={(v) => saveField("chatRouterEnabled", v)}
+                size="sm"
+                aria-label={t("agentSetup.chatRouterEnabled")}
+              />
+            </span>
+          }
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
+        >
+          <div className="space-y-3">
+    {/* Router model (auto = compact-model chain) */}
+            <div className="space-y-1">
+              <label className="block text-10 font-medium text-text-tertiary ">
+                {t("agentSetup.chatRouterModel")}
+              </label>
+              <Dropdown
+                value={routerModelValue}
+                onChange={handleRouterModelChange}
+                options={routerModelDropdownOptions}
+                disabled={profile.chatRouterEnabled === false}
+              />
+              <p className="text-9 text-text-tertiary ">
+                {t("agentSetup.chatRouterModelDesc")}
+              </p>
+            </div>
+
+    {/* Router call timeout */}
+            <div className="space-y-1">
+              <label className="block text-10 font-medium text-text-tertiary ">
+                {t("agentSetup.chatRouterTimeoutMs")}
+              </label>
+              <StyledInput
+                type="number"
+                min={1000}
+                max={60000}
+                step={500}
+                value={profile.chatRouterTimeoutMs && profile.chatRouterTimeoutMs > 0 ? profile.chatRouterTimeoutMs : ""}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  saveField(
+                    "chatRouterTimeoutMs",
+                    v === "" ? undefined : Math.min(60000, Math.max(1000, parseInt(v, 10) || 0)),
+                  );
+                }}
+                placeholder="8000 (default)"
+                className="rounded-md"
+              />
+              <p className="text-9 text-text-tertiary ">
+                {t("agentSetup.chatRouterTimeoutMsDesc")}
+              </p>
+            </div>
+
+            {profile.chatRouterEnabled === false && (
+              <p className="text-9 text-text-tertiary ">
+                {t("agentSetup.chatRouterDisabledHint")}
+              </p>
+            )}
           </div>
         </ExpandableRow>
       </ListBox>

@@ -145,9 +145,13 @@ interface RowProps {
    *  finished, failed or empty-bodied alike (§5.5.5: the pointer survives
    *  rotation, the JSONL stays in Agent home). */
   onJumpToExec: (execSid: string) => void;
+  /** For a `router_fallback` receipt: the exec session its trigger message was
+   *  routed into (resolved through the window's `turn_started` pointer). When
+   *  present the receipt is a clickable anchor, not just a line of text. */
+  routerExecSid?: string;
 }
 
-function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec }: RowProps) {
+function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, routerExecSid }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
@@ -158,11 +162,27 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec }: RowP
     // notices (receipts) are a quiet centered line.
     if (row.meta?.notice_type === "turn_started") return null;
     // ADR-099: the router degraded to the deterministic route. The message
-    // itself still went through — a receipt, not an error.
-    const text =
-      row.meta?.notice_type === "router_fallback"
-        ? t("chatView.routerFallback")
-        : row.body || row.meta?.status || "";
+    // itself still went through — a receipt, not an error. Once routing
+    // landed the receipt is an anchor: clicking drills into the execution
+    // session the message was assigned to.
+    if (row.meta?.notice_type === "router_fallback") {
+      const text = t("chatView.routerFallback");
+      if (!routerExecSid) {
+        return <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>;
+      }
+      return (
+        <div className="py-1 text-center">
+          <button
+            type="button"
+            onClick={() => onJumpToExec(routerExecSid)}
+            className="text-10 text-text-tertiary underline-offset-2 transition-colors hover:text-text-secondary hover:underline"
+          >
+            {text}
+          </button>
+        </div>
+      );
+    }
+    const text = row.body || row.meta?.status || "";
     return (
       <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>
     );
@@ -402,6 +422,24 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => (win ? [...win.older, ...win.tail] : []),
     [win],
   );
+  // `in_reply_to → agent_session_id` over the window's `turn_started`
+  // pointer rows — the anchor map receipts and other rows drill through
+  // (§5.5.5: the pointer is written at routing time, so it exists while the
+  // turn is still queued on a busy session).
+  const pointerSid = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of rows) {
+      if (
+        r.kind === "system_notice" &&
+        r.meta?.notice_type === "turn_started" &&
+        r.meta?.in_reply_to &&
+        r.meta?.agent_session_id
+      ) {
+        m.set(r.meta.in_reply_to, r.meta.agent_session_id);
+      }
+    }
+    return m;
+  }, [rows]);
   // The live round — one projection for the status card, drilled from the
   // rows themselves so the card reacts to the window the user is looking at
   // rather than to the last refresh tick (§5.5.5).
@@ -458,9 +496,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     const attachmentIds = pendingAttachments.map((a) => a.id);
     if ((!text && attachmentIds.length === 0) || sending || uploading) return;
     const replyTo = answerTarget?.meta?.message_id;
-    // A card answer continues the ORIGINAL turn — no new execution session
-    // is created, so a config draft would be meaningless there (§4.5 seed
-    // applies at session creation only). Plain messages carry the draft.
+    // A card answer continues the ORIGINAL turn deterministically (it does
+    // not go through the Chat Router), so no seed is applied — carrying a
+    // draft there would be meaningless. Plain messages carry the draft;
+    // per ADR-099 the router-side seed lands on session creation and, for
+    // model/reasoning, on reuse of an existing session (workspace is only
+    // applied to a newly created one).
     const sessionConfig = replyTo ? undefined : (Object.keys(draft).length > 0 ? draft : undefined);
     setInput("");
     setAnswerTarget(null);
@@ -679,6 +720,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 r.kind === "agent_message" && rows[i - 1]?.kind !== "agent_message"
               }
               onJumpToExec={(sid) => void jumpToExec(sid)}
+              routerExecSid={
+                r.meta?.in_reply_to ? pointerSid.get(r.meta.in_reply_to) : undefined
+              }
             />
           </div>
         ))}

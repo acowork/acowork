@@ -81,6 +81,19 @@ export interface AgentProfileSettings {
   /** Design 27 §2.1: T2 handoff target token cap (500–4,000).
    *  Undefined = built-in default (1,500). */
   intentHandoffMaxTokens?: number;
+  /** ADR-099: Chat Router kill switch (`chat_router.enabled`).
+   *  Undefined = design default (enabled). */
+  chatRouterEnabled?: boolean;
+  /** ADR-099: explicit router model id (`chat_router.model`).
+   *  Undefined / empty = the agent's compact-model chain — the router
+   *  deliberately does NOT follow the session's chat-model selection. */
+  chatRouterModel?: string;
+  /** ADR-099: explicit router provider id (`chat_router.provider`).
+   *  Undefined / empty = whichever provider serves `chatRouterModel`. */
+  chatRouterProvider?: string;
+  /** ADR-099: router call timeout in ms (`chat_router.timeout_ms`).
+   *  Undefined = built-in default (8000); clamped 1000–60000. */
+  chatRouterTimeoutMs?: number;
   // ADR-094 note: `skillsAutoLoad` was removed from the profile
   // shape. Skill mode (Progressive / Manual) now lives entirely
   // on the `load_skill` tool entry in `agent_tools.json` and is
@@ -180,6 +193,25 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
       s.intentHandoffMaxTokens >= 500 &&
       s.intentHandoffMaxTokens <= 4000
         ? Math.floor(s.intentHandoffMaxTokens)
+        : undefined,
+    // ADR-099 Chat Router knobs. `chatRouterModel` / `chatRouterProvider`
+    // keep non-empty strings only — "" is the UI "auto" marker and
+    // normalizes to undefined (same display, same server semantics).
+    chatRouterEnabled:
+      typeof s.chatRouterEnabled === "boolean" ? s.chatRouterEnabled : undefined,
+    chatRouterModel:
+      typeof s.chatRouterModel === "string" && s.chatRouterModel
+        ? s.chatRouterModel
+        : undefined,
+    chatRouterProvider:
+      typeof s.chatRouterProvider === "string" && s.chatRouterProvider
+        ? s.chatRouterProvider
+        : undefined,
+    chatRouterTimeoutMs:
+      typeof s.chatRouterTimeoutMs === "number" &&
+      s.chatRouterTimeoutMs >= 1000 &&
+      s.chatRouterTimeoutMs <= 60000
+        ? Math.floor(s.chatRouterTimeoutMs)
         : undefined,
   };
 }

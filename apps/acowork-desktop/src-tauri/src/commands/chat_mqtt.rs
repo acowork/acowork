@@ -573,6 +573,21 @@ pub async fn connect_mqtt(app: tauri::AppHandle, state: tauri::State<'_, AppStat
                 });
                 // Parse status and context_usage inline
                 let mut m = event.as_object().unwrap().clone();
+                // ADR-099 (design 27 §5.5.5): intents routed into a busy
+                // session, so the execution UI can show the real pending queue.
+                let pending: Vec<serde_json::Value> = state
+                    .pending_intents
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "message_id": p.message_id,
+                            "from": p.from,
+                            "preview": p.preview,
+                            "from_chat": p.from_chat,
+                        })
+                    })
+                    .collect();
+                m.insert("pending_intents".into(), serde_json::Value::Array(pending));
                 if !state.status.is_empty() {
                     match serde_json::from_str::<serde_json::Value>(&state.status) {
                         Ok(val) => { m.insert("status".into(), val); }

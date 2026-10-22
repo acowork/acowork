@@ -784,6 +784,9 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const todos = sessionState?.todos ?? [];
   /** Per-session queued messages — persisted in chatStore across agent switches */
   const queuedMessages = sessionState?.queuedMessages ?? [];
+  /** ADR-099 (design 27 §5.5.5): intents routed into this session while it was
+   *  busy (e.g. chat-forwarded messages), mirrored from the backend push. */
+  const pendingIntents = sessionState?.pendingIntents ?? [];
   // ADR-050 C5: isAssistantReplying no longer drives a trailing virtual
   // item; the v2 adapter folds the live assistant stream into blocks.
   const isThinking = liveState.isThinking;
@@ -2672,12 +2675,47 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           </div>
         )}
 
+        {/* ADR-099 (design 27 §5.5.5): server-side pending queue — messages
+          routed into this session while it is busy (e.g. forwarded from a
+          chat). This is a read-only mirror of the backend state, distinct
+          from the local draft queue below (which is frontend-only). */}
+        {pendingIntents.length > 0 && (
+          <div className={cn(
+            "mx-12 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
+            todos.length > 0 ? "" : "rounded-t-md"
+          )}>
+            <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
+              <span className="text-10 font-medium text-text-tertiary  uppercase tracking-wider">
+                {t("chatPanel.pendingQueue", { count: pendingIntents.length })}
+              </span>
+            </div>
+            <div className="max-h-[7.5rem] overflow-y-auto">
+              {pendingIntents.map((p, i) => (
+                <div
+                  key={p.message_id || i}
+                  className={`flex items-start gap-1.5 px-2.5 py-1.5 border-b border-border-divider last:border-b-0 ${listRowHover}`}
+                >
+                  <span className="shrink-0 text-10 mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
+                  <span className="flex-1 min-w-0 text-xs text-text-secondary truncate leading-relaxed">
+                    {p.preview || t("chatPanel.pendingNoPreview")}
+                  </span>
+                  {p.from_chat && (
+                    <span className="shrink-0 text-10 mt-0.5 px-1.5 py-0.5 rounded-sm bg-[var(--color-accent)]/10 text-[var(--color-accent)]">
+                      {t("chatPanel.pendingFromChat")}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Queued messages box — separate box above the input area,
           flush against input, slightly narrower for layered depth */}
         {queuedMessages.length > 0 && (
           <div className={cn(
             "mx-12 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
-            todos.length > 0 ? "" : "rounded-t-md"
+            todos.length > 0 || pendingIntents.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
               <span className="text-10 font-medium text-text-tertiary  uppercase tracking-wider">
