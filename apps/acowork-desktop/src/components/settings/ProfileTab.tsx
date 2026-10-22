@@ -440,6 +440,11 @@ export function ProfileTab() {
             <p className="text-sm font-medium text-text ">
               {profile.displayName}
             </p>
+            {backendUser?.user_id && (
+              <p className="mt-0.5 select-all break-all text-10 text-text-tertiary" title={backendUser.user_id}>
+                ID: {backendUser.user_id}
+              </p>
+            )}
           </div>
           {/* Account actions — the same two the avatar's right-click menu
               offers (AccountMenu.tsx), duplicated here because the menu is
