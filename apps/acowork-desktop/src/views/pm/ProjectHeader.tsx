@@ -6,22 +6,19 @@
  * - 描述单行展示，hover 编辑（点击展开为 textarea）
  * - 统计（总任务 / 进行中 / 待审核 / 已完成）
  * - [+ 新建任务] 按钮
- * - [⋯] 菜单（编辑项目、删除项目——含级联语义确认）
+ *
+ * 成员管理与删除项目已从头部退出：它们迁入右侧 40px 齿轮轨唤出的
+ * `PmSettingsPanel`，与 chat 视图的右面板风格统一。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
-import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { showToast } from "../../components/common/ToastProvider";
-import { MemberManagerDialog } from "./MemberManagerDialog";
-import { MemberAvatar, useResolvedMembers } from "./pmMembers";
+import { ProjectAvatar } from "../../components/common/ProjectAvatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { PmProject } from "../../lib/pm-types";
-
-/** 成员头像组最多展示个数，超出以 "+N" 折叠 */
-const MAX_AVATARS = 5;
 
 interface ProjectHeaderProps {
   project: PmProject;
@@ -31,7 +28,6 @@ interface ProjectHeaderProps {
 export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   const { t } = useTranslation();
   const updateProjectMeta = usePmProjectStore((s) => s.updateProjectMeta);
-  const deleteProject = usePmProjectStore((s) => s.deleteProject);
   const tasks = usePmBoardStore((s) => s.tasks);
   const healthy = usePmHealthStore((s) => s.healthy);
   const offline = healthy === false;
@@ -40,9 +36,6 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   const [titleDraft, setTitleDraft] = useState(project.title);
   const [editingDesc, setEditingDesc] = useState(false);
   const [descDraft, setDescDraft] = useState(project.description);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [membersOpen, setMembersOpen] = useState(false);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
   // 统计：从看板任务计算
@@ -50,11 +43,6 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
   const inProgress = tasks.filter((t) => t.status === "in_progress").length;
   const submitted = tasks.filter((t) => t.status === "submitted").length;
   const done = tasks.filter((t) => t.status === "done").length;
-
-  // 成员头像：join 实时源解析（不存快照）。Agent 走 agentStore，人类成员走
-  // 登录账号 —— 两者都收敛到 `pmMembers`。解析不出名字的成员（Agent 已
-  // 卸载）画问号占位，而不是被过滤掉：否则头像数会和旁边那个计数对不上。
-  const memberViews = useResolvedMembers(project.members);
 
   useEffect(() => {
     if (editingTitle) titleInputRef.current?.focus();
@@ -79,21 +67,14 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
     }
   }, [descDraft, project, updateProjectMeta, t]);
 
-  const handleDelete = useCallback(async () => {
-    setConfirmDelete(false);
-    setMenuOpen(false);
-    const ok = await deleteProject(project.id);
-    if (ok) {
-      showToast({ type: "success", message: t("pm.projectDeleted") });
-    }
-  }, [project.id, deleteProject, t]);
-
   return (
     <header className="shrink-0 border-b border-border-divider px-4 py-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          {/* 标题 inline-edit */}
-          {editingTitle ? (
+          {/* 标题 inline-edit（前置项目图标） */}
+          <div className="flex items-center gap-2">
+            <ProjectAvatar project={project} size={22} className="shrink-0" />
+            {editingTitle ? (
             <input
               ref={titleInputRef}
               value={titleDraft}
@@ -129,6 +110,7 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
               {project.title}
             </h2>
           )}
+          </div>
 
           {/* 描述 hover 编辑 */}
           {editingDesc ? (
@@ -176,34 +158,6 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
               {t("pm.board.done")}: <strong className="tabular-nums">{done}</strong>
             </span>
           </div>
-
-          {/* 成员区 — 点击打开成员管理 */}
-          <div className="mt-2 flex items-center gap-1.5">
-            <button
-              type="button"
-              onClick={() => setMembersOpen(true)}
-              className="group flex items-center gap-1.5 rounded-full border border-dashed border-zinc-300 px-2 py-0.5 text-11 text-text-tertiary hover:border-zinc-400 hover:text-zinc-700 dark:border-zinc-600  dark:hover:border-zinc-400 dark:hover:text-zinc-200"
-              aria-label={t("pm.manageMembers")}
-            >
-              {project.members.length === 0 ? (
-                <span>+ {t("pm.addMember")}</span>
-              ) : (
-                <>
-                  <span className="flex -space-x-1.5">
-                    {memberViews.slice(0, MAX_AVATARS).map((m) => (
-                      <MemberAvatar
-                        key={m.instance_id}
-                        member={m}
-                        size={18}
-                        className="ring-[var(--color-modal-surface)]"
-                      />
-                    ))}
-                  </span>
-                  <span className="tabular-nums">{project.members.length}</span>
-                </>
-              )}
-            </button>
-          </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -215,58 +169,8 @@ export function ProjectHeader({ project, onNewTask }: ProjectHeaderProps) {
           >
             + {t("pm.newTask")}
           </button>
-
-          {/* ⋮ 菜单 */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setMenuOpen((v) => !v)}
-              className="rounded-md px-1.5 py-1 text-xs text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700  dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
-              aria-label={t("pm.projectMenu")}
-              aria-expanded={menuOpen}
-            >
-              ⋮
-            </button>
-            {menuOpen && (
-              <>
-                <div className="fixed inset-0 z-30" onClick={() => setMenuOpen(false)} />
-                <div
-                  className="absolute right-0 top-full z-40 mt-1 w-44 overflow-hidden rounded-md border border-border-outer bg-modal-surface py-1 shadow-lg"
-                  role="menu"
-                >
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="block w-full px-3 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      setConfirmDelete(true);
-                    }}
-                  >
-                    {t("common.deleteProject")}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
         </div>
       </div>
-
-      {/* 删除项目确认 — 级联语义提示 */}
-      <ConfirmDialog
-        open={confirmDelete}
-        title={t("pm.deleteProjectTitle")}
-        message={`${t("pm.deleteProjectCascadeDesc")} "${project.title}"?`}
-        confirmLabel={t("common.delete")}
-        destructive
-        onConfirm={handleDelete}
-        onCancel={() => setConfirmDelete(false)}
-      />
-
-      {/* 成员管理 */}
-      {membersOpen && (
-        <MemberManagerDialog project={project} onClose={() => setMembersOpen(false)} />
-      )}
     </header>
   );
 }

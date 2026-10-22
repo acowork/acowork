@@ -7,6 +7,8 @@
  * 保证与服务端一致（doc 树以文件系统为真相，不做本地乐观 patch）。
  *
  * 选中态：`openDocId` 驱动右侧编辑器；删除当前打开文档时自动清空。
+ * `selectedNode` 记录树中最后被点击的节点（目录或文档），驱动右侧
+ * 设置面板的权限卡片（设计 §9）。
  */
 
 import { create } from "zustand";
@@ -15,6 +17,15 @@ import { log } from "../../lib/logger";
 import { DOC_ROOT_DIR_ID } from "../../lib/doc-types";
 import type { DirMeta, DocMeta, DocTreeNode } from "../../lib/doc-types";
 import { useDocEditorStore } from "./editorStore";
+
+/** 树中选中的节点（权限卡片的作用对象，设计 §9） */
+export interface DocSelectedNode {
+  kind: PermissionKindLike;
+  id: string;
+  name: string;
+}
+
+type PermissionKindLike = "doc" | "dir";
 
 interface DocTreeState {
   /** dir_id → 已加载直接子项 */
@@ -29,6 +40,10 @@ interface DocTreeState {
   rootReady: boolean;
   /** `refreshVisible` 进行中（防 30s 轮询与手动点击打架） */
   refreshingVisible: boolean;
+  /** 树中最后点击的节点（目录或文档）；权限卡片作用对象 */
+  selectedNode: DocSelectedNode | null;
+
+  selectNode: (node: DocSelectedNode | null) => void;
 
   loadDir: (dirId: string, opts?: { force?: boolean }) => Promise<boolean>;
   toggleDir: (dirId: string) => Promise<void>;
@@ -66,6 +81,9 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
   error: null,
   rootReady: false,
   refreshingVisible: false,
+  selectedNode: null,
+
+  selectNode: (node) => set({ selectedNode: node }),
 
   loadDir: async (dirId, { force = false } = {}): Promise<boolean> => {
     const cached = get().nodes[dirId];
@@ -143,6 +161,10 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
   renameDir: async (dirId, parentDirId, newName) => {
     try {
       await docApi.renameDir(dirId, { new_name: newName });
+      const sel = get().selectedNode;
+      if (sel?.kind === "dir" && sel.id === dirId) {
+        set({ selectedNode: { ...sel, name: newName } });
+      }
       await get().refreshDir(parentDirId);
       return true;
     } catch (e) {
@@ -158,6 +180,23 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
       // 目录级联删除（含其下所有文档）：移除该目录的展开态与缓存。
       // 编辑器若正打开被删目录下的文档，后续保存会因文档不存在而报错，
       // 由 editorStore.save 的错误路径提示用户（无法在此精确枚举被删 doc）。
+      // 选中节点在被删子树内 → 清空（权限卡片不能指向鬼魂节点）。遍历必须在
+      // 删缓存之前进行：从 dirId 往下走才能覆盖全部已加载后代（树节点
+      // 只有加载后才能被点击选中，缓存遍历足以判定命中）。
+      const sel = get().selectedNode;
+      if (sel) {
+        const stack = [dirId];
+        let hit = sel.kind === "dir" && sel.id === dirId;
+        while (stack.length && !hit) {
+          const id = stack.pop()!;
+          const n = get().nodes[id];
+          if (!n) continue;
+          if (sel.kind === "doc" && n.files.some((f) => f.doc_id === sel.id)) hit = true;
+          if (sel.kind === "dir" && n.dirs.some((d) => d.dir_id === sel.id)) hit = true;
+          n.dirs.forEach((d) => stack.push(d.dir_id));
+        }
+        if (hit) set({ selectedNode: null });
+      }
       set((s) => {
         const expanded = { ...s.expanded };
         delete expanded[dirId];
@@ -181,6 +220,8 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
       await get().refreshDir(parentDirId);
       // 新建后自动在编辑器打开（dirty guard 由 editorStore.requestOpen 处理）
       await useDocEditorStore.getState().requestOpen(meta.doc_id);
+      // 权限卡片跟随切换到新文档（设计 §9）
+      set({ selectedNode: { kind: "doc", id: meta.doc_id, name: meta.name } });
       return meta;
     } catch (e) {
       log.warn("[doc:tree] createDoc failed:", e);
@@ -192,6 +233,11 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
   renameDoc: async (docId, parentDirId, baseVersion, newTitle) => {
     try {
       await docApi.renameDoc(docId, baseVersion, newTitle);
+      // 权限卡片跟随改名（id 不变，名字变了）
+      const sel = get().selectedNode;
+      if (sel?.kind === "doc" && sel.id === docId) {
+        set({ selectedNode: { ...sel, name: newTitle } });
+      }
       await get().refreshDir(parentDirId);
       return true;
     } catch (e) {
@@ -208,6 +254,11 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
       const ed = useDocEditorStore.getState();
       if (ed.doc?.meta.doc_id === docId) {
         ed.closeDoc();
+      }
+      // 选中节点被删 → 回退到打开的文档或清空（权限卡片不能指向鬼魂节点）
+      const sel = get().selectedNode;
+      if (sel?.kind === "doc" && sel.id === docId) {
+        set({ selectedNode: null });
       }
       await get().refreshDir(parentDirId);
       return true;
@@ -228,5 +279,6 @@ export const useDocTreeStore = create<DocTreeState>((set, get) => ({
       error: null,
       rootReady: false,
       refreshingVisible: false,
+      selectedNode: null,
     }),
 }));

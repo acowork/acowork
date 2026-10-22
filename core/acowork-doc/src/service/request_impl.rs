@@ -250,6 +250,7 @@ mod tests {
                 title: "协作文档".into(),
                 content: "v1".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();

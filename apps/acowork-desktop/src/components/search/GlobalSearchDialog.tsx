@@ -29,7 +29,7 @@
  * - git tab   : GET /api/agents/{id}/git/log + CommitPicker-style
  *               client-side subject/author/hash filter → virtual log file
  * - 文档 tab  : GET /api/doc/search (doc process) → DocEditor
- * - 项目 tab  : GET /api/pm/search (pm process) → ProjectBoard / TaskDetailDrawer
+ * - 项目 tab  : GET /api/pm/search (pm process) → ProjectBoard / TaskDetailDialog
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";

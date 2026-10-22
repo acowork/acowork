@@ -188,6 +188,7 @@ mod tests {
             .create(CreateDirectoryInput {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "项目A".into(),
+                creator: None,
             })
             .await
             .unwrap();
@@ -197,6 +198,7 @@ mod tests {
             title: "PRD-方案".into(),
             content: "这里包含路由方案细节与评审".into(),
             import: None,
+            creator: None,
         })
         .await
         .unwrap();
@@ -206,6 +208,7 @@ mod tests {
             title: "会议纪要".into(),
             content: "讨论了部署方案".into(),
             import: None,
+            creator: None,
         })
         .await
         .unwrap();
@@ -215,6 +218,7 @@ mod tests {
             title: "无关".into(),
             content: "今天天气不错".into(),
             import: None,
+            creator: None,
         })
         .await
         .unwrap();
@@ -235,6 +239,7 @@ mod tests {
                 title: format!("shared-{i}"),
                 content: "公共内容 keyword".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();

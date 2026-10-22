@@ -33,6 +33,39 @@ pub type DocId = String;
 pub type DirId = String;
 pub type RequestId = String;
 
+// ── ACL (design §9 node-level permissions) ────────────────────────────────
+
+/// Permission tier on a library node. `Edit` implies `View`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AclRole {
+    View,
+    Edit,
+}
+
+impl AclRole {
+    /// Wire name used in 403 `required` payloads and error messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AclRole::View => "view",
+            AclRole::Edit => "edit",
+        }
+    }
+    /// `needed ⊑ held` check: an `Edit` grant satisfies a `View` demand,
+    /// never the other way around.
+    pub fn satisfies(self, needed: AclRole) -> bool {
+        matches!(self, AclRole::Edit) || matches!(needed, AclRole::View)
+    }
+}
+
+/// One access-control entry: a principal (user id, e.g. `u-alice`) and
+/// the tier granted to it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Ace {
+    pub principal: String,
+    pub role: AclRole,
+}
+
 // ── `library.json` top-level ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +79,15 @@ pub struct LibraryIndex {
     pub dirs: Vec<DirMeta>,
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    /// Who created this directory (user id / actor string). `None` for
+    /// pre-ACL libraries and synthesised entries — only admins may then
+    /// manage its permissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    /// Explicit ACL for this directory. `None` = inherit from the closest
+    /// ancestor that sets one; no ancestor sets one = public (design §9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<Vec<Ace>>,
 }
 
 impl LibraryIndex {
@@ -56,6 +98,8 @@ impl LibraryIndex {
             files: vec![],
             dirs: vec![],
             schema_version: default_schema_version(),
+            creator: None,
+            acl: None,
         }
     }
 }
@@ -72,6 +116,14 @@ pub struct DocMeta {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted: bool,
+    /// Who created this document (user id / actor string). See
+    /// [`LibraryIndex::creator`] for the `None` semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    /// Explicit ACL (same inheritance contract as
+    /// [`LibraryIndex::acl`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<Vec<Ace>>,
 }
 
 impl DocMeta {
@@ -89,6 +141,8 @@ impl DocMeta {
             created_at: now,
             updated_at: now,
             deleted: false,
+            creator: None,
+            acl: None,
         }
     }
 }
@@ -101,6 +155,15 @@ pub struct DirMeta {
     pub name: String,
     pub updated_at: DateTime<Utc>,
     pub deleted: bool,
+    /// Creator of this dir (design §9). Display cache for tree responses —
+    /// the canonical copy lives in the dir's own `library.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    /// Explicit ACL (design §9). Same display-cache caveat as `creator`:
+    /// `AclService` reads/writes the canonical copy on the dir's own index
+    /// and patches this entry so trees stay fresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<Vec<Ace>>,
 }
 
 // ── Import source ─────────────────────────────────────────────────────────
@@ -190,6 +253,17 @@ pub struct TrashEntry {
     pub deleted_at: DateTime<Utc>,
     /// File size in bytes (`0` for directory entries).
     pub file_size_bytes: u64,
+    /// Creator snapshot at deletion time — re-applied on restore so a
+    /// private node does not silently lose its owner (and thus its manage
+    /// gate) across a delete→restore round-trip (design §9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    /// Explicit-ACL snapshot at deletion time. `None` = the node was
+    /// inheriting (restore re-creates it as inheriting); `Some(vec![])`
+    /// = it was private. Re-applied onto the restored document so its
+    /// visibility survives the round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<Vec<Ace>>,
 }
 
 /// Trash-specific id prefix.
@@ -284,8 +358,12 @@ mod tests {
                 name: "项目A".into(),
                 updated_at: now,
                 deleted: false,
+                creator: None,
+                acl: None,
             }],
             schema_version: 1,
+            creator: None,
+            acl: None,
         };
         let json = serde_json::to_string(&idx).unwrap();
         let back: LibraryIndex = serde_json::from_str(&json).unwrap();

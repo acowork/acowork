@@ -213,6 +213,8 @@ mod tests {
             original_name: name.to_string(),
             deleted_at,
             file_size_bytes: 0,
+            creator: None,
+            acl: None,
         }
     }
 

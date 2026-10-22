@@ -4,7 +4,7 @@
  * 对齐 UX 设计 §2.1/§3.1：左侧 ProjectSidebar（可拖动宽度，默认 240px）+ 右侧 ProjectBoard。
  * 职责：
  * - 进入视图时加载项目列表 + 健康检查
- * - 组合 Sidebar / Board / TaskDetailDrawer / TaskEditDialog
+ * - 组合 Sidebar / Board / TaskDetailDialog / TaskEditDialog
  * - 三态：加载骨架 / 空状态（创建第一个项目）/ 错误 banner + 重试
  *
  * 注意：Desktop 无 react-router，路由由 AppLayout 的 NavView state 驱动；
@@ -22,7 +22,7 @@ import { usePmTaskDetailStore } from "../stores/pm/taskDetailStore";
 import { usePmHealthStore } from "../stores/pm/healthStore";
 import { ProjectSidebar } from "./pm/ProjectSidebar";
 import { ProjectBoard } from "./pm/ProjectBoard";
-import { TaskDetailDrawer } from "./pm/TaskDetailDrawer";
+import { TaskDetailDialog } from "./pm/TaskDetailDialog";
 import { TaskEditDialog } from "./pm/TaskEditDialog";
 import { ServiceOfflineBanner } from "./pm/ServiceOfflineBanner";
 import { useTranslation } from "../i18n/useTranslation";
@@ -199,9 +199,10 @@ export function ProjectsView() {
           }}
         />
       </div>
-      {/* 任务详情抽屉（含编辑/添加子任务） */}
+      {/* 任务详情对话框（含编辑/添加子任务）——居中 dialog，与全局 dialog 风格统一；
+          pm 右侧 40px 轨归项目设置面板（PmSettingsPanel） */}
       {detailTaskId && (
-        <TaskDetailDrawer
+        <TaskDetailDialog
           taskId={detailTaskId}
           onClose={handleCloseDetail}
           onEdit={(task) => setEditDialog({ mode: "edit", task })}

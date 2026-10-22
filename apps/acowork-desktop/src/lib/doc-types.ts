@@ -35,6 +35,10 @@ export interface DocMeta {
   /** RFC 3339 */
   updated_at: string;
   deleted: boolean;
+  /** 创建者用户 id（权限 manage 门，设计 §9） */
+  creator?: string | null;
+  /** 显式 ACL；缺省 = 继承父目录链（设计 §9） */
+  acl?: Ace[] | null;
 }
 
 export interface DirMeta {
@@ -43,6 +47,32 @@ export interface DirMeta {
   /** RFC 3339 */
   updated_at: string;
   deleted: boolean;
+  /** 创建者用户 id（权限 manage 门，设计 §9） */
+  creator?: string | null;
+  /** 显式 ACL；缺省 = 继承父目录链（设计 §9） */
+  acl?: Ace[] | null;
+}
+
+// ── 权限（ACL，设计 §9）──────────────────────────────────────────────
+
+/** 权限级别：`edit` 隐含 `view` */
+export type AclRole = "view" | "edit";
+
+/** 单条授权：principal 为用户 id（`u-…`） */
+export interface Ace {
+  principal: string;
+  role: AclRole;
+}
+
+/** `GET /api/permissions/{kind}/{id}` 响应 */
+export interface PermissionsView {
+  /** 节点自身的显式 ACL；null = 继承 */
+  explicit: Ace[] | null;
+  /** 实际生效的 ACL（继承解析后）；null = 公开 */
+  effective: Ace[] | null;
+  /** 当前调用者是否有权修改该节点权限（创建者 / admin） */
+  can_manage: boolean;
+  creator: string | null;
 }
 
 /** 文档全文读取：meta + Markdown 原文 + 库内相对路径 */

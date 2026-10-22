@@ -8,6 +8,8 @@
 //!   and a clock (`Fn() -> DateTime<Utc>`) for testability.
 //! - `directory.rs` / `directory_impl.rs` — `DirectoryService` for
 //!   create / list / rename / delete on directory nodes.
+//! - `acl.rs` — `AclService`: node-level view/edit permissions with
+//!   closest-ancestor inheritance and creator/admin management (design §9).
 //! - `request.rs` / `request_impl.rs` — `RequestService` PR-style review
 //!   flow: submit (base_version check), list, approve (merge + version+1),
 //!   reject, TTL expiry (design §5).
@@ -21,6 +23,7 @@
 //! wire schema evolve independently of the on-disk schema, and keeps
 //! version / lock semantics in one auditable place.
 
+pub mod acl;
 pub mod directory;
 pub mod directory_impl;
 pub mod document;
@@ -32,6 +35,9 @@ pub mod search_impl;
 pub mod trash;
 pub mod trash_impl;
 
+pub use acl::{
+    AclService, AclTarget, ActorCtx, Effective, LOCAL_HUMAN_ACTOR, PermissionsView,
+};
 pub use directory::{CreateDirectoryInput, DirectoryService};
 pub use directory_impl::LibraryDirectoryService;
 pub use document::{CreateDocumentInput, DocumentService, UpdateDocumentInput};

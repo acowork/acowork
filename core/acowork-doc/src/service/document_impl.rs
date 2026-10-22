@@ -14,7 +14,7 @@ use crate::service::document::{
 };
 use crate::store::library::LibraryStore;
 use crate::store::trash::TrashStore;
-use crate::types::{generate_doc_id, generate_trash_id, DocMeta, DocRead, LibraryIndex, TrashEntry};
+use crate::types::{generate_doc_id, generate_trash_id, Ace, DocMeta, DocRead, LibraryIndex, TrashEntry};
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
@@ -104,7 +104,9 @@ impl DocumentService for LibraryDocumentService {
             .dir_path(&input.parent_dir_id)?
             .join(format!("{}.md", input.title));
         self.write_content(&file_path, &input.content).await?;
-        let meta = DocMeta::new(doc_id.clone(), input.title.clone(), input.import, now);
+        let mut meta = DocMeta::new(doc_id.clone(), input.title.clone(), input.import, now);
+        // Design §9: the creator may always view/edit/manage-ACL its node.
+        meta.creator = input.creator.clone();
         idx.files.push(meta.clone());
         self.store.save(&idx).await?;
         crate::mqtt_publisher::notify_tree_changed(vec![input.parent_dir_id]);
@@ -273,6 +275,11 @@ impl DocumentService for LibraryDocumentService {
             original_name: entry.name.clone(),
             deleted_at: now,
             file_size_bytes: content.len() as u64,
+            // Snapshot the node's ACL ownership so a delete→restore
+            // round-trip does not silently strip creator / private ACL
+            // (design §9).
+            creator: entry.creator.clone(),
+            acl: entry.acl.clone(),
         };
         self.trash.record_doc(&trash_entry, &content).await?;
         let _ = fs::remove_file(&file_path).await;
@@ -293,6 +300,20 @@ impl DocumentService for LibraryDocumentService {
         } else {
             format!("{}/{}.md", parent_dir_id, entry.name)
         })
+    }
+
+    async fn set_restored_acl(&self, doc_id: &str, acl: Option<Vec<Ace>>) -> Result<()> {
+        // Internal restore-path write: reattach the snapshotted explicit
+        // ACL onto the freshly re-created document. Deliberately bypasses
+        // the manage gate (the caller already held edit on the target dir).
+        let (parent_dir_id, _file_path, mut entry, mut idx) = self.locate(doc_id).await?;
+        entry.acl = acl;
+        if let Some(slot) = idx.files.iter_mut().find(|f| f.doc_id == doc_id) {
+            *slot = entry;
+        }
+        self.store.save(&idx).await?;
+        crate::mqtt_publisher::notify_tree_changed(vec![parent_dir_id]);
+        Ok(())
     }
 }
 
@@ -334,6 +355,7 @@ mod tests {
                 title: "hello".into(),
                 content: "# hi".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -350,6 +372,7 @@ mod tests {
             title: "dup".into(),
             content: "x".into(),
             import: None,
+            creator: None,
         })
         .await
         .unwrap();
@@ -359,6 +382,7 @@ mod tests {
                 title: "dup".into(),
                 content: "y".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap_err();
@@ -374,6 +398,7 @@ mod tests {
                 title: ".hidden".into(),
                 content: "x".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap_err();
@@ -389,6 +414,7 @@ mod tests {
                 title: "v".into(),
                 content: "v1".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -418,6 +444,7 @@ mod tests {
                 title: "old".into(),
                 content: "v1".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -448,6 +475,7 @@ mod tests {
                 title: "v".into(),
                 content: "v1".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -487,6 +515,7 @@ mod tests {
                 title: "old".into(),
                 content: "x".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -506,6 +535,7 @@ mod tests {
                 title: "bye".into(),
                 content: "x".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -529,6 +559,7 @@ mod tests {
             .create(CreateDirectoryInput {
                 parent_dir_id: crate::types::ROOT_DIR_ID.into(),
                 name: "项目A".into(),
+                creator: None,
             })
             .await
             .unwrap();
@@ -538,6 +569,7 @@ mod tests {
                 title: "PRD".into(),
                 content: "x".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -560,6 +592,7 @@ mod tests {
                 title: "x".into(),
                 content: "x".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();

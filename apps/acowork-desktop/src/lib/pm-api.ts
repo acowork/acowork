@@ -229,6 +229,34 @@ export function attachmentUrl(aid: string, opts?: { download?: boolean; thumb?: 
   return `${getGatewayUrl()}/api/pm/attachments/${encodeURIComponent(aid)}${qs ? `?${qs}` : ""}`;
 }
 
+// ── Project Icons ───────────────────────────────────────────────────
+
+/** 项目图标资产条目（上传返回、`icon-assets` 列表项）。 */
+export interface PmIconAsset {
+  relative_path: string;
+}
+
+/**
+ * 上传项目图标（multipart，字段 `file`）→ 服务端存 `icon-NN.{ext}` 并返回
+ * 相对路径。**不**自动选中——调用方拿到 `relative_path` 后合并进
+ * `metadata.icon` 再回写（与头像上传一致）。
+ */
+export function uploadProjectIcon(pid: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  return request<PmIconAsset>(`/projects/${encodeURIComponent(pid)}/icon`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+/** 列出某项目已上传的自定义图标（供选择器 Custom tab 网格）。 */
+export function fetchProjectIconAssets(pid: string): Promise<PmIconAsset[]> {
+  return request<{ assets: PmIconAsset[] }>(
+    `/projects/${encodeURIComponent(pid)}/icon-assets`,
+  ).then((r) => r.assets);
+}
+
 // ── Search（ADR-081 P0-2）────────────────────────────────────────────
 
 /** `GET /api/pm/search?q=&limit=` — 项目/任务子串搜索，命中字段加权

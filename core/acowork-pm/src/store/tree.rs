@@ -203,6 +203,23 @@ pub trait PmStore: Send + Sync {
 // TreePmStore 结构 + 构造
 // ────────────────────────────────────────────────────────────────────────────
 
+/// 项目图标允许的扩展名 → content-type。非图片返回 `None`。
+fn icon_ext(name: &str) -> Option<&'static str> {
+    match Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        Some("svg") => Some("image/svg+xml"),
+        _ => None,
+    }
+}
+
 /// 目录树存储实现。
 ///
 /// 内部状态：
@@ -414,6 +431,59 @@ impl TreePmStore {
     /// 计算项目 `project.json` 路径。
     pub(crate) fn project_json_path(&self, project_id: &ProjectId) -> PathBuf {
         self.project_dir(project_id).join("project.json")
+    }
+
+    /// 计算项目图标的物理目录 `{project_dir}/icon`。
+    ///
+    /// 图标是项目级小图片资产（自定义上传落这里），与任务附件
+    /// 分开——附件是 task 级、随任务删除。布局：
+    /// `{data_dir}/projects/{pid}/icon/icon-NN.{ext}`
+    pub(crate) fn project_icon_dir(&self, project_id: &ProjectId) -> PathBuf {
+        self.project_dir(project_id).join("icon")
+    }
+
+    /// 写入一个项目图标文件（`name` 由 handler 生成、已净化，不含路径分隔）。
+    pub async fn write_project_icon(&self, project_id: &ProjectId, name: &str, bytes: &[u8]) -> Result<()> {
+        let dir = self.project_icon_dir(project_id);
+        fs::create_dir_all(&dir).await?;
+        fs::write(dir.join(name), bytes).await?;
+        Ok(())
+    }
+
+    /// 列出项目图标文件名（`icon-*` 且图片扩展名），升序。目录不存在 → 空。
+    pub async fn list_project_icons(&self, project_id: &ProjectId) -> Result<Vec<String>> {
+        let dir = self.project_icon_dir(project_id);
+        let mut out = Vec::new();
+        let mut entries = match fs::read_dir(&dir).await {
+            Ok(e) => e,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(err) => return Err(PmError::Io(err)),
+        };
+        while let Some(e) = entries.next_entry().await? {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("icon-") && icon_ext(&name).is_some() {
+                out.push(name);
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// 读取一个项目图标字节（`(content_type, bytes)`）。不存在 → `None`。
+    ///
+    /// 调用方（handler）必须先校验 `name` 不含路径分隔 / `..`，这里
+    /// 只按净化后的文件名直接拼接目录，不做二次遍历防护。
+    pub async fn read_project_icon(
+        &self,
+        project_id: &ProjectId,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        let path = self.project_icon_dir(project_id).join(name);
+        match fs::read(&path).await {
+            Ok(bytes) => Ok(icon_ext(name).map(|ct| (ct.to_string(), bytes))),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(PmError::Io(err)),
+        }
     }
 
     /// 当前索引任务数（供健康检查）。

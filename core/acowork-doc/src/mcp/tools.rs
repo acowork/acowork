@@ -274,7 +274,6 @@ struct MkdirArgs {
 
 /// `doc_mkdir` — 创建子目录（父须已存在，逐级创建）。
 async fn doc_mkdir(state: &DocState, actor: &str, args: Value) -> Result<Value> {
-    let _ = actor;
     let a: MkdirArgs = parse_args("doc_mkdir", args)?;
     let path = a.path.trim().trim_matches('/');
     let (parent_path, name) = match path.rsplit_once('/') {
@@ -292,6 +291,10 @@ async fn doc_mkdir(state: &DocState, actor: &str, args: Value) -> Result<Value> 
         .create(CreateDirectoryInput {
             parent_dir_id,
             name: name.to_string(),
+            // Provenance only — MCP agent calls are not ACL-enforced in v1
+            // (see `service::acl` module docs); the creator stamp keeps
+            // "who made this" answerable.
+            creator: Some(actor.to_string()),
         })
         .await?;
     Ok(json!({
@@ -352,6 +355,7 @@ async fn doc_add(state: &DocState, actor: &str, args: Value) -> Result<Value> {
             title,
             content: a.content,
             import: Some(import),
+            creator: Some(actor.to_string()),
         })
         .await?;
     let path = state.docs.path_of(&meta.doc_id).await?;

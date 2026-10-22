@@ -34,7 +34,7 @@ use crate::config::PmConfig;
 use crate::mcp::AgentDirectory;
 use crate::store::tree::TreePmStore;
 
-use super::{attachments, projects, search, tasks, ApiState};
+use super::{attachments, icon, projects, search, tasks, ApiState};
 
 /// 构建 PM API 路由树（内部路径**不带** `/api` 前缀）。
 ///
@@ -81,6 +81,10 @@ pub fn pm_router(
             "/projects/{pid}/transfer-owner",
             post(projects::transfer_owner),
         )
+        // ── Project icons (custom upload) ──────────────────────────
+        .route("/projects/{pid}/icon", post(icon::upload))
+        .route("/projects/{pid}/icon-assets", get(icon::list_assets))
+        .route("/projects/{pid}/icon-file", get(icon::serve))
         // ── Tasks ────────────────────────────────────────────────
         .route(
             "/projects/{pid}/tasks",

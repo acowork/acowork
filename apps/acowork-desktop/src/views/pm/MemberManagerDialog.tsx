@@ -1,9 +1,10 @@
 /**
- * MemberManagerDialog — 项目成员管理对话框。
+ * MemberManagerSection — 项目成员管理主体（无外壳）。
  *
  * 需求：每个项目可添加 Agent 实例为项目成员。联动指派的前提：
- * 任务 assignee 必须是项目成员，因此成员管理入口放在 ProjectHeader
- * （成员头像组点击打开）。
+ * 任务 assignee 必须是项目成员。两个宿主表面复用同一份主体：
+ * - `MemberManagerDialog`（群聊 GroupMembersPanel 的“+”入口）
+ * - `PmSettingsPanel`（pm 视图右侧设置面板内嵌）
  *
  * 数据契约：
  * - 成员以 `instance_id` 标识，与 task.assignee 同一身份体系；`kind` 区分
@@ -37,12 +38,7 @@ import {
   withOwner,
 } from "./pmMembers";
 
-interface MemberManagerDialogProps {
-  project: PmProject;
-  onClose: () => void;
-}
-
-export function MemberManagerDialog({ project, onClose }: MemberManagerDialogProps) {
+export function MemberManagerSection({ project }: { project: PmProject }) {
   const { t } = useTranslation();
   const agents = useAgentStore((s) => s.agents);
   const fetchAgents = useAgentStore((s) => s.fetchAgents);
@@ -93,14 +89,8 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ESC 关闭
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  // ESC 不再由主体处理：主体可内嵌在面板里，关闭语义归宿主
+  //（Dialog 自己挂 ESC，PmSettingsPanel 无此需求）。
 
   const memberError = (e: unknown): string => {
     if (e instanceof PmApiError) {
@@ -208,34 +198,12 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
   const currentMembers = useResolvedMembers(displayMembers);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-modal-overlay" onClick={onClose} />
-      <div
-        className="relative z-10 flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("pm.memberManagerTitle")}
-      >
-        <header className="flex items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
-          <h3 className="text-sm font-semibold text-text ">
-            {t("pm.memberManagerTitle")}
-          </h3>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-700"
-            aria-label={t("common.close")}
-          >
-            ×
-          </button>
-        </header>
+    <>
+      <p className="mb-2 text-11 text-text-tertiary">
+        {t("pm.memberManagerHint")}
+      </p>
 
-        <p className="border-b border-border-divider px-5 py-2 text-11 text-text-tertiary">
-          {t("pm.memberManagerHint")}
-        </p>
-
-        <OverlayScrollbar fill="flex" className="px-5 py-3">
-          {/* 当前成员 */}
+      {/* 当前成员 */}
           <div className="mb-1 text-11 font-medium text-text-tertiary ">
             {t("pm.members")}（{currentMembers.length}）
           </div>
@@ -372,6 +340,53 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
               ))}
             </ul>
           )}
+    </>
+  );
+}
+
+interface MemberManagerDialogProps {
+  project: PmProject;
+  onClose: () => void;
+}
+
+/** 居中对话框外壳 + `MemberManagerSection`（群聊面板入口）。 */
+export function MemberManagerDialog({ project, onClose }: MemberManagerDialogProps) {
+  const { t } = useTranslation();
+
+  // ESC 关闭
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-modal-overlay" onClick={onClose} />
+      <div
+        className="relative z-10 flex max-h-[80vh] w-full max-w-md flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("pm.memberManagerTitle")}
+      >
+        <header className="flex shrink-0 items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
+          <h3 className="text-sm font-semibold text-text ">
+            {t("pm.memberManagerTitle")}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+            aria-label={t("common.close")}
+          >
+            ×
+          </button>
+        </header>
+
+        <OverlayScrollbar fill="flex" className="px-5 py-3">
+          <MemberManagerSection project={project} />
         </OverlayScrollbar>
       </div>
     </div>

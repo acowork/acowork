@@ -204,6 +204,8 @@
   "apiError": {
     "permissionDenied": "You don't have permission for this action. Ask the resource owner to grant you access.",
     "permissionUse": "This action requires use permission. Ask the owner to add you as an authorized user.",
+    "permissionView": "This action requires view permission. Ask the owner to grant you access.",
+    "permissionEdit": "This action requires edit permission. Ask the owner to grant you edit access.",
     "permissionManage": "This action requires manage permission — only the resource owner or an admin can do it.",
     "permissionAdmin": "This action is restricted to administrators.",
     "permissionTransfer": "Only the resource owner or an admin can change its authorization settings.",
@@ -1677,6 +1679,17 @@
     "formInstallScript": "Install script name"
   },
   "pm": {
+    "settingsPanel": {
+      "title": "Project Settings",
+      "noProject": "Select a project to manage its members and settings.",
+      "info": "Project Info",
+      "members": "Members",
+      "actions": "Project Actions",
+      "service": "Service Status",
+      "serviceOnline": "PM service online",
+      "serviceOffline": "PM service offline",
+      "serviceUnknown": "Checking service status…"
+    },
     "projects": "Projects",
     "emptyTitle": "No projects yet",
     "emptyDesc": "Create your first project to get started.",
@@ -1690,6 +1703,14 @@
     "projectDescEdit": "Edit project description",
     "clickToEdit": "Click to edit",
     "noDescription": "No description",
+    "projectName": "Name",
+    "projectRemark": "Remark",
+    "iconUpdated": "Project icon updated",
+    "iconPicker": {
+      "title": "Change project icon",
+      "upload": "Upload an image",
+      "clear": "Use default icon"
+    },
     "statTotal": "Total",
     "searchPlaceholder": "Search projects...",
     "noMatchingProjects": "No matching projects",
@@ -1828,6 +1849,38 @@
     "emptyDir": "Empty folder"
   },
   "doc": {
+    "settingsPanel": {
+      "title": "Doc Settings",
+      "permissions": "Permissions",
+      "openTrash": "Open Trash",
+      "service": "Service Status",
+      "serviceOnline": "Doc service online",
+      "serviceOffline": "Doc service offline",
+      "serviceUnknown": "Checking service status…"
+    },
+    "permissions": {
+      "title": "Access permissions",
+      "kind_doc": "Document",
+      "kind_dir": "Folder",
+      "creator": "Creator",
+      "creatorTag": "Owner",
+      "mode_inherit": "Inherit",
+      "mode_private": "Private",
+      "mode_custom": "Custom",
+      "role_view": "View",
+      "role_edit": "Edit",
+      "effectivePublic": "Visible to everyone by default (no explicit ACL on this or any parent folder).",
+      "effectiveFromParent": "Inherited from parent folder — {{count}} entr(ies) can access.",
+      "privateEffective": "Private — only the creator and admins can access.",
+      "effectiveNamed": "Effective: {{names}}",
+      "noUsers": "No users available to grant access.",
+      "readOnlyHint": "Only the creator or an admin can change permissions for this item.",
+      "save": "Save permissions",
+      "saving": "Saving…",
+      "saved": "Permissions updated",
+      "saveFailed": "Could not save permissions",
+      "loadFailed": "Could not load permissions"
+    },
     "title": "Docs",
     "sidebarLabel": "Docs",
     "treeLabel": "Document tree",

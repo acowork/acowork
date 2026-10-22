@@ -63,8 +63,20 @@ impl TrashService for LibraryTrashService {
                 title: entry.original_name.clone(),
                 content,
                 import: None,
+                // Restore the original owner (design §9) so the restored
+                // doc keeps its creator-based manage gate instead of
+                // degrading to admin-only.
+                creator: entry.creator.clone(),
             })
             .await?;
+        // Reattach the snapshotted explicit ACL (if any) so a private node
+        // stays private across the delete→restore round-trip; `None` was
+        // never set so the doc simply inherits (no call needed).
+        if entry.acl.is_some() {
+            self.docs
+                .set_restored_acl(&created.doc_id, entry.acl.clone())
+                .await?;
+        }
         // Drop the slot only after the document is safely re-created.
         self.store.purge(trash_id).await?;
         Ok(created)
@@ -129,6 +141,7 @@ mod tests {
                 title: "delete-me".into(),
                 content: "body".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -148,6 +161,7 @@ mod tests {
                 title: "rescue".into(),
                 content: "珍贵内容".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -171,6 +185,7 @@ mod tests {
                 title: "gone-forever".into(),
                 content: "x".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -192,6 +207,7 @@ mod tests {
                 title: "same-name".into(),
                 content: "old".into(),
                 import: None,
+                creator: None,
             })
             .await
             .unwrap();
@@ -202,6 +218,7 @@ mod tests {
             title: "same-name".into(),
             content: "new".into(),
             import: None,
+            creator: None,
         })
         .await
         .unwrap();
@@ -243,6 +260,8 @@ mod tests {
                     original_name: "stale".into(),
                     deleted_at: old,
                     file_size_bytes: 1,
+                    creator: None,
+                    acl: None,
                 },
                 "x",
             )
@@ -257,6 +276,8 @@ mod tests {
                     original_name: "kept".into(),
                     deleted_at: fresh,
                     file_size_bytes: 1,
+                    creator: None,
+                    acl: None,
                 },
                 "y",
             )

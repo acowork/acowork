@@ -60,6 +60,9 @@ impl DirectoryService for LibraryDirectoryService {
             files: vec![],
             dirs: vec![],
             schema_version: 1,
+            // Design §9: creator lives on the directory's own index.
+            creator: input.creator.clone(),
+            acl: None,
         };
         self.store.save(&fresh).await?;
         // Patch parent.
@@ -69,6 +72,10 @@ impl DirectoryService for LibraryDirectoryService {
             name: input.name.clone(),
             updated_at: now,
             deleted: false,
+            // Design §9 display cache mirrored on the parent entry so tree
+            // responses carry ACL state without extra per-child loads.
+            creator: input.creator.clone(),
+            acl: None,
         });
         self.store.save(&parent_idx).await?;
         crate::mqtt_publisher::notify_tree_changed(vec![input.parent_dir_id]);
@@ -77,6 +84,8 @@ impl DirectoryService for LibraryDirectoryService {
             name: input.name,
             updated_at: now,
             deleted: false,
+            creator: input.creator,
+            acl: None,
         })
     }
 
@@ -88,6 +97,8 @@ impl DirectoryService for LibraryDirectoryService {
                 name: ROOT_DIR_ID.to_string(),
                 updated_at: self.now(),
                 deleted: false,
+                creator: None,
+                acl: None,
             });
         }
         // Load the directory's own `library.json` to find its `parent`
@@ -198,7 +209,14 @@ impl DirectoryService for LibraryDirectoryService {
             .parent
             .unwrap_or_else(|| ROOT_DIR_ID.to_string());
         let mut stack = vec![dir_id.to_string()];
-        let mut to_delete: Vec<(String, String, String, std::path::PathBuf)> = vec![];
+        let mut to_delete: Vec<(
+            String,
+            String,
+            String,
+            std::path::PathBuf,
+            Option<String>,
+            Option<Vec<crate::types::Ace>>,
+        )> = vec![];
         while let Some(d) = stack.pop() {
             let idx = self.store.load(&d).await?;
             for f in &idx.files {
@@ -207,7 +225,14 @@ impl DirectoryService for LibraryDirectoryService {
                 }
                 let dir_path = self.store.dir_path(&d)?;
                 let file_path = dir_path.join(format!("{}.md", f.name));
-                to_delete.push((f.doc_id.clone(), d.clone(), f.name.clone(), file_path));
+                to_delete.push((
+                    f.doc_id.clone(),
+                    d.clone(),
+                    f.name.clone(),
+                    file_path,
+                    f.creator.clone(),
+                    f.acl.clone(),
+                ));
             }
             for sub in &idx.dirs {
                 if !sub.deleted {
@@ -215,7 +240,7 @@ impl DirectoryService for LibraryDirectoryService {
                 }
             }
         }
-        for (doc_id, parent_dir_id, name, file_path) in &to_delete {
+        for (doc_id, parent_dir_id, name, file_path, creator, acl) in &to_delete {
             if !file_path.exists() {
                 continue;
             }
@@ -228,6 +253,10 @@ impl DirectoryService for LibraryDirectoryService {
                         original_name: name.clone(),
                         deleted_at: now,
                         file_size_bytes: content.len() as u64,
+                        // Snapshot ACL ownership for the delete→restore
+                        // round-trip (design §9).
+                        creator: creator.clone(),
+                        acl: acl.clone(),
                     };
                     let _ = self.trash.record_doc(&entry, &content).await;
                     let _ = fs::remove_file(file_path).await;
@@ -298,6 +327,7 @@ mod tests {
             .create(CreateDirectoryInput {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "A".into(),
+                creator: None,
             })
             .await
             .unwrap();
@@ -316,6 +346,7 @@ mod tests {
         dirs.create(CreateDirectoryInput {
             parent_dir_id: ROOT_DIR_ID.into(),
             name: "dup".into(),
+            creator: None,
         })
         .await
         .unwrap();
@@ -323,6 +354,7 @@ mod tests {
             .create(CreateDirectoryInput {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "dup".into(),
+                creator: None,
             })
             .await
             .unwrap_err();
@@ -338,6 +370,7 @@ mod tests {
             .create(CreateDirectoryInput {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "x".into(),
+                creator: None,
             })
             .await
             .unwrap();
@@ -352,6 +385,7 @@ mod tests {
             .create(CreateDirectoryInput {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "A".into(),
+                creator: None,
             })
             .await
             .unwrap();
@@ -360,6 +394,7 @@ mod tests {
             title: "root-doc".into(),
             content: "x".into(),
             import: None,
+            creator: None,
         })
         .await
         .unwrap();
@@ -368,6 +403,7 @@ mod tests {
             title: "sub-doc".into(),
             content: "y".into(),
             import: None,
+            creator: None,
         })
         .await
         .unwrap();
@@ -386,6 +422,7 @@ mod tests {
             .create(CreateDirectoryInput {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "old".into(),
+                creator: None,
             })
             .await
             .unwrap();
@@ -406,6 +443,7 @@ mod tests {
             .create(CreateDirectoryInput {
                 parent_dir_id: ROOT_DIR_ID.into(),
                 name: "bye".into(),
+                creator: None,
             })
             .await
             .unwrap();
@@ -414,6 +452,7 @@ mod tests {
             title: "inside".into(),
             content: "x".into(),
             import: None,
+            creator: None,
         })
         .await
         .unwrap();

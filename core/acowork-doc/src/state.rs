@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::config::DocConfig;
 use crate::error::Result;
 use crate::service::{
-    DocumentService, LibraryDirectoryService, LibraryDocumentService,
+    AclService, DocumentService, LibraryDirectoryService, LibraryDocumentService,
     LibraryRequestService, LibrarySearchService, LibraryTrashService, TrashService,
 };
 use crate::store::library::LibraryStore;
@@ -40,6 +40,8 @@ pub struct DocState {
     pub trash: Arc<LibraryTrashService>,
     /// Cross-directory keyword search (design §4 `GET /api/search`).
     pub search: Arc<LibrarySearchService>,
+    /// Node-level view/edit permissions + ACL management (design §9).
+    pub acl: Arc<AclService>,
 }
 
 impl DocState {
@@ -69,6 +71,7 @@ impl DocState {
             config.trash_retention_days,
         ));
         let search = Arc::new(LibrarySearchService::new(store.clone()));
+        let acl = Arc::new(AclService::new(store.clone()));
         trash.purge_expired().await?;
         Ok(Self {
             config: Arc::new(config),
@@ -78,6 +81,7 @@ impl DocState {
             requests,
             trash,
             search,
+            acl,
         })
     }
 }

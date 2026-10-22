@@ -14,6 +14,9 @@ use crate::types::{DirMeta, TreeNode};
 pub struct CreateDirectoryInput {
     pub parent_dir_id: String,
     pub name: String,
+    /// Trusted identity of the caller (design §9) — recorded as the new
+    /// directory's creator so it may manage the ACL.
+    pub creator: Option<String>,
 }
 
 #[async_trait]

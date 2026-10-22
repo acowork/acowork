@@ -10,6 +10,7 @@
 import { getGatewayUrl } from "./config";
 import { NOT_AUTHORIZED, permissionMessage } from "./api-error";
 import type {
+  Ace,
   ApproveResult,
   CreateDirInput,
   CreateDocInput,
@@ -18,6 +19,7 @@ import type {
   DocRead,
   DocTreeNode,
   MoveDocInput,
+  PermissionsView,
   RenameDirInput,
   ReviewInput,
   SearchHit,
@@ -68,15 +70,17 @@ async function request<T>(
     let required: string | undefined;
     try {
       const body = (await res.json()) as {
-        error?: { code?: string; message?: string } | string;
+        error?: { code?: string; message?: string; required?: string } | string;
         code?: string;
         message?: string;
         required?: string;
       };
       if (typeof body.error === "object" && body.error !== null) {
-        // acowork-doc's nested envelope {"error":{"code","message"}}.
+        // acowork-doc's nested envelope {"error":{"code","message","required"}}.
         code = body.error.code ?? code;
         message = body.error.message ?? message;
+        required =
+          typeof body.error.required === "string" ? body.error.required : undefined;
       } else if (typeof body.code === "string") {
         // Gateway ACL middleware's flat envelope (403 fires here before
         // the request ever reaches the doc service).
@@ -249,4 +253,31 @@ export function purgeTrash(trashId: string): Promise<void> {
 export function searchDocs(keyword: string, limit = 20, signal?: AbortSignal): Promise<SearchHit[]> {
   const q = `?keyword=${encodeURIComponent(keyword)}&limit=${limit}`;
   return request<SearchHit[]>(`/search${q}`, { signal });
+}
+
+// ── 权限（ACL，设计 §9）───────────────────────────────────────────
+
+/** 权限端点的节点类型段（`/permissions/{kind}/{id}`） */
+export type PermissionKind = "doc" | "dir";
+
+/** `GET /api/permissions/:kind/:id` — 显式/生效 ACL + 是否可管理 */
+export function getPermissions(kind: PermissionKind, id: string): Promise<PermissionsView> {
+  return request<PermissionsView>(`/permissions/${kind}/${encodeURIComponent(id)}`);
+}
+
+/**
+ * `PUT /api/permissions/:kind/:id` — 整体替换显式 ACL（204）。
+ *
+ * `acl = null` 清除（恢复继承）；`acl = []` 私有（仅创建者/admin）。
+ * 服务端门：仅节点创建者或 admin 可调用（其他用户 403 required=manage）。
+ */
+export function setPermissions(
+  kind: PermissionKind,
+  id: string,
+  acl: Ace[] | null,
+): Promise<void> {
+  return request<void>(`/permissions/${kind}/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify({ acl }),
+  });
 }

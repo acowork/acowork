@@ -16,6 +16,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { TaskCard } from "./TaskCard";
+import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { cn } from "../../lib/utils";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
@@ -104,7 +105,7 @@ export function KanbanColumn({ status, i18nKey, tasks, onOpenTask, isOver }: Kan
 
       {/* 任务列表 */}
       {flatRows.length === 0 ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        <div className="min-h-0 flex-1 px-2 pb-2">
           <div
             className={cn(
               "flex h-16 items-center justify-center rounded-md border border-dashed text-10 text-text-tertiary ",
@@ -116,19 +117,21 @@ export function KanbanColumn({ status, i18nKey, tasks, onOpenTask, isOver }: Kan
         </div>
       ) : isDragging ? (
         // 拖拽中：全量渲染
-        <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-2 pb-2">
-          {flatRows.map((row) => (
-            <TaskCard
-              key={row.task.id}
-              task={row.task}
-              onOpenTask={onOpenTask}
-              depth={row.depth}
-            />
-          ))}
-        </div>
+        <OverlayScrollbar fill="flex" className="px-2 pb-2">
+          <div className="space-y-1.5">
+            {flatRows.map((row) => (
+              <TaskCard
+                key={row.task.id}
+                task={row.task}
+                onOpenTask={onOpenTask}
+                depth={row.depth}
+              />
+            ))}
+          </div>
+        </OverlayScrollbar>
       ) : (
         // 虚拟化渲染
-        <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        <OverlayScrollbar fill="flex" viewportRef={scrollRef} className="px-2 pb-2">
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((vi) => {
               const row = flatRows[vi.index];
@@ -151,7 +154,7 @@ export function KanbanColumn({ status, i18nKey, tasks, onOpenTask, isOver }: Kan
               );
             })}
           </div>
-        </div>
+        </OverlayScrollbar>
       )}
     </section>
   );

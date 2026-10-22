@@ -26,8 +26,8 @@
 //!
 //! | Path | Policy |
 //! |------|--------|
-//! | `/api/doc/*` (REST, Desktop) | **Override** `X-Actor` with the trusted identity: the token identity (`AuthContext.effective_user_id`) under `multi_user`, the `human` constant under `local`. Client-claimed `X-Actor` (e.g. forged `agent:xxx`) is dropped |
-//! | `/api/doc/mcp` (MCP, Agent) | **Validate** `X-MCP-Actor`: agent_id ∈ Gateway `installed_agents` → pass through (trusted); otherwise **strip** (→ anonymous, read-only tools only, design §9.3) |
+//! | `/api/doc/*` (REST, Desktop) | **Override** `X-Actor` with the trusted identity: the token identity (`AuthContext.effective_user_id`) under `multi_user`, the `human` constant under `local`. Client-claimed `X-Actor` (e.g. forged `agent:xxx`) is dropped. Under `multi_user`, also inject `x-auth-role` (admin/user) for the doc ACL manage gate — client-forged role headers are always dropped |
+//! | `/api/doc/mcp` (MCP, Agent) | **Validate** `X-MCP-Actor`: agent_id ∈ Gateway `installed_agents` → pass through (trusted); otherwise **strip** (→ anonymous, read-only tools only, design §9.3). `x-auth-role` never travels here |
 
 use axum::Router;
 use axum::body::Bytes;
@@ -65,13 +65,19 @@ async fn doc_proxy_handler(
     // ADR-076 §决策 10: REST actor is the token identity under `multi_user`,
     // the `human` constant under `local` (§决策 12).
     let actor = trusted_rest_actor(auth.as_ref().map(|Extension(c)| c));
+    // Design §9 (doc ACLs): the authenticated role rides along as a trusted
+    // header too — the doc service gates permission *management* on it.
+    // `None` under `local` (no account system, `human` bypasses anyway).
+    let role = auth
+        .as_ref()
+        .map(|Extension(c)| if c.is_admin() { "admin" } else { "user" });
     // Read the doc process actual port + identity-injection state (the
     // supervisor writes `doc_process` once doc is ready).
     let (port, trusted_headers) = {
         let gw = state.gateway_state.read().await;
         let port = gw.doc_process.as_ref().map(|p| p.port);
         let is_mcp = rest == "mcp" || rest.starts_with("mcp/");
-        let trusted = build_trusted_headers(&headers, is_mcp, &gw, &actor);
+        let trusted = build_trusted_headers(&headers, is_mcp, &gw, &actor, role);
         (port, trusted)
     };
     let Some(port) = port else {
@@ -145,15 +151,19 @@ async fn doc_proxy_handler(
 ///
 /// - **REST path** (`is_mcp = false`): drop the client-claimed `X-Actor` and
 ///   inject `actor` — the token identity under `multi_user`, the `human`
-///   constant under `local` (ADR-076 §决策 10 / §决策 12).
+///   constant under `local` (ADR-076 §决策 10 / §决策 12). When `role` is
+///   `Some`, also inject `x-auth-role` so the doc service can gate permission
+///   *management* on admin (design §9); client-forged `x-auth-role` is always
+///   dropped.
 /// - **MCP path** (`is_mcp = true`): validate `X-MCP-Actor` — agent_id in
 ///   Gateway `installed_agents` passes through; otherwise strip (→ anonymous,
-///   read-only tools only).
+///   read-only tools only). `x-auth-role` never travels on this path.
 fn build_trusted_headers(
     headers: &HeaderMap,
     is_mcp: bool,
     gw: &GatewayState,
     actor: &str,
+    role: Option<&str>,
 ) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in headers.iter() {
@@ -165,6 +175,11 @@ fn build_trusted_headers(
         // / `X-Actor` and has no use for it, so the machine token must not
         // travel past the reverse proxy (least privilege).
         if name == acowork_core::auth::NODE_TOKEN_HEADER {
+            continue;
+        }
+        // Client-forged role claims never reach the doc service — the
+        // trusted value (if any) is injected below on the REST path.
+        if name == acowork_core::auth::AUTH_ROLE_HEADER {
             continue;
         }
         if is_mcp {
@@ -188,8 +203,15 @@ fn build_trusted_headers(
             }
         }
     }
-    if !is_mcp && let Ok(header) = HeaderValue::from_str(actor) {
-        out.insert("x-actor", header);
+    if !is_mcp {
+        if let Ok(header) = HeaderValue::from_str(actor) {
+            out.insert("x-actor", header);
+        }
+        if let Some(role) = role
+            && let Ok(h) = HeaderValue::from_str(role)
+        {
+            out.insert(acowork_core::auth::AUTH_ROLE_HEADER, h);
+        }
     }
     out
 }
@@ -593,6 +615,106 @@ mod tests {
             echoed["x-actor"],
             serde_json::json!("human"),
             "absent X-Actor must be injected as human, got: {echoed}"
+        );
+    }
+
+    // ── Role injection for the doc ACL manage gate (design §9) ────────
+
+    /// REST path under `multi_user`: the token role is injected as trusted
+    /// `x-auth-role`, and a client-forged `x-auth-role: admin` from a plain
+    /// user is replaced (the doc service gates permission *management* on it).
+    #[tokio::test]
+    async fn rest_path_injects_token_role_and_drops_forged_role() {
+        let state = multi_user_app_state();
+        let token = seed_and_login(&state); // u-alice, role `user`
+        let port = start_echo_doc_server().await;
+        set_doc_process(&state, port).await;
+
+        let router = build_router(state);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/doc/echo-headers")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("x-auth-role", "admin")
+            .body(Body::empty())
+            .expect("build request");
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            echoed["x-auth-role"],
+            serde_json::json!("user"),
+            "forged x-auth-role must be replaced by the trusted token role, got: {echoed}"
+        );
+    }
+
+    /// REST path under `multi_user` with an *admin* token → `x-auth-role: admin`.
+    #[tokio::test]
+    async fn rest_path_injects_admin_role() {
+        let state = multi_user_app_state();
+        let token = crate::http::test_support::access_token("u-root", "admin");
+        let port = start_echo_doc_server().await;
+        set_doc_process(&state, port).await;
+
+        let router = build_router(state);
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/doc/echo-headers")
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("build request");
+        let response = router.oneshot(request).await.expect("router responds");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(
+            echoed["x-auth-role"],
+            serde_json::json!("admin"),
+            "admin token must yield trusted admin role header, got: {echoed}"
+        );
+    }
+
+    /// `local` mode has no account system: no `x-auth-role` is injected and a
+    /// forged one is dropped (the doc service bypasses ACLs for `human` anyway).
+    #[tokio::test]
+    async fn local_path_never_carries_x_auth_role() {
+        let state = test_app_state();
+        let port = start_echo_doc_server().await;
+        set_doc_process(&state, port).await;
+
+        let echoed = proxy_echo_headers(
+            state,
+            "/api/doc/echo-headers",
+            &[("x-auth-role", "admin")],
+        )
+        .await;
+
+        assert!(
+            echoed.get("x-auth-role").is_none(),
+            "client-forged x-auth-role must never reach the doc service, got: {echoed}"
+        );
+    }
+
+    /// MCP path: `x-auth-role` never travels (ACL enforcement is REST-only).
+    #[tokio::test]
+    async fn mcp_path_strips_x_auth_role() {
+        let state = test_app_state();
+        let port = start_echo_doc_server().await;
+        set_doc_process(&state, port).await;
+
+        let echoed = proxy_echo_headers(
+            state,
+            "/api/doc/mcp",
+            &[("x-auth-role", "admin")],
+        )
+        .await;
+
+        assert!(
+            echoed.get("x-auth-role").is_none(),
+            "x-auth-role must be stripped on the MCP path, got: {echoed}"
         );
     }
 

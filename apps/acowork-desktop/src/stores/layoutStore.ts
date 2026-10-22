@@ -38,6 +38,18 @@ interface LayoutState {
     setRightPanelCollapsed: (collapsed: boolean | ((prev: boolean) => boolean)) => void;
 
     /**
+     * Whether the pm view's right settings panel is open. Separate from
+     * `rightPanelCollapsed` (which belongs to the chat view's agent panel);
+     * the two share only the rail geometry and the panel width.
+     */
+    pmPanelOpen: boolean;
+    setPmPanelOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
+
+    /** Whether the docs view's right settings panel is open (see pmPanelOpen). */
+    docPanelOpen: boolean;
+    setDocPanelOpen: (open: boolean | ((prev: boolean) => boolean)) => void;
+
+    /**
      * Monotonically-increasing counter for "show me the workspace panel" requests.
      * AppLayout consumes each new value once (via a local ref) to expand the
      * right panel and switch the active tab to "workspace", even when the
@@ -90,6 +102,24 @@ export const useLayoutStore = create<LayoutState>((set) => ({
                 typeof collapsed === "function"
                     ? (collapsed as (prev: boolean) => boolean)(state.rightPanelCollapsed)
                     : collapsed,
+        })),
+
+    pmPanelOpen: false,
+    setPmPanelOpen: (open) =>
+        set((state) => ({
+            pmPanelOpen:
+                typeof open === "function"
+                    ? (open as (prev: boolean) => boolean)(state.pmPanelOpen)
+                    : open,
+        })),
+
+    docPanelOpen: false,
+    setDocPanelOpen: (open) =>
+        set((state) => ({
+            docPanelOpen:
+                typeof open === "function"
+                    ? (open as (prev: boolean) => boolean)(state.docPanelOpen)
+                    : open,
         })),
 
     workspacePanelRequestSeq: 0,

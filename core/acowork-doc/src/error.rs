@@ -66,6 +66,12 @@ pub enum DocError {
     #[error("forbidden: anonymous callers may only read (actor={0:?})")]
     Forbidden(Option<String>),
 
+    /// Node-level ACL denial (design §9). `required` names the capability
+    /// tier that refused (`view` / `edit` / `manage`) so the client can
+    /// render a precise message without parsing the display text.
+    #[error("forbidden: actor {actor:?} lacks `{required}` permission")]
+    AclDenied { actor: String, required: &'static str },
+
     // ── IO / storage ──────────────────────────────────────────────────
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -100,7 +106,7 @@ impl DocError {
             PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             NameConflict(_) | VersionConflict { .. } => StatusCode::CONFLICT,
             AlreadyReviewed(_) | RequestExpired(_) | TrashMissing(_) => StatusCode::NOT_FOUND,
-            Forbidden(_) => StatusCode::FORBIDDEN,
+            Forbidden(_) | AclDenied { .. } => StatusCode::FORBIDDEN,
             Io(_) | CorruptIndex(_) | Serde(_) | Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -122,18 +128,25 @@ impl DocError {
             AlreadyReviewed(_) => "already_reviewed",
             RequestExpired(_) => "request_expired",
             TrashMissing(_) => "trash_missing",
-            Forbidden(_) => "not_authorized",
+            Forbidden(_) | AclDenied { .. } => "not_authorized",
             Io(_) | CorruptIndex(_) | Serde(_) | Internal(_) => "internal_error",
         }
     }
 
     /// Render the standard error JSON body `{"error": {...}}` (design §4).
     pub fn to_json_response(&self) -> axum::Json<serde_json::Value> {
+        // The Desktop client pattern-matches `required` on 403s to pick the
+        // localized permission message (ADR-087 D5.3 contract).
+        let required = match self {
+            DocError::AclDenied { required, .. } => Some(*required),
+            _ => None,
+        };
         axum::Json(serde_json::json!({
             "error": {
                 "code": self.code(),
                 "message": self.to_string(),
                 "details": null,
+                "required": required,
             }
         }))
     }

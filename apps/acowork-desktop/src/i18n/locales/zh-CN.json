@@ -298,6 +298,8 @@
   "apiError": {
     "permissionDenied": "没有权限执行该操作,请联系资源所有者添加授权",
     "permissionUse": "此操作需要使用权,请联系资源所有者将你添加为授权用户",
+    "permissionView": "此操作需要查看权限,请联系所有者授予你访问权限",
+    "permissionEdit": "此操作需要编辑权限,请联系所有者授予你编辑权限",
     "permissionManage": "此操作需要管理权限,仅资源所有者或管理员可以执行",
     "permissionAdmin": "此操作仅管理员可以执行",
     "permissionTransfer": "仅资源所有者或管理员可以修改授权设置",
@@ -1694,6 +1696,17 @@
     "formInstallScript": "安装脚本名"
   },
   "pm": {
+    "settingsPanel": {
+      "title": "项目设置",
+      "noProject": "选择一个项目以管理其成员与设置。",
+      "info": "项目信息",
+      "members": "成员管理",
+      "actions": "项目操作",
+      "service": "服务状态",
+      "serviceOnline": "PM 服务在线",
+      "serviceOffline": "PM 服务离线",
+      "serviceUnknown": "正在检查服务状态…"
+    },
     "projects": "项目",
     "emptyTitle": "还没有项目",
     "emptyDesc": "创建你的第一个项目，开始使用看板。",
@@ -1707,6 +1720,14 @@
     "projectDescEdit": "编辑项目描述",
     "clickToEdit": "点击编辑",
     "noDescription": "暂无描述",
+    "projectName": "名称",
+    "projectRemark": "备注",
+    "iconUpdated": "项目图标已更新",
+    "iconPicker": {
+      "title": "更换项目图标",
+      "upload": "上传图片",
+      "clear": "使用默认图标"
+    },
     "statTotal": "全部",
     "searchPlaceholder": "搜索项目...",
     "noMatchingProjects": "无匹配的项目",
@@ -1845,6 +1866,38 @@
     "emptyDir": "空文件夹"
   },
   "doc": {
+    "settingsPanel": {
+      "title": "文档设置",
+      "permissions": "权限",
+      "openTrash": "打开回收站",
+      "service": "服务状态",
+      "serviceOnline": "文档服务在线",
+      "serviceOffline": "文档服务离线",
+      "serviceUnknown": "正在检查服务状态…"
+    },
+    "permissions": {
+      "title": "访问权限",
+      "kind_doc": "文档",
+      "kind_dir": "目录",
+      "creator": "创建者",
+      "creatorTag": "所有者",
+      "mode_inherit": "继承",
+      "mode_private": "私有",
+      "mode_custom": "自定义",
+      "role_view": "查看",
+      "role_edit": "编辑",
+      "effectivePublic": "默认对所有人可见（本目录/文档及各级父目录均未设置显式权限）。",
+      "effectiveFromParent": "继承自父目录 — {{count}} 个成员可访问。",
+      "privateEffective": "私有 — 仅创建者与管理员可访问。",
+      "effectiveNamed": "当前生效：{{names}}",
+      "noUsers": "没有可授权的用户。",
+      "readOnlyHint": "仅创建者或管理员可以修改此项的权限。",
+      "save": "保存权限",
+      "saving": "保存中…",
+      "saved": "权限已更新",
+      "saveFailed": "权限保存失败",
+      "loadFailed": "权限加载失败"
+    },
     "title": "文档库",
     "sidebarLabel": "文档库",
     "treeLabel": "文档目录树",

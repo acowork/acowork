@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::types::{DocMeta, DocRead, ImportSource};
+use crate::types::{Ace, DocMeta, DocRead, ImportSource};
 
 /// Input for creating a new document.
 ///
@@ -25,6 +25,10 @@ pub struct CreateDocumentInput {
     pub title: String,
     pub content: String,
     pub import: Option<ImportSource>,
+    /// Trusted identity of the caller (design §9) — recorded on the new
+    /// node so its creator may manage the ACL. `None` for synthesised /
+    /// pre-ACL creations.
+    pub creator: Option<String>,
 }
 
 /// Input for `DocumentService::update`.
@@ -89,6 +93,13 @@ pub trait DocumentService: Send + Sync {
     /// and mark `DocMeta.deleted = true`. The directory's `library.json`
     /// is rewritten atomically.
     async fn delete(&self, doc_id: &str) -> Result<()>;
+
+    /// Re-apply an explicit ACL onto an existing document **without** the
+    /// management gate. Used only by the restore path (a trash slot
+    /// re-creates the doc, then reattaches its snapshotted ACL) — the
+    /// user-facing ACL editor goes through `AclService::set`, which does
+    /// enforce `manage`. `None` leaves the node inheriting.
+    async fn set_restored_acl(&self, doc_id: &str, acl: Option<Vec<Ace>>) -> Result<()>;
 
     /// Absolute on-disk path of the document, relative to the library
     /// root (e.g. `"项目A/PRD.md"`). Used by search and move logic.

@@ -55,6 +55,10 @@ export function permissionMessage(required?: string | null): string {
   switch (required) {
     case "use":
       return i18n.t("apiError.permissionUse");
+    case "view":
+      return i18n.t("apiError.permissionView");
+    case "edit":
+      return i18n.t("apiError.permissionEdit");
     case "manage":
       return i18n.t("apiError.permissionManage");
     case "admin":

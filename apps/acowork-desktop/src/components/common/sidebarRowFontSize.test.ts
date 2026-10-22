@@ -20,7 +20,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const ROOT = resolve(__dirname, "..", "..", "..");
@@ -36,7 +36,9 @@ describe("sidebar row name sizing", () => {
       cwd: ROOT,
     })
       .split("\n")
-      .filter((f) => f && !/\.test\.tsx?$/.test(f) && SIDEBAR.test(f));
+      // `git ls-files` also lists tracked-but-deleted files (rename/remove
+      // mid-commit), so skip anything not on disk.
+      .filter((f) => f && !/\.test\.tsx?$/.test(f) && SIDEBAR.test(f) && existsSync(resolve(ROOT, f)));
 
     const offenders: string[] = [];
     let labels = 0;

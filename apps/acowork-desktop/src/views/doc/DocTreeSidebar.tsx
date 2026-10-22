@@ -33,7 +33,6 @@ import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { DOC_ROOT_DIR_ID } from "../../lib/doc-types";
 import type { DirMeta, DocMeta } from "../../lib/doc-types";
-import { TrashDialog } from "./TrashDialog";
 
 /** inline 编辑态：新建或重命名 */
 type InlineEdit =
@@ -63,7 +62,6 @@ export function DocTreeSidebar({ width }: { width?: number }) {
 
   const [editing, setEditing] = useState<InlineEdit>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null);
-  const [trashOpen, setTrashOpen] = useState(false);
 
   // 首次挂载：加载根（树根不自动展开，懒加载第一层）
   const loadDir = useDocTreeStore((s) => s.loadDir);
@@ -155,23 +153,14 @@ export function DocTreeSidebar({ width }: { width?: number }) {
         />
       </div>
 
-      {/* ── 底部：回收站 + 离线提示 ─────────────────────────── */}
-      <div className="border-t border-border-divider p-1">
-        {healthy === false && (
-          <div className="mb-1 rounded-md bg-amber-50 px-2 py-1 text-11 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+      {/* ── 底部：离线提示（回收站入口已迁入右侧齿轮轨唤出的 DocSettingsPanel） ─────────────────────────── */}
+      {healthy === false && (
+        <div className="border-t border-border-divider p-1">
+          <div className="rounded-md bg-amber-50 px-2 py-1 text-11 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
             {t("doc.offlineHint")}
           </div>
-        )}
-        <button
-          type="button"
-          onClick={() => setTrashOpen(true)}
-          disabled={healthy === false}
-          className={cn("flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-text-tertiary transition-colors disabled:opacity-40", listRowHover)}
-        >
-          <Trash2 className="h-3.5 w-3.5" aria-hidden />
-          <span>{t("doc.trash")}</span>
-        </button>
-      </div>
+        </div>
+      )}
 
       {/* ── 删除确认 ────────────────────────────────────────── */}
       <ConfirmDialog
@@ -203,12 +192,6 @@ export function DocTreeSidebar({ width }: { width?: number }) {
             if (ok) toast.addToast({ type: "success", message: t("doc.deletedToTrash", { name: target.dir.name }) });
           }
         }}
-      />
-
-      <TrashDialog
-        open={trashOpen}
-        onClose={() => setTrashOpen(false)}
-        disabled={healthy === false}
       />
     </aside>
   );
@@ -480,6 +463,8 @@ function DirRow({
   );
 
   async function toggle() {
+    // 点击即选中（右侧权限卡片作用对象，设计 §9），展开/折叠照旧。
+    useDocTreeStore.getState().selectNode({ kind: "dir", id: dir.dir_id, name: dir.name });
     if (isOpen) {
       useDocTreeStore.getState().collapseDir(dir.dir_id);
     } else {
@@ -548,6 +533,10 @@ function DocRow({
         <button
           type="button"
           onClick={() => {
+            // 选中跟随打开（权限卡片切到本文档，设计 §9）
+            useDocTreeStore
+              .getState()
+              .selectNode({ kind: "doc", id: doc.doc_id, name: doc.name });
             void requestOpen(doc.doc_id);
           }}
           className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left select-none"

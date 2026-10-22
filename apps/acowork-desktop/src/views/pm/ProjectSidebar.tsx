@@ -14,7 +14,9 @@ import { Plus, Search } from "lucide-react";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { StyledInput } from "../../components/common/StyledInput";
+import { ProjectAvatar } from "../../components/common/ProjectAvatar";
 import { showToast } from "../../components/common/ToastProvider";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
@@ -107,13 +109,15 @@ export function ProjectSidebar({ width }: { width?: number }) {
       </div>
 
       {/* 项目列表 */}
-      <nav
+      <OverlayScrollbar
         // `py-1` matches SectionPane's list container (and harness/settings,
         // which renders through it) — without it the pm rows sit flush
         // against the header hairline while every other capsule list has
         // the same 4px breathing room top and bottom.
-        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 py-1"
+        fill="flex"
+        role="navigation"
         aria-label={t("pm.projectListAria")}
+        className="px-1.5 py-1"
       >
         {filteredProjects.map((p, index) => {
           const active = selected?.id === p.id;
@@ -134,6 +138,13 @@ export function ProjectSidebar({ width }: { width?: number }) {
               )}
               aria-current={active ? "page" : undefined}
             >
+              {/* 项目图标（custom / builtin / 默认兜底）。active 时 ring 换白描边
+                  以在 accent 底上保持对比。 */}
+              <ProjectAvatar
+                project={p}
+                size={18}
+                className={active ? "ring-white/40" : undefined}
+              />
               {/* `font-medium` 与 chat 侧边栏的 agent 名一致，见 SectionPane
                   同一处的说明：`text-xs` 下 `semibold` 明显过重。 */}
               <span
@@ -183,7 +194,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
               {t("pm.noMatchingProjects")}
             </div>
           )}
-      </nav>
+      </OverlayScrollbar>
 
       {/* 离线时禁用写操作 — 紧贴列表底部，但仍在 + 按钮上方 */}
       {healthy === false && (

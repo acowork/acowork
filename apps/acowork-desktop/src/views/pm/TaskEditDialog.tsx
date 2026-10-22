@@ -22,6 +22,7 @@ import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Dropdown } from "../../components/common/Dropdown";
+import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
 import { showToast } from "../../components/common/ToastProvider";
 import type { PmTaskResponse, Priority, TaskType } from "../../lib/pm-types";
@@ -232,7 +233,8 @@ export function TaskEditDialog({
         </header>
 
         {/* 表单区 */}
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4">
+        <OverlayScrollbar fill="flex" className="px-5 py-4">
+          <div className="space-y-3">
           <Field label={t("pm.task.title")} required>
             <StyledInput
               value={title}
@@ -310,7 +312,11 @@ export function TaskEditDialog({
             {depOptions.length === 0 ? (
               <p className="text-xs text-text-tertiary">{t("pm.task.noCandidates")}</p>
             ) : (
-              <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border border-border-outer p-2">
+              <OverlayScrollbar
+                maxHeight="7rem"
+                containerClassName="rounded-md border border-border-outer"
+                className="space-y-1 p-2"
+              >
                 {depOptions.map((opt) => (
                   <label
                     key={opt.value}
@@ -325,10 +331,11 @@ export function TaskEditDialog({
                     <span className="min-w-0 flex-1 truncate">{opt.label}</span>
                   </label>
                 ))}
-              </div>
+              </OverlayScrollbar>
             )}
           </Field>
-        </div>
+          </div>
+        </OverlayScrollbar>
 
         {/* 底部操作 */}
         <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">

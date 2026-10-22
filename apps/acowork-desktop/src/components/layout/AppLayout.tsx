@@ -12,6 +12,7 @@ import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
 import { GroupRightNavBar } from "./GroupRightNavBar";
+import { ViewSettingsRail } from "./ViewSettingsRail";
 // FileEditorPanel is lazy-loaded: its module graph pulls in monaco-editor
 // (~170 kB) plus monaco-languageclient's vscode-api stack (~1 MB) via
 // useLspClientPool. Keeping it out of the entry chunk is what actually
@@ -49,8 +50,10 @@ import { SettingsPage } from "../settings/SettingsPage";
 import { useLocalNodeAutoStart } from "../../hooks/useLocalNodeAutoStart";
 import { HarnessPage } from "../harness/HarnessPage";
 import { ProjectsView } from "../../views/ProjectsView";
+import { PmSettingsPanel } from "../../views/pm/PmSettingsPanel";
 
 import { DocsView } from "../../views/DocsView";
+import { DocSettingsPanel } from "../../views/doc/DocSettingsPanel";
 import { ExtensionsView } from "../../views/ExtensionsView";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
@@ -126,6 +129,10 @@ export function AppLayout() {
   const setActiveTab = useLayoutStore((s) => s.setActivePanelTab);
   const rightPanelCollapsed = useLayoutStore((s) => s.rightPanelCollapsed);
   const setRightPanelCollapsed = useLayoutStore((s) => s.setRightPanelCollapsed);
+  const pmPanelOpen = useLayoutStore((s) => s.pmPanelOpen);
+  const setPmPanelOpen = useLayoutStore((s) => s.setPmPanelOpen);
+  const docPanelOpen = useLayoutStore((s) => s.docPanelOpen);
+  const setDocPanelOpen = useLayoutStore((s) => s.setDocPanelOpen);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     if (stored) {
@@ -1222,13 +1229,45 @@ export function AppLayout() {
         {currentView === "projects" && (
           <div className="flex flex-1 overflow-hidden rounded-xl">
             <ProjectsView />
+            {/* PM 右面板 — 与群聊 GroupMembersPanel 同槽位：齿轮轨唤出，
+                宽度 / 拖拽复用 chat 的 rightWidth。面板自带空态（未选项目）。 */}
+            {pmPanelOpen && (
+              <PmSettingsPanel
+                width={rightWidth}
+                onResizeStart={handleMouseDownRight}
+                onClose={() => setPmPanelOpen(false)}
+              />
+            )}
           </div>
+        )}
+
+        {currentView === "projects" && (
+          <ViewSettingsRail
+            expanded={pmPanelOpen}
+            onToggle={() => setPmPanelOpen((v) => !v)}
+            tooltipKey="pm.settingsPanel.title"
+          />
         )}
 
         {currentView === "docs" && (
           <div className="flex flex-1 overflow-hidden rounded-xl">
             <DocsView />
+            {docPanelOpen && (
+              <DocSettingsPanel
+                width={rightWidth}
+                onResizeStart={handleMouseDownRight}
+                onClose={() => setDocPanelOpen(false)}
+              />
+            )}
           </div>
+        )}
+
+        {currentView === "docs" && (
+          <ViewSettingsRail
+            expanded={docPanelOpen}
+            onToggle={() => setDocPanelOpen((v) => !v)}
+            tooltipKey="doc.settingsPanel.title"
+          />
         )}
 
         {currentView === "extensions" && (
@@ -1237,11 +1276,12 @@ export function AppLayout() {
           </div>
         )}
 
-        {/* Right rail placeholder for non-chat views — keeps the 40px right
-            column reserved so window chrome stays symmetric when switching
-            between nav targets. Positioned last so it always sits at the
-            right edge, regardless of which central panel is active. */}
-        {currentView !== "chat" && (
+        {/* Right rail placeholder for the remaining non-chat views — keeps the
+            40px right column reserved so window chrome stays symmetric when
+            switching between nav targets. projects / docs now own a real
+            ViewSettingsRail above; settings / harness / extensions keep the
+            empty placeholder. */}
+        {currentView !== "chat" && currentView !== "projects" && currentView !== "docs" && (
           <aside className="w-10 shrink-0 py-2 dark:border-zinc-800" aria-hidden="true" />
         )}
       </div>

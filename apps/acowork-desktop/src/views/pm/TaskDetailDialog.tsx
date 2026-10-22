@@ -1,12 +1,17 @@
 /**
- * TaskDetailDrawer — 任务详情抽屉（T2-6）。
+ * TaskDetailDialog — 任务详情居中对话框（T2-6，原 TaskDetailDrawer）。
  *
- * 对齐 UX 设计 §3.4：
- * - 右侧滑入，宽 480px，可滚动
+ * 布局对齐全局统一 dialog chrome（GlobalSearchDialog / TaskEditDialog 同款）：
+ * - 遮罩 `fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay`，
+ *   mousedown 遮罩关闭；面板 stopPropagation
+ * - 面板 `max-w-3xl max-h-[70vh] rounded-md border bg-modal-surface shadow-xl`
  * - Tabs（按需显示）：概述 / 描述 / 子任务 / 依赖 / 附件
- * - 子任务树 SubtaskTree（同 Drawer 内导航到子任务）
+ * - 子任务树 SubtaskTree（同 dialog 内导航到子任务）
  * - 底部：编辑 / 删除 / 状态快速流转
  * - 关闭时焦点回归原 Task Card
+ *
+ * 曾经的右侧滑出抽屉形态已退役：pm/doc 视图的 40px 右轨改为承载项目/文档
+ * 设置面板（见 PmSettingsPanel / AppLayout），任务详情不再是右侧表面。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -17,13 +22,14 @@ import { PriorityBadge } from "./PriorityBadge";
 import { TaskTypeIcon } from "./TaskTypeIcon";
 import { SubtaskTree } from "./SubtaskTree";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { showToast } from "../../components/common/ToastProvider";
 import { attachmentUrl } from "../../lib/pm-api";
 import { cn } from "../../lib/utils";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 import { useActorLabel } from "./pmMembers";
 
-interface TaskDetailDrawerProps {
+interface TaskDetailDialogProps {
   taskId: string;
   onClose: () => void;
   onEdit?: (task: PmTaskResponse) => void;
@@ -58,7 +64,39 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: TaskDetailDrawerProps) {
+/** 统一的居中遮罩 + 面板外壳（三种内容状态共用）。 */
+function DialogShell({
+  dialogRef,
+  ariaLabel,
+  onClose,
+  children,
+}: {
+  dialogRef?: React.Ref<HTMLDivElement>;
+  ariaLabel: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay"
+      onMouseDown={onClose}
+    >
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={ariaLabel}
+        className="relative z-10 flex max-h-[70vh] w-full max-w-3xl flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface text-text shadow-xl outline-none"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export function TaskDetailDialog({ taskId, onClose, onEdit, onAddSubtask }: TaskDetailDialogProps) {
   const { t } = useTranslation();
   const detail = usePmTaskDetailStore((s) => s.detail);
   const attachments = usePmTaskDetailStore((s) => s.attachments);
@@ -74,7 +112,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDeleteAtt, setConfirmDeleteAtt] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const drawerRef = useRef<HTMLElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const handleTabKeyDown = (e: React.KeyboardEvent, index: number) => {
@@ -95,10 +133,10 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
   // 子任务 Tab：有子任务或允许添加时显示
   tabs.push({ id: "subtasks", label: t("pm.task.subtasks") });
 
-  // 打开时拉取详情 + 聚焦抽屉
+  // 打开时拉取详情 + 聚焦对话框
   useEffect(() => {
     openTask(taskId);
-    drawerRef.current?.focus();
+    dialogRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
@@ -145,22 +183,20 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
 
   if (loading && !detail) {
     return (
-      <div className="fixed inset-0 z-40" role="dialog" aria-modal="true">
-        <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-        <aside className="absolute inset-y-0 right-0 w-[480px] bg-page-bg p-6 shadow-xl dark:bg-zinc-900">
+      <DialogShell ariaLabel={t("pm.task.details")} onClose={onClose}>
+        <div className="p-6">
           <div className="h-5 w-48 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
           <div className="mt-4 h-3 w-32 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
           <div className="mt-6 h-40 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
-        </aside>
-      </div>
+        </div>
+      </DialogShell>
     );
   }
 
   if (!detail) {
     return (
-      <div className="fixed inset-0 z-40" role="dialog" aria-modal="true">
-        <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-        <aside className="absolute inset-y-0 right-0 w-[480px] bg-page-bg p-6 shadow-xl dark:bg-zinc-900">
+      <DialogShell ariaLabel={t("pm.task.details")} onClose={onClose}>
+        <div className="p-6">
           <p className="text-xs text-text-tertiary">
             {error ?? t("pm.task.taskNotFound")}
           </p>
@@ -171,25 +207,17 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
           >
             {t("common.close") ?? "Close"}
           </button>
-        </aside>
-      </div>
+        </div>
+      </DialogShell>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-40" role="dialog" aria-modal="true" aria-label={detail.title}>
-      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <aside
-        ref={drawerRef}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label={detail?.title || t("pm.task.details")}
-        className="absolute inset-y-0 right-0 flex w-[480px] flex-col bg-page-bg shadow-xl outline-none dark:bg-zinc-900"
-      >
+    <>
+      <DialogShell dialogRef={dialogRef} ariaLabel={detail.title || t("pm.task.details")} onClose={onClose}>
         {/* 头部：标题 + 徽章 + 关闭
             flex-col：header 内是"标题行 + tab 条"两行堆叠。写成 flex 行
-            容器时两者左右并排抢宽度——标题被压到逐字折行、tab 溢出抽屉。*/}
+            容器时两者左右并排抢宽度——标题被压到逐字折行、tab 溢出面板。*/}
         <header className="flex shrink-0 flex-col border-b border-border-divider px-4 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
@@ -246,7 +274,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         </header>
 
         {/* 内容区 */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        <OverlayScrollbar fill="flex" className="px-4 py-3">
           {error && (
             <div className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
               {error}
@@ -401,7 +429,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
             </div>
           )}
           </div>
-        </div>
+        </OverlayScrollbar>
 
         {/* 底部操作 */}
         <footer className="flex shrink-0 items-center gap-2 border-t border-border-divider px-4 py-2.5">
@@ -429,7 +457,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
             />
           </div>
         </footer>
-      </aside>
+      </DialogShell>
 
       <ConfirmDialog
         open={confirmDelete}
@@ -450,7 +478,7 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
         onConfirm={handleDeleteAttachment}
         onCancel={() => setConfirmDeleteAtt(null)}
       />
-    </div>
+    </>
   );
 }
 

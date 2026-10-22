@@ -207,6 +207,8 @@ mod tests {
             files: vec![],
             dirs: vec![],
             schema_version: 1,
+            creator: None,
+            acl: None,
         };
         sub_idx.files.push(crate::types::DocMeta::new(
             "doc-111111111111".into(),
@@ -261,6 +263,8 @@ mod tests {
             )],
             dirs: vec![],
             schema_version: 1,
+            creator: None,
+            acl: None,
         };
         store.save(&sub_idx).await.unwrap();
 

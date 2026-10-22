@@ -26,6 +26,7 @@
 //! handlers 维持现状，**零 handler 改动**。
 
 pub mod attachments;
+pub mod icon;
 pub mod projects;
 pub mod routes;
 pub mod search;
