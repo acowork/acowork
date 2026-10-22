@@ -25,11 +25,11 @@ const WINDOW_CEILING = 4_194_304;
 const WINDOW_PRESETS = [200_000, 250_000, 300_000, 500_000];
 
 const CATEGORY_META: Record<ContextUsageCategoryKey, { labelKey: string; color: string }> = {
-  system: { labelKey: "contextUsage.categories.systemPrompt", color: "#6366f1" },
-  tools: { labelKey: "contextUsage.categories.tools", color: "#14b8a6" },
-  messages: { labelKey: "contextUsage.categories.messages", color: "#f59e0b" },
-  connectors: { labelKey: "contextUsage.categories.connectors", color: "#a855f7" },
-  skills: { labelKey: "contextUsage.categories.skills", color: "#ec4899" },
+  system: { labelKey: "contextUsage.categories.systemPrompt", color: "#ec4899" },
+  tools: { labelKey: "contextUsage.categories.tools", color: "#a855f7" },
+  messages: { labelKey: "contextUsage.categories.messages", color: "#14b8a6" },
+  connectors: { labelKey: "contextUsage.categories.connectors", color: "#f59e0b" },
+  skills: { labelKey: "contextUsage.categories.skills", color: "#6366f1" },
 };
 
 /** Circular progress ring showing context usage percentage.
