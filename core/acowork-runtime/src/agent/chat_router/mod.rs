@@ -11,7 +11,8 @@
 //!
 //! - [`prompt`] — Block A, the byte-stable system prompt;
 //! - [`context`] — Block B (history projection) and Block C (this turn's view);
-//! - [`tool`] — the `dispatch` tool and its validation;
+//! - [`tool`] — the `dispatch` tool, the read-only information tools
+//!   (`memory_recall`, GET-only `http_request`), and their validation;
 //! - [`decision`] — the append-only decision log;
 //! - [`runner`] — read history, call the model, act, log.
 //!

@@ -1059,7 +1059,7 @@ async fn route_intent_inbound(
         return Ok(());
     }
 
-    route_intent_legacy(session_manager, designated_session_id, env).await
+    route_intent_legacy(session_manager, designated_session_id, env, node_token).await
 }
 
 /// Run one chat's router turns, strictly in arrival order, on a task of its
@@ -1096,12 +1096,12 @@ fn spawn_chat_router_drain(
             let cs = Arc::clone(&chat_sessions);
             let envelope = turn.envelope;
             let designated = turn.designated_session_id;
-            let token = turn.node_token;
+            let token = turn.node_token.clone();
             let turn_result = tokio::spawn(async move {
                 let outcome =
                     crate::agent::chat_router::runner::handle_intent(&sm, &cs, &envelope, &token)
                         .await;
-                finish_chat_turn(&sm, outcome, &designated, envelope)
+                finish_chat_turn(&sm, outcome, &designated, envelope, &token)
                     .await
                     .map_err(|e| e.to_string())
             })
@@ -1132,20 +1132,21 @@ pub(crate) async fn finish_chat_turn(
     outcome: crate::agent::chat_router::runner::Outcome,
     designated_session_id: &str,
     envelope: Box<crate::agent::inbound::IntentEnvelope>,
+    node_token: &str,
 ) -> crate::error::Result<()> {
     use crate::agent::chat_router::runner::Outcome;
 
     match outcome {
         Outcome::Handled => Ok(()),
         Outcome::PassThrough => {
-            route_intent_legacy(session_manager, designated_session_id, envelope).await
+            route_intent_legacy(session_manager, designated_session_id, envelope, node_token).await
         }
         Outcome::Fallback { reason } => {
             tracing::info!(
                 reason = %reason,
                 "Chat Router fell back to the deterministic route"
             );
-            route_intent_legacy(session_manager, designated_session_id, envelope).await
+            route_intent_legacy(session_manager, designated_session_id, envelope, node_token).await
         }
     }
 }
@@ -1160,6 +1161,7 @@ async fn route_intent_legacy(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     designated_session_id: &str,
     env: Box<crate::agent::inbound::IntentEnvelope>,
+    node_token: &str,
 ) -> crate::error::Result<()> {
     use crate::agent::inbound::IntentEnvelope;
     use crate::agent::intent_turn::render_intent_message;
@@ -1234,7 +1236,31 @@ async fn route_intent_legacy(
     // as a *separate* field — never folded into `content` — so the user's
     // actual message stays clean for the auto-title and the persisted `user`
     // entry; the SessionTask records it as its own `system` turn (§4.1).
-    session_manager.lock().await.send_to_session(
+    //
+    // §5.5.5 anchor at routing time: for a Chat-sourced turn that owes its
+    // chat session a write-back, the `turn_started` pointer is written as
+    // soon as the intent is delivered — not when a (possibly busy) session
+    // dequeues it minutes later. Without it the chat surface projects
+    // "assigning…" for the whole queue wait. The session-task write at turn
+    // start keeps the same deterministic `meta.message_id`, so the store
+    // dedups the second one; this early write is best-effort — a failure
+    // costs the anchor, never the message.
+    let pointer = if !source_chat_session_id.is_empty()
+        && crate::agent::intent_turn::turn_kind_semantics(&kind, &message_id).1
+    {
+        Some((
+            message_id.clone(),
+            source_chat_session_id.clone(),
+            from.clone(),
+        ))
+    } else {
+        None
+    };
+    let deps = crate::agent::chat_router::runner::RouterDeps::from_core(
+        &session_manager.lock().await.core(),
+        node_token,
+    );
+    let sent = session_manager.lock().await.send_to_session(
         &target.0,
         SessionMessage::Intent {
             content,
@@ -1250,7 +1276,51 @@ async fn route_intent_legacy(
             chat_attachment_ids,
             in_reply_to,
         },
-    )
+    );
+    if let (Some((message_id, chat_id, from)), Ok(())) = (pointer, sent.as_ref()) {
+        if let Err(e) = crate::agent::intent_turn::append_chat_row(
+            &deps.instance_id,
+            &deps.gateway_host,
+            &deps.node_token,
+            &chat_id,
+            "system_notice",
+            &from,
+            "",
+            serde_json::json!({
+                "message_id": format!("ts:{message_id}"),
+                "notice_type": "turn_started",
+                "in_reply_to": message_id,
+                "agent_session_id": target.0,
+            }),
+        )
+        .await
+        {
+            tracing::warn!(
+                chat_id = %chat_id,
+                error = %e,
+                "early turn_started pointer failed — session task retries at turn start"
+            );
+        }
+        // §5.5.5 pending queue: a chat message routed into a session that is
+        // still mid-turn is otherwise invisible to the execution UI (its
+        // queue box is frontend-only state). Record it so the queue shows the
+        // real wait; a no-op when the session is idle and starts immediately.
+        session_manager.lock().await.record_pending_intent(
+            &target.0,
+            crate::agent::session_state::PendingIntent {
+                message_id: message_id.clone(),
+                from: from.clone(),
+                preview: crate::agent::session_state::pending_preview(
+                    params
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                ),
+                from_chat: true,
+            },
+        );
+    }
+    sent
 }
 
 /// Forward an `InboundMessage` to the session task's `agent_inbound_tx`.
@@ -1557,7 +1627,7 @@ mod tests {
         let (sm, _) = chat_router_test_pair(dir.path());
         let sessions = || sm.try_lock().expect("lock free").active_sessions().len();
 
-        finish_chat_turn(&sm, Outcome::Handled, "", chat_envelope("cs-handled", "hello"))
+        finish_chat_turn(&sm, Outcome::Handled, "", chat_envelope("cs-handled", "hello"), "node-token")
             .await
             .expect("a handled turn is already complete");
         assert_eq!(sessions(), 0, "the drainer must not re-deliver a handled turn");
@@ -1572,7 +1642,7 @@ mod tests {
                 Outcome::PassThrough => "cs-passthrough",
                 _ => "cs-fallback",
             };
-            finish_chat_turn(&sm, outcome, "", chat_envelope(chat, "hello"))
+            finish_chat_turn(&sm, outcome, "", chat_envelope(chat, "hello"), "node-token")
                 .await
                 .expect("the deterministic route must deliver a declined turn");
         }

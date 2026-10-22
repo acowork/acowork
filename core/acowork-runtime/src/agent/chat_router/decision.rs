@@ -40,7 +40,8 @@ pub struct DecisionRecord {
     /// fallback that never reached a session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_session_id: Option<String>,
-    /// Wall-clock duration of the router call (including one tool retry).
+    /// Wall-clock duration of the router turn (model calls, information
+    /// rounds, and one dispatch-argument retry included).
     pub latency_ms: u64,
     /// `ok` / `error`.
     pub outcome: String,
@@ -57,6 +58,10 @@ pub struct DecisionRecord {
     /// Number of projected history rows (excluding the current message).
     #[serde(default)]
     pub history_len: usize,
+    /// Information-tool rounds run before the decision (`memory_recall` /
+    /// `http_request`); absent when the turn answered or routed directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info_rounds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -120,6 +125,7 @@ mod tests {
             prefix_hash: "9f2c1a7b".into(),
             anchor_seq: 40,
             history_len: 18,
+            info_rounds: Some(1),
             prompt_tokens: Some(3120),
             cache_read_tokens: Some(2816),
             cache_write_tokens: Some(0),
@@ -156,5 +162,6 @@ mod tests {
         assert_eq!(parsed.anchor_seq, 0);
         assert_eq!(parsed.history_len, 0);
         assert_eq!(parsed.prefix_hash, "");
+        assert_eq!(parsed.info_rounds, None);
     }
 }

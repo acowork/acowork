@@ -332,7 +332,7 @@ pub struct ChatRouterConfig {
     /// Router call timeout in ms. `None` = 8,000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    /// Chat messages projected into the router context. `None` = 24.
+    /// Chat messages projected into the router context. `None` = 32.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_window: Option<usize>,
     /// Maximum candidates shown to the router. `None` = 10.
@@ -342,7 +342,7 @@ pub struct ChatRouterConfig {
 
 impl ChatRouterConfig {
     pub const DEFAULT_TIMEOUT_MS: u64 = 8_000;
-    pub const DEFAULT_HISTORY_WINDOW: usize = 24;
+    pub const DEFAULT_HISTORY_WINDOW: usize = 32;
     pub const DEFAULT_MAX_CANDIDATES: usize = 10;
 
     /// Master switch, defaulting to on.

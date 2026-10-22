@@ -94,6 +94,45 @@ pub struct SessionRuntimeSnapshot {
     pub context_usage: Option<String>,
 }
 
+/// One queued inbound intent routed into a session while it was already busy
+/// (ADR-099, design 27 §5.5.5).
+///
+/// Held on `ConversationSession` as the source of truth and projected through
+/// the retained `SessionState` snapshot, so the execution UI can show the real
+/// pending queue — the chat-forwarded messages that the local composer queue
+/// box (frontend-only state) cannot see. `preview` is a bounded excerpt, never
+/// a full body (ADR-096). Recorded on enqueue only when the target session is
+/// active; cleared when the session dequeues it to start the turn.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingIntent {
+    /// Durable id of the user message this intent answers — the dedup key.
+    pub message_id: String,
+    /// Display name of the sender, for the queue row label.
+    pub from: String,
+    /// Bounded single-line excerpt of the user's message.
+    pub preview: String,
+    /// `true` when the message was routed from a Chat session (vs an
+    /// agent-to-agent or PM intent), so the UI can label it "from chat".
+    pub from_chat: bool,
+}
+
+/// Max characters kept in a [`PendingIntent::preview`] excerpt (bounded read).
+pub const PENDING_INTENT_PREVIEW_CHARS: usize = 120;
+
+/// Collapse raw message text to a single line and cut it to
+/// [`PENDING_INTENT_PREVIEW_CHARS`] characters on a `char` boundary, appending
+/// an ellipsis when trimmed. Used to build a queue preview without shipping the
+/// whole body.
+pub fn pending_preview(text: &str) -> String {
+    let flat = text.trim().replace(['\r', '\n'], " ");
+    if flat.chars().count() <= PENDING_INTENT_PREVIEW_CHARS {
+        flat
+    } else {
+        let cut: String = flat.chars().take(PENDING_INTENT_PREVIEW_CHARS).collect();
+        format!("{cut}…")
+    }
+}
+
 /// A single item in the session-level todo list.
 ///
 /// Re-exported from `acowork_memory::session_meta::TodoItem` (canonical
@@ -606,6 +645,20 @@ impl SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_preview_collapses_newlines_and_keeps_short_text() {
+        assert_eq!(pending_preview("  hi\nthere\r "), "hi there");
+    }
+
+    #[test]
+    fn pending_preview_cuts_on_char_boundary_with_ellipsis() {
+        let long = "字".repeat(PENDING_INTENT_PREVIEW_CHARS + 10);
+        let out = pending_preview(&long);
+        // exactly the cap characters + the ellipsis marker, no split char
+        assert_eq!(out.chars().count(), PENDING_INTENT_PREVIEW_CHARS + 1);
+        assert!(out.ends_with('…'));
+    }
 
     #[test]
     fn paused_serializes_reason_and_message() {

@@ -2217,6 +2217,33 @@ impl SessionManager {
         }
     }
 
+    /// Record a routed intent in the target session's pending queue so the
+    /// execution UI can show it while the session is still busy (ADR-099,
+    /// design 27 §5.5.5).
+    ///
+    /// Only meaningful for a session that is already running a turn: an idle
+    /// session dequeues the intent immediately and the message appears in its
+    /// history, so no queue row is needed. Best-effort — a session without a
+    /// persistent conversation (ephemeral) simply has nowhere to record.
+    /// Pushes one state change so the projection is live without waiting for
+    /// the next turn boundary.
+    pub fn record_pending_intent(
+        &self,
+        session_id: &str,
+        intent: crate::agent::session_state::PendingIntent,
+    ) {
+        let Some(handle) = self.sessions.get(session_id) else {
+            return;
+        };
+        if !handle.status().is_active() {
+            return;
+        }
+        if let Some(conv) = &handle.conversation {
+            conv.push_pending_intent(intent);
+            conv.notify_state_change();
+        }
+    }
+
     /// ADR-038: Observe the lifecycle state of a session.
     ///
     /// - `Active` if a session handle exists in the in-memory map.

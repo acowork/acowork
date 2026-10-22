@@ -2959,6 +2959,10 @@ async fn put_agent_config(
         req.session_language,
         req.intent_idle_rotate_hours,
         req.intent_handoff_max_tokens,
+        req.chat_router_enabled,
+        req.chat_router_model,
+        req.chat_router_provider,
+        req.chat_router_timeout_ms,
     );
     let svc = state
         .agent_config
@@ -3141,6 +3145,26 @@ struct UpdateAgentConfigRequest {
     /// Absent = leave alone; `null` = clear (fall back to default 1,500).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     intent_handoff_max_tokens: Option<serde_json::Value>,
+    /// ADR-099: Chat Router kill switch (`chat_router.enabled`).
+    /// `true`/`false` overwrites the on-disk sub-field; absent = leave
+    /// alone. The router re-reads `agent_config.json` every turn, so no
+    /// live broadcast is needed — the next Chat message sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_router_enabled: Option<serde_json::Value>,
+    /// Explicit router model id (`chat_router.model`). An empty string
+    /// clears it — the wire collapses JSON-null into "absent", so `""`
+    /// is the expressible "fall back to the compact-model chain".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_router_model: Option<serde_json::Value>,
+    /// Explicit router provider id (`chat_router.provider`). Empty
+    /// string clears (whichever provider serves the model wins again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_router_provider: Option<serde_json::Value>,
+    /// Router call timeout in ms (`chat_router.timeout_ms`). Values
+    /// outside 1,000–60,000 are clamped by `ChatRouterConfig::timeout_ms`
+    /// at read time, not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_router_timeout_ms: Option<serde_json::Value>,
     // Note: `skills_auto_load` was deleted — the toggle now lives on
     // the `load_skill` entry of `agent_tools.json` (see ADR-094 §4:
     // `load_skill` is the toggle, full stop). Toggling it goes through
@@ -5270,6 +5294,141 @@ mod tests {
             Some(80usize),
             "untouched distiller fields are preserved"
         );
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// ADR-099: the Chat Router sub-fields round-trip through
+    /// `PUT /agents/{id}/config` → nested `chat_router` block on
+    /// `agent_config.json` → `GET /config`. The flat `chat_router_*` wire
+    /// collapses into one nested block, so this also guards the
+    /// `skip_serializing_if` envelope the Setup panel reads back, plus the
+    /// empty-string clear that drops only `model` while siblings survive.
+    #[tokio::test]
+    async fn test_put_agent_config_chat_router_fields_roundtrip() {
+        let temp_dir =
+            std::env::temp_dir().join("acowork-test-runtime-http-put-config-chatrouter");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            TEST_INSTANCE_ID.to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore needed
+        )
+        .await
+        .expect("server should start");
+
+        let url = format!(
+            "http://127.0.0.1:{}/agents/{TEST_INSTANCE_ID}/config",
+            server.port
+        );
+        let client = reqwest::Client::new();
+
+        // 1. PUT the four Chat Router wire fields.
+        let resp = client
+            .put(&url)
+            .json(&serde_json::json!({
+                "chat_router_enabled": true,
+                "chat_router_model": "deepseek-flash",
+                "chat_router_provider": "deepseek",
+                "chat_router_timeout_ms": 12000,
+            }))
+            .send()
+            .await
+            .expect("PUT chat router fields");
+        assert!(resp.status().is_success(), "PUT got {}", resp.status());
+
+        // 2. The flat wire collapsed into the nested on-disk block.
+        let reloaded = crate::agent_config::load_agent_config(std::path::Path::new(&temp_dir))
+            .expect("load ok")
+            .expect("config exists");
+        let router = reloaded
+            .chat_router
+            .as_ref()
+            .expect("chat_router block created");
+        assert_eq!(router.enabled, Some(true));
+        assert_eq!(router.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(router.provider.as_deref(), Some("deepseek"));
+        assert_eq!(router.timeout_ms, Some(12000));
+
+        // 3. GET /config surfaces the nested block (the Setup panel read
+        //    path — `agentSetupConfigSync` maps this back to the profile).
+        let get: serde_json::Value = client
+            .get(&url)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let router_json = &get["config"]["chat_router"];
+        assert_eq!(router_json["enabled"], serde_json::json!(true));
+        assert_eq!(router_json["model"], serde_json::json!("deepseek-flash"));
+        assert_eq!(router_json["provider"], serde_json::json!("deepseek"));
+        assert_eq!(router_json["timeout_ms"], serde_json::json!(12000));
+
+        // 4. Empty-string model clears ONLY the model (the panel's "auto");
+        //    the block and its siblings survive (sub-field patch, not a
+        //    whole-block overwrite).
+        let resp = client
+            .put(&url)
+            .json(&serde_json::json!({ "chat_router_model": "" }))
+            .send()
+            .await
+            .expect("PUT clear router model");
+        assert!(
+            resp.status().is_success(),
+            "PUT clear got {}",
+            resp.status()
+        );
+        let reloaded = crate::agent_config::load_agent_config(std::path::Path::new(&temp_dir))
+            .expect("load ok")
+            .expect("config exists");
+        let router = reloaded
+            .chat_router
+            .as_ref()
+            .expect("block still present after clearing one sub-field");
+        assert_eq!(router.model, None, "empty string clears the model");
+        assert_eq!(router.enabled, Some(true), "sibling preserved");
+        assert_eq!(router.provider.as_deref(), Some("deepseek"), "sibling preserved");
+        assert_eq!(router.timeout_ms, Some(12000), "sibling preserved");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }

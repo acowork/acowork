@@ -190,7 +190,38 @@ fn apply_field_patch(
         ConfigField::IntentHandoffMaxTokens => {
             cfg.intent_handoff_max_tokens = patch_typed::<u64>(field, op);
         }
+        // ADR-099: sub-field patches against the nested `chat_router`
+        // block. The block is created on first write; an all-`None`
+        // block serializes as `{}` and `chat_router_config()` reads it
+        // back as the design defaults, so clearing is lossless.
+        ConfigField::ChatRouterEnabled => {
+            chat_router(cfg).enabled = patch_typed::<bool>(field, op);
+        }
+        ConfigField::ChatRouterModel => {
+            // Empty string = explicit clear (the Setup panel's "auto"
+            // option): the wire collapses JSON-null into "absent", so
+            // `""` is the only value that can express "fall back to
+            // the compact-model chain".
+            chat_router(cfg).model = patch_typed::<String>(field, op)
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty());
+        }
+        ConfigField::ChatRouterProvider => {
+            chat_router(cfg).provider = patch_typed::<String>(field, op)
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty());
+        }
+        ConfigField::ChatRouterTimeoutMs => {
+            chat_router(cfg).timeout_ms = patch_typed::<u64>(field, op);
+        }
     }
+}
+
+/// Get-or-create the nested `chat_router` block for a sub-field patch.
+fn chat_router(
+    cfg: &mut AgentConfig,
+) -> &mut crate::agent_config::ChatRouterConfig {
+    cfg.chat_router.get_or_insert_with(Default::default)
 }
 
 /// Type-erase a `FieldPatch<serde_json::Value>` into the
@@ -408,6 +439,10 @@ mod tests {
             None,                          // session_language absent -> skip
             None,                          // intent_idle_rotate_hours absent -> skip
             None,                          // intent_handoff_max_tokens absent -> skip
+            None,                          // chat_router_enabled absent -> skip
+            None,                          // chat_router_model absent -> skip
+            None,                          // chat_router_provider absent -> skip
+            None,                          // chat_router_timeout_ms absent -> skip
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
@@ -466,6 +501,10 @@ mod tests {
             None,                          // session_language absent -> skip
             None,                          // intent_idle_rotate_hours absent -> skip
             None,                          // intent_handoff_max_tokens absent -> skip
+            None,                          // chat_router_enabled absent -> skip
+            None,                          // chat_router_model absent -> skip
+            None,                          // chat_router_provider absent -> skip
+            None,                          // chat_router_timeout_ms absent -> skip
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
@@ -492,5 +531,113 @@ mod tests {
                 .iter()
                 .any(|(f, _)| *f == ConfigField::MemoryForgettingArchiveDays)
         );
+    }
+
+    /// ADR-099: the flat `chat_router_*` wire fields translate onto
+    /// sub-field patches (present -> Set, null -> Clear, absent -> skip)
+    /// so the Desktop's per-field write-through composes without a
+    /// read-modify-write race on the nested block. The distiller /
+    /// forgetting wire tests already pin the absent->skip path for these
+    /// four args; this test pins the present/null mapping to the right
+    /// `ConfigField`.
+    #[test]
+    fn test_chat_router_wire_to_patch_translation() {
+        let body = PutAgentConfigBody::from_request_fields(
+            None, None, None, None, None, None, None, None, // 8 core knobs
+            None, None, None, None, None, None, // 6 distiller
+            None, None, None, None, // 4 memory-forgetting
+            None, None, None, // session_language / intent_idle / intent_handoff
+            Some(serde_json::json!(true)),   // chat_router_enabled -> Set
+            Some(serde_json::json!("fast")), // chat_router_model -> Set
+            Some(serde_json::json!(null)),   // chat_router_provider -> Clear
+            None,                            // chat_router_timeout_ms absent -> skip
+        );
+
+        let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
+            body.patches.iter().map(|p| (p.field, &p.op)).collect();
+        assert_eq!(fields.len(), 3, "two present + one clear, absent skipped");
+        assert!(fields.contains(&(
+            ConfigField::ChatRouterEnabled,
+            &FieldPatch::Set(serde_json::json!(true))
+        )));
+        assert!(fields.contains(&(
+            ConfigField::ChatRouterModel,
+            &FieldPatch::Set(serde_json::json!("fast"))
+        )));
+        assert!(fields.contains(&(ConfigField::ChatRouterProvider, &FieldPatch::Clear)));
+        assert!(
+            !fields
+                .iter()
+                .any(|(f, _)| *f == ConfigField::ChatRouterTimeoutMs)
+        );
+    }
+
+    /// ADR-099: `chat_router_*` sub-field patches create the nested block,
+    /// set one sub-field at a time, treat an empty string as "clear" (the
+    /// Setup panel's "auto" option), and never disturb sibling fields.
+    #[test]
+    fn test_chat_router_subfield_patches() {
+        let mut cfg = AgentConfig::default();
+        assert!(cfg.chat_router.is_none());
+
+        apply(
+            &mut cfg,
+            &[patch(
+                ConfigField::ChatRouterModel,
+                serde_json::json!("fast-model"),
+            )],
+        );
+        let router = cfg.chat_router.as_ref().expect("block created");
+        assert_eq!(router.model.as_deref(), Some("fast-model"));
+        assert!(router.enabled.is_none(), "sibling fields untouched");
+
+        apply(
+            &mut cfg,
+            &[patch(
+                ConfigField::ChatRouterEnabled,
+                serde_json::json!(false),
+            )],
+        );
+        assert_eq!(cfg.chat_router.as_ref().unwrap().enabled, Some(false));
+
+        // Empty string clears the model back to the compact chain while
+        // the kill switch stays where the user left it.
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::ChatRouterModel, serde_json::json!(""))],
+        );
+        let router = cfg.chat_router.as_ref().unwrap();
+        assert_eq!(router.model, None);
+        assert_eq!(router.enabled, Some(false));
+
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::ChatRouterTimeoutMs, serde_json::json!(15000))],
+        );
+        assert_eq!(cfg.chat_router.as_ref().unwrap().timeout_ms, Some(15000));
+
+        // Provider round-trips the same way the model does: a value
+        // sets it, an empty string clears it back to "whichever provider
+        // serves the model", and neither touches the other sub-fields.
+        apply(
+            &mut cfg,
+            &[
+                patch(
+                    ConfigField::ChatRouterProvider,
+                    serde_json::json!("openai"),
+                ),
+                patch(ConfigField::ChatRouterTimeoutMs, serde_json::json!(20000)),
+            ],
+        );
+        let router = cfg.chat_router.as_ref().unwrap();
+        assert_eq!(router.provider.as_deref(), Some("openai"));
+        assert_eq!(router.timeout_ms, Some(20000));
+        assert_eq!(router.model, None, "still cleared from the prior step");
+
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::ChatRouterProvider, serde_json::json!(""))],
+        );
+        assert_eq!(cfg.chat_router.as_ref().unwrap().provider, None);
     }
 }

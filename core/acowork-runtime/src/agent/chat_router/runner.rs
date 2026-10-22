@@ -13,7 +13,11 @@
 //! 2. one short `SessionManager` lock: prompt, candidates, router model;
 //! 3. history read over node-auth HTTP (bounded by a timeout — it is the only
 //!    network hop before the model);
-//! 4. Block B projection + Block C tail, one `provider.chat` call;
+//! 4. Block B projection + Block C tail, model call(s) — `dispatch` plus
+//!    read-only information tools (`memory_recall`, GET-only `http_request`);
+//!    information rounds stay inside one turn so a full
+//!    user → assistant → tool_call → tool_result → assistant chain is never
+//!    cut across turns;
 //! 5. act: reply (the write-back channel), dispatch to a session, or degrade
 //!    to the pre-ADR-099 deterministic route;
 //! 6. append one line to the decision log.
@@ -29,6 +33,7 @@ use acowork_core::defaults::GATEWAY_HTTP_PORT;
 use acowork_core::providers::traits::{
     CacheControl, ChatMessage, ChatRequest, ChatResponse, Provider, ToolCall,
 };
+use acowork_core::tools::traits::{Tool, ToolContext};
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -38,7 +43,10 @@ use super::context::{
 };
 use super::decision::{append_decision, DecisionRecord};
 use super::prompt::{build_block_a, surface_label, PersonaSource};
-use super::tool::{dispatch_tools, parse_dispatch, AliasTable, DispatchArgs, DispatchError};
+use super::tool::{
+    parse_dispatch, router_tools, AliasTable, DispatchArgs, DispatchError, DISPATCH_TOOL,
+    HTTP_REQUEST_TOOL, MEMORY_RECALL_TOOL,
+};
 use super::ChatSlot;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::IntentEnvelope;
@@ -51,9 +59,18 @@ use crate::agent::session::{SessionManager, SessionMessage};
 use crate::agent_config::ChatRouterConfig;
 
 /// Router output ceiling. A routed turn's own text is a one-to-three-sentence
-/// acknowledgement (design 29 §3.2); the cap keeps a chatty model from
-/// spending the turn on prose.
-const MAX_OUTPUT_TOKENS: u32 = 512;
+/// acknowledgement (design 29 §3.2), but the ceiling must also leave room for
+/// an information round — a thinking block plus tool-call arguments plus the
+/// final sentence — so one `user → assistant → tool_call → tool_result →
+/// assistant` chain stays complete instead of being cut mid-call by a
+/// length-truncated response.
+const MAX_OUTPUT_TOKENS: u32 = 2048;
+
+/// Per-result ceiling for an information tool fed back to the model. Generous
+/// (a whole page of search hits or recalled memories), yet bounded: one
+/// runaway HTTP body must not swamp the router request. The truncation
+/// marker keeps the round structurally complete.
+const INFO_RESULT_MAX_BYTES: usize = 8 * 1024;
 
 /// Everything a turn needs from the Runtime process, snapshotted once so the
 /// `SessionManager` lock is not held across the HTTP/LLM calls.
@@ -215,6 +232,10 @@ struct Prepared {
     provider: Arc<dyn Provider>,
     model: String,
     provider_label: String,
+    /// The read-only information tools enabled for this agent, resolved off
+    /// the dispatch list (`all_tools` is already the enabled-builtin subset,
+    /// so the agent-level toggle governs the router too).
+    info_tools: Vec<Arc<dyn Tool>>,
 }
 
 async fn run_turn(
@@ -262,12 +283,27 @@ async fn run_turn(
             cfg.max_candidates(),
         );
         let (provider, model) = router_llm(&core, cfg);
+        // The router only ever runs the two read-only lookups, resolved by
+        // name off the enabled dispatch list. A disabled or missing tool is
+        // neither exposed nor executed.
+        let info_tools: Vec<Arc<dyn Tool>> = core
+            .all_tools
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.name().as_str(),
+                    MEMORY_RECALL_TOOL | HTTP_REQUEST_TOOL
+                )
+            })
+            .cloned()
+            .collect();
         Prepared {
             block_a,
             candidates,
             provider_label: provider.name().to_string(),
             provider,
             model,
+            info_tools,
         }
     };
 
@@ -344,8 +380,23 @@ async fn run_turn(
     }
     .render();
 
-    // ── One stateless call ─────────────────────────────────────────────
-    let tools = dispatch_tools();
+    // ── Stateless call(s) ──────────────────────────────────────────────
+    let mut info_names: Vec<&str> = Vec::new();
+    if prepared
+        .info_tools
+        .iter()
+        .any(|t| t.name() == MEMORY_RECALL_TOOL)
+    {
+        info_names.push(MEMORY_RECALL_TOOL);
+    }
+    if prepared
+        .info_tools
+        .iter()
+        .any(|t| t.name() == HTTP_REQUEST_TOOL)
+    {
+        info_names.push(HTTP_REQUEST_TOOL);
+    }
+    let tools = router_tools(&info_names);
     let tools_json = serde_json::to_string(&tools).unwrap_or_default();
     let mut system = ChatMessage::system(prepared.block_a.clone());
     system.cache_control = Some(CacheControl::Ephemeral);
@@ -363,7 +414,7 @@ async fn run_turn(
         thinking_mode: None,
     };
 
-    let trace = TurnTrace {
+    let mut trace = TurnTrace {
         deps,
         chat_id: &chat_id,
         message_id: &envelope.message_id,
@@ -375,6 +426,7 @@ async fn run_turn(
         anchor_seq: block_b.anchor_seq as usize,
         history_len: block_b.messages.len(),
         started,
+        info_rounds: 0,
     };
 
     let mut response = match call_model(&prepared.provider, request.clone(), cfg.timeout_ms()).await {
@@ -384,6 +436,56 @@ async fn run_turn(
             return degrade(deps, envelope, &chat_id, reason).await;
         }
     };
+
+    // ── Information rounds ────────────────────────────────────────────
+    // How many lookups a turn may run is a prompt-level soft limit
+    // ("usually zero, rarely one or two"), not a hard counter here: the
+    // tools are read-only, every round pays the per-call model timeout and
+    // the per-tool timeout, so a runaway chain degrades on time, never on
+    // an arbitrary cap - and a cap that cuts a lookup off mid-answer is
+    // exactly the "result runs away" failure it would claim to prevent.
+    // The assistant → tool_call → tool_result → assistant chain lives in
+    // this single request only; the write-back persists the final text, so
+    // no tool traffic ever enters Block B.
+    loop {
+        // A dispatch - even after earlier lookups - outranks executing
+        // more info calls: routing is the turn's decision, the lookups
+        // were only context for it.
+        if dispatch_call(&response).is_some() {
+            break;
+        }
+        let info_calls: Vec<ToolCall> = response
+            .tool_calls
+            .as_ref()
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter(|call| call.function.name != DISPATCH_TOOL)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if info_calls.is_empty() {
+            break;
+        }
+        trace.info_rounds += 1;
+        request.messages.push(ChatMessage::assistant_with_tools(
+            response.content.clone(),
+            info_calls.clone(),
+        ));
+        for call in &info_calls {
+            let result =
+                execute_info_tool(&prepared.info_tools, call, deps, text, cfg.timeout_ms()).await;
+            request.messages.push(ChatMessage::tool(call.id.clone(), result));
+        }
+        response = match call_model(&prepared.provider, request.clone(), cfg.timeout_ms()).await {
+            Ok(r) => r,
+            Err(reason) => {
+                trace.write("fallback", None, "error", Some(reason.clone()), None);
+                return degrade(deps, envelope, &chat_id, reason).await;
+            }
+        };
+    }
 
     // ── Act ────────────────────────────────────────────────────────────
     let mut dispatch: Option<(DispatchArgs, String)> = None;
@@ -476,6 +578,9 @@ async fn run_turn(
                 .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
             let content = args.message.clone().unwrap_or_else(|| text.to_string());
             let target = args.target.clone();
+            // Kept before `content` moves into the intent, to build the bounded
+            // queue preview if the target session turns out to be busy.
+            let preview_text = content.clone();
             let delivered = {
                 let mut guard = session_manager.lock().await;
                 match guard.chat_dispatch(&chat_id, target, seed).await {
@@ -504,6 +609,49 @@ async fn run_turn(
             };
             match delivered {
                 (Ok(session_id), Ok(())) => {
+                    // §5.5.5 anchor at routing time: write the `turn_started`
+                    // pointer now, not when the receiving session dequeues
+                    // the intent. A busy session may sit on this turn for a
+                    // long time; without the pointer the chat surface keeps
+                    // projecting "assigning…" long after routing completed.
+                    // Same deterministic `meta.message_id` as the session-
+                    // task write, so the store dedups the later one — this
+                    // is best-effort, a failure only costs the early anchor.
+                    if let Err(e) = append_chat_row(
+                        &deps.instance_id,
+                        &deps.gateway_host,
+                        &deps.node_token,
+                        &chat_id,
+                        "system_notice",
+                        &envelope.from,
+                        "",
+                        serde_json::json!({
+                            "message_id": format!("ts:{}", envelope.message_id),
+                            "notice_type": "turn_started",
+                            "in_reply_to": envelope.message_id,
+                            "agent_session_id": session_id,
+                        }),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            chat_id = %chat_id,
+                            error = %e,
+                            "early turn_started pointer failed — session task retries at turn start"
+                        );
+                    }
+                    // §5.5.5 pending queue: if the target session is mid-turn,
+                    // show this routed message in its execution pending queue
+                    // (a no-op when it is idle and starts right away).
+                    session_manager.lock().await.record_pending_intent(
+                        &session_id,
+                        crate::agent::session_state::PendingIntent {
+                            message_id: envelope.message_id.clone(),
+                            from: envelope.from.clone(),
+                            preview: crate::agent::session_state::pending_preview(&preview_text),
+                            from_chat: true,
+                        },
+                    );
                     trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
@@ -605,6 +753,99 @@ async fn call_model(
     }
 }
 
+/// Run one router information-tool call and render its result for the model.
+///
+/// Everything failing here is a *tool result*, never a turn failure: the
+/// model reads the error text and decides whether to answer with what it
+/// has, look something else up, or route. `http_request` is forced to a
+/// bounded GET regardless of what arguments the model invented (ADR-099 D3:
+/// the router reads, it never changes anything) - the narrowed request-side
+/// schema is the polite form of the same rule.
+async fn execute_info_tool(
+    tools: &[Arc<dyn Tool>],
+    call: &ToolCall,
+    deps: &RouterDeps,
+    user_text: &str,
+    timeout_ms: u64,
+) -> String {
+    let name = call.function.name.as_str();
+    let Some(tool) = tools.iter().find(|t| t.name() == name) else {
+        return format!(
+            "Error: `{name}` is not available on a chat turn — valid tools: {DISPATCH_TOOL}, {MEMORY_RECALL_TOOL}, {HTTP_REQUEST_TOOL} (GET only)"
+        );
+    };
+    let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+    let params = if name == HTTP_REQUEST_TOOL {
+        let url = raw
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return "Error: `url` must be an http(s) URL".to_string();
+        }
+        // String headers only; anything else the model invented is dropped.
+        let headers: serde_json::Map<String, Value> = raw
+            .get("headers")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(k, v)| {
+                        v.as_str().map(|s| (k.clone(), Value::String(s.to_string())))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Inner request timeout strictly under the outer turn timeout so
+        // the model - not the deadline - sees the failure.
+        let secs = (timeout_ms / 1000).saturating_sub(1).max(1);
+        serde_json::json!({
+            "method": "GET",
+            "url": url,
+            "headers": Value::Object(headers),
+            "timeout_secs": secs,
+        })
+    } else {
+        raw
+    };
+    let ctx = ToolContext {
+        work_dir: Some(deps.work_dir.clone()),
+        // The router turn belongs to the chat, not to any execution
+        // session: no session-node exclusion, and the user's message is
+        // the semantic query source for memory recall.
+        session_id: None,
+        current_user_message: Some(user_text.to_string()),
+    };
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        tool.execute_with_context(params, &ctx),
+    )
+    .await;
+    let text = match outcome {
+        Ok(Ok(result)) if result.ok => result.content,
+        Ok(Ok(result)) => format!(
+            "Error: {}",
+            result.error.unwrap_or_else(|| "tool failed".to_string())
+        ),
+        Ok(Err(e)) => format!("Error: {e}"),
+        Err(_) => format!("Error: `{name}` timed out after {timeout_ms}ms"),
+    };
+    truncate_info_result(&text)
+}
+
+/// Bound one tool result without splitting a character; the marker keeps
+/// the message pair structurally valid however large the payload was.
+fn truncate_info_result(text: &str) -> String {
+    if text.len() <= INFO_RESULT_MAX_BYTES {
+        return text.to_string();
+    }
+    let mut end = INFO_RESULT_MAX_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated]", &text[..end])
+}
+
 fn dispatch_call(response: &ChatResponse) -> Option<ToolCall> {
     response
         .tool_calls
@@ -691,6 +932,10 @@ async fn degrade(
         // Idempotent: a redelivered turn never doubles the notice.
         "message_id": format!("router-fallback:{}", envelope.message_id),
         "notice_type": "router_fallback",
+        // Anchor link target: the surface resolves the message this
+        // receipt degraded through to its `ts:` pointer row, so the
+        // notice is clickable once routing lands.
+        "in_reply_to": envelope.message_id,
     });
     if let Err(e) = append_chat_row(
         &deps.instance_id,
@@ -723,6 +968,9 @@ struct TurnTrace<'a> {
     anchor_seq: usize,
     history_len: usize,
     started: Instant,
+    /// Information-tool rounds this turn ran before deciding (audit
+    /// surface for "the router looked things up instead of routing").
+    info_rounds: u64,
 }
 
 impl TurnTrace<'_> {
@@ -750,6 +998,7 @@ impl TurnTrace<'_> {
             prefix_hash: self.prefix_hash.clone(),
             anchor_seq: self.anchor_seq,
             history_len: self.history_len,
+            info_rounds: (self.info_rounds > 0).then_some(self.info_rounds),
             prompt_tokens: usage.map(|u| u.0),
             cache_read_tokens: usage.map(|u| u.1),
             cache_write_tokens: usage.map(|u| u.2),
@@ -925,5 +1174,109 @@ mod tests {
         .render();
         assert!(rendered.contains("S1"));
         assert!(!rendered.contains("sess-secret"));
+    }
+
+    fn info_call(name: &str, arguments: &str) -> ToolCall {
+        ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: acowork_core::providers::traits::FunctionCall {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        }
+    }
+
+    fn deps() -> RouterDeps {
+        RouterDeps {
+            instance_id: "i-1".into(),
+            gateway_host: "127.0.0.1".into(),
+            node_token: String::new(),
+            work_dir: ".".into(),
+        }
+    }
+
+    /// A tool that echoes the params it was called with, so the test can see
+    /// exactly what the runner handed to the builtin layer.
+    struct EchoTool {
+        name: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for EchoTool {
+        fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+            acowork_core::tools::traits::ToolSpec {
+                name: self.name.to_string(),
+                description: "echo".to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            params: Value,
+            _work_dir: Option<&str>,
+        ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            Ok(acowork_core::tools::traits::ToolResult {
+                ok: true,
+                content: params.to_string(),
+                error: None,
+                token_usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn http_info_calls_are_forced_to_a_bounded_get() {
+        // Even if the model invents mutating arguments, only a GET with the
+        // url (+ string headers) reaches the tool (ADR-099 D3).
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool { name: HTTP_REQUEST_TOOL })];
+        let call = info_call(
+            HTTP_REQUEST_TOOL,
+            r#"{"url":"https://example.com/time","method":"DELETE","body":{"evil":1},"headers":{"a":"b","c":42},"timeout_secs":9999}"#,
+        );
+        let out = execute_info_tool(&tools, &call, &deps(), "now?", 8000).await;
+        let echoed: Value = serde_json::from_str(&out)
+            .unwrap_or_else(|e| panic!("echoed json params: {e}\nout: {out}"));
+        assert_eq!(echoed["method"], "GET");
+        assert_eq!(echoed["url"], "https://example.com/time");
+        assert_eq!(echoed["headers"], serde_json::json!({ "a": "b" }));
+        assert!(echoed.get("body").is_none());
+        assert!(
+            echoed["timeout_secs"].as_u64().unwrap() <= 8,
+            "inner timeout must stay under the turn budget"
+        );
+
+        // Non-http schemes are rejected before any request runs.
+        let bad = info_call(HTTP_REQUEST_TOOL, r#"{"url":"file:///etc/passwd"}"#);
+        let out = execute_info_tool(&tools, &bad, &deps(), "x", 1000).await;
+        assert!(out.starts_with("Error:"), "got: {out}");
+        assert!(out.contains("http(s)"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_or_malformed_info_calls_come_back_as_tool_errors() {
+        // A hallucinated or disabled tool name is feedback, not a turn
+        // failure - the model gets one more chance to answer or route.
+        let out = execute_info_tool(&[], &info_call("web_fetch", "{}"), &deps(), "x", 1000).await;
+        assert!(out.starts_with("Error:"));
+        assert!(out.contains("not available"));
+
+        // Malformed argument JSON degrades to Null params, not a panic.
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool { name: MEMORY_RECALL_TOOL })];
+        let out = execute_info_tool(&tools, &info_call(MEMORY_RECALL_TOOL, "{oops"), &deps(), "x", 1000).await;
+        assert!(!out.starts_with("Error:"), "got: {out}");
+    }
+
+    #[test]
+    fn oversized_info_results_are_cut_on_char_boundaries() {
+        let big = "汉".repeat(3000); // 9000 bytes > INFO_RESULT_MAX_BYTES
+        let cut = truncate_info_result(&big);
+        assert!(cut.len() <= INFO_RESULT_MAX_BYTES + "…[truncated]".len());
+        assert!(cut.ends_with("…[truncated]"));
+        // Valid UTF-8 by construction.
+        assert!(std::str::from_utf8(cut.as_bytes()).is_ok());
+        // Small results pass through untouched.
+        assert_eq!(truncate_info_result("fine"), "fine");
     }
 }

@@ -1637,6 +1637,34 @@ mod tests {
             serde_json::json!({"type": "object", "properties": {}})
         );
     }
+
+    #[test]
+    fn router_tools_survive_conversion_with_real_names() {
+        // Cross-layer guard for the ADR-099 router bug: `router_tools()`
+        // builds its own tools array and this adapter reads flat top-level
+        // fields. A shape drift (e.g. the OpenAI nested wrapper) silently
+        // turned every router tool into `name = "unknown"` with an empty
+        // schema — the model could never call `dispatch`. Neither side's
+        // own unit tests cross this boundary; this one does.
+        use crate::agent::chat_router::tool::{
+            router_tools, DISPATCH_TOOL, HTTP_REQUEST_TOOL, MEMORY_RECALL_TOOL,
+        };
+        let tools = router_tools(&[MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL]);
+        let native = convert_tools(Some(&tools)).expect("router tools convert");
+        let names: Vec<&str> = native.iter().map(|t| t.function.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![DISPATCH_TOOL, MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL]
+        );
+        // Parameters must survive too — `dispatch` with an empty schema is
+        // just as uncallable as a misnamed one.
+        assert_eq!(
+            native[0].function.parameters["required"],
+            serde_json::json!(["target"])
+        );
+        assert!(native[0].function.parameters["properties"]["target"].is_object());
+        assert!(!native[0].function.description.is_empty());
+    }
 }
 
 // ── ADR-022: Think tag parser ──────────────────────────────────────────────

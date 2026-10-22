@@ -1250,6 +1250,15 @@ impl SessionTask {
                     in_reply_to,
                     handoff_note,
                 }) => {
+                    // §5.5.5: this intent has left the pending queue and is
+                    // starting its turn — drop its queue row so the execution
+                    // UI stops showing it as waiting. A no-op when it reached
+                    // an idle session and was never recorded as pending.
+                    if !source_chat_session_id.is_empty()
+                        && let Some(conv) = agent_loop.session.conversation.as_ref()
+                    {
+                        conv.remove_pending_intent(&message_id);
+                    }
                     // Design 27 §7.1 / plan D-C/C1: the inbound kind
                     // decides two orthogonal things — the responder role
                     // (`request` only: hide intent_send / ask_user_question,

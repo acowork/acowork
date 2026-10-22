@@ -1,10 +1,14 @@
-//! `dispatch` — the only tool visible on a Chat Router turn (ADR-099 D15).
+//! Router-turn tools (ADR-099 D3).
 //!
-//! One tool covers both routable actions: continue an existing execution
-//! session (`target = "S3"`) or start a new one (`target = "new"`). **Not
-//! calling the tool** is the third action — a plain chat answer. Keeping the
-//! action set this small is the point: a router model that has no execution
-//! tools cannot be talked into doing the work instead of routing it.
+//! `dispatch` is the routing tool: one call covers both routable actions —
+//! continue an existing execution session (`target = "S3"`) or start a new
+//! one (`target = "new"`). **Not calling the tool** is the third action — a
+//! plain chat answer. Alongside it the router exposes read-only information
+//! tools (`memory_recall`, `http_request` narrowed to GET) so answering a
+//! factual question does not require handing the message to an execution
+//! session. The executor boundary is unchanged: no execution tool is ever
+//! visible here, so a package cannot talk the router into doing work —
+//! lookups read information, they never change anything.
 //!
 //! The alias form (`S1`, `S2`, …) is deliberate. Candidate ids are runtime
 //! state; a model that only ever sees short aliases cannot invent a
@@ -19,6 +23,13 @@ use crate::agent::session::intent_routing::SessionSeed;
 
 /// Tool name, fixed across turns — it is part of the cached prefix.
 pub const DISPATCH_TOOL: &str = "dispatch";
+/// Read-only memory lookup exposed on a router turn. Same name as the
+/// execute-side builtin so the runtime can resolve it off `all_tools`.
+pub const MEMORY_RECALL_TOOL: &str = "memory_recall";
+/// HTTP lookup exposed on a router turn, **GET only** (see
+/// [`http_request_router_spec`]). The router-side schema drops every
+/// mutating field so a chat turn cannot issue a side-effecting request.
+pub const HTTP_REQUEST_TOOL: &str = "http_request";
 
 /// Alias → real session id for one router turn.
 pub type AliasTable = HashMap<String, String>;
@@ -52,16 +63,94 @@ pub fn dispatch_tool_spec() -> Value {
     })
 }
 
-/// The whole `tools` array of a router request.
+/// The `dispatch` entry of the router `tools` array. See
+/// [`router_tools`] for the full request array.
+///
+/// Flat `name` / `description` / `parameters` at the top level — the same
+/// `ChatRequest.tools` shape a serialized `ToolSpec` produces. The provider
+/// adapters (`convert_tools` in `providers/openai.rs` and
+/// `providers/anthropic.rs`) read these fields at the top level; handing
+/// them the OpenAI nested form made every router tool arrive at the model
+/// as `name = "unknown"` with an empty schema, so `dispatch` could never be
+/// called and no execution session was ever created.
 pub fn dispatch_tools() -> Vec<Value> {
     vec![json!({
-        "type": "function",
-        "function": {
-            "name": DISPATCH_TOOL,
-            "description": "Route this conversation turn to an execution session. Call at most once.",
-            "parameters": dispatch_tool_spec(),
-        }
+        "name": DISPATCH_TOOL,
+        "description": "Route this conversation turn to an execution session. Call at most once.",
+        "parameters": dispatch_tool_spec(),
     })]
+}
+
+/// Router-facing `memory_recall` definition. A deliberate subset of the
+/// builtin's full schema (ADR-099 D3): keyword/time query, read-only.
+/// Flat shape — see [`dispatch_tools`].
+pub fn memory_recall_router_spec() -> Value {
+    json!({
+        "name": MEMORY_RECALL_TOOL,
+        "description": "Search this agent's long-term memory for a fact or preference needed to answer. Returns scored results. Provide 'query' (keywords) and/or a time range. Look up at most what the answer needs.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Targeted keywords or phrase (optional if since/until provided)."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (default: 5)."
+                },
+                "since": {
+                    "type": "string",
+                    "description": "Only memories created at or after this time (RFC 3339)."
+                },
+                "until": {
+                    "type": "string",
+                    "description": "Only memories created at or before this time (RFC 3339)."
+                }
+            }
+        }
+    })
+}
+
+/// Router-facing `http_request` definition — GET only. No `method`, `body`,
+/// or `content_type`: the router can read the web, never write to it. The
+/// runner additionally forces `method = "GET"` at execution time so a
+/// hallucinated mutating argument cannot reach the tool either. Flat shape —
+/// see [`dispatch_tools`].
+pub fn http_request_router_spec() -> Value {
+    json!({
+        "name": HTTP_REQUEST_TOOL,
+        "description": "Fetch a URL with an HTTP GET to look up information needed to answer. Read-only: no request body, no mutating methods.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The http(s) URL to fetch."
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Optional request headers (key-value pairs).",
+                    "additionalProperties": { "type": "string" }
+                }
+            },
+            "required": ["url"]
+        }
+    })
+}
+
+/// Assemble the request's `tools` array from `dispatch` plus the enabled
+/// information tool names (order fixed: dispatch, memory_recall,
+/// http_request).
+pub fn router_tools(info_enabled: &[&str]) -> Vec<Value> {
+    let mut tools = dispatch_tools();
+    if info_enabled.contains(&MEMORY_RECALL_TOOL) {
+        tools.push(memory_recall_router_spec());
+    }
+    if info_enabled.contains(&HTTP_REQUEST_TOOL) {
+        tools.push(http_request_router_spec());
+    }
+    tools
 }
 
 /// The action a router turn decided on.
@@ -230,15 +319,41 @@ mod tests {
     }
 
     #[test]
-    fn tool_schema_is_stable_and_single_function() {
+    fn tool_schema_is_stable_and_dispatch_first() {
         // The schema is part of the cached prefix — pin the shape so an
         // accidental edit shows up as a failing test, not a cache miss.
+        // Flat form (name/description/parameters at the top level) is the
+        // ChatRequest.tools convention every provider adapter reads; the
+        // OpenAI nested wrapper must NOT appear here (regression: it made
+        // the adapters emit `name = "unknown"` and killed router dispatch).
         let tools = dispatch_tools();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["type"], "function");
-        assert_eq!(tools[0]["function"]["name"], DISPATCH_TOOL);
-        let params = &tools[0]["function"]["parameters"];
+        assert_eq!(tools[0]["name"], DISPATCH_TOOL);
+        assert!(tools[0].get("function").is_none());
+        let params = &tools[0]["parameters"];
         assert_eq!(params["required"], json!(["target"]));
         assert_eq!(params["properties"]["target"]["type"], "string");
+    }
+
+    #[test]
+    fn router_tools_keeps_a_fixed_order_and_get_only_http() {
+        let all = router_tools(&[MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL]);
+        let names: Vec<&str> = all
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec![DISPATCH_TOOL, MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL]);
+        // The router-side http schema must not offer a way to mutate anything.
+        let http_params = &all[2]["parameters"];
+        assert!(!http_params["properties"].as_object().unwrap().contains_key("method"));
+        assert!(!http_params["properties"].as_object().unwrap().contains_key("body"));
+        assert_eq!(http_params["required"], json!(["url"]));
+        // With nothing enabled the array is exactly the pre-tool-router one.
+        assert_eq!(router_tools(&[]).len(), 1);
+        // Deterministic bytes for a fixed enablement set (cached prefix).
+        assert_eq!(
+            serde_json::to_string(&all).unwrap(),
+            serde_json::to_string(&router_tools(&[MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL])).unwrap()
+        );
     }
 }

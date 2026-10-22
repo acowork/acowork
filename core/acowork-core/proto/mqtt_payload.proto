@@ -628,6 +628,20 @@ message SessionState {
   double ratio = 9;
   string context_usage = 10;
   string updated_at = 11;  // ISO 8601
+  // ADR-099 (design 27 §5.5.5): intents routed into this session while it is
+  // busy, projected so the execution UI can show the real pending queue
+  // (chat-forwarded messages the local composer queue box cannot see). Bounded
+  // excerpt only — never a full body (ADR-096). Empty when the session is idle
+  // or has nothing queued.
+  repeated PendingIntent pending_intents = 12;
+}
+
+/// One queued inbound intent shown in the execution pending queue.
+message PendingIntent {
+  string message_id = 1;
+  string from = 2;        // display name of the sender
+  string preview = 3;     // bounded excerpt of the user's message
+  bool from_chat = 4;     // true when routed from a Chat session
 }
 
 /// Session message event (incremental, QoS 0).

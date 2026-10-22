@@ -146,6 +146,19 @@ pub enum ConfigField {
     /// `AgentConfig::intent_handoff_max_tokens` — `Option<u64>`
     /// (design 27 §4.1 T2 handoff cap, 500–4,000 tokens).
     IntentHandoffMaxTokens,
+    /// `AgentConfig::chat_router.enabled` — `Option<bool>` (ADR-099).
+    /// `None` = enabled (the design default).
+    ChatRouterEnabled,
+    /// `AgentConfig::chat_router.model` — `Option<String>`. An empty
+    /// string from the UI means "clear": fall back to the agent's
+    /// compact-model chain.
+    ChatRouterModel,
+    /// `AgentConfig::chat_router.provider` — `Option<String>`. Empty
+    /// string clears (whichever provider serves the model).
+    ChatRouterProvider,
+    /// `AgentConfig::chat_router.timeout_ms` — `Option<u64>`
+    /// (clamped to 1,000–60,000 by [`ChatRouterConfig::timeout_ms`]).
+    ChatRouterTimeoutMs,
     // ADR-094 note: `ConfigField::SkillsAutoLoad` was removed.
     // Skill mode (Progressive / Manual) is now driven entirely by
     // `agent_tools.json::load_skill.enabled` — see
@@ -181,6 +194,10 @@ impl ConfigField {
             ConfigField::SessionLanguage => "session_language",
             ConfigField::IntentIdleRotateHours => "intent_idle_rotate_hours",
             ConfigField::IntentHandoffMaxTokens => "intent_handoff_max_tokens",
+            ConfigField::ChatRouterEnabled => "chat_router_enabled",
+            ConfigField::ChatRouterModel => "chat_router_model",
+            ConfigField::ChatRouterProvider => "chat_router_provider",
+            ConfigField::ChatRouterTimeoutMs => "chat_router_timeout_ms",
         }
     }
 }
@@ -258,6 +275,10 @@ impl PutAgentConfigBody {
         session_language: Option<serde_json::Value>,
         intent_idle_rotate_hours: Option<serde_json::Value>,
         intent_handoff_max_tokens: Option<serde_json::Value>,
+        chat_router_enabled: Option<serde_json::Value>,
+        chat_router_model: Option<serde_json::Value>,
+        chat_router_provider: Option<serde_json::Value>,
+        chat_router_timeout_ms: Option<serde_json::Value>,
     ) -> Self {
         let mut patches = Vec::new();
         if let Some(v) = max_output_tokens {
@@ -388,6 +409,34 @@ impl PutAgentConfigBody {
         if let Some(v) = intent_handoff_max_tokens {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::IntentHandoffMaxTokens,
+                op: value_to_patch(&v),
+            });
+        }
+        // ADR-099: the Chat Router block is nested on `AgentConfig`, but
+        // the wire stays flat — one `chat_router_*` field per sub-field
+        // so the desktop's per-field write-through debouncing composes
+        // without read-modify-write races on the whole block.
+        if let Some(v) = chat_router_enabled {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::ChatRouterEnabled,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = chat_router_model {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::ChatRouterModel,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = chat_router_provider {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::ChatRouterProvider,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = chat_router_timeout_ms {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::ChatRouterTimeoutMs,
                 op: value_to_patch(&v),
             });
         }

@@ -142,7 +142,7 @@ mod tests {
         let budget = skill_recall_budget_tokens(usable, occupied);
         assert_eq!(
             budget,
-            (4_000 as f64 * SKILL_RECALL_FREE_SHARE) as u64,
+            (4_000_f64 * SKILL_RECALL_FREE_SHARE) as u64,
             "tight context: half of the free space, not the ceiling"
         );
         assert!(

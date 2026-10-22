@@ -25,8 +25,11 @@ use serde_json::Value;
 
 use super::prompt::truncate_utf8;
 
-/// Default history window (design 29 §4.4).
-pub const DEFAULT_MAX_HISTORY: usize = 24;
+/// Default history window (design 29 §4.4). Widened past the original 24
+/// when the router gained information tools: a turn that spends part of its
+/// context on a lookup round needs a bit more conversation kept in view to
+/// route well.
+pub const DEFAULT_MAX_HISTORY: usize = 32;
 /// Extra rows tolerated before the window is rebuilt.
 pub const DEFAULT_SLACK: usize = 8;
 /// Rows kept after a rebuild.
@@ -622,24 +625,31 @@ mod tests {
     #[test]
     fn anchor_stays_put_until_the_slack_threshold_trips() {
         let budget = WindowBudget::default();
-        let rows: Vec<ChatRow> = (1..=30).map(|i| row(i, "user_message", "u1", "x")).collect();
-        // 30 rows <= 24 + 8: nothing is dropped, the anchor does not move.
+        let threshold = budget.max_history + budget.slack;
+        let rows: Vec<ChatRow> = (1..=threshold as u64)
+            .map(|i| row(i, "user_message", "u1", "x"))
+            .collect();
+        // At the threshold nothing is dropped, the anchor does not move.
         let block = build_block_b(&rows, 0, &ids(&[]), "a1", &budget);
-        assert_eq!(block.messages.len(), 30);
+        assert_eq!(block.messages.len(), threshold);
         assert_eq!(block.anchor_seq, 0);
         assert!(!block.rebuilt);
 
         // One more row trips the threshold: rebuild down to `retain` rows.
-        let rows: Vec<ChatRow> = (1..=33).map(|i| row(i, "user_message", "u1", "x")).collect();
+        let rows: Vec<ChatRow> = (1..=threshold as u64 + 1)
+            .map(|i| row(i, "user_message", "u1", "x"))
+            .collect();
         let block = build_block_b(&rows, 0, &ids(&[]), "a1", &budget);
         assert_eq!(block.messages.len(), budget.retain);
-        assert_eq!(block.anchor_seq, 33 - budget.retain as u64);
+        assert_eq!(block.anchor_seq, threshold as u64 + 1 - budget.retain as u64);
         assert!(block.rebuilt);
 
         // The next turn appends exactly one message on top of the rebuilt
         // window — the prefix is stable again.
-        let rows2: Vec<ChatRow> = (1..=34).map(|i| row(i, "user_message", "u1", "x")).collect();
-        let next = build_block_b(&rows2, block.anchor_seq, &ids(&[]), "a1", &budget);
+        let rows: Vec<ChatRow> = (1..=threshold as u64 + 2)
+            .map(|i| row(i, "user_message", "u1", "x"))
+            .collect();
+        let next = build_block_b(&rows, block.anchor_seq, &ids(&[]), "a1", &budget);
         assert_eq!(next.messages.len(), budget.retain + 1);
         assert_eq!(next.anchor_seq, block.anchor_seq);
     }

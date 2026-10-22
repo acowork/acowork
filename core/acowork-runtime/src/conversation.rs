@@ -906,6 +906,13 @@ pub struct ConversationSession {
     last_status: std::sync::Mutex<String>,
     last_ratio: std::sync::Mutex<f64>,
     last_context_usage: std::sync::Mutex<String>,
+    /// Inbound intents routed into this session while it was busy, kept as the
+    /// source of truth for the execution pending-queue projection (ADR-099,
+    /// design 27 §5.5.5). Recorded by the routing path on enqueue and cleared
+    /// by `SessionTask` when the intent is dequeued to start a turn; projected
+    /// into the retained `SessionState` snapshot by
+    /// [`Self::build_session_state_snapshot`]. Empty for an idle session.
+    pending_intents: std::sync::Mutex<Vec<crate::agent::session_state::PendingIntent>>,
     /// ADR-067: per-section byte sizes from the most recent LLM call.
     ///
     /// Cached as the typed `Vec<ContextUsageSection>` directly — no JSON
@@ -1085,6 +1092,52 @@ impl ConversationSession {
             ratio,
             context_usage,
             updated_at: full.last_active_at,
+            pending_intents: self
+                .pending_intents()
+                .into_iter()
+                .map(|p| acowork_core::mqtt_proto::PendingIntent {
+                    message_id: p.message_id,
+                    from: p.from,
+                    preview: p.preview,
+                    from_chat: p.from_chat,
+                })
+                .collect(),
+        }
+    }
+
+    /// Snapshot the current pending-intent queue (ADR-099, design 27 §5.5.5).
+    pub fn pending_intents(&self) -> Vec<crate::agent::session_state::PendingIntent> {
+        self.pending_intents
+            .lock()
+            .ok()
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// Record an intent routed into this session while it was busy. Dedups on
+    /// `message_id` so a redelivered trigger never shows twice. Does not push
+    /// the state change — the caller pairs it with
+    /// [`Self::notify_state_change`] once.
+    pub fn push_pending_intent(&self, intent: crate::agent::session_state::PendingIntent) {
+        if let Ok(mut q) = self.pending_intents.lock()
+            && !q.iter().any(|p| p.message_id == intent.message_id)
+        {
+            q.push(intent);
+        }
+    }
+
+    /// Drop a pending-intent row once the session dequeues it to start a turn.
+    /// Removes by `message_id`; a no-op when the id is not queued (e.g. the
+    /// intent reached an idle session and was never recorded).
+    pub fn remove_pending_intent(&self, message_id: &str) {
+        if let Ok(mut q) = self.pending_intents.lock() {
+            let before = q.len();
+            q.retain(|p| p.message_id != message_id);
+            // Only worth a push if a row actually left the queue.
+            if q.len() != before {
+                drop(q);
+                self.notify_state_change();
+            }
         }
     }
 
@@ -1292,6 +1345,7 @@ impl ConversationSession {
             last_status: std::sync::Mutex::new(String::new()),
             last_ratio: std::sync::Mutex::new(crate::token::counter::DEFAULT_RATIO),
             last_context_usage: std::sync::Mutex::new(String::new()),
+            pending_intents: std::sync::Mutex::new(Vec::new()),
             last_context_usage_sections: std::sync::Mutex::new(None),
             last_compaction_offset,
             last_compaction_summary: std::sync::Mutex::new(None),
@@ -1413,6 +1467,7 @@ impl ConversationSession {
                 last_status: std::sync::Mutex::new(String::new()),
                 last_ratio: std::sync::Mutex::new(crate::token::counter::DEFAULT_RATIO),
                 last_context_usage: std::sync::Mutex::new(String::new()),
+                pending_intents: std::sync::Mutex::new(Vec::new()),
                 last_context_usage_sections: std::sync::Mutex::new(None),
                 last_compaction_offset,
                 last_compaction_summary: std::sync::Mutex::new(meta.last_compaction_summary.clone()),
@@ -2540,6 +2595,9 @@ impl Clone for ConversationSession {
                     .ok()
                     .map(|s| s.clone())
                     .unwrap_or_default(),
+            ),
+            pending_intents: std::sync::Mutex::new(
+                self.pending_intents.lock().ok().map(|p| p.clone()).unwrap_or_default(),
             ),
             // ADR-067: the sections cache is owned per-session — each clone
             // starts empty and receives its own writes. Sharing it (Arc)
