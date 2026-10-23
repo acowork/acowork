@@ -65,7 +65,7 @@ if [ -f "$LSP_RELAY_BIN" ]; then
     echo -e "${GREEN}Bundled LSP Relay binary: $LSP_RELAY_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-lsp-relay not found at $LSP_RELAY_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/common/build_core.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, Gateway startup will fail with:${NC}"
     echo -e "${YELLOW}        acowork-lsp-relay binary not found${NC}"
 fi
@@ -80,7 +80,7 @@ if [ -f "$NODE_BIN" ]; then
     echo -e "${GREEN}Bundled Node Agent binary: $NODE_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-node not found at $NODE_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/common/build_core.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, Gateway startup will fail with:${NC}"
     echo -e "${YELLOW}        acowork-node binary not found — node topology disabled${NC}"
 fi
@@ -95,7 +95,7 @@ if [ -f "$PM_BIN" ]; then
     echo -e "${GREEN}Bundled PM service binary: $PM_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-pm not found at $PM_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/common/build_core.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, /api/pm/* returns 503 (PM unavailable).${NC}"
 fi
 
@@ -110,7 +110,7 @@ if [ -f "$DOC_BIN" ]; then
     echo -e "${GREEN}Bundled Doc service binary: $DOC_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-doc not found at $DOC_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/common/build_core.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, /api/doc/* returns 503 (Doc unavailable).${NC}"
 fi
 
@@ -126,7 +126,7 @@ if [ -f "$USER_BIN" ]; then
     echo -e "${GREEN}Bundled User service binary: $USER_BIN${NC}"
 else
     echo -e "${YELLOW}WARN: acowork-user not found at $USER_BIN.${NC}"
-    echo -e "${YELLOW}      Run ./dev/desktop/macos/build_macos.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Run ./dev/common/build_core.sh (release) first.${NC}"
     echo -e "${YELLOW}      Without it, /api/auth/*, /api/users/* and /api/user/* return 503.${NC}"
 fi
 

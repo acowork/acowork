@@ -176,7 +176,7 @@ cd ACowork
 ./dev/common/build_core.sh --debug              # bash
 ```
 
-macOS Apple Silicon 用户也可使用 `./dev/desktop/macos/build_macos.sh` 一键编译（自动启用 CoreML）。
+macOS 用户直接用 `./dev/common/build_core.sh` 即可一键编译：Apple Silicon 上会自动通过 cargo 下载 ONNX Runtime 并启用 CoreML 加速（加 `--cpu` 可强制 CPU 推理）。
 
 ### Step 3 — 启动 Desktop App
 

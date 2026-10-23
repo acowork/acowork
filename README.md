@@ -182,7 +182,7 @@ cd ACowork
 ./dev/common/build_core.sh --debug              # bash
 ```
 
-macOS users on Apple Silicon can also use `./dev/desktop/macos/build_macos.sh` for a one-click build with CoreML enabled.
+macOS users get a one-click build from `./dev/common/build_core.sh` itself: on Apple Silicon it downloads ONNX Runtime via cargo with CoreML acceleration enabled (pass `--cpu` to force CPU inference).
 
 ### Step 3 — Launch the Desktop App
 
