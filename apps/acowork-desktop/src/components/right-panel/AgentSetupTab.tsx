@@ -30,6 +30,7 @@ import { useToast } from "../common/ToastProvider";
 import { ListBox, ExpandableRow } from "../common/list";
 import { flushPendingWrites } from "./agentSetupPendingWrites";
 import { buildProfilePatchFromServerConfig } from "./agentSetupConfigSync";
+import { resolveEffectiveAvatar } from "./agentSetupAvatar";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -182,6 +183,18 @@ export function AgentSetupTab() {
   const [avatarAssets, setAvatarAssets] = useState<AvatarAssetEntry[]>([]);
   const [avatarConfig, setAvatarConfig] = useState<AvatarConfigResponse | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
+
+  /**
+   * What the header avatar paints *right now*.
+   *
+   * Seeded from the store's `AgentInfo` — already effective, because the
+   * Gateway resolves `avatar` / `builtin_avatar` with the same
+   * override-first rule as the runtime avatar-config endpoint — so the
+   * first paint is correct and the async response only refines it.
+   * Reading `avatarConfig` alone made the header flash a builtin icon
+   * for one round-trip on every panel open; see `agentSetupAvatar.ts`.
+   */
+  const effectiveAvatar = resolveEffectiveAvatar(selectedAgent, avatarConfig);
   /** In-flight rename draft; `null` = show the server value. */
   const [nameDraft, setNameDraft] = useState<string | null>(null);
 
@@ -803,8 +816,8 @@ export function AgentSetupTab() {
               >
                 <AgentAvatar
                   agentId={selectedAgentId}
-                  avatarUrl={avatarConfig?.avatar ?? null}
-                  builtinAvatarId={avatarConfig?.builtin_avatar ?? null}
+                  avatarUrl={effectiveAvatar.avatarUrl}
+                  builtinAvatarId={effectiveAvatar.builtinAvatarId}
                   version={selectedAgent.version}
                   size={64}
                 />
