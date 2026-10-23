@@ -473,26 +473,30 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
                   first because it is what the header above shows and
                   the most common reason to open this dialog on a node. */}
               {target.kind === "node" && (
-                <div className="flex flex-col gap-2">
-                  <div>
-                    <div className="text-text-secondary">
-                      {t("permissionDialog.displayName")}
+                <div className="flex flex-col gap-1">
+                  {/* Same row shape as the owner / visibility rows below:
+                      label (+hint) left, fixed-width control right. */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-text-secondary">
+                        {t("permissionDialog.displayName")}
+                      </div>
+                      <div className="text-10 text-text-tertiary">
+                        {t("permissionDialog.displayNameHint")}
+                      </div>
                     </div>
-                    <div className="text-10 text-text-tertiary">
-                      {t("permissionDialog.displayNameHint")}
-                    </div>
+                    <StyledInput
+                      data-node-name
+                      value={nodeName}
+                      onChange={(e) => setNodeName(e.target.value)}
+                      disabled={!editable}
+                      aria-label={t("permissionDialog.displayName")}
+                      aria-invalid={nameChanged && !nameValid}
+                      className="w-40 shrink-0"
+                    />
                   </div>
-                  <StyledInput
-                    data-node-name
-                    value={nodeName}
-                    onChange={(e) => setNodeName(e.target.value)}
-                    disabled={!editable}
-                    aria-label={t("permissionDialog.displayName")}
-                    aria-invalid={nameChanged && !nameValid}
-                    className="w-full"
-                  />
                   {nameChanged && !nameValid && (
-                    <div className="text-10 text-text-tertiary" role="alert">
+                    <div className="text-10 text-text-tertiary text-right" role="alert">
                       {t("permissionDialog.displayNameInvalid")}
                     </div>
                   )}
