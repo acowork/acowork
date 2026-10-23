@@ -1,3 +1,11 @@
+<style>
+  /* 当在个人主页（Profile）渲染时，隐藏这部分内容 */
+  div[id^="user-content-"] ~ *, 
+  .vcard-names-container ~ * {
+    display: none !important;
+  }
+</style>
+
 <h1 align="center">ACowork — AI Agents Collaboration Platform</h1>
 
 <p align="center">
