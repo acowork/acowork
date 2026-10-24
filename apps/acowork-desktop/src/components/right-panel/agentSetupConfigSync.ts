@@ -35,12 +35,6 @@ export interface ServerConfigEnvelope {
      * that this helper was extracted to prevent.
      */
     session_language?: string | null;
-    /** Design 27 §2.1: T1 idle-rotation threshold in hours. `0` is a
-     *  meaningful value (disables T1 rotation), so it must be passed
-     *  through, not treated as "absent". */
-    intent_idle_rotate_hours?: number | null;
-    /** Design 27 §2.1: T2 handoff target token cap. */
-    intent_handoff_max_tokens?: number | null;
     /** ADR-099 Chat Router block. The same skip-serializing rule
      *  applies per sub-field — absent (or the whole block absent)
      *  means "no opinion", not "cleared". */
@@ -125,15 +119,6 @@ export function buildProfilePatchFromServerConfig(
   // ADR-094 note: `skills_auto_load` was removed from the wire. The
   // `load_skill` tool entry in `agent_tools.json` is the single
   // source of truth for skill-mode (Progressive / Manual) now.
-  // Intent rotation knobs (design 27 §4.1). `0` is a meaningful
-  // idle-hours value (it disables T1 rotation), so guard on
-  // `typeof === "number"` only — never on `> 0`.
-  if (typeof cfg.intent_idle_rotate_hours === "number") {
-    patch.intentIdleRotateHours = cfg.intent_idle_rotate_hours;
-  }
-  if (typeof cfg.intent_handoff_max_tokens === "number") {
-    patch.intentHandoffMaxTokens = cfg.intent_handoff_max_tokens;
-  }
   // session_language is string-or-absent — preserve explicit `null`
   // (clear) AND concrete value, leave absent alone (preserves an
   // optimistic local edit while in-flight).

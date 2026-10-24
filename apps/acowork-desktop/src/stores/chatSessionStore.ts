@@ -72,7 +72,7 @@ export interface ChatMessageRow {
      *  the `turn_started` pointer and `interaction_request` card. */
     agent_session_id?: string;
     /** ADR-100: the routing decision stamped on the turn pointer — "new" when
-     *  this turn starts a fresh task, "continue" when it reuses or rotates an
+     *  this turn starts a fresh task, "continue" when it reuses an
      *  existing one. Drives the two-state `turn_started` reaction copy. */
     turn_mode?: "new" | "continue";
     /** The SENDER's execution session (design 27 `source_agent_session_id`) —
@@ -225,8 +225,8 @@ export interface ChatSessionConfig {
  *  `sessionConfig` is the initiator's `session_config` suggestion (design
  *  27 §4.5): model / workspace / reasoning-effort chosen on the Chat
  *  surface before sending. It rides the intent envelope and seeds the
- *  execution session at creation (or triggers a T3 rotation if a mapped
- *  session already runs under a different config). `undefined` = use the
+ *  execution session — at creation, and re-applied (from its next turn) when
+ *  a mapped session is reused. `undefined` = use the
  *  agent's own defaults. */
 function sendChatMessage(
   me: string,

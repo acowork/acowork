@@ -10,9 +10,9 @@
 //   pick is a `session_config` DRAFT held on the Chat session ROW (design 27
 //   §4.5) — the store only caches what the server returned: `setCurrentModel`
 //   needs an active execution session, and a Chat turn's session is created
-//   server-side when the intent lands. The draft rides `sendText` and seeds
-//   that session at creation (or rotates it via T3 if one is already running
-//   under a different config) — so the choice is fixed BEFORE the turn, not
+//   server-side when the intent lands. The draft rides `sendText`: it seeds
+//   a newly created execution session and is re-applied when a mapped
+//   session is reused — so the choice is fixed BEFORE the turn, not
 //   after, which is the whole point (pick model/workspace/reasoning first).
 //   Persisting it on the session (not in component state) is what keeps the
 //   last pick across tab switches, reloads and devices.
@@ -147,8 +147,8 @@ interface RowProps {
   showHeader: boolean;
   /** Drill into the execution session that produced this agent message.
    *  Every `agent_message` with a resolved exec session id is clickable —
-   *  finished, failed or empty-bodied alike (§5.5.5: the pointer survives
-   *  rotation, the JSONL stays in Agent home). */
+   *  finished, failed or empty-bodied alike (§5.5.5: the exec JSONL stays
+   *  in Agent home). */
   onJumpToExec: (execSid: string) => void;
   /** Cards that can no longer be answered — the inline card paints an
    *  answered/closed receipt for these instead of an answer affordance. */
@@ -708,7 +708,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
 
   // Jump to the execution session behind a specific agent message — for a
   // resolved turn (finished, failed or empty). openSession cold-loads the exec
-  // tab; the pointer stays valid after rotation because the old JSONL remains
+  // tab; the pointer stays valid because the exec JSONL remains
   // in Agent home (§5.5.5).
   // A DELETED session would otherwise cold-open as an empty exec tab whose
   // every load fails into the retry banner, so probe existence first: a
