@@ -202,6 +202,7 @@ fn control_action_to_inbound(
             status,
             has_human,
             chat_attachment_ids,
+            for_execution_session,
         } => {
             let params: serde_json::Value =
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
@@ -224,6 +225,7 @@ fn control_action_to_inbound(
                     status,
                     has_human,
                     chat_attachment_ids,
+                    for_execution_session,
                 })),
             ))
         }
@@ -513,8 +515,15 @@ async fn dispatch_inbound(
                 // Route it through the receiver-private registry (chat /
                 // conv / one-shot message key) so it gets an execution
                 // session instead of being dropped.
-                route_intent_inbound(session_manager, chat_sessions, "", msg, work_dir, node_token)
-                    .await
+                route_intent_inbound(
+                    session_manager,
+                    chat_sessions,
+                    "",
+                    msg,
+                    work_dir,
+                    node_token,
+                )
+                .await
             }
             // ── ADR-052 §3.5: agent-level config mutations are
             //    GLOBAL, not per-session. Route through SessionManager
@@ -977,6 +986,10 @@ async fn dispatch_inbound(
                         active_skill,
                         attached_items,
                         content_parts,
+                        // Written straight against the execution surface: no
+                        // Chat row precedes it, so the echo stays standalone
+                        // (ADR-100 D12).
+                        chat_trigger_message_id: None,
                     },
                 )
                 .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))
@@ -992,7 +1005,6 @@ async fn dispatch_inbound(
             );
             Ok(())
         }
-
     }
 }
 
@@ -1028,11 +1040,35 @@ async fn route_intent_inbound(
     use crate::agent::inbound::InboundMessage;
     use crate::error::RuntimeError;
 
-    let InboundMessage::IntentMessage(env) = msg else {
+    let InboundMessage::IntentMessage(mut env) = msg else {
         return Err(RuntimeError::Config(
             "route_intent_inbound called with a non-intent message".to_string(),
         ));
     };
+
+    // ADR-100 D12: a message composed inside one execution session's own
+    // view already names its answer target — "who runs this" was settled by
+    // where the human typed it. Skip the router queue entirely: no routing
+    // LLM call, no rotation, no routing-reaction row. The pin is only a hint,
+    // so a session that is not loaded has its hint dropped and the turn takes
+    // the ordinary route below (a stale id costs a hop, never the message).
+    if !env.for_execution_session.trim().is_empty() {
+        let pinned = env.for_execution_session.clone();
+        if deliver_pinned_turn(session_manager, &pinned, &env).await {
+            tracing::debug!(
+                session_id = %pinned,
+                chat_id = %env.source_chat_session_id,
+                "pinned turn delivered straight to the named execution session"
+            );
+            return Ok(());
+        }
+        tracing::warn!(
+            session_id = %pinned,
+            chat_id = %env.source_chat_session_id,
+            "pinned execution session is not loaded — routing this turn normally"
+        );
+        env.for_execution_session.clear();
+    }
 
     // A router turn is an LLM call plus a couple of HTTP hops. Running it here
     // would stop this agent from receiving *anything* — including a `Stop` —
@@ -1059,7 +1095,180 @@ async fn route_intent_inbound(
         return Ok(());
     }
 
-    route_intent_legacy(session_manager, designated_session_id, env, node_token).await
+    // Router off: the deterministic route, unchanged (ADR-099).
+    route_intent_legacy(
+        session_manager,
+        designated_session_id,
+        env,
+        node_token,
+        false,
+    )
+    .await
+}
+
+/// Deliver a pinned turn (ADR-100 D12) straight to the execution session the
+/// human composed it in, reporting whether that session took it.
+///
+/// The turn lands as [`SessionMessage::ChatMessage`] — the very variant the
+/// execution surface's own write endpoint feeds — and not as an `Intent`.
+/// That choice is what makes the pinned path capability-preserving: a per-turn
+/// skill (`command`) and the ADR-046 attachment union are fields of
+/// `ChatMessage` and exist nowhere on the Intent shape, so delivering a pinned
+/// turn through the Intent path would silently drop both. `Intent` is the
+/// agent-to-agent protocol; this turn is not agent-to-agent — it is the human
+/// speaking to the task already on their screen.
+///
+/// The turn's `message_id` is the Chat row the Gateway wrote for it (the
+/// client mints one id and both surfaces use it), which is what lets the
+/// execution transcript, the chat thread and the frontend's optimistic bubble
+/// settle on a single message instead of three.
+///
+/// Chat attachments are deliberately NOT pulled here. On this path the
+/// execution session *is* the attachment's home: a `file_upload` blob already
+/// sits in this agent's `files/` under the content-hash id the prompt hint
+/// resolves, and a workspace reference reads straight off the node filesystem.
+/// Pulling the Gateway's copy as well would hand the turn the same file twice.
+///
+/// `false` = the named session is not loaded in this agent. The caller then
+/// drops the hint and routes normally; a pin can delay a turn, never lose one.
+async fn deliver_pinned_turn(
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    session_id: &str,
+    env: &crate::agent::inbound::IntentEnvelope,
+) -> bool {
+    use crate::agent::session::SessionMessage;
+
+    // Same ADR-046 parse the execution surface's write path uses: a
+    // strongly-typed discriminated union, unparseable entries dropped rather
+    // than failing the turn.
+    let attached_items = env
+        .params
+        .get("attached_items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|d| {
+                    serde_json::from_value::<acowork_core::protocol::AttachedItem>(d.clone()).ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|v: &Vec<acowork_core::protocol::AttachedItem>| !v.is_empty());
+    let content_parts = env
+        .params
+        .get("content_parts")
+        .and_then(|v| v.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| {
+                    serde_json::from_value::<acowork_core::providers::traits::ContentPart>(
+                        p.clone(),
+                    )
+                    .ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|v: &Vec<acowork_core::providers::traits::ContentPart>| !v.is_empty());
+    let content = env
+        .params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if content.is_empty() && attached_items.is_none() && content_parts.is_none() {
+        // Nothing to run. This mirrors the guard the SessionTask applies on
+        // arrival, checked up here so a textless, attachment-less pinned send
+        // is settled as done instead of waking a session only to be dropped
+        // with a warning — and instead of falling through to the router, which
+        // would spend a routing call on an empty turn. The Chat row the
+        // Gateway already wrote stays the honest record of what was sent.
+        return true;
+    }
+
+    // Per-turn skill: the client sends only the NAME and the Runtime owns the
+    // instructions, resolved against the agent's loaded SkillRegistry here —
+    // identical to the write path, so skill content is never trusted to the
+    // client. An unknown command degrades to "no skill this turn".
+    let command = env
+        .params
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let active_skill = if command.is_empty() {
+        None
+    } else {
+        let resolved = session_manager
+            .lock()
+            .await
+            .resolve_skill_instructions(command);
+        match &resolved {
+            Some(instructions) => tracing::info!(
+                session_id = %session_id,
+                skill = %command,
+                skill_len = instructions.len(),
+                "pinned turn: resolved skill command → instructions"
+            ),
+            None => tracing::warn!(
+                session_id = %session_id,
+                command = %command,
+                "pinned turn: command did not match any loaded skill, ignoring"
+            ),
+        }
+        resolved
+    };
+
+    // ADR-100 D12: the pin may only name a session that belongs to the chat this
+    // send came from. "Loaded in this agent" is not enough — one agent instance
+    // serves many chats, and session ids travel on rows other people can read (a
+    // group's `meta.agent_session_id` is visible to every member). Without this
+    // check a person could inject text, a per-turn skill and node-local
+    // attachment paths into somebody else's task, and that task's answer would be
+    // written into a chat the asker has no row in — while the asker's own chat
+    // kept the head of a turn that was never run there.
+    //
+    // Refusing returns `false`, which is the pin's existing "hint, not gate"
+    // contract: the hint is dropped and the turn routes normally, so the sender
+    // still reaches this agent — just not through a session that is not theirs.
+    let bound_chat = session_manager
+        .lock()
+        .await
+        .get_session(session_id)
+        .and_then(|handle| {
+            handle
+                .conversation
+                .as_ref()
+                .and_then(|conv| conv.chat_session_id())
+        });
+    let Some(bound_chat) = bound_chat.filter(|c| !c.is_empty()) else {
+        return false;
+    };
+    if bound_chat != env.source_chat_session_id.trim() {
+        tracing::warn!(
+            session_id = %session_id,
+            pinned_chat = %bound_chat,
+            sender_chat = %env.source_chat_session_id,
+            "pinned execution session belongs to another chat — dropping the pin and routing normally"
+        );
+        return false;
+    }
+    session_manager
+        .lock()
+        .await
+        .send_to_session(
+            session_id,
+            SessionMessage::ChatMessage {
+                content,
+                message_id: env.message_id.clone(),
+                active_skill,
+                attached_items,
+                content_parts,
+                // The Chat row this turn answers — the echo owes it a reply.
+                chat_trigger_message_id: Some(env.message_id.clone()),
+            },
+        )
+        .is_ok()
 }
 
 /// Run one chat's router turns, strictly in arrival order, on a task of its
@@ -1139,14 +1348,34 @@ pub(crate) async fn finish_chat_turn(
     match outcome {
         Outcome::Handled => Ok(()),
         Outcome::PassThrough => {
-            route_intent_legacy(session_manager, designated_session_id, envelope, node_token).await
+            route_intent_legacy(
+                session_manager,
+                designated_session_id,
+                envelope,
+                node_token,
+                false,
+            )
+            .await
         }
         Outcome::Fallback { reason } => {
             tracing::info!(
                 reason = %reason,
                 "Chat Router fell back to the deterministic route"
             );
-            route_intent_legacy(session_manager, designated_session_id, envelope, node_token).await
+            // ADR-099 revision: a chat-sourced human message degraded by the
+            // router gets a FRESH execution session, not the mapped one — the
+            // mapping is not a semantic verdict and continuing an unrelated old
+            // task on a guess is worse than starting a new one. PM tasks and
+            // agent-agent intents keep the deterministic reuse (their
+            // conversation_id / msg key IS the task identity).
+            route_intent_legacy(
+                session_manager,
+                designated_session_id,
+                envelope,
+                node_token,
+                true,
+            )
+            .await
         }
     }
 }
@@ -1157,16 +1386,24 @@ pub(crate) async fn finish_chat_turn(
 /// Also the degraded path of a Chat turn the router could not decide, which is
 /// why the router's own result is not consulted here — a fallback must never
 /// re-enter the queue.
+///
+/// `fresh` (set only by the router's `Fallback` outcome) routes a Chat-sourced
+/// human message to a **newly created** execution session instead of the
+/// mapped one (ADR-099 revision): a degraded router has no semantic verdict,
+/// and the registry mapping is not one either — continuing an unrelated old
+/// task on a guess is worse than starting clean. `PassThrough` (router off,
+/// PM, agent-agent, responses) keeps the deterministic reuse unchanged.
 async fn route_intent_legacy(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     designated_session_id: &str,
     env: Box<crate::agent::inbound::IntentEnvelope>,
     node_token: &str,
+    fresh: bool,
 ) -> crate::error::Result<()> {
     use crate::agent::inbound::IntentEnvelope;
     use crate::agent::intent_turn::render_intent_message;
-    use crate::agent::session::intent_routing::routing_key;
     use crate::agent::session::SessionMessage;
+    use crate::agent::session::intent_routing::routing_key;
 
     let IntentEnvelope {
         from,
@@ -1182,6 +1419,10 @@ async fn route_intent_legacy(
         status,
         has_human,
         chat_attachment_ids,
+        // A pinned turn never reaches this function (ADR-100 D12 handles it
+        // upstream); the name is dropped so the deterministic route stays
+        // exactly what it was before the pin existed.
+        for_execution_session: _,
     } = *env;
 
     let is_response = kind == "response";
@@ -1198,8 +1439,7 @@ async fn route_intent_legacy(
         &status,
     );
 
-    // Candidate session: the designated one for responses, registry for
-    // everything else.
+    // Candidate session: the designated one for responses, registry otherwise.
     let mut target: Option<String> = None;
     if is_response && !designated_session_id.is_empty() {
         let guard = session_manager.lock().await;
@@ -1208,27 +1448,41 @@ async fn route_intent_legacy(
         }
     }
     let target = match target {
-        Some(t) => (t, None),
+        Some(t) => (t, None, false),
         None => {
-            let key = routing_key(&source_chat_session_id, &conversation_id, &message_id);
             // The initiator's session-config suggestion (§4) is consumed on
             // whichever branch the routing takes: at creation here, or applied
             // to the session the message was routed into (ADR-099).
-            let seed = crate::agent::session::intent_routing::SessionSeed::from_json(
-                &session_config_json,
-            );
-            session_manager
-                .lock()
-                .await
-                .route_intent_session(
-                    &key,
-                    seed,
-                    // ADR-099: a PM task dispatched from a group chat binds
-                    // that session to the group, so follow-ups there can find
-                    // it. Empty for agent-to-agent and cron intents.
-                    Some(source_chat_session_id.as_str()),
-                )
-                .await?
+            let seed =
+                crate::agent::session::intent_routing::SessionSeed::from_json(&session_config_json);
+            let is_chat_human = kind == "user_message" && !source_chat_session_id.is_empty();
+            if fresh && is_chat_human {
+                // Degraded router turn: fresh session, bound to the same
+                // chat, mapping re-pointed — the same creation path the
+                // router's own `dispatch(new)` uses.
+                let mut guard = session_manager.lock().await;
+                guard
+                    .chat_dispatch(
+                        &source_chat_session_id,
+                        crate::agent::chat_router::tool::Target::New,
+                        seed,
+                    )
+                    .await?
+            } else {
+                let key = routing_key(&source_chat_session_id, &conversation_id, &message_id);
+                session_manager
+                    .lock()
+                    .await
+                    .route_intent_session(
+                        &key,
+                        seed,
+                        // ADR-099: a PM task dispatched from a group chat binds
+                        // that session to the group, so follow-ups there can find
+                        // it. Empty for agent-to-agent and cron intents.
+                        Some(source_chat_session_id.as_str()),
+                    )
+                    .await?
+            }
         }
     };
     // A rotation (§2.1) carries a handoff note (pointer for T1, distilled
@@ -1237,14 +1491,10 @@ async fn route_intent_legacy(
     // actual message stays clean for the auto-title and the persisted `user`
     // entry; the SessionTask records it as its own `system` turn (§4.1).
     //
-    // §5.5.5 anchor at routing time: for a Chat-sourced turn that owes its
-    // chat session a write-back, the `turn_started` pointer is written as
-    // soon as the intent is delivered — not when a (possibly busy) session
-    // dequeues it minutes later. Without it the chat surface projects
-    // "assigning…" for the whole queue wait. The session-task write at turn
-    // start keeps the same deterministic `meta.message_id`, so the store
-    // dedups the second one; this early write is best-effort — a failure
-    // costs the anchor, never the message.
+    // §5.5.5 pending queue: which intents must be shown in the execution
+    // side's pending list while that session is busy. A Chat-sourced turn that
+    // owes its chat a write-back is exactly that set — no chat row is written
+    // here (ADR-100 revision: dispatch/start milestones are runtime-only).
     let pointer = if !source_chat_session_id.is_empty()
         && crate::agent::intent_turn::turn_kind_semantics(&kind, &message_id).1
     {
@@ -1256,10 +1506,26 @@ async fn route_intent_legacy(
     } else {
         None
     };
-    let deps = crate::agent::chat_router::runner::RouterDeps::from_core(
-        &session_manager.lock().await.core(),
-        node_token,
-    );
+    // §5.5.5 pending queue: record BEFORE delivering, mirroring the router
+    // path (runner.rs). Recording after the send raced with an idle session
+    // that woke and started the turn at once — its empty removal ran first,
+    // leaving the row we then pushed stuck in the queue forever. A busy
+    // session is active now (row recorded, cleared at dequeue); an idle one
+    // is not (record is a no-op — it starts immediately).
+    if let Some((pending_message_id, _, pending_from)) = pointer.as_ref() {
+        session_manager.lock().await.record_pending_intent(
+            &target.0,
+            crate::agent::session_state::PendingIntent {
+                message_id: pending_message_id.clone(),
+                from: pending_from.clone(),
+                preview: crate::agent::session_state::pending_preview(
+                    params.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                ),
+                from_chat: true,
+            },
+        );
+    }
+    let opened_new = target.2;
     let sent = session_manager.lock().await.send_to_session(
         &target.0,
         SessionMessage::Intent {
@@ -1277,48 +1543,47 @@ async fn route_intent_legacy(
             in_reply_to,
         },
     );
-    if let (Some((message_id, chat_id, from)), Ok(())) = (pointer, sent.as_ref()) {
+    // ADR-100 D11: the routing reaction row — the same conversational fact the
+    // router path writes after a successful dispatch ("your message went to a
+    // new task / continues task X"), here for every turn that owes its chat a
+    // write-back: the router-off human turn and the PM dispatch alike. Written
+    // only once the intent is actually delivered, best-effort: a lost row
+    // costs the reaction, never the turn.
+    if let Some((reaction_message_id, reaction_chat_id, reaction_from)) =
+        pointer.as_ref().filter(|_| sent.is_ok())
+    {
+        let (instance_id, gateway_host) = {
+            let guard = session_manager.lock().await;
+            let core = guard.core();
+            (
+                core.config.agent_instance_id.clone(),
+                core.config
+                    .gateway_host
+                    .clone()
+                    .map(|h| h.trim().to_string())
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
+            )
+        };
         if let Err(e) = crate::agent::intent_turn::append_chat_row(
-            &deps.instance_id,
-            &deps.gateway_host,
-            &deps.node_token,
-            &chat_id,
+            &instance_id,
+            &gateway_host,
+            node_token,
+            reaction_chat_id,
             "system_notice",
-            &from,
+            reaction_from,
             "",
-            serde_json::json!({
-                "message_id": format!("ts:{message_id}"),
-                "notice_type": "turn_started",
-                "in_reply_to": message_id,
-                "agent_session_id": target.0,
-            }),
+            crate::agent::intent_turn::turn_routed_meta(reaction_message_id, &target.0, opened_new),
         )
         .await
         {
             tracing::warn!(
-                chat_id = %chat_id,
+                chat_id = %reaction_chat_id,
+                message_id = %reaction_message_id,
                 error = %e,
-                "early turn_started pointer failed — session task retries at turn start"
+                "routing reaction row failed — non-fatal"
             );
         }
-        // §5.5.5 pending queue: a chat message routed into a session that is
-        // still mid-turn is otherwise invisible to the execution UI (its
-        // queue box is frontend-only state). Record it so the queue shows the
-        // real wait; a no-op when the session is idle and starts immediately.
-        session_manager.lock().await.record_pending_intent(
-            &target.0,
-            crate::agent::session_state::PendingIntent {
-                message_id: message_id.clone(),
-                from: from.clone(),
-                preview: crate::agent::session_state::pending_preview(
-                    params
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(""),
-                ),
-                from_chat: true,
-            },
-        );
     }
     sent
 }
@@ -1413,9 +1678,13 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            for_execution_session: String::new(),
         })
         .expect("Intent must map");
-        assert_eq!(route, "", "cron intent has no target session — system-level");
+        assert_eq!(
+            route, "",
+            "cron intent has no target session — system-level"
+        );
 
         match msg {
             InboundMessage::IntentMessage(env) => {
@@ -1446,6 +1715,7 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            for_execution_session: String::new(),
         })
         .expect("Intent must still map");
 
@@ -1476,6 +1746,7 @@ mod tests {
             status: String::new(),
             has_human: Some(true),
             chat_attachment_ids: Vec::new(),
+            for_execution_session: String::new(),
         })
     }
 
@@ -1519,7 +1790,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
         let core = Arc::new(AgentCore::new(
             config,
             manifest,
@@ -1530,7 +1803,10 @@ mod tests {
         manager.set_resolver(Arc::new(std::sync::RwLock::new(
             WorkspaceResolver::new_for_test(vec![]),
         )));
-        (Arc::new(tokio::sync::Mutex::new(manager)), Default::default())
+        (
+            Arc::new(tokio::sync::Mutex::new(manager)),
+            Default::default(),
+        )
     }
 
     /// The head-of-line fix (ADR-099 §5): a Chat message is queued for a
@@ -1627,10 +1903,20 @@ mod tests {
         let (sm, _) = chat_router_test_pair(dir.path());
         let sessions = || sm.try_lock().expect("lock free").active_sessions().len();
 
-        finish_chat_turn(&sm, Outcome::Handled, "", chat_envelope("cs-handled", "hello"), "node-token")
-            .await
-            .expect("a handled turn is already complete");
-        assert_eq!(sessions(), 0, "the drainer must not re-deliver a handled turn");
+        finish_chat_turn(
+            &sm,
+            Outcome::Handled,
+            "",
+            chat_envelope("cs-handled", "hello"),
+            "node-token",
+        )
+        .await
+        .expect("a handled turn is already complete");
+        assert_eq!(
+            sessions(),
+            0,
+            "the drainer must not re-deliver a handled turn"
+        );
 
         for outcome in [
             Outcome::PassThrough,
@@ -1650,6 +1936,143 @@ mod tests {
             sessions(),
             2,
             "a degraded router turn costs latency, never the message"
+        );
+    }
+
+    // ── ADR-100 D12: a turn pinned to one execution session ──────────────
+
+    /// A human Chat message that also names the execution session it was
+    /// composed in — the shape an execution view's composer sends.
+    fn pinned_envelope(chat_id: &str, text: &str, exec_session: &str) -> Box<IntentEnvelope> {
+        let mut env = chat_envelope(chat_id, text);
+        env.for_execution_session = exec_session.to_string();
+        env
+    }
+
+    /// Bring up one loaded execution session through the ordinary routing
+    /// path and hand back its id — the target a pinned turn names.
+    async fn spawn_session(
+        sm: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+        key: &str,
+    ) -> String {
+        sm.lock()
+            .await
+            .route_intent_session(
+                key,
+                crate::agent::session::intent_routing::SessionSeed::from_json(""),
+                None,
+            )
+            .await
+            .expect("test session")
+            .0
+    }
+
+    /// The pin is the whole point: no routing LLM call, no rotation, no
+    /// routing-reaction row. The human already knows which task this is —
+    /// they typed it while looking at that task's own transcript.
+    #[tokio::test]
+    async fn a_pinned_turn_never_reaches_the_router_queue() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, chat_sessions) = chat_router_test_pair(dir.path());
+        let target = spawn_session(&sm, "chat:cs-pin").await;
+
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            InboundMessage::IntentMessage(pinned_envelope("cs-pin", "keep going", &target)),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("a pinned turn is delivered, not refused");
+
+        assert!(
+            !chat_sessions.chat_is_busy("cs-pin"),
+            "a pinned turn is not a router turn — it must not claim a drain"
+        );
+        assert_eq!(
+            chat_sessions.pending_turns("cs-pin"),
+            0,
+            "nor may it queue: skipping the routing call is what the pin buys"
+        );
+    }
+
+    /// A pin is a hint, never a gate. A session that is not loaded — closed,
+    /// or an id carried across a restart — must not cost the human their
+    /// message: the hint is dropped and the turn routes the ordinary way.
+    #[tokio::test]
+    async fn a_stale_pin_falls_through_instead_of_losing_the_turn() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, chat_sessions) = chat_router_test_pair(dir.path());
+
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            InboundMessage::IntentMessage(pinned_envelope(
+                "cs-stale",
+                "hello",
+                "session-that-is-not-loaded",
+            )),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("a stale pin still delivers");
+
+        assert!(
+            chat_sessions.chat_is_busy("cs-stale"),
+            "the turn falls back to the router rather than vanishing with the pin"
+        );
+    }
+
+    /// A textless, attachment-less send is not a turn at all. It is settled
+    /// before the target session is even looked up, so it cannot wake a
+    /// session only to have the message dropped with a warning downstream.
+    #[tokio::test]
+    async fn a_pinned_turn_with_nothing_to_say_wakes_no_session() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, _chat_sessions) = chat_router_test_pair(dir.path());
+        let mut env = chat_envelope("cs-empty", "   ");
+        env.for_execution_session = "session-that-was-never-loaded".into();
+
+        assert!(
+            deliver_pinned_turn(&sm, "session-that-was-never-loaded", &env).await,
+            "nothing to run is a settled outcome, not a fall-through to routing"
+        );
+    }
+
+    /// ADR-100 D12: a pin naming somebody else's session is not a delivery.
+    /// The session exists and is loaded in this very agent — it is simply bound
+    /// to a different chat — so the hint is dropped and the turn takes the
+    /// ordinary route rather than running inside a foreign task.
+    #[tokio::test]
+    async fn a_pin_naming_another_chats_session_does_not_take_that_turn() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, chat_sessions) = chat_router_test_pair(dir.path());
+        // Bound to `chat:cs-victim` by its routing key, the way a task started
+        // from that conversation is.
+        let victim = spawn_session(&sm, "chat:cs-victim").await;
+
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            InboundMessage::IntentMessage(pinned_envelope("cs-attacker", "do my bidding", &victim)),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("a refused pin still delivers the turn");
+
+        assert!(
+            chat_sessions.chat_is_busy("cs-attacker"),
+            "the turn falls back to the router in the sender's own chat"
+        );
+        assert!(
+            !chat_sessions.chat_is_busy("cs-victim"),
+            "and the victim's conversation is never touched"
         );
     }
 }

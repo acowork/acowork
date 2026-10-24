@@ -239,6 +239,14 @@ pub struct IntentMeta {
     /// routing resolved it (`target_agent_session_id`).
     #[serde(default)]
     pub agent_session_id: String,
+    /// ADR-100 (superseded): the routing decision stamped on a turn pointer —
+    /// `"new"` when the turn starts a fresh task, `"continue"` when it reuses
+    /// or rotates an existing one. The ADR-100 revision stopped persisting the
+    /// dispatch/start pointers, so nothing writes this any more; the field
+    /// stays deserializable so transcripts recorded before the revision still
+    /// load with their meta intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_mode: Option<String>,
     /// Repo the request concerns (§4.1). A chat log records the
     /// normalised remote URL, never a filesystem path.
     #[serde(default)]
@@ -251,8 +259,10 @@ pub struct IntentMeta {
     /// fan-out is a field, not extra rows). Empty = no mentions.
     #[serde(default)]
     pub mentions: Vec<String>,
-    /// For a `system_notice`: which notice this is (§5.5.5: `turn_started`
-    /// today). Required on every `system_notice` row.
+    /// For a `system_notice`: which notice this is. `system_notice` is
+    /// legacy-only now (ADR-100 revision stopped writing routing milestones);
+    /// `interaction_resolved` and the older dispatch/start/fallback values
+    /// remain readable so old transcripts still project their cards correctly.
     #[serde(default)]
     pub notice_type: String,
     /// For an `interaction_request`: the decision payload (§5.5.4).
@@ -260,6 +270,31 @@ pub struct IntentMeta {
     /// is not a card.
     #[serde(default)]
     pub interaction: Option<InteractionPayload>,
+    /// ADR-100 D12: the display names of whatever an execution view's
+    /// composer handed to the task alongside this message. Labels **only** —
+    /// no path, no documentId, nothing the chat side could try to open, since
+    /// the execution session is the attachment's only home (design 27 §4.2.1 /
+    /// ADR-009 §5). Empty on every other row, including a chat-surface
+    /// `user_message` with genuine chat attachments (those are
+    /// [`SessionMessage::attachments`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec_attachments: Vec<ExecAttachmentLabel>,
+}
+
+/// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12): what the item
+/// was called on the surface that sent it, plus which arm of the ADR-046
+/// `AttachedItem` union it came from. Pure display data — the chat renders it
+/// and never resolves it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecAttachmentLabel {
+    /// Upload arms send `filename`, workspace arms send `name` (a repo-relative
+    /// path is display text there, not a location); an item that sent only a
+    /// path is reduced to its last segment by the Gateway.
+    pub filename: String,
+    /// The ADR-046 item type, quoted from the wire. Empty = the sender did not
+    /// say which arm it was.
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// The decision an `interaction_request` card asks a human to make
@@ -605,6 +640,13 @@ pub fn append_message(
     if msg.kind == KIND_USER_MESSAGE
         && msg.body.trim().is_empty()
         && msg.attachment_ids.is_empty()
+        // ADR-100 D12: an execution view's composer may hand the task a file
+        // and say nothing. The bytes stay on the execution side — the chat row
+        // carries only their display names — so those labels *are* this row's
+        // content, and they count as content here. Refusing it would drop the
+        // head of a turn the execution surface accepts, which is the one
+        // outcome a transcript must never produce.
+        && msg.meta.exec_attachments.is_empty()
     {
         return Err("a user_message needs a body or an attachment".to_string());
     }
@@ -715,9 +757,17 @@ pub fn append_message(
     };
     // §4.6 (plan 3.6): every participant except the sender gains one
     // unread. Keyed by id, never by position — same rule as `chat.rs`.
-    for p in &session.participants {
-        if p.id != stored.from {
-            *session.unread.entry(p.id.clone()).or_insert(0) += 1;
+    // Bookkeeping rows are exempt: a bodyless `system_notice` (the
+    // `turn_dispatched` / `turn_started` event lines, receipts) is a
+    // milestone in the transcript, not new content to catch up on, so it
+    // must not inflate the unread badge. Without this guard a round writes
+    // two pointer rows and would count double against the human's unread.
+    let bookkeeping = stored.kind == KIND_SYSTEM_NOTICE && stored.body.is_empty();
+    if !bookkeeping {
+        for p in &session.participants {
+            if p.id != stored.from {
+                *session.unread.entry(p.id.clone()).or_insert(0) += 1;
+            }
         }
     }
     session.last_active_at = stored.ts;
@@ -2689,6 +2739,148 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_and_start_rows_coexist_and_each_dedups() {
+        // §5.5.5 event-log model: one routed turn leaves BOTH a
+        // `turn_dispatched` row (id `td:`) and a `turn_started` row (id
+        // `ts:`). They carry distinct message_ids, so the store keeps them
+        // as two separate event rows (never deduped against each other),
+        // while a redelivery of the same milestone still collapses.
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::UserAgent,
+            &[
+                Participant::new("u", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        let mut dispatched = msg("ag", KIND_SYSTEM_NOTICE, "", "td:m1");
+        dispatched.meta.notice_type = "turn_dispatched".into();
+        dispatched.meta.in_reply_to = "m1".into();
+        let mut started = msg("ag", KIND_SYSTEM_NOTICE, "", "ts:m1");
+        started.meta.notice_type = "turn_started".into();
+        started.meta.in_reply_to = "m1".into();
+
+        assert!(append_message(&dir, &s.session_id, &dispatched, 1)
+            .unwrap()
+            .1);
+        let (start_row, wrote_start) = append_message(&dir, &s.session_id, &started, 2).unwrap();
+        assert!(
+            wrote_start,
+            "a `ts:` start row must not collapse into the `td:` dispatch row"
+        );
+        assert_eq!(start_row.seq, 2, "the two milestones are ordered rows");
+        // A redelivery of the dispatch milestone is still idempotent.
+        assert!(
+            !append_message(&dir, &s.session_id, &dispatched, 3)
+                .unwrap()
+                .1,
+            "redelivery of the same `td:` id must not double-write"
+        );
+        let (_, total) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        assert_eq!(total, 2, "exactly one dispatch row + one start row");
+    }
+
+    #[test]
+    fn turn_mode_survives_the_persist_read_round_trip() {
+        // ADR-100 two-state reaction: the routing `turn_mode` the Runtime
+        // stamps on a turn pointer is a durable fact the surfaces read back.
+        // The store's `IntentMeta` is a typed struct, so an unknown field
+        // would be silently dropped at deserialization — this test is the
+        // regression net that keeps `turn_mode` a known, persisted field.
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::UserAgent,
+            &[
+                Participant::new("u", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        let mut started = msg("ag", KIND_SYSTEM_NOTICE, "", "ts:m1");
+        started.meta.notice_type = "turn_started".into();
+        started.meta.in_reply_to = "m1".into();
+        started.meta.agent_session_id = "exec-9".into();
+        started.meta.turn_mode = Some("new".into());
+        append_message(&dir, &s.session_id, &started, 1).unwrap();
+
+        let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.meta.message_id == "ts:m1")
+            .expect("the start row reads back");
+        assert_eq!(
+            row.meta.turn_mode.as_deref(),
+            Some("new"),
+            "turn_mode must persist and read back verbatim"
+        );
+    }
+
+    #[test]
+    fn bodyless_notice_rows_do_not_inflate_unread() {
+        // §4.6 unread rule with the §5.5.5 event-log exemption: a routed turn
+        // writes two bodyless `system_notice` pointer rows (`td:` + `ts:`).
+        // They are milestones in the transcript, not new content to catch up
+        // on, so they must not climb the human's unread badge. A content row
+        // still counts.
+        let dir = temp_dir();
+        let s = create_session(
+            &dir,
+            SessionKind::UserAgent,
+            &[
+                Participant::new("u", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        // The agent's reply: the human (not the sender) gains one unread.
+        append_message(
+            &dir,
+            &s.session_id,
+            &msg("ag", KIND_AGENT_MESSAGE, "a reply", "a-1"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            load(&dir, &s.session_id).unwrap().unread.get("u").copied(),
+            Some(1)
+        );
+
+        // Both pointer rows land (distinct ids, not deduped) but move no unread.
+        let mut dispatched = msg("ag", KIND_SYSTEM_NOTICE, "", "td:m1");
+        dispatched.meta.notice_type = "turn_dispatched".into();
+        dispatched.meta.in_reply_to = "m1".into();
+        let mut started = msg("ag", KIND_SYSTEM_NOTICE, "", "ts:m1");
+        started.meta.notice_type = "turn_started".into();
+        started.meta.in_reply_to = "m1".into();
+        assert!(append_message(&dir, &s.session_id, &dispatched, 2)
+            .unwrap()
+            .1);
+        assert!(append_message(&dir, &s.session_id, &started, 3)
+            .unwrap()
+            .1);
+        assert_eq!(
+            load(&dir, &s.session_id).unwrap().unread.get("u").copied(),
+            Some(1),
+            "bodyless system_notice rows must not inflate the unread badge"
+        );
+    }
+
+    #[test]
     fn vocabulary_is_the_four_new_kinds_only() {
         // 2b.1 acceptance: new writes only produce the four kinds; the
         // retired `intent_*` kinds are rejected at the write entry (they
@@ -3284,6 +3476,72 @@ mod tests {
         assert!(
             store_attachment(&dir, &s.session_id, "outsider", "x", "text/plain", b"x").is_err()
         );
+    }
+
+    /// ADR-100 D12: the display names an execution composer sent with its
+    /// message are part of the durable row. `IntentMeta` is a *typed* struct, so
+    /// a key the store does not declare is dropped silently on the way in — this
+    /// test is the guard that the one D12 adds is actually declared, and that it
+    /// comes back out of the JSONL rather than only surviving in memory.
+    #[test]
+    fn exec_attachment_labels_are_durable_on_a_user_message() {
+        let dir = temp_dir();
+        let s = ua_session(&dir);
+        let mut m = msg("u1", KIND_USER_MESSAGE, "take a look", "pinned-1");
+        m.meta.exec_attachments = vec![
+            ExecAttachmentLabel {
+                filename: "src/main.rs".into(),
+                kind: "attached_file".into(),
+            },
+            ExecAttachmentLabel {
+                filename: "notes.md".into(),
+                kind: "upload".into(),
+            },
+        ];
+        let (stored, _) = append_message(&dir, &s.session_id, &m, 2).unwrap();
+        assert_eq!(stored.meta.exec_attachments, m.meta.exec_attachments);
+        let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.meta.message_id == "pinned-1")
+            .expect("the row is readable");
+        assert_eq!(row.meta.exec_attachments.len(), 2);
+        assert_eq!(row.meta.exec_attachments[0].filename, "src/main.rs");
+        // A row that sent none stays clean: the key is skipped rather than
+        // written as an empty array, so ordinary transcript rows grow no noise.
+        append_message(
+            &dir,
+            &s.session_id,
+            &msg("ag", KIND_AGENT_MESSAGE, "a reply", "plain-1"),
+            3,
+        )
+        .unwrap();
+        let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        let plain = rows
+            .iter()
+            .find(|r| r.meta.message_id == "plain-1")
+            .expect("the second row");
+        assert!(plain.meta.exec_attachments.is_empty());
+    }
+
+    /// ADR-100 D12: an execution composer that hands over a file without
+    /// writing anything still gets its head row. The attachment bytes live on
+    /// the execution side, so the labels in meta are the only content the
+    /// transcript has, and the emptiness rule must see them.
+    #[test]
+    fn an_attachment_only_user_message_is_accepted_from_the_execution_surface() {
+        let dir = temp_dir();
+        let s = ua_session(&dir);
+        // No body, no chat-side attachment ids — only the execution labels.
+        let mut labels_only = msg("u1", KIND_USER_MESSAGE, "", "pinned-2");
+        labels_only.meta.exec_attachments = vec![ExecAttachmentLabel {
+            filename: "diff.patch".into(),
+            kind: "upload".into(),
+        }];
+        assert!(append_message(&dir, &s.session_id, &labels_only, 2).is_ok());
+        // With no content of any kind the row is still refused: an empty,
+        // label-less human message is a producer bug, not a turn.
+        assert!(append_message(&dir, &s.session_id, &msg("u1", KIND_USER_MESSAGE, "  ", "pinned-3"), 3).is_err());
     }
 
     // ── Unread (§4.6, plan 3.6) ───────────────────────────────────────

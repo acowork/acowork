@@ -50,7 +50,7 @@ use super::tool::{
 use super::ChatSlot;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::IntentEnvelope;
-use crate::agent::intent_turn::{append_chat_row, post_intent_response, IntentTurnContext};
+use crate::agent::intent_turn::{post_intent_response, IntentTurnContext};
 use crate::agent::session::chat_candidates::{
     self, CandidateSurface, SessionCandidate,
 };
@@ -108,8 +108,7 @@ impl RouterDeps {
 /// What the caller must do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The router owned the turn — answered, dispatched, or already degraded
-    /// visibly (a `router_fallback` notice was written).
+    /// The router owned the turn and delivered it (answered or dispatched).
     Handled,
     /// Not a Chat turn (or the router is switched off): keep the legacy path.
     PassThrough,
@@ -584,7 +583,29 @@ async fn run_turn(
             let delivered = {
                 let mut guard = session_manager.lock().await;
                 match guard.chat_dispatch(&chat_id, target, seed).await {
-                    Ok((session_id, handoff_note)) => {
+                    Ok((session_id, handoff_note, opened_new)) => {
+                        // §5.5.5 pending queue: record BEFORE delivering. The
+                        // only place that drops this row is the SessionTask
+                        // dequeue, which can run only once the send below has
+                        // happened — so recording first guarantees the row is
+                        // present when removal fires. Recording after the send
+                        // raced: an idle session woke and started the turn at
+                        // once, its empty removal ran first, and the row pushed
+                        // right after (the session now `is_active`) sat in the
+                        // queue forever. A busy session is active now (row
+                        // recorded, cleared at dequeue); an idle one is not
+                        // (record is a no-op — it starts immediately).
+                        guard.record_pending_intent(
+                            &session_id,
+                            crate::agent::session_state::PendingIntent {
+                                message_id: envelope.message_id.clone(),
+                                from: envelope.from.clone(),
+                                preview: crate::agent::session_state::pending_preview(
+                                    &preview_text,
+                                ),
+                                from_chat: true,
+                            },
+                        );
                         let sent = guard.send_to_session(
                             &session_id,
                             SessionMessage::Intent {
@@ -602,22 +623,24 @@ async fn run_turn(
                                 in_reply_to: envelope.in_reply_to.clone(),
                             },
                         );
-                        (Ok(session_id), sent)
+                        (Ok((session_id, opened_new)), sent)
                     }
                     Err(e) => (Err(e.to_string()), Ok(())),
                 }
             };
             match delivered {
-                (Ok(session_id), Ok(())) => {
-                    // §5.5.5 anchor at routing time: write the `turn_started`
-                    // pointer now, not when the receiving session dequeues
-                    // the intent. A busy session may sit on this turn for a
-                    // long time; without the pointer the chat surface keeps
-                    // projecting "assigning…" long after routing completed.
-                    // Same deterministic `meta.message_id` as the session-
-                    // task write, so the store dedups the later one — this
-                    // is best-effort, a failure only costs the early anchor.
-                    if let Err(e) = append_chat_row(
+                (Ok((session_id, opened_new)), Ok(())) => {
+                    // ADR-100 D11: the routing reaction. The dispatch/start
+                    // *progress* milestones stay runtime-only (D10) — what is
+                    // written here is the one conversational fact the Chat
+                    // turn owes immediately: "your message went to a new task
+                    // / continues task X". It lands the moment the target is
+                    // resolved, minutes or hours before the answer, and it is
+                    // durable because "which task handled this message" is a
+                    // fact of the conversation, not of the progress bar.
+                    // Best-effort: a lost row costs the reaction, never the
+                    // delivery (the turn runs regardless).
+                    if let Err(e) = crate::agent::intent_turn::append_chat_row(
                         &deps.instance_id,
                         &deps.gateway_host,
                         &deps.node_token,
@@ -625,33 +648,21 @@ async fn run_turn(
                         "system_notice",
                         &envelope.from,
                         "",
-                        serde_json::json!({
-                            "message_id": format!("ts:{}", envelope.message_id),
-                            "notice_type": "turn_started",
-                            "in_reply_to": envelope.message_id,
-                            "agent_session_id": session_id,
-                        }),
+                        crate::agent::intent_turn::turn_routed_meta(
+                            &envelope.message_id,
+                            &session_id,
+                            opened_new,
+                        ),
                     )
                     .await
                     {
                         tracing::warn!(
                             chat_id = %chat_id,
+                            message_id = %envelope.message_id,
                             error = %e,
-                            "early turn_started pointer failed — session task retries at turn start"
+                            "routing reaction row failed — non-fatal"
                         );
                     }
-                    // §5.5.5 pending queue: if the target session is mid-turn,
-                    // show this routed message in its execution pending queue
-                    // (a no-op when it is idle and starts right away).
-                    session_manager.lock().await.record_pending_intent(
-                        &session_id,
-                        crate::agent::session_state::PendingIntent {
-                            message_id: envelope.message_id.clone(),
-                            from: envelope.from.clone(),
-                            preview: crate::agent::session_state::pending_preview(&preview_text),
-                            from_chat: true,
-                        },
-                    );
                     trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
@@ -815,6 +826,7 @@ async fn execute_info_tool(
         // the semantic query source for memory recall.
         session_id: None,
         current_user_message: Some(user_text.to_string()),
+        chat_session_id: None,
     };
     let outcome = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
@@ -913,9 +925,13 @@ fn task_label(conversation_id: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
-/// A degraded turn: leave a visible `router_fallback` notice, then hand the
-/// message back to the deterministic route. The user's message is still
-/// delivered — degradation costs latency and a notice, never the message.
+/// A degraded turn: hand the message back to the deterministic route. The
+/// user's message is still delivered — degradation costs latency, never the
+/// message.
+///
+/// No chat row is written: a fallback receipt is a RUNTIME fact about how this
+/// turn was routed, not something a reader needs when scrolling history
+/// (ADR-100 revision). The decision log below keeps it auditable.
 async fn degrade(
     deps: &RouterDeps,
     envelope: &IntentEnvelope,
@@ -928,29 +944,7 @@ async fn degrade(
         reason = %reason,
         "chat router degraded to the deterministic route"
     );
-    let meta = serde_json::json!({
-        // Idempotent: a redelivered turn never doubles the notice.
-        "message_id": format!("router-fallback:{}", envelope.message_id),
-        "notice_type": "router_fallback",
-        // Anchor link target: the surface resolves the message this
-        // receipt degraded through to its `ts:` pointer row, so the
-        // notice is clickable once routing lands.
-        "in_reply_to": envelope.message_id,
-    });
-    if let Err(e) = append_chat_row(
-        &deps.instance_id,
-        &deps.gateway_host,
-        &deps.node_token,
-        chat_id,
-        "system_notice",
-        "",
-        "",
-        meta,
-    )
-    .await
-    {
-        tracing::debug!(error = %e, "chat router: fallback notice not written");
-    }
+    let _ = deps;
     Outcome::Fallback { reason }
 }
 
@@ -1036,6 +1030,7 @@ mod tests {
             status: String::new(),
             has_human: Some(true),
             chat_attachment_ids: Vec::new(),
+            for_execution_session: String::new(),
         }
     }
 

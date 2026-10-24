@@ -85,6 +85,9 @@ pub enum ControlAction {
         has_human: Option<bool>,
         /// Chat attachment ids from a human message; bytes are pulled over HTTP.
         chat_attachment_ids: Vec<String>,
+        /// Design 27 §5.5.5 / ADR-100 D12: deliver straight to this
+        /// execution session instead of routing. Empty = route normally.
+        for_execution_session: String,
     },
 }
 
@@ -121,6 +124,7 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             status: intent.status,
             has_human: intent.has_human_participant,
             chat_attachment_ids: intent.chat_attachment_ids,
+            for_execution_session: intent.for_execution_session,
         },
     };
 

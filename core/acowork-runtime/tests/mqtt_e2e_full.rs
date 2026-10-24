@@ -180,7 +180,8 @@ fn integration_control_message_flow() {
                 status: String::new(),
                 has_human_participant: None,
                 chat_attachment_ids: vec![],
-params_json: r#"{"hello":"e2e"}"#.into(),
+                for_execution_session: String::new(),
+                params_json: r#"{"hello":"e2e"}"#.into(),
             })),
         };
         gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -280,7 +281,8 @@ fn integration_control_intent_flow() {
                 status: String::new(),
                 has_human_participant: None,
                 chat_attachment_ids: vec![],
-params_json: String::new(),
+                for_execution_session: String::new(),
+                params_json: String::new(),
             })),
         };
         gw.publish_control_command(TEST_INSTANCE_ID, cmd)
@@ -324,7 +326,8 @@ params_json: String::new(),
                                     status: String::new(),
                                     has_human_participant: None,
                                     chat_attachment_ids: vec![],
-params_json: String::new(),
+                                    for_execution_session: String::new(),
+                                    params_json: String::new(),
                                 })),
                             },
                         )
@@ -410,7 +413,8 @@ fn integration_multiple_messages() {
                     status: String::new(),
                     has_human_participant: None,
                     chat_attachment_ids: vec![],
-params_json: format!(r#"{{"seq":{i}}}"#),
+                    for_execution_session: String::new(),
+                    params_json: format!(r#"{{"seq":{i}}}"#),
                 })),
             };
             gw.publish_control_command(TEST_INSTANCE_ID, cmd)

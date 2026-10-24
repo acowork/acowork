@@ -648,13 +648,15 @@ impl AgentCore {
     /// - Agent startup (after `builtin_tools` is initialized with flags)
     /// - MCP connect/disconnect
     /// - `RuntimeConfigUpdate.builtin_tools_enabled` toggle
-    ///   (tool-result compression is retired, so there is no
-    ///   platform-tool hot-reload path anymore)
+    ///
+    /// Platform-protected tools (`chat_history_read`, `intent_send`) are
+    /// always included regardless of the `enabled` flag — disabling them
+    /// would silently break the Chat ↔ Execution session architecture.
     pub(crate) fn rebuild_all_tools(&mut self) {
         let mut merged: Vec<Arc<dyn Tool>> = self
             .builtin_tools
             .iter()
-            .filter(|e| e.enabled)
+            .filter(|e| e.enabled || crate::agent_config::is_protected_tool(&e.name()))
             .map(|e| e.tool.clone())
             .collect();
         if let Some(ref mcp) = self.mcp_tools {

@@ -8,7 +8,7 @@ import { useAgentStore } from "./agentStore";
 import { useGatewayStore, stopGatewayDeathWatch } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useAuthStore } from "./authStore";
-import { wakeAgentChat } from "./chatSessionStore";
+import { wakeAgentChat, sendPinnedChatMessage } from "./chatSessionStore";
 import { useProjectGroupStore } from "./projectGroupStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { releaseAdapterSession, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
@@ -2191,15 +2191,50 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // if the MQTT publish fails (the backend never accepted the message).
     const optimisticIds = new Set([userMsgId, ...items.map((i) => i.clientId ?? "")]);
 
+    // ADR-100 D12: does this session have a Chat to file the message in? Two
+    // halves must both hold — a binding stamped by the Runtime, and a signed-in
+    // account (the Chat channel is identity-bearing; in local mode there is no
+    // Chat surface at all, so the session-scoped write is the only path and an
+    // unbound send is the correct fallback, not a degradation).
+    const me = useAuthStore.getState().account?.user_id ?? "";
+    const chatSessionId =
+      sessionId &&
+      useAgentStore
+        .getState()
+        .agents[agentId]?.sessions.find((s) => s.session_id === sessionId)?.chat_session_id;
+    const pinnedChat = me !== "" && chatSessionId ? { me, chatSessionId } : undefined;
+
     try {
       // ADR-076 §决策 4: HTTP, not MQTT — the send is a user action, so the
       // Gateway authenticates the caller and the Runtime checks ownership.
-      await sessionControl.sendMessage(agentId, sessionId!, {
-        message_id: userMsgId,
-        content,
-        command: command ?? "",
-        params_json: paramsJson,
-      });
+      //
+      // ADR-100 D12: when this execution session came from a Chat, the words
+      // go through the Chat entry point instead, pinned back to this session.
+      // The human's message then gets its own durable row under the human's own
+      // identity (so the conversation reads as a question and an answer, not as
+      // a result the Runtime transcribed) and the Agent skips its router, so the
+      // turn still runs right here. Everything after the send is shared: the
+      // bubble, the attachment entries and the reconcile all key on `userMsgId`,
+      // which both paths land on the same id.
+      if (pinnedChat) {
+        await sendPinnedChatMessage({
+          me: pinnedChat.me,
+          agentId,
+          chatSessionId: pinnedChat.chatSessionId,
+          text: content,
+          messageId: userMsgId,
+          executionSessionId: sessionId!,
+          command,
+          attachedItems: items.length > 0 ? toWireAttachedItems(items) : undefined,
+        });
+      } else {
+        await sessionControl.sendMessage(agentId, sessionId!, {
+          message_id: userMsgId,
+          content,
+          command: command ?? "",
+          params_json: paramsJson,
+        });
+      }
       log.debug("[ChatStore] Message sent via HTTP:", userMsgId);
       // Touch the user's last-interaction timestamp so the next Gateway
       // boot can pick this agent as the default (`/api/agents` sorts by

@@ -2090,6 +2090,18 @@ impl ConversationSession {
         self.write_meta();
     }
 
+    /// Design 27 §8.2 / ADR-100 D9: the Chat session this execution session
+    /// was started from (stamped by `set_chat_binding`), if any. A turn the
+    /// user composes directly in this session owes that Chat a result even
+    /// when no routed request carried the debt, so the turn-end echo reads
+    /// this binding. `None` for a session that never came from a Chat.
+    pub fn chat_session_id(&self) -> Option<String> {
+        self.chat_session_id
+            .lock()
+            .ok()
+            .and_then(|c| c.clone())
+    }
+
     /// Design 27 §8.2: bind this execution session to a Chat session and
     /// mark it `Members`-visible in one persisted step. Called once at
     /// creation from the `chat:` routing path; the pair is what makes the
@@ -3478,6 +3490,44 @@ pub fn read_messages_paginated(
 }
 
 // ── ADR-021: Incremental read with line-number coordinates ─────────────────
+
+/// Read the first persisted `user` entry of a session's JSONL log.
+///
+/// Session-title generation uses this instead of the current turn's message:
+/// the title must always describe the conversation's FIRST user turn. After a
+/// Stop the async title task may still be running, and a follow-up message
+/// typed into the same session must never become the title — neither through
+/// a second generation task nor through a session restored from disk (a
+/// rebuilt session has no in-memory title cache).
+///
+/// Internal runtime artifacts (output-budget nudges, handoff notes) are
+/// skipped — they are not user input. `None` when the log has no user row yet.
+pub fn read_first_user_message(path: &Path) -> Option<String> {
+    // The first user row sits at the head of the log; a couple of pages cover
+    // the session-init / system rows that may precede it. Pages are only
+    // walked when a log is unusually header-heavy.
+    const PAGE: u32 = 16;
+    const MAX_PAGES: u8 = 32;
+    let mut offset = 0u64;
+    for _ in 0..MAX_PAGES {
+        let page = read_messages_paginated(path, offset, PAGE, false).ok()?;
+        if let Some(entry) = page
+            .messages
+            .into_iter()
+            .find(|e| e.role == "user" && !e.is_internal())
+        {
+            return Some(entry.content);
+        }
+        if page.limit == 0 {
+            return None;
+        }
+        offset += u64::from(page.limit);
+        if offset >= page.total {
+            return None;
+        }
+    }
+    None
+}
 
 /// Design 27 §2.1 T2 handoff source: the LAST persisted compaction summary
 /// of a session. Read from the write-time derived state in the session meta
@@ -5940,6 +5990,42 @@ mod tests {
             metadata: None,
             kind: None,
         }
+    }
+
+    #[test]
+    fn read_first_user_message_skips_non_user_and_internal_rows() {
+        // Title generation must describe the FIRST real user turn: session-init
+        // system rows and internal runtime nudges are not user input.
+        let dir = TempDir::new().unwrap();
+        let mut nudge = make_entry("nudge", "user", "budget nudge");
+        nudge.metadata = Some(serde_json::json!({ "internal": true }));
+        let entries = vec![
+            make_entry("sys", "system", "session init"),
+            nudge,
+            make_entry("u1", "user", "第一条用户消息"),
+            make_entry("a1", "assistant", "reply"),
+            make_entry("u2", "user", "第二条用户消息"),
+        ];
+        let path = write_test_jsonl(&dir, "first-user", &entries);
+
+        assert_eq!(
+            read_first_user_message(&path).as_deref(),
+            Some("第一条用户消息"),
+            "must return the first real user row, not the internal nudge"
+        );
+    }
+
+    #[test]
+    fn read_first_user_message_returns_none_without_a_user_row() {
+        let dir = TempDir::new().unwrap();
+        let path = write_test_jsonl(&dir, "no-user", &[make_entry("a1", "assistant", "reply")]);
+        assert_eq!(read_first_user_message(&path), None);
+
+        // A missing file (brand-new session) is a clean `None`, not an error.
+        assert_eq!(
+            read_first_user_message(&dir.path().join("conversations").join("missing.jsonl")),
+            None
+        );
     }
 
     #[test]

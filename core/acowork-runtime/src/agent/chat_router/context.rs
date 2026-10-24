@@ -320,10 +320,22 @@ pub fn project_row(row: &ChatRow, agent_instance: &str) -> Option<ChatMessage> {
     }
 }
 
-/// Fixed notice texts (design 29 §4.3). `turn_started` embeds the first 8
-/// characters of the execution session id, which is durable in the row meta.
+/// Fixed notice texts (design 29 §4.3). The `turn_dispatched` / `turn_started`
+/// arms are LEGACY-ONLY: the ADR-100 revision stopped writing those milestones
+/// (intermediate state is runtime-only), so only transcripts produced before
+/// the revision can carry them. They stay here so a router reading an old
+/// history still sees a sane line instead of a raw notice type.
 fn notice_text(row: &ChatRow) -> String {
     match row.meta.notice_type.as_str() {
+        "turn_dispatched" => {
+            let sid = &row.meta.agent_session_id;
+            let short: String = sid.chars().take(8).collect();
+            if short.is_empty() {
+                "[system] Dispatched to execution".to_string()
+            } else {
+                format!("[system] Dispatched to session {short}")
+            }
+        }
         "turn_started" => {
             let sid = &row.meta.agent_session_id;
             let short: String = sid.chars().take(8).collect();
@@ -617,9 +629,19 @@ mod tests {
         let mut notice = row(2, "system_notice", "system", "raw");
         notice.meta.notice_type = "turn_started".to_string();
         notice.meta.agent_session_id = "0123456789abcdef".to_string();
-        let block = build_block_b(&[card, notice], 0, &ids(&[]), "a1", &WindowBudget::default());
+        let mut dispatched = row(3, "system_notice", "system", "raw");
+        dispatched.meta.notice_type = "turn_dispatched".to_string();
+        dispatched.meta.agent_session_id = "0123456789abcdef".to_string();
+        let block =
+            build_block_b(&[card, notice, dispatched], 0, &ids(&[]), "a1", &WindowBudget::default());
         assert_eq!(block.messages[0].content, "[card] Proceed?\n- yes\n- no");
         assert_eq!(block.messages[1].content, "[system] A round started in session 01234567");
+        // The dispatch milestone has its own fixed text (distinct from the
+        // turn-start row the same turn also lands).
+        assert_eq!(
+            block.messages[2].content,
+            "[system] Dispatched to session 01234567"
+        );
     }
 
     #[test]

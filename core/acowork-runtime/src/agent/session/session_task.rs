@@ -58,6 +58,16 @@ pub enum SessionMessage {
         /// When present, the agent loop constructs a ChatMessage::user_multimodal()
         /// instead of ChatMessage::user(), enabling image inputs to flow to the LLM.
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+        /// ADR-100 D12: `Some(id)` when this turn's human message already has
+        /// its own row in the session's Chat transcript — a pinned turn, sent
+        /// from the execution view but written through the Chat entry point,
+        /// carries that row's id. The continuation echo then threads under it
+        /// (`in_reply_to`), so the chat reads as one round: the question asked
+        /// here and the answer that came back from it. `None` = composed
+        /// straight against the execution surface, which owes the chat no
+        /// answer to a visible row — the echo stays the standalone `exec:`
+        /// keyed line it has always been.
+        chat_trigger_message_id: Option<String>,
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
@@ -221,6 +231,7 @@ impl std::fmt::Debug for SessionMessage {
                 active_skill,
                 attached_items,
                 content_parts,
+                chat_trigger_message_id,
             } => f
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
@@ -231,6 +242,7 @@ impl std::fmt::Debug for SessionMessage {
                     &attached_items.as_ref().map(|c| c.len()).unwrap_or(0),
                 )
                 .field("has_content_parts", &content_parts.is_some())
+                .field("has_chat_trigger", &chat_trigger_message_id.is_some())
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::UpdateRuntimeConfig(overrides) => f
@@ -961,6 +973,7 @@ impl SessionTask {
                     active_skill,
                     attached_items,
                     content_parts,
+                    chat_trigger_message_id,
                 }) => {
                     let has_attached = attached_items.as_ref().is_some_and(|a| !a.is_empty());
                     let has_content_parts = content_parts.as_ref().is_some_and(|p| !p.is_empty());
@@ -1119,6 +1132,18 @@ impl SessionTask {
                     // the chat turn with the same `ChunkEvent::Error` shape used
                     // by `agent_loop.run` failures below, so the frontend sees a
                     // consistent error surface regardless of which stage failed.
+                    // ADR-100 D12: the Chat surface this turn owes a terminal row
+                    // to, resolved once before the loop runs so every exit —
+                    // success, empty answer, abort, attachment failure, loop
+                    // error — can close the human's `user_message`. Own value, not
+                    // a borrow: the agent loop takes `&mut` below.
+                    let echo_chat_id = agent_loop
+                        .session
+                        .conversation
+                        .as_ref()
+                        .and_then(|c| c.chat_session_id())
+                        .filter(|c| !c.is_empty());
+
                     let final_content_parts: Option<
                         Vec<acowork_core::providers::traits::ContentPart>,
                     > = match attached_items.as_deref() {
@@ -1141,8 +1166,32 @@ impl SessionTask {
                                         error = %e,
                                         "Failed to derive image content_parts from attached_items"
                                     );
+                                    let (user_message, detail, error_type) = e.error_info();
+                                    // A pinned turn already has its question in
+                                    // the chat; saying nothing here would leave
+                                    // that round open with no way to close it. A
+                                    // local turn has no row to answer, so it stays
+                                    // as silent as it always was. The body is the
+                                    // human-readable line only — detail and
+                                    // error_type never enter a transcript.
+                                    if let (Some(chat_id), Some(trigger)) = (
+                                        echo_chat_id.as_deref(),
+                                        chat_trigger_message_id.as_deref(),
+                                    ) {
+                                        echo_terminal_row(
+                                            &agent_loop.core.config.agent_instance_id,
+                                            agent_loop.core.config.gateway_host.as_deref(),
+                                            agent_loop.core.config.mqtt_password.as_deref(),
+                                            chat_id,
+                                            &message_id,
+                                            &session_id,
+                                            "failed",
+                                            &user_message,
+                                            Some(trigger),
+                                        )
+                                        .await;
+                                    }
                                     if let Some(ref tx) = chunk_tx {
-                                        let (user_message, detail, error_type) = e.error_info();
                                         let event = SessionChunkEvent {
                                             session_id: session_id.clone(),
                                             event: ChunkEvent::Error {
@@ -1183,6 +1232,14 @@ impl SessionTask {
                                 response_len = response.len(),
                                 "SessionTask processed chat message"
                             );
+                            // ADR-100 D9: a locally-composed turn in a
+                            // chat-bound session still owes that chat a result.
+                            // Capture the coordinates before the Done event
+                            // consumes `response` / `message_id`; the echo is
+                            // sent after the event so it never delays the UI's
+                            // completion signal.
+                            let echo_message_id = message_id.clone();
+                            let echo_body = response.clone();
                             if let Some(ref tx) = chunk_tx {
                                 let event = SessionChunkEvent {
                                     session_id: session_id.clone(),
@@ -1208,6 +1265,56 @@ impl SessionTask {
                             // streaming (loop_llm.rs) serve real-time streaming UX;
                             // this one guarantees a signal after full persistence.
                             agent_loop.session_core.notify_new_data_available();
+                            // ADR-100 D9: echo this locally-composed turn's
+                            // final output back to the Chat session the
+                            // execution session was started from. Chat-routed
+                            // turns already write back through their request
+                            // context (the Intent arm); this turn has none — the
+                            // user typed it here, usually to continue after
+                            // stopping a chat turn — so without this the chat
+                            // would stop at the abort and never learn the task
+                            // finished. A standalone `agent_message` keyed
+                            // `exec:{message_id}` (idempotent), drillable via
+                            // `sender_session_id`. Best-effort: a failed echo
+                            // costs a surface row, never the turn.
+                            //
+                            // A stopped turn is echoed too (`aborted`, empty
+                            // body): the terminal row is the ONLY thing that
+                            // can tell the chat its message was interrupted,
+                            // and without it every stop/continue cycle after
+                            // the first is invisible in the transcript. An
+                            // ordinary empty answer leaves no row.
+                            let aborted = agent_loop.turn_aborted;
+                            let echo_text = crate::agent::intent_turn::truncate_response_body(
+                                &echo_body,
+                                64 * 1024,
+                            );
+                            // D9 deliberately left an ordinary empty answer with
+                            // no row: a turn composed straight against the
+                            // execution surface has no Chat question to close.
+                            // A pinned turn does (D12), so it owes a terminal row
+                            // even when the model had nothing to say — otherwise
+                            // the conversation stays "in progress" over a run that
+                            // finished.
+                            let owes_a_row = aborted
+                                || !echo_text.trim().is_empty()
+                                || chat_trigger_message_id.is_some();
+                            if let Some(chat_id) = echo_chat_id.as_deref()
+                                && owes_a_row
+                            {
+                                echo_terminal_row(
+                                    &agent_loop.core.config.agent_instance_id,
+                                    agent_loop.core.config.gateway_host.as_deref(),
+                                    agent_loop.core.config.mqtt_password.as_deref(),
+                                    chat_id,
+                                    &echo_message_id,
+                                    &session_id,
+                                    if aborted { "aborted" } else { "completed" },
+                                    &echo_text,
+                                    chat_trigger_message_id.as_deref(),
+                                )
+                                .await;
+                            }
                         }
                         Err(e) => {
                             tracing::error!(
@@ -1215,8 +1322,30 @@ impl SessionTask {
                                 error = %e,
                                 "SessionTask agent loop error"
                             );
+                            let (user_message, detail, error_type) = e.error_info();
+                            // ADR-100 D12: a failed pinned turn still closes the
+                            // round it was asked in — the Intent arm has always
+                            // written a `status=failed` terminal row, and now that
+                            // the human's own row sits in the chat, silence here
+                            // means an in-progress round that never resolves.
+                            if let (Some(chat_id), Some(trigger)) = (
+                                echo_chat_id.as_deref(),
+                                chat_trigger_message_id.as_deref(),
+                            ) {
+                                echo_terminal_row(
+                                    &agent_loop.core.config.agent_instance_id,
+                                    agent_loop.core.config.gateway_host.as_deref(),
+                                    agent_loop.core.config.mqtt_password.as_deref(),
+                                    chat_id,
+                                    &message_id,
+                                    &session_id,
+                                    "failed",
+                                    &user_message,
+                                    Some(trigger),
+                                )
+                                .await;
+                            }
                             if let Some(ref tx) = chunk_tx {
-                                let (user_message, detail, error_type) = e.error_info();
                                 let event = SessionChunkEvent {
                                     session_id: session_id.clone(),
                                     event: ChunkEvent::Error {
@@ -1281,50 +1410,14 @@ impl SessionTask {
                     };
                     agent_loop.pending_intent = if responder { Some(turn_ctx()) } else { None };
                     agent_loop.chat_writeback = if write_back { Some(turn_ctx()) } else { None };
-                    // §5.5.5 (plan 3.3): the turn-started pointer row,
-                    // written before the turn runs so a refresh mid-turn
-                    // recovers "a round is in flight". Deterministic
-                    // message id — a redelivered trigger dedups at the
-                    // store, never a second row. Awaited rather than
-                    // spawned so the pointer precedes the write-back in
-                    // seq order; a failure is logged, never fatal (the
-                    // pointer is a credential for the surface, not for
-                    // the conversation).
-                    if write_back
-                        && !source_chat_session_id.is_empty()
-                        && let Err(e) = crate::agent::intent_turn::append_chat_row(
-                            &agent_loop.core.config.agent_instance_id,
-                            &agent_loop
-                                .core
-                                .config
-                                .gateway_host
-                                .clone()
-                                .unwrap_or_else(|| "127.0.0.1".to_string()),
-                            &agent_loop
-                                .core
-                                .config
-                                .mqtt_password
-                                .clone()
-                                .unwrap_or_default(),
-                            &source_chat_session_id,
-                            "system_notice",
-                            &from,
-                            "",
-                            serde_json::json!({
-                                "message_id": format!("ts:{message_id}"),
-                                "notice_type": "turn_started",
-                                "in_reply_to": message_id,
-                                "agent_session_id": session_id,
-                            }),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %e,
-                            "turn_started pointer row failed — turn proceeds without it"
-                        );
-                    }
+                    // ADR-100 revision: the round-open milestone is a RUNTIME
+                    // state. It used to be a durable `turn_started` row so a
+                    // refresh mid-turn could recover "a round is in flight",
+                    // but that made every transcript accumulate status lines
+                    // that mean nothing once the turn is over. The live surface
+                    // now derives its waiting indicator from the unanswered
+                    // trigger (frontend `pendingTurn`), and this turn's own
+                    // terminal write-back closes it.
                     // §5.5.4 answerability for this turn (plan 2b.3); reset
                     // with the turn like the two fields above.
                     agent_loop.chat_has_human = has_human;
@@ -2114,7 +2207,7 @@ fn rebuild_context_tool_definitions(
 ) {
     let new_tool_definitions: Vec<serde_json::Value> = builtin_tools
         .iter()
-        .filter(|e| e.enabled)
+        .filter(|e| e.enabled || crate::agent_config::is_protected_tool(&e.name()))
         .map(|e| {
             let spec = e.tool.spec();
             serde_json::to_value(&spec).unwrap_or_default()
@@ -2288,6 +2381,64 @@ async fn materialize_pulled_attachments(
         }
     }
     out
+}
+
+/// ADR-100 D9 / D12: write the terminal `agent_message` a chat-bound turn owes
+/// the Chat surface, through the Gateway relay.
+///
+/// Extracted because the turn has more than one way to end — a finished answer,
+/// a stopped one, an attachment that could not be read, an agent loop that
+/// returned an error — and D12 made every one of them accountable to a
+/// `user_message` row that is already sitting in the chat waiting for a reply.
+/// Before that, only the first two wrote a row, so a failed turn left the
+/// conversation displaying an in-progress round forever.
+///
+/// `trigger` is the Chat row this turn answers: `Some` threads the echo under it
+/// (a pinned turn — the question is in the transcript), `None` keeps the
+/// standalone `exec:` shape a turn composed straight against the execution
+/// surface has always had. Idempotent by `meta.message_id`.
+///
+/// Best-effort by contract: a failed echo costs a surface row, never the turn.
+#[allow(clippy::too_many_arguments)] // positional row shape; a struct here is boilerplate
+async fn echo_terminal_row(
+    agent_instance_id: &str,
+    gateway_host: Option<&str>,
+    node_token: Option<&str>,
+    chat_id: &str,
+    echo_message_id: &str,
+    session_id: &str,
+    status: &str,
+    body: &str,
+    trigger: Option<&str>,
+) {
+    let host = gateway_host
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("127.0.0.1");
+    if let Err(e) = crate::agent::intent_turn::append_chat_row(
+        agent_instance_id,
+        host,
+        node_token.unwrap_or_default(),
+        chat_id,
+        "agent_message",
+        "",
+        body,
+        crate::agent::intent_turn::exec_echo_meta(
+            echo_message_id,
+            session_id,
+            status,
+            trigger,
+        ),
+    )
+    .await
+    {
+        tracing::warn!(
+            session_id = %session_id,
+            chat_id = %chat_id,
+            error = %e,
+            "terminal echo to chat failed — non-fatal"
+        );
+    }
 }
 
 fn build_attachment_hint(

@@ -471,6 +471,21 @@ pub fn save_agent_config(work_dir: &Path, cfg: &AgentConfig) -> Result<(), Strin
 
 // ── Per-agent builtin-tools config (ADR-029) ───────────────────────────
 
+/// Tools whose operation is required for the Chat ↔ Execution session
+/// architecture to function. Disabling them via the user-facing toggle
+/// would silently break `chat_history_read` (context retrieval) or
+/// `intent_send` (agent-to-agent communication). They are always included
+/// in the dispatch list regardless of the persisted `enabled` flag.
+///
+/// See [`AgentCore::rebuild_all_tools`] which consumes this list.
+pub const PROTECTED_TOOL_NAMES: &[&str] = &["chat_history_read", "intent_send"];
+
+/// Returns `true` when `name` must always be enabled (cannot be turned off
+/// by the user or a manifest omission).
+pub fn is_protected_tool(name: &str) -> bool {
+    PROTECTED_TOOL_NAMES.contains(&name)
+}
+
 /// Per-agent builtin tools enable/disable configuration.
 ///
 /// Persisted to `{work_dir}/config/agent_tools.json`.
@@ -493,11 +508,11 @@ pub struct AgentToolsConfig {
 /// `{ "name": "...", "enabled": bool }`. No extra presentation hint
 /// fields — `AgentToolEntry` is plain persisted state.
 ///
-/// **Platform-protected tools** were historically filtered out here.
-/// The mechanism was retired along with the `context_retrieve` /
-/// `context_abandon` tool surface (`context_abandon` alone survives, as
-/// dead code — `context_retrieve` has been deleted). Every persistence
-/// path now passes all declared entries through verbatim.
+/// **Platform-protected tools** ([`PROTECTED_TOOL_NAMES`]) are always
+/// included in the dispatch list and LLM tool definitions regardless of
+/// their persisted `enabled` flag. The persistence layer still stores
+/// the user's intent, but `rebuild_all_tools` and
+/// `rebuild_context_tool_definitions` override it for these names.
 //
 /// See ADR-029 (per-agent builtin tools) and ADR-052 (tool compression).
 #[derive(Debug, Clone, Serialize, Deserialize)]

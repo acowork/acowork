@@ -8,6 +8,7 @@
 //! S1.7: Parallel tool execution with per-tool timeout
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, Provider};
@@ -66,6 +67,26 @@ pub struct SessionChunkEvent {
     pub session_id: String,
     /// The actual chunk event.
     pub event: ChunkEvent,
+}
+
+/// Releases the session's title-generation claim when the spawned task ends.
+///
+/// Held for the whole lifetime of the async title task (and by the
+/// synchronous resume path that propagates a persisted title), so the claim
+/// is released on every exit — success, error, or panic — letting a later
+/// turn retry generation.
+struct TitleTaskClaim(Arc<AtomicBool>);
+
+impl TitleTaskClaim {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+}
+
+impl Drop for TitleTaskClaim {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Streaming chunk event emitted during LLM response generation.
@@ -466,6 +487,14 @@ pub struct AgentLoop {
     /// [`Self::chat_writeback`] has already been taken. Each entry carries
     /// its own row coordinates for that reason.
     pub(crate) open_chat_cards: Vec<crate::agent::loop_interaction::OpenChatCard>,
+
+    /// ADR-100 revision: whether the current turn ended because the user
+    /// stopped it. Set by [`Self::mark_turn_aborted`], which historically only
+    /// stamped the pending `chat_writeback` context. A turn composed directly
+    /// in the execution session has no such context, so its abort outcome had
+    /// nowhere to live — and the chat it is bound to could never learn why its
+    /// previous message went unanswered. Reset at the top of every request.
+    pub(crate) turn_aborted: bool,
 }
 
 impl AgentLoop {
@@ -538,6 +567,7 @@ impl AgentLoop {
             chat_writeback: None,
             chat_has_human: None,
             open_chat_cards: Vec::new(),
+            turn_aborted: false,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         loop_.session_core.approval_handle = Some(approval_handle.clone());
@@ -611,6 +641,7 @@ impl AgentLoop {
             chat_writeback: None,
             chat_has_human: None,
             open_chat_cards: Vec::new(),
+            turn_aborted: false,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -649,6 +680,11 @@ impl AgentLoop {
             work_dir,
             session_id: self.session_core.session_id.clone(),
             current_user_message: self.current_turn_user_message.clone(),
+            chat_session_id: self
+                .session
+                .conversation
+                .as_ref()
+                .and_then(|c| c.chat_session_id()),
         };
         match tool.execute_with_context(params, &ctx).await {
             Ok(result) if result.ok => Ok(result.content),
@@ -827,6 +863,10 @@ impl AgentLoop {
         // request begins.
         let _cancel_handle = self.session_core.begin_new_request();
 
+        // ADR-100 revision: a new request starts with a clean outcome — an
+        // abort from the previous turn must not leak into this one.
+        self.turn_aborted = false;
+
         // Replay is a debug path over existing history; the staged turn
         // message from the live run is not re-embedded (memory tools fall
         // back to keyword-only recall).
@@ -900,9 +940,26 @@ impl AgentLoop {
             // Only when a conversation exists (not in tests without sessions).
             // Title generation runs only once per session — subsequent user
             // messages skip the LLM call entirely.
+            //
+            // Gate on the in-flight claim, not just `title.is_none()`: a Stop
+            // interrupts this turn while the spawned LLM call is still in
+            // flight, and a follow-up message sent right after would spawn a
+            // second task whose result (derived from that follow-up) would
+            // overwrite the first-message title. See `title_task_in_flight`.
             if self.session.conversation.is_some()
                 && self.session_core.title.read().unwrap().is_none()
+                && !self
+                    .session_core
+                    .title_task_in_flight
+                    .swap(true, Ordering::AcqRel)
             {
+                // Claim released on every exit path below — the spawned task
+                // holds it for its whole lifetime, the synchronous resume
+                // path drops it at the end of this block.
+                let _title_claim = TitleTaskClaim::new(Arc::clone(
+                    &self.session_core.title_task_in_flight,
+                ));
+
                 // Check if the conversation already has a title from a
                 // previous session run (session resume case). If so,
                 // propagate it to session_core.title and skip the LLM call.
@@ -925,15 +982,34 @@ impl AgentLoop {
                         })
                         .unwrap_or_else(|| "en".to_string());
 
-                    // Use the raw user message (before any prompt enrichment)
-                    // for title generation. This is the user's original input
-                    // without [Attached context:] prefix, document content,
-                    // or file hints — exactly what the user typed.
+                    // The title must always describe the session's FIRST user
+                    // turn — never the message currently being handled. A
+                    // follow-up sent after a Stop, or a session rebuilt from
+                    // disk (which has no in-memory title cache), would
+                    // otherwise title the conversation after a later message.
+                    // The JSONL log is the durable source of the first turn;
+                    // the current message is only a fallback for logs that
+                    // have not flushed a user row yet.
                     //
-                    // When `raw_user_message` is None or empty (e.g. user only
+                    // These are the user's original input (no
+                    // [Attached context:] prefix, document content, or file
+                    // hints) — exactly what the user typed.
+                    //
+                    // When the first turn has no text (e.g. user only
                     // uploaded files without typing text), the fallback below
-                    // extracts filenames from <attached_document> tags.
-                    let title_input = raw_user_message.unwrap_or("");
+                    // extracts filenames from <attached_document> tags in the
+                    // current message.
+                    let first_user_message = self
+                        .session
+                        .conversation
+                        .as_ref()
+                        .and_then(|conv| {
+                            crate::conversation::read_first_user_message(conv.session_path())
+                        })
+                        .filter(|s| !s.trim().is_empty());
+                    let title_input_owned = first_user_message
+                        .unwrap_or_else(|| raw_user_message.unwrap_or("").to_string());
+                    let title_input = title_input_owned.as_str();
 
                     let prompt = crate::prompt::TITLE_PROMPT
                         .replace("{language}", &lang)
@@ -975,6 +1051,10 @@ impl AgentLoop {
                     };
 
                     tokio::spawn(async move {
+                        // Hold the claim for the task's whole lifetime: it is
+                        // released only when this future completes (or panics),
+                        // so a follow-up turn cannot spawn a competing task.
+                        let _title_claim = _title_claim;
                         // max_tokens=120 leaves room for a 60-char Chinese title
                         // (CJK char ≈ 1.5–2 BPE tokens). 64 was tight for a 30-char
                         // budget and would silently cap LLM output for Chinese
@@ -2683,6 +2763,7 @@ mod tests {
                     status: String::new(),
                     has_human: None,
                     chat_attachment_ids: Vec::new(),
+                    for_execution_session: String::new(),
                 },
             )))
             .unwrap();

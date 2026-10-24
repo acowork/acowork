@@ -366,7 +366,10 @@ describe('poll loop', () => {
     setChatTransport(okT)
     const ok = await useChatStore.getState().sendMessage('a1', 's1', 'hello')
     expect(ok).toBe(true)
-    expect(okT.send).toHaveBeenCalledWith('a1', 's1', 'hello', '')
+    // ADR-100 D12: the fifth argument is the Chat pin — `undefined` here
+    // because the seeded session has no `chat_session_id`, so this send must
+    // go down the session-scoped path.
+    expect(okT.send).toHaveBeenCalledWith('a1', 's1', 'hello', '', undefined)
     expect(useChatStore.getState().agentStates.a1?.pendingSend).toBeNull()
     expect(useChatStore.getState().agentStates.a1?.messages.at(-1)?.content).toBe('hello')
 
@@ -380,7 +383,7 @@ describe('poll loop', () => {
     setChatTransport(okT)
     const retried = await useChatStore.getState().sendMessage('a1', 's1')
     expect(retried).toBe(true)
-    expect(okT.send).toHaveBeenLastCalledWith('a1', 's1', 'retry me', '')
+    expect(okT.send).toHaveBeenLastCalledWith('a1', 's1', 'retry me', '', undefined)
   })
 
   it('sendMessage: retry replays the originally picked skill (command survives the failure)', async () => {
@@ -400,7 +403,7 @@ describe('poll loop', () => {
     setChatTransport(okT)
     const retried = await useChatStore.getState().sendMessage('a1', 's1') // no content, no command
     expect(retried).toBe(true)
-    expect(okT.send).toHaveBeenLastCalledWith('a1', 's1', 'weekly report please', 'weekly-report')
+    expect(okT.send).toHaveBeenLastCalledWith('a1', 's1', 'weekly report please', 'weekly-report', undefined)
   })
 
   it('openSession clears the previous session status', async () => {

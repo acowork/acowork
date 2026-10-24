@@ -229,9 +229,6 @@
   },
   "chatView": {
     "empty": "该聊天暂无消息",
-    "processing": "Agent 处理中 · 点击查看执行过程",
-    "queued": "已送达，等待 Agent 开始处理…",
-    "assigning": "正在分配任务…",
     "routerFallback": "已自动分配任务",
     "cardAnswered": "已回答",
     "cardClosed": "已结束",
@@ -239,47 +236,20 @@
     "answer": "回答",
     "replyingTo": "回复",
     "cancelReply": "取消回复",
-    "emptyReply": "已中断，无输出",
     "emptyAnswer": "（无内容）",
     "viewRun": "查看执行",
-    "execSessionGone": "该执行会话已被删除，无法查看",
-    "statusCard": {
-      "untitled": "未命名执行",
-      "detail": "详情",
-      "workspaceAgentHome": "Agent 主页",
-      "labelStatus": "状态",
-      "labelTitle": "会话",
-      "labelStep": "当前步骤",
-      "labelModel": "模型",
-      "labelWorkspace": "工作区",
-      "errorTitle": "错误",
-      "dismiss": "忽略",
-      "continue": "继续",
-      "deny": "拒绝",
-      "allow": "允许",
-      "pausedIteration": "已达迭代上限，已暂停。",
-      "stepApproval": "等待授权：{{tool}}",
-      "stepRunningTool": "正在执行 {{count}} 个工具…",
-      "stepTodo": "（{{index}}/{{total}}）{{content}}",
-      "status": {
-        "idle": "空闲",
-        "llm_awaiting_first_chunk": "等待模型",
-        "thinking": "思考中",
-        "llm_streaming": "输出中",
-        "tool_executing": "执行工具中",
-        "waiting_approval": "等待授权",
-        "paused": "已暂停"
-      },
-      "phase": {
-        "idle": "空闲",
-        "waiting": "等待模型",
-        "thinking": "思考中",
-        "streaming": "生成回复中",
-        "tool_executing": "执行工具中",
-        "waiting_approval": "等待授权",
-        "paused": "已暂停"
-      }
-    }
+    "notice": {
+      "pendingTurn": "{{name}}正在处理…",
+      "pendingTurnGeneric": "正在处理…",
+      "interrupted": "本轮执行已中断",
+      "failed": "本轮执行失败",
+      "timeout": "本轮执行超时",
+      "waiting": "本轮等待你回复",
+      "noAnswer": "本轮没有产生回复",
+      "turnRoutedNew": "启动新任务：{{task}}",
+      "turnRoutedContinue": "继续之前的任务：{{task}}"
+    },
+    "execSessionGone": "该执行会话已被删除，无法查看"
   },
   "time": {
     "justNow": "刚刚",
@@ -1991,7 +1961,6 @@
     "members": "{{count}} 名成员",
     "loadEarlier": "加载更早的消息",
     "empty": "还没有消息",
-    "working": "Agent 处理中…",
     "placeholder": "发消息给项目组",
     "placeholderWithMentions": "发消息，@Agent 让其处理",
     "send": "发送",

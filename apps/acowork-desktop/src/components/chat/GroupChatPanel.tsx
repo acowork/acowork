@@ -39,10 +39,22 @@ import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
-import { OutlineBrainIcon } from "../common/BrainIcon";
+import { ViewRunButton } from "./ViewRunButton";
+import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
+import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
+import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import {
+  isFailureStatus,
+  isEmptyTerminalReply,
+  isTurnRoutedNotice,
+  pendingTurn,
+  terminalNoticeKey,
+} from "./chatTurnState";
+import { InlineInteractionCard } from "./InlineInteractionCard";
 import { detectPaste } from "./pasteDetect";
 import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
 import { useAuthStore } from "../../stores/authStore";
@@ -112,6 +124,15 @@ const chatMarkdownComponents = {
   li: ({ children }: { children?: React.ReactNode }) => (
     <li className="text-sm leading-relaxed">{children}</li>
   ),
+  /** Same scroll wrapper as every other desktop markdown surface
+   *  (`MessageBubble` / `CompactionCard` / `MarkdownPreviewView`): a GFM table
+   *  cannot shrink below its widest cell, so unwrapped it widened the bubble
+   *  instead of scrolling inside it. */
+  table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
+    <div className="prose-table-scroll">
+      <table {...rest}>{children}</table>
+    </div>
+  ),
 };
 
 function ChatMarkdown({ content }: { content: string }) {
@@ -167,112 +188,73 @@ interface RowProps {
   /** The subset the human actually replied to — the line says "Answered",
    *  anything else that closed (turn ended, timeout, stop) says "Closed". */
   answered: Set<string>;
-  onAnswer: (row: ChatMessageRow, text: string) => void;
+  onAnswer: (row: ChatMessageRow, text: string, immediate: boolean) => void;
   /** Drill into the exec session that produced an agent reply — jumps to that
    *  agent's 1:1 page and opens the exec tab (mirrors AgentChatView.jumpToExec). */
   onJumpToExec: (agentId: string, execSid: string) => void;
-  /** For a `router_fallback` receipt: the exec session its trigger message was
-   *  routed into (resolved through the window's `turn_started` pointer). When
-   *  present the receipt is a clickable anchor, not just a line of text. */
-  routerExecSid?: string;
   /** Admin viewing a group they never joined: cards are shown, never
    *  answered — posting into someone else's project stays forbidden. */
   readOnly?: boolean;
+  /** Body of the message that triggered this row's turn (`meta.in_reply_to`).
+   *  Names the run in the drill-down tooltip while the exec session still has
+   *  no title. Resolved by the parent through its message_id → body index. */
+  triggerBody?: string;
 }
 
-function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, routerExecSid, readOnly }: RowProps) {
+function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
 
+  // The exec session behind this row and the agent that owns it (`row.from`).
+  // Its name feeds the "view run" tooltip. Read before the kind branches so
+  // the store hook stays unconditional. The routing reaction row (ADR-100
+  // D11) names the task in its bubble, so it resolves through the same hook.
+  const routed = isTurnRoutedNotice(row);
+  const drillSid =
+    row.kind === "agent_message" || routed
+      ? row.meta?.agent_session_id || row.meta?.sender_session_id || ""
+      : undefined;
+  const execRunName = useSessionTitle(row.from, drillSid);
+
   if (row.kind === "system_notice") {
-    // Bookkeeping rows — a pointer or a card closure carries no text of its
-    // own, so it never paints a line in the stream.
-    if (row.meta?.notice_type === "turn_started") return null;
-    // ADR-099: the router degraded to the deterministic route. The message
-    // itself still went through — a receipt, not an error. Once routing
-    // landed the receipt is an anchor: clicking drills into the execution
-    // session the agent assigned the message to.
-    if (row.meta?.notice_type === "router_fallback") {
-      const text = t("chatView.routerFallback");
-      if (!routerExecSid) {
-        return <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>;
-      }
-      return (
-        <div className="py-1 text-center">
-          <button
-            type="button"
-            onClick={() => onJumpToExec(row.from, routerExecSid)}
-            className="text-10 text-text-tertiary underline-offset-2 transition-colors hover:text-text-secondary hover:underline"
-          >
-            {text}
-          </button>
-        </div>
-      );
+    if (routed) {
+      // ADR-100 D11: the routing reaction — runtime-written, but it speaks as
+      // the agent, so it is synthesized into the ordinary agent-bubble path
+      // (avatar + name + bubble), never a centered system line. A user
+      // message must always be followed by an agent message: that exchange IS
+      // the chat.
+      const taskName = execRunName?.trim() || truncateTaskName(triggerBody) || "";
+      row = {
+        ...row,
+        kind: "agent_message",
+        body: t(
+          row.meta?.turn_mode === "new"
+            ? "chatView.notice.turnRoutedNew"
+            : "chatView.notice.turnRoutedContinue",
+          { task: taskName },
+        ),
+      };
+    } else {
+      // Legacy receipts only — the milestones and the router-fallback receipt
+      // are gone from the stream (ADR-100 revision). Whatever survived paints
+      // as a quiet centered line, never on an agent's side.
+      return <ChatNoticeEventRow row={row} className="px-4" />;
     }
-    const text = row.body || row.meta?.status || "";
-    if (!text) return null;
-    return (
-      <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>
-    );
   }
 
   if (row.kind === "interaction_request") {
-    const it = row.meta?.interaction;
-    const question = it?.question || row.body;
-    const asker = nameOf(row.from);
-    if (closed.has(row.meta?.message_id ?? "")) {
-      return (
-        <div className="mx-6 my-1 rounded-md border border-border-divider bg-chat-bubble px-3 py-2 text-xs text-text-tertiary">
-          {answered.has(row.meta?.message_id ?? "")
-            ? t("chatView.cardAnswered")
-            : t("chatView.cardClosed")}
-          : {question}
-        </div>
-      );
-    }
-    if (readOnly) {
-      // Read-only admin view: show the question, no answer affordance.
-      return (
-        <div className="mx-6 my-2 rounded-lg border border-border-divider bg-chat-bubble p-3">
-          <div className="mb-1 text-10 text-text-tertiary">{asker.name}</div>
-          <div className="text-xs font-medium text-text-primary">{question}</div>
-        </div>
-      );
-    }
+    // The shared inline card — same grammar, affordances and answered/closed
+    // receipt as the 1:1 surface (design 27 §5.5.4).
     return (
-      <div className="mx-6 my-2 rounded-lg border border-[var(--color-accent)]/30 bg-chat-bubble p-3">
-        <div className="mb-1 text-10 text-text-tertiary">{asker.name}</div>
-        <div className="text-xs font-medium text-text-primary">{question}</div>
-        {it?.options && it.options.length > 0 ? (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {it.options.map((opt) => (
-              <button
-                key={opt}
-                onClick={() => onAnswer(row, opt)}
-                className="rounded btn-accent px-3 py-1.5 text-xs"
-              >
-                {opt}
-              </button>
-            ))}
-            <button
-              onClick={() => onAnswer(row, "")}
-              className="rounded btn-solid px-3 py-1.5 text-xs"
-            >
-              {t("chatView.freeAnswer")}
-            </button>
-          </div>
-        ) : (
-          <div className="mt-2">
-            <button
-              onClick={() => onAnswer(row, "")}
-              className="rounded btn-accent px-3 py-1.5 text-xs"
-            >
-              {t("chatView.answer")}
-            </button>
-          </div>
-        )}
-      </div>
+      <InlineInteractionCard
+        row={row}
+        closed={closed}
+        answered={answered}
+        askerName={nameOf(row.from).name}
+        readOnly={readOnly}
+        onAnswer={onAnswer}
+      />
     );
   }
 
@@ -280,13 +262,28 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
   const who = own
     ? { name: profile.displayName, isAgent: false }
     : nameOf(row.from);
-  const failed = !!row.meta?.status && row.meta.status !== "completed";
+  const failed = isFailureStatus(row.meta?.status);
   const agentMeta = who.isAgent ? agentsMap[row.from]?.meta : undefined;
   // The exec session behind an agent reply — a group / routed reply carries
-  // `sender_session_id` (the answering agent's own session; `agent_session_id`
-  // on turn pointers). Same formula as AgentChatView, so finished / failed /
-  // empty-bodied replies are all drillable.
+  // `sender_session_id` (the answering agent's own session). Same formula as
+  // AgentChatView, so finished / failed / empty-bodied replies are all
+  // drillable.
   const execSid = row.meta?.agent_session_id || row.meta?.sender_session_id || "";
+
+  // A terminal reply with nothing in it IS its outcome ("interrupted",
+  // "failed"): paint the centered status line with the drill into the run,
+  // never a bubble speaking in the agent's voice.
+  if (row.kind === "agent_message" && isEmptyTerminalReply(row)) {
+    return (
+      <ChatTurnStatusLine
+        className="px-4"
+        text={t(terminalNoticeKey(row.meta?.status))}
+        danger={failed}
+        onJump={execSid ? () => onJumpToExec(row.from, execSid) : undefined}
+        runName={execRunName?.trim() || truncateTaskName(triggerBody) || undefined}
+      />
+    );
+  }
 
   // Avatar is a 40px side column (left for others, right for own) — the same
   // primitive the user↔user inbox (`MessageRow`) and user↔agent thread
@@ -370,10 +367,26 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
               ))}
             </div>
           )}
-          {(row.body || row.meta?.status || !row.attachments?.length) && (
+          {/* ADR-100 D12: a PM task session is bound to this group's chat, so a
+              turn composed in its execution view arrives here as a `user_message`
+              whose attached items are labels only — the file lives in the run,
+              not in this chat session, so the pill is deliberately inert. They
+              also count as content, which is what keeps a file-with-no-words
+              head row from painting the empty-turn placeholder. */}
+          <ExecAttachmentLabels
+            labels={row.meta?.exec_attachments ?? []}
+            align={own ? "end" : "start"}
+          />
+          {/* The group column is an `items-start` flex column, so the bubble is
+             shrink-to-fit too: without the clamp, content that cannot be
+             squeezed (a mermaid SVG's natural width, an unwrapped table, one
+             long token) widened the bubble past the row's `max-w-[var(
+             --content-max-width)]` and spilled under the next panel. The clamp
+             hands that overflow to the inner scroll containers. */}
+          {(row.body || !(row.attachments?.length || row.meta?.exec_attachments?.length)) && (
           <div
             className={cn(
-              "rounded-md px-4 py-2.5 leading-relaxed break-words select-text",
+              "max-w-full rounded-md px-4 py-2.5 leading-relaxed break-words select-text",
               own
                 ? "rounded-br-sm bg-chat-user text-chat-user-text"
                 : "rounded-bl-sm bg-chat-bubble text-text-primary",
@@ -398,15 +411,10 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
                 tabs (design 27 §6.1) — the button and its destination are
                 the same thing. */}
             {!own && who.isAgent && row.kind === "agent_message" && execSid && (
-              <button
-                type="button"
-                onClick={() => onJumpToExec(row.from, execSid)}
-                title={t("chatView.viewRun")}
-                className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
-              >
-                <OutlineBrainIcon className="h-[11px] w-[11px] shrink-0" />
-                {t("chatView.viewRun")}
-              </button>
+              <ViewRunButton
+                runName={execRunName?.trim() || truncateTaskName(triggerBody) || undefined}
+                onJump={() => onJumpToExec(row.from, execSid)}
+              />
             )}
             <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
@@ -501,9 +509,6 @@ export function GroupChatPanel() {
   const win = useChatSessionStore(
     (s) => (activeGroupId ? s.windows[activeGroupId] : undefined),
   );
-  const inFlight = useChatSessionStore((s) =>
-    activeGroupId ? (s.live[activeGroupId]?.inFlight ?? null) : null,
-  );
   const sending = useChatSessionStore((s) => (activeGroupId ? s.sending[activeGroupId] : false));
   const pendingLocateSeq = useChatSessionStore((s) =>
     activeGroupId ? (s.windows[activeGroupId]?.pendingLocateSeq ?? null) : null,
@@ -572,26 +577,17 @@ export function GroupChatPanel() {
       .catch(() => {});
   }, []);
 
-  const rows = useMemo(() => {
-    const all = [...(win?.older ?? []), ...(win?.tail ?? [])];
-    return all.filter(
-      (r) => !(r.kind === "system_notice" && (r.meta?.notice_type === "turn_started" || !r.body)),
-    );
-  }, [win]);
-  // `in_reply_to → agent_session_id` over the raw window's `turn_started`
-  // pointer rows (those are filtered out of `rows` above, so map over the
-  // unfiltered window). A `router_fallback` receipt drills through this.
-  const pointerSid = useMemo(() => {
+  // The stream is now a straight durable log: every retired milestone renders
+  // as nothing (the shared renderer returns null) and the only state line the
+  // surface adds is derived below. No projection layer is needed.
+  const rows = useMemo(() => [...(win?.older ?? []), ...(win?.tail ?? [])], [win]);
+  // message_id → body index over the raw window, so a reply (whose trigger is
+  // only an `in_reply_to` id) can name the task in its drill-down tooltip when
+  // the run has no title yet.
+  const bodyById = useMemo(() => {
     const m = new Map<string, string>();
     for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
-      if (
-        r.kind === "system_notice" &&
-        r.meta?.notice_type === "turn_started" &&
-        r.meta?.in_reply_to &&
-        r.meta?.agent_session_id
-      ) {
-        m.set(r.meta.in_reply_to, r.meta.agent_session_id);
-      }
+      if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
     }
     return m;
   }, [win]);
@@ -616,7 +612,6 @@ export function GroupChatPanel() {
     () => (win?.tail ? humanAnsweredCardIds(win.tail) : new Set<string>()),
     [win],
   );
-
   const agentParticipants = useMemo(() => {
     if (!group?.participants) return [];
     return group.participants
@@ -624,6 +619,19 @@ export function GroupChatPanel() {
       .map((p) => ({ id: p.id, name: nameOf(p.id).name }))
       .filter((p) => nameOf(p.id).isAgent);
   }, [group, me, nameOf]);
+
+  // Is the newest message still waiting for an answering agent? Derived, never
+  // stored (`chatTurnState`). Suppressed while a locate has the window parked
+  // mid-history (no newest message is rendered there).
+  //
+  // `agentParticipants.length > 0` is the chat-side fact that makes the line
+  // meaningful at all: a `user_user` DM has no agent, so it must never claim
+  // somebody is working — not even while the send is in flight. Rows are
+  // filtered the same way inside `pendingTurn`, so an un-@'d group remark
+  // opens no wait either (it woke nobody), while a turn an agent is still
+  // chewing on keeps its line even if a plain remark landed after it.
+  const waiting =
+    !hasMoreNewer && pendingTurn(rows, sending, closed, agentParticipants.length > 0);
 
   // Everything the @ picker lists. Design 27 §5.3.1: @-ing an Agent wakes it,
   // @-ing a person is a mention that triggers nothing — but both are pickable,
@@ -798,7 +806,7 @@ export function GroupChatPanel() {
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
 
   const onAnswer = useCallback(
-    (row: ChatMessageRow, text: string) => {
+    (row: ChatMessageRow, text: string, _immediate: boolean) => {
       if (!activeGroupId) return;
       stickNow();
       void useChatSessionStore
@@ -892,7 +900,7 @@ export function GroupChatPanel() {
             )}
           </div>
         )}
-        {rows.length === 0 && !inFlight && (
+        {rows.length === 0 && (
           <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
             {t("groupChat.empty")}
           </div>
@@ -915,15 +923,19 @@ export function GroupChatPanel() {
               answered={answered}
               onAnswer={onAnswer}
               onJumpToExec={(aid, sid) => void jumpToExec(aid, sid)}
-              routerExecSid={
-                row.meta?.in_reply_to ? pointerSid.get(row.meta.in_reply_to) : undefined
+              triggerBody={
+                row.meta?.in_reply_to ? bodyById.get(row.meta.in_reply_to) : undefined
               }
               readOnly={!canPost}
             />
           </div>
         ))}
-        {inFlight && (
-          <div className="px-6 py-1 text-10 text-text-tertiary">{t("groupChat.working")}</div>
+        {/* One aggregated "an agent has your message" line, derived from the
+            newest unanswered row — the group twin of the 1:1 waiting line. No
+            agent is named: a fan-out can wake more than one, and the reply
+            bubbles say who answered. */}
+        {waiting && (
+          <ChatTurnStatusLine className="px-4" live text={t("chatView.notice.pendingTurnGeneric")} />
         )}
         {hasMoreNewer && (
           <div className="py-2 text-center text-10 text-text-tertiary">

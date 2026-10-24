@@ -27,9 +27,21 @@
 
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
+import { SessionAccessError } from "../lib/session-control";
 import { useAuthStore } from "./authStore";
 
 // ── Wire types (mirror `chat_sessions_api.rs` responses) ──────────────
+
+/** ADR-100 D12: one display label for something an execution view's composer
+ *  handed to the task alongside a turn. Labels only — no path, no id, nothing
+ *  the chat side could try to open, because the attachment bytes stay in the
+ *  execution session (design 27 §4.2.1). Mirrors `chat_sessions::ExecAttachmentLabel`. */
+export interface ExecAttachmentLabel {
+  filename: string;
+  /** The ADR-046 item arm (`upload` / `file` / `attached_folder` / `selection`);
+   *  absent when the sender did not say which arm it was. */
+  kind?: string;
+}
 
 /** One durable chat row. Mirrors `chat_sessions_api::MessageRow`. */
 export interface ChatMessageRow {
@@ -44,6 +56,10 @@ export interface ChatMessageRow {
     message_id?: string;
     conversation_id?: string;
     in_reply_to?: string;
+    /** Design 27 §5.3.1: the Agent instances an @-fan-out woke. Only that one
+     *  broadcast `user_message` carries it, and it is what marks the row as an
+     *  opened agent turn (see `chatTurnState.opensAgentTurn`). */
+    mentions?: string[];
     status?: string;
     repo?: string;
     notice_type?: string;
@@ -55,6 +71,10 @@ export interface ChatMessageRow {
     /** Routing-resolved execution session that HANDLED a request — set on
      *  the `turn_started` pointer and `interaction_request` card. */
     agent_session_id?: string;
+    /** ADR-100: the routing decision stamped on the turn pointer — "new" when
+     *  this turn starts a fresh task, "continue" when it reuses or rotates an
+     *  existing one. Drives the two-state `turn_started` reaction copy. */
+    turn_mode?: "new" | "continue";
     /** The SENDER's execution session (design 27 `source_agent_session_id`) —
      *  on a 1:1 `agent_message` this is the exec session that produced the
      *  reply, so every agent message (finished or empty) can drill into it. */
@@ -65,6 +85,10 @@ export interface ChatMessageRow {
       question?: string;
       options?: string[];
     };
+    /** ADR-100 D12: labels of the execution session's own attached items on a
+     *  `user_message` sent from an execution view's composer. Present only on
+     *  that head row; never resolvable from here (see [`ExecAttachmentLabel`]). */
+    exec_attachments?: ExecAttachmentLabel[];
   };
   attachment_ids?: string[];
   attachments?: Array<{ id: string; filename: string; mime: string; size: number }>;
@@ -122,10 +146,23 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
-    throw new Error(`${method} ${path} → ${resp.status} ${text.slice(0, 200)}`);
+    throw new ChatRequestError(resp.status, `${method} ${path} → ${resp.status} ${text.slice(0, 200)}`);
   }
   if (method === "DELETE") return undefined as T;
   return resp.json() as Promise<T>;
+}
+
+/** A failed `req` that remembers its status, so a caller can tell a terminal
+ *  denial from a transient one without parsing the message text. Every existing
+ *  handler catches these as a plain `Error`, so nothing changes for them. */
+class ChatRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ChatRequestError";
+  }
 }
 
 /** The caller's default 1:1 session with `agentId`, created on first call
@@ -207,6 +244,68 @@ function sendChatMessage(
     ...(sessionConfig ? { session_config: sessionConfig } : {}),
     ...(attachmentIds && attachmentIds.length > 0 ? { attachment_ids: attachmentIds } : {}),
   });
+}
+
+/** ADR-100 D12: post one turn from an EXECUTION view's composer into the Chat
+ *  session that execution session is bound to, pinned straight back to that
+ *  same session (`forExecutionSessionId`).
+ *
+ *  Same channel as `sendChatMessage`, and deliberately not the session-scoped
+ *  write: the durable `user_message` row lands under the human's own identity
+ *  before delivery resolves (design 27 §5.1), so the Chat shows a real question
+ *  rather than a result the Runtime transcribed on the user's behalf. The pin
+ *  is what makes it safe to leave the Chat surface — the receiving Agent skips
+ *  its Chat Router, so the turn still runs in the session the human is looking
+ *  at, and the continuation echo threads under this row (`in_reply_to`), which
+ *  is how the two surfaces read as one round.
+ *
+ *  `messageId` is the id the composer already minted for its optimistic bubble:
+ *  the Chat row, the execution session's JSONL row and the bubble then reconcile
+ *  on one id instead of duplicating. `command` / `attachedItems` are the ADR-046
+ *  turn facts the session-scoped write would have carried; the Gateway honors
+ *  them on this pinned path only, so the send loses no capability. Attachment
+ *  BYTES stay in the execution session — the Chat row records labels only. */
+export async function sendPinnedChatMessage(params: {
+  me: string;
+  agentId: string;
+  chatSessionId: string;
+  text: string;
+  messageId: string;
+  executionSessionId: string;
+  command?: string;
+  attachedItems?: unknown[];
+}): Promise<void> {
+  try {
+    await req<void>("POST", "/api/intents/chat-message", {
+      chat_session_id: params.chatSessionId,
+      from_user: params.me,
+      text: params.text,
+      in_reply_to: "",
+      message_id: params.messageId,
+      for_execution_session: params.executionSessionId,
+      // ADR-100 D12: which Agent owns this execution session. Ignored on a 1:1
+      // chat (the Gateway resolves its single agent participant) and required
+      // when the bound chat is a group — a PM task's session is bound to the
+      // project group it was dispatched from, and a group has several agents, so
+      // without it the Gateway has no target and refuses the send. It is a claim
+      // the Gateway checks against this chat's participants, not a trust.
+      pinned_agent: params.agentId,
+      ...(params.command ? { command: params.command } : {}),
+      ...(params.attachedItems && params.attachedItems.length > 0
+        ? { attached_items: params.attachedItems }
+        : {}),
+    });
+  } catch (e) {
+    // A deleted Chat session outlives the execution session it was bound to
+    // (design 27 §5.5.5), and that reads as a 404 — terminal, and NOT "the
+    // Gateway is down". Surfacing it as the shared access-error type is what
+    // lets the execution composer say why, exactly as the session-scoped path
+    // does; every other status travels unchanged.
+    if (e instanceof ChatRequestError && (e.status === 401 || e.status === 403 || e.status === 404)) {
+      throw new SessionAccessError(e.status, params.agentId, e.message);
+    }
+    throw e;
+  }
 }
 
 /** Archive-only group message: one `user_message` row, no delivery.
@@ -294,100 +393,11 @@ export async function chatAttachmentObjectUrl(
   return url;
 }
 
-// ── Read-time turn projection (design 27 §6.2) ────────────────────────
-
-/** The in-flight turn, projected from the rows — no send-time bookkeeping. */
-export interface InFlightTurn {
-  /** meta.message_id of the unanswered human `user_message`. */
-  triggerId: string;
-  /** execution session id from the `turn_started` pointer, if it arrived. */
-  execSid: string | null;
-  /** ADR-099: delivered, but no `turn_started` pointer yet — the window in
-   *  which the Chat Router decides where the message goes. Only ever set on
-   *  a surface where the turn is guaranteed (a 1:1 chat). */
-  assigning?: boolean;
-}
-
-/** Projection options for [`projectInFlight`]. */
-export interface ProjectInFlightOptions {
-  /** `true` (default): a trailing `user_message` without its `turn_started`
-   *  pointer is not in flight — the message may have been addressed to nobody
-   *  (a group @-nobody), and no pointer will ever arrive. `false` on a 1:1
-   *  surface, where every message reaches the agent: the same row is the
-   *  assigning window and comes back with `assigning: true`. */
-  awaitPointer?: boolean;
-}
-
-/**
- * COPIED VERBATIM from the mobile twin — the two apps must project the
- * same state from the same rows (plan 5.5 drift guard). Do not "fix" one
- * side without the other; the tests are duplicated for the same reason.
- *
- * Walk the window from the newest row backwards — a trailing `user_message`
- * (with `turn_started` pointers allowed in between) means the turn has not
- * produced its chat-side terminal row yet, so it is in flight. Any agent-side
- * row (terminal `agent_message`, answered `interaction_request` card, failure
- * receipt) ends the turn. Position-based on purpose: a card answer continues
- * the ORIGINAL turn's terminal row (`in_reply_to` = the first trigger), which
- * an id-matching rule would never connect to the answer message.
- *
- * A trailing `user_message` counts as in flight only once its `turn_started`
- * pointer is in the window: the pointer is written by the Runtime for every
- * turn that actually runs, so a group message that @-nobody never shows a
- * false "in progress" — at the cost of a sub-second quiet gap between send
- * and pointer on 1:1.
- *
- * `system_notice` rows are bookkeeping, never a turn's start or end: the walk
- * skips every one of them (a `turn_started` pointer, an `interaction_resolved`
- * closure, anything added later), otherwise a notice landing after the live
- * trigger would read as "the round already finished".
- */
-export function projectInFlight(
-  rows: ChatMessageRow[],
-  opts?: ProjectInFlightOptions,
-): InFlightTurn | null {
-  const awaitPointer = opts?.awaitPointer ?? true;
-  const findPointer = (trigger: string): ChatMessageRow | undefined => {
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const p = rows[i]!;
-      if (
-        p.kind === "system_notice" &&
-        p.meta?.notice_type === "turn_started" &&
-        p.meta?.in_reply_to === trigger
-      )
-        return p;
-    }
-    return undefined;
-  };
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const r = rows[i]!;
-    if (r.kind === "system_notice") continue;
-    if (r.kind === "user_message") {
-      const triggerId = r.meta?.message_id ?? "";
-      if (!triggerId) return null;
-      let pointer = findPointer(triggerId);
-      if (!pointer && r.meta?.in_reply_to) {
-        // Card answer: the turn continues under the ORIGINAL trigger, whose
-        // pointer is two hops away (answer → card row → its trigger).
-        const card = rows.find(
-          (x) => x.kind === "interaction_request" && x.meta?.message_id === r.meta?.in_reply_to,
-        );
-        if (card?.meta?.in_reply_to) pointer = findPointer(card.meta.in_reply_to);
-      }
-      return pointer
-        ? { triggerId, execSid: pointer.meta?.agent_session_id || null }
-        : // A card answer never passes through the router (§5.5.4 decision:
-          // the Gateway resolves it to the card's own agent), so its bubble
-          // is never the assigning window — a stale card falls through as a
-          // plain message, not as "assigning…".
-          awaitPointer || r.meta?.in_reply_to
-          ? null
-          : { triggerId, execSid: null, assigning: true };
-    }
-    return null;
-  }
-  return null;
-}
+// ── Durable card projections (design 27 §5.5.4) ──────────────────────
+// The chat window is a pure event log — there is no read-time turn
+// projection any more. "Still running" is expressed by the next round's own
+// `turn_started` event row, not a live mirror (that was the removed status
+// card, whose two truths could not stay in sync).
 
 /**
  * §5.5.4: the cards that are no longer answerable.
@@ -450,36 +460,6 @@ export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
   );
 }
 
-/**
- * The live round of a Chat window, as one projection.
- *
- * The status card, the tab's processing dot and the group panel all ask the
- * same question — "is there something happening for this agent right now?" —
- * and used to answer it from different inputs, which is how a tab could look
- * idle while its card was still asking for an approval. One function, one
- * answer: a round is live while a turn is in flight OR a card can still be
- * answered.
- */
-export interface LiveTurn {
-  inFlight: InFlightTurn | null;
-  pendingCard: ChatMessageRow | null;
-}
-
-export function projectLiveTurn(rows: ChatMessageRow[]): LiveTurn {
-  const inFlight = projectInFlight(rows);
-  const closed = closedCardIds(rows);
-  let pendingCard: ChatMessageRow | null = null;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const r = rows[i]!;
-    if (r.kind === "interaction_request") {
-      const mid = r.meta?.message_id;
-      pendingCard = mid && !closed.has(mid) ? r : null;
-      break;
-    }
-  }
-  return { inFlight, pendingCard };
-}
-
 // ── Store ──────────────────────────────────────────────────────────────
 
 interface AgentChatState {
@@ -518,9 +498,6 @@ interface Window {
 interface ChatSessionStore {
   byAgent: Record<string, AgentChatState>;
   windows: Record<string, Window>;
-  /** The live round per Chat session — see [`projectLiveTurn`]. Single
-   *  source for the card, the tab dot and any other "is it running" surface. */
-  live: Record<string, LiveTurn>;
   sending: Record<string, boolean>;
   /** Cache of the server-side `session_config` draft, keyed by chat
    *  session id. The session row is the source of truth (design 27 §4.5);
@@ -592,7 +569,6 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   byAgent: {},
   openGroupIds: {},
   windows: {},
-  live: {},
   sending: {},
   draft: {},
 
@@ -709,10 +685,6 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       if (cur && !force && !atTail(cur)) {
         set((s) => ({
           windows: { ...s.windows, [chatSessionId]: { ...cur, total: page.total } },
-          // The newest page is still the doorbell's payload: project the
-          // in-flight turn from it so a parked reader's group header does
-          // not freeze on "working…" until they walk back to the tail.
-          live: { ...s.live, [chatSessionId]: projectLiveTurn(page.messages) },
         }));
         return;
       }
@@ -728,7 +700,6 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
             lastPos: page.total - 1,
           },
         },
-        live: { ...s.live, [chatSessionId]: projectLiveTurn(page.messages) },
       }));
     } catch (e) {
       console.warn("[chatSessionStore] refresh failed:", e);
@@ -791,7 +762,6 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
             loadingNewer: false,
           },
         },
-        live: { ...s.live, [chatSessionId]: projectLiveTurn([...cur.tail, ...page.messages]) },
       }));
     } catch (e) {
       console.warn("[chatSessionStore] loadNewer failed:", e);
@@ -840,7 +810,6 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
             pendingLocateSeq: seq,
           },
         },
-        live: { ...s.live, [chatSessionId]: projectLiveTurn(page.messages) },
       }));
     } catch (e) {
       console.warn("[chatSessionStore] jumpToMessage failed:", e);

@@ -46,7 +46,7 @@ pub fn dispatch_tool_spec() -> Value {
             },
             "message": {
                 "type": "string",
-                "description": "Optional instruction added for the execution session. Omit to forward the user's message verbatim."
+                "description": "Task instruction for the execution session. REQUIRED with target=\"new\": write a self-contained instruction summarising what the user wants, relevant context from this conversation, and constraints already established. Omit only for existing sessions to forward the user message verbatim."
             },
             "session_config": {
                 "type": "object",
@@ -180,6 +180,9 @@ pub enum DispatchError {
     MissingTarget,
     UnknownAlias(String),
     EmptyMessage,
+    /// `target="new"` without a contextual `message` — the fresh session
+    /// would receive only the raw user text with no background.
+    MissingContextForNew,
 }
 
 impl DispatchError {
@@ -195,6 +198,12 @@ impl DispatchError {
             ),
             Self::EmptyMessage => {
                 "`message` was empty — omit it to forward the user's message verbatim".to_string()
+            }
+            Self::MissingContextForNew => {
+                "`target=\"new\"` requires a non-empty `message` with task context for the new session — \
+                 the execution agent has no prior history, so your message IS its only starting context. \
+                 Write a self-contained instruction summarising the user's goal and relevant background."
+                    .to_string()
             }
         }
     }
@@ -239,6 +248,12 @@ pub fn parse_dispatch(args: &Value, aliases: &AliasTable) -> Result<DispatchArgs
         }
         None => None,
     };
+
+    // Enforce: target="new" MUST have a message (the fresh session has no
+    // prior context — forwarding raw text alone starves the agent).
+    if matches!(target, Target::New) && message.is_none() {
+        return Err(DispatchError::MissingContextForNew);
+    }
 
     let seed = match (&target, args.get("session_config")) {
         (Target::New, Some(cfg)) if !cfg.is_null() => SessionSeed::from_json(&cfg.to_string()),
@@ -316,6 +331,23 @@ mod tests {
             parse_dispatch(&json!({ "target": "S1", "message": "   " }), &aliases()),
             Err(DispatchError::EmptyMessage)
         );
+    }
+
+    #[test]
+    fn new_target_without_message_is_rejected() {
+        // The whole point: a fresh session cannot function on raw user text
+        // alone — the router MUST provide a contextual message.
+        assert_eq!(
+            parse_dispatch(&json!({ "target": "new" }), &aliases()),
+            Err(DispatchError::MissingContextForNew)
+        );
+        // With a message it passes:
+        let parsed = parse_dispatch(
+            &json!({ "target": "new", "message": "Refactor login per earlier discussion" }),
+            &aliases(),
+        )
+        .unwrap();
+        assert_eq!(parsed.target, Target::New);
     }
 
     #[test]

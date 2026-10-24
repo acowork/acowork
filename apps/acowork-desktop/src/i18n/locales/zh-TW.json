@@ -228,9 +228,6 @@
   },
   "chatView": {
     "empty": "該聊天暫無訊息",
-    "processing": "Agent 處理中 · 點擊查看執行過程",
-    "queued": "已送達，等待 Agent 開始處理…",
-    "assigning": "正在分配任務…",
     "routerFallback": "已自動分配任務",
     "cardAnswered": "已回答",
     "cardClosed": "已結束",
@@ -238,47 +235,20 @@
     "answer": "回答",
     "replyingTo": "回覆對象",
     "cancelReply": "取消回覆",
-    "emptyReply": "已中斷，無輸出",
     "emptyAnswer": "（無內容）",
     "viewRun": "檢視執行",
-    "execSessionGone": "該執行工作階段已被刪除，無法檢視",
-    "statusCard": {
-      "untitled": "未命名執行",
-      "detail": "詳情",
-      "workspaceAgentHome": "Agent 主頁",
-      "labelStatus": "狀態",
-      "labelTitle": "會話",
-      "labelStep": "當前步驟",
-      "labelModel": "模型",
-      "labelWorkspace": "工作區",
-      "errorTitle": "錯誤",
-      "dismiss": "忽略",
-      "continue": "繼續",
-      "deny": "拒絕",
-      "allow": "允許",
-      "pausedIteration": "已達迭代上限，已暫停。",
-      "stepApproval": "等待授權：{{tool}}",
-      "stepRunningTool": "正在執行 {{count}} 個工具…",
-      "stepTodo": "（{{index}}/{{total}}）{{content}}",
-      "status": {
-        "idle": "閒置",
-        "llm_awaiting_first_chunk": "等待模型",
-        "thinking": "思考中",
-        "llm_streaming": "輸出中",
-        "tool_executing": "執行工具中",
-        "waiting_approval": "等待授權",
-        "paused": "已暫停"
-      },
-      "phase": {
-        "idle": "閒置",
-        "waiting": "等待模型",
-        "thinking": "思考中",
-        "streaming": "生成回覆中",
-        "tool_executing": "執行工具中",
-        "waiting_approval": "等待授權",
-        "paused": "已暫停"
-      }
-    }
+    "notice": {
+      "pendingTurn": "{{name}}正在處理…",
+      "pendingTurnGeneric": "正在處理…",
+      "interrupted": "本輪執行已中斷",
+      "failed": "本輪執行失敗",
+      "timeout": "本輪執行逾時",
+      "waiting": "本輪等待你回覆",
+      "noAnswer": "本輪沒有產生回覆",
+      "turnRoutedNew": "啟動新任務：{{task}}",
+      "turnRoutedContinue": "繼續之前的任務：{{task}}"
+    },
+    "execSessionGone": "該執行工作階段已被刪除，無法檢視"
   },
   "time": {
     "justNow": "剛剛",
@@ -1874,7 +1844,6 @@
     "members": "{{count}} 名成員",
     "loadEarlier": "載入更早的訊息",
     "empty": "尚無訊息",
-    "working": "Agent 處理中…",
     "placeholder": "傳送訊息給專案組",
     "placeholderWithMentions": "傳送訊息，@Agent 讓其處理",
     "send": "傳送",

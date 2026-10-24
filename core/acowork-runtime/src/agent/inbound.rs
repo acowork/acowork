@@ -122,6 +122,13 @@ pub struct IntentEnvelope {
     /// Durable Chat attachment ids referenced by this Intent's user_message.
     #[serde(default)]
     pub chat_attachment_ids: Vec<String>,
+    /// Design 27 §5.5.5 / ADR-100 D12: the execution session this turn is
+    /// pinned to. Set when the human composed the message inside that
+    /// session's own view, so the answer target needs no routing decision.
+    /// Empty = route normally (Chat Router, or the deterministic registry
+    /// route when the router is off).
+    #[serde(default)]
+    pub for_execution_session: String,
 }
 
 /// Messages that can be injected into the agent loop from external sources.
@@ -375,6 +382,7 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            for_execution_session: String::new(),
         }));
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
@@ -496,6 +504,7 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            for_execution_session: String::new(),
         }));
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);

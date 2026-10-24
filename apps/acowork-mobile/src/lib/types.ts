@@ -26,6 +26,15 @@ export interface SessionInfo {
    * detector for tail reloads — see chatStore's `messagesStale`.
    */
   message_count?: number
+  /**
+   * ADR-100 D12: the Chat session this execution session came from, when it
+   * did (design 27 §8.2). The composer reads it as a routing flag: with a
+   * binding the human's words go through the Chat entry point, so the
+   * conversation holds a real `user_message` row of theirs and the execution
+   * view's turn still lands back here. Absent = no Chat to file into, which is
+   * also what an older Runtime returns — both keep the session-scoped write.
+   */
+  chat_session_id?: string | null
 }
 
 /** An installed agent, as shown in the IM conversation list. */
@@ -309,12 +318,20 @@ export interface ChatMessageRow {
     message_id?: string
     conversation_id?: string
     in_reply_to?: string
+    /** Design 27 §5.3.1: the Agent instances an @-fan-out woke. Only that one
+     *  broadcast `user_message` carries it, and it is what marks the row as an
+     *  opened agent turn (see `opensAgentTurn`). */
+    mentions?: string[]
     status?: string
     repo?: string
     notice_type?: string
     /** Routing-resolved execution session that HANDLED a request — set on the
      *  `turn_started` pointer and `interaction_request` card. */
     agent_session_id?: string
+    /** ADR-100: the routing decision stamped on the turn pointer — "new" when
+     *  this turn starts a fresh task, "continue" when it reuses or rotates an
+     *  existing one. Drives the two-state `turn_started` reaction copy. */
+    turn_mode?: 'new' | 'continue'
     /** The SENDER's execution session (design 27 `source_agent_session_id`) —
      *  on a 1:1 `agent_message` this is the exec session that produced the
      *  reply. `closedCardIds` uses it to bind a terminal row to the card of its
@@ -326,6 +343,10 @@ export interface ChatMessageRow {
       question?: string
       options?: string[]
     }
+    /** ADR-100 D12: labels of the execution session's own attached items on a
+     *  `user_message` that an execution view's composer sent. Labels only — the
+     *  bytes stay in that run, so the chip is inert (design 27 §4.2.1). */
+    exec_attachments?: ExecAttachmentLabel[]
   }
   attachment_ids?: string[]
   attachments?: Array<{ id: string; name: string; mime: string; size: number }>
@@ -340,6 +361,14 @@ export interface ChatSessionInfo {
   created_at: number
   last_active_at: number
   message_count: number
+}
+
+/** ADR-100 D12: one display label for something an execution view's composer
+ *  handed to the task alongside a turn. Mirrors `chat_sessions::ExecAttachmentLabel`. */
+export interface ExecAttachmentLabel {
+  filename: string
+  /** The ADR-046 item arm; absent when the sender did not say which arm it was. */
+  kind?: string
 }
 
 export interface ChatMessagesPage {

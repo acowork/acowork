@@ -135,9 +135,6 @@
   },
   "chatView": {
     "empty": "No messages yet",
-    "processing": "Agent working · click to view the run",
-    "queued": "Delivered — waiting for the Agent to start…",
-    "assigning": "Assigning a task…",
     "routerFallback": "Assigned automatically",
     "cardAnswered": "Answered",
     "cardClosed": "Closed",
@@ -145,47 +142,20 @@
     "answer": "Answer",
     "replyingTo": "Replying to",
     "cancelReply": "Cancel reply",
-    "emptyReply": "Interrupted, no output",
     "emptyAnswer": "(no content)",
     "viewRun": "View run",
-    "execSessionGone": "This execution session has been deleted",
-    "statusCard": {
-      "untitled": "Untitled run",
-      "detail": "Details",
-      "workspaceAgentHome": "Agent Home",
-      "labelStatus": "Status",
-      "labelTitle": "Session",
-      "labelStep": "Current step",
-      "labelModel": "Model",
-      "labelWorkspace": "Workspace",
-      "errorTitle": "Error",
-      "dismiss": "Dismiss",
-      "continue": "Continue",
-      "deny": "Deny",
-      "allow": "Allow",
-      "pausedIteration": "Paused at the iteration limit.",
-      "stepApproval": "Waiting for approval: {{tool}}",
-      "stepRunningTool": "Running {{count}} tool(s)…",
-      "stepTodo": "({{index}}/{{total}}) {{content}}",
-      "status": {
-        "idle": "Idle",
-        "llm_awaiting_first_chunk": "Waiting for model",
-        "thinking": "Thinking",
-        "llm_streaming": "Streaming",
-        "tool_executing": "Running tools",
-        "waiting_approval": "Waiting for approval",
-        "paused": "Paused"
-      },
-      "phase": {
-        "idle": "Idle",
-        "waiting": "Waiting for model",
-        "thinking": "Thinking",
-        "streaming": "Generating reply",
-        "tool_executing": "Running tools",
-        "waiting_approval": "Waiting for approval",
-        "paused": "Paused"
-      }
-    }
+    "notice": {
+      "pendingTurn": "{{name}} is working on it…",
+      "pendingTurnGeneric": "Working on it…",
+      "interrupted": "This run was interrupted",
+      "failed": "This run failed",
+      "timeout": "This run timed out",
+      "waiting": "Waiting for your reply",
+      "noAnswer": "This run produced no reply",
+      "turnRoutedNew": "Starting a new task: {{task}}",
+      "turnRoutedContinue": "Continuing the previous task: {{task}}"
+    },
+    "execSessionGone": "This execution session has been deleted"
   },
   "time": {
     "justNow": "Just now",
@@ -1974,7 +1944,6 @@
     "members": "{{count}} members",
     "loadEarlier": "Load earlier messages",
     "empty": "No messages yet",
-    "working": "Agent working…",
     "placeholder": "Message the project team",
     "placeholderWithMentions": "Message the team — @Agent to assign work",
     "send": "Send",

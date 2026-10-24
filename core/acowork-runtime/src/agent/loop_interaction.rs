@@ -244,14 +244,19 @@ impl AgentLoop {
         .await;
     }
 
-    /// Mark the turn's chat write-back as user-interrupted (§7.1
-    /// `aborted`).
+    /// Mark the turn as user-interrupted (§7.1 `aborted`).
     ///
     /// A stop ends the loop with no text, and the write-back used to
     /// record that as `status=completed` with an empty body — so the Chat
     /// surface could only guess at what happened ("no output") and the
     /// transcript could not tell an interrupted run from an empty answer.
+    ///
+    /// Sets [`Self::turn_aborted`] as well as the pending write-back: a turn
+    /// composed directly in the execution session carries no write-back
+    /// context, yet the chat bound to that session still has to learn that the
+    /// turn was stopped (ADR-100 revision).
     pub(crate) fn mark_turn_aborted(&mut self) {
+        self.turn_aborted = true;
         if let Some(ctx) = self.chat_writeback.as_mut() {
             ctx.outcome = "aborted".to_string();
         }

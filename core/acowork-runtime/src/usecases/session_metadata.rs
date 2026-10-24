@@ -28,6 +28,13 @@ pub struct SessionSummary {
     /// Not an ownership flag: admins and `local`-mode callers may write
     /// sessions they do not own (see `SessionInfo::can_write`).
     pub can_write: bool,
+    /// Design 27 §8.2 / ADR-100 D12: the Chat session this execution
+    /// session was started from. An execution view's composer sends through
+    /// that Chat (`for_execution_session`) so the turn becomes a real Chat
+    /// message instead of a result with no trigger; `None` = a session that
+    /// never came from a Chat, which keeps the direct composer path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_session_id: Option<String>,
 }
 
 /// Response for `list_sessions` — paginated session list.

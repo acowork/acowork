@@ -87,6 +87,7 @@ impl Tool for MemoryRecallTool {
             work_dir: work_dir.map(str::to_string),
             session_id: None,
             current_user_message: None,
+            ..Default::default()
         };
         self.execute_with_context(params, &ctx).await
     }
@@ -352,6 +353,7 @@ mod tests {
             work_dir: None,
             session_id: Some("current-session".to_string()),
             current_user_message: Some("I just moved to a new apartment, any tips?".to_string()),
+            ..Default::default()
         };
         let result = tool
             .execute_with_context(serde_json::json!({ "query": "apartment hangzhou" }), &ctx)
@@ -459,6 +461,7 @@ mod tests {
             work_dir: None,
             session_id: Some(sid.to_string()),
             current_user_message: Some(msg.to_string()),
+            ..Default::default()
         };
         let t1 = {
             let tool = tool.clone();

@@ -1895,6 +1895,20 @@
   font-size: 12px;
 }
 
+/* ADR-100 D12: an execution surface's attached item, labelled but not
+   downloadable — the blob stays in the run. The dashed outline and the muted
+   ink say "this is a name, not a link", so it never reads as a broken chip. */
+.chat-attachment-label {
+  border: 1px dashed rgba(0, 0, 0, 0.18);
+  background: transparent;
+  opacity: 0.75;
+}
+@media (prefers-color-scheme: dark) {
+  .chat-attachment-label {
+    border-color: rgba(255, 255, 255, 0.22);
+  }
+}
+
 /* One-line collapsed cards (status + decision): a full-width tappable row,
    NOT an inline chip — 390pt thumbs need a real hit target (§6.5). */
 .chat-card-line {
@@ -1966,6 +1980,64 @@
   background: var(--color-surface, rgba(128, 128, 128, 0.1));
   color: var(--color-text-dim, #888);
   font-size: 12px;
+}
+
+/* A turn's STATE line (ADR-100 revision): centered and chrome-free, because a
+   bubble belongs to something a participant said — "interrupted" is the
+   platform talking. Live turns shimmer (the mobile twin of the desktop
+   `thinking-shimmer`); a settled outcome is quiet, and only failures paint
+   red (a stop is a user action, not a fault). */
+.chat-turn-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 6px 0;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--color-text-dim, #888);
+}
+.chat-turn-status-text {
+  min-width: 0;
+  text-align: center;
+}
+.chat-turn-status-text-live {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, currentColor 40%, transparent) 0%,
+    currentColor 35%,
+    color-mix(in srgb, currentColor 25%, transparent) 50%,
+    currentColor 65%,
+    color-mix(in srgb, currentColor 40%, transparent) 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: chat-turn-shimmer 3.5s ease-in-out infinite;
+}
+@keyframes chat-turn-shimmer {
+  from { background-position: 200% center; }
+  to { background-position: -200% center; }
+}
+.chat-turn-status-text-danger {
+  color: var(--color-danger, #ef4444);
+}
+.chat-turn-status-drill,
+.chat-bubble-drill {
+  flex: none;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-accent, #0ea5e9);
+  font-size: 12px;
+  cursor: pointer;
+}
+/* The reply's own drill sits under the bubble, on the speaker's side. */
+.chat-bubble-drill {
+  align-self: flex-start;
+  margin: -2px 0 2px 2px;
 }
 
 /* Decision-card bottom sheet body (§6.5). */

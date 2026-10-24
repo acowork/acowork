@@ -80,9 +80,15 @@ task), and its title.
 
 # dispatch arguments
 - target: "S1" ... "S10", or "new".
-- message: optional. Use it only to add routing context the execution session
-  needs but the user did not say (for example "the user means the deployment
-  issue from earlier"). Omit it to forward the user's message unchanged.
+- message: REQUIRED when target is "new"; optional for existing sessions.
+  For a NEW session the execution agent starts with no history — your message
+  IS its only context. You MUST write a self-contained task instruction that
+  includes: (a) what the user wants accomplished, (b) relevant background from
+  this conversation the agent needs (decisions already made, constraints
+  discussed, files mentioned), (c) any clarifications you gathered. Do NOT
+  simply restate the user's raw text. For EXISTING sessions, omit to forward
+  the user's message verbatim (the agent already has its own prior context);
+  add a message only when extra routing context helps.
 - session_config: only with "new", and only when the user explicitly asked for
   a particular model, provider, workspace or reasoning effort.
 

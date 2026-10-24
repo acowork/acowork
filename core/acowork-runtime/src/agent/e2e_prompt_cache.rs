@@ -262,6 +262,7 @@ impl E2eHarness {
                         active_skill: None,
                         attached_items: None,
                         content_parts: None,
+                        chat_trigger_message_id: None,
                     },
                 )
                 .expect("session task accepts the message");

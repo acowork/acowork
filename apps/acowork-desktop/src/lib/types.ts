@@ -1428,6 +1428,21 @@ export interface SessionInfo {
   can_write?: boolean;
   /** ADR-076 §决策 4: `null`/absent = public (readable by everyone). */
   visibility?: "public" | "private" | null;
+  /**
+   * ADR-100 D12: the Chat session this execution session is bound to, when it
+   * came from one (the router's `dispatch(new)`, a Chat-surface `+`, or a PM
+   * task dispatched from a project group — design 27 §8.2).
+   *
+   * The execution composer reads it as a routing flag: with a binding, the
+   * human's words are sent through the Chat entry point so they land as a
+   * durable `user_message` row under the user's own identity and the chat
+   * reads as one round (question + execution result). Without one there is no
+   * chat to answer, so the send keeps the session-scoped write.
+   *
+   * Absent on responses from a Runtime predating the binding — `undefined`
+   * means "no chat", which is the correct fallback, not a bug.
+   */
+  chat_session_id?: string | null;
 }
 
 /**

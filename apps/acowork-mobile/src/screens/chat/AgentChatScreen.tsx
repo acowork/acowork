@@ -4,15 +4,18 @@
  * chat rows only (user_message / agent_message / interaction_request /
  * system_notice). The differences are presentation-only, per §6.5:
  *
- *  - the in-flight turn's status card is a ONE-LINE summary; tapping it
- *    expands into the execution session view (the existing ChatDetailScreen
- *    — the read path enforces visibility, hidden 404 shows its own error);
+ *  - turn state is DERIVED, never stored (ADR-100 revision): while the newest
+ *    message is unanswered the stream shows one centered shimmer line, and a
+ *    turn that ended without a reply (stopped / failed / timed out) leaves a
+ *    centered outcome line with a drill into the execution session view (the
+ *    existing ChatDetailScreen — the read path enforces visibility, hidden 404
+ *    shows its own error);
  *  - a decision card collapses to one line; answering opens a BOTTOM SHEET
  *    (mis-tap safety on a 390pt screen), and every answer goes back through
  *    the same chat-message channel with `in_reply_to` (§5.5.4).
  *
  * Deliberately NOT here: agent thinking, tool calls, execution process —
- * those live behind the status card, not in the chat stream (§6).
+ * those live behind the event row's drill, not in the chat stream (§6).
  *
  * Freshness: the `chat/changed` doorbell (content-free) fans out into
  * `wakeAgentChat()` → HTTP re-read; plus an immediate refresh on mount and
@@ -95,6 +98,131 @@ export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
   )
 }
 
+/**
+ * COPIED VERBATIM from the desktop `chatTurnState` module — both apps must
+ * infer the live turn state from the same durable evidence (§5.5.5 drift
+ * guard).
+ *
+ * The chat log records conversation, not progress: the dispatch / round-open
+ * milestones are runtime facts and no longer rows. "A turn is in flight" is
+ * derived instead: the newest human message has no terminal reply and no open
+ * decision card after it.
+ */
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'aborted', 'timeout', 'waiting'])
+
+/** Notice types retired by the ADR-100 revision — never painted, even when an
+ * old transcript still carries them. Mirrors the desktop renderer. */
+const RETIRED_NOTICES = new Set(['turn_dispatched', 'turn_started', 'router_fallback'])
+
+export function isTerminalReply(row: ChatMessageRow): boolean {
+  return row.kind === 'agent_message' && TERMINAL_STATUSES.has(row.meta?.status ?? '')
+}
+
+/** `failed` / `timeout` are errors; `aborted` is a user action, not a fault. */
+export function isFailureStatus(status?: string): boolean {
+  return status === 'failed' || status === 'timeout'
+}
+
+/** A terminal reply with no text: the outcome IS the message. */
+export function isEmptyTerminalReply(row: ChatMessageRow): boolean {
+  return isTerminalReply(row) && !row.body.trim() && !(row.attachments && row.attachments.length > 0)
+}
+
+/**
+ * The routing reaction row (ADR-100 D11): the agent's immediate in-chat
+ * answer to "where did my message go" — "启动新任务：X" / "继续之前的任务：X".
+ * A `system_notice` by producer, but it renders as an agent bubble (avatar +
+ * name): a user message must always be followed by an agent message — that
+ * exchange IS the chat. Mirrors the desktop `chatTurnState` renderer.
+ */
+export function isTurnRoutedNotice(row: ChatMessageRow): boolean {
+  return row.kind === 'system_notice' && row.meta?.notice_type === 'turn_routed'
+}
+
+/** Label for the centered outcome line of an empty terminal reply. */
+export function terminalStatusText(status?: string): string {
+  switch (status) {
+    case 'aborted':
+      return '本轮执行已中断'
+    case 'timeout':
+      return '本轮执行超时'
+    case 'failed':
+      return '本轮执行失败'
+    case 'waiting':
+      return '本轮等待你回复'
+    default:
+      return '本轮没有产生回复'
+  }
+}
+
+/** Bound a raw trigger body used as the task name in the routing reaction,
+ *  mirroring the desktop `truncateTaskName` — a long first message must not
+ *  wrap the bubble. */
+function truncateTaskName(body: string): string {
+  const collapsed = body.trim().replace(/\s+/g, ' ')
+  if (!collapsed) return ''
+  return collapsed.length > 40 ? `${collapsed.slice(0, 40)}…` : collapsed
+}
+
+/**
+ * Did this human row actually ask an Agent something? (Same rule as the desktop
+ * `chatTurnState.opensAgentTurn`.) `/api/intents/chat-message` files its
+ * `user_message` with `to` = the agent it delivered to, and the §5.3.1 mention
+ * fan-out files one broadcast row (`to` empty) carrying `meta.mentions`.
+ * Archive-only rows — a `user_user` DM, an un-@'d group remark — store `to: ""`
+ * and wake nobody, so they must not hold a waiting line open: no agent will ever
+ * answer a conversation that contains no agent.
+ */
+export function opensAgentTurn(row: ChatMessageRow): boolean {
+  if (row.to?.trim()) return true
+  return (row.meta?.mentions?.length ?? 0) > 0
+}
+
+/**
+ * Is the newest human message still waiting for its answer?
+ *
+ * `sending` covers the HTTP round trip before the human row lands. Afterwards
+ * the turn is over as soon as a terminal reply, an OPEN decision card, or a
+ * newer human message that opens its own turn follows the trigger — the same
+ * rule the desktop uses. Rows that opened no turn are skipped rather than
+ * treated as a superseder. The routing reaction row (ADR-100 D11) does NOT close
+ * the wait: the run is still in flight, and the live line is the only thing
+ * between the reaction and the final answer.
+ */
+export function pendingTurn(
+  rows: ChatMessageRow[],
+  sending: boolean,
+  closedCards: ReadonlySet<string>,
+): boolean {
+  if (sending) return true
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!
+    if (row.kind !== 'user_message' || !opensAgentTurn(row)) continue
+    const trigger = row.meta?.message_id
+    return !!trigger && !answeredAfter(rows, i, trigger, closedCards)
+  }
+  return false
+}
+
+function answeredAfter(
+  rows: ChatMessageRow[],
+  fromIndex: number,
+  trigger: string,
+  closedCards: ReadonlySet<string>,
+): boolean {
+  for (let i = fromIndex + 1; i < rows.length; i++) {
+    const row = rows[i]!
+    if (row.kind === 'agent_message' && row.meta?.in_reply_to === trigger && isTerminalReply(row)) {
+      return true
+    }
+    if (row.kind === 'interaction_request' && row.meta?.in_reply_to === trigger) {
+      const cardId = row.meta?.message_id
+      if (!cardId || !closedCards.has(cardId)) return true
+    }
+  }
+  return false
+}
+
 export function AgentChatScreen() {
   const pop = useNavStore((s) => s.pop)
   const push = useNavStore((s) => s.push)
@@ -106,7 +234,6 @@ export function AgentChatScreen() {
   const st = useChatSessionStore((s) => (agentId ? s.byAgent[agentId] : undefined))
   const sessionId = st?.sessionId ?? null
   const win = useChatSessionStore((s) => (sessionId ? s.windows[sessionId] : undefined))
-  const inFlight = useChatSessionStore((s) => (sessionId ? s.inFlight[sessionId] ?? null : null))
   const sending = useChatSessionStore((s) => (sessionId ? s.sending[sessionId] ?? false : false))
 
   const [draft, setDraft] = useState('')
@@ -120,6 +247,17 @@ export function AgentChatScreen() {
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win])
   const closed = useMemo(() => closedCardIds(rows), [rows])
   const answeredHuman = useMemo(() => humanAnsweredCardIds(rows), [rows])
+  // message_id → body, so the routing reaction bubble (ADR-100 D11) can name
+  // the task off its trigger message — the mobile twin of the desktop index.
+  const bodyById = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of rows) {
+      if (r.meta?.message_id) m.set(r.meta.message_id, r.body)
+    }
+    return m
+  }, [rows])
+  // Derived live state — one aggregated line while the newest message waits.
+  const waiting = pendingTurn(rows, sending, closed)
 
   const { ref: scrollRef } = useStickToBottom([rows.length, sessionId], sessionId, () => {
     if (sessionId) void useChatSessionStore.getState().loadOlder(sessionId)
@@ -212,7 +350,7 @@ export function AgentChatScreen() {
         <div className="scroll scroll-chat" ref={scrollRef}>
           {win?.loadingOlder ? <div className="time-sep">载入更早消息…</div> : null}
           {!st?.resolved ? <div className="empty-state">载入中…</div> : null}
-          {st?.resolved && !failed && rows.length === 0 && !inFlight ? (
+          {st?.resolved && !failed && rows.length === 0 ? (
             <div className="empty-state">还没有消息，发一条开始对话</div>
           ) : null}
           {rows.map((r, i) => {
@@ -230,13 +368,23 @@ export function AgentChatScreen() {
                   agentName={agent?.name ?? 'Agent'}
                   closed={!!(r.meta?.message_id && closed.has(r.meta.message_id))}
                   answered={!!(r.meta?.message_id && answeredHuman.has(r.meta.message_id))}
-                  inFlightTrigger={inFlight?.triggerId ?? null}
                   onOpenExec={openExec}
                   onAnswerCard={(card) => setAnswering(card)}
+                  triggerBody={r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined}
                 />
               </Fragment>
             )
           })}
+          {/* One aggregated "the agent has your message" line, derived from the
+              newest unanswered row — it disappears the moment a terminal row
+              lands. */}
+          {waiting ? (
+            <div className="chat-turn-status" role="status">
+              <span className="chat-turn-status-text chat-turn-status-text-live">
+                {agent?.name ? `${agent.name}正在处理…` : '正在处理…'}
+              </span>
+            </div>
+          ) : null}
         </div>
 
         <div className="composer">
@@ -288,13 +436,69 @@ interface RowProps {
   closed: boolean
   /** ...and a human did answer it — otherwise it just ended. */
   answered: boolean
-  inFlightTrigger: string | null
   onOpenExec: (execSid: string) => void
   onAnswerCard: (card: ChatMessageRow) => void
+  /** Body of the message that triggered this row's turn (`meta.in_reply_to`).
+   *  Names the task in the routing reaction bubble (ADR-100 D11), the mobile
+   *  twin of the desktop `triggerBody` — mobile has no session-title store
+   *  read here, so the trigger body is the name. */
+  triggerBody?: string
 }
 
 function RowView(props: RowProps) {
-  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, inFlightTrigger, onOpenExec, onAnswerCard } = props
+  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, onOpenExec, onAnswerCard, triggerBody } = props
+  const routed = isTurnRoutedNotice(row)
+  const execSid =
+    row.kind === 'agent_message' || routed
+      ? row.meta?.agent_session_id || row.meta?.sender_session_id || ''
+      : ''
+  // ADR-100 D11: the routing reaction — runtime-written, but it speaks as the
+  // agent: avatar + name + bubble, never a centered system line. A user
+  // message must always be followed by an agent message — that exchange IS
+  // the chat, and it lands within seconds of the send, long before the answer.
+  if (routed) {
+    const task = truncateTaskName(triggerBody ?? '')
+    const text =
+      row.meta?.turn_mode === 'new' ? `启动新任务：${task}` : `继续之前的任务：${task}`
+    return (
+      <div className="msg-group msg-group-peer">
+        <div className="msg-header">
+          <div className="msg-avatar">{agentAvatar}</div>
+          <div className="msg-sender">
+            <span className="msg-sender-name">{agentName}</span>
+          </div>
+        </div>
+        <div className="msg-stack">
+          <div className="bubble bubble-peer">
+            <div className="bubble-text">{text}</div>
+          </div>
+          {execSid ? (
+            <button type="button" className="chat-bubble-drill" onClick={() => onOpenExec(execSid)}>
+              查看执行
+            </button>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
+  // A terminal reply with nothing in it IS its outcome — a centered status
+  // line with the drill into the run, never a bubble in the agent's voice.
+  if (row.kind === 'agent_message' && isEmptyTerminalReply(row)) {
+    return (
+      <div className="chat-turn-status">
+        <span
+          className={`chat-turn-status-text${isFailureStatus(row.meta?.status) ? ' chat-turn-status-text-danger' : ''}`}
+        >
+          {terminalStatusText(row.meta?.status)}
+        </span>
+        {execSid ? (
+          <button type="button" className="chat-turn-status-drill" onClick={() => onOpenExec(execSid)}>
+            查看执行
+          </button>
+        ) : null}
+      </div>
+    )
+  }
   if (row.kind === 'user_message' || row.kind === 'agent_message') {
     const fromAgent = row.kind === 'agent_message'
     return (
@@ -315,7 +519,29 @@ function RowView(props: RowProps) {
                 ))}
               </div>
             ) : null}
+            {/* ADR-100 D12: a turn sent from an execution view carries that run's
+                attached items as labels only — the file belongs to the execution
+                session, not to this chat, so there is nothing to open. They still
+                paint, because a task sent with a file and no words must not read
+                as an empty bubble. */}
+            {row.meta?.exec_attachments && row.meta.exec_attachments.length > 0 ? (
+              <div className="chat-attachments">
+                {row.meta.exec_attachments.map((l, i) => (
+                  <span key={`exec-${i}-${l.filename}`} className="chat-attachment-chip chat-attachment-label">
+                    {l.filename}
+                  </span>
+                ))}
+              </div>
+            ) : null}
           </div>
+          {/* Every agent reply with a resolved execution session drills into it,
+              finished or empty alike — the mobile twin of the desktop
+              "View run" affordance. */}
+          {fromAgent && execSid ? (
+            <button type="button" className="chat-bubble-drill" onClick={() => onOpenExec(execSid)}>
+              查看执行
+            </button>
+          ) : null}
         </div>
       </div>
     )
@@ -341,25 +567,15 @@ function RowView(props: RowProps) {
   }
 
   if (row.kind === 'system_notice') {
-    if (row.meta?.notice_type === 'turn_started') {
-      // §6.2: the pointer row renders the status card ONLY while its turn
-      // is the in-flight one; once the terminal row lands the card is gone.
-      if (row.meta?.in_reply_to !== inFlightTrigger) return null
-      const execSid = row.meta?.agent_session_id ?? ''
-      return (
-        <div className="chat-card-line">
-          <button
-            type="button"
-            className="chat-card-line-btn chat-card-status"
-            disabled={!execSid}
-            onClick={() => execSid && onOpenExec(execSid)}
-          >
-            <span className="chat-card-spinner" aria-hidden />
-            <span className="chat-card-text">Agent 处理中{execSid ? ' · 点击查看执行过程' : ''}</span>
-          </button>
-        </div>
-      )
-    }
+    const noticeType = row.meta?.notice_type ?? ''
+    // The milestones and the router-fallback receipt are retired (ADR-100
+    // revision): the runtime stopped writing them, and an old transcript's
+    // copies must not paint either — state belongs to the live surface, not to
+    // history.
+    if (RETIRED_NOTICES.has(noticeType)) return null
+    // A card closure paints as the answered/closed receipt on its own card,
+    // never a separate line; other receipts render their body.
+    if (noticeType === 'interaction_resolved') return null
     return row.body ? (
       <div className="chat-notice">
         <span className="chat-notice-pill">{row.body}</span>

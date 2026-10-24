@@ -1,7 +1,11 @@
 # Intent 通信与聊天 Session 设计
 
 > 状态：设计定稿（框架、需求、数据模型、协议、前端、模块边界已确认；API 与 schema 细节待实现设计）
-> 版本：v2.1 | 更新日期：2026-10-18
+> 版本：v2.6 | 更新日期：2026-10-23
+>
+> v2.6 为**执行视图输入入口修订**（ADR-100 D12）：绑定 chat 的 execution session，其 composer 的发送改走 `POST /api/intents/chat-message` 并携带 `for_execution_session` 指名自己——Gateway 以**调用者身份**落一条 `user_message`（补上 v2.5 只回写尾、不落头的半轮对话），Runtime 收到带指名的消息后**跳过 Chat Router** 直投该会话，以 `SessionMessage::ChatMessage`（不是 `Intent`）进入与执行面原路径逐项等价的流程，因此 slash 技能、附件、JSONL 用户行**零能力回退**。pin 是提示不是闸门（目标未加载 → 清空 hint 落回正常路由）；`message_id` 由客户端 mint，在 chat 行 / 执行会话 JSONL 行 / 乐观气泡三处对齐。逐项见 §2.2 决策 29、§4.2 kind 表、§5.5.5。
+>
+> v2.5 为**路由反应行与降级落点修订**（ADR-100 D11 / ADR-099 D8 修订）：① 恢复且仅恢复一条 durable 反应行 `turn_routed`——路由结论得出时写入，渲染为 agent 头像 + 名字 + 气泡（"启动新任务：X" / "继续之前的任务：X"），补上 v2.4 连带取消的即时对话反馈（用户消息之后必须紧跟 agent 消息的交互感不变量）；② chat 来源的人类消息在 router 降级时**新建**执行会话而非复用 intent_map 映射；③ 确立头像不变量：居中终态行不折叠其后 agent 气泡的头像。逐项见 §2.2 决策 20 / 28、§4.2 kind 表、§5.5.5。
 >
 > v2.1 为 **user-agent 单聊形态修订（微信模型）**：每个 (user, agent) 恰好一条 Chat session，作为 Agent 页标签栏的**固定 tab**（标题 = Agent 名），不可关闭、不建列表；execution session 是同一标签栏里可随意开关的普通 tab，与 Chat tab **共存**而非互斥。撤销 v2.0 §5.4.4「点 `+` 新建第二条同 pair 会话」与 §5.5.2「Chat history 列表按钮」。逐项见 §13 v2.1 修订。
 >
@@ -115,7 +119,7 @@ graph TB
 
 **卡片是唯一的例外，且是语义上的例外而非漏洞。**`interaction_request` 引用的确实是执行内事件（一次待审批的工具调用、一次暂停态），但进入 Chat session 的是**"需要有人做决定"这一交流事实**，不是那个工具调用本身：卡片携带决策所需的摘要，不携带 tool payload、命令行、内部错误 detail 或思考过程。审批结果落回 execution session 继续执行，Chat session 只记录"谁在什么时候答了什么"（§5.5.4）。区分标准是：**这条消息的内容是否对会话的其它参与者有意义**。有 → 进 Chat session；只是 Agent 自己的进度 → 留在 execution session。
 
-执行状态卡片同样遵守这条：进 Chat session 的是"你这句话已被接受、Agent 正在处理"这一交流事实，以及指向该轮的 `agent_session_id`；**处理到哪一步、正在调哪个工具，不进 Chat session**（§5.5.5）。
+轮次进度同样遵守这条：**"已派发 / 已开轮"这类运行时状态不进 Chat session**，它只在当前窗口以一条前端派生的等待行呈现；进 Chat session 的是对话本身与终态事实（为何没有回复）、路由结论这一条对话反馈（`turn_routed` 反应行，"这条消息去了哪个任务"，v2.5），以及指向该轮的 `agent_session_id`；**处理到哪一步、正在调哪个工具，不进 Chat session**，靠"查看执行"跳转进 execution 视图（§5.5.5）。
 
 ### 2.4 术语表
 
@@ -131,7 +135,7 @@ graph TB
 | **候选集** | router 可选的目标执行会话清单，按 chat 绑定与 owner 硬过滤（≤ 10） | 不是全量 session 列表，不是权限授予 |
 | **轮转（rotation）** | 逻辑映射指向的物理 execution session 更换为 successor | 不是 Chat session 的变化 |
 | **决策卡片** | `interaction_request`：需要人做决定，阻塞 | 不是执行进度展示 |
-| **状态卡片** | `system_notice` / `turn_started`：本轮已开始，不阻塞 | 不是实时状态的持久化 |
+| **在途等待行** | 运行期由前端派生、不落盘的居中状态行（"{{agent}}正在处理…"），不阻塞 | 不是持久化事件行，不是 live 镜像卡 |
 | **唯一写入口** | 每个 Chat session 的单写者串行队列，`seq` 单调、`message_id` 幂等 | 不是全局串行 |
 | **可见性** | 读权限作用域：owner / Chat session 参与者 / 平台级 | 不是「群聊 = Public」 |
 
@@ -162,7 +166,7 @@ graph TB
 | 维度 | 要求 | 依据 |
 |---|---|---|
 | **成本** | 决策卡片默认不结束本轮；只有无人类可答或超时才以 `waiting` / `aborted` 收尾。一次任务的审批次数不得与 turn 重放次数线性相关 | §5.5.4 |
-| **延迟** | 发送侧即时反馈由前端乐观占位承担，不靠提前落库；`turn_started` 允许比按下发送晚一个往返 | §5.5.5 |
+| **延迟** | 发送侧即时反馈由前端派生的等待行承担（`sending` 在途即显示，但仅当该 chat 有 agent 参与者；私聊不显示），不靠落库 | §5.5.5 |
 | **可靠性** | 任何会写回的 turn 无论成败都必须写回，含崩溃兜底；不允许存在「发完消息永久无响应」的状态 | §5.5.1 |
 | **幂等** | `message_id` 全 kind 必填，重复投递不产生第二行；`seq` 单调 | §4.6 |
 | **可回滚** | 不迁移历史；Chat surface 不可达（无账号 / 用户服务异常）时 Agent 页退回旧 exec 形态 | §9.1 |
@@ -186,7 +190,7 @@ graph TB
 
 6. **Agent 页面默认打开 user-agent Chat session。**用户打开某个 Agent 时进入其与它的**唯一** Chat session（每个 (user, agent) 恰好一条，首次打开时幂等创建，v2.1）；群聊、单聊、agent-agent 使用同一套会话模型、消息词汇表与写入口。Agent 的 execution session 不迁移，仍由 Session history 与 exec tab 承载（§5.4.4）。
 
-7. **Chat session 是持久对话记录，execution session 的在途轮次是当前轮次的瞬时视图。**前端 = 历史渲染自 Chat session + 在途轮次渲染自 execution session 事件流；轮次结束、`agent_message` 落库后，用持久行替换瞬时视图。
+7. **Chat session 是持久对话记录，在途轮次只是当前窗口的运行期状态。**前端 = 历史渲染自 Chat session + 在途渲染自"最新消息尚未被终态回答"这条派生判据；轮次结束、`agent_message` 落库后，等待行让位给持久行。
 
 8. **对话所有权采用 C / S 式模型。**发起方拥有并负责结束对话；应对方只有应答权，无发起权；单个对话的 request 次数设服务端可配置上限（默认 6）；需要第三方信息时把问题写回发起方，不由应对方转问。
 
@@ -204,15 +208,15 @@ graph TB
 
 15. **卡片类型统一、语义按可答者分流。**`interaction_request` 覆盖 ask question、权限审批、暂停续跑、重试等所有需要人决策的东西，持久化用"无 `in_reply_to` 指向它 = 未决"表示；但"本轮持有等待"还是"结束本轮"按卡片类型与成本决定，且纯 agent-agent 会话不创建需要人的东西（§5.5.4 / §5.4.5）。
 
-16. **Chat session 是 Agent 页固定 tab，与 execution session tab 共存。**打开 Agent 必然落在 Chat tab 上，它不可关闭、不可删除；execution session 是同一标签栏里的普通 tab，可随意开关，关掉最后一个也只是回到 Chat tab。`+`、Session history、状态卡片都是 exec tab 的入口——后台不等于隐藏（§5.4.4 / §6.1，v2.1 修订）。
+16. **Chat session 是 Agent 页固定 tab，与 execution session tab 共存。**打开 Agent 必然落在 Chat tab 上，它不可关闭、不可删除；execution session 是同一标签栏里的普通 tab，可随意开关，关掉最后一个也只是回到 Chat tab。`+`、Session history 都是 exec tab 的入口——后台不等于隐藏（§5.4.4 / §6.1，v2.1 修订）。
 
-17. **执行状态卡片持久化指针，状态读时投影。**落库的是一行不可变的 `system_notice` / `turn_started`（携带 `in_reply_to` + `agent_session_id`），实时状态来自 execution session 既有状态机的事件流，**不落 Chat session**。状态落库会在一次 turn 内产生几十次改写，必然破坏 §4.6 的 append-only 单写入口或淹没聊天历史（§5.5.5）。
+17. **chat 是对话历史，轮次进度不进历史（v2.4 修订，依次撤销 v2.1 的"执行状态卡片"与 v2.3 的"进度事件行"）。**落库的是对话与终态事实（`agent_message` / `interaction_request` / 通道回执）；"已派发 / 已开轮"这类中间状态**既不落 Chat session、也不在 chat 侧读时投影**，只在当前窗口由前端派生一条等待行。v2.1 的 live 镜像卡是在 durable 事件日志上叠加的第二块真相，两块永远对不齐（派发后到回复前的可见性空窗、stop 时卡片与仍在跑的 pending 新一轮打架）；v2.3 的进度行则是把运行时事实写进了历史——对三个月后翻记录的人零信息量，反而淹没对话。两者都删（§5.5.5）。任何状态落库都会在一轮内产生几十次改写，破坏 §4.6 的 append-only 单写入口。
 
-18. **卡片收尾由聊天终态行决定，不由 `Idle` 决定；状态只订阅不轮询。**`Idle` 且无终态行 = 收尾中（§5.5.5）。
+18. **轮次是否结束由聊天终态行决定，不由 `Idle` 决定。**chat 侧不读 `Idle`；等待行在出现 answering 的终态 `agent_message`（或一张未关闭的决策卡片）后消失——"已被回答"这件事有唯一的 durable 判据（§5.5.5）。
 
 19. **群聊触发的 execution session 对该群聊全体参与者可读。**判据由 routing key `chat:{chat_session_id}` 派生，不建独立 ACL；**不得复用 `SessionVisibility::Public`**，它是平台级可见，会让非群成员读到群执行历史。agent-agent 会话的执行记录不对界面外的人类开放（§5.5.5）。
 
-20. **`turn_started` 由 Runtime 写，与 §5.5.1 写回同源。**Gateway 是通信与资源管理边界，不承载业务逻辑；发送侧的即时反馈由前端乐观占位承担，不靠提前落库（§5.5.5）。
+20. **中间状态无人写，但对话反馈有一条 durable 反应行（v2.5 修订）。**v2.3 的 `turn_dispatched` / `turn_started` 指针行已下线：Runtime 只写对话与终态（§5.5.1），运行中的等待反馈由前端派生等待行承担。但 v2.4 连带取消了即时对话反馈，实测留下更基本的缺口：人类消息之后到回复之前（可能数小时）chat 里没有任何 agent 的话。聊天的交互感来自有来有回——**用户消息之后必须紧跟 agent 头像 + 名字 + 气泡**。因此 v2.5 恢复且仅恢复一条 durable 反应行 `turn_routed`（"启动新任务：X" / "继续之前的任务：X"，路由结论得出时写入，ADR-100 D11）：它回答"这条消息去了哪个任务"，是对话事实而非进度。1:1、人类群聊 @、PM 任务派发三条链路走同一路由，前端共用同一渲染器（§5.5.5）。
 
 21. **不迁移历史。**既有 execution session 留在 Session history，新会话才建 Chat session；好处是该步完全可回滚。（v2.1：两个列表并存的代价表述已失效——Agent 页不再有 chat 列表，并存的是固定 Chat tab 与 exec tab。）
 
@@ -228,7 +232,9 @@ graph TB
 
 27. **Chat prompt 与 execute system prompt 分离（v2.2）。**chat prompt = 内置基座（不可覆盖）+ 可选 `prompts/chat.md` 人格段（缺失时回退 manifest 元数据）+ 1:1 / 群聊场景段；不加载 `system.md` / `constraints.md` / 其他 prompts / skills / workspace prompt file / retrieved memory。`chat.md` 纳入 ADR-063 override 清单，因而从 execute prompt 拼接中排除；长度上限 4KB，只替换人格段（设计 29）。
 
-28. **Router 失败降级，可用性不退步。**超时（默认 8 s）、provider 报错或连续两次非法工具参数时回退既有 `routing_key` 路径，并写 `system_notice`（`notice_type = router_fallback`）；消息已落库，不因路由失败丢失（§5.7）。降级不是唯一需要约束的失败面：router 链路上的每个 Gateway HTTP 都有界（历史读 `chat_router.timeout_ms`，写回 15 s，附件拉取 60 s），且 router turn 跑在该 chat 的 drain task 上而不是 MQTT 入站循环上，一个挂起的 Gateway 或慢模型只能放慢这一条 chat 的分配，不能停住该 Agent 的接收面（含 `Stop`）。`chat_router.enabled=false` 时不排队，Chat 消息内联走确定性路由（ADR-099 D8）。
+28. **Router 失败降级，可用性不退步（v2.5 修订降级落点）。**超时（默认 8 s）、provider 报错或连续两次非法工具参数时降级；**chat 来源的人类消息降级时新建执行会话**（`chat_dispatch(Target::New)`，绑定同一 chat、映射重指向），不再复用 `routing_key` 映射——降级意味着没有语义判断，映射也不是语义判断，把可能开新话题的消息猜塞进不相关的历史会话比新建更糟；`PassThrough`（PM / agent-agent / response / kill switch 关闭态）的确定性复用不变，那些链路上 `conversation_id` / `msg:` 键就是任务身份（ADR-099 D8 修订）。**不再为降级写 `system_notice(router_fallback)`**（旧行渲染期隐藏），但降级新建与正常派发同样落一条 `turn_routed` 反应行（决策 20）；消息已落库，不因路由失败丢失（§5.7）。降级不是唯一需要约束的失败面：router 链路上的每个 Gateway HTTP 都有界（历史读 `chat_router.timeout_ms`，写回 15 s，附件拉取 60 s），且 router turn 跑在该 chat 的 drain task 上而不是 MQTT 入站循环上，一个挂起的 Gateway 或慢模型只能放慢这一条 chat 的分配，不能停住该 Agent 的接收面（含 `Stop`）。`chat_router.enabled=false` 时不排队，Chat 消息内联走确定性路由（ADR-099 D8）。
+
+29. **执行视图的输入走 chat 入口，并定向直投指名会话（v2.6）。**绑定 chat 的 execution session，其 composer 的发送走 `POST /api/intents/chat-message` 并携带 `for_execution_session`：Gateway 以**调用者身份**落一条 `user_message`（补上 v2.5 只回写尾、不落头的半轮对话，而不是让 Runtime 以用户身份代写——写入口的身份必须是发起人），Runtime 收到带指名的消息后**跳过 Chat Router** 直投该会话，以 `SessionMessage::ChatMessage`（不是 `Intent`——它没有 `active_skill` / `attached_items` / `content_parts` 三臂）进入与执行面原路径**逐项等价**的流程：slash 技能仍由 Runtime 按 `SkillRegistry` 解析（指令永不信任客户端）、附件仍按 ADR-046 落进本会话 `files/`、JSONL 仍原生记录用户行——**零能力回退**。pin 是提示不是闸门：目标未加载 → 清空 hint 落回正常路由（一次路由调用的代价，不是丢消息）；空内容（无文本、无附件、无 content_parts）的定向发送在查会话之前就判为已完成，不唤醒会话也不烧路由调用。`message_id` 由客户端 mint 并在 chat 行 / 执行会话 JSONL 行 / 乐观气泡三处对齐，所以乐观插入与 reconcile 机制不动。附件**不跨系统搬运**：chat 行只在 `meta.exec_attachments` 带显示名（ADR-009 §5 红线：node-local 路径在 Gateway / Node 分机时必 5xx，而打不开的引用比不写更糟）；该字段必须在 chat 存储的 `IntentMeta` 上声明（未声明的 meta 键会被 serde 静默丢弃，症状是投影写成功而盘上没那一项），且存储的"`user_message` 必须有内容"判据认这枚标签为内容；两端将其渲染为不可点的静音 pill，因此"只交文件不发消息"的回合头行不会是空白气泡。`command` / `attached_items` 只在带 pin 时被采纳（无 pin 则置空而非 400，因为 routed 回合被消费成 Intent、那两条臂本就不存在），带 pin 时受上限护栏：`command` ≤128 字符（是技能名不是指令）、`attached_items` ≤32 条且序列化后 ≤32KB。无绑定、或本地模式（无账号，chat 通道是身份通道）保持原 `POST /sessions/{sid}/messages`；pinned 回合不写 `turn_routed`（未经路由，无去向可宣布）。绑定的 chat 是**项目群**时（PM 任务会话绑的正是派发它的群，决策 26），群里不止一个 agent，"谁来回话"不能由 chat 推出，因此请求另带 `pinned_agent` 指名拥有该执行会话的 instance；它只当**待校验的声明**：必须是本 chat 的 agent 参与者，否则 403 且不落行（本轮的回答要落进这个 chat），未带 pin 的群发仍走 §5.3 归档入口。归属另一半由**接收侧 Runtime** 校验：被指名会话绑的 chat 必须等于本次发送的来源 chat，不符同样清空 hint 落回正常路由——一个 agent 实例服务多个 chat，而 session id 会出现在群成员都读得到的行上，没这道校验任何人都能把文本、slash 技能与 node-local 附件路径注入别人正在跑的任务。头行既然每次都写，尾行就必须在**每一条出口**都写（完成 / 被 stop / 附件读不出来 / agent loop 报错 → `completed` / `aborted` / `failed`，`failed` 只写人可读单行），否则一轮在 chat 里永久显示"处理中"。尾行还兼任关闭 mailbox：pinned 回合没有 Intent 写回可关，所以 `chat-append` 在 `kind=agent_message` 且 `meta.in_reply_to` 非空时、**落库成功之后** `mark_answered`（与 §7.1 的关闭时机一致）；缺这一步，一轮即使答得完好，也会在超时后由 sweeper 在同一 chat 补一条 `fallback-` 的 `failed` 回执。内容门与 `attached_items` 的 ADR-046 union 校验都在 pin 归一化**之后**、投递之前跑：无 pin 时那些字段会被整批丢弃，拿原始请求判内容就会把请求形状错伪装成 503（本轮连头都不落）。绑定值只读自 Runtime 暴露的会话行，前端不发明、不缓存、不改写（§5.5.5）。
 
 ### 3.5 现有实现缺陷
 
@@ -321,10 +327,10 @@ Chat session 是用户聊天与 Agent 间消息的持久化会话，由 `acowork
 
 | kind | 写入方 | 语义 | 必需约束 |
 |---|---|---|---|
-| `user_message` | 人类参与者 | 人类发言；带 `mentions` 即 @Agent；带 `in_reply_to` 即**回答一张卡片** | `body` 或 `attachments` 至少一个非空；`message_id` 必需 |
+| `user_message` | 人类参与者 | 人类发言；带 `mentions` 即 @Agent；带 `in_reply_to` 即**回答一张卡片**；执行视图 composer 发出的也走本 kind（v2.6，ADR-100 D12），其 `meta.exec_attachments` 只带附件**显示名**、不带路径或 documentId，并以静音 pill 呈现（不可点） | `body` / `attachments` / `meta.exec_attachments` 至少一个非空；`message_id` 必需 |
 | `agent_message` | Agent 参与者 | Agent 对人类、对群、或对另一个 Agent 的发言。**Agent 在 Chat session 里的所有消息都是这一种** | `message_id` 必需；应答时 `in_reply_to` 必需 |
 | `interaction_request` | Agent 或系统 | 要求参与者做出决策的卡片：提问、工具审批、暂停续跑、重试 | `message_id` 必需；须有 `interaction` 载荷与目标参与者 |
-| `system_notice` | 系统 | 回执与凭证，按 `notice_type` 分流：`turn_started`（本轮已开始，携带 `agent_session_id`）、`delivery_failed`、`budget_exhausted`、`truncated`、`unavailable` | `message_id` 必需；`turn_started` 另需 `in_reply_to` + `agent_session_id` |
+| `system_notice` | 系统 | 通道回执，按 `notice_type` 分流：`delivery_failed`、`budget_exhausted`、`truncated`、`unavailable`（旧的 `turn_dispatched` / `turn_started` / `router_fallback` 仅作兼容读取，渲染期隐藏）；`turn_routed` 为路由反应行（v2.5，ADR-100 D11），kind 是系统、**渲染是 agent 归属气泡**（头像 + 名字 + "启动新任务 / 继续之前的任务"），meta 携 `in_reply_to` / `agent_session_id` / `turn_mode`，body 恒空 | `message_id` 必需 |
 
 **Intent 不再是消息类型。**`intent_request` / `intent_response` 作为 kind 取消，其语义降级为 `agent_message`（或 `user_message`）上的**字段**：`conversation_id`、`in_reply_to`、`agent_session_id`、`repo`、`status`。一条消息是否为 Intent 应答，由 `in_reply_to` 是否存在推导，不新增判别字段。
 
@@ -343,16 +349,15 @@ Chat session 是用户聊天与 Agent 间消息的持久化会话，由 `acowork
 
 Agent 侧收到的仍是解析后的引用，Runtime 不读 Chat session 目录；附件的读取路径与消息正文一致，经唯一写入口所在的受信任服务。投递载体：**MQTT Intent 信封只携带附件 id，文件字节永不进 MQTT 消息**——Runtime 在回合开始时经 node 鉴权的 HTTP（Gateway 转发 user service 的内部流式端点）逐个拉取字节并物化进 agent home 的 `files/` 目录；user service 校验 durable `user_message` 行确实 addressed 给该 target 且 pin 了该 id，行即授权。单个拉取失败降级为"该附件本轮不可见"，回合照常运行。
 
-#### 4.2.2 卡片
+#### 4.2.2 卡片与运行期状态行
 
-Chat session 里有两类卡片，都指向 execution session 内的事件：
+Chat session 里只有一类指向 execution session 内事件的 durable 行：
 
-- **决策卡片** `interaction_request`：需要人类决策的中断（`ask_user_question`、工具审批、迭代上限 / 环路检测暂停、失败重试）。
-- **执行状态卡片** `system_notice` 的 `turn_started`：一条人类消息被接受、Agent 开始处理这一轮的凭证，携带 `in_reply_to` 与 `agent_session_id`。
+- **决策卡片** `interaction_request`：需要人类决策的中断（`ask_user_question`、工具审批、迭代上限 / 环路检测暂停、失败重试）——在流里就地可答。
 
-两类卡片让单聊与群聊共用同一套"Agent 在问话 / 在干活"的表示。完整规则见 §5.5.4 与 §5.5.5。
+轮次进度**不是** durable 行：它在当前窗口由前端派生一条等待行呈现，不落盘、不进历史（§5.5.5）。两条规则让单聊、群聊、PM 任务派发共用同一套"Agent 在问话 / 在干活"的表示与同一渲染器。完整规则见 §5.5.4 与 §5.5.5。
 
-**卡片持久化的是指针与事实，不是状态。**`turn_started` 落库的内容是"这一轮开始了、由哪个 execution session 处理"，一次写入不再变更；运行中 / 思考中 / 等工具 / 已暂停这些**实时状态一律不落 Chat session**，读时由 execution session 事件流投影。状态落库会在一次 turn 内产生几十次改写，要么破坏 §4.6 的 append-only 单写入口，要么让聊天历史被执行细节淹没。
+**这些行持久化的是指针与事实，不是状态。**决策卡片落库的是"需要有人做决定"这一交流事实；轮次的运行中 / 思考中 / 等工具 / 已暂停这些**实时状态一律不落 Chat session、也不在 chat 侧镜像**，只在 execution 视图里看，从回复行 / 状态行"查看执行"跳转过去（§5.5.5）。状态落库会在一次 turn 内产生几十次改写，要么破坏 §4.6 的 append-only 单写入口，要么让聊天历史被执行细节淹没。
 
 #### 4.2.3 统一类型、不同参与者
 
@@ -480,7 +485,7 @@ Intent 可携带 model / provider / reasoning-effort / 工作目录的目标 Age
 | `POST /chat-sessions/{id}/messages` | acowork-user | Runtime / Gateway | **唯一写入口**；分配 `message_id` + `seq` |
 | `GET /chat-sessions/default?pair=` | acowork-user | Gateway 转发 | 取某 pair 的默认会话（§5.4.4） |
 | `POST /intent` | acowork-gateway | 前端 / Runtime / PM | Intent 投递入口，仅做通信与资源管理 |
-| `GET /sessions/{sid}` | acowork-runtime | 前端 | 合并 meta + live_state，供状态卡片投影（§5.5.5） |
+| `GET /sessions/{sid}` | acowork-runtime | 前端 | 合并 meta + live_state，供 execution 视图的状态展示（§5.5.5） |
 | `chat_history_read` | acowork-runtime（MCP） | Agent | Agent 侧读取 Chat 历史（§5.5.3） |
 | `intent_send` | acowork-runtime（MCP） | Agent | Agent 发起 Intent；声明 `intent:send` 权限 |
 
@@ -533,13 +538,14 @@ sequenceDiagram
     participant ES as Execution session (agent-A)
     U->>CS: user_message（文本 + 附件）
     CS->>ES: 投递，发起方角色
-    ES-->>CS: system_notice / turn_started（占位）
+    Note over ES,CS: 不写进度行（仅卡片与终态落库）
     ES->>ES: 执行中…
+    CS-->>U: 前端派生等待行（不落盘）
     ES-->>CS: interaction_request（需人决策时）
     U-->>CS: user_message + in_reply_to（回答卡片）
     CS-->>ES: 转交回答，本轮继续
     ES->>CS: agent_message（终态）
-    CS-->>U: 渲染终态行，替换占位卡片
+    CS-->>U: 渲染终态行（空终态为居中状态行），等待行消失
 ```
 
 #### 5.2.2 群聊
@@ -658,7 +664,7 @@ Agent-Agent Chat session 的首次创建由明确的聊天入口 / 首次建立�
 
 **人类消息是 `user_message`，不是 Intent request。**这条必须钉死：若把用户消息实现成 request 语义，Runtime 会把该轮判成 responder，于是 `ask_user_question` 和 `intent_send` 被从工具集里摘掉、审批被自动拒绝——单聊直接废掉。传输可以复用 Intent 投递管线，**入站类型必须是人类输入，本轮角色是发起方**（§5.4.5）。
 
-**执行过程不进 Chat session，但必须可见。**Chat session 按 §2.3 只存消息；若前端只渲染 Chat session，用户就变成"发完消息空等几分钟，然后蹦出最终答案"。规则：**Chat session 是持久对话记录，execution session 的在途轮次是当前轮次的瞬时视图**。前端 = 历史渲染自 Chat session + 在途轮次渲染自 execution session 事件流；轮次结束、`agent_message` 落库后，用持久行替换瞬时视图。不变量不破，UX 不退化。两条视图用 `target_agent_session_id` + `message_id` 对齐。
+**执行过程不进 Chat session，但必须可见。**Chat session 按 §2.3 只存消息；若前端只渲染 Chat session，用户就变成"发完消息空等几分钟，然后蹦出最终答案"。规则：**Chat session 是持久对话记录，在途轮次只是当前窗口的运行期状态**。前端 = 历史渲染自 Chat session + 在途渲染自"最新消息尚未被终态回答"这条派生判据；轮次结束、`agent_message` 落库后，等待行让位给持久行。不变量不破，UX 不退化。
 
 **轮转因此对单聊生效。**§4.1 的 T1/T2 轮转原本只管 Intent 映射的 session，用户直聊那条 JSONL 会无限增长。统一后单聊走同一条 `chat:{chat_session_id}` 逻辑映射，"连续性由 Chat session 承载而非物理 execution session"这条已确认原则才对全部会话成立。
 
@@ -792,46 +798,40 @@ execution session 中需要人决策的东西——`ask_user_question` 的选项
 
 卡片不产生新对话、不计入 §5.4.5 R4 的 request 上限——它是对话内的一次交互，不是新的委派。回答卡片不唤醒应对方以外的任何 Agent。
 
-#### 5.5.5 执行状态卡片
+#### 5.5.5 在途轮次的呈现：派生等待行（不落盘）、路由反应行与执行视图入口（durable，v2.5 / v2.6 修订）
 
-用户发完消息到 Agent 回复落库之间可能间隔几分钟。若这段时间聊天界面什么都不显示，UX 就退化成"发完消息空等，然后蹦出答案"。§5.4.4 已定"在途轮次渲染自 execution session 事件流"，本节把它落成具体对象。
+用户发完消息到 Agent 回复落库之间可能间隔几分钟。若这段时间聊天界面什么都不显示，UX 就退化成"发完消息空等，然后蹦出答案"。本节规定这段时间在 chat 里以**一条前端派生的居中状态行**表达在途轮次——它不落盘，也不叠加任何读时投影的"执行状态卡片"（v2.1 曾引入，v2.3 撤销）。
 
-**持久化：一行 `turn_started`，由 Runtime 写。**Runtime 接受一条 `user_message` 并解析出 execution session 后，经唯一聊天写入口追加一行 `system_notice`，`notice_type = turn_started`，携带 `in_reply_to`（触发本轮的那条消息 id）与 `agent_session_id`。
+**为什么撤销 live 卡片。** chat 是 append-only 的持久事件日志；live 卡片是在这套真相之上叠加的**第二块镜像真相**（数据源为 execution session 的 `session_state` 事件流）。两块真相永远对不齐：消息被路由进一个正忙的 execution session 后开新一轮，卡片按镜像显示"未 idle"，而 chat 侧当时毫无反馈，于是"派发后到回复前"出现可见性空窗；stop 当前轮时卡片即时消失，被加塞的 pending 却已开新一轮、执行并未 idle，卡片与真相打架。
 
-**写入方必须是 Runtime，不是 Gateway。**Gateway 的既定边界是通信、资源管理与反向代理，不承载业务逻辑（AGENTS.md「Gateway boundary」，并由 `dev/ci.sh` 的 redline 检查强制）。"一轮开始了"是业务事实，只有 Gateway 能写就等于把业务逻辑塞进通信层。此外 §5.5.1 的回复写回**已经**由 Runtime 经同一路径完成，`turn_started` 与它同源，因此写入者仍是一个，不产生第二个写入口。
+**为什么连事件行也不要（v2.4）。** v2.3 把"已派发 / 已开轮"落成 durable 指针行，但实测中它们对**历史会话**毫无意义："你的消息送达了 agent""这一轮开跑了"是执行面的运行时事实，对三个月后翻记录的人零信息量；落下去只是把进度日志混进对话日志，让每段历史都飘满状态行。真正值得留存的"为什么没有回复"由终态行表达。因此 v2.4 把中间状态彻底移出 chat：**历史只记对话与"未获回答的事实"，进度只在运行时的当前窗口里存在。**
 
-代价是卡片比用户按下发送晚一个往返出现。用**前端乐观占位**吸收：本地先渲染一张瞬时卡片，`turn_started` 落库后替换为持久行——这正是 §5.4.4"在途轮次是瞬时视图"的既有规则，不新增机制。占位卡片不入库，因此刷新后若持久行尚未落，卡片消失是正确行为（该轮确实没被接受）。
+**运行中：一条派生的等待行（不落盘）。**
 
-**这一行一次写入、永不修改**——它是凭证，不是仪表盘。有了它，页面刷新、断线重连、换设备登录都能恢复出"有一条消息正在被处理"，而不依赖事件流恰好在线。
+1. **判据**只有一条 durable 证据：**最新一条已向 agent 发出请求的 `user_message` 尚无终态回答**。"这条人类行是否真的惊动了 agent"本身就是行上的事实：`/api/intents/chat-message` 落的行 `to` 就是它投递的 agent（1:1、答卡、pinned 执行回合都走这里），§5.3.1 的群 @ 群发只落一条广播行（`to` 空）而把被点名的 agent 放在 `meta.mentions`；除此之外（`user_user` 私聊、群里未 @ 的普通发言）走仅归档的写入口，`to` 为空、无 mentions，它谁也没唤醒。因此等待行只可能开在开启了 agent 回合的行上；**没有任何 agent 参与者的 chat（私聊、纯人类群）永不显示等待行**，连 `sending` 窗口也不——那里没有任何人会来回话（实测缺陷：私聊打开即在底部永久 shimmer）。前端不读 execution session 实时状态、不新增 MQTT 通道、不改会话列表 API。
+2. **结束条件**：其后出现 answering 的终态 `agent_message`（`in_reply_to` 匹配）、一张未关闭的 `interaction_request`（球在人类手上）、或一条同样开启了 agent 回合的更新人类消息 → 立即消失。未 @ 的插话既不结束也不开启等待（它不是一回合的应答，也不取消另一条正在跑的任务）。发送本身还在 HTTP 在途（消息尚未落行）时同样显示（前提仍是该 chat 有 agent），否则"按下发送"到"消息落行"之间仍是空白。
+3. **文案一条，不分态**：只有"在处理"一种说法，不区分排队 / 开轮 / 工具执行——前端无法可靠区分它们，分了就是猜测。1:1 展示"{{agent 名}}正在处理…"，群聊不指名（多 agent 时点名会误导），展示"正在处理…"。带文字滚动闪烁动画（复用"正在执行工具"的 shimmer），给用户"有人在干活"的实感。
+4. **只在末尾显示**：窗口被 locate 定位到中段（后面还有未加载的新页）时没有"最新消息"可言，不显示。
 
-**状态：读时投影。**卡片上显示的进行中 / 思考中 / 等工具 / 已暂停，来自 execution session 已有的状态机（`Idle` / `LlmAwaitingFirstChunk` / `Thinking` / `LlmStreaming` / `ToolExecuting` / `WaitingApproval` / `Paused`），经事件流推送。**状态侧零新后端**：该状态机与 meta + live_state 合并读接口均已存在。
+**历史里留什么。** `aborted` / `failed` / `timeout` / `waiting` 的终态 `agent_message` 继续写、继续存——它们回答"为什么没有回复"，正是历史需要的。**空正文的终态渲染成居中状态行**而不是 agent 气泡（状态词不是 agent 说的话），并保留"查看执行"；有正文的终态仍是普通气泡。旧的 `turn_dispatched` / `turn_started` / `router_fallback` 行不迁移、不删除，但在渲染期一律隐藏（Desktop 两视图 + Mobile 同一套隐藏集合）。
 
-**执行界面的 pending 队列也是投影，但需要一小份新状态。**输入框上方那个「消息队列」盒原本只反映前端本地暂存的用户草稿（忙碌时按下停止键存下的输入），与后端真实排队消息无关：一条 chat 转发的 `user_message` 被路由进一个正忙的 execution session 时，它只是在该 session 的入站通道里静默排队，执行界面完全看不见，用户不知道它是否已送达。现在 Runtime 维护一份**有界**的 pending 清单——意图在目标 session 正忙时于入队侧记录、在该轮出队开跑时清除；条目只携带 `message_id`、发送者、受限摘要（≤ 120 字符，ADR-096 受限读）与 `from_chat` 标记，随既有的 retained `session_state` 快照（design 29 §6.4 的同一投影面）推送，执行界面据此显示「来自对话」的排队消息。它是上文 chat 侧 `turn_started` 指针在执行侧的对应物：指针回答「这条消息被哪个 session 接了」，pending 队列回答「这个 session 还压着哪些没跑到」。idle session 不入队（消息直接开跑、落进历史即可），因此这份清单不引入第二个写入口、也不落库。
+**路由反应行 `turn_routed`（v2.5，ADR-100 D11）。** 历史不落进度，但欠用户一句即时回答："这条消息去了哪里"。路由目标解析、intent 投递成功后，Runtime 写一条 `system_notice`（`tr:{request_id}` 按触发行幂等，meta 携 `in_reply_to` / `agent_session_id` / `turn_mode`，body 恒空），三端把它渲染成 **agent 头像 + 名字 + 气泡**——"启动新任务：X"（物理新建）或"继续之前的任务：X"（reuse / rotation 都是同一逻辑任务在继续），任务名取执行会话标题、未生成时回退触发正文。它不是等待行那种运行时状态：它回答的是对话事实，几个月后翻记录的人同样需要。两条写入路径（router drain 的 dispatch 成功分支、`route_intent_legacy` 中欠 chat 回写的回合）共用同一 builder。**头像不变量**：凡渲染成 agent 气泡的行必须带头像 + 名字归属；判定"上一条已是气泡、本条折叠头像"时，居中终态行与 `turn_routed` 都不算前一条气泡——反应行与真实回复各自独立带头像（两者可能相隔数小时，一个是"接住"，一个是"回答"）。等待行不因反应行消失：运行仍在进行，等待行继续覆盖到终态。
 
-**卡片是状态镜像，不是精简 banner（v2.1 修订）。**卡片以全局统一的卡片视觉语法（右侧面板 Session/Agent 状态卡、settings/harness 同款：`rounded-md border border-border-outer bg-panel-block` 外壳 + `bg-panel-inset` 内块 + StatRow 标签/值 + ADR-049 六色状态点）展示比一条长条更多的细节：session status、session title、当前 step、model（+ provider）、workspace。当前 step 按优先级派生——待授权的工具名 → 在飞工具 → 活动 todo → 阶段文案，全部是既有 execution session 状态（`sessionStates[exec_sid]`）的读时投影。model / provider / workspace / title 来自 execution session 的 config 快照（`GET /sessions/{sid}/config`，ADR-047），首次拿到 `exec_sid` 时拉取一次，与是否打开 exec tab 无关。
+**执行视图的输入也是这一轮的头（v2.6，ADR-100 D12）。**上一段的回写让绑定 chat 的执行会话把本地回合的**输出**送回 chat，但那条回合的**人类消息**只在执行会话的 JSONL 里，chat 于是读出"只有回答、没有提问"的半轮对话——几个月后翻记录的人看不到任务是被哪句话开起来的。补法不是让 Runtime 以用户身份代写一行（写入口的身份必须是发起人），而是**把入口换掉**：执行视图的 composer 走 `POST /api/intents/chat-message` 并携 `for_execution_session` 指名自己，Gateway 以调用者身份落 `user_message`，Runtime 跳过 Chat Router 直投该会话（逐项见决策 29）。它改动本节的三处现有规则：① 派生等待行的判据不变，但 pinned 回合的终态 `agent_message` 携 `in_reply_to` 指向那条 chat 触发行，于是等待行按正常的"已被回答"路径消失；非 pinned 的执行面回合（含未绑定会话）仍写不带 `in_reply_to` 的 standalone `exec:` 行——它不欠任何可见行一个回答。② `turn_routed` 反应行**不适用于** pinned 回合：它没经过路由，没有"去了哪个任务"可宣布，而且人就看着它跑。③ chat 行的附件只有显示名（`meta.exec_attachments`）、以不可点的静音 pill 呈现，附件唯一能真正被打开的地方仍是执行视图；这枚标签自身也算消息内容（存储必须声明该字段并把它计入"有内容"），否则"只交文件不发消息"的回合会在 chat 里留下一条空白气泡。执行会话未绑定 chat、或客户端处于本地模式（无账号）时，composer 仍走 `POST /sessions/{sid}/messages`，chat 不增行。
 
-**执行过程的交互统一进卡片，卡片向下线性增长。**服务端错误、工具授权（Allow / Deny）、迭代上限 / 环路检测暂停的 Continue 这些原本只在 exec 视图里的动作，现在也镜像进卡片，按到达顺序在详情区下方逐个追加一个块。卡片仍是**展示与交互入口**：每个动作都转发到既有的 session 作用域 HTTP 端点（ADR-076：`.../sessions/{exec_sid}/approval`、`/continue`），前端不持有独立状态或业务；本地镜像的即时清除（授权项出 pending map、错误 dismiss）只是对后端事件流的乐观缓存，权威确认仍由后端事件（`tool_approval_resolved` 等）给出。`ask_user_question` 不重复进卡片——它已是 §5.5.4 的决策卡片。若 turn 以空 body 结束（stop 后写回的 `agent_message` 无正文），卡片消失后渲染占位文案而非空气泡。
+**"查看执行"跳转，不是状态镜像。**带 `agent_session_id` 的终态行与任何解析出执行会话的 `agent_message` 附一个离散跳转 affordance（脑图标 + "查看执行"），点击 best-effort 打开当轮实际的 execution session。它只跳转、不镜像——chat 界面不读、不持有 execution session 的实时状态，因此没有会打架的第二块真相，也无需为该状态镜像维护前端投影。
 
+**执行界面的 pending 队列仍是投影，与本次改动无关。**输入框上方的「消息队列」盒反映后端真实排队消息：一条 chat 转发的 `user_message` 被路由进一个正忙的 execution session 时，Runtime 维护一份**有界**的 pending 清单——意图在目标 session 正忙时于入队侧记录、在该轮出队开跑时清除；条目只携带 `message_id`、发送者、受限摘要（≤ 120 字符，ADR-096 受限读）与 `from_chat` 标记，随既有的 retained `session_state` 快照（design 29 §6.4 的同一投影面）推送。它是 **execution 视图内**的能力，保留不动；本次只改 **chat 侧**的呈现。idle session 不入队（消息直接开跑、落进历史即可），因此这份清单不引入第二个写入口、也不落库。
 
-**收尾由聊天行决定，不由 `Idle` 决定。**回复写回发生在最终事件**之后**，中间存在窗口：execution session 已 `Idle`，`agent_message` 尚未落库。若卡片跟 `Idle` 走，用户会以为答案丢了。规则：`Idle` 且该 `in_reply_to` 下没有终态行 = **收尾中**；卡片只在出现 `agent_message`（或失败回执）后消失。
+**工具授权 / ask_question 落在 chat 的方式不变。**`ask_user_question`、权限审批这类需要人决策的东西仍是 §5.5.4 的 `interaction_request` 决策卡片，在 chat 流里就地可答（单聊、群聊、PM 任务共用同一 `InlineInteractionCard` 渲染器）。它不是 live 镜像——它是"要有人做决定"这一持久交流事实。本轮执行到哪一步、正在等哪个工具，仍只在 execution 视图里看，从 chat 的状态行 / 回复行"查看执行"跳转过去。
 
-**订阅，不轮询。**状态经事件推送获取，REST 读 execution session 状态只用于首次绘制开着的卡片。若每张开着的卡片各自轮询，等于把 §5.5.1 明确否决的 busy-wait 搬到浏览器，并按并发卡片数放大 Gateway→Runtime 调用。
+**点击权限按"是否该 Chat session 的参与者"判定，不按 owner。**群聊的存在理由就是成员共享同一份工作上下文，因此**群聊触发的 execution session 对该群聊全体参与者可读**——否则成员看到的是"Agent 在干活"却永远无法知道它卡在哪，群聊退化成给 Agent 发工单。单聊里用户本就是 owner，行为不变。判定依据是**派生，不是新表**：群聊 execution session 由 routing key `chat:{chat_session_id}` 创建（§5.4.1），该 key 已持久化在 Runtime 的 `intent-sessions.json`，因此"这个 execution session 属于哪个 Chat session"是已知事实，读权限 = 该 Chat session 的参与者集合。不引入独立 ACL 存储。**不得使用现有 `SessionVisibility::Public`**——它语义是"任何已认证用户可读"（[session_meta.rs](../../../core/acowork-memory/src/session_meta.rs)），是平台级可见，会让非群成员读到群执行历史，比原问题更糟。具体建模留实现设计（§10.20）。
 
-**点击权限按"是否该 Chat session 的参与者"判定，不按 owner。**群聊的存在理由就是成员共享同一份工作上下文，因此**群聊触发的 execution session 对该群聊全体参与者可读**——否则成员看到的是"Agent 在干活"却永远无法知道它卡在哪，群聊退化成给 Agent 发工单。单聊里用户本就是 owner，行为不变。
+**agent-agent 会话的执行记录不对界面外的人类开放。**A 与 B 的共享会话没有人类参与者，用户 A 可点开 A 侧的执行，但**不得**借此打开 B 的 execution session——那是 B 的私有执行记录。
 
-判定依据是**派生，不是新表**：群聊 execution session 由 routing key `chat:{chat_session_id}` 创建（§5.4.1），该 key 已持久化在 Runtime 的 `intent-sessions.json`，因此"这个 execution session 属于哪个 Chat session"是已知事实，读权限 = 该 Chat session 的参与者集合。不引入独立 ACL 存储。
+**轮转后仍可点。**带跳转的行指向当轮实际执行的物理 session；§4.1 轮转后旧 JSONL 仍留在 Agent home，因此点击历史行打开的是**当时那一轮**，不是 successor。这是期望行为：它是"这条消息产生了哪一次执行"的凭证，不是"当前会话状态"的指针。
 
-**不得使用现有 `SessionVisibility::Public`。**它的语义是"任何已认证用户可读"（[session_meta.rs](../../../core/acowork-memory/src/session_meta.rs)），是**平台级**可见，不是群内可见。拿它实现"群聊默认公开"会让非群成员也能读到该群的执行历史，比原问题更糟。需要新增的是第三种作用域（绑定到某个 Chat session 的参与者集合），不是复用 Public。具体建模（在 execution session 侧记 `chat_session_id` 反查，还是在 Chat session 侧记 session 集合）留实现设计（§10.20）。
-
-**agent-agent 会话的卡片对界面外的人类不可点。**A 与 B 的共享会话没有人类参与者，用户 A 在 Agent 页面看到的 A 侧卡片可点（A 是 A 的 owner），但**不得**借此点开 B 的 execution session——那是 B 的私有执行记录。
-
-**卡片对所有参与者可见**（"Agent 正在为这条消息干活"是交流事实）。只有当查看者既不是该 Chat session 参与者、也不是该 execution session 的 owner 时才置灰，并给原因而不是报错；这类情形现在只剩 agent-agent 与越权访问。
-
-**轮转后仍可点。**`turn_started` 指向当轮实际执行的物理 session；§4.1 轮转后旧 JSONL 仍留在 Agent home，因此点击历史卡片打开的是**当时那一轮**，不是 successor。这是期望行为：卡片是"这条消息产生了哪一次执行"的凭证，不是"当前会话状态"的指针。
-
-**一张卡片对应一个 (消息, Agent) 对。**群聊一条消息 @ 多个 Agent 时产生多行 `turn_started`，各自独立收尾；串行执行槽（§4.6）保证同一 (chat session, agent) 的卡片按序完成。
-
-**与 §5.5.4 的分工。**`interaction_request` 是"要人做决定"，阻塞，必须有人答；`turn_started` 是"正在做"，不阻塞，不需要任何人做任何事。两者共用同一套指针 + 投影规则。一轮之内两者可同时存在（执行中触发审批）。
+**与 §5.5.4 的分工。**`interaction_request` 是"要人做决定"，阻塞，必须有人答；运行中的等待行是"已经收到、正在处理"，不阻塞，不需要任何人做任何事——但它**不是对话内容**，只活在当前窗口，不落盘、不进历史。一轮之内两者可同时存在（执行中触发审批）。1:1、人类群聊 @、PM 任务派发三条链路共用同一套行类型契约与同一渲染器（`ChatNoticeEventRow` + `InlineInteractionCard` + 居中状态行），读起来是同一种语法。
 
 ### 5.6 PM 集成与身份
 
@@ -886,7 +886,7 @@ graph TB
     BAR --> ET["Execution session tab<br/>可随意开关"]
     CT --> MSG["消息流<br/>user_message / agent_message / 卡片"]
     CT --> INPUT["输入区 + 附件"]
-    MSG -.->|"点状态卡片跳对应 tab"| ET
+    MSG -.->|"点回复行 / 状态行'查看执行'跳对应 tab"| ET
     ET -.->|"关闭最后一个回落 Chat tab"| CT
 ```
 
@@ -902,52 +902,44 @@ graph TB
 | **Agent 未启动** | Agent 页维持旧启动屏交互（大 Play 按钮 + 空白聊天背景），**不显示统一标签栏与 Chat session**；启动后才进入标签栏形态 | Chat session 消息没有 Runtime 无法得到回应，未启动时显示它没有意义 |
 | **同 pair 第二条 Chat session** | **不存在** | 每个 (user, agent) 恰好一条，无新建/列表入口 |
 
-Execution session 不再是对话的默认入口，但也不降级为"只通过卡片进入的后台会话"：它是同一标签栏里平权的一等 tab，Session history 仍是并列入口。
+Execution session 不再是对话的默认入口，但也不降级为"只能通过跳转进入的后台会话"：它是同一标签栏里平权的一等 tab，Session history 仍是并列入口。
 
-### 6.2 组件与状态映射
+### 6.2 等待行与终态映射
 
-状态卡片的视觉状态**读时投影**自 execution session 的 `live_state`，不落库（§5.5.5）。
+chat 侧不读 execution session 的 `live_state`：既不读时投影为持续态卡片（v2.1 已撤销），也不再把中间状态落成事件行（v2.3 已撤销）。在途轮次只有一条运行期等待行，终态仍是持久行（§5.5.5）。
 
-v2.2 新增一个**不属于 `SessionStatus` 的前置态**：消息已落库、`turn_started` 尚未到达的窗口（router 正在决策，或已投递但目标会话未开轮）。前端在气泡区显示本地"正在分配…"占位，不落库；`turn_started` 到达即替换为目标会话的状态卡片。router 直接以文本回答时没有 `turn_started`，占位在 `agent_message` 到达时直接替换为终态消息。
-
-| 状态来源 | 卡片状态 | 文案基调 |
+| 事件 | chat 呈现 | 语义 |
 |---|---|---|
-| （无 `turn_started`，消息已落库） | 分配中 | 已发出，正在判断由谁处理（前端本地态，不落库） |
-| `LlmAwaitingFirstChunk` | 排队中 | 已发出，等待响应 |
-| `Thinking` | 进行中 | Agent 正在思考 |
-| `LlmStreaming` | 输出中 | Agent 正在输出 |
-| `ToolExecuting` | 执行中 | 显示当前工具名（不显示参数） |
-| `WaitingApproval` | 等待确认 | 引导到决策卡片 |
-| `Paused` | 已暂停 | 提供续跑入口 |
-| `Idle` **且无终态行** | 收尾中 | 不显示「完成」——写回存在窗口期 |
-| 存在 `agent_message` 终态行 | **卡片消失，替换为终态消息** | 聊天终态才是收尾判据 |
+| 消息尚未落库（`sending` 在途） | 居中等待行（generic） | 已按下发送，正在写入 |
+| 最新 `user_message` 尚无终态回答 | 居中等待行（1:1 带 agent 名、群聊 generic）+ shimmer | 这一轮在飞 |
+| 存在未关闭的 `interaction_request` | 决策卡片 | 球在人类手上，等待行让位 |
+| 存在 answering 的终态 `agent_message` | 终态行（有正文为气泡、空正文为居中状态行）+ "查看执行" | 收尾判据，不依赖 `Idle` |
+| 旧的 `turn_dispatched` / `turn_started` / `router_fallback` 行 | 不渲染 | 历史里的中间状态一律隐藏（§5.5.5） |
 
-收尾判据是**聊天侧的终态行**，不是 Runtime 的 `Idle` 事件：写回发生在最终事件之后，`Idle` 只说明"执行结束"，不说明"结果已落库"。状态**只订阅不轮询**。
+收尾判据是**聊天侧的终态行**，不是 Runtime 的 `Idle` 事件：写回发生在最终事件之后，`Idle` 只说明"执行结束"，不说明"结果已落库"。工具授权、迭代上限 / 环路暂停的 Continue 等 execution 阶段动作**不在 chat 展示**，从状态行 / 回复行"查看执行"进入 execution 视图完成。
 
-`notice_type = router_fallback` 的 `system_notice` 渲染为轻量系统行（"已自动分配"），与 `turn_started` 一样不带执行细节：它告知的是"这次没有经过语义判断"这一事实，不暴露降级原因的内部细节（§5.7）。
+### 6.3 卡片与状态行规范
 
-### 6.3 卡片规范
-
-| | 决策卡片 `interaction_request` | 状态卡片 `system_notice` |
+| | 决策卡片 `interaction_request` | 在途等待行（运行期派生） |
 |---|---|---|
 | 是否阻塞 | 是，Agent 本轮持有等待 | 否，纯展示 |
-| 持久化 | 一行 append-only 记录 | 一行 `turn_started` 指针 |
-| 未决判定 | 不存在 `in_reply_to` 指向它的后续行 | 不适用 |
-| 过期 | 读时求值（不落库改状态） | 不适用 |
-| 可操作性 | 按钮 / 选项 / 输入 | 点击打开 execution session（受权限约束） |
-| 无人类参与者时 | **不创建**（§5.4.5） | 仍创建 |
+| 持久化 | 一行 append-only 记录 | **不落盘**，仅存在于当前窗口 |
+| 未决判定 | 不存在 `in_reply_to` 指向它的后续行 | 最新 `user_message` 尚无终态回答 |
+| 过期 | 读时求值（不落库改状态） | 终态回答落地 / 卡片打开 / 出现更新的消息即消失 |
+| 可操作性 | 按钮 / 选项 / 输入（就地可答） | 无；终态行才带"查看执行"跳转（受权限约束） |
+| 无人类参与者时 | **不创建**（§5.4.5） | 同样显示（agent-agent 会话走同一条派生判据） |
 
-不可点时置灰而非隐藏——卡片对全体参与者可见，可点性由读权限决定（§8.2）。
+跳转不可用时置灰而非隐藏——带 `agent_session_id` 的行对全体参与者可见，可点性由读权限决定（§8.2）。
 
 ### 6.4 群聊特有交互
 
 - **@ 选择器**：只有 @ 到 Agent 才触发执行；@ 到人仅产生提及，不触发（§5.3.1）。
-- **多 Agent 并发**：同一消息 @ 多个 Agent 时，各自一条独立状态卡片，互不合并。
+- **多 Agent 并发**：同一消息 @ 多个 Agent 时，各自独立地跑一轮（chat 侧只有一条群级等待行，不逐个点名）。
 - **成员变更**：被移出群的成员，其视图中的历史群消息保留，但群 execution session 立即不可达（§8.3）。
 
 ### 6.5 移动端
 
-移动端（ADR-086）与桌面共用同一视图模型，差异仅在：状态卡片折叠为单行摘要、点击展开；决策卡片以底部弹层呈现，避免误触。
+移动端（ADR-086）与桌面共用同一视图模型与同一条派生判据，差异仅在：等待行与 Desktop 同构（同一条居中状态行 + 自己的 shimmer），终态仍带"查看执行"跳转；决策卡片以底部弹层呈现，避免误触。
 
 ### 6.6 会话内历史查询与消息定位（ADR-097）
 
@@ -1034,7 +1026,7 @@ ACP 可参考其 Agent 能力描述、发现和结构化消息；本设计不要
 - 解封 `SessionKind::UserAgent`：放开创建入口的参与者校验 + `ensure_pair` 的 kind 参数化，并补参与者身份类型校验（§10.14）；
 - 写回触发点改为"入站消息携带 `source_chat_session_id`"，与本轮角色无关（§5.5.1）；
 - `pairs.json` 保持"每 pair 单条会话"语义即为正确形态（v2.1：每个 (user, agent) 恰好一条），无需改造；其余 kind 会话经 `list_for` 枚举（§5.4.4）；
-- 落 `system_notice` 的 `notice_type` 分流与 `turn_started` 凭证行（§4.2 / §5.5.5）；
+- 落 `system_notice` 的 `notice_type` 分流（仅通道回执，§4.2.1）；
 - 建立单一后端写入口、每 Chat session 串行化、顺序键及 `message_id` 幂等；
 - 固化 Chat session 与现有 Agent execution session 的边界及关联引用。
 
@@ -1063,8 +1055,8 @@ ACP 可参考其 Agent 能力描述、发现和结构化消息；本设计不要
 - 三段式上下文编排（Block A / B / C）、窗口锚点与 cache 断点按设计 29 实施；
 - 删除 T3；T1 降级为 prompt 信号，仅降级路径保留硬触发；T2 保留在 router 选定目标之后；
 - 群聊 @Agent 经过该 agent 的 router，多话题可并行；PM task 会话绑定项目群聊并进入候选，终态清单排除；
-- 失败降级回旧 `routing_key` 路径，写 `router_fallback` 回执；决策日志 `chat-router-decisions.jsonl` 可审计；
-- 前端补 origin 标识与"正在分配…"前置态；显式新建不新增 composer 按钮，而是复用会话栏的 `+`（创建即绑定 chat，ADR-099 D9）。
+- 失败降级：chat 来源的人类消息**新建**执行会话（`chat_dispatch(Target::New)`，v2.5 / ADR-099 D8 修订），`PassThrough` 保持确定性复用；v2.4 起不再写 `router_fallback` 回执，但降级与正常派发同样落 `turn_routed` 反应行（ADR-100 D11）；决策日志 `chat-router-decisions.jsonl` 可审计；
+- 前端补 origin 标识与在途等待行（§5.5.5）；显式新建不新增 composer 按钮，而是复用会话栏的 `+`（创建即绑定 chat，ADR-099 D9）。
 
 ---
 
@@ -1115,12 +1107,12 @@ ACP 可参考其 Agent 能力描述、发现和结构化消息；本设计不要
 19. **Agent 重装换 instance id 后旧 Chat session 的孤儿处理**：`session_id` 是服务端 UUID 而非参与者推导，历史不会丢，但 participants 里的旧 id 需要重绑或标记。
 20. **群聊 execution session 的参与者级可见性如何建模**：判定依据是 routing key `chat:{chat_session_id}`（已存在于 `intent-sessions.json`）。v2.2 已选定落地方式：execution session 侧存 `chat_session_id`，`set_chat_binding` 同时置 `SessionVisibility::Members`（实现已存在），群聊与 PM task session 均走此路径；剩下的是读时如何反查参与者集合（或由 Gateway 注入会话作用域令牌），以及群成员被移出后对既往执行记录的访问如何回收。
 21. **卡片状态事件的订阅拓扑**：前端订阅的是 execution session 的 `SessionStateChanged` 频道，需确认远程拓扑（Gateway ↔ Node ↔ Runtime）下该频道对非 owner 用户是否可达、以及多卡片并发时的订阅成本。
-22. **`turn_started` 与 `agent_message` 的配对窗口**：崩溃时可能留下永不收尾的 `turn_started`。需定义读时的陈旧判定（超过 execution session 存活上限即渲染为中断），并确认它与 §5.7 的 `response_unavailable` 兜底不重复落行。
+22. ~~**`turn_started` 与 `agent_message` 的配对窗口**~~：**v2.4 已关闭**——中间状态不再落盘，不存在永不收尾的进度行；崩溃后聊天侧只会看到一条缺失的终态，由 §5.5.1 的兜底写回补上。
 23. **卡片置灰的展示文案**：不可点时向无权限参与者显示什么，既不能泄露 session 是否存在（hidden 404 的语义），又要让用户明白"这里有个执行过程但你不能看"。
 24. **Router 的模型与成本口径（v2.2）**：`AgentConfig.chat_router.model` → compact model → Agent 默认模型的解析优先级；router turn 是否计入 Agent 预算；离线部署无 compact model 时的降级选择（关闭 router 回旧路径 vs 用主模型）。
 25. **候选枚举的成本与一致性（v2.2）**：候选需合并 `SessionMetadataService::list_sessions` 与 `intent-sessions.json`，而当前 `list_for` 是目录扫描（§3.5 P2）；router 每条消息都要枚举一次，需补 per-chat 索引或短期缓存，否则会把 P2 缺陷放大成 P1。
 26. **决策日志的保留与隐私（v2.2）**：`chat-router-decisions.jsonl` 记录候选标题与决策理由，属 Agent-private 数据，只经 Runtime HTTP 读取；需定保留窗口、轮转与导出边界（不得把其他 chat 的标题写进日志）。
-27. **降级回执的语义（v2.2）**：`router_fallback` 对用户只说"已自动分配"，但排障需要知道回退原因（超时 / provider 错误 / 非法参数）；需定 WARN 日志字段与是否在 DevMode 下透出。
+27. ~~**降级回执的语义**~~：**v2.4 已关闭**——降级不再落 `router_fallback` 行，排障改看 `chat-router-decisions.jsonl` 与 WARN 日志（见开放问题 26）。
 
 ## 11. 与既有 ADR 的关系
 
@@ -1175,6 +1167,10 @@ v2.0 重排了章节。代码注释中对本设计的 `§` 引用需按此表更
 ## 13. 变更记录
 
 保留历史修订要点（原文照录；其中 § 引用为当时的旧编号，新旧对照见 §12）
+
+> v2.4 修订（轮次状态只在运行期，中间状态不再落盘，取代 v2.3 的指针行）：中间状态彻底不落盘。`turn_dispatched` / `turn_started` / `router_fallback` 均不再写入，旧行在 Desktop 两个表面与 Mobile 渲染期一律隐藏。发送到回复之间的空窗由**一条前端派生的居中等待行**覆盖（“{{agent}}正在处理…”，所有在途态共用一种文案 + 文字滚动闪烁），它的唯一判据是“最新一条 `user_message` 尚无终态回答”——不新增 MQTT 通道、不改会话列表 API。终态仍然落盘；**空正文的终态渲染为居中状态行**（aborted 中性，failed / timeout 红）并保留“查看执行”，不再画成 agent 气泡；绑定 chat 的执行会话其本地回合被 stop 时落一条幂等的 `aborted` 空行。取代 v2.3 的 ADR 决策集与 ADR-100 D9 末条。详见 ADR-100 Rev.2（D10）与 §2.3 / §3.4 决策 7、17、18、20 / §4.2.2 / §5.5.5 / §6.2 / §6.3 / §6.5。
+
+> v2.3 修订（chat 事件日志化，撤销 v2.1 的执行状态卡片）：删除叠在 durable 事件日志上的 live 状态镜像卡片（`ExecSessionStatusCard`）——它与事件日志两块真相永远对不齐（派发后到回复前的可见性空窗、stop 时卡片与仍在跑的 pending 新一轮打架）。chat 回归纯时间点事件日志：早期 pointer 改名 `turn_dispatched`（路由时点，幂等 id `td:{message_id}`）+ `turn_started`（开轮时点，id `ts:{message_id}`）两类并存，终态沿用 `agent_message`；“仍在执行”由新一轮自己的开始行表达，执行过程细节靠“查看执行”跳转进 execution 视图。`interaction_request` 仍为行内决策卡（`InlineInteractionCard`）。1:1、人类群聊 @、PM 任务派发三条链路本就同构（同一 pointer 写入），共用同一渲染器（`ChatNoticeEventRow` + `InlineInteractionCard`），数据侧零新增。两端删除驱动 live 卡片的读时投影。**已在 v2.4 被取代：两类 pointer 行不再写入。**详见新增 ADR（chat 事件日志化）与 §3.4 决策 16–20 / §4.2 / §4.2.2 / §5.5.5 / §6.2 / §6.3 / §6.5。
 
 > v2.2 修订（Chat Router）：每条人类消息（1:1、群聊 @Agent）先经过目标 Agent 的**无状态 Chat Router turn**，工具集只有 `dispatch`，产出回答 / 转交已有执行会话 / 新建；T3 配置冲突轮转删除，T1 降级为 prompt 信号（仅降级路径硬触发），T2 保留且在 router 选定目标后求值；群聊 @ 只决定 agent、不决定执行会话，多话题可并行；PM 派单保持确定性 `task:` 映射，但 task 会话绑定项目群聊并进入候选、终态排除；chat prompt 与 execute system prompt 分离（内置基座 + 可选 `prompts/chat.md` + 场景段）；新增 `dispatch` 不替代 `intent_send` / `chat_history_read` / `ask_user_question`，只按 turn 类型裁剪可见性。详见 ADR-099 与设计 29，逐项见 §2.2 / §3.4 决策 22–28 / §4.1 / §5.1 / §5.4.1 / §5.4.5 / §6.2 / §8.2。
 

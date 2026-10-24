@@ -118,6 +118,11 @@ impl AgentLoop {
                     work_dir,
                     session_id: session_id.clone(),
                     current_user_message: self.current_turn_user_message.clone(),
+                    chat_session_id: self
+                        .session
+                        .conversation
+                        .as_ref()
+                        .and_then(|c| c.chat_session_id()),
                 };
 
                 // ADR-045: per-tool cancel token. Created BEFORE `spawn`

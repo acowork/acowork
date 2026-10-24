@@ -1,7 +1,7 @@
 # ADR-099：Chat Session 的 LLM 语义路由（Chat Router）
 
 - **编号**：ADR-099
-- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下）
+- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下。2026-10-23 修订：D8 降级语义——chat 来源的人类消息降级时**新建**执行会话，见 D8）
 - **日期**：2026-10-21
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊）、设计 29（Chat Session 上下文编排）、ADR-060（Prompt Cache 友好的上下文块重排）、ADR-063（包级 Prompt 覆盖）、ADR-066（Provider Cache Tokens）、ADR-076（多用户账号体系）、ADR-085（Agent 生命周期状态机）、ADR-092（用户消息身份与有界读取）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
@@ -128,7 +128,7 @@ execute prompt（`prompts/system.md` + `constraints.md` + 其他 `prompts/*.md` 
 - T3 删除；
 - T1 仅用于降级路径，正常路径把「闲置时长」作为 prompt 信号；
 - T2 保留为执行侧物理轮转；
-- router 超时/报错/连续两次非法工具参数 → 回退 `route_intent_session`，写 `system_notice(router_fallback)`；回退发生在该 chat 的 drain task 上，消息不丢；
+- router 超时/报错/连续两次非法工具参数 → 降级；回退发生在该 chat 的 drain task 上，消息不丢。**降级的落点按来源分（2026-10-23 修订）**：chat 来源的人类消息不再回退到 `route_intent_session` 的映射复用，改走 `chat_dispatch(Target::New)` **新建**执行会话（绑定同一 chat、intent_map 重指向）——降级意味着 router 没有给出语义判断，而映射也不是语义判断：把一条可能开新话题的消息猜塞进不相关的历史会话，比新建更糟（实测事故：模型超时降级后新话题被塞进旧任务的执行会话，chat 界面无从察觉）。`PassThrough`（PM 任务 / agent-agent / response / kill switch 关闭态）的确定性复用不变——那些链路上 `conversation_id` / `msg:` 键**就是**任务身份，复用是有据的，不是猜测。反应行（ADR-100 D11 `turn_routed`）在两条路径下由同一 builder 写入，降级新建同样落一条"启动新任务"。
 - router 链路上的每个 Gateway HTTP 都有界：chat 历史读用 `chat_router.timeout_ms`（默认 8 s，clamp 1–60 s），写回 15 s，附件拉取 60 s。挂起的 Gateway 的代价是这一轮降级，而不是该 chat 的 drainer 被永久 park；
 - 候选清单的目录扫描在 `SessionManager` 锁外完成，锁内只做映射解析（一次全局锁不得覆盖磁盘 IO）；
 - `agent_config.json` 的 `chat_router.enabled=false` 是 kill switch：入站循环**不排队**，Chat 消息直接内联走确定性路由（执行位置与 ADR-098 相同）。它与 ADR-098 时点不是逐字节等效——T3 已按 D1 删除，所以关闭态下 `session_config` 是更新映射到的会话（下一轮生效）而不是强制新建；E2E 依赖的「内联立即投递」这一可观测行为保持现有断言。

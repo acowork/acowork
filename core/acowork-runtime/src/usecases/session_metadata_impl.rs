@@ -49,8 +49,12 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         scope: &SessionScope,
     ) -> Result<SessionsListResponse> {
         let conversations = self.work_dir.join("conversations");
-        let join =
-            conversation::scan_sessions_async(conversations, Some(page), Some(size), scope.clone());
+        let join = conversation::scan_sessions_async(
+            conversations.clone(),
+            Some(page),
+            Some(size),
+            scope.clone(),
+        );
         // ADR-066: scan_sessions_async returns a 4-tuple
         // (input, output, cache_read, cache_write) — feed all four into
         // the AgentTokenService merge so the in-process counters
@@ -76,7 +80,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         let page_sessions: Vec<SessionSummary> = sessions
             .into_iter()
             .map(|s| SessionSummary {
-                session_id: s.session_id,
+                session_id: s.session_id.clone(),
                 title: s.title,
                 created_at: s.created_at,
                 last_active_at: s.last_active_at,
@@ -86,6 +90,14 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
                 provider: s.provider,
                 visibility: s.visibility,
                 can_write: s.can_write,
+                // Design 27 §8.2 / ADR-100 D12: the Chat binding is not part
+                // of the scan projection, so it is a point read per row on
+                // this page only (the scan itself already touched every
+                // session). A row whose meta cannot be read simply reports no
+                // binding — the client then keeps the direct composer path.
+                chat_session_id: conversation::read_session_meta(&conversations, &s.session_id)
+                    .ok()
+                    .and_then(|m| m.chat_session_id),
             })
             .collect();
 

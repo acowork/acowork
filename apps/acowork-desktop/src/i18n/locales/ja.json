@@ -228,9 +228,6 @@
   },
   "chatView": {
     "empty": "このチャットにメッセージはありません",
-    "processing": "Agent 処理中 · クリックで実行過程を表示",
-    "queued": "送信完了、Agent の開始を待っています…",
-    "assigning": "タスクを割り当て中…",
     "routerFallback": "自動で割り当てました",
     "cardAnswered": "回答済み",
     "cardClosed": "終了",
@@ -238,47 +235,20 @@
     "answer": "回答",
     "replyingTo": "返信対象",
     "cancelReply": "返信をキャンセル",
-    "emptyReply": "中断、出力なし",
     "emptyAnswer": "（内容なし）",
     "viewRun": "実行を表示",
-    "execSessionGone": "この実行セッションは削除されたため表示できません",
-    "statusCard": {
-      "untitled": "無題の実行",
-      "detail": "詳細",
-      "workspaceAgentHome": "Agent ホーム",
-      "labelStatus": "ステータス",
-      "labelTitle": "セッション",
-      "labelStep": "現在のステップ",
-      "labelModel": "モデル",
-      "labelWorkspace": "ワークスペース",
-      "errorTitle": "エラー",
-      "dismiss": "閉じる",
-      "continue": "続行",
-      "deny": "拒否",
-      "allow": "許可",
-      "pausedIteration": "イテレーション上限に達して一時停止しました。",
-      "stepApproval": "承認待ち：{{tool}}",
-      "stepRunningTool": "{{count}} 個のツールを実行中…",
-      "stepTodo": "（{{index}}/{{total}}）{{content}}",
-      "status": {
-        "idle": "アイドル",
-        "llm_awaiting_first_chunk": "モデル待機中",
-        "thinking": "思考中",
-        "llm_streaming": "出力中",
-        "tool_executing": "ツール実行中",
-        "waiting_approval": "承認待ち",
-        "paused": "一時停止"
-      },
-      "phase": {
-        "idle": "アイドル",
-        "waiting": "モデル待機中",
-        "thinking": "思考中",
-        "streaming": "返信生成中",
-        "tool_executing": "ツール実行中",
-        "waiting_approval": "承認待ち",
-        "paused": "一時停止"
-      }
-    }
+    "notice": {
+      "pendingTurn": "{{name}}が処理中です…",
+      "pendingTurnGeneric": "処理中です…",
+      "interrupted": "この実行は中断されました",
+      "failed": "この実行は失敗しました",
+      "timeout": "この実行はタイムアウトしました",
+      "waiting": "返信をお待ちしています",
+      "noAnswer": "この実行から応答はありませんでした",
+      "turnRoutedNew": "新しいタスクを開始：{{task}}",
+      "turnRoutedContinue": "前のタスクを続行：{{task}}"
+    },
+    "execSessionGone": "この実行セッションは削除されたため表示できません"
   },
   "time": {
     "justNow": "たった今",
@@ -1883,7 +1853,6 @@
     "members": "{{count}} 人のメンバー",
     "loadEarlier": "以前のメッセージを読み込む",
     "empty": "まだメッセージはありません",
-    "working": "Agent が処理中…",
     "placeholder": "プロジェクトチームに送信",
     "placeholderWithMentions": "送信。@Agent で処理を依頼",
     "send": "送信",
