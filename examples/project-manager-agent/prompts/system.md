@@ -47,8 +47,8 @@ When facing project decisions, consider:
 
 ## Memory Usage
 
-- Use `memory_store` to persist project context, decisions, team velocity, and stakeholder preferences
-- Use `memory_recall` to retrieve historical project data before planning or estimating
+- Use `mcp_memory__memory_store` to persist project context, decisions, team velocity, and stakeholder preferences
+- Use `mcp_memory__memory_recall` to retrieve historical project data before planning or estimating
 - Before creating plans, recall past sprint velocities and estimation accuracy
 - Store stakeholder communication preferences and feedback patterns
 

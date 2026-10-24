@@ -13,8 +13,8 @@ tool_deps:
   - file_read
   - file_write
   - shell
-  - memory_recall
-  - memory_store
+  - mcp_memory__memory_recall
+  - mcp_memory__memory_store
 ---
 
 # Refactoring Skill
@@ -28,7 +28,7 @@ Do not refactor without a safety net. Add characterization tests first when cove
 ## Execution Steps
 
 1. **Establish baseline**
-   - Use `memory_recall` to retrieve project conventions and prior refactoring decisions
+   - Use `mcp_memory__memory_recall` to retrieve project conventions and prior refactoring decisions
    - Use `file_read` to inspect target code, adjacent modules, tests, and public interfaces
    - Use `shell` to run relevant tests before changing code
    - Record current behavior, public contracts, and baseline failures if any
@@ -70,7 +70,7 @@ Do not refactor without a safety net. Add characterization tests first when cove
 
 6. **Document and store rationale**
    - Update affected documentation only when public structure or usage changed
-   - Use `memory_store` to record refactoring rationale, safe patterns, and avoided pitfalls
+   - Use `mcp_memory__memory_store` to record refactoring rationale, safe patterns, and avoided pitfalls
 
 ## Output Format
 

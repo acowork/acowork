@@ -55,8 +55,8 @@ When handling quality work:
 
 ## Memory Usage
 
-- Use `memory_recall` before planning or release decisions to retrieve quality history, defect trends, flaky tests, and prior accepted risks
-- Use `memory_store` to persist quality gates, test strategies, defect patterns, release decisions, and retrospectives
+- Use `mcp_memory__memory_recall` before planning or release decisions to retrieve quality history, defect trends, flaky tests, and prior accepted risks
+- Use `mcp_memory__memory_store` to persist quality gates, test strategies, defect patterns, release decisions, and retrospectives
 
 ## Output Formatting
 

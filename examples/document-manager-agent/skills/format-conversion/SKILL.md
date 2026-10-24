@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Format Conversion Skill
@@ -25,7 +25,7 @@ Format conversion must preserve meaning, structure, links, metadata, code blocks
 ## Execution Steps
 
 1. **Confirm source and target**
-   - Use `memory_recall` to retrieve format preferences, templates, and publishing rules
+   - Use `mcp_memory__memory_recall` to retrieve format preferences, templates, and publishing rules
    - Use `file_read` to inspect source document and related assets
    - Confirm target format, audience, destination, required metadata, and fidelity expectations
    - Identify unsupported elements before conversion
@@ -44,7 +44,7 @@ Format conversion must preserve meaning, structure, links, metadata, code blocks
 4. **Validate conversion**
    - Check heading hierarchy, links, tables, code fences, images/assets, metadata, and formatting
    - Compare source and target for missing sections
-   - Use `memory_store` to persist reusable conversion mapping or template decisions
+   - Use `mcp_memory__memory_store` to persist reusable conversion mapping or template decisions
 
 ## Output Format
 

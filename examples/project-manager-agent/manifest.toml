@@ -23,29 +23,22 @@ type = "FilesystemWrite"
 [[permissions]]
 type = "Network"
 
-[[permissions]]
-type = "MemoryRead"
-
-[[permissions]]
-type = "MemoryWrite"
-
 # Tool opt-in declarations (ADR-029).
 # Project Manager focuses on requirements analysis, task decomposition,
 # progress tracking, risk assessment, and team coordination. Tools cover those
 # workflows:
 #   - file_*/doc_reader/glob_search/content_search → project docs, status reports
 #   - http_request/web_fetch                      → research tools/methodologies
-#   - memory_*                                     → project history & decisions
+#   - mcp_memory__* (hosted memory MCP, ADR-100)   → project history & decisions
 #   - intent_send                                  → coordinate team member agents
 #   - ask_user_question, todo_write                → clarify requirements & track tasks
 # No shell tools — PM does not hold a Shell permission.
 
-# --- Memory ---
-[[tools]]
-name = "memory_recall"
-
-[[tools]]
-name = "memory_store"
+# --- Memory (ADR-100) ---
+# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
+# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
+# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
+# (ADR-069).
 
 # --- Filesystem ---
 [[tools]]

@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Feature Acceptance Skill
@@ -25,7 +25,7 @@ Do not accept a feature by impression. Acceptance requires evidence against PRD,
 ## Execution Steps
 
 1. **Load acceptance basis**
-   - Use `memory_recall` to retrieve PRD decisions, Figma review findings, known risks, and accepted trade-offs
+   - Use `mcp_memory__memory_recall` to retrieve PRD decisions, Figma review findings, known risks, and accepted trade-offs
    - Use `file_read` to inspect PRD, acceptance criteria, design specs, test reports, release notes, and known issues
    - Identify in-scope requirements and non-goals
 
@@ -45,7 +45,7 @@ Do not accept a feature by impression. Acceptance requires evidence against PRD,
    - Accept, Accept with follow-ups, Conditional Accept, or Reject
    - For conditional acceptance, define exact conditions, owner, and deadline
    - Use `file_write` to save acceptance report when requested
-   - Use `memory_store` to persist acceptance decision, gaps, follow-ups, and rationale
+   - Use `mcp_memory__memory_store` to persist acceptance decision, gaps, follow-ups, and rationale
 
 ## Output Format
 

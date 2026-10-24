@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Quality Strategy Skill
@@ -25,7 +25,7 @@ Quality strategy must be risk-based and evidence-driven. Do not define generic q
 ## Execution Steps
 
 1. **Load context**
-   - Use `memory_recall` to retrieve prior quality gates, defect trends, release history, flaky tests, and accepted risks
+   - Use `mcp_memory__memory_recall` to retrieve prior quality gates, defect trends, release history, flaky tests, and accepted risks
    - Use `file_read` to inspect PRD, architecture docs, roadmap, release plan, support issues, test reports, and incident history
    - Identify product area, release target, users, stakeholders, compliance needs, and operational constraints
 
@@ -51,7 +51,7 @@ Quality strategy must be risk-based and evidence-driven. Do not define generic q
 
 6. **Create improvement loop**
    - Define how quality retrospectives capture root causes and prevention actions
-   - Use `memory_store` to persist quality strategy, metrics, gates, and known risks
+   - Use `mcp_memory__memory_store` to persist quality strategy, metrics, gates, and known risks
    - Use `file_write` to save the strategy when requested
 
 ## Output Format

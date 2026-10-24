@@ -13,7 +13,7 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_recall
+  - mcp_memory__memory_recall
 ---
 
 # Documentation Skill
@@ -22,7 +22,7 @@ tool_deps:
 
 1. **Understand what needs documentation**
    - Use `file_read` to examine the code or system that needs documentation
-   - Use `memory_recall` to retrieve any prior documentation decisions, style guides, or templates
+   - Use `mcp_memory__memory_recall` to retrieve any prior documentation decisions, style guides, or templates
    - Determine the documentation type:
      - **API Reference**: Auto-generated from code annotations (rustdoc, JSDoc, docstrings)
      - **Architecture Decision Record (ADR)**: Why a particular technical choice was made
@@ -107,4 +107,4 @@ For ADRs specifically:
 - Code examples > prose explanations — show, don't tell
 - When documenting APIs, include: parameters, return values, error conditions, and at least one example
 - Keep documentation close to the code it describes — colocated docs stay up to date
-- Use `memory_store` to save documentation patterns and style decisions for consistency
+- Use `mcp_memory__memory_store` to save documentation patterns and style decisions for consistency

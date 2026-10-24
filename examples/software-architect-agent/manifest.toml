@@ -26,12 +26,6 @@ type = "Network"
 [[permissions]]
 type = "Shell"
 
-[[permissions]]
-type = "MemoryRead"
-
-[[permissions]]
-type = "MemoryWrite"
-
 # Tool opt-in declarations (ADR-029).
 # Software Architect investigates systems, reviews designs, and plans technical
 # work — the broadest tool set among user agents, mirroring the senior engineer's
@@ -40,18 +34,17 @@ type = "MemoryWrite"
 #   - bash/powershell/shell                       → investigate infra, run analysis tools
 #   - http_request/web_fetch                     → research patterns & best practices
 #   - codebase                                    → LSP-based code intelligence for review
-#   - memory_*                                    → architecture decisions and trade-offs
+#   - mcp_memory__* (hosted memory MCP, ADR-100)   → architecture decisions and trade-offs
 #   - intent_send                                 → coordinate with dev and review agents
 #   - ask_user_question, todo_write               → clarify requirements & track planning
 # Shell tools are declared for all three names (platform-detected) so an
 # architect always has shell access on every platform.
 
-# --- Memory ---
-[[tools]]
-name = "memory_recall"
-
-[[tools]]
-name = "memory_store"
+# --- Memory (ADR-100) ---
+# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
+# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
+# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
+# (ADR-069).
 
 # --- Filesystem ---
 [[tools]]

@@ -13,8 +13,8 @@ tool_deps:
   - file_read
   - file_write
   - shell
-  - memory_recall
-  - memory_store
+  - mcp_memory__memory_recall
+  - mcp_memory__memory_store
 ---
 
 # Debugging Skill
@@ -28,7 +28,7 @@ If you cannot explain why the bug happens, do not change production code except 
 ## Execution Steps
 
 1. **Reproduce and capture facts**
-   - Use `memory_recall` to check whether a similar issue, convention, or known failure mode exists
+   - Use `mcp_memory__memory_recall` to check whether a similar issue, convention, or known failure mode exists
    - Use `file_read` to inspect relevant source, tests, configuration, and docs
    - Use `shell` to run the exact failing command or scenario
    - Record environment, inputs, expected behavior, actual behavior, logs, stack traces, and frequency
@@ -76,7 +76,7 @@ If you cannot explain why the bug happens, do not change production code except 
    - Use `shell` to run the regression test and confirm it passes
    - Run relevant existing tests, lint, and type checks
    - Re-run the original reproduction steps
-   - Use `memory_store` to persist non-obvious root causes, project-specific failure modes, and debugging insights
+   - Use `mcp_memory__memory_store` to persist non-obvious root causes, project-specific failure modes, and debugging insights
 
 ## Output Format
 

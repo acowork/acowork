@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Requirements Analysis Skill
@@ -27,7 +27,7 @@ If a requirement is ambiguous, ask one focused question before turning it into s
 ## Execution Steps
 
 1. **Collect context and sources**
-   - Use `memory_recall` to retrieve project context, stakeholder preferences, prior requirements, decisions, and constraints
+   - Use `mcp_memory__memory_recall` to retrieve project context, stakeholder preferences, prior requirements, decisions, and constraints
    - Use `file_read` to inspect docs, meeting notes, backlog items, roadmap, support issues, and customer feedback
    - Identify sources: users, business stakeholders, engineering, operations, compliance, support, market, and dependencies
    - Separate facts, assumptions, opinions, and open questions
@@ -60,7 +60,7 @@ If a requirement is ambiguous, ask one focused question before turning it into s
    - Use `file_write` to save the PRD when requested
    - Include owners, decision-makers, sign-off status, and unresolved questions
    - Present the PRD for stakeholder review before task decomposition or sprint commitment
-   - Use `memory_store` to persist requirement decisions, changes, rationale, and PRD location
+   - Use `mcp_memory__memory_store` to persist requirement decisions, changes, rationale, and PRD location
 
 7. **Self-review before handoff**
    - Check that every Must Have has acceptance criteria

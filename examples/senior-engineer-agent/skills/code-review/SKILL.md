@@ -10,8 +10,8 @@ triggers:
   - PR review
 tool_deps:
   - file_read
-  - memory_recall
-  - memory_store
+  - mcp_memory__memory_recall
+  - mcp_memory__memory_store
 ---
 
 # Code Review Skill
@@ -25,7 +25,7 @@ Critical and Important issues must be resolved before proceeding unless the user
 ## Execution Steps
 
 1. **Understand scope and intent**
-   - Use `memory_recall` to retrieve project-specific coding standards, architectural boundaries, and prior review feedback
+   - Use `mcp_memory__memory_recall` to retrieve project-specific coding standards, architectural boundaries, and prior review feedback
    - Use `file_read` to inspect changed files, surrounding context, tests, docs, and relevant interfaces
    - Identify change type: bug fix, feature, refactor, config, dependency, docs, or generated artifact
    - Identify claimed behavior and acceptance criteria from the request, commit message, or PR description
@@ -71,7 +71,7 @@ Critical and Important issues must be resolved before proceeding unless the user
      - **Question**: ambiguity requiring clarification
    - Provide concrete recommendations with file and line references when possible
    - Acknowledge good decisions worth preserving
-   - Use `memory_store` for recurring project review findings and conventions
+   - Use `mcp_memory__memory_store` for recurring project review findings and conventions
 
 ## Output Format
 

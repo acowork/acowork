@@ -13,8 +13,8 @@ tool_deps:
   - file_read
   - file_write
   - network
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Document Collection Skill
@@ -26,7 +26,7 @@ Do not mix source material with interpretation. Every collected item needs prove
 ## Execution Steps
 
 1. **Define collection scope**
-   - Use `memory_recall` to retrieve existing document inventories, canonical sources, taxonomy, and archive rules
+   - Use `mcp_memory__memory_recall` to retrieve existing document inventories, canonical sources, taxonomy, and archive rules
    - Clarify purpose, audience, topic boundary, output format, source types, time range, and freshness needs
    - Ask one focused question when scope is ambiguous
 
@@ -44,7 +44,7 @@ Do not mix source material with interpretation. Every collected item needs prove
 4. **Create inventory**
    - Use `file_write` to save inventory when requested
    - Include provenance and open questions
-   - Use `memory_store` to persist inventory location, canonical-source candidates, and collection rules
+   - Use `mcp_memory__memory_store` to persist inventory location, canonical-source candidates, and collection rules
 
 ## Output Format
 

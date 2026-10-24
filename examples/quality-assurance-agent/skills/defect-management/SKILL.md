@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Defect Management Skill
@@ -25,7 +25,7 @@ Do not accept or close a defect without evidence. A defect needs reproduction, i
 ## Execution Steps
 
 1. **Collect defect evidence**
-   - Use `memory_recall` to retrieve similar defects, known issues, release risks, and prior root causes
+   - Use `mcp_memory__memory_recall` to retrieve similar defects, known issues, release risks, and prior root causes
    - Use `file_read` to inspect bug reports, logs, screenshots, test results, requirements, and related code or docs when available
    - Capture environment, build/version, steps to reproduce, expected behavior, actual behavior, frequency, and impact
    - If reproduction is missing, request it before prioritization unless impact requires immediate escalation
@@ -52,7 +52,7 @@ Do not accept or close a defect without evidence. A defect needs reproduction, i
    - Group defects by component, severity, root cause, phase introduced, phase detected, and escape reason
    - Identify prevention actions: requirement clarification, test coverage, automation, code review checklist, monitoring
    - Use `file_write` to save triage report when requested
-   - Use `memory_store` to persist defect trends and prevention actions
+   - Use `mcp_memory__memory_store` to persist defect trends and prevention actions
 
 ## Output Format
 

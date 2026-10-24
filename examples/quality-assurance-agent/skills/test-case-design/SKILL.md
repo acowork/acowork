@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Test Case Design Skill
@@ -25,7 +25,7 @@ Test cases must prove behavior and risk coverage, not implementation details. Ev
 ## Execution Steps
 
 1. **Load requirements and context**
-   - Use `memory_recall` to retrieve known edge cases, defect patterns, test conventions, and flaky areas
+   - Use `mcp_memory__memory_recall` to retrieve known edge cases, defect patterns, test conventions, and flaky areas
    - Use `file_read` to inspect PRD, acceptance criteria, design docs, test plan, existing tests, and defect history
    - Identify target behavior, user roles, inputs, outputs, state changes, and error conditions
 
@@ -47,7 +47,7 @@ Test cases must prove behavior and risk coverage, not implementation details. Ev
 
 5. **Save and persist**
    - Use `file_write` to save test cases when requested
-   - Use `memory_store` to persist reusable edge cases, scenario patterns, and automation decisions
+   - Use `mcp_memory__memory_store` to persist reusable edge cases, scenario patterns, and automation decisions
 
 ## Output Format
 

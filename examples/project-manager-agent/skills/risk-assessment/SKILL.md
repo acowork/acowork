@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Risk Assessment Skill
@@ -27,7 +27,7 @@ Every High or Medium risk needs an owner, trigger, mitigation, contingency, resi
 ## Execution Steps
 
 1. **Load context and history**
-   - Use `memory_recall` to retrieve historical risks, incidents, estimate misses, dependency failures, and mitigation patterns
+   - Use `mcp_memory__memory_recall` to retrieve historical risks, incidents, estimate misses, dependency failures, and mitigation patterns
    - Use `file_read` to inspect PRD, sprint plan, task breakdown, architecture/design docs, dependency lists, and status reports
    - Identify assumptions that, if false, would threaten scope, schedule, quality, cost, or trust
 
@@ -65,7 +65,7 @@ Every High or Medium risk needs an owner, trigger, mitigation, contingency, resi
 
 7. **Save and persist**
    - Use `file_write` to save the risk register when requested
-   - Use `memory_store` to persist risk patterns, realized risks, mitigation outcomes, and estimation learnings
+   - Use `mcp_memory__memory_store` to persist risk patterns, realized risks, mitigation outcomes, and estimation learnings
 
 ## Output Format
 

@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # PRD Writing Skill
@@ -27,7 +27,7 @@ Do not write vague requirements that cannot be accepted or rejected.
 ## Execution Steps
 
 1. **Load context**
-   - Use `memory_recall` to retrieve product decisions, research insights, roadmap constraints, Figma review findings, and stakeholder preferences
+   - Use `mcp_memory__memory_recall` to retrieve product decisions, research insights, roadmap constraints, Figma review findings, and stakeholder preferences
    - Use `file_read` to inspect strategy, research, roadmap, existing PRDs, Figma exports/specs, support feedback, and technical constraints
    - Separate facts, assumptions, decisions, and open questions
 
@@ -50,7 +50,7 @@ Do not write vague requirements that cannot be accepted or rejected.
 5. **Self-review and persist**
    - Check for placeholders, contradictions, vague words, missing acceptance criteria, missing metrics, and missing non-goals
    - Use `file_write` to save the PRD when requested
-   - Use `memory_store` to persist PRD location, decisions, requirements, and open questions
+   - Use `mcp_memory__memory_store` to persist PRD location, decisions, requirements, and open questions
 
 ## Output Format
 

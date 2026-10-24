@@ -13,8 +13,8 @@ tool_deps:
   - file_read
   - file_write
   - network
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Figma Design Review Skill
@@ -28,7 +28,7 @@ If direct Figma access is unavailable, ask for screenshots, exported frames, pro
 ## Execution Steps
 
 1. **Load product and design context**
-   - Use `memory_recall` to retrieve PRD decisions, user segments, Figma review findings, design standards, and launch constraints
+   - Use `mcp_memory__memory_recall` to retrieve PRD decisions, user segments, Figma review findings, design standards, and launch constraints
    - Use `file_read` to inspect PRD, acceptance criteria, user flow, prior design notes, screenshots, or exported Figma specs
    - Use `network` only when a Figma or design reference is available and access is allowed
    - Identify design source: Figma file, prototype, screenshot, exported frames, or written spec
@@ -51,7 +51,7 @@ If direct Figma access is unavailable, ask for screenshots, exported frames, pro
 5. **Provide findings and recommendation**
    - Classify findings as Blocker, Important, Minor, or Question
    - Use `file_write` to save review when requested
-   - Use `memory_store` to persist design decisions, gaps, and accepted trade-offs
+   - Use `mcp_memory__memory_store` to persist design decisions, gaps, and accepted trade-offs
 
 ## Output Format
 

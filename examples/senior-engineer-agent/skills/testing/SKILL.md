@@ -14,8 +14,8 @@ tool_deps:
   - file_read
   - file_write
   - shell
-  - memory_recall
-  - memory_store
+  - mcp_memory__memory_recall
+  - mcp_memory__memory_store
 ---
 
 # Testing Skill
@@ -29,7 +29,7 @@ If you did not see the test fail for the expected reason, you have not proven th
 ## Execution Steps
 
 1. **Analyze the target and conventions**
-   - Use `memory_recall` to retrieve project-specific testing conventions and known edge cases
+   - Use `mcp_memory__memory_recall` to retrieve project-specific testing conventions and known edge cases
    - Use `file_read` to inspect the code under test, existing tests, fixtures, and test commands
    - Identify the public contract: inputs, outputs, side effects, error conditions, and invariants
    - Find similar tests in the codebase and follow their style
@@ -68,7 +68,7 @@ If you did not see the test fail for the expected reason, you have not proven th
    - Check output for warnings, flakes, panics, and nondeterminism
 
 7. **Record useful findings**
-   - Use `memory_store` for recurring edge cases, testing patterns, flaky-test causes, and project-specific test commands
+   - Use `mcp_memory__memory_store` for recurring edge cases, testing patterns, flaky-test causes, and project-specific test commands
 
 ## Output Format
 

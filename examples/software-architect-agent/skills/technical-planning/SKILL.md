@@ -13,8 +13,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Technical Planning Skill
@@ -22,7 +22,7 @@ tool_deps:
 ## Execution Steps
 
 1. **Read the approved design**
-   - Use `memory_recall` to retrieve relevant decisions and conventions
+   - Use `mcp_memory__memory_recall` to retrieve relevant decisions and conventions
    - Use `file_read` to inspect the design/spec, existing file structure, tests, and implementation patterns
    - Confirm scope, non-goals, constraints, and acceptance criteria
 
@@ -52,7 +52,7 @@ tool_deps:
    - Remove placeholders such as TBD, TODO, or "handle edge cases"
    - Check type, interface, and file-name consistency across tasks
    - Use `file_write` to save the plan when requested
-   - Use `memory_store` to persist key decisions and implementation constraints
+   - Use `mcp_memory__memory_store` to persist key decisions and implementation constraints
 
 ## Output Format
 

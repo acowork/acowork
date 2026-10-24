@@ -26,12 +26,6 @@ type = "Network"
 [[permissions]]
 type = "Shell"
 
-[[permissions]]
-type = "MemoryRead"
-
-[[permissions]]
-type = "MemoryWrite"
-
 # Built-in tool opt-in declarations (ADR-029)
 # Each [[tools]] entry seeds `agent_tools.json` with `enabled = true` on first start.
 # Tools NOT listed here are registered in code but kept disabled (opt-in model).
@@ -43,12 +37,11 @@ type = "MemoryWrite"
 #                   access on every platform — `init_tools_config_from_manifest`
 #                   silently drops names that the runtime hasn't registered.
 
-# --- Memory ---
-[[tools]]
-name = "memory_recall"
-
-[[tools]]
-name = "memory_store"
+# --- Memory (ADR-100) ---
+# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
+# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
+# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
+# (ADR-069).
 
 # --- Filesystem ---
 [[tools]]

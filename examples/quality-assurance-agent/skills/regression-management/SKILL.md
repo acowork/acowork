@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Regression Management Skill
@@ -27,7 +27,7 @@ Prioritize tests that protect critical user journeys, high-change areas, high-de
 ## Execution Steps
 
 1. **Load regression context**
-   - Use `memory_recall` to retrieve defect history, flaky tests, release escapes, critical paths, and prior regression scope
+   - Use `mcp_memory__memory_recall` to retrieve defect history, flaky tests, release escapes, critical paths, and prior regression scope
    - Use `file_read` to inspect test plan, test reports, automation suite, changelog, PR list, release scope, and known issues
    - Identify changed areas and impacted user journeys
 
@@ -54,7 +54,7 @@ Prioritize tests that protect critical user journeys, high-change areas, high-de
    - Specify owners, environments, data needs, commands/tools, and reporting format
    - Define pass/fail criteria and escalation for failures
    - Use `file_write` to save the regression plan when requested
-   - Use `memory_store` to persist suite changes, flaky tests, retired tests, and regression learnings
+   - Use `mcp_memory__memory_store` to persist suite changes, flaky tests, retired tests, and regression learnings
 
 ## Output Format
 

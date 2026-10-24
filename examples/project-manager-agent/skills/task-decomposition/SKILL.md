@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Task Decomposition Skill
@@ -27,7 +27,7 @@ Each task must be small enough to complete, review, and verify independently.
 ## Execution Steps
 
 1. **Confirm source of truth**
-   - Use `memory_recall` to retrieve PRD, prior breakdowns, decisions, velocity, estimation accuracy, and constraints
+   - Use `mcp_memory__memory_recall` to retrieve PRD, prior breakdowns, decisions, velocity, estimation accuracy, and constraints
    - Use `file_read` to inspect requirements, architecture/design docs, backlog, and existing plans
    - Confirm goal, in-scope items, non-goals, acceptance criteria, and required delivery date
    - If the source has unresolved scope questions, stop and ask before decomposing
@@ -46,7 +46,7 @@ Each task must be small enough to complete, review, and verify independently.
    - Avoid vague tasks like "handle edge cases" or "finish integration"
 
 4. **Estimate with uncertainty**
-   - Use historical velocity from `memory_recall` when available
+   - Use historical velocity from `mcp_memory__memory_recall` when available
    - Use three-point estimation for uncertain work: Optimistic, Most Likely, Pessimistic
    - Calculate expected effort with PERT: `(O + 4M + P) / 6`
    - Apply utilization factor for meetings, review, support, and context switching
@@ -63,7 +63,7 @@ Each task must be small enough to complete, review, and verify independently.
    - Check every task has owner role, estimate, dependency, priority, and Done criteria
    - Check no task hides multiple unrelated concerns
    - Use `file_write` to save the breakdown when requested
-   - Use `memory_store` to persist task structure, estimates, assumptions, and dependency decisions
+   - Use `mcp_memory__memory_store` to persist task structure, estimates, assumptions, and dependency decisions
 
 ## Output Format
 

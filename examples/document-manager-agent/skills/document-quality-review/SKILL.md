@@ -11,8 +11,8 @@ triggers:
   - proofreading
 tool_deps:
   - file_read
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Document Quality Review Skill
@@ -26,7 +26,7 @@ Review against purpose, audience, source accuracy, structure, and maintainabilit
 ## Execution Steps
 
 1. **Load review context**
-   - Use `memory_recall` to retrieve style guide, templates, taxonomy, canonical sources, and prior review findings
+   - Use `mcp_memory__memory_recall` to retrieve style guide, templates, taxonomy, canonical sources, and prior review findings
    - Use `file_read` to inspect target document and related canonical references
    - Identify audience, purpose, owner, lifecycle status, and publication target
 
@@ -47,7 +47,7 @@ Review against purpose, audience, source accuracy, structure, and maintainabilit
 
 5. **Report findings**
    - Classify findings as Blocker, Important, Minor, or Question
-   - Use `memory_store` for recurring documentation quality issues and style decisions
+   - Use `mcp_memory__memory_store` for recurring documentation quality issues and style decisions
 
 ## Output Format
 

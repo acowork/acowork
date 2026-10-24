@@ -19,8 +19,8 @@ triggers:
 tool_deps:
   - http_request
   - file_write
-  - memory_recall
-  - memory_store
+  - mcp_memory__memory_recall
+  - mcp_memory__memory_store
 ---
 
 # agnes-image Skill
@@ -65,7 +65,7 @@ Never hardcode the API key in saved files, logs, or memory entries.
 - Confirm the output format: hosted URL (default) or Base64
 - Confirm the size bucket the user wants (e.g. `1024x1024`, `1024x768`, `768x1024`)
 - For I2I, multi-image, or editing, collect every input image as either a public URL or a `data:image/...;base64,...` Data URI
-- Use `memory_recall` to check whether the user has stored preferred defaults (size, output format, style tags) before asking
+- Use `mcp_memory__memory_recall` to check whether the user has stored preferred defaults (size, output format, style tags) before asking
 
 ### Step 2: Build the prompt
 
@@ -141,7 +141,7 @@ Always show the resolved prompt, the request size, the output mode, and the resu
 
 ### Step 6: Persist learning (optional)
 
-Use `memory_store` to record only durable user preferences, such as:
+Use `mcp_memory__memory_store` to record only durable user preferences, such as:
 
 - Default size (e.g. `1024x1024`)
 - Default output format (URL vs Base64)

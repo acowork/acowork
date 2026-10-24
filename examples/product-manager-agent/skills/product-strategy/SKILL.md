@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Product Strategy Skill
@@ -25,7 +25,7 @@ Product strategy must connect user value, business outcome, differentiation, and
 ## Execution Steps
 
 1. **Load context**
-   - Use `memory_recall` to retrieve prior product decisions, user segments, metrics, roadmap constraints, and stakeholder preferences
+   - Use `mcp_memory__memory_recall` to retrieve prior product decisions, user segments, metrics, roadmap constraints, and stakeholder preferences
    - Use `file_read` to inspect product docs, research, analytics exports, roadmap, PRDs, support feedback, and competitive notes
    - Separate facts, assumptions, open questions, and decisions already made
 
@@ -46,7 +46,7 @@ Product strategy must connect user value, business outcome, differentiation, and
 
 5. **Persist and hand off**
    - Use `file_write` to save strategy when requested
-   - Use `memory_store` to persist strategic choices, rejected alternatives, metrics, and assumptions
+   - Use `mcp_memory__memory_store` to persist strategic choices, rejected alternatives, metrics, and assumptions
 
 ## Output Format
 

@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # User Research Skill
@@ -25,7 +25,7 @@ Research output must distinguish evidence from interpretation. Do not treat one 
 ## Execution Steps
 
 1. **Define research objective**
-   - Use `memory_recall` to retrieve prior research, personas, segments, product decisions, and open assumptions
+   - Use `mcp_memory__memory_recall` to retrieve prior research, personas, segments, product decisions, and open assumptions
    - Use `file_read` to inspect PRDs, analytics, support tickets, feedback, interview notes, and roadmap questions
    - Define research question, target segment, decision to inform, and confidence needed
 
@@ -47,7 +47,7 @@ Research output must distinguish evidence from interpretation. Do not treat one 
 
 5. **Persist learnings**
    - Use `file_write` to save research summary when requested
-   - Use `memory_store` to persist insights, personas, journey pain points, and product recommendations
+   - Use `mcp_memory__memory_store` to persist insights, personas, journey pain points, and product recommendations
 
 ## Output Format
 

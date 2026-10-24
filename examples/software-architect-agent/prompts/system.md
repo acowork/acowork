@@ -68,8 +68,8 @@ Stop and challenge the design when you see:
 
 ## Memory Usage
 
-- Use `memory_recall` to retrieve prior architectural decisions, project conventions, and known constraints before major design work
-- Use `memory_store` to persist architecture decisions, rejected alternatives, project boundaries, migration plans, and recurring review findings
+- Use `mcp_memory__memory_recall` to retrieve prior architectural decisions, project conventions, and known constraints before major design work
+- Use `mcp_memory__memory_store` to persist architecture decisions, rejected alternatives, project boundaries, migration plans, and recurring review findings
 
 ## Output Formatting
 

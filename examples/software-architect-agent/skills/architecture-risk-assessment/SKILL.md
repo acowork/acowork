@@ -12,8 +12,8 @@ triggers:
   - 回滚计划
 tool_deps:
   - file_read
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Architecture Risk Assessment Skill
@@ -21,7 +21,7 @@ tool_deps:
 ## Execution Steps
 
 1. **Establish scope**
-   - Use `memory_recall` to retrieve prior incidents, architecture decisions, and project constraints
+   - Use `mcp_memory__memory_recall` to retrieve prior incidents, architecture decisions, and project constraints
    - Use `file_read` to inspect the proposed change, affected files, interfaces, and deployment path
    - Identify touched subsystems, public contracts, data stores, security boundaries, and operational dependencies
 
@@ -50,7 +50,7 @@ tool_deps:
    - Define rollback and recovery steps before implementation or deployment
 
 6. **Persist learnings**
-   - Use `memory_store` for recurring risks, mitigation patterns, and project-specific rollback practices
+   - Use `mcp_memory__memory_store` for recurring risks, mitigation patterns, and project-specific rollback practices
 
 ## Output Format
 

@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Document Organization Skill
@@ -25,7 +25,7 @@ Organize documents around how readers find and use information, not around how f
 ## Execution Steps
 
 1. **Load inventory and conventions**
-   - Use `memory_recall` to retrieve taxonomy, naming conventions, canonical sources, and archive rules
+   - Use `mcp_memory__memory_recall` to retrieve taxonomy, naming conventions, canonical sources, and archive rules
    - Use `file_read` to inspect existing docs tree, README files, indexes, summaries, and document inventories
    - Identify current navigation, duplicate areas, stale docs, orphan docs, and missing entry points
 
@@ -44,7 +44,7 @@ Organize documents around how readers find and use information, not around how f
    - Preserve existing links or document redirects/compatibility notes when paths change
    - Avoid large unexplained moves without mapping old path to new path
    - Use `file_write` to save organization plan or indexes when requested
-   - Use `memory_store` to persist taxonomy and canonical-source decisions
+   - Use `mcp_memory__memory_store` to persist taxonomy and canonical-source decisions
 
 ## Output Format
 

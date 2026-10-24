@@ -13,8 +13,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Architecture Strategy Skill
@@ -22,7 +22,7 @@ tool_deps:
 ## Execution Steps
 
 1. **Explore context**
-   - Use `memory_recall` to retrieve prior architecture decisions and project constraints
+   - Use `mcp_memory__memory_recall` to retrieve prior architecture decisions and project constraints
    - Use `file_read` to inspect existing structure, docs, interfaces, and conventions
    - Identify current system shape, integration points, operational constraints, and known pain points
    - Separate facts from assumptions
@@ -52,7 +52,7 @@ tool_deps:
 
 6. **Persist decisions**
    - Use `file_write` to save the architecture strategy when requested
-   - Use `memory_store` to persist decisions, rejected alternatives, assumptions, and follow-up questions
+   - Use `mcp_memory__memory_store` to persist decisions, rejected alternatives, assumptions, and follow-up questions
 
 ## Output Format
 

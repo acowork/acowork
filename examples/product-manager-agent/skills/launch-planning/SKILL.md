@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Launch Planning Skill
@@ -25,7 +25,7 @@ A launch is not complete when code ships. It is complete when target users can d
 ## Execution Steps
 
 1. **Load launch context**
-   - Use `memory_recall` to retrieve product strategy, prior launches, stakeholder preferences, known risks, and metric baselines
+   - Use `mcp_memory__memory_recall` to retrieve product strategy, prior launches, stakeholder preferences, known risks, and metric baselines
    - Use `file_read` to inspect PRD, roadmap, acceptance report, release readiness, support docs, analytics plan, and communication drafts
    - Confirm target users, launch scope, release date, channels, and decision owner
 
@@ -48,7 +48,7 @@ A launch is not complete when code ships. It is complete when target users can d
    - Define analytics events, dashboards, feedback channels, experiment design, and decision thresholds
    - Define post-launch actions: iterate, scale, pause, rollback, or retire
    - Use `file_write` to save launch plan when requested
-   - Use `memory_store` to persist launch plan, decisions, metric baselines, and post-launch learnings
+   - Use `mcp_memory__memory_store` to persist launch plan, decisions, metric baselines, and post-launch learnings
 
 ## Output Format
 

@@ -12,8 +12,8 @@ triggers:
   - 设计评审
 tool_deps:
   - file_read
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # System Design Review Skill
@@ -21,7 +21,7 @@ tool_deps:
 ## Execution Steps
 
 1. **Load context**
-   - Use `memory_recall` to retrieve prior decisions, conventions, and known constraints
+   - Use `mcp_memory__memory_recall` to retrieve prior decisions, conventions, and known constraints
    - Use `file_read` to inspect the proposed design, relevant source files, and existing architecture docs
    - Identify stated goals, non-goals, constraints, and affected subsystems
 
@@ -54,7 +54,7 @@ tool_deps:
    - Provide actionable alternatives, not just criticism
 
 7. **Persist review insights**
-   - Use `memory_store` for recurring architectural risks, project conventions, and important decisions
+   - Use `mcp_memory__memory_store` for recurring architectural risks, project conventions, and important decisions
 
 ## Output Format
 

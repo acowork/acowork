@@ -23,12 +23,6 @@ type = "FilesystemWrite"
 [[permissions]]
 type = "Network"
 
-[[permissions]]
-type = "MemoryRead"
-
-[[permissions]]
-type = "MemoryWrite"
-
 # Tool opt-in declarations (ADR-029).
 # QA Manager focuses on quality strategy, test planning, test case design,
 # defect management, release acceptance, and regression management. This is a
@@ -36,17 +30,16 @@ type = "MemoryWrite"
 # and review, not running test commands:
 #   - file_*/doc_reader/glob_search/content_search → test plans, cases, defect reports
 #   - http_request/web_fetch                      → research test tools & practices
-#   - memory_*                                     → quality history & known issues
+#   - mcp_memory__* (hosted memory MCP, ADR-100)   → quality history & known issues
 #   - intent_send                                  → coordinate with dev/PM agents
 #   - ask_user_question, todo_write                → clarify acceptance & track plans
 # No shell tools — this QA role is management-focused, not test execution.
 
-# --- Memory ---
-[[tools]]
-name = "memory_recall"
-
-[[tools]]
-name = "memory_store"
+# --- Memory (ADR-100) ---
+# `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
+# here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
+# `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
+# (ADR-069).
 
 # --- Filesystem ---
 [[tools]]

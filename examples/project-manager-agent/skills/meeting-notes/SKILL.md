@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Meeting Notes Skill
@@ -27,7 +27,7 @@ Every decision needs rationale. Every action item needs one owner, due date, and
 ## Execution Steps
 
 1. **Prepare context**
-   - Use `memory_recall` to retrieve project context, prior decisions, open action items, stakeholder preferences, and unresolved questions
+   - Use `mcp_memory__memory_recall` to retrieve project context, prior decisions, open action items, stakeholder preferences, and unresolved questions
    - Use `file_read` to inspect agenda, prior notes, status report, risk register, or relevant project docs
    - Document meeting purpose, desired outcomes, attendees, decision-makers, and absent stakeholders
    - Bring forward unresolved action items from prior meetings
@@ -59,7 +59,7 @@ Every decision needs rationale. Every action item needs one owner, due date, and
    - Use `file_write` to save formatted notes when requested
    - Put decisions and action items near the top
    - Distribute notes within 24 hours
-   - Use `memory_store` to persist decisions, action items, owner commitments, and follow-up dates
+   - Use `mcp_memory__memory_store` to persist decisions, action items, owner commitments, and follow-up dates
 
 ## Output Format
 

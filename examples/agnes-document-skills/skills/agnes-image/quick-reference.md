@@ -11,7 +11,7 @@ triggers:
 tool_deps:
   - http_request
   - file_write
-  - memory_recall
+  - mcp_memory__memory_recall
 ---
 
 # agnes-image Quick Reference

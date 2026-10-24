@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Sprint Planning Skill
@@ -27,7 +27,7 @@ A sprint goal is the commitment; individual stories are the forecast.
 ## Execution Steps
 
 1. **Review previous sprint evidence**
-   - Use `memory_recall` to retrieve velocity, completion rate, carry-over, interruptions, and retrospective actions
+   - Use `mcp_memory__memory_recall` to retrieve velocity, completion rate, carry-over, interruptions, and retrospective actions
    - Review planned vs completed work and why items slipped
    - Carry over unfinished work only after re-estimating remaining effort
    - Apply retrospective actions as explicit sprint planning constraints
@@ -66,7 +66,7 @@ A sprint goal is the commitment; individual stories are the forecast.
 
 6. **Save and persist**
    - Use `file_write` to save the sprint plan when requested
-   - Use `memory_store` to persist sprint goal, commitment, capacity assumptions, selected items, risks, and retrospective actions
+   - Use `mcp_memory__memory_store` to persist sprint goal, commitment, capacity assumptions, selected items, risks, and retrospective actions
 
 ## Output Format
 

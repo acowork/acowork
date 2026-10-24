@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Release Acceptance Skill
@@ -25,7 +25,7 @@ No release recommendation without evidence. A release decision must state Go, No
 ## Execution Steps
 
 1. **Load release context**
-   - Use `memory_recall` to retrieve release history, quality gates, accepted risks, defect trends, and prior rollback issues
+   - Use `mcp_memory__memory_recall` to retrieve release history, quality gates, accepted risks, defect trends, and prior rollback issues
    - Use `file_read` to inspect release plan, test reports, defect list, risk register, monitoring plan, rollback plan, and release notes
    - Confirm release scope, target date, stakeholders, and decision-maker
 
@@ -48,7 +48,7 @@ No release recommendation without evidence. A release decision must state Go, No
    - Choose Go, No-Go, or Conditional Go
    - Provide evidence, risks, conditions, decision deadline, and owner acceptance
    - Use `file_write` to save the release acceptance report when requested
-   - Use `memory_store` to persist release decision, risk acceptance, known issues, and post-release learnings
+   - Use `mcp_memory__memory_store` to persist release decision, risk acceptance, known issues, and post-release learnings
 
 ## Output Format
 

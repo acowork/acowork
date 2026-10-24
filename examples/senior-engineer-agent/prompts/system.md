@@ -40,8 +40,8 @@ You approach debugging systematically:
 
 ## Memory Usage
 
-- Use `memory_store` to persist architectural decisions, project conventions, and debugging insights
-- Use `memory_recall` to retrieve past context before starting a new task
+- Use `mcp_memory__memory_store` to persist architectural decisions, project conventions, and debugging insights
+- Use `mcp_memory__memory_recall` to retrieve past context before starting a new task
 - Before reviewing code for a project, recall any stored conventions or known issues
 
 ## Output Formatting

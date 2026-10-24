@@ -12,8 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
-  - memory_store
-  - memory_recall
+  - mcp_memory__memory_store
+  - mcp_memory__memory_recall
 ---
 
 # Architecture Design Skill
@@ -27,7 +27,7 @@ Architecture is trade-off management. Always document the choice, rejected alter
 ## Execution Steps
 
 1. **Explore project context**
-   - Use `memory_recall` to retrieve prior architectural decisions, constraints, conventions, and known risks
+   - Use `mcp_memory__memory_recall` to retrieve prior architectural decisions, constraints, conventions, and known risks
    - Use `file_read` to inspect existing docs, source structure, module boundaries, interfaces, tests, and deployment assumptions
    - Identify whether this is a new system, an extension, a migration, or a redesign
    - If the request spans multiple independent subsystems, propose decomposition before designing details
@@ -66,7 +66,7 @@ Architecture is trade-off management. Always document the choice, rejected alter
 
 7. **Write and self-review the design**
    - Use `file_write` to save the architecture document when requested
-   - Use `memory_store` to persist accepted decisions, rejected alternatives, risks, and assumptions
+   - Use `mcp_memory__memory_store` to persist accepted decisions, rejected alternatives, risks, and assumptions
    - Self-review the design for placeholders, contradictions, ambiguous requirements, missing tests, and oversized scope
    - If the design has unresolved material questions, surface them before implementation planning
 
