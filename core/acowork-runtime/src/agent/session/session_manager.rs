@@ -536,9 +536,8 @@ pub struct SessionManager {
     /// Design 27 §3.2/§6.1: intent-context → execution-session routing
     /// table (chat/conv keys). Loaded from the work dir so a restart
     /// keeps follow-up turns on the session that holds the conversation.
-    /// Shared (`Arc<Mutex<_>>`) with every session task so an intent turn
-    /// can stamp its rotation bookkeeping (§2.1) at turn end.
-    intent_map: Arc<std::sync::Mutex<super::intent_routing::IntentSessionMap>>,
+    /// Owned by the manager — the routing entry points are its only writers.
+    intent_map: std::sync::Mutex<super::intent_routing::IntentSessionMap>,
     /// ADR-099 D5: session ids whose PM task is over. Written when the
     /// Gateway closes an intent context, read by the candidate builder so a
     /// finished task is never offered again.
@@ -600,7 +599,7 @@ impl SessionManager {
             latest_session,
             session_configs,
             package_dir,
-            intent_map: Arc::new(std::sync::Mutex::new(intent_map)),
+            intent_map: std::sync::Mutex::new(intent_map),
             terminal_sessions,
         }
     }
@@ -640,7 +639,7 @@ impl SessionManager {
     /// ADR-099: apply an initiator's `session_config` suggestion to a session
     /// that already exists instead of dropping it.
     ///
-    /// T3 is gone (a config difference alone never rotates), but the seed still
+    /// A config difference alone never opens a new session, but the seed still
     /// has to land somewhere — otherwise a model switch requested from the chat
     /// surface would be silently ignored, on both the router path and the
     /// kill-switch path. `ConversationSession::apply_config` is THE config entry
@@ -699,46 +698,36 @@ impl SessionManager {
         );
     }
 
-    /// Design 27 §6.1 + §2.1: resolve (or create) the execution session that
-    /// owns an intent context for this agent. `key` comes from
-    /// `intent_routing::routing_key`. A mapped session that is still Active
-    /// is reused; a rotation is taken when §2.1 says so —
-    /// T2 (the previous turn compacted) or T1 (idle past the threshold) —
-    /// or when the mapping is stale (closed / evicted). The successor starts
-    /// empty with a pointer handoff naming the old session; the conversation
-    /// itself lives in the Chat session store, so nothing is copied.
-    /// Returns `(session_id, handoff_note)` — the caller attaches the note to
-    /// the routed intent (persisted as a standalone `system` JSONL row and
-    /// folded into the model-facing user turn) when a rotation just happened.
+    /// Design 27 §6.1: resolve (or create) the execution session that owns an
+    /// intent context for this agent. `key` comes from
+    /// `intent_routing::routing_key`. A mapped session that is still Active is
+    /// reused — that is the whole rule. A compaction never interrupts the
+    /// chain: the compacted session keeps its own history and continues to
+    /// accept turns (ADR-032/ADR-061), which is exactly what context
+    /// compaction exists for. Only a stale mapping (closed / evicted / gone
+    /// from disk) opens a fresh session.
+    /// Returns `(session_id, opened_new)`. The second element is whether this
+    /// routing **created** a physical session (ADR-100 D11): reuse reports
+    /// `false`, a fresh create `true`. It is the routing-time authority behind
+    /// the chat's "started a new task / continued the previous task" reaction
+    /// row — the surface never infers it from timestamps.
     /// `seed` is the
     /// initiator's optional `session_config` suggestion (design 27 §4.5);
     /// clamped to this agent's provider list (§13-6). It is applied when a
-    /// session is created (fresh mapping or rotation successor) and, on a
-    /// reuse, to the reused session itself — never dropped (ADR-099).
-    /// The third element is `opened_new` — whether this routing **created** a
-    /// physical session (ADR-100 D11). Reuse and rotation both report `false`
-    /// (the logical task continues); only a fresh create reports `true`. It is
-    /// the routing-time authority behind the chat's "started a new task /
-    /// continued the previous task" reaction row — the surface never infers
-    /// it from timestamps.
+    /// session is created and, on a reuse, to the reused session itself —
+    /// never dropped (ADR-099).
     pub async fn route_intent_session(
         &mut self,
         key: &str,
         seed: Option<super::intent_routing::SessionSeed>,
         source_chat_session_id: Option<&str>,
-    ) -> Result<(String, Option<String>, bool)> {
-        let work_dir = std::path::PathBuf::from(&self.core.config.work_dir);
-        let (mapped, rotation) = {
+    ) -> Result<(String, bool)> {
+        let mapped = {
             let map = self
                 .intent_map
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let mapped = map.get(key).map(|e| e.session_id.clone());
-            let rotation =
-                mapped.as_ref().and_then(|_| {
-                    map.needs_rotation(key, super::intent_routing::idle_rotate_threshold(&work_dir))
-                });
-            (mapped, rotation)
+            map.get(key).map(|e| e.session_id.clone())
         };
         // Design 27 §4.5: the seed is a suggestion inside this agent's own
         // allowed set; one that survives clamping empty carries no opinion.
@@ -753,81 +742,17 @@ impl SessionManager {
             .or_else(|| key.strip_prefix("chat:"));
         if let Some(sid) = &mapped {
             if self.get_session(sid).is_some() {
-                // ADR-099: T3 (config conflict) is gone — an explicit
-                // `session_config` no longer forces a new physical session.
-                // Only the two physical pressures rotate here: T2 after an
-                // in-turn compaction, T1 for the legacy (router-disabled)
-                // path. The Chat Router values T1 as a prompt signal instead
-                // and evaluates only T2 after picking a target.
-                match rotation {
-                    None => {
-                        // Idempotent: re-stamps only when the binding or the
-                        // `Members` visibility is still missing.
-                        self.stamp_chat_binding(chat_id, sid);
-                        // ADR-099: continuation without rotation still honors
-                        // the suggestion — effective from the next turn.
-                        self.apply_seed_to_session(sid, seed.as_ref());
-                        return Ok((sid.clone(), None, false));
-                    }
-                    Some(reason) => {
-                        // §2.1 crash recovery: allocate + persist the
-                        // successor id *before* creating the session, so a
-                        // crash between the two steps replays to the same
-                        // id — never a second successor, never a new orphan.
-                        let planned = {
-                            self.intent_map
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .plan_rotation(key)?
-                        };
-                        let new_sid = self
-                            .create_agent_owned_session_with_id(
-                                None,
-                                Some(&planned),
-                                seed.as_ref(),
-                            )
-                            .await?;
-                        self.intent_map
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .rekey(key, new_sid.clone())
-                        .map_err(|e| {
-                            RuntimeError::Config(format!("intent routing persist failed: {e}"))
-                        })?;
-                        // ADR-099: the binding follows the envelope's Chat
-                        // session, and the routing key is still the authority
-                        // for legacy `chat:` callers.
-                        self.stamp_chat_binding(chat_id, &new_sid);
-                        tracing::info!(
-                            key,
-                            old_session = %sid,
-                            new_session = %new_sid,
-                            reason = ?reason,
-                            "Intent session rotated (design 27 §4.1)"
-                        );
-                        // §2.1 Handoff grading: T2 carries the old session's
-                        // last persisted compaction summary (already an LLM
-                        // distillation — no second LLM call at rotation);
-                        // T1 stays a pointer (design: no conversation summary).
-                        let summary = (reason == super::intent_routing::RotateReason::T2Compaction)
-                            .then(|| {
-                                crate::conversation::last_compaction_summary(&work_dir, sid)
-                            })
-                            .flatten();
-                        return Ok((
-                            new_sid,
-                            Some(super::intent_routing::rotation_handoff(
-                                reason,
-                                sid,
-                                summary.as_deref(),
-                                super::intent_routing::handoff_max_tokens(&work_dir),
-                            )),
-                            // A rotation continues the same logical task in a
-                            // successor session — not a new task (ADR-100 D11).
-                            false,
-                        ));
-                    }
-                }
+                // ADR-099: an explicit `session_config` never forces a new
+                // physical session — the router decides whether a message
+                // continues an existing task, and a config change alone is not
+                // a new task.
+                // Idempotent: re-stamps only when the binding or the
+                // `Members` visibility is still missing.
+                self.stamp_chat_binding(chat_id, sid);
+                // Continuation still honors the suggestion — effective from
+                // the next turn.
+                self.apply_seed_to_session(sid, seed.as_ref());
+                return Ok((sid.clone(), false));
             }
             tracing::info!(
                 key,
@@ -844,7 +769,7 @@ impl SessionManager {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key.to_string(), new_sid.clone())
             .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
-        Ok((new_sid, None, true))
+        Ok((new_sid, true))
     }
 
     /// Design 27 §4.5 clamping, shared by the legacy route and the Chat
@@ -880,7 +805,7 @@ impl SessionManager {
     /// filesystem walk inside the global `SessionManager` lock would stall
     /// `POST /sessions`. Read from the session-meta store rather than memory:
     /// most sessions are idle-evicted, so an in-memory scan would hide exactly
-    /// the rotation predecessors the candidate list exists for.
+    /// the older sessions the candidate list exists for.
     ///
     /// The Runtime-only facts are folded in here — live status (busy / idle /
     /// broken), the `chat:` mapping (the `current` mark) and which sessions
@@ -949,31 +874,24 @@ impl SessionManager {
     ///   closed session when needed and falling back to a fresh one when the
     ///   target no longer exists on disk.
     /// - The mapping is re-pointed at the chosen session, because the
-    ///   candidate list, the T2 check and the turn-end bookkeeping all read
-    ///   it. Selecting a rotation predecessor is a legitimate choice
-    ///   ("continue that thing from before") and must not leave the chat
+    ///   candidate list reads it. Selecting an older session is a legitimate
+    ///   choice ("continue that thing from before") and must not leave the chat
     ///   pointing somewhere else.
-    /// - T2 (compaction) is evaluated **only** when the target is already the
-    ///   mapped session: the compaction marker is a property of the turn the
-    ///   chat just had. Selecting another session starts a clean chain (T3 is
-    ///   gone — a config change alone never rotates).
+    /// - Nothing else opens a new session. A compacted session continues to
+    ///   accept turns in place — compaction's whole purpose — and the router is
+    ///   the only judge of whether this turn is new work.
     ///
-    /// The router only needs the session it dispatched into plus an optional
-    /// handoff note; whether that session was created fresh or carried over is
-    /// a routing detail the chat surface no longer persists (ADR-100 revision:
-    /// intermediate milestones are runtime-only).
+    /// The router only needs the session it dispatched into plus `opened_new`;
+    /// whether that session was created fresh is a routing-time fact (ADR-100
+    /// D11), reported `true` exactly when this call creates a physical session.
     pub async fn chat_dispatch(
         &mut self,
         chat_session_id: &str,
         target: crate::agent::chat_router::tool::Target,
         seed: Option<super::intent_routing::SessionSeed>,
-    ) -> Result<(String, Option<String>, bool)> {
+    ) -> Result<(String, bool)> {
         use crate::agent::chat_router::tool::Target;
-        use crate::agent::session::intent_routing::{
-            handoff_max_tokens, rotation_handoff, RotateReason,
-        };
 
-        let work_dir = std::path::PathBuf::from(&self.core.config.work_dir);
         let key = format!("chat:{chat_session_id}");
         let seed = self.clamp_seed(seed);
 
@@ -1016,63 +934,13 @@ impl SessionManager {
                         RuntimeError::Config(format!("intent routing persist failed: {e}"))
                     })?;
                 self.stamp_chat_binding(Some(chat_session_id), &session_id);
-                // ADR-099: switching to a session that exists is a reuse, not a
-                // creation — the draft config the router carried still applies.
-                self.apply_seed_to_session(&session_id, seed.as_ref());
-                return Ok((session_id, None, false));
             }
-
-            let rotation = {
-                let map = self
-                    .intent_map
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                // No idle threshold: T1 is a prompt signal on the router path.
-                map.needs_rotation(&key, None)
-            };
-            let Some(reason) = rotation else {
-                // ADR-099 acceptance criterion 1: a config change reaches the
-                // session the message was routed into, from the next turn.
-                self.apply_seed_to_session(&session_id, seed.as_ref());
-                return Ok((session_id, None, false));
-            };
-
-            let planned = self
-                .intent_map
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .plan_rotation(&key)?;
-            let new_sid = self
-                .create_agent_owned_session_with_id(None, Some(&planned), seed.as_ref())
-                .await?;
-            self.intent_map
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .rekey(&key, new_sid.clone())
-                .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
-            self.stamp_chat_binding(Some(chat_session_id), &new_sid);
-            let summary = (reason == RotateReason::T2Compaction)
-                .then(|| crate::conversation::last_compaction_summary(&work_dir, &session_id))
-                .flatten();
-            tracing::info!(
-                key,
-                old_session = %session_id,
-                new_session = %new_sid,
-                reason = ?reason,
-                "Chat router target rotated (ADR-099)"
-            );
-            return Ok((
-                new_sid,
-                Some(rotation_handoff(
-                    reason,
-                    &session_id,
-                    summary.as_deref(),
-                    handoff_max_tokens(&work_dir),
-                )),
-                // A rotation continues the same logical task in a successor
-                // session — not a new task (ADR-100 D11).
-                false,
-            ));
+            // ADR-099 acceptance criterion 1: a config change reaches the
+            // session the message was routed into, from the next turn. Selecting
+            // an older session is a reuse, not a creation — `opened_new` stays
+            // `false` either way.
+            self.apply_seed_to_session(&session_id, seed.as_ref());
+            return Ok((session_id, false));
         }
 
         let new_sid = self.create_agent_owned_session(None, seed.as_ref()).await?;
@@ -1082,17 +950,18 @@ impl SessionManager {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, new_sid.clone())
             .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
-        Ok((new_sid, None, true))
+        Ok((new_sid, true))
     }
 
-    /// Design 27 §6.2 T2-a: a PM task reaching a terminal state ends its
-    /// logical execution context — close the mapped session, no successor,
-    /// drop the mapping. Idempotent: unknown keys are a no-op.
+    /// Design 27 §6.2: a PM task reaching a terminal state ends its
+    /// logical execution context — close the mapped session and drop the
+    /// mapping. Idempotent: unknown keys are a no-op.
     ///
     /// ADR-099 D5: a `conv:task:` key also records the session id in the
     /// terminal mirror, so the Chat Router stops offering it as a candidate.
     /// `chat:` / `conv:` keys describe a conversation, not a finished task —
-    /// closing them is a rotation, not a completion.
+    /// they are never closed on their own; the router re-points a chat at
+    /// another session when the user starts new work.
     pub async fn close_intent_context(&mut self, key: &str) -> Result<()> {
         let mapped = self
             .intent_map
@@ -1117,7 +986,7 @@ impl SessionManager {
                 .unwrap_or_else(|e| e.into_inner())
                 .remove(key)
                 .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
-            tracing::info!(key, session_id = %sid, "Intent execution context closed (task terminal, design 27 §4.1 T2-a)");
+            tracing::info!(key, session_id = %sid, "Intent execution context closed (task terminal, design 27 §6.2)");
         }
         Ok(())
     }
@@ -1302,7 +1171,6 @@ impl SessionManager {
             current_work_dir.clone(),
             session_committed_lines,
             self.streaming_lines.clone(),
-            self.intent_map.clone(),
         );
 
         // ADR-014: Create watch channel for session status.
@@ -1432,7 +1300,8 @@ impl SessionManager {
         Ok(session_id)
     }
 
-    /// Create a new session from frontend request, handling everything in one call.
+    /// Create a new session from a frontend or intent request, handling
+    /// everything in one call.
     ///
     /// Generates a session ID, creates the JSONL file with initial metadata,
     /// writes the index entry, spawns the session task, and enables
@@ -1449,102 +1318,7 @@ impl SessionManager {
         provider: Option<&str>,
         user_id: Option<&str>,
     ) -> Result<String> {
-        self.create_frontend_session_inner(workspace_id, model, provider, user_id, None)
-            .await
-    }
-
-    /// Design 27 §6.1: like `create_frontend_session`, but the session is
-    /// owned by the **agent account** (`last_user_profile` — the account
-    /// bound to this Runtime via `UserProfileUpdate`), not the requesting
-    /// human. An intent execution session is agent-private working state:
-    /// the human surface is the Chat session, and the Session-history list
-    /// must not fill up with background responder sessions. Falls back to
-    /// the caller-provided owner when no profile is cached (and to
-    /// ownerless/local mode when neither exists).
-    pub async fn create_agent_owned_session(
-        &mut self,
-        requester_user_id: Option<&str>,
-        seed: Option<&super::intent_routing::SessionSeed>,
-    ) -> Result<String> {
-        self.create_agent_owned_session_with_id(requester_user_id, None, seed)
-            .await
-    }
-
-    /// `create_agent_owned_session` with a pre-allocated session id — used
-    /// by intent rotation replay (§2.1 crash recovery: the id was planned
-    /// and persisted before the session existed).
-    pub async fn create_agent_owned_session_with_id(
-        &mut self,
-        requester_user_id: Option<&str>,
-        preset_session_id: Option<&str>,
-        seed: Option<&super::intent_routing::SessionSeed>,
-    ) -> Result<String> {
-        let agent_user = self
-            .last_user_profile
-            .as_ref()
-            .map(|p| p.user_id.clone())
-            .filter(|id| !id.is_empty());
-        // Design 27 §4.5: apply the initiator's (already clamped) session-
-        // config suggestion at creation. `workspace` is validated against
-        // the resolver here — an unknown id is dropped so it can never
-        // leave the session in a dangling-workspace state. `model`/
-        // `provider` were clamped in `route_intent_session`. `reasoning_effort`
-        // is not carried by `SessionConfig`, so it is stamped right after
-        // the conversation exists — before the routed intent is delivered,
-        // so the first turn already runs under the requested effort.
-        let seeded_workspace = seed
-            .and_then(|s| s.workspace.as_deref())
-            .filter(|ws| self.workspace_exists(ws));
-        let sid = self
-            .create_frontend_session_inner(
-                seeded_workspace,
-                seed.and_then(|s| s.model.as_deref()),
-                seed.and_then(|s| s.provider.as_deref()),
-                agent_user.as_deref().or(requester_user_id),
-                preset_session_id,
-            )
-            .await?;
-        if let Some(effort) = seed.and_then(|s| s.reasoning_effort.as_deref())
-            && let Some(handle) = self.get_session(&sid)
-            && let Some(conv) = &handle.conversation
-        {
-            conv.update_reasoning_effort(Some(effort.to_string()));
-        }
-        Ok(sid)
-    }
-
-    /// Whether a workspace id resolves on this agent (design 27 §4.5 seed
-    /// validation). `__agent_home__` is always valid; otherwise the id must
-    /// be present in the resolver. Without a resolver (cold-start / test
-    /// scaffolding) a suggestion is accepted leniently — the resolver is a
-    /// hard precondition in production, so this only affects degenerate
-    /// setups and never silently drops a valid choice there.
-    fn workspace_exists(&self, workspace_id: &str) -> bool {
-        if workspace_id == "__agent_home__" {
-            return true;
-        }
-        match &self.resolver {
-            Some(resolver) => resolver.read().unwrap().find_by_id(workspace_id).is_some(),
-            None => true,
-        }
-    }
-
-    async fn create_frontend_session_inner(
-        &mut self,
-        workspace_id: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
-        user_id: Option<&str>,
-        preset_session_id: Option<&str>,
-    ) -> Result<String> {
-        // A pre-assigned id (§2.1 rotation replay) reopens the planned id
-        // instead of generating a new one. `ConversationSession::new`
-        // truncates an existing file — safe here because a planned id can
-        // only exist as a not-yet-used successor (rekey clears the plan
-        // before any turn ever ran on it).
-        let session_id = preset_session_id
-            .map(|s| s.to_string())
-            .unwrap_or_else(crate::conversation::generate_session_id);
+        let session_id = crate::conversation::generate_session_id();
         let committed_lines = Self::new_committed_lines();
 
         // Create the JSONL file and index entry
@@ -1627,6 +1401,68 @@ impl SessionManager {
         // no front/back suppression mechanism remains.
 
         Ok(session_id)
+    }
+
+    /// Design 27 §6.1: like `create_frontend_session`, but the session is
+    /// owned by the **agent account** (`last_user_profile` — the account
+    /// bound to this Runtime via `UserProfileUpdate`), not the requesting
+    /// human. An intent execution session is agent-private working state:
+    /// the human surface is the Chat session, and the Session-history list
+    /// must not fill up with background responder sessions. Falls back to
+    /// the caller-provided owner when no profile is cached (and to
+    /// ownerless/local mode when neither exists).
+    pub async fn create_agent_owned_session(
+        &mut self,
+        requester_user_id: Option<&str>,
+        seed: Option<&super::intent_routing::SessionSeed>,
+    ) -> Result<String> {
+        let agent_user = self
+            .last_user_profile
+            .as_ref()
+            .map(|p| p.user_id.clone())
+            .filter(|id| !id.is_empty());
+        // Design 27 §4.5: apply the initiator's (already clamped) session-
+        // config suggestion at creation. `workspace` is validated against
+        // the resolver here — an unknown id is dropped so it can never
+        // leave the session in a dangling-workspace state. `model`/
+        // `provider` were clamped in `route_intent_session`. `reasoning_effort`
+        // is not carried by `SessionConfig`, so it is stamped right after
+        // the conversation exists — before the routed intent is delivered,
+        // so the first turn already runs under the requested effort.
+        let seeded_workspace = seed
+            .and_then(|s| s.workspace.as_deref())
+            .filter(|ws| self.workspace_exists(ws));
+        let sid = self
+            .create_frontend_session(
+                seeded_workspace,
+                seed.and_then(|s| s.model.as_deref()),
+                seed.and_then(|s| s.provider.as_deref()),
+                agent_user.as_deref().or(requester_user_id),
+            )
+            .await?;
+        if let Some(effort) = seed.and_then(|s| s.reasoning_effort.as_deref())
+            && let Some(handle) = self.get_session(&sid)
+            && let Some(conv) = &handle.conversation
+        {
+            conv.update_reasoning_effort(Some(effort.to_string()));
+        }
+        Ok(sid)
+    }
+
+    /// Whether a workspace id resolves on this agent (design 27 §4.5 seed
+    /// validation). `__agent_home__` is always valid; otherwise the id must
+    /// be present in the resolver. Without a resolver (cold-start / test
+    /// scaffolding) a suggestion is accepted leniently — the resolver is a
+    /// hard precondition in production, so this only affects degenerate
+    /// setups and never silently drops a valid choice there.
+    fn workspace_exists(&self, workspace_id: &str) -> bool {
+        if workspace_id == "__agent_home__" {
+            return true;
+        }
+        match &self.resolver {
+            Some(resolver) => resolver.read().unwrap().find_by_id(workspace_id).is_some(),
+            None => true,
+        }
     }
 
     /// Build a fully-initialized SessionState for a new or resumed session.
@@ -5663,7 +5499,6 @@ mod tests {
                 perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-                last_compaction_summary: None,
                 corrupted: false,
             chat_session_id: None,
                 model_usage: None,
@@ -5839,7 +5674,7 @@ mod tests {
         )));
         let conversations = work_dir.join("conversations");
 
-        let (sid, _, _) = manager
+        let (sid, _) = manager
             .route_intent_session("chat:cs-group-1", None, None)
             .await
             .expect("route chat session");
@@ -5847,7 +5682,7 @@ mod tests {
         assert_eq!(meta.visibility, Some(SessionVisibility::Members));
         assert_eq!(meta.chat_session_id.as_deref(), Some("cs-group-1"));
         // The routing reuse path must not re-stamp or lose the binding.
-        let (sid2, _, _) = manager
+        let (sid2, _) = manager
             .route_intent_session("chat:cs-group-1", None, None)
             .await
             .expect("reuse chat session");
@@ -5856,7 +5691,7 @@ mod tests {
         assert_eq!(meta2.chat_session_id.as_deref(), Some("cs-group-1"));
 
         // A `conv:` key keeps the pre-Wave-4 shape: no binding, private.
-        let (csid, _, _) = manager
+        let (csid, _) = manager
             .route_intent_session("conv:c-1", None, None)
             .await
             .expect("route conv session");
@@ -5920,7 +5755,7 @@ mod tests {
         let conversations = work_dir.join("conversations");
 
         let key = "conv:task:proj-1:T-7:com.test.task_bind";
-        let (sid, _, _) = manager
+        let (sid, _) = manager
             .route_intent_session(key, None, Some("cs-project-group"))
             .await
             .expect("route task session");
@@ -5943,7 +5778,7 @@ mod tests {
         assert_eq!(meta2.chat_session_id.as_deref(), Some("cs-project-group"));
 
         // No source chat → no binding (pre-Wave-4 shape).
-        let (plain, _, _) = manager
+        let (plain, _) = manager
             .route_intent_session("conv:c-2", None, None)
             .await
             .expect("route conv session");
@@ -5954,12 +5789,12 @@ mod tests {
     }
 
     /// ADR-099: a `session_config` seed that differs from the mapped
-    /// session's own config must NOT rotate — a config change alone is not
-    /// a new task (this is the regression test for the removed T3 trigger).
-    /// It must still LAND: the reused session takes the suggestion, effective
-    /// from its next turn. Dropping it silently is the bug this pins.
+    /// session's own config never opens a new session — a config change alone
+    /// is not new work, the router is the only judge of that. It must still
+    /// LAND: the reused session takes the suggestion, effective from its next
+    /// turn. Dropping it silently is the bug this pins.
     #[tokio::test]
-    async fn config_seed_is_applied_to_a_reused_session_without_rotating() {
+    async fn config_seed_is_applied_to_a_reused_session() {
         let work_dir =
             std::env::temp_dir().join(format!("acowork-not3-{}", Uuid::new_v4()));
         let config = crate::config::RuntimeConfig {
@@ -5968,10 +5803,10 @@ mod tests {
         };
         let manifest = acowork_core::AgentManifest::from_toml(
             r#"
-            agent_id = "com.test.no_t3"
+            agent_id = "com.test.config_seed"
             version = "1.0.0"
-            name = "Test no T3"
-            description = "Config seeds must not rotate (ADR-099)"
+            name = "Test config seed reuse"
+            description = "A config seed alone never opens a new session (ADR-099)"
             author = "test"
             runtime_version = "0.1.0"
 
@@ -5993,22 +5828,23 @@ mod tests {
             WorkspaceResolver::new_for_test(vec![]),
         )));
 
-        let (sid, _, _) = manager
+        let (sid, first_new) = manager
             .route_intent_session("chat:cs-not3", None, None)
             .await
             .expect("create chat session");
+        assert!(first_new, "a first routing creates the session");
         // A conflicting seed (different reasoning effort) reuses the mapped
-        // session: no rotation, no handoff, no config mutation.
+        // session: no new session, and the suggestion lands on the old one.
         let seed = crate::agent::session::intent_routing::SessionSeed {
             reasoning_effort: Some("high".into()),
             ..Default::default()
         };
-        let (sid2, handoff, _) = manager
+        let (sid2, opened_new) = manager
             .route_intent_session("chat:cs-not3", Some(seed), None)
             .await
             .expect("reuse under a config seed");
-        assert_eq!(sid, sid2, "ADR-099: config seed never rotates");
-        assert!(handoff.is_none(), "no rotation -> no handoff note");
+        assert_eq!(sid, sid2, "ADR-099: a config seed alone creates nothing");
+        assert!(!opened_new, "the mapped session was reused, not created");
         // The existing session takes the suggestion — never dropped (D5).
         let conv = manager
             .get_session(&sid2)
@@ -6082,18 +5918,18 @@ mod tests {
                 .and_then(|c| c.reasoning_effort())
         };
 
-        // Branch A — target is the mapped session: no rotation, no re-point,
-        // but the draft still takes effect from the next turn.
-        let (cur, _, _) = manager
+        // Branch A — target is the mapped session: no re-point, but the draft
+        // still takes effect from the next turn.
+        let (cur, _) = manager
             .chat_dispatch("cs-cur", Target::New, None)
             .await
             .expect("open a session for the chat");
-        let (same, handoff, _) = manager
+        let (same, opened_new) = manager
             .chat_dispatch("cs-cur", Target::Existing(cur.clone()), Some(effort("high")))
             .await
             .expect("dispatch to the current session");
-        assert_eq!(same, cur, "continuing must not rotate on a config seed");
-        assert!(handoff.is_none(), "no rotation -> no handoff note");
+        assert_eq!(same, cur, "continuing the mapped target creates nothing");
+        assert!(!opened_new, "a reuse reports opened_new = false");
         assert_eq!(
             effective(&manager, &cur).as_deref(),
             Some("high"),
@@ -6102,16 +5938,16 @@ mod tests {
 
         // Branch B — target is a different live session: the chat mapping
         // follows the choice, and so does the seed.
-        let (other, _, _) = manager
+        let (other, _) = manager
             .chat_dispatch("cs-two", Target::New, None)
             .await
             .expect("first session of the second chat");
-        let (prev, _, _) = manager
+        let (prev, _) = manager
             .chat_dispatch("cs-two", Target::New, None)
             .await
             .expect("second session of the second chat");
         assert_ne!(prev, other, "dispatch(new) always starts fresh");
-        let (chosen, _, _) = manager
+        let (chosen, _) = manager
             .chat_dispatch(
                 "cs-two",
                 Target::Existing(other.clone()),
@@ -6127,7 +5963,7 @@ mod tests {
         );
         assert_eq!(effective(&manager, &prev).as_deref(), None);
         // The chat now resolves to the session it was pointed at.
-        let (reused, _, _) = manager
+        let (reused, _) = manager
             .route_intent_session("chat:cs-two", None, None)
             .await
             .expect("mapping follows the dispatch");
@@ -6136,12 +5972,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 
-    /// ADR-099 revision / ADR-100 D11: the third element of the routing
-    /// result — `opened_new` — is the only honest source for the chat's
-    /// routing reaction ("启动新任务" vs "继续之前的任务"). It must be
-    /// `true` exactly when a physical session was created, and `false` on
-    /// every reuse path, including a `dispatch(new)` that only re-points the
-    /// mapping to an existing session.
+    /// ADR-099 revision / ADR-100 D11: `opened_new`, the second element of the
+    /// routing result, is the only honest source for the chat's routing
+    /// reaction ("启动新任务" vs "继续之前的任务"). It must be `true` exactly
+    /// when a physical session was created, and `false` on every reuse path.
     #[tokio::test]
     async fn opened_new_tracks_physical_creation_not_dispatch_intent() {
         use crate::agent::chat_router::tool::Target;
@@ -6150,29 +5984,29 @@ mod tests {
 
         // Fresh creation — the fallback's destination and the router's
         // `new` verdict alike.
-        let (first, _, fresh) = manager
+        let (first, fresh) = manager
             .chat_dispatch("cs-open", Target::New, None)
             .await
             .expect("first dispatch creates");
         assert!(fresh, "Target::New on a fresh chat creates a session");
 
         // Registry reuse: same chat, same session, not new.
-        let (again, _, reused) = manager
+        let (again, again_new) = manager
             .route_intent_session("chat:cs-open", None, None)
             .await
             .expect("mapping reuse");
         assert_eq!(again, first);
-        assert!(!reused, "a mapped session is never 'new'");
+        assert!(!again_new, "a mapped session is never 'new'");
 
         // Existing-target dispatch to the mapped session: reuse, not new.
-        let (_, _, onto_same) = manager
+        let (_, onto_same) = manager
             .chat_dispatch("cs-open", Target::Existing(first.clone()), None)
             .await
             .expect("existing target");
         assert!(!onto_same, "dispatch(existing) never reports new");
 
         // A second chat creating its own session is new again.
-        let (second, _, fresh2) = manager
+        let (second, fresh2) = manager
             .chat_dispatch("cs-open", Target::New, None)
             .await
             .expect("second dispatch creates");
@@ -6181,7 +6015,7 @@ mod tests {
 
         // A brand-new registry key creates — and is reported as new, so a
         // first PM task also gets an honest "启动新任务" reaction.
-        let (_, _, task_new) = manager
+        let (_, task_new) = manager
             .route_intent_session("conv:task:p:T1:com.test.x", None, None)
             .await
             .expect("task session created");

@@ -80,15 +80,17 @@ task), and its title.
 
 # dispatch arguments
 - target: "S1" ... "S10", or "new".
-- message: REQUIRED when target is "new"; optional for existing sessions.
+- message: the task brief, and it is only ever used with target "new".
   For a NEW session the execution agent starts with no history — your message
   IS its only context. You MUST write a self-contained task instruction that
   includes: (a) what the user wants accomplished, (b) relevant background from
   this conversation the agent needs (decisions already made, constraints
   discussed, files mentioned), (c) any clarifications you gathered. Do NOT
-  simply restate the user's raw text. For EXISTING sessions, omit to forward
-  the user's message verbatim (the agent already has its own prior context);
-  add a message only when extra routing context helps.
+  simply restate the user's raw text.
+  For an EXISTING session leave it out: the runtime forwards the user's own
+  message verbatim and anything you write here is discarded. That agent has
+  its own prior context and can read this conversation with its own history
+  tool — paraphrasing the user would only overwrite their words in the record.
 - session_config: only with "new", and only when the user explicitly asked for
   a particular model, provider, workspace or reasoning effort.
 

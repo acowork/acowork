@@ -266,23 +266,6 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_language: Option<String>,
 
-    // ── Intent session rotation (design 27 §4.1, frontend-configurable
-    //    surface) ──────────────────────────────────────────────────────
-    //
-    // Layer 1 (highest priority) of the two Intent knobs; `None` = system
-    // default. The Desktop "Intent 会话轮转" card reads/writes these.
-    // Out-of-range values are clamped at the consumer
-    // (`intent_routing`), mirroring the deployment-level env override.
-    /// T1 idle-rotation threshold in hours. Design range 1–72; `Some(0)`
-    /// disables T1 rotation. `None` = default 24h.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent_idle_rotate_hours: Option<u64>,
-    /// T2 handoff target token cap. Design range 500–4,000.
-    /// `None` = default 1,500. T1's 500-token cap is design-fixed and
-    /// not configurable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent_handoff_max_tokens: Option<u64>,
-
     // ── Global-search retrieval config (ADR-095) ─────────────────────
     //
     // Layer 1 of the search retrieval policy chain, same convention as the

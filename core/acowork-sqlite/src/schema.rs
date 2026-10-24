@@ -129,8 +129,10 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// History: 1 = `version` / `corrupted` columns; 2 = `user_id` / `visibility`
 /// (ADR-076 §决策 4 session ownership); 3 = `perf_*` LLM speed averages;
 /// 4 = `chat_session_id`; 5 = `last_compaction_summary` + `conversation_state`;
-/// 6 = `model_usage` breakdown column + `token_stats` aggregate table.
-pub const SCHEMA_VERSION: i64 = 6;
+/// 6 = `model_usage` breakdown column + `token_stats` aggregate table;
+/// 7 = drop `last_compaction_summary` (its only reader, the retired intent
+/// rotation handoff, is gone).
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -191,10 +193,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         "ALTER TABLE sessions ADD COLUMN chat_session_id TEXT;",
     ),
     // Design 27 §4 iron rule (no whole-session reads on request paths):
-    // - `last_compaction_summary`: write-time derived state, so the T2
-    //   handoff read is O(1) instead of a full JSONL scan. Nullable, no
-    //   default: pre-existing rows read as NULL, which the runtime heals
-    //   with one legacy scan + write-back on first touch.
+    // - `last_compaction_summary`: write-time derived state, so the rotation
+    //   handoff read was O(1) instead of a full JSONL scan. Nullable, no
+    //   default: pre-existing rows read as NULL. Superseded by migration 7,
+    //   which drops it again once its only reader was retired.
     // - `conversation_state`: per-session indexer watermark (next physical
     //   line + byte offset), updated in the same transaction as the indexed
     //   row. Lets the sweep skip untouched logs via file size alone and
@@ -224,6 +226,17 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         6,
         "ALTER TABLE sessions ADD COLUMN model_usage TEXT; \n         CREATE TABLE IF NOT EXISTS token_stats ( \n             provider              TEXT NOT NULL, \n             model                 TEXT NOT NULL, \n             total_input           INTEGER NOT NULL DEFAULT 0, \n             total_output          INTEGER NOT NULL DEFAULT 0, \n             total_cache_read      INTEGER NOT NULL DEFAULT 0, \n             total_cache_write     INTEGER NOT NULL DEFAULT 0, \n             total_cost            REAL, \n             PRIMARY KEY (provider, model) \n         ); \n         UPDATE sessions SET model_usage = json_object( \n             'unknown|unknown', json_object( \n                 'input', token_total_input, \n                 'output', token_total_output, \n                 'cache_read', token_total_cache_read, \n                 'cache_write', token_total_cache_write, \n                 'cost', NULL \n             ) \n         ) \n         WHERE model_usage IS NULL \n           AND (token_total_input + token_total_output + token_total_cache_read + token_total_cache_write) > 0; \n         INSERT INTO token_stats (provider, model, total_input, total_output, total_cache_read, total_cache_write, total_cost) \n         SELECT substr(j.key, 1, instr(j.key, '|') - 1), \n                substr(j.key, instr(j.key, '|') + 1), \n                SUM(json_extract(j.value, '$.input')), \n                SUM(json_extract(j.value, '$.output')), \n                SUM(json_extract(j.value, '$.cache_read')), \n                SUM(json_extract(j.value, '$.cache_write')), \n                CASE WHEN SUM(CASE WHEN json_extract(j.value, '$.cost') IS NULL THEN 1 ELSE 0 END) > 0 THEN NULL \n                     ELSE SUM(json_extract(j.value, '$.cost')) END \n         FROM sessions s, json_each(s.model_usage) j \n         WHERE s.model_usage IS NOT NULL AND instr(j.key, '|') > 0 \n         GROUP BY j.key;",
+    ),
+    // The `last_compaction_summary` column added at 5 lost its only reader when
+    // the intent-rotation mechanism was retired: nothing reads or writes it any
+    // more. It is write-time derived state, so dropping it loses no
+    // conversation data — the JSONL stays the ground truth (ADR-032). A plain
+    // `DROP COLUMN` is safe: this step only runs for a database stored below
+    // version 7, and every such database has the column (step 5 added it, and
+    // a fresh one runs the whole chain in order).
+    (
+        7,
+        "ALTER TABLE sessions DROP COLUMN last_compaction_summary;",
     ),
 ];
 

@@ -184,12 +184,6 @@ fn apply_field_patch(
         ConfigField::SessionLanguage => {
             cfg.session_language = patch_typed::<String>(field, op);
         }
-        ConfigField::IntentIdleRotateHours => {
-            cfg.intent_idle_rotate_hours = patch_typed::<u64>(field, op);
-        }
-        ConfigField::IntentHandoffMaxTokens => {
-            cfg.intent_handoff_max_tokens = patch_typed::<u64>(field, op);
-        }
         // ADR-099: sub-field patches against the nested `chat_router`
         // block. The block is created on first write; an all-`None`
         // block serializes as `{}` and `chat_router_config()` reads it
@@ -437,8 +431,6 @@ mod tests {
             None,                          // memory_forgetting_dormant_threshold absent -> skip
             None,                          // memory_forgetting_archive_days absent -> skip
             None,                          // session_language absent -> skip
-            None,                          // intent_idle_rotate_hours absent -> skip
-            None,                          // intent_handoff_max_tokens absent -> skip
             None,                          // chat_router_enabled absent -> skip
             None,                          // chat_router_model absent -> skip
             None,                          // chat_router_provider absent -> skip
@@ -499,8 +491,6 @@ mod tests {
             Some(serde_json::json!(null)), // memory_forgetting_dormant_threshold -> Clear
             None,                          // memory_forgetting_archive_days absent -> skip
             None,                          // session_language absent -> skip
-            None,                          // intent_idle_rotate_hours absent -> skip
-            None,                          // intent_handoff_max_tokens absent -> skip
             None,                          // chat_router_enabled absent -> skip
             None,                          // chat_router_model absent -> skip
             None,                          // chat_router_provider absent -> skip
@@ -546,7 +536,7 @@ mod tests {
             None, None, None, None, None, None, None, None, // 8 core knobs
             None, None, None, None, None, None, // 6 distiller
             None, None, None, None, // 4 memory-forgetting
-            None, None, None, // session_language / intent_idle / intent_handoff
+            None, // session_language
             Some(serde_json::json!(true)),   // chat_router_enabled -> Set
             Some(serde_json::json!("fast")), // chat_router_model -> Set
             Some(serde_json::json!(null)),   // chat_router_provider -> Clear

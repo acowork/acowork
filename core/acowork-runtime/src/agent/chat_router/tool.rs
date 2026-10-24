@@ -46,7 +46,7 @@ pub fn dispatch_tool_spec() -> Value {
             },
             "message": {
                 "type": "string",
-                "description": "Task instruction for the execution session. REQUIRED with target=\"new\": write a self-contained instruction summarising what the user wants, relevant context from this conversation, and constraints already established. Omit only for existing sessions to forward the user message verbatim."
+                "description": "Task brief for a NEW execution session (target=\"new\"); REQUIRED there, because the session starts with no history. With an existing session omit it: the user's own message is forwarded verbatim and a `message` here is discarded."
             },
             "session_config": {
                 "type": "object",
@@ -166,7 +166,11 @@ pub enum Target {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispatchArgs {
     pub target: Target,
-    /// `None` = forward the user's message verbatim.
+    /// The router's task brief. Kept for both targets because the runtime
+    /// only learns whether the turn opens a physical session once the target
+    /// is resolved (an `Existing` alias can point at a session that is gone);
+    /// `runner::dispatch_content` decides whether the brief or the user's own
+    /// message is delivered. `None` = forward the user's message verbatim.
     pub message: Option<String>,
     /// Applied only with `Target::New`; already clamped downstream.
     pub seed: Option<SessionSeed>,
@@ -216,6 +220,9 @@ impl DispatchError {
 ///   sentinel, anything else must be a known alias;
 /// - `message` is optional, but a present-and-blank value is rejected — an
 ///   empty instruction reads as "replace the user's message with nothing";
+/// - `message` is kept for `Existing` targets as well: whether this turn ends
+///   up in a session that already has history is settled by `chat_dispatch`,
+///   not here;
 /// - `session_config` is parsed with the same `SessionSeed` parser as the
 ///   inbound envelope (unknown keys ignored, malformed values dropped) and
 ///   is ignored for `Existing` targets: an existing session keeps its own
@@ -311,7 +318,7 @@ mod tests {
     #[test]
     fn session_config_is_ignored_for_existing_targets() {
         // ADR-099: an existing session keeps its configuration; a config
-        // suggestion must not silently rotate it (T3 removed).
+        // suggestion alone is never a reason to abandon it.
         let args = json!({ "target": "S1", "session_config": { "model": "m1" } });
         let parsed = parse_dispatch(&args, &aliases()).unwrap();
         assert!(parsed.seed.is_none());
@@ -348,6 +355,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed.target, Target::New);
+    }
+
+    #[test]
+    fn a_brief_for_an_existing_alias_survives_parsing() {
+        // The runtime, not the parser, decides what the session receives: an
+        // `Existing` target whose session has vanished opens a fresh one, and
+        // that one still needs the brief. Dropping it here would silently
+        // starve that path (see `runner::dispatch_content`).
+        let parsed = parse_dispatch(
+            &json!({ "target": "S1", "message": "commit the batch we just finished" }),
+            &aliases(),
+        )
+        .unwrap();
+        assert_eq!(parsed.target, Target::Existing("sess-1".into()));
+        assert_eq!(
+            parsed.message.as_deref(),
+            Some("commit the batch we just finished")
+        );
     }
 
     #[test]

@@ -938,12 +938,6 @@ pub struct ConversationSession {
     /// `meta.last_compaction_offset` so the next restore can use O(1)
     /// offset skip instead of falling back to the O(N) rposition scan.
     last_compaction_offset: Arc<std::sync::Mutex<Option<u64>>>,
-    /// §8 (write-time derived state): text of the most recent compaction
-    /// summary, mirrored into `SessionMeta.last_compaction_summary`.
-    /// Set by [`Self::append_compaction_event`] before its `write_meta()`,
-    /// so the T2-handoff reader is O(1) instead of a full JSONL scan.
-    /// Initialized from meta on `resume()`.
-    last_compaction_summary: std::sync::Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for ConversationSession {
@@ -1039,11 +1033,6 @@ impl ConversationSession {
         // value is fresh as long as compaction writes are awaited
         // (see `append_compaction_event`).
         let last_compaction_offset = self.last_compaction_offset.lock().ok().and_then(|g| *g);
-        let last_compaction_summary = self
-            .last_compaction_summary
-            .lock()
-            .ok()
-            .and_then(|s| s.clone());
         SessionMeta {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: self.session_id.clone(),
@@ -1074,7 +1063,6 @@ impl ConversationSession {
             perf: self.perf.lock().ok().and_then(|p| p.clone()),
             model_ratio: self.model_ratio.lock().ok().and_then(|r| *r),
             last_compaction_offset,
-            last_compaction_summary,
             corrupted: false,
         }
     }
@@ -1405,7 +1393,6 @@ impl ConversationSession {
             pending_intents: std::sync::Mutex::new(Vec::new()),
             last_context_usage_sections: std::sync::Mutex::new(None),
             last_compaction_offset,
-            last_compaction_summary: std::sync::Mutex::new(None),
         };
 
         // ADR-082 §4 step 3: write the initial meta row through the
@@ -1528,7 +1515,6 @@ impl ConversationSession {
                 pending_intents: std::sync::Mutex::new(Vec::new()),
                 last_context_usage_sections: std::sync::Mutex::new(None),
                 last_compaction_offset,
-                last_compaction_summary: std::sync::Mutex::new(meta.last_compaction_summary.clone()),
             },
             config_rx,
             state_rx,
@@ -1658,15 +1644,6 @@ impl ConversationSession {
                 "Compaction writer dropped its done channel before reply: {}",
                 e
             ),
-        }
-
-        // §8: persist the summary text itself into the derived meta state
-        // (mirrored by `build_meta` into the row below). Matches the legacy
-        // scan semantics: empty summaries never become the handoff source.
-        if !summary.trim().is_empty()
-            && let Ok(mut guard) = self.last_compaction_summary.lock()
-        {
-            *guard = Some(summary.to_string());
         }
 
         // ADR-024 / ADR-060 v2 §5.4: persist the freshly-recorded
@@ -2753,9 +2730,6 @@ impl Clone for ConversationSession {
             // the parent does. This matches the comment above that the
             // sender is shared for the same reason.
             last_compaction_offset: self.last_compaction_offset.clone(),
-            last_compaction_summary: std::sync::Mutex::new(
-                self.last_compaction_summary.lock().ok().and_then(|s| s.clone()),
-            ),
         }
     }
 }
@@ -3500,7 +3474,7 @@ pub fn read_messages_paginated(
 /// a second generation task nor through a session restored from disk (a
 /// rebuilt session has no in-memory title cache).
 ///
-/// Internal runtime artifacts (output-budget nudges, handoff notes) are
+/// Internal runtime artifacts (output-budget nudges and the like) are
 /// skipped — they are not user input. `None` when the log has no user row yet.
 pub fn read_first_user_message(path: &Path) -> Option<String> {
     // The first user row sits at the head of the log; a couple of pages cover
@@ -3527,49 +3501,6 @@ pub fn read_first_user_message(path: &Path) -> Option<String> {
         }
     }
     None
-}
-
-/// Design 27 §2.1 T2 handoff source: the LAST persisted compaction summary
-/// of a session. Read from the write-time derived state in the session meta
-/// row (§8) — O(1), no JSONL scan. Sessions persisted before the field
-/// existed fall back to a one-time legacy line scan whose result is written
-/// back, healing the row for every later read. `None` when the session has
-/// no meta row or no compaction was ever recorded.
-pub fn last_compaction_summary(work_dir: &Path, session_id: &str) -> Option<String> {
-    let conversations_dir = work_dir.join("conversations");
-    let mut meta = read_session_meta(&conversations_dir, session_id).ok()?;
-    if meta.last_compaction_summary.is_some() {
-        return meta.last_compaction_summary;
-    }
-    // One-time self-heal for pre-field rows. Low frequency by construction:
-    // exactly one scan per legacy session, then the row carries the value.
-    let path = conversations_dir.join(format!("{session_id}.jsonl"));
-    let found = scan_last_compaction_summary_legacy(&path);
-    if found.is_some() {
-        meta.last_compaction_summary = found.clone();
-        let _ = write_session_meta(&conversations_dir, &meta);
-    }
-    found
-}
-
-/// The pre-§8 O(N) full-file scan. Only reachable as the one-time legacy
-/// self-heal above — do NOT call it from request-path code.
-fn scan_last_compaction_summary_legacy(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut last: Option<String> = None;
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
-        if !line.contains(ENTRY_KIND_COMPACTION) {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<ConversationEntry>(&line)
-            && entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)
-            && !entry.content.trim().is_empty()
-        {
-            last = Some(entry.content);
-        }
-    }
-    last
 }
 
 /// Read messages from a JSONL file since a given line-number coordinate.
@@ -3838,130 +3769,6 @@ mod tests {
     }
 
     #[test]
-    fn last_compaction_summary_reads_meta_and_self_heals_legacy_rows() {
-        let dir = TempDir::new().unwrap();
-        let conv = dir.path().join("conversations");
-        std::fs::create_dir_all(&conv).unwrap();
-        let entry = |role: &str, content: &str, kind: Option<&str>| ConversationEntry {
-            id: "x".into(),
-            ts: "2026-01-01T00:00:00.000Z".into(),
-            role: role.into(),
-            content: content.into(),
-            metadata: None,
-            kind: kind.map(str::to_string),
-        };
-        let seed_meta = |sid: &str, summary: Option<&str>| {
-            let meta = SessionMeta {
-                version: 1,
-                session_id: sid.to_string(),
-                agent_id: "com.test.agent".to_string(),
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                user_id: None,
-                visibility: None,
-                title: None,
-                workspace_id: None,
-                model: None,
-                provider: None,
-                account_id: None,
-                reasoning_effort: None,
-                temperature: None,
-                context_window: None,
-                todos: None,
-                message_count: 0,
-                last_active_at: "2026-01-01T00:00:00Z".to_string(),
-                tokens: None,
-                llm_call_counter: None,
-                perf: None,
-                model_ratio: None,
-                last_compaction_offset: None,
-                last_compaction_summary: summary.map(str::to_string),
-                corrupted: false,
-                chat_session_id: None,
-                model_usage: None,
-            };
-            write_session_meta(&conv, &meta).unwrap();
-        };
-
-        // §8 O(1) read: a meta row that already carries the summary wins and
-        // the JSONL is never opened. The stored value differs from the only
-        // compaction line on disk, so a hit here proves the meta path.
-        seed_meta("s-0", Some("FROM META"));
-        std::fs::write(
-            conv.join("s-0.jsonl"),
-            format!(
-                "{}\n",
-                serde_json::to_string(&entry(
-                    "system",
-                    "SCANNED",
-                    Some(ENTRY_KIND_COMPACTION)
-                ))
-                .unwrap(),
-            ),
-        )
-        .unwrap();
-        assert_eq!(
-            last_compaction_summary(dir.path(), "s-0").as_deref(),
-            Some("FROM META")
-        );
-
-        // Legacy self-heal: a pre-field meta row (`summary = None`) with
-        // compaction lines on disk. The first read scans once, keeps the latest
-        // summary, and writes it back; the JSONL is then no longer consulted.
-        std::fs::write(
-            conv.join("s-1.jsonl"),
-            format!(
-                "{}\n{}\n{}\n",
-                serde_json::to_string(&entry("user", "hi", None)).unwrap(),
-                serde_json::to_string(&entry(
-                    "system",
-                    "FIRST SUMMARY",
-                    Some(ENTRY_KIND_COMPACTION)
-                ))
-                .unwrap(),
-                serde_json::to_string(&entry(
-                    "system",
-                    "SECOND SUMMARY",
-                    Some(ENTRY_KIND_COMPACTION)
-                ))
-                .unwrap(),
-            ),
-        )
-        .unwrap();
-        seed_meta("s-1", None);
-        assert_eq!(
-            last_compaction_summary(dir.path(), "s-1").as_deref(),
-            Some("SECOND SUMMARY")
-        );
-        // The write-back healed the row...
-        assert_eq!(
-            read_session_meta(&conv, "s-1")
-                .unwrap()
-                .last_compaction_summary
-                .as_deref(),
-            Some("SECOND SUMMARY")
-        );
-        // ...so emptying the JSONL afterwards still yields the healed value —
-        // proof the request path reads meta, not the log.
-        std::fs::write(conv.join("s-1.jsonl"), "").unwrap();
-        assert_eq!(
-            last_compaction_summary(dir.path(), "s-1").as_deref(),
-            Some("SECOND SUMMARY")
-        );
-
-        // No compaction line -> None (and nothing written back).
-        std::fs::write(
-            conv.join("s-2.jsonl"),
-            serde_json::to_string(&entry("user", "hi", None)).unwrap(),
-        )
-        .unwrap();
-        seed_meta("s-2", None);
-        assert_eq!(last_compaction_summary(dir.path(), "s-2"), None);
-
-        // No meta row -> None, never a panic.
-        assert_eq!(last_compaction_summary(dir.path(), "nope"), None);
-    }
-
-    #[test]
     fn test_generate_session_id() {
         let id = generate_session_id();
         // Format: YYYYMMDD_HHMMSS_xxxxxx (6-char short UUID)
@@ -4218,7 +4025,6 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
@@ -4436,7 +4242,6 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-            last_compaction_summary: None,
                 corrupted: false,
             chat_session_id: None,
                 model_usage: None,
@@ -4728,7 +4533,6 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
@@ -5493,7 +5297,6 @@ mod tests {
             }),
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
@@ -5820,7 +5623,6 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-            last_compaction_summary: None,
                 corrupted: false,
             chat_session_id: None,
                 model_usage: None,
@@ -7657,7 +7459,6 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
         chat_session_id: None,
             model_usage: None,
         };
@@ -7735,7 +7536,6 @@ mod tests {
                 perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-            last_compaction_summary: None,
                 corrupted: false,
                 model_usage: None,
             }
@@ -7834,7 +7634,6 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-            last_compaction_summary: None,
             chat_session_id: None,
                 model_usage: None,
             }

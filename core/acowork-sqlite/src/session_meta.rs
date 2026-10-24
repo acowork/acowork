@@ -100,8 +100,6 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     let llm_call_counter: Option<i64> = row.get("llm_call_counter")?;
     let model_ratio: Option<f64> = row.get("model_ratio")?;
     let last_compaction_offset: Option<i64> = row.get("last_compaction_offset")?;
-    // §8 write-time derived state: the most recent compaction summary text.
-    let last_compaction_summary: Option<String> = row.get("last_compaction_summary")?;
     // Per-model breakdown (token statistics). An empty/absent map reads as
     // `None` so a session that never made an LLM call is byte-equivalent in
     // the API shape to a pre-feature row.
@@ -198,7 +196,6 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         perf,
         model_ratio,
         last_compaction_offset: last_compaction_offset.map(|o| o.max(0) as u64),
-        last_compaction_summary,
         corrupted: corrupted != 0,
     })
 }
@@ -591,7 +588,7 @@ const SELECT_ALL_COLUMNS: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, last_compaction_summary, model_usage \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, model_usage \
 FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
@@ -602,7 +599,7 @@ const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, last_compaction_summary, model_usage \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, model_usage \
 FROM sessions";
 
 /// Clamp a `u64` token counter into SQLite's `i64` column.
@@ -634,7 +631,7 @@ fn upsert_row(
             token_last_input, token_last_output, token_total_input, token_total_output, \
             token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
             perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, \
-            version, corrupted, user_id, visibility, chat_session_id, last_compaction_summary, model_usage \
+            version, corrupted, user_id, visibility, chat_session_id, model_usage \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
             ?5, ?6, ?7, ?8, ?9, ?10, \
@@ -643,7 +640,7 @@ fn upsert_row(
             ?18, ?19, ?20, ?21, \
             ?22, ?23, ?24, ?25, \
             ?26, ?27, ?28, ?29, \
-            ?30, ?31, ?32, ?33, ?34, ?35, ?36 \
+            ?30, ?31, ?32, ?33, ?34, ?35 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
@@ -679,7 +676,6 @@ fn upsert_row(
             user_id = excluded.user_id, \
             visibility = excluded.visibility, \
             chat_session_id = excluded.chat_session_id, \
-            last_compaction_summary = excluded.last_compaction_summary, \
             model_usage = excluded.model_usage",
         params![
             meta.session_id,
@@ -719,7 +715,6 @@ fn upsert_row(
             meta.user_id,
             meta.visibility.map(|v| v.as_str()),
             meta.chat_session_id,
-            meta.last_compaction_summary,
             serialize_model_usage(meta.model_usage.as_ref()),
         ],
     )?;

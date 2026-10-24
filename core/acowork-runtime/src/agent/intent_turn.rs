@@ -253,7 +253,7 @@ pub fn exec_echo_meta(
 /// - `agent_session_id` — the execution session that will run the turn, the
 ///   drill target and the title source;
 /// - `turn_mode` — `"new"` when the routing **created** a physical session,
-///   `"continue"` for reuse and rotation alike (the same logical task
+///   `"continue"` for every reuse (the same logical task
 ///   carries on). It is a one-time routing-time fact, never re-derived.
 ///
 /// The body stays empty: the row is rendered from i18n by the surface, in
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(m["turn_mode"], "new");
         assert_eq!(m["notice_type"], "turn_routed");
 
-        // Reuse and rotation alike read as "continue" — the same logical
+        // Every reuse reads as "continue" — the same logical
         // task carries on; only physical creation is "new".
         assert_eq!(turn_routed_meta("msg-43", "s-1", false)["turn_mode"], "continue");
     }

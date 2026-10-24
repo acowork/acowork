@@ -140,12 +140,6 @@ pub enum ConfigField {
     /// `UserProfile.language`). `None` = follow the user's global
     /// language from `UserProfile`.
     SessionLanguage,
-    /// `AgentConfig::intent_idle_rotate_hours` — `Option<u64>`
-    /// (design 27 §4.1 T1 threshold, 1–72 hours, 0 disables).
-    IntentIdleRotateHours,
-    /// `AgentConfig::intent_handoff_max_tokens` — `Option<u64>`
-    /// (design 27 §4.1 T2 handoff cap, 500–4,000 tokens).
-    IntentHandoffMaxTokens,
     /// `AgentConfig::chat_router.enabled` — `Option<bool>` (ADR-099).
     /// `None` = enabled (the design default).
     ChatRouterEnabled,
@@ -192,8 +186,6 @@ impl ConfigField {
             ConfigField::MemoryForgettingDormantThreshold => "memory_forgetting_dormant_threshold",
             ConfigField::MemoryForgettingArchiveDays => "memory_forgetting_archive_days",
             ConfigField::SessionLanguage => "session_language",
-            ConfigField::IntentIdleRotateHours => "intent_idle_rotate_hours",
-            ConfigField::IntentHandoffMaxTokens => "intent_handoff_max_tokens",
             ConfigField::ChatRouterEnabled => "chat_router_enabled",
             ConfigField::ChatRouterModel => "chat_router_model",
             ConfigField::ChatRouterProvider => "chat_router_provider",
@@ -273,8 +265,6 @@ impl PutAgentConfigBody {
         memory_forgetting_dormant_threshold: Option<serde_json::Value>,
         memory_forgetting_archive_days: Option<serde_json::Value>,
         session_language: Option<serde_json::Value>,
-        intent_idle_rotate_hours: Option<serde_json::Value>,
-        intent_handoff_max_tokens: Option<serde_json::Value>,
         chat_router_enabled: Option<serde_json::Value>,
         chat_router_model: Option<serde_json::Value>,
         chat_router_provider: Option<serde_json::Value>,
@@ -397,18 +387,6 @@ impl PutAgentConfigBody {
         if let Some(v) = session_language {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::SessionLanguage,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = intent_idle_rotate_hours {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::IntentIdleRotateHours,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = intent_handoff_max_tokens {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::IntentHandoffMaxTokens,
                 op: value_to_patch(&v),
             });
         }

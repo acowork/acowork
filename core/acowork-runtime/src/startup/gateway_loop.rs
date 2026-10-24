@@ -1049,7 +1049,7 @@ async fn route_intent_inbound(
     // ADR-100 D12: a message composed inside one execution session's own
     // view already names its answer target — "who runs this" was settled by
     // where the human typed it. Skip the router queue entirely: no routing
-    // LLM call, no rotation, no routing-reaction row. The pin is only a hint,
+    // LLM call, no routing-reaction row. The pin is only a hint,
     // so a session that is not loaded has its hint dropped and the turn takes
     // the ordinary route below (a stale id costs a hop, never the message).
     if !env.for_execution_session.trim().is_empty() {
@@ -1474,7 +1474,7 @@ async fn route_intent_legacy(
         }
     }
     let target = match target {
-        Some(t) => (t, None, false),
+        Some(t) => (t, false),
         None => {
             // The initiator's session-config suggestion (§4) is consumed on
             // whichever branch the routing takes: at creation here, or applied
@@ -1511,12 +1511,6 @@ async fn route_intent_legacy(
             }
         }
     };
-    // A rotation (§2.1) carries a handoff note (pointer for T1, distilled
-    // compaction summary for T2) alongside the routed intent. It is passed
-    // as a *separate* field — never folded into `content` — so the user's
-    // actual message stays clean for the auto-title and the persisted `user`
-    // entry; the SessionTask records it as its own `system` turn (§4.1).
-    //
     // §5.5.5 pending queue: which intents must be shown in the execution
     // side's pending list while that session is busy. A Chat-sourced turn that
     // owes its chat a write-back is exactly that set — no chat row is written
@@ -1551,7 +1545,7 @@ async fn route_intent_legacy(
             },
         );
     }
-    let opened_new = target.2;
+    let opened_new = target.1;
     let sent = session_manager.lock().await.send_to_session(
         &target.0,
         SessionMessage::Intent {
@@ -1564,7 +1558,6 @@ async fn route_intent_legacy(
             repo,
             kind,
             has_human,
-            handoff_note: target.1,
             chat_attachment_ids,
             in_reply_to,
         },
@@ -1994,7 +1987,7 @@ mod tests {
             .0
     }
 
-    /// The pin is the whole point: no routing LLM call, no rotation, no
+    /// The pin is the whole point: no routing LLM call, no
     /// routing-reaction row. The human already knows which task this is —
     /// they typed it while looking at that task's own transcript.
     #[tokio::test]

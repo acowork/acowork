@@ -585,20 +585,23 @@ async fn run_turn(
         Some((args, label)) => {
             // A `dispatch` without `session_config` still honours the user's
             // draft configuration when it starts a new session — that is the
-            // whole point of not forcing a rotation on a config change.
+            // whole point of not forcing a new session on a config change.
             let seed = args
                 .seed
                 .clone()
                 .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
-            let content = args.message.clone().unwrap_or_else(|| text.to_string());
+            // The router's `message` is a brief, and whether this turn needs
+            // one is NOT decided by the model's `target` argument: an
+            // existing session may have vanished from disk, in which case
+            // `chat_dispatch` opens a fresh one and reports `opened_new`.
+            // So the brief waits until the target is actually resolved.
+            let brief = args.message.clone();
             let target = args.target.clone();
-            // Kept before `content` moves into the intent, to build the bounded
-            // queue preview if the target session turns out to be busy.
-            let preview_text = content.clone();
             let delivered = {
                 let mut guard = session_manager.lock().await;
                 match guard.chat_dispatch(&chat_id, target, seed).await {
-                    Ok((session_id, handoff_note, opened_new)) => {
+                    Ok((session_id, opened_new)) => {
+                        let content = dispatch_content(opened_new, brief.as_deref(), text);
                         // §5.5.5 pending queue: record BEFORE delivering. The
                         // only place that drops this row is the SessionTask
                         // dequeue, which can run only once the send below has
@@ -616,7 +619,7 @@ async fn run_turn(
                                 message_id: envelope.message_id.clone(),
                                 from: envelope.from.clone(),
                                 preview: crate::agent::session_state::pending_preview(
-                                    &preview_text,
+                                    &content,
                                 ),
                                 from_chat: true,
                             },
@@ -633,7 +636,6 @@ async fn run_turn(
                                 repo: envelope.repo.clone(),
                                 kind: envelope.kind.clone(),
                                 has_human: envelope.has_human,
-                                handoff_note,
                                 chat_attachment_ids: envelope.chat_attachment_ids.clone(),
                                 in_reply_to: envelope.in_reply_to.clone(),
                             },
@@ -1100,6 +1102,30 @@ impl TurnTrace<'_> {
     }
 }
 
+/// What the execution session actually receives for a dispatched turn.
+///
+/// The router's brief exists for one thing only: a session that starts empty
+/// has no history to resolve "commit the local changes" against, so the
+/// brief has to carry the conversation. A **continued** session already has
+/// its own history — a compaction included, since a compacted session keeps
+/// its summary and its tail and continues in place (ADR-032/ADR-061) — so it
+/// receives the user's own words verbatim. Overwriting them with a router
+/// paraphrase would put the paraphrase in the persisted `user` row and in
+/// the auto-title (ADR-046 keeps those the user's actual message) and
+/// re-inject context the session already holds; anything it genuinely lacks it
+/// pulls with `chat_history_read`.
+///
+/// `opened_new` is the routing-time authority for "this turn landed in a
+/// physically new session", which is why the choice is made here rather than
+/// from `Target`: `Target::Existing` against a session that is gone from disk
+/// also creates one, and that one still needs the brief.
+fn dispatch_content(opened_new: bool, brief: Option<&str>, user_text: &str) -> String {
+    match (opened_new, brief) {
+        (true, Some(brief)) => brief.to_string(),
+        _ => user_text.to_string(),
+    }
+}
+
 // The `SessionStatus` → `CandidateStatus` vocabulary table lives in
 // `chat_candidates` (ADR-099): `SessionManager::resolve_candidates` needs the
 // same mapping, and the session layer must not reach up into the router layer
@@ -1289,6 +1315,33 @@ mod tests {
         .render();
         assert!(rendered.contains("S1"));
         assert!(!rendered.contains("sess-secret"));
+    }
+
+    #[test]
+    fn a_continued_session_receives_the_users_own_words() {
+        // Regression (2026-10-24): the router appended a context brief when
+        // dispatching to an existing session, and it replaced the user's
+        // message — the execution session's persisted `user` row and its
+        // auto-title then held the router's paraphrase, and the brief restated
+        // history that session already has.
+        let brief = "把本地修改的代码提交一下。\n\n上下文（同一 session 内刚完成的工作）：1. …";
+        assert_eq!(
+            dispatch_content(false, Some(brief), "把本地修改的代码提交一下。"),
+            "把本地修改的代码提交一下。"
+        );
+    }
+
+    #[test]
+    fn a_fresh_session_keeps_the_routers_brief() {
+        // A session that starts empty has nothing else to work from. This
+        // covers `dispatch(new)` and a `target=S3` whose session has vanished
+        // from disk — `chat_dispatch` reports `opened_new` for both.
+        assert_eq!(
+            dispatch_content(true, Some("Commit the batch described below: …"), "raw"),
+            "Commit the batch described below: …"
+        );
+        // Without a brief (e.g. an attachment-only turn) the text still lands.
+        assert_eq!(dispatch_content(true, None, "raw"), "raw");
     }
 
     fn info_call(name: &str, arguments: &str) -> ToolCall {

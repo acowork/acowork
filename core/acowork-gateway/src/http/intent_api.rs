@@ -1041,8 +1041,7 @@ async fn deliver_intent(
 /// physical session id (agent-private state, ADR-009) — it forwards the
 /// registry key to the target's Runtime, which closes and unmaps it.
 /// Idempotent; an unreachable Runtime is reported, not retried (the next
-/// dispatch on a dead mapping already self-heals, and T1/T2 rotation
-/// bounds the residue).
+/// dispatch on a dead mapping already self-heals).
 #[derive(Debug, Deserialize)]
 struct TaskCloseRequest {
     project_id: String,

@@ -210,13 +210,6 @@ pub enum SessionMessage {
         /// id is carried here, so attachment pulls fall back to this
         /// coordinate. Never rendered; purely the pull address.
         in_reply_to: String,
-        /// Design 27 §2.1 / §4.1: when this intent opened a *rotated*
-        /// successor session, the handoff note describing the session it
-        /// replaced. Persisted as a standalone `system` JSONL row (transcript
-        /// copy) and folded into the model-facing `user_message`; `content`
-        /// itself stays the user's verbatim text so the auto-title and the
-        /// persisted `user` entry stay clean (ADR-046).
-        handoff_note: Option<String>,
     },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, the front/back suppression mechanism is gone.
@@ -387,10 +380,6 @@ pub(crate) struct SessionTask {
     identity_context: Option<String>,
     /// LLM protocol type (for image token estimation)
     protocol_type: acowork_core::protocol::ProtocolType,
-    /// Design 27 §2.1: shared intent routing registry. An intent `request`
-    /// turn stamps its rotation bookkeeping (T1 idle clock + T2 compaction
-    /// marker) here at turn end, after the response write-back path runs.
-    intent_map: Arc<std::sync::Mutex<super::intent_routing::IntentSessionMap>>,
     /// ADR-094: agent-level Progressive-mode skills summary, seeded from
     /// `SessionManagerConfig.skill_summary` at session creation. Applied to
     /// the new session's `ContextBuilder` in `run()` via
@@ -540,8 +529,6 @@ impl SessionTask {
         committed_lines: Arc<std::sync::atomic::AtomicUsize>,
         // Shared streaming lines map, cloned into SessionCore.
         streaming_lines: crate::conversation::StreamingStateMap,
-        // Design 27 §2.1: shared intent routing registry (rotation bookkeeping).
-        intent_map: Arc<std::sync::Mutex<super::intent_routing::IntentSessionMap>>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         // Create per-session SessionCore from the shared AgentCore template.
         let notify_interval_ms = core.config.data_flow.notify_interval_ms;
@@ -640,7 +627,6 @@ impl SessionTask {
             session_id,
             identity_context,
             protocol_type,
-            intent_map,
         };
         (task, agent_inbound_tx)
     }
@@ -700,7 +686,6 @@ impl SessionTask {
             system_prompt,
             identity_context,
             protocol_type,
-            intent_map,
             skill_summary,
         } = self;
 
@@ -1377,7 +1362,6 @@ impl SessionTask {
                     has_human,
                         chat_attachment_ids,
                     in_reply_to,
-                    handoff_note,
                 }) => {
                     // §5.5.5: this intent has left the pending queue and is
                     // starting its turn — drop its queue row so the execution
@@ -1430,23 +1414,10 @@ impl SessionTask {
                             .supersede_pause_cards(&source_chat_session_id)
                             .await;
                     }
-                    // A rotation (§2.1) hands off with a note describing the
-                    // session it replaced. Two deliveries: (a) persist it as a
-                    // standalone `system` JSONL row for the transcript/UI, and
-                    // (b) fold it into the model-facing message so the live
-                    // turn sees the handoff — `ContextBuilder::build` drops
-                    // System-role history, so the note must ride on the user
-                    // turn (a cold restart re-feeds it via the restorer's
-                    // `rotation_handoff` → User replay). `content` stays the
-                    // user's clean text for the auto-title and the JSONL `user`
-                    // entry (ADR-046).
-                    let mut llm_message = match handoff_note.as_deref() {
-                        Some(note) => {
-                            agent_loop.record_intent_handoff(note, &message_id);
-                            format!("{note}\n\n{content}")
-                        }
-                        None => content.clone(),
-                    };
+                    // The model-facing message starts as the user's verbatim
+                    // text; the auto-title and the JSONL `user` entry stay
+                    // clean (ADR-046).
+                    let mut llm_message = content.clone();
                     // Design 27 §4.2.1 chat attachments: the Intent carries
                     // ids only — the bytes are pulled over node-auth HTTP
                     // through the Gateway (never the MQTT envelope) and
@@ -1571,7 +1542,7 @@ impl SessionTask {
                     // Take both fields back regardless of outcome — the
                     // turn is over and the next one must not inherit them.
                     // The write-back context (D-C/C1) is what the turn-end
-                    // posting and the routing registry stamp read.
+                    // posting reads.
                     agent_loop.pending_intent = None;
                     agent_loop.chat_has_human = None;
                     let ctx = agent_loop.chat_writeback.take();
@@ -1588,22 +1559,6 @@ impl SessionTask {
                             "turn_ended",
                         )
                         .await;
-                    // Design 27 §2.1: stamp the routing registry for the next
-                    // arrival — reset the T1 idle clock and carry the T2
-                    // compaction marker if this turn compacted. Bookkeeping
-                    // only; the rotation itself is taken by the next
-                    // `route_intent_session` (i.e. after this write-back).
-                    if let Some(ref c) = ctx {
-                        let key = super::intent_routing::routing_key(
-                            &c.source_chat_session_id,
-                            &c.conversation_id,
-                            &c.request_id,
-                        );
-                        let compacted = agent_loop.session.is_compacted;
-                        if let Ok(mut map) = intent_map.lock() {
-                            let _ = map.note_turn_end(&key, compacted);
-                        }
-                    }
                     match result {
                         Ok(response) => {
                             if let Some(ref tx) = chunk_tx {

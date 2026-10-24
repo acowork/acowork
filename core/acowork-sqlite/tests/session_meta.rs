@@ -76,7 +76,6 @@ fn make_meta(
         }),
         model_ratio: Some(1.0),
         last_compaction_offset: Some(0),
-        last_compaction_summary: None,
         corrupted: false,
         user_id: None,
         visibility: None,
@@ -558,7 +557,6 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              ALTER TABLE sessions DROP COLUMN perf_ttft_ms_sum;
              ALTER TABLE sessions DROP COLUMN perf_ttft_ms_samples;
              ALTER TABLE sessions DROP COLUMN chat_session_id;
-             ALTER TABLE sessions DROP COLUMN last_compaction_summary;
              ALTER TABLE sessions DROP COLUMN model_usage;
              PRAGMA user_version = 1;",
         )
@@ -653,6 +651,8 @@ fn v6_migration_backfills_unknown_breakdown_and_aggregate() -> AcoworkResult<()>
 
     // Build a current store (all migrations), then roll it back to the v5
     // shape: no `model_usage` column, no `token_stats` table, version 5.
+    // The `last_compaction_summary` column is re-added because a genuine v5
+    // database had it (migration 5) — the v7 step drops it again on reopen.
     {
         let (_store, sm) = open_pair(&path);
         let mut meta = make_meta("legacy", "2026-01-01T00:00:00.000Z", Some("l"), "a");
@@ -688,6 +688,7 @@ fn v6_migration_backfills_unknown_breakdown_and_aggregate() -> AcoworkResult<()>
         .execute_batch(
             "DROP TABLE token_stats;
              ALTER TABLE sessions DROP COLUMN model_usage;
+             ALTER TABLE sessions ADD COLUMN last_compaction_summary TEXT;
              PRAGMA user_version = 5;",
         )
         .unwrap();

@@ -207,7 +207,7 @@ impl GatewayClient {
     /// Design 27 §2.1 T2-a: a task reached a terminal state, so the target
     /// agent's logical execution context for it ends. Best-effort: the
     /// Runtime self-heals dead mappings on the next dispatch, so a failed
-    /// close only leaves an idle session until T1 rotation reclaims it.
+    /// close only leaves the session mapped until that next dispatch.
     pub async fn close_task_context(&self, project_id: &str, task_id: &str, target_agent: &str) {
         let mut req = self.client.post(format!(
             "{}/api/intents/task-close",

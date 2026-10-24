@@ -2997,8 +2997,6 @@ async fn put_agent_config(
         req.memory_forgetting_dormant_threshold,
         req.memory_forgetting_archive_days,
         req.session_language,
-        req.intent_idle_rotate_hours,
-        req.intent_handoff_max_tokens,
         req.chat_router_enabled,
         req.chat_router_model,
         req.chat_router_provider,
@@ -3176,15 +3174,6 @@ struct UpdateAgentConfigRequest {
     /// back to `UserProfile.language`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_language: Option<serde_json::Value>,
-    /// Design 27 §2.1: T1 idle-rotation threshold in hours (1–72;
-    /// `0` disables T1). Absent = leave the on-disk value alone
-    /// (partial PUT); `null` = clear (fall back to default 24h).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    intent_idle_rotate_hours: Option<serde_json::Value>,
-    /// Design 27 §2.1: T2 handoff target token cap (500–4,000).
-    /// Absent = leave alone; `null` = clear (fall back to default 1,500).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    intent_handoff_max_tokens: Option<serde_json::Value>,
     /// ADR-099: Chat Router kill switch (`chat_router.enabled`).
     /// `true`/`false` overwrites the on-disk sub-field; absent = leave
     /// alone. The router re-reads `agent_config.json` every turn, so no
@@ -4783,7 +4772,6 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
@@ -5053,7 +5041,6 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
             chat_session_id: None,
             model_usage: None,
@@ -8185,7 +8172,6 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
             model_usage: None,
@@ -8924,7 +8910,6 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
             model_usage: None,

@@ -1072,7 +1072,7 @@ message Intent {
   /// instead of letting the Chat Router decide. Set when the human composed
   /// the message while standing in that session's own execution view — who
   /// answers this is already answered by where they typed it. The Runtime
-  /// delivers straight to it and skips the router (no rotation, no reaction
+  /// delivers straight to it and skips the router (no router call, no reaction
   /// row). Empty = ordinary routing. Advisory: the Runtime falls back to the
   /// normal route when the named session is not loaded.
   string for_execution_session = 15;
