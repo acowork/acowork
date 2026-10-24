@@ -106,8 +106,9 @@ pub enum Permission {
     Network(String),               // "network:https://api.weather.com"
     FilesystemRead(String),        // "filesystem:read:~/Documents"
     FilesystemWrite(String),       // "filesystem:write:~/Documents"
-    MemoryRead,                    // "memory:read"
-    MemoryWrite,                   // "memory:write"
+    // MemoryRead / MemoryWrite were removed by ADR-100 (their binary tags 3/4 are
+    // retired too, not renumbered): memory is served by the Gateway-hosted
+    // acowork-memory service now and is no longer a permission domain.
     IntentSend(String),            // "intent:send:com.example.calendar"
     IntentReceive(String),         // "intent:receive:com.example.weather"
     Shell,                         // "shell"

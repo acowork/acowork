@@ -71,7 +71,7 @@ ADR-040 Phase 1 清理死代码时删除了 gRPC server + `connect_gateway_clien
 | Runtime `identity_context` | ✅ 启动时填好 | ❌ **始终 None** |
 | Compaction language hint | ✅ 按 profile 语言 | ❌ 永远默认英文 |
 
-### 2.5 设计漏洞诊断���
+### 2.5 设计漏洞诊断
 
 | 维度 | 状态 | 证据 |
 |------|------|------|
@@ -131,7 +131,7 @@ message UserProfileRef {
 ```
 
 **字段裁剪理由**：
-- `avatar` / `builtin_avatar`：纯 UI 渲染���，Runtime 不需要
+- `avatar` / `builtin_avatar`：纯 UI 渲染字段，Runtime 不需要
 - `created_at` / `updated_at`：管理 UI 用，Runtime 不需要
 - `is_active`：subscribed topic 只下发 active，所以该字段在 wire 上恒为 true，省略
 - `custom`：序列化为 JSON 字符串，避免 protobuf 嵌入 map<string,string> 增加复杂度

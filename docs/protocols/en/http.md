@@ -35,6 +35,7 @@
     - [5.3.2 `GET /files/{document_id}`](#532-get-filesdocument_id)
     - [5.3.3 `attached_items` in message entries](#533-attached_items-in-message-entries)
   - [5.4 Memory](#54-memory)
+    - [5.4.1 Service-direct prefix `/api/memory/*` (ADR-100)](#541-service-direct-prefix-apimemoryadr-100)
   - [5.5 Workspace](#55-workspace)
 - [6. Static File Service (direct streaming of raw bytes)](#6-static-file-service-direct-streaming-of-raw-bytes)
 - [7. Migrated to MQTT (HTTP endpoints removed)](#7-migrated-to-mqtt-http-endpoints-removed)
@@ -91,11 +92,12 @@ sequenceDiagram
 |---|---|---|
 | Gateway native | Gateway single‑point processing | **No** |
 | Gateway → Runtime reverse proxy | Gateway passthrough to Runtime localhost HTTP | **Yes** (503 if offline) |
+| Gateway → memory-service reverse proxy (ADR-100) | Gateway passthrough to `acowork-memory` `127.0.0.1:18084` | **No** (Runtime is not involved in the memory surface at all; the service is kept alive by the Gateway supervisor, 503 while it is not ready) |
 | Static files | Gateway reads disk and returns byte stream | **No** (only file existence required) |
 | MQTT commands / streaming | rumqttd Broker relay | Yes (Runtime responds via MQTT subscription) |
 | Global resource active pull (`GET /api/global-resources`) | Gateway single‑point responds to Runtime active pull | **No** (see [§4.13](#413-global-resource-snapshot-runtime-active-pull-entry)) |
 
-Gateway **does not persist business data**: Memory, Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite memory layer; Gateway pulls snapshots or passthrough requests via HTTP reverse proxy, while commands / writes go through MQTT control topics.
+Gateway **does not persist business data**: Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite; since ADR-100 memory belongs to a separate process, `acowork-memory` (one database per agent instance — Gateway only supervises its lifecycle and reverse-proxies it). Gateway pulls snapshots or passthrough requests via HTTP reverse proxy, while commands / writes go through MQTT control topics.
 
 ---
 
@@ -404,7 +406,7 @@ Runtime consumption rule: `503` **does not update local cache**, backs off per `
 >
 > **Node reverse‑proxy authentication (ADR-055 Phase 5a)**: when `mqtt.auth_enabled` is enabled, Gateway, on outbound reverse‑proxy, resolves the agent's hosting Node via `installed_agents.node_id` → node registry, and automatically injects `X-ACowork-Node-Token: <node_token>` header; Node inbound validates this header (an enrolled Node must match `identity.node_token`; mismatch → 403 + `X-Error-Origin: node`). When auth is disabled, no header is sent, behaviour identical to pre‑Phase 4.
 
-Gateway does not parse the Runtime response body; all reads and writes are verbatim passthrough. This means Runtime is the **authoritative owner of workspace config / memory / session state**, and Gateway acts purely as a reverse proxy.
+Gateway does not parse the Runtime response body; all reads and writes are verbatim passthrough. This means Runtime is the **authoritative owner of workspace config / session state**, and Gateway acts purely as a reverse proxy. (Memory is not in that list: since ADR-100 it is private data of `acowork-memory`, see [§5.4](#54-memory).)
 
 ### 5.1 Agent Runtime Configuration
 
@@ -486,7 +488,7 @@ Returns blob raw bytes. `Content-Type` derivation rule: client provides lowercas
 
 #### 5.3.3 `attached_items` in message entries
 
-Runtime receives the **typed** attachment item array pushed from the frontend via MQTT `attached_items` field. The **wire shape** corresponds to Rust's [`AttachedItem`](../../../core/acowork-core/src/protocol.rs): serde tag `type` uses snake_case (`file_upload`, `attached_selection`, etc.), **variant fields use camelCase** (`documentId`, `sizeBytes`, `absPath`, `startLine`, `endLine`). Runtime maps it to JSONL‑persisted [`AttachmentMeta`](../../../core/acowork-runtime/src/conversation.rs) in `loop_memory.rs::write_attached_items` (variant fields converted back to snake_case: `document_id`, `size_bytes`, `abs_path`, `start_line`, `end_line`).
+Runtime receives the **typed** attachment item array pushed from the frontend via MQTT `attached_items` field. The **wire shape** corresponds to Rust's [`AttachedItem`](../../../core/acowork-core/src/protocol.rs): serde tag `type` uses snake_case (`file_upload`, `attached_selection`, etc.), **variant fields use camelCase** (`documentId`, `sizeBytes`, `absPath`, `startLine`, `endLine`). Runtime maps it to JSONL‑persisted [`AttachmentMeta`](../../../core/acowork-runtime/src/conversation.rs) in `loop_persist.rs::write_attached_items` (variant fields converted back to snake_case: `document_id`, `size_bytes`, `abs_path`, `start_line`, `end_line`).
 
 | wire `type` | wire fields (camelCase) | JSONL fields (snake_case) | Scenario |
 |---|---|---|---|
@@ -509,10 +511,17 @@ Runtime receives the **typed** attachment item array pushed from the frontend vi
 
 ### 5.4 Memory
 
-> **Runtime holds the actual SQLite 记忆层 storage**. HTTP reverse proxy detailed in [mqtt.md §7.5](./mqtt.md).
-> Gateway `memory_api.rs` itself is an **empty router** (ADR-033): registering its paths would conflict with `proxy_routes`, causing `Router::merge()` to panic at startup.
+> **ADR-100: memory has been split out into a separate process, `acowork-memory`**
+> (supervised by the Gateway, default `127.0.0.1:18084`, one database per instance at
+> `{data_dir}/instances/{instance_id}/memory.db`). The panel paths
+> `/api/agents/{id}/memory/*` and the response wire shape are **byte-identical**:
+> `memory_proxy` (`core/acowork-gateway/src/http/memory_proxy.rs`) turns the id in the
+> path into `?instance_id=` and reverse-proxies the service's `/memory/*`. Service not
+> started / restarting → Gateway answers `503 + Retry-After: 2` directly. Gateway's
+> `memory_api.rs` is still an **empty router** (ADR-033): registering its paths would
+> conflict with the proxy routes, causing `Router::merge()` to panic at startup.
 
-| Method | Path | Purpose | Runtime path |
+| Method | Path | Purpose | Service path |
 |---|---|---|---|
 | GET | `/api/agents/{id}/memory/nodes` | List nodes (pagination + filters: `type` / `keyword` / `time_range`) | `/memory/nodes` |
 | GET | `/api/agents/{id}/memory/nodes/{nid}` | Read single node | `/memory/nodes/{nid}` |
@@ -520,11 +529,54 @@ Runtime receives the **typed** attachment item array pushed from the frontend vi
 | PUT | `/api/agents/{id}/memory/nodes/{nid}` | Update node | `/memory/nodes/{nid}` |
 | DELETE | `/api/agents/{id}/memory/nodes/{nid}` | Delete node | `/memory/nodes/{nid}` |
 | GET | `/api/agents/{id}/memory/stats` | Statistics: totals, storage bytes, distribution by type/status, embedding dimensions, etc. | `/memory/stats` |
-| POST | `/api/agents/{id}/memory/consolidate` | Trigger memory consolidation (`force`, `retention_days`) | `/memory/consolidate` |
 | GET | `/api/agents/{id}/memory/graph` | Full graph pull (frontend graph view) | `/memory/graph` |
-| GET | `/api/agents/{id}/memory/consolidation/status` | Consolidation timer status (idle duration, pending count, scheduling config) | `/memory/consolidation/status` |
+| POST | `/api/agents/{id}/memory/distill` | Trigger one EpisodicDistiller pass (the former `consolidate` endpoint was folded into this one) | `/memory/distill` |
+| GET | `/api/agents/{id}/memory/consolidation/status` | Consolidation / forgetting pipeline status and scheduling config | `/memory/consolidation/status` |
+| PUT | `/api/agents/{id}/memory/consolidation/status` | Write scheduling config back | `/memory/consolidation/status` |
+| GET | `/api/agents/{id}/memory/search` | In-instance retrieval (global search uses the short path in §5.4.1) | `/memory/search` |
+| POST | `/api/agents/{id}/memory/rebuild-embeddings` | Rebuild the vector index (`scope`: `all` / `repair`, 202 background) | `/memory/rebuild-embeddings` |
+| GET | `/api/agents/{id}/memory/rebuild-progress` | Rebuild progress polling | `/memory/rebuild-progress` |
+
+> The panel's "Rebuild Index" button does **not** call `rebuild-embeddings` directly: it
+> goes through Gateway `POST /api/embedding-models/{id}/start-migration` (§4.7), which
+> forwards to that instance's service endpoint and writes progress back into the
+> `migration-progress` snapshot.
+>
+> This section is the **only non-Runtime backend** inside §5 (Gateway → Runtime reverse
+> proxy): since ADR-100 storage and panel data for memory live on the service side, all
+> other subsections are still Runtime reverse proxies.
+
+RAG is not part of the memory surface and stays with the Runtime:
+
+| Method | Path | Purpose | Runtime path |
+|---|---|---|---|
 | GET | `/api/agents/{id}/rag/status` | RAG configuration status (whether configured, provider name) | `/agents/{id}/rag/status` |
 | POST | `/api/agents/{id}/rag/query` | Direct RAG query (bypasses LLM, for debugging/connectivity verification) | `/agents/{id}/rag/query` |
+
+#### 5.4.1 Service-direct prefix `/api/memory/*` (ADR-100)
+
+| Method | Path | Caller | Service path |
+|---|---|---|---|
+| GET | `/api/memory/search?instance_id={id}` | Desktop global search memory tab | `/memory/search` |
+| POST | `/api/memory/mcp` | Agent Runtime (MCP tool calls) | `/mcp` |
+| POST | `/api/memory/admin/bootstrap?instance_id={id}` | Agent Runtime first-start bootstrap (write entry D) | `/admin/bootstrap` |
+| POST | `/api/memory/admin/import?instance_id={id}` | **Node only**: one-shot legacy-store handover (ADR-100 decision 10) | `/admin/import` |
+
+Mapping and gating rules:
+
+- `mcp` and `admin/*` are the service's own namespaces; every other short path lands on
+  `/memory/{rest}`.
+- Non-MCP calls **MUST** carry `instance_id` (missing → `400`); reads (`GET`/`HEAD`) are
+  gated at `Op::Use`, writes at `Op::Manage` (a machine actor has no `AuthContext` →
+  passes through, ADR-087).
+- `X-MCP-Actor` is injected only after the Gateway has validated the install table;
+  `X-ACowork-Node-Token` stops at the Gateway — it **never crosses the reverse proxy**.
+- The `/admin/import` request body is raw SQLite bytes
+  (`Content-Type: application/x-sqlite3`) capped at 64 MiB (equal to Gateway's
+  `GLOBAL_BODY_LIMIT`); the response is
+  `{imported_nodes, imported_vectors, imported_lexical_rows, imported_purge_log_rows, skipped_existing}`.
+  A namespace that already holds memories is **not merged into** — only
+  `skipped_existing: true` is returned.
 
 ### 5.5 Workspace
 
@@ -689,58 +741,101 @@ PUB acowork/agents/com.acowork.senior-engineer/sessions/control/chat_message
 
 > `attached_items` array wire field names are **camelCase** (`documentId`, `sizeBytes`, `absPath`, `startLine`, `endLine`), matching the Rust `AttachedItem` deserialiser. Full field details in [§5.3.3](#533-attached_items-in-message-entries).
 
-### 9.4 Query Memory (reverse proxy)
+### 9.4 Query Memory (reverse proxy → memory service)
 
 ```http
-GET /api/agents/{id}/memory/nodes?page=1&size=20&type=Episodic&time_range=7d HTTP/1.1
+GET /api/agents/com.acowork.senior-engineer/memory/nodes?page=1&size=20&type=Episodic&time_range=7d HTTP/1.1
 Authorization: Bearer <token>
 ```
 
-Gateway receives → looks up `RuntimeHttpRegistry` for Runtime HTTP port → reverse‑proxies to `127.0.0.1:{port}/memory/nodes?...` → verbatim returns.
+`memory_proxy` handles this on the Gateway (ADR-100): the instance id in the path is the
+sole coordinate — the proxy writes it as `?instance_id=` (a caller-supplied
+`instance_id` is **dropped, never merged**, so nobody can address a namespace they were
+not authorized for) → reverse-proxies
+`http://127.0.0.1:{memory_port}/memory/nodes?...` (default `18084`) → verbatim returns.
 
-### 9.5 Query consolidation status (reverse proxy)
+When the service process does not exist (not started / restarting) the Gateway answers
+`503` + `Retry-After: 2` without consulting any port — the same contract as
+`/api/doc/*`, `/api/pm/*` and `/api/user/*`.
+
+### 9.5 Query consolidation status (reverse proxy → memory service)
 
 ```http
-GET /api/agents/{id}/memory/consolidation/status HTTP/1.1
+GET /api/agents/com.acowork.senior-engineer/memory/consolidation/status HTTP/1.1
 Authorization: Bearer <token>
 ```
 
-Response:
+Response (the Desktop "Memory distiller" / "Memory forgetting" cards render this envelope directly):
 
 ```json
 {
   "idle_secs": 42,
-  "pending_count": 3,
-  "idle_timeout_secs": 1800,
-  "accumulation_threshold": 50,
-  "bg_task_running": true
+  "bg_task_running": true,
+  "distiller": {
+    "enabled": true,
+    "episode_backlog": 3,
+    "secs_since_distill": 120,
+    "interval_secs": 3600,
+    "accumulation_threshold": 50,
+    "idle_secs": 1800,
+    "models": [{ "provider_id": "openai", "model_id": "gpt-4o-mini" }],
+    "last_run": {
+      "at": "2026-10-23T02:11:07+00:00",
+      "episodes_scanned": 12,
+      "total_promoted": 7,
+      "facts_promoted": 4,
+      "preferences_promoted": 1,
+      "relations_promoted": 1,
+      "procedures_promoted": 1,
+      "autobio_promoted": 0,
+      "episodes_marked_consolidated": 9,
+      "error": null,
+      "funnel": { "scanned": 12, "backlog_remaining": 0, "llm_calls": 3 }
+    }
+  },
+  "forgetting": {
+    "enabled": true,
+    "half_life_days": 30,
+    "dormant_threshold": 0.15,
+    "archive_days": 180,
+    "interval_secs": 86400
+  }
 }
 ```
 
-Returns `503 Service Unavailable` if Runtime has not started the consolidation pipeline.
+`distiller.last_run` is `null` until the instance has distilled once; `distiller.models`
+is the candidate chain the panel's model picker reads and writes (**additive** to the
+Runtime response shape, which had no model field). `PUT` on the same path writes the
+scheduling config back: body `{"distiller": {...}, "forgetting": {...}}`, omitted fields
+keep their current values, unknown fields are rejected with `400`
+(`deny_unknown_fields`).
 
-### 9.5.1 Trigger memory consolidation (reverse proxy)
+### 9.5.1 Trigger memory distillation (reverse proxy → memory service)
 
 ```http
-POST /api/agents/{id}/memory/consolidate HTTP/1.1
+POST /api/agents/com.acowork.senior-engineer/memory/distill HTTP/1.1
 Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "force": false,
-  "retention_days": 7
-}
 ```
 
-Response:
+No request body (`?instance_id=` is injected by the proxy). Response:
 
 ```json
 {
   "started": true,
-  "duration_ms": 142,
-  "episodes_consolidated": 12,
-  "knowledge_nodes_generated": 3,
-  "message": "Consolidated 12 episodes (8 upgraded, 2 dormant), generated 3 knowledge nodes, cleaned 1 episodic"
+  "episodes_scanned": 12,
+  "facts_promoted": 4,
+  "preferences_promoted": 1,
+  "relations_promoted": 1,
+  "procedures_promoted": 1,
+  "autobio_promoted": 0,
+  "episodes_marked_consolidated": 9,
+  "funnel": {
+    "scanned": 12, "backlog_remaining": 0, "llm_calls": 3, "llm_calls_failed": 0,
+    "llm_calls_truncated": 1, "below_importance": 2, "candidates_recalled": 9,
+    "projected": 8, "verdict_no_merge": 3, "verdict_merged": 4,
+    "verdict_superseded": 1, "episodes_consolidated": 9, "episodes_deferred": 2,
+    "errors": 0
+  }
 }
 ```
 
@@ -748,13 +843,71 @@ Field description:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `started` | `bool` | Whether consolidation was actually executed (`false` if store unavailable) |
-| `duration_ms` | `u64` | Consolidation duration (milliseconds) |
-| `episodes_consolidated` | `u64` | Total pending nodes processed (upgraded + kept_pending + marked_dormant) |
-| `knowledge_nodes_generated` | `u64` | New knowledge nodes generated (triples_extracted + procedural_created) |
-| `message` | `string` | Human‑readable summary |
+| `started` | `bool` | Whether the pass completed (always `true`; failures leave via the status codes below) |
+| `episodes_scanned` | `usize` | Pending episodes read in this pass |
+| `facts_promoted` / `preferences_promoted` / `relations_promoted` / `procedures_promoted` / `autobio_promoted` | `usize` | Nodes newly written (including merged results) per memory type |
+| `episodes_marked_consolidated` | `usize` | Episodes marked consolidated, so they leave the backlog |
+| `funnel` | `object` | Funnel counters: where the rest of the 12 scanned episodes went |
 
-> **Note**: HTTP manual trigger only executes Phase 2 basic policy (confidence‑based upgrade/downgrade), does **not** include LLM triple extraction / conflict resolution / generalisation. Full Phase 3 pipeline is scheduled by the background `ConsolidationTimer` (idle 30min or pending ≥ 50).
+Status codes: `200` run completed (an empty backlog is still a completed run) · `409` run
+not possible (memory provider not initialized, embedding provider not initialized, or the
+distiller is disabled) · `500` run failed · `503` `distiller_not_available` (the pipeline
+produced no result at all).
+
+> **ADR-100 change**: the Runtime's former `POST …/memory/consolidate`
+> (`{force, retention_days}` → `{started, duration_ms, episodes_consolidated,
+> knowledge_nodes_generated, message}`) no longer exists; manual triggers go through
+> `distill` and run the same complete EpisodicDistiller pipeline as the background loop
+> (LLM extraction and merge verdicts included). There is no "basic policy only" branch.
+
+### 9.5.2 Legacy memory store handover (Node only → memory service)
+
+ADR-100 decision 10: the `{workspace}/memory/private.sqlite` that every Agent workspace
+held before ADR-100 is handed to the service **unilaterally by `acowork-node`** — Node
+owns the node-local filesystem (ADR-055), and neither the Runtime nor the Gateway takes
+part.
+
+```http
+POST /api/memory/admin/import?instance_id=21212121-2121-4121-8121-212121212121 HTTP/1.1
+X-ACowork-Node-Token: <node token>
+Content-Type: application/x-sqlite3
+Content-Length: 1048576
+
+<raw private.sqlite bytes (WAL already checkpointed)>
+```
+
+Response:
+
+```json
+{
+  "imported_nodes": 2,
+  "imported_vectors": 1,
+  "imported_lexical_rows": 2,
+  "imported_purge_log_rows": 0,
+  "skipped_existing": false
+}
+```
+
+Contract points:
+
+- Exactly two trigger points: the background pass after Node starts, and
+  `acowork-node migrate-memory`. Each migrated instance gets a
+  `{workspace}/memory/.migrated` sentinel, which later passes skip.
+- The body is **raw bytes** (no multipart), capped at 64 MiB =
+  `acowork_core::workspace::STORE_IMPORT_MAX_BYTES`, deliberately equal to the Gateway's
+  `GLOBAL_BODY_LIMIT`; a bigger store is refused by Node before uploading, with an
+  operator instruction instead of streaming 64 MiB into a 413.
+- `X-ACowork-Node-Token` stops at the Gateway and **never crosses the reverse proxy**;
+  a machine actor carries no `AuthContext`, so the write-tier `Op::Manage` ACL passes it
+  through (ADR-087).
+- A namespace that **already has memories is not merged**: `skipped_existing: true`, zero
+  rows written to all four tables, and Node then **deletes nothing** — the legacy file
+  stays where it was and the handover can be retried.
+- Only after a real import (`skipped_existing: false`) does Node DELETE the memory rows
+  from the local legacy store; the file itself is kept for the Runtime (sessions /
+  ConversationMessage still live in it, ADR-082).
+- Not a SQLite file (magic mismatch) → `400`; missing `instance_id` → `400`; service not
+  ready → `503` (Node retries with 6 rounds × 5s backoff).
 
 ### 9.6 Query RAG status (reverse proxy)
 
@@ -878,8 +1031,8 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 
 ## 10. Notes
 
-1. **Gateway does not persist business data**: Memory, Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite memory layer; Gateway pulls snapshots or passthrough via HTTP reverse proxy.
-2. **Proxy endpoints require Runtime online**: if Runtime is not registered / has exited, returns 503; the MQTT channel `acowork/agents/{id}/http_port` is the **sole source** for Gateway to discover the Runtime port — **retained publish** is critical (after Gateway restart, broker replays the last port).
+1. **Gateway does not persist business data**: Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite, and memory in the separate `acowork-memory` process's per-instance database (ADR-100); Gateway pulls snapshots or passthrough via HTTP reverse proxy.
+2. **Proxy endpoints require the backend online**: if Runtime is not registered / has exited, returns 503; the MQTT channel `acowork/agents/{id}/http_port` is the **sole source** for Gateway to discover the Runtime port — **retained publish** is critical (after Gateway restart, broker replays the last port). The memory surface (§5.4 / §5.4.1) is the only exception: its backend is the `acowork-memory` process the Gateway supervisor starts itself (port read from the port-file, not from MQTT), so a down Runtime does not affect it.
 3. **Most writes trigger hot pushes**: for example, after modifying Provider / MCP config, Gateway synchronises the latest available list to all connected Runtimes via MQTT **retained publish**; see [mqtt.md §Global resource availability broadcast](./mqtt.md).
 4. **CORS**: always enabled as `CorsLayer::permissive()` (any origin, any method, any header; **without** `allow_credentials(true)` — `*` wildcard conflicts with `Access-Control-Allow-Credentials: true`, tower-http panics at build; also frontend `fetch` defaults to `credentials: 'same-origin'`, so this header is unnecessary). Dev mode Vite (`:5173`) and production Tauri custom protocol (`tauri://localhost` / `http(s)://tauri.localhost`) both cross‑origin access Gateway (`:19876`); any hardcoded allowlist would be broken when browsers resolve `localhost` to different IP literals. Local bind defaults to `127.0.0.1` — an attacker would already need access to the loopback to exploit permissive CORS, so it's zero‑risk on loopback. For remote deployments, CSRF protection relies on `Authorization: Bearer <token>` (`[http].auth_enabled = true`); Gateway does not send Set‑Cookie, and browsers by default do not send cookies with `credentials: 'same-origin'`.
 5. **Static file service**: `/workspace-files` and `/ws-files` paths are served directly by the Axum router as file streams, for frontend `<img>` / video direct references (historical names remain unchanged).

@@ -1,11 +1,15 @@
-﻿# acowork-memory + acowork-sqlite — Agent Private Memory Engine
+﻿# acowork-memory + acowork-sqlite — Agent Private Memory Engine and Memory Service
 
-**Position**: Storage + retrieval + offline distillation of Agent-private Memory, described as two crates.
+**Position**: Storage + retrieval + offline distillation of Agent-private Memory **plus the standalone service process**, described across two crates.
 
-- `acowork-memory`: Memory traits / types / manager / offline distiller / retrieval quality metrics — **storage-agnostic**.
-- `acowork-sqlite`: Sole production storage backend; single-file SQLite (`memory/private.sqlite`), implementing `acowork_memory::MemoryProvider` as `SqliteStore`.
+- `acowork-memory`: Memory traits / types / offline distiller / retrieval quality metrics — **plus** the SQLite storage engine (`src/sqlite/`) — **plus** the `acowork-memory` service process (`src/main.rs` + `src/service/`, ADR-100).
+- `acowork-sqlite`: keeps only the two sidecar subsystems that still belong to the Runtime — the conversation vector index `ConversationStore` (ADR-081) and `SqliteSessionMetaStore` (ADR-082 §4 step 3); both hang off an already-open `SqliteStore`, and the crate re-exports that type.
 
-Runtime holds `Arc<dyn MemoryProvider>` (ADR-051) and never touches a concrete storage engine.
+**ADR-100 separated three things**:
+
+1. **The storage engine moved up**: `SqliteStore` / schema / hybrid retrieval / admin implementations moved from `acowork-sqlite` into `acowork-memory::sqlite`. The reason is the service binary: the crate that hosts a binary must be able to link a concrete backend, and a backend crate must not depend back on the crate that defines the traits it implements. `acowork-sqlite::SqliteStore` survives as a re-export, so old call sites need no change.
+2. **The process shape changed**: memory is no longer an in-process Runtime capability but a standalone `acowork-memory` process supervised by the Gateway (default `127.0.0.1:18084`, one process serving every instance). One DB per instance: `{data_dir}/instances/{instance_id}/memory.db` (`data_dir` defaults to `$HOME/.acowork/acowork-memory/`).
+3. **The Runtime goes to zero**: the Runtime holds no `Arc<dyn MemoryProvider>` and never touches a memory DB; writes go only through the MCP tools `memory_store` / `memory_recall` (via the Gateway `memory_proxy`), panel reads only through the REST reverse proxy. `{workspace}/memory/private.sqlite` still exists as the Runtime's shared sessions / conversation-index file (ADR-082), but its memory rows were handed to the service once by Node and then DELETEd (ADR-100 Decision 10).
 
 ---
 
@@ -16,11 +20,12 @@ Runtime holds `Arc<dyn MemoryProvider>` (ADR-051) and never touches a concrete s
 | Storage engine             | Single-file SQLite (rusqlite direct, no ORM, no Diesel). PRAGMA WAL + NORMAL + foreign_keys |
 | Vector retrieval           | Same-database `vectors` table + application-layer cosine scan (ADR-082 C1)       |
 | Full-text retrieval        | One FTS5 virtual table per Label, `tokenize='trigram'` (CJK substring match)   |
-| Knowledge graph            | Application-layer `edges` table; graph traversal = SQL JOIN + early-stop       |
-| Embedding                  | From Runtime `EmbeddingProvider` trait (Ollama / Remote fallback); Store never holds it |
+| Relation modelling         | Relations are `Knowledge(subtype=Relation)` nodes, not graph edges; the standalone `edges` table and the `graph_expand_*` / `create_memory_edge` APIs were removed by ADR-082 D4 (triples removed since ADR-057) |
+| Embedding                  | The service owns its OpenAI-compatible client (`service/embedding.rs`); endpoints resolve from the Gateway global-resource snapshot (`service/resources.rs`); the DB stores vector bytes only |
 | Lifecycle                  | Startup O(1) (no WAL replay, no BM25 rebuild) — ADR-082 §3                       |
+| Process shape              | **Standalone binary** (ADR-100): one axum router serving both REST (panel + admin) and MCP (`POST /mcp`); spawn / port-file / restart owned by the Gateway supervisor |
 | Schema evolution           | `PRAGMA user_version` + idempotent migration steps — ADR-082 D2                |
-| Isolation                  | Per workspace/agent single file via in-process `MemoryProvider` — ADR-009       |
+| Isolation                  | One DB per **Agent instance**: `{data_dir}/instances/{instance_id}/memory.db`, the id being the ADR-073 immutable install-time UUID; a request without a usable id is a 4xx — there is no cross-instance code path |
 
 ---
 
@@ -30,48 +35,79 @@ Runtime holds `Arc<dyn MemoryProvider>` (ADR-051) and never touches a concrete s
 
 ```
 crates/acowork-memory/
-├── Cargo.toml
+├── Cargo.toml                # lib + [[bin]] acowork-memory (ADR-100)
 └── src/
-    ├── lib.rs                  # Pub re-exports of trait/types/managers
+    ├── lib.rs                  # Pub re-exports of trait/types/store/service
+    ├── main.rs                 # Service entrypoint: clap Cli → MemoryService::run
     ├── provider.rs             # MemoryProvider trait (35+ methods)
     ├── store.rs                # MemoryStore trait (legacy, 16 methods)
-    ├── manager.rs              # MemoryManager — Retrieve / Inject / Record three phases
+    ├── manager.rs              # MemoryManager — Retrieve / Inject / Record three phases (the service uses retrieve only)
     ├── quality.rs              # MemoryQualityConfig + DedupQuality + ConsolidationQuality
     ├── admin.rs                # MemoryAdminService — node CRUD / list / rebuild
     ├── keyword.rs              # Keyword sanitize / length gates (ADR-062)
     ├── judge.rs                # LLM Judge sampling decision (ADR-068 §5)
-    ├── session_meta.rs         # SessionMeta + SessionMetaStore trait + TodoItem
     ├── types.rs                # Episode / KnowledgeNode / ProceduralNode
     │                           # AutobiographicalNode / MemoryQuery / SearchResult
     │                           # MemoryContext / DecayConfig / DecayScanResult ...
+    ├── wire.rs                 # Panel wire format (shaped like the Runtime endpoints the service replaced, ADR-100)
     ├── consolidation/
     │   ├── mod.rs              # EpisodicDistiller trait + SchedulerConfig
-    │   └── distiller.rs        # DefaultEpisodicDistiller (server-side LLM distillation)
-    └── retrieval_metrics.rs    # Retrieval quality metrics (Abstention / Conflict / Dedup)
+    │   └── distiller.rs        # DefaultEpisodicDistiller (LLM distillation implementation)
+    ├── retrieval_metrics.rs    # Retrieval quality metrics (Abstention / Conflict / Dedup evaluation)
+    ├── sqlite/                 # ← ADR-100: the storage engine moved in from acowork-sqlite
+    │   ├── mod.rs              # SqliteStore + factories + error type
+    │   ├── schema.rs           # SCHEMA_SQL + SCHEMA_VERSION + MIGRATIONS + apply_migrations
+    │   ├── provider.rs         # MemoryProvider / MemoryStore trait implementations
+    │   ├── retrieval.rs        # hybrid_search / vector_search / text_search / RRF_K
+    │   ├── admin.rs            # MemoryAdminService implementation
+    │   ├── legacy_import.rs    # ADR-100 Decision 10: import_legacy_store / purge_memory_rows / has_sqlite_magic
+    │   └── tests.rs            # Trait round-trip assertions (every field of every node type)
+    └── service/                # ADR-100 service layer (additive on top of the lib)
+        ├── mod.rs              # Exports Cli / MemoryService / MemoryServiceConfig / MemoryState
+        ├── cli.rs              # Process arguments (port / data_dir / config / logging)
+        ├── config.rs           # `{data_dir}/config.toml`: the authority for distill & forgetting scheduling
+        ├── error.rs            # Service error → HTTP status (empty body) / JSON-RPC code mapping (MCP non-retryable rejection uses -32002)
+        ├── server.rs           # axum router + boot (health / api / mcp assembly)
+        ├── state.rs            # Per-instance store registry (lazy open + cached) + instance_id validation
+        ├── health.rs           # `/health` probe (the supervisor's readiness check)
+        ├── api/                # Panel REST: nodes / search / consolidation / rebuild / admin / import_legacy
+        ├── mcp/                # `POST /mcp`: initialize / tools\_list / tools\_call (memory\_store, memory\_recall)
+        ├── pipeline.rs         # Distillation + forgetting loops (one scheduler per instance)
+        ├── llm.rs              # OpenAI-compatible chat client for distillation + candidate-chain resolution
+        ├── embedding.rs        # Embedding client for retrieval and rebuild
+        └── resources.rs        # Pulls the provider / embedding snapshot from Gateway `GET /api/global-resources`
 ```
+
+> `session_meta.rs` was removed from this crate (ADR-100): the authoritative definitions of
+> `SessionMeta` and the `SessionMetaStore` trait live in `acowork-core::session_meta`, and this
+> crate only re-exported them — so the Runtime no longer has to depend on the memory crate just to
+> reach session metadata.
 
 **One-liner per module**:
 
-- `provider.rs` / `store.rs`: define traits (implementation lives in `acowork-sqlite`).
-- `manager.rs`: intermediate layer between Runtime and Store; orchestrates the three-phase lifecycle.
-- `consolidation/distiller.rs`: 6-step offline distillation pipeline (ADR-068 §3.4), reads/writes via the `MemoryProvider` interface.
+- `provider.rs` / `store.rs`: define traits (implementations live in this crate's `sqlite/`).
+- `manager.rs`: intermediate layer between the caller and the Store; orchestrates the three-phase
+  memory lifecycle. The service side uses only its **retrieval orchestration**
+  (`service/mcp/tools.rs` runs `retrieve()` with `MemoryManagerConfig::default()`: retrieval
+  quality parameters are service-wide now, and the per-agent config that lived inside the old
+  Runtime session handle has no counterpart on this side of the boundary).
+- `consolidation/distiller.rs`: 6-step offline distillation pipeline (ADR-068 §3.4), reads/writes via the `MemoryProvider` interface; scheduled by `service/pipeline.rs`.
 - `retrieval_metrics.rs`: retrieval quality metrics (see §6).
 - `quality.rs` / `keyword.rs` / `judge.rs`: distillation-side gating config.
+- `sqlite/legacy_import.rs`: the single write entrypoint for the one-off legacy-store handoff (ADR-100 Decision 10).
+- `service/`: the process, the routers, the authenticated instance namespace, the schedulers, and how external dependencies (LLM / embedding) resolve.
 
 ### 2.2 `core/acowork-sqlite/`
 
+After ADR-100 this crate keeps **only the two sidecar subsystems that still belong to the Runtime** (the storage engine moved up to `acowork-memory::sqlite`):
+
 ```
 crates/acowork-sqlite/
-├── Cargo.toml
+├── Cargo.toml                # depends on acowork-memory (uses its traits) — never the reverse
 └── src/
-    ├── lib.rs                  # SqliteStore struct + error type + top-level factories
-    ├── schema.rs               # SCHEMA_SQL + SCHEMA_VERSION + MIGRATIONS + apply_migrations
-    ├── provider.rs             # MemoryProvider / MemoryStore trait implementations (~800 LoC core)
-    ├── retrieval.rs            # hybrid_search / vector_search / text_search / RRF_K
-    ├── admin.rs                # MemoryAdminService implementation (node browse / list / rebuild)
+    ├── lib.rs                  # re-export acowork_memory::sqlite::{SqliteStore, Error, ...}
     ├── conversation.rs         # ConversationStore (ADR-082 §4 step 2, reusing nodes/vectors/FTS)
-    ├── session_meta.rs         # SqliteSessionMetaStore (ADR-082 §4 step 3, sessions table)
-    └── tests.rs                # Trait round-trip assertions (every field of every node type)
+    └── session_meta.rs         # SqliteSessionMetaStore (ADR-082 §4 step 3, sessions table)
 
 tests/
 ├── memory_chains_e2e.rs        # write/read / distiller / dedup end-to-end
@@ -80,11 +116,15 @@ tests/
 └── store_isolation.rs          # same DB different label isolation (privacy boundary)
 ```
 
+Both sidecars wrap an already-open store handle (`ConversationStore::from_store(Arc<SqliteStore>)`, `SqliteSessionMetaStore::new(Arc<SqliteStore>)`), so the Runtime-side conversation index and session metadata still share one `{workspace}/memory/private.sqlite`. The memory rows are gone from it — they were uploaded once through Node and then DELETEd from this file (ADR-100 Decision 10).
+
 ---
 
 ## 3. SQLite Schema (ADR-082 D1)
 
-A single database with 6 physical tables and 6 virtual tables. All DDL in [`schema.rs::SCHEMA_SQL`] is idempotent; re-running on every `open` does not corrupt data.
+A single database with 6 physical tables and 6 virtual tables. All DDL in `schema.rs::SCHEMA_SQL` is idempotent; re-running on every `open` does not corrupt data.
+
+`SCHEMA_SQL` is frozen at the v0 baseline shape: columns/tables introduced by migrations **never** get backfilled into that DDL (explicit convention at the top of `schema.rs`). A fresh database starts at `user_version = 0` and runs the whole migration chain, ending with exactly the shape an upgraded database has.
 
 ### 3.1 Physical tables
 
@@ -93,7 +133,7 @@ A single database with 6 physical tables and 6 virtual tables. All DDL in [`sche
 | `nodes`        | One row per memory node; `label` distinguishes memory type; `props` JSON holds other fields |
 | `vectors`      | Node embedding (f32 BLOB), FK `node_id` → `nodes.id` ON DELETE CASCADE              |
 | `meta`         | Library-level metadata (currently only `embedding_dim`); reopen reads from DB to avoid stale caller dimension |
-| `edges`        | Relations among consolidated-layer nodes (used by application-layer graph traversal), `(src_id, dst_id, kind, weight, props)` |
+| `conversation_state` | Per-session indexer watermark (`next_line` / `byte_offset`), committed in the same transaction as the indexed row (design 27 §4) |
 | `purge_log`    | Forgetting decay terminal table (archive first, then delete; field-encoded reason like `decay/purge/expiry`) |
 | `sessions`     | Session metadata (ADR-082 §4 step 3, replacing `conversations/meta/*.json` sidecar)  |
 
@@ -132,15 +172,15 @@ embedding BLOB NOT NULL           -- dim × f32 little-endian
 
 A dimension mismatch on write errors out — silent score corruption is never acceptable; a stale caller dimension is overridden by the stored `meta.embedding_dim` (see `SqliteStore::from_connection` priority).
 
-### 3.5 `edges` row contract (application-layer graph traversal)
+### 3.5 `conversation_state` row contract
 
 ```
-src_id    INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE
-dst_id    INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE
-kind      TEXT NOT NULL           -- {PREFERS, RELATES_TO, CONTRADICTS, ...}
-weight    REAL NOT NULL DEFAULT 1.0
-props     JSON                    -- edge properties (e.g. timestamp, source)
+session_id   TEXT PRIMARY KEY
+next_line    INTEGER NOT NULL DEFAULT 0   -- next physical line to index
+byte_offset  INTEGER NOT NULL DEFAULT 0   -- matching byte offset
 ```
+
+The watermark commits in the same transaction as the indexed row, so a crash neither re-indexes nor skips anything. It lets the sweep skip untouched logs by file size alone and brings reopening down to O(#sessions) instead of a full-table pass (the design 27 §4 iron rule: no whole-session reads on request paths).
 
 ### 3.6 `purge_log` row contract
 
@@ -163,7 +203,7 @@ purged_at TEXT NOT NULL
 ### 4.1 The trinity
 
 ```rust
-pub const SCHEMA_VERSION: i64 = 3;                           // current version
+pub const SCHEMA_VERSION: i64 = 5;                           // current version
 pub(crate) const MIGRATIONS: &[(i64, &str)] = &[...];        // [(target, sql)]
 pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 ```
@@ -194,14 +234,20 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 | 1 | `sessions.version` / `sessions.corrupted` | ADR-082 D2 |
 | 2 | `sessions.user_id` / `sessions.visibility` | ADR-076 §Decision 4 (session ownership) |
 | 3 | `sessions.perf_tps_sum` / `perf_tps_samples` / `perf_ttft_ms_sum` / `perf_ttft_ms_samples` | Session-level LLM output speed and first-token latency |
+| 4 | `sessions.chat_session_id` | Design 27 §8.2 (a group-execution session's owning Chat session) |
+| 5 | `sessions.last_compaction_summary` + the new `conversation_state` table | Design 27 §4 (O(1) handoff read + indexer watermark) |
 
 v3 stores **sum + count**, not a folded mean: each figure divides by its own sample count. A call can be measurable for TTFT only (the Provider reported no completion count), and a shared denominator would systematically inflate the speed mean.
 
-> `acowork-sqlite::SCHEMA_VERSION` is independent of the trait-layer semantic version — it is the SQLite in-library `user_version`, decoupled from the `acowork-memory` crate version.
+> `acowork-memory::sqlite::schema::SCHEMA_VERSION` is independent of the trait-layer semantic version — it is the SQLite in-library `user_version`, decoupled from the `acowork-memory` crate version.
 
 ---
 
 ## 5. SqliteStore — MemoryProvider Implementation
+
+> The type is authoritatively defined in `acowork-memory::sqlite` (ADR-100);
+> `acowork_sqlite::SqliteStore` is a re-export of the same type. The factories and trait
+> implementations in this section all refer to the former.
 
 ### 5.1 Factories
 
@@ -223,17 +269,22 @@ Why `open_dim_agnostic` exists: subsystems sharing the workspace `.sqlite` file 
 
 - Single `Connection` with outer `Mutex`.
 - ADR-082 workload premise: **one agent per DB, zero query concurrency**; serial access is sufficient and simpler.
+- ADR-100 keeps the shape but raises the requester count: one service process serves every instance,
+  so different instances run truly in parallel (one `Arc<SqliteStore>` each, held in
+  `service/state.rs`'s `RwLock<HashMap<…>>`), while panel reads, MCP calls and the distill loop hitting
+  the *same* instance serialize on that store's mutex. The single-connection-per-DB choice
+  deliberately did not change — the traffic that got worse is per-instance, not global.
 - `Connection: Send`, so `SqliteStore: Send + Sync` (statically asserted).
 - If high concurrency arises in the future → swap to a pool, **without** changing the trait interface.
 
 ### 5.3 Trait method → implementation map
 
-| `MemoryProvider` method family                  | `acowork-sqlite` implementation location |
+| `MemoryProvider` method family                  | `acowork-memory::sqlite` implementation location |
 | ----------------------------------------------- | ----------------------------------------- |
 | Episodic CRUD / retrieval                         | `provider.rs::episodic_*`                 |
 | Consolidated CRUD / retrieval                    | `provider.rs::consolidated_*`             |
 | Hybrid retrieval / RRF fusion                    | `retrieval.rs` + `provider.rs`            |
-| Node CRUD / edge CRUD                            | `provider.rs::node_*` / `edge_*`          |
+| Node CRUD                                         | `provider.rs::node_*`                     |
 | Forgetting decay / archive                       | `provider.rs::decay_*` / `purge_*`        |
 | Health check / stats                            | `provider.rs::health_*`                   |
 | `MemoryAdminService` (node list / rebuild)        | `admin.rs`                                |
@@ -281,13 +332,17 @@ pub enum Error {
 
 ## 9. Boundaries with Neighbouring Modules
 
-| Boundary             | ↔                                                                                                          | Notes                                                                                  |
-| -------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Runtime ↔ storage    | ↔                                                                                                         | Runtime holds only `Arc<dyn MemoryProvider>`, never `use acowork_sqlite::*`           |
-| Runtime ↔ embedding  | ↔                                                                                                         | Runtime generates vectors via `EmbeddingProvider` trait; Store never holds the provider |
-| Storage ↔ workspace  | ↔                                                                                                         | Store writes `<install_path>/workspace/memory/private.sqlite` (+ WAL/SHM); Gateway does not access directly |
-| Cloning              | ↔                                                                                                         | the `acowork-node` clone path copies `private.sqlite` + `*.wal` + `*.shm` triplet (ADR-082 D5) |
-| InboxAgent tests     | ↔                                                                                                         | Integration tests use `SqliteStore::open_in_memory()`, same trait / same path as production |
+| Boundary                | ↔                                                                                                          | Notes                                                                                  |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Runtime ↔ memory         | ↔ | **Zero boundary** (ADR-100): the Runtime never `use acowork_memory::*` and holds no store handle; writes go only through the MCP tools `memory_store` / `memory_recall` |
+| Desktop ↔ panel data    | ↔ | Only via the Gateway `memory_proxy` (panel paths `/api/agents/{id}/memory/*` + short paths `/api/memory/*`); the Gateway never opens an instance DB (ADR-009 §5) |
+| Gateway ↔ service process | ↔ | The supervisor owns lifecycle only: spawn / port-file / `/health` probe / restart, and injects the MCP into the global resources (ADR-100 Decisions 1, 3) |
+| Service ↔ embedding      | ↔ | The service owns its OpenAI-compatible embedding client (`service/embedding.rs`); endpoints resolve from the Gateway global-resource snapshot; the DB stores vector bytes only |
+| Storage ↔ service data dir | ↔ | The service writes `{data_dir}/instances/{instance_id}/memory.db` (+ WAL/SHM); neither the Runtime nor the Gateway reads that directory directly |
+| Runtime ↔ workspace DB   | ↔ | `{workspace}/memory/private.sqlite` is still where the Runtime's conversation index + session meta live (`open_dim_agnostic`), but it no longer contains memory rows |
+| Cloning                  | ↔ | The `acowork-node` clone path still copies the `private.sqlite` + `*.wal` + `*.shm` triplet and calls `purge_conversation_state()` (ADR-082 D5); but since ADR-100 memory no longer travels with the workspace directory, so **a clone inherits no service-side memory** (see the ADR-100 §5 risk table) |
+| Legacy-store handoff     | ↔ | Initiated by `acowork-node` only: read `{workspace}/memory/private.sqlite` → `POST /api/memory/admin/import?instance_id=` → delete the local rows only after a real import (ADR-100 Decision 10) |
+| InboxAgent tests     | ↔ | Integration tests use `SqliteStore::open_in_memory()`, same trait / same path as production |
 
 ---
 
@@ -301,3 +356,23 @@ These capabilities existed in the `acowork-grafeo` era but have been removed aft
 - ❌ `.grafeo` single-file storage — historical working-tree residue (`memory/private.grafeo*`) can be physically deleted.
 - ❌ `meta/*.json` sidecar files — SessionMeta data has migrated to the `sessions` table.
 - ❌ `conversation_index.grafeo` / standalone `conversation_index.sqlite` — all unified into the `nodes` table.
+
+ADR-100 (memory-as-a-service) retired another batch — these must not be reintroduced either:
+
+- ❌ Memory code paths inside the Runtime (`agent/loop_memory.rs`, the built-in `memory_store` /
+  `memory_recall` tools, the `Arc<dyn MemoryProvider>` field, `init_memory_store` /
+  `retrieve_and_inject_memories`).
+- ❌ The Runtime running its own distill / forgetting loops (scheduling now lives in exactly one
+  place: `service/pipeline.rs`).
+- ❌ The Gateway reading instance DBs directly (`instances/*/memory.db`) — panel data goes through
+  `memory_proxy` only.
+- ❌ The Runtime-side `POST …/memory/consolidate` (folded into the service's `POST /memory/distill`).
+- ❌ A memory scope inside `acowork-runtime::http::global_search` (the panel's global search now
+  calls `/api/memory/search` directly).
+- ❌ The five memory-subset switches in `PackageOptions` (`include_episodes` /
+  `include_private_knowledge` / `include_procedural` / `include_autobiographical` /
+  `include_public_knowledge`) — packaging always excluded the whole `memory/` directory, so the
+  toggles never had an effect (ADR-100 Decision 11).
+- ❌ The `edges` table and any `edge_*` method on `SqliteStore` — that table is not in the schema;
+  don't JOIN against it from the historical doc wording (relations are
+  `Knowledge(subtype=Relation)` nodes, see §1).

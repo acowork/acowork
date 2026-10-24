@@ -72,7 +72,9 @@ triggers:
 
 # === 工具依赖 ===
 tool_deps:
-  - memory_recall
+  # 记忆工具不再是内置工具，而是 Gateway 托管记忆服务的 MCP 工具（ADR-100）；
+  # 注册名带 `mcp_<server>__` 前缀，工具级开关在 `agent_mcp_tools.json`（ADR-069）。
+  - mcp_memory__memory_recall
   - file_write
 
 # === 平台兼容性（可选）===
@@ -95,7 +97,7 @@ tested_models:
 
 ## 执行步骤
 
-1. 使用 `memory_recall` 检索本周的对话和工作记录
+1. 使用 `mcp_memory__memory_recall` 检索本周的对话和工作记录
 2. 按项目分类整理完成事项
 3. 生成结构化周报：
    - 本周完成事项（含进展说明）
@@ -110,7 +112,7 @@ tested_models:
 ## 注意事项
 
 - 如果本周无工作记录，回复"本周暂无工作记录"
-- 优先使用 memory_recall 获取数据，而非要求用户重复提供
+- 优先使用 mcp_memory__memory_recall 获取数据，而非要求用户重复提供
 - 输出风格默认简洁，除非用户明确要求详细版
 ```
 
@@ -432,7 +434,7 @@ triggers:
   - weekly report
   - 总结本周
 tool_deps:
-  - memory_recall
+  - mcp_memory__memory_recall
   - file_write
 tested_models:
   - provider: openai

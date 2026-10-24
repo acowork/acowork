@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 88 / 88 documents translated.
+**Coverage**: 93 / 93 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -118,6 +118,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 90 | [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) | In-Conversation History Search — Per-Session Disposable Search Index | Accepted | [zh](../zh/ADR-097-in-conversation-history-search-disposable-index.md) |
 | 91 | [ADR-098](./ADR-098-unified-standard-group-model.md) | Unified Standard Group Model — Every Chat Surface Converges on `kind`-Typed `chat_sessions` | Accepted | [zh](../zh/ADR-098-unified-standard-group-model.md) |
 | 92 | [ADR-099](./ADR-099-chat-session-llm-router.md) | LLM Semantic Routing for Chat Sessions (Chat Router) | Accepted | [zh](../zh/ADR-099-chat-session-llm-router.md) |
+| 93 | [ADR-100](./ADR-100-memory-standalone-mcp-service.md) | Extracting the Memory Module from the Runtime into a Replaceable Standalone Service acowork-memory (MCP Integration) | Proposed (pending architecture review) | [zh](../zh/ADR-100-memory-standalone-mcp-service.md) |
 
 ---
 

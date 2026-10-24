@@ -26,7 +26,7 @@
   - `BootstrapState` 的 `mark_ready` / 现有 Required 子系统注册点（移除一项即可，不改机制）。
 - **不在范围（YAGNI）**：
   - 不改 `com.acowork.system` 的 `agent_id`、prompt、skills、tool 集。
-  - 不改 `IdentityRead` / `IdentityWrite` 权限定义（权限定义与 agent 实现解耦��。
+  - 不改 `IdentityRead` / `IdentityWrite` 权限定义（权限定义与 agent 实现解耦）。
   - 不动 `intent/privacy.rs`、`memory_recall` / `memory_store` 工具。
   - 不动 `acowork-core`（无 Gateway 边界契约变化）。
 
@@ -106,7 +106,7 @@
 | 删除 `system_agent` Required 后，BootstrapState 在某些边角先于 System Agent ready 切到 READY，导致 UI 短暂状态不一致 | 中 | M2-4 新测试覆盖该路径；Desktop 端 System Agent status 走 `/api/agents` 常规列表，与平台 ready 解耦（§3.2 决策） |
 | 陈旧 `node_id == "local"` 记录清理误删正常记录 | 低 | M0-6 限定 `agent_id == "com.acowork.system"` 才删；加 fixture 单测覆盖 |
 | `system = true` 删除后，是否有外部 package installer 依赖此字段 | 低 | Q1 已决策删除；grep 全仓库无消费方 |
-| 多用户模式下 onboarding 默认勾选 System Agent，但用户首次登录账号时身份记忆未生效（user_profiles 还不存在） | 低 | System Agent 的 identity / preference 存储与 acowork-user 解耦（ADR-076/084 完成后）；空场景下 System Agent 即空数据���不报错 |
+| 多用户模式下 onboarding 默认勾选 System Agent，但用户首次登录账号时身份记忆未生效（user_profiles 还不存在） | 低 | System Agent 的 identity / preference 存储与 acowork-user 解耦（ADR-076/084 完成后）；空场景下 System Agent 即空数据也不报错 |
 
 ---
 

@@ -38,7 +38,7 @@ Design a decentralized, high-security, scalable AI Agent runtime platform. The c
 │                     Gateway (Persistent)                      │
 │                                                              │
 │  ┌────────────┐ ┌────────────┐ ┌───────────┐ ┌───────────┐ │
-│  │ Package    │ │ Lifecycle  �� │ Intent    │ │ Rate      │ │
+│  │ Package    │ │ Lifecycle  │ │ Intent    │ │ Rate      │ │
 │  │ Manager    │ │ Manager    │ │ Router    │ │ Limiter   │ │
 │  └────────────┘ └────────────┘ └───────────┘ └───────────┘ │
 │                                                              │

@@ -50,7 +50,7 @@ Desktop App (现有)
     │           └── ProjectBoard (右侧主区)
     │               ├── ProjectHeader (项目名/描述/统计/操作)
     │               └── KanbanBoard (4 列)
-    │                   ├── PendingColumn (待审核��Agent 创建)
+    │                   ├── PendingColumn (待审核/Agent 创建)
     │                   ├── TodoColumn
     │                   ├── InProgressColumn
     │                   └── DoneColumn
@@ -270,7 +270,7 @@ sequenceDiagram
 ```
 
 **关键点**：
-- 字段顺序按使用频率：标题 → 类型/优先级 → 描��� → 指派/截止 → 父任务/依赖 → 附件。
+- 字段顺序按使用频率：标题 → 类型/优先级 → 描述 → 指派/截止 → 父任务/依赖 → 附件。
 - 必填校验仅"标题"非空；其他字段均可后补。
 - 父任务下拉：仅同项目内可选；含"无"选项（顶层任务）。
 - 依赖下拉：多选 + 搜索；显示 task 标题 + 当前状态。
@@ -332,7 +332,7 @@ sequenceDiagram
 
 | 拖动源 | 目标 | 服务端校验 | UI 行为 |
 |--------|------|-----------|---------|
-| ToDo | InProgress | 允许 | 直接移�� |
+| ToDo | InProgress | 允许 | 直接移动 |
 | InProgress | Done | 允许 | 直接移动；如有依赖未满足警告 toast（不阻止） |
 | Done | InProgress | 允许（退回） | 直接移动 |
 | InProgress | ToDo | 允许（退回） | 直接移动 |
@@ -402,7 +402,7 @@ sequenceDiagram
        │                  [取消]      [拒绝]      │
        └──────────────────────────────────────────┘
 ```
-- 拒绝原因可��（P5+ 可作为 note 写入 `rejected_reason`）。
+- 拒绝原因可选（P5+ 可作为 note 写入 `rejected_reason`）。
 - 调 `POST /api/tasks/:id/reject { reason? }`，卡片从看板消失（status=rejected）。
 
 ---
@@ -588,7 +588,7 @@ useEffect(() => {
 
 | 操作 | 快捷键 |
 |------|--------|
-| 聚焦项目��表项 | `Tab` / `↑/↓` |
+| 聚焦项目列表项 | `Tab` / `↑/↓` |
 | 选中项目 | `Enter` |
 | 聚焦任务卡 | `Tab`（每张卡单独 focusable） |
 | 打开任务详情 | `Enter` / `Space` |
@@ -615,7 +615,7 @@ useEffect(() => {
 - **Drawer 打开**：焦点移入 Drawer 第一个可 focus 元素（标题输入框）。
 - **Drawer 关闭**：焦点回到原 Task Card。
 - **Dialog 打开**：焦点 trap 在 Dialog 内；首个 input 自动 focus。
-- **Dialog 关闭**��焦点回到触发元素。
+- **Dialog 关闭**：焦点回到触发元素。
 - **拖动结束后**：焦点保持在被拖动的卡（不跳走）。
 
 ### 8.4 颜色对比
@@ -696,5 +696,5 @@ useEffect(() => {
 > **下一步行动**：
 > 1. 团队评审本文档（重点：§4 拖动/父子树交互、§8 可访问性）
 > 2. 把 P2 任务清单对齐到本文档（每个 T2-x 引用本文档对应章节）
-> 3. 设计 v0.2 §7"Desktop 集成"小��链接到本文档，避免重复
+> 3. 设计 v0.2 §7"Desktop 集成"小节链接到本文档，避免重复
 > 4. 待 §10 开放问题（UX-OP-1~UX-OP-8）有结论后，将倾向写入决策记录

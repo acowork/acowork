@@ -72,7 +72,10 @@ triggers:
 
 # === Tool dependencies ===
 tool_deps:
-  - memory_recall
+  # Memory tools are no longer built-ins — they are MCP tools of the Gateway-hosted
+  # memory service (ADR-100). Registered names carry the `mcp_<server>__` prefix and
+  # the per-tool switch lives in `agent_mcp_tools.json` (ADR-069).
+  - mcp_memory__memory_recall
   - file_write
 
 # === Platform compatibility (optional) ===
@@ -95,7 +98,7 @@ tested_models:
 
 ## Execution Steps
 
-1. Use `memory_recall` to retrieve this week's conversation and work records
+1. Use `mcp_memory__memory_recall` to retrieve this week's conversation and work records
 2. Organize completed items by project
 3. Generate a structured weekly report:
    - Items completed this week (with progress notes)
@@ -110,7 +113,7 @@ Use Markdown format; one section per project; keep within 500 words.
 ## Notes
 
 - If there are no work records this week, reply "No work records this week"
-- Prefer `memory_recall` to get data rather than asking user to repeat
+- Prefer `mcp_memory__memory_recall` to get data rather than asking user to repeat
 - Default style is concise, unless user explicitly requests detailed version
 ```
 
@@ -321,7 +324,7 @@ SkillDraft (current draft)
   │                                               │
   │                                               ├─ [EXECUTED_AS] → SkillExecution #3 (Partial)
   │                                               │                     model: ollama/qwen3:8b
-  ��                                               │                     feedback: "Output format chaotic"
+  │                                               │                     feedback: "Output format chaotic"
   │                                               │
   │                                               └─ [NEXT_ITERATION] → SkillIteration #3 (final)
   │
@@ -432,7 +435,7 @@ triggers:
   - summarize this week
   - week recap
 tool_deps:
-  - memory_recall
+  - mcp_memory__memory_recall
   - file_write
 tested_models:
   - provider: openai

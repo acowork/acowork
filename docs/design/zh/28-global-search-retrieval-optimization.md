@@ -206,9 +206,9 @@ impl FusionPolicy {
 
 **配置来源**：Runtime agent config 增 `search` 段（`analyzer_mode: off|shadow|on`、可选权重覆盖，供 Phase 4 阈值 sweep 使用）。默认值即上表常量；**Phase 2 之前不改任何线上权重**。
 
-### 3.3 评估 Harness — `dev/eval/retrieval/` + `core/acowork-runtime/tests/retrieval_eval.rs`
+### 3.3 评估 Harness — `dev/eval/retrieval/` + 按二进制边界拆分的三个 runner
 
-**职责**（D6 / Phase 0）：离线比较检索变体，产出指标报告；不进入任何线上路径。
+**职责**（D6 / Phase 0）：离线比较检索变体，产出指标报告；不进入任何线上路径，也不链接进任何发布二进制（runner 是集成测试，共用内核 `core/acowork-eval` 只以 `[dev-dependencies]` 被依赖）。
 
 - **数据集** `dev/eval/retrieval/dataset.jsonl`（脱敏、人工标注）：
 
@@ -219,13 +219,18 @@ impl FusionPolicy {
 ```
 
   覆盖矩阵（D6 最低要求）：英文/中文/混合 × 短关键词/整句/精确实体/仅语义/无相关结果/对话与记忆重复候选。
-- **语料 fixture**：`corpus.jsonl` → 建临时 `SqliteStore`（memory 4 labels + conversation 表），embedding 用固定模型（与线上一致）预生成缓存，保证可重复。
-- **runner**：`#[ignore]` 集成测试（放 `acowork-runtime/tests/`，因为需要 analyzer + sqlite + memory 三方），CLI 参数选择变体：
-  1. baseline（现状：单查询、等权）；
-  2. dual-query 等权 RRF；
-  3. dual-query 4:1 加权 RRF；
-  4. （Phase 4）cosine floor sweep。
-- **指标**：Recall@K、Precision@K、MRR、nDCG@K、无关查询误召回率、**文本精确命中保留率**（单列，D6）。输出 JSON + Markdown 报告到 `dev/eval/retrieval/reports/`。
+- **语料 fixture**：`corpus.jsonl`（38 行：22 memory + 16 conversation）→ 每个 harness 只建自己 scope 的临时 store（memory label 表 / 对话索引）。向量是 `dev/eval/retrieval/embeddings.json` 里的**确定性 hashed-token 占位投影**（非生产模型；生产模型的预生成缓存是它预留的接缝，不是它当前的内容），因此两次运行可字节比较。该文件是 `corpus.jsonl` 的派生数据，`EvalDataset::load` 会拒绝与内核分词器不一致的旧文件——语料与查询必须由同一个分词器投影，否则语义权重静默变味；改分词器/维度/语料文本后用 `cargo test -p acowork-eval --test regenerate_stand_in_embeddings -- --ignored` 重生成。
+- **runner 按 ADR-100 的二进制边界拆分**（不再存在"一个 harness 同时喂两个引擎"的形态）：
+
+| runner | scope | 位置 | 变体 |
+|---|---|---|---|
+| 离线 memory | memory | `core/acowork-memory/tests/retrieval_eval.rs` | 现状 4:1 / 等权 / 4:1+floor / 2:1 |
+| 离线 conversation | conversation | `core/acowork-runtime/tests/retrieval_eval.rs` | baseline / dual 等权 / dual 4:1 / dual 4:1+floor |
+| 线上 E2E | conversation（真实 HTTP + 生产模型） | `core/acowork-runtime/tests/global_search_e2e.rs` | Tier 1/3 结构断言默认可跑；Tier 2 质量数字 `--ignored` |
+
+  每个 harness 只播种并只打分自己 scope 的行；ground truth 全在另一 scope 的查询跳过并计入 `skipped` 列（不进均值）——把没发给某引擎的行算成它的命中或误召回，都会让它的数字朝有利的方向动。变体是 `enum Variant` 里的固定清单，不是 CLI 参数：可以现场改出来的变体不构成可复现的对比。
+- **共用内核** `core/acowork-eval/src/lib.rs`：指标数学、数据集读取、stand-in 投影、报告形状。集成测试无法跨 crate 互相 import，而两侧各抄一份定义就等于一次权重变更被两把尺子量；把它放进 `acowork-core` 又会把测量代码链接进发布二进制，故独立成 dev-only crate（`tests/shipping_redline.rs` 守住这条线）。
+- **指标**：Recall@K、Precision@K、MRR、nDCG@K、无关查询误召回率、**文本精确命中保留率**（单列，D6）。输出 JSON + Markdown 报告到 `dev/eval/retrieval/reports/`（`memory-report.*` / `conversation-report.*` / `conversation-live-model-report.*` / `conversation-live-cosine.json`）。
 
 ### 3.4 Desktop 候选选择策略 — `searchRun.ts` 内新函数（非新文件）
 
@@ -470,9 +475,10 @@ export interface CandidateInput {
 |---|---|---|
 | `MatchedBy` / `FusedHit` / `FusionPolicy` | `acowork-core::retrieval`（**唯一公共契约点**） | sqlite 引擎、memory manager、Runtime search 模块与 API |
 | `DualQuery` | `acowork-runtime::search`（Runtime 内部编排类型，非跨 crate 契约） | analyzer 产出、global_search 消费；memory 路径经 `MemoryQuery` 字段传值，不 import 此类型 |
-| `MemoryProvider::hybrid_search_detailed` | trait 在 `acowork-memory`，实现在 `acowork-sqlite`（既有方向） | memory manager；返回 core 契约类型 |
+| `MemoryProvider::hybrid_search_detailed` | trait 与实现均在 `acowork-memory`（`src/provider.rs` + `src/sqlite/`，随 ADR-100 迁入） | memory manager；返回 core 契约类型 |
+| `retrieval_eval`（指标数学 / 数据集读取 / stand-in 投影 / 报告形状） | `acowork-eval`（**dev-only crate**） | 仅 `acowork-memory/tests/` 与 `acowork-runtime/tests/` 的检索 harness；以 `[dev-dependencies]` 被依赖 |
 
-依赖红线（评审/CI 检查项）：`acowork-memory` ✗→ `acowork-runtime::search`；`acowork-runtime::search` ✗→ `acowork-memory`；`acowork-sqlite::conversation` ✗→ `acowork-memory` 域类型。三者只允许各自指向 `acowork-core::retrieval`。
+依赖红线（评审/CI 检查项）：`acowork-memory` ✗→ `acowork-runtime::search`；`acowork-runtime::search` ✗→ `acowork-memory`；`acowork-sqlite::conversation` ✗→ `acowork-memory` 域类型。三者只允许各自指向 `acowork-core::retrieval`。测量面另有一条：`acowork-eval` ✗→ 任何发布二进制（它不得出现在 `[dependencies]`/`[build-dependencies]` 下，也不得回住 `acowork-core`），且两个引擎的测试不得互相引用——由 `acowork-eval/tests/shipping_redline.rs` 与 `dev/ci.sh` 的对应步骤强制。
 
 ---
 
@@ -494,7 +500,7 @@ export interface CandidateInput {
 
 | Phase | 交付物（代码单元） | 验证 | 回滚 |
 |---|---|---|---|
-| 0 | `dev/eval/retrieval/dataset.jsonl` + `corpus.jsonl` + `retrieval_eval.rs` runner | 基线三指标报告入库；数据集覆盖矩阵完整 | 纯离线，删文件即可 |
+| 0 | `dev/eval/retrieval/dataset.jsonl` + `corpus.jsonl` + 两个离线 runner（`acowork-memory/tests/retrieval_eval.rs`、`acowork-runtime/tests/retrieval_eval.rs`）+ 共用内核 `core/acowork-eval` | 基线三指标报告入库（分 scope 两份）；数据集覆盖矩阵完整 | 纯离线，删文件即可（内核是 dev-only crate，不牵扯发布面） |
 | 1 | `acowork-core::retrieval` 契约模块、`search/analyzer.rs`、`text_search_terms` 拆分、`hybrid_search_detailed`、`analyzer_mode=shadow` | analyzer 单测（中英/上限/回退）、FTS 转义测试、现有检索回归全绿、shadow 对比报告、**依赖方向检查（§5.3 红线）** | 配置 `analyzer_mode=off`；旧 API wrapper 未删 |
 | 2 | 全局搜索 memory 切 `SEMANTIC_4TO1` + detailed 路径；`SearchHit.score` 换真实 fused_score；conversation 按评估结果定权重；Desktop 采用服务端序 | eval 达标（预约定 Precision@K/Recall@K 门槛，评审时定数）；`matched_by` 正确性测试；文本精确命中保留率单列验证 | 恢复旧 mapper 常量（一行 policy 改动）；可选响应字段保留不影响旧客户端 |
 | 3 | `selectSummaryCandidates`（多样性/去重/可欠预算）、`SummaryCandidate.matched_by`、prompt 证据类别与"不足须声明" | builder 单测（含 0 候选、部分源失败）、citation/prompt 回归 | 恢复固定每源前 5 builder（旧导出保留一周期）；检索行为不受影响 |
@@ -511,10 +517,11 @@ export interface CandidateInput {
 | 单元 | analyzer：中英混合、上限截断、空结果回退、CJK Keep/Trigram 开关 | `search/analyzer.rs` tests |
 | 单元 | `text_search_terms`：转义、词项数防御截断、<3 字符 LIKE 回退、label 隔离 | `acowork-sqlite/tests.rs` 扩展 |
 | 单元 | `hybrid_search_detailed`：matched_by 正确性（vector-only/text-only/both）、floor 仅作用向量路、rank 语义、稳定序 | `retrieval.rs` tests（沿用现有 `hybrid_search_keeps_lexical_hit_whose_embedding_is_far` 并扩展） |
-| 集成 | `GET /search` 新 payload 字段、memory score 语义变更 | runtime http tests |
-| 集成 | summary 校验：`matched_by` 枚举白名单、旧请求（无新字段）通过 | `search_summary.rs` tests |
+| 集成 | `GET /search` 新 payload 字段；memory scope 已按 ADR-100 下线（返回 `not_available` 且零命中），断言归位 `global_search_e2e.rs` Tier 1 | `core/acowork-runtime/tests/global_search_e2e.rs` |
+| 集成 | summary 校验：`matched_by` 枚举白名单、旧请求（无新字段）通过 | `global_search_e2e.rs` Tier 3（走真实 HTTP） |
 | 前端 | `selectSummaryCandidates`：多样性、去重、欠预算、0 候选不发请求 | `searchRun.test.ts` 扩展 |
-| 离线 | 三变体对比 + 指标门限（CI 手动/定时任务，不入 PR 阻塞） | `retrieval_eval.rs -- --ignored` |
+| 离线 | 分 scope 的变体对比 + 指标（CI 手动/定时任务，不入 PR 阻塞） | memory：`cargo test -p acowork-memory --test retrieval_eval -- --ignored`；conversation：`cargo test -p acowork-runtime --test retrieval_eval -- --ignored`；指标定义共用 `core/acowork-eval` |
+| 线上 E2E | Tier 1/3（真实 HTTP + SQLite + FTS，无外部依赖）默认可跑；Tier 2（生产嵌入模型）`--ignored` | `cargo test -p acowork-runtime --test global_search_e2e [-- --ignored]` |
 
 ---
 

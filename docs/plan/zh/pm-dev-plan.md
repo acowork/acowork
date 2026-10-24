@@ -65,7 +65,7 @@
 | T1-6 | `TaskIndex` 二级索引：`by_id` / `by_project` / `by_assignee` / `blocked_by` + 启动重建（walkdir + 过滤保留名） | 1d | T1-4 | 千任务启动 < 3s；索引与物理一致 |
 | T1-7 | 任务状态机：`status` 合法流转校验（§4 状态机图）+ 状态变更写入 `task.json` | 0.5d | T1-4 | 非法流转返回 422；合法流转通过 |
 | T1-8 | 依赖图校验：创建/编辑时 `depends_on` DFS 防环（深度 ≤ 10） + `is_blocked` / `blocked_by` 派生字段 | 0.5d | T1-1 | 自环 / A→B→A 返回 422；跨项目依赖允许 |
-| T1-9 | 附件存储：上传（multipart + sha256 + 大小限制 10MB / 50MB） + 图片缩略图生成（`image/*` → 256x256 JPG） + 元���据写 `task.json` | 1d | T1-1 | 图片有缩略图；超 10MB 返回 413；累计超 50MB 返回 413 |
+| T1-9 | 附件存储：上传（multipart + sha256 + 大小限制 10MB / 50MB） + 图片缩略图生成（`image/*` → 256x256 JPG） + 元数据写 `task.json` | 1d | T1-1 | 图片有缩略图；超 10MB 返回 413；累计超 50MB 返回 413 |
 | T1-10 | 附件下载 + 删除：`GET /api/attachments/:id`（`?download=1` 强制下载） + `DELETE` 物理清理 | 0.25d | T1-9 | inline preview + 下载头正确；删除后元数据 + 文件双清 |
 | T1-11 | Agent 目录同步：启动拉全量 + 周期刷新（`agent_sync_interval_secs`） + 即时校验兜底（HTTP 调用 Gateway `/api/agents`） | 0.5d | T1-6 | 缓存命中；Agent 卸载后指派校验立即失败 |
 | T1-12 | REST API 实现（§5 全量端点，扣除 P3 才需要的 `/api/reviews` / `/api/tasks/:id/approve` / `/api/tasks/:id/reject`） | 1d | T1-3~T1-10 | 每个端点 happy path 通过 |
@@ -92,7 +92,7 @@
 | T2-6 | **TaskDetailDrawer**（UX §3.4）：右侧滑入 480px + 6 Tabs（概述/描述/子任务/依赖/附件/备注）+ SubtaskTree 递归 + 关闭焦点回到原卡 | 1d | T2-5, T1-9 | tabs 切换无重渲；子任务树展开/折叠；深度限制 5 |
 | T2-7 | **Create/Edit Task Dialog**（UX §3.5）：字段表单 + AgentPicker + DependencyPicker（搜索）+ 父任务下拉（同项目内）+ 附件 drag-drop 上传区 | 1d | T2-5, P1 | 字段校验；下拉只显示可选值；上传进度条 |
 | T2-8 | **状态拖动流转**（UX §4.1）：跨列拖动 → `PATCH /api/tasks/:id/status` + 乐观更新 + 失败回滚 + toast + 键盘拖动（Space 拾起 / ←→ 选列 / Space 落下 / Esc 取消） + 非法流转拦截 | 0.75d | T2-5, T2-12 | 拖动流畅；乐观更新正确回滚；键盘可拖 |
-| T2-9 | **Reparent + 父子树**（UX §4.2 / §4.3）：拖到另一任务卡（drop zone 高亮 + tooltip）→ `PATCH /api/tasks/:id/parent` + DFS 防环（前端预检） + 子任务树 `▾/▸` 展开/折叠（local state，不持久��） | 0.5d | T2-5, T2-6 | reparent 防环；展开状态正确 |
+| T2-9 | **Reparent + 父子树**（UX §4.2 / §4.3）：拖到另一任务卡（drop zone 高亮 + tooltip）→ `PATCH /api/tasks/:id/parent` + DFS 防环（前端预检） + 子任务树 `▾/▸` 展开/折叠（local state，不持久化） | 0.5d | T2-5, T2-6 | reparent 防环；展开状态正确 |
 | T2-10 | **附件预览**（UX §4.4）：AttachmentGrid 缩略图 + AttachmentLightbox（原图放大 + 上一张/下一张）+ 非图片下载（`?download=1`） | 0.5d | T2-5, T1-9, T1-10 | 图片放大流畅；非图片走下载 |
 | T2-11 | **审核 UI**（UX §4.5）：PendingColumn 卡片底色区分 + inline `[批准]/[拒绝]` 按钮 + Drawer 内 ApproveActions + RejectDialog（含可选拒绝原因） | 0.5d | T2-5 | approve 立即移到 ToDo；reject 走确认 → status=rejected |
 | T2-12 | **状态管理**（UX §6）：`@tanstack/react-query` setup + Query Key 规划 + 乐观更新基础设施 + Loading skeleton / Empty hero / Error toast 三态 | 0.5d | T2-1 | 三态齐全；缓存失效正确；staleTime 配置 |

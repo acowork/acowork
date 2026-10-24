@@ -49,7 +49,7 @@
 | 9 | 存储归属 | 用户聊天数据完全归属 Gateway 所在机器（`data_dir/users/...`），**不**走 Runtime HTTP 反代；明确写入 ADR-009 §5.4 例外条款 |
 | 10 | 反代身份注入（PM/Doc） | REST 反代 `X-Actor` 从硬编码 `"human"` 改为 `AuthContext.effective_user_id`（决策 3 的 token 身份）；MCP 路径 `X-MCP-Actor` 校验不变（agent 身份与 user 正交，见 §决策 10） |
 | 11 | PM 成员模型多用户化 | `ProjectMember` 新增 `kind`（`Agent`/`User`），人类操作者与 agent 成员对称；移除 `assignee = "human"` 特例，不变式收紧为 `assignee ∈ ∅ ∪ members`（见 §决策 11） |
-| 12 | 部署模式分流 | 新增 `AUTH_MODE ∈ {local, multi_user}`，由 bind 地址自动推断（`127.0.0.1` → `local`；`0.0.0.0` → `multi_user`），可显式覆盖；local 模式下 §1-§11 退化为 no-op（不引入登录页 / Argon2id / admin / session 过滤 / 用户聊天）。**multi_user 模式下空账号库的处理（v2 修订）**：不再"缺则拒启动"，而是 seed 一个 `username=admin` 的无密码账号（`password_hash=DISABLED_PASSWORD_HASH`），Gateway 进入**受限模式**——只有 `/health` 和 `/api/status` 可达，其他 `/api/*` 一律返回 403 `{error: setup_required}`。操作员在 Gateway 主机上完成首次设置（TTY prompt / `admin-setup` 子命令 / `[multi_user].bootstrap_admin` toml 段）后，受���模式关闭。**没有任何 HTTP 端点接受首次密码**——密码只走 stdin / 文件 / TTY / toml，**永远不上网络**。**（v3 修订：daemon 永远先起 HTTP，受限模式真的对外服务；prompt 只是 best-effort，非 TTY 不阻断启动——见 §决策 12 v3）** 详见 §决策 12 v2 / v3。 |
+| 12 | 部署模式分流 | 新增 `AUTH_MODE ∈ {local, multi_user}`，由 bind 地址自动推断（`127.0.0.1` → `local`；`0.0.0.0` → `multi_user`），可显式覆盖；local 模式下 §1-§11 退化为 no-op（不引入登录页 / Argon2id / admin / session 过滤 / 用户聊天）。**multi_user 模式下空账号库的处理（v2 修订）**：不再"缺则拒启动"，而是 seed 一个 `username=admin` 的无密码账号（`password_hash=DISABLED_PASSWORD_HASH`），Gateway 进入**受限模式**——只有 `/health` 和 `/api/status` 可达，其他 `/api/*` 一律返回 403 `{error: setup_required}`。操作员在 Gateway 主机上完成首次设置（TTY prompt / `admin-setup` 子命令 / `[multi_user].bootstrap_admin` toml 段）后，受限模式关闭。**没有任何 HTTP 端点接受首次密码**——密码只走 stdin / 文件 / TTY / toml，**永远不上网络**。**（v3 修订：daemon 永远先起 HTTP，受限模式真的对外服务；prompt 只是 best-effort，非 TTY 不阻断启动——见 §决策 12 v3）** 详见 §决策 12 v2 / v3。 |
 
 ### 1.3 不变量（必须满足）
 
@@ -895,7 +895,7 @@ require_mixed_case = false
 
 #### §决策 12 v2：空账号库不再拒启动——seed 无密码 admin + 受限模式
 
-**修订动机**（实施期记录）：原 §决策 12 的 "multi_user + 空账号库 → fail-fast" 把"创建首位 admin"的责任推给 toml 的 `[multi_user].bootstrap_admin` 段。新用户跑 `build_macos.sh --start --remote`（bind 0.0.0.0 → 自动推断 multi_user）→ 无 toml → gateway 拒启动 → **用户看不到 stderr**（脚本 `> /dev/null`）→ desktop 连不上 → 黑洞。��是糟糕的首次使用体验，跟"产品还没人能用"等价。
+**修订动机**（实施期记录）：原 §决策 12 的 "multi_user + 空账号库 → fail-fast" 把"创建首位 admin"的责任推给 toml 的 `[multi_user].bootstrap_admin` 段。新用户跑 `build_macos.sh --start --remote`（bind 0.0.0.0 → 自动推断 multi_user）→ 无 toml → gateway 拒启动 → **用户看不到 stderr**（脚本 `> /dev/null`）→ desktop 连不上 → 黑洞。这是糟糕的首次使用体验，跟"产品还没人能用"等价。
 
 **新合约**（v2，**已实现**，见 §6.4 `Gateway::new` 的 passwordless seed 路径 + `http/restricted_mode.rs` middleware）：
 
@@ -920,7 +920,7 @@ require_mixed_case = false
 
 - **首次密码永远不上网络**。HTTP 上没有任何端点接受它。即使 LAN 攻击者抢先连到 Gateway，端口开放的 `/health` 和 `/api/status` 不接受密码。SSH/物理访问 = 已经是 admin。
 - **受限模式 + LAN 攻击者 + 远程 desktop**：desktop 拿到 `requires_setup=true` → 显示"去 Gateway 主机设密码"提示页，**不会**尝试登录。攻击者不能代替操作员设密。
-- **race window**：从"daemon 完成 `set_admin_password` 写盘"到"HTTP 中间件下一次看到 `is_restricted()==false`"是 micro-秒级（同一进程内的 accounts.json 原子写 + middleware 直接调 `is_restricted()` 读盘）���
+- **race window**：从"daemon 完成 `set_admin_password` 写盘"到"HTTP 中间件下一次看到 `is_restricted()==false`"是 micro-秒级（同一进程内的 accounts.json 原子写 + middleware 直接调 `is_restricted()` 读盘）。
 - **policy 一致性**：`set_admin_password` 走 `PasswordPolicy::validate`，跟普通 `change-password` 同一条代码路径。
 
 **与原 §决策 12 的关系**：
@@ -1046,7 +1046,7 @@ require_mixed_case = false
 
 ## 6. 改动清单（按 crate / 文件）
 
-> **实现状态（截至 Phase 6 Desktop ���天 UI）**：本节标注 **（已实现）** 的条目已合并并测试通过——core `src/account.rs`；gateway `src/account/store.rs` / `password.rs` / `auth/{mode,token,revoked,service}.rs` / `http/{auth_middleware,auth_api,account_api,restricted_mode}.rs` / `chat.rs` / `http/chat_api.rs` / config `auth_mode` + `[multi_user]` + `effective_auth_mode()` / cli `--auth-mode` / `Gateway::new` 的 **passwordless-seed + 受限模式**（§决策 12 v2，取代原 bootstrap_admin fail-fast）/ `proxy.rs` 的 14 条会话控制路由（生命周期 7 + 会话动作 7）；runtime `src/http/session_control.rs` + `conversation.rs` 的 scope/visibility + `agent/session/session_manager.rs` 的 `create_frontend_session` / `resume_session`；Desktop `authStore` / `authFetch` / `account/*` / `user-list/*` / `lib/user-chat-api.ts` / `stores/userChatStore.ts` / `views/MessagesView.tsx` / `components/account/SetupRequiredView.tsx`。**未实现**的条目 = 后续 PR（`chat/attachments`），属计划范围，非本节遗漏。原稿的 `protocol.rs AccountPublicView` **未新增**——`acowork_core::account::AccountView` 已承担脱敏 API 返回类型，再建一个同类是重复。
+> **实现状态（截至 Phase 6 Desktop 聊天 UI）**：本节标注 **（已实现）** 的条目已合并并测试通过——core `src/account.rs`；gateway `src/account/store.rs` / `password.rs` / `auth/{mode,token,revoked,service}.rs` / `http/{auth_middleware,auth_api,account_api,restricted_mode}.rs` / `chat.rs` / `http/chat_api.rs` / config `auth_mode` + `[multi_user]` + `effective_auth_mode()` / cli `--auth-mode` / `Gateway::new` 的 **passwordless-seed + 受限模式**（§决策 12 v2，取代原 bootstrap_admin fail-fast）/ `proxy.rs` 的 14 条会话控制路由（生命周期 7 + 会话动作 7）；runtime `src/http/session_control.rs` + `conversation.rs` 的 scope/visibility + `agent/session/session_manager.rs` 的 `create_frontend_session` / `resume_session`；Desktop `authStore` / `authFetch` / `account/*` / `user-list/*` / `lib/user-chat-api.ts` / `stores/userChatStore.ts` / `views/MessagesView.tsx` / `components/account/SetupRequiredView.tsx`。**未实现**的条目 = 后续 PR（`chat/attachments`），属计划范围，非本节遗漏。原稿的 `protocol.rs AccountPublicView` **未新增**——`acowork_core::account::AccountView` 已承担脱敏 API 返回类型，再建一个同类是重复。
 ### 6.1 core/acowork-core
 
 - 新增 `src/account.rs`（**已实现**）：`UserAccount`、`Role`、`AccountListFile`、`DISABLED_PASSWORD_HASH`；`UserAccount::to_public_profile()` 产出 `UserProfile` 公开视图

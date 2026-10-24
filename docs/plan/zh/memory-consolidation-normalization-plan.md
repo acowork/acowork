@@ -316,7 +316,7 @@ episodic rows   : 269      pending backlog : 262      sediment before : knowledg
 
 ### 8.4 验证方式
 
-`core/acowork-runtime/tests/memory_lifecycle_e2e.rs`（9 通过 + 1 ignored）。每条断言都做过变异测试确认能失败：
+`core/acowork-runtime/tests/memory_lifecycle_e2e.rs`（验证时路径；该文件已随 ADR-100 迁入 `core/acowork-memory/tests/`）（9 通过 + 1 ignored）。每条断言都做过变异测试确认能失败：
 
 | 注入的错误 | 被捕获的测试 |
 |---|---|

@@ -1,6 +1,8 @@
 ﻿# Tool System
 
-> Version: v3.4 | Last Updated: 2026-04-16
+> Version: v3.5 | Last Updated: 2026-10-23
+
+> **v3.5 change (implemented)**: `memory_recall` / `memory_store` are no longer built-in tools — memory was split out into a Gateway-hosted standalone service, `acowork-memory`, and Agents reach it through the MCP tools `mcp_memory__memory_recall` / `mcp_memory__memory_store` ([ADR-100](../../adr/en/ADR-100-memory-standalone-mcp-service.md)). The `memory:read` / `memory:write` permission entries were removed along with them, as was the "main loop step ② MemoryManager.retrieve() auto-inject" described in §4 / §4.2.1 of this document (auto-inject, ADR-100 decision 5) — memory is now fetched only by an explicit tool call. Those sections are kept as a historical design record; actual behaviour follows ADR-100.
 
 ---
 
@@ -31,8 +33,8 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 
 | Tool Name | Function | Required Permission | Description |
 |-----------|----------|---------------------|-------------|
-| `memory_recall` | Semantic search of private SQLite memory layer | `memory:read` | Hybrid search (HNSW + BM25) + associative diffusion (1-2 hop graph expansion), returns relevant memory fragments |
-| `memory_store` | Write to private SQLite memory layer | `memory:write` | Real-time extraction via Tool Call mechanism: LLM autonomously decides whether to call; supports Fact/Preference/Relation/Procedural/Autobiographical five types, with importance (0-1) and privacy (Public/Personal/Sensitive) parameters. Fact deduplicated semantically by (subject, predicate) |
+| ~~`memory_recall`~~ | ~~Semantic search of private SQLite memory layer~~ | ~~`memory:read`~~ | **Migrated** — ADR-100: memory is a standalone service now, so this tool is `mcp_memory__memory_recall` on the Gateway-hosted memory MCP. No permission domain; per-tool opt-in happens in `agent_mcp_tools.json` (ADR-069). Hybrid search (HNSW + BM25) + associative diffusion semantics unchanged |
+| ~~`memory_store`~~ | ~~Write to private SQLite memory layer~~ | ~~`memory:write`~~ | **Migrated** — same as above, now `mcp_memory__memory_store`; real-time extraction, the five types and the importance / privacy parameters keep their semantics, only the call channel changed |
 | `http_request` | HTTP requests (GET/POST/PUT/DELETE) | `network:<url_pattern>` | Supports method parameter for HTTP method selection; JSON responses auto-parsed; supports JSON body and form |
 | `web_fetch` | Fetch web page content | `network:<url_pattern>` | HTML → Markdown conversion, Agent directly receives readable text |
 | `shell` | Execute shell commands | `filesystem:exec` | Subject to sandbox restrictions, interruptible on timeout |
@@ -50,8 +52,6 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 
 | Tool Name | Windows | Linux | macOS | Android | iOS | Availability Level |
 |-----------|---------|-------|-------|---------|-----|---------------------|
-| `memory_recall` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
-| `memory_store` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | `http_request` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | `web_fetch` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | `shell` | ✅ | ✅ | ✅ | ❌ | ❌ | Desktop only |
@@ -118,10 +118,10 @@ name = "http_request"
 type = "builtin"
 permissions = ["network:https://api.weather.com"]
 
-[[tools]]
-name = "memory_recall"
-type = "builtin"
-permissions = ["memory:read"]
+# Memory tools are no longer built-ins (ADR-100): they come from the Gateway-hosted
+# memory MCP, opted in per tool in `agent_mcp_tools.json` as
+# `mcp_memory__memory_recall` (ADR-069). There is no `[[tools]]` entry for them in the
+# manifest and no `memory:*` permission left to declare.
 
 # shell declared optional — mobile install not blocked, but tool unavailable
 [[tools]]
@@ -176,7 +176,7 @@ Custom tools are provided by Agent developers as .wasm files, executed isolated 
 name = "image_filter"
 type = "wasm"
 binary = "./tools/image_filter.wasm"
-permissions = ["memory:read"]
+permissions = ["filesystem:read:./input"]
 
 [tools.image_filter.resource_limits]
 max_memory_mb = 50
@@ -220,7 +220,7 @@ Agent Runtime (host process)
 │  │  │  ├─ Other tools' memory/state  │  │
 │  │  │  ├─ Undeclared file paths      │  │
 │  │  │  ├─ Undeclared network addrs   │  │
-│  │  ���  ├─ LLM API Key                │  │
+│  │  │  ├─ LLM API Key                │  │
 │  │  │  └─ Other Agents' data         │  │
 │  │  └────────────────────────────────┘  │
 │  │                                      │

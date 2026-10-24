@@ -7,9 +7,17 @@
 **Branch**: `bugfix/memory`
 **Basis**: ADR-062 §5.2 (metrics and thresholds) / §5.4 (report archiving) / §6.4 (auto_inject
 min_score)
-**Harness**: `core/acowork-runtime/tests/memory_m4_bench.rs`
+**Harness**: `core/acowork-memory/tests/memory_m4_bench.rs`
 **Probes**: `core/acowork-runtime/tests/memory_m4_probe.rs`, `memory_m4_tiediag.rs` (temporary, to
-verify the score domain and MRR fluctuation)
+verify the score domain and MRR fluctuation; since removed — see the path note below)
+
+> Path note: the numbers in this report were measured while memory was built into the Runtime, and
+> these files then lived under `core/acowork-runtime/tests/`. After ADR-100 split the memory engine
+> into its own service, the benchmarks that still exist (m4 / m5 / retrieval_eval / lifecycle /
+> chains) moved with the logic to `core/acowork-memory/tests/`; the two temporary probes were
+> deleted — they were one-off diagnostics whose conclusions are recorded below. The metric math
+> (Precision@K / MRR / nDCG) behind every number here is the single definition now kept in the
+> dev-only `core/acowork-eval`, so this report stays column-comparable with the moved harnesses.
 
 ---
 
@@ -379,8 +387,8 @@ a "backlog black hole".
 
 ```bash
 cd core
-cargo test -p acowork-runtime --test memory_m4_bench   -- --nocapture   # the main benchmark
-cargo test -p acowork-runtime --test memory_m4_probe    -- --nocapture   # the score-domain probe
+cargo test -p acowork-memory --test memory_m4_bench   -- --nocapture   # the main benchmark
+cargo test -p acowork-runtime --test memory_m4_probe    -- --nocapture   # the score-domain probe (file removed, see the path note above)
 ```
 
 Self-contained, using an in-memory `GrafeoStore`; it does not touch any running Gateway / Runtime /
@@ -390,7 +398,7 @@ Desktop process or port.
 
 ## 8. M5 Execution Results (2026-09)
 
-**Harness**: `core/acowork-runtime/tests/memory_m5_bench.rs` (restored from the `15654af0` safe
+**Harness**: `core/acowork-memory/tests/memory_m5_bench.rs` (restored from the `15654af0` safe
 snapshot; the `set_quality` helper was replaced by the trait method `apply_quality_config` because
 `b117f901` reverted it).
 
@@ -441,6 +449,6 @@ keyword any-rank rate (K* only)         0.0000      1.0000
 
 ```bash
 cd core
-cargo test -p acowork-runtime --test memory_m5_bench -- --nocapture   # M5 keyword before/after
+cargo test -p acowork-memory --test memory_m5_bench -- --nocapture   # M5 keyword before/after
 cargo test -p acowork-memory --lib keyword                             # quality gate rule unit tests
 ```

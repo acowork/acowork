@@ -106,8 +106,8 @@ pub enum Permission {
     Network(String),               // "network:https://api.weather.com"
     FilesystemRead(String),        // "filesystem:read:~/Documents"
     FilesystemWrite(String),       // "filesystem:write:~/Documents"
-    MemoryRead,                    // "memory:read"
-    MemoryWrite,                   // "memory:write"
+    // MemoryRead / MemoryWrite 已随 ADR-100 删除（其二进制 tag 3/4 一并废弃、不重编号）：
+    // 记忆改由 Gateway 托管的 acowork-memory 服务承载，不再是权限域。
     IntentSend(String),            // "intent:send:com.example.calendar"
     IntentReceive(String),         // "intent:receive:com.example.weather"
     Shell,                         // "shell"

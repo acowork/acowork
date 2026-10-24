@@ -1823,7 +1823,7 @@ C4 拆为三个子 commit 顺序发布：
 
 5. **manual 入口是否做 CLI 版本？**
    - **已确定**：v1 **做** CLI 版本（C4d 子 commit）。
-   - **理由**：CLI 是高级用���的常用入口（脚本化 / 自动化场景）；与 Gateway API 共享 channel 路径，零新增后端复杂度。
+   - **理由**：CLI 是高级用户的常用入口（脚本化 / 自动化场景）；与 Gateway API 共享 channel 路径，零新增后端复杂度。
    - **设计**：`acowork compress tool_result --session <id>` / `acowork compress summary --session <id>` 两个子命令；通过 Gateway IPC（Unix Socket / Named Pipe）注入 `manual_compress_tx`。
 
 6. **前端"压缩上下文"按钮的 UX 形式？**

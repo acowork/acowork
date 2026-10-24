@@ -1,6 +1,8 @@
 ﻿# Tool System（工具系统）
 
-> 版本：v3.4 | 更新日期：2026-04-16
+> 版本：v3.5 | 更新日期：2026-10-23
+
+> **v3.5 变更（已实施）**：`memory_recall` / `memory_store` 不再是内置工具——记忆已剥离为 Gateway 托管的独立服务 `acowork-memory`，Agent 侧以 MCP 工具 `mcp_memory__memory_recall` / `mcp_memory__memory_store` 访问（[ADR-100](../../adr/zh/ADR-100-memory-standalone-mcp-service.md)）。随之删除的还有 `memory:read` / `memory:write` 两个权限项，以及本文 §4 / §4.2.1 中描述的“主循环步骤② MemoryManager.retrieve() 自动注入”（auto-inject，ADR-100 决策 5）——记忆获取统一为工具主动调用。这些段落保留作历史设计记录，实际行为以 ADR-100 为准。
 
 ---
 
@@ -30,8 +32,8 @@ Tool Dispatcher
 **平台基础设施级工具定义：** 内置工具的范围仅限**平台基础设施级**——即调用开放协议（HTTP/DNS/文件系统/操作系统 API）或本地计算（WASM/Embedding），不依赖特定第三方服务的付费 API。SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置。
 | 工具名                 | 功能                             | 所需权限                  | 说明                                                                                                                                                                                                                      |
 | ---------------------- | -------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory_recall`        | 语义检索私有 SQLite 记忆层              | `memory:read`             | 混合检索（HNSW + BM25）+ 关联扩散（1-2 跳图扩展），返回相关记忆片段                                                                                                                                                       |
-| `memory_store`         | 写入私有 SQLite 记忆层                  | `memory:write`            | 即时提取 Tool Call 机制：LLM 自主判断是否调用，支持 Fact/Preference/Relation/Procedural/Autobiographical 五种类型，带 importance（0-1）和 privacy（Public/Personal/Sensitive）参数。Fact 按 (subject, predicate) 语义去重 |
+| ~~`memory_recall`~~        | ~~语义检索私有 SQLite 记忆层~~          | ~~`memory:read`~~          | **已迁移** — ADR-100：记忆已剥离为独立服务，该工具现为 Gateway 托管记忆 MCP 的 `mcp_memory__memory_recall`，无权限域，经 `agent_mcp_tools.json` 做工具级 opt-in（ADR-069） |
+| ~~`memory_store`~~         | ~~写入私有 SQLite 记忆层~~              | ~~`memory:write`~~         | **已迁移** — 同上，现为 `mcp_memory__memory_store`；即时提取 / 五种类型 / importance / privacy 参数语义不变，只是调用通道改了 |
 | `http_request`         | HTTP 请求（GET/POST/PUT/DELETE） | `network:<url_pattern>`   | 支持 method 参数选择 HTTP 方法，JSON 响应自动解析，JSON body 和表单                                                                                                                                                       |
 | `web_fetch`            | 获取网页内容                     | `network:<url_pattern>`   | HTML → Markdown 转换，Agent 直接获得可读文本                                                                                                                                                                              |
 | `shell`                | 执行 shell 命令                  | `filesystem:exec`         | 受沙箱限制，超时可中断                                                                                                                                                                                                    |
@@ -49,8 +51,6 @@ Tool Dispatcher
 
 | 工具名                 | Windows | Linux | macOS | Android |  iOS  | 可用性级别         |
 | ---------------------- | :-----: | :---: | :---: | :-----: | :---: | ------------------ |
-| `memory_recall`        |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
-| `memory_store`         |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | `http_request`         |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | `web_fetch`            |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | `shell`                |    ✅    |   ✅   |   ✅   |    ❌    |   ❌   | 仅桌面端           |
@@ -117,10 +117,9 @@ name = "http_request"
 type = "builtin"
 permissions = ["network:https://api.weather.com"]
 
-[[tools]]
-name = "memory_recall"
-type = "builtin"
-permissions = ["memory:read"]
+# 记忆工具不再属于 builtin（ADR-100）：它由 Gateway 托管的 memory MCP 提供，
+# 工具级 opt-in 写在 `agent_mcp_tools.json`（`mcp_memory__memory_recall`，ADR-069），
+# manifest 里没有对应的 `[[tools]]` 条目，也没有 `memory:*` 权限可声明。
 
 # shell 声明为可选——移动端安装不受阻，但工具不可用
 [[tools]]
@@ -175,7 +174,7 @@ permissions = ["filesystem:exec"]
 name = "image_filter"
 type = "wasm"
 binary = "./tools/image_filter.wasm"
-permissions = ["memory:read"]
+permissions = ["filesystem:read:./input"]
 
 [tools.image_filter.resource_limits]
 max_memory_mb = 50

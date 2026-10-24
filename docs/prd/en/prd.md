@@ -1,8 +1,11 @@
 ﻿# ACowork Platform Requirements Definition
 
-> Version: v1.6 | Updated: 2026-08-15
+> Version: v1.7 | Updated: 2026-10-23
 >
 > This document is reverse‑engineered from design documents (01~19) and design conversations, serving as the authoritative source of platform requirements. Design documents describe "how", this document describes "what" and "why".
+>
+> **v1.7 Changes**:
+> 1. Memory requirements aligned with the implementation ([ADR-100](../../adr/en/ADR-100-memory-standalone-mcp-service.md)): memory is no longer a Runtime built-in capability but a Gateway-hosted standalone service, `acowork-memory`; `memory_recall` / `memory_store` move from the built-in inventory to that service's MCP tools (registered as `mcp_memory__*`), and the `memory:read` / `memory:write` permission entries were deleted. §1.4 and §1.5.1 are corrected accordingly; the capability semantics (three layers / five types, forgetting, consolidation, privacy grading, retrieval quality) are unchanged.
 >
 > **v1.6 Changes**:
 > 1. Aligned with current code implementation (tool inventory, Crate count, actual GUI structure, actual communication protocols)
@@ -94,17 +97,19 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 
 ### 1.4 Memory System
 
+> Ownership change (ADR-100): the implementation and process ownership of everything below moved wholesale into the `acowork-memory` service (one DB per instance, `{data_dir}/instances/{instance_id}/memory.db`); the Runtime holds zero memory business code. The requirements themselves are unchanged, and old paths / old module names are kept only as historical coordinates.
+
 | ID | Requirement | Priority | Notes |
 |----|-------------|----------|-------|
 | MEM‑01 | Each Agent owns a completely independent private SQLite memory layer (`memory/private.sqlite`); no shared database | P0 | Data isolation baseline |
 | MEM‑02 | Three layers, five types biomimetic hierarchy: Transient (working memory) → Episodic (experience) → Consolidated (semantic + procedural + autobiographical) | P0 | Biomimetic memory architecture |
-| MEM‑03 | Immediate extraction: LLM autonomously decides via `memory_store` tool whether to store, zero extra API cost | P0 | Core mechanism for memory accumulation |
+| MEM‑03 | Immediate extraction: LLM autonomously decides via the memory-store tool whether to store, zero extra API cost (built-in era: `memory_store`; since ADR-100: the service's MCP tool `mcp_memory__memory_store`) | P0 | Core mechanism for memory accumulation |
 | MEM‑04 | Forgetting: graded decay model – ① background periodic scan (`run_decay_scan`) computes decay_score = importance × activity_signal, nodes below threshold move Active→Dormant; ② Dormant nodes automatically Purge after expiry; ③ capacity pressure triggers eviction (lowest decay_score first). Background scan non‑blocking, scheduled by Gateway Cron, scanning granularity by label batches | P1 | Prevent memory bloat |
 | MEM‑05 | Associative diffusion retrieval: 1‑2 hop graph expansion, cross‑layer (Episodic↔Consolidated) | P1 | Retrieval quality |
 | MEM‑06 | Autobiographical memory: six‑dimensional self‑perception, auto‑derived from manifest, injected into System Prompt | P1 | Agent self‑perception |
 | MEM‑07 | Procedural memory: common behavioural patterns across Skills | P2 | Self‑learning capability |
 | MEM‑08 | Privacy grading: PrivacyLevel (Public/Personal/Sensitive), automatically determined by LLM. Controls whether a node is included when packaging/sharing – Personal/Sensitive nodes are stripped on export, Public nodes retained. In‑context data cannot be technically access‑controlled, only constrained via prompt conventions | P1 | Packaging‑boundary privacy protection |
-| MEM‑09 | Offline consolidation: triggers dedicated LLM calls during idle time to distill Episodic layer to Consolidated layer | P3 | Memory quality improvement – `acowork-sqlite/src/consolidation/` (`offline.rs`/`scheduler.rs`/`generalization.rs`/`triple_extraction.rs`) has skeleton and scheduling framework; Runtime `memory/consolidation_bg.rs` provides `ConsolidationBgTask` entry point. Full LLM‑driven offline consolidation still pending Phase 6 activation |
+| MEM‑09 | Offline consolidation: triggers dedicated LLM calls during idle time to distill Episodic layer to Consolidated layer | P3 | Memory quality improvement – consolidation and its scheduling migrated into the `acowork-memory` service with ADR-100 (formerly the Runtime `memory/consolidation_bg.rs` and the scheduling side of `acowork-sqlite/src/consolidation/`), scheduled per instance. Full LLM‑driven offline consolidation still pending Phase 6 activation |
 | MEM‑10 | SQLite memory layer full‑Zone cross‑device sync (platform‑hosted cleartext, consistent multi‑device experience). enterprise Zone renamed to work Zone (personal work memory, unrelated to enterprise RAG). Privacy grading and sync strategy are fully decoupled – PrivacyLevel controls packaging boundary (whether Personal/Sensitive data is stripped on sharing), Zone serves only as semantic packaging boundary, not sync scope | P1 | Multi‑device sync – MemoryStore currently local only (`memory/private.sqlite`), **cloud sync not implemented**. Cloud Sync and enterprise MemStore planned Phase 6 together |
 | MEM‑11 | Content‑type compression: artifact content (code/files/command output) stores only summary + ArtifactRef reference | P1 | Prevent SQLite 记忆层 bloat |
 | MEM‑12 | Embedding generation: Ollama local (`/api/embed`) → Remote API (`/embeddings`) fallback chain, `MemoryManager.retrieve()` internally times out at 200ms auto‑generate | P1 | Vector retrieval prerequisite |
@@ -128,8 +133,8 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 
 | # | Tool | Type | Permission | Notes |
 |---|------|------|------------|-------|
-| 1 | `memory_recall` | core | `memory:read` | Retrieve memory |
-| 2 | `memory_store` | core | `memory:write` | Write memory |
+| 1 | ~~`memory_recall`~~ | ~~core~~ | ~~`memory:read`~~ | **Migrated out** (ADR-100) — now the Gateway-hosted memory service's MCP tool `mcp_memory__memory_recall`, opted in per tool in `agent_mcp_tools.json` (ADR-069); no permission domain |
+| 2 | ~~`memory_store`~~ | ~~core~~ | ~~`memory:write`~~ | **Migrated out** (ADR-100) — same as above, now `mcp_memory__memory_store`; declaring `MemoryRead` / `MemoryWrite` in a manifest is rejected as an unknown permission type |
 | 3 | `http_request` | core | `network:<url>` | HTTP request |
 | 4 | `web_fetch` | core | `network:<url>` | URL → text (with timeout) |
 | 6 | `shell` | core × N | `filesystem:exec` | Platform‑detected shell tools (Windows: bash + PowerShell, Unix: system shell) |
@@ -149,7 +154,7 @@ The developer toolchain is complete: `acowork-sign` (with `keygen / sign / verif
 
 **Key points**:
 
-- Identity management is not exposed as a standalone tool API: identity is served via Gateway's `UserProfile` (`/api/users`), `acowork-system` exposes it through ordinary `memory_recall`/`memory_store`.
+- Identity management is not exposed as a standalone tool API: identity is served via Gateway's `UserProfile` (`/api/users`), `acowork-system` exposes it through the memory-service tools (`memory_recall`/`memory_store` before ADR-100, `mcp_memory__*` now).
 - Actual tool count varies by configuration: core 16 + `rag_query` + `codebase` = 16 ~ 18. (`context_retrieve` / `context_abandon` are both retired and unregistered: the former's implementation has been deleted, the latter's source is kept as dead code — ADR-061 §10.1.)
 - WASM tools not in this list: module code exists (`core/acowork-runtime/src/tools/wasm/`) but `wasm-tools` feature is off by default, **no Agent uses WASM tools** – TOL‑02~04/TOL‑08~09 are effectively unavailable before Phase 6.
 

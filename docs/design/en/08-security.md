@@ -313,7 +313,7 @@ When an Agent is shared, the packaged SQLite memory layer memory contains SkillI
   │  │ Validator │  │ Analyzer │  │ Analyzer │  │
   │  └─────┬─────┘  └────┬─────┘  └────┬─────┘ │
   │        │              │              │       │
-  │  ┌─────┴��────┐  ┌────┴─────┐  ┌────┴─────┐ │
+  │  ┌─────┴─────┐  ┌────┴─────┐  ┌────┴─────┐ │
   │  │ WASM      │  │ SQLite memory layer   │  │ Structure│  │
   │  │ Scanner   │  │ Scanner  │  │ Checker  │  │
   │  └─────┬─────┘  └────┬─────┘  └────┬─────┘ │

@@ -188,7 +188,7 @@ let todo_call_ids: Vec<String> = assistant
 ```
 然后 `inject_todo_write_round_after_marker` 用并集做 in_tail 检测。
 
-**优先级**：P1 — 当前 `todo_write` 工具定义限制每次调用只有一个 call，现实中不会触发；��与"defensive" 注释意图不符。
+**优先级**：P1 — 当前 `todo_write` 工具定义限制每次调用只有一个 call，现实中不会触发；但与"defensive" 注释意图不符。
 
 ---
 

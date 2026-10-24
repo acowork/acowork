@@ -10,6 +10,8 @@
 
 > **v4.0 变更**：记忆层切到 SQLite（单库 + WAL + FTS5 + sqlite-vss 向量；沉淀层图关系由应用层 `MemoryNode.edges` 边表承担，不再依赖存储引擎原生 LPG/GQL；详见 [ADR-082](../../adr/zh/ADR-082-sqlite-memory-cutover.md)）。`acowork-grafeo` crate 已删除，记忆引擎代码（`EpisodicDistiller` / `RetrievalMetrics`）迁移至 `core/acowork-memory/`。
 
+> **v4.1 变更（已实施，2026-10-23）**：记忆模块已从 Runtime 剥离为 Gateway 托管的独立进程 `acowork-memory`；Agent 侧经 MCP 调用该服务的工具（注册名 `mcp_memory__memory_store` / `mcp_memory__memory_recall`，工具级 opt-in 走 `agent_mcp_tools.json`，ADR-069），面板经 Gateway 反代访问；auto-inject 移除、`memory:read` / `memory:write` 权限项删除，Runtime 达到零记忆业务代码——详见 [ADR-100](../../adr/zh/ADR-100-memory-standalone-mcp-service.md)。**本文档其余章节仍以剥离前的（内置）形态行文**；分层数据模型（瞬态 / 经历 / 沉淀）、蒸馏与遗忘流水线语义不变，变的只是进程归属与访问通道。
+
 ---
 
 Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Agent 拥有完全独立的私有 Memory（单文件 SQLite 数据库 `memory/private.sqlite`，应用层隔离；详见 [ADR-009](../../adr/zh/ADR-009-gateway-workspace-isolation.md)），不存在 Gateway 维护的公共数据库。跨 Agent 的数据共享通过 Intent 查询和系统 Agent 服务实现，而非共享存储。
@@ -686,7 +688,7 @@ retention = exp(-ln2 × age_days / half_life_days)
 
 > **实现保证（有端到端测试覆盖）**：`run_episodic_decay_scan` 的扫描集合是 `WHERE label = 'Episodic'`，语义标签根本不在候选集里，因此「沉淀层不被遗忘」由查询形状保证，不靠运行时判断。同理，遗忘是两阶段——Active → Dormant（retention < `dormant_threshold`）→ 超过 `archive_days` 才 purge，且 purge 前整行复制进 `purge_log`，是**可恢复的归档而非删除**。
 >
-> 覆盖这些不变量的测试在 `core/acowork-runtime/tests/memory_lifecycle_e2e.rs`：沉淀在其证据被遗忘后仍可召回；衰减扫描误扫 Knowledge 会被捕获；`dormant_threshold`、`archive_days`、`enabled` 各自的失效都有对应断言。每条断言都经过变异测试确认能失败。
+> 覆盖这些不变量的测试在 `core/acowork-memory/tests/memory_lifecycle_e2e.rs`：沉淀在其证据被遗忘后仍可召回；衰减扫描误扫 Knowledge 会被捕获；`dormant_threshold`、`archive_days`、`enabled` 各自的失效都有对应断言。每条断言都经过变异测试确认能失败。
 
 ### 5.3 不参与遗忘的节点
 

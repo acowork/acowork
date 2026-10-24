@@ -50,7 +50,7 @@ graph LR
    - **broker 宿主**：管理 MQTT 连接、ACL、retained 存储。
    - **HTTP server**：CRUD、Desktop 全量列表拉取（Settings）、Runtime 启动期注册。
    - **Global Resources Publisher**：发布 `acowork/global/{kind}`(单主题,Retained)——Gateway 后台 health-check 后重新计算出的“已就绪”资源列表（**不区分 agent**，所有 Runtime 共享同一份）。
-2. **Runtime 是 MQTT 客户端 + localhost HTTP server**：`rumqttc` 直连 Broker，只 PUBLISH 自己拥有的数据源（`agents/{id}/*` 下所有主题），SUBSCRIBE 自己关心的资源（`acowork/global/#` + `agents/{id}/sessions/control/#`，后者现在只剩 `intent` + `active_heartbeat`）。同时启动 localhost-only HTTP server，供 Gateway 反向代理大数据查询（全量 session 列表、message 列表、memory graph、文件内容），以及接收用户操作（ADR-076 §决策 4）。
+2. **Runtime 是 MQTT 客户端 + localhost HTTP server**：`rumqttc` 直连 Broker，只 PUBLISH 自己拥有的数据源（`agents/{id}/*` 下所有主题），SUBSCRIBE 自己关心的资源（`acowork/global/#` + `agents/{id}/sessions/control/#`，后者现在只剩 `intent` + `active_heartbeat`）。同时启动 localhost-only HTTP server，供 Gateway 反向代理大数据查询（全量 session 列表、message 列表、文件内容；**记忆不在此列**——ADR-100 之后记忆由独立进程 `acowork-memory` 提供，该进程**不说 MQTT**，也不连 Broker），以及接收用户操作（ADR-076 §决策 4）。
 3. **Desktop 是纯 MQTT 客户端**：通过 Tauri Rust backend 用 `rumqttc` 直连 Broker，SUBSCRIBE 数据源主题（`agents/{id}/*`）。**不经过 Gateway 转发**。
 4. **全局资源三层分离**（详见 §3.1）：
    - **全量原始列表**：HTTP only（`GET/POST/PUT/DELETE /api/global/{kind}`），Desktop Settings 用。
@@ -316,12 +316,14 @@ acowork/agents/{agent_id}/
             ├── compaction_cancelled  # ADR-083 压缩未产出摘要：取消 / 超时 / 全部 tier 失败
             │                         #   payload = { session_id, reason: "user"|"timeout"|"failed" }
             ├── context_usage         # 上下文用量
-            ├── memory_updated        # session 内 Memory 发生变更（通知性事件）
+            ├── memory_updated        # 预留（proto field 16）：无发布者——ADR-100 之后记忆不在 Runtime
             └── skill_executed        # 技能执行完毕
-└── memory/                           # Agent 记忆（SQLite `memory/private.sqlite`）数据源
-    └── nodes/                        # node 级别增量事件
-        └── {nid}/update              # 【增量事件】Memory node 增删/整合
+└── memory/                           # 【预留命名空间，始终无发布者】
+    └── nodes/                        # node 级别增量事件（未实现）
+        └── {nid}/update              # 【增量事件】设想中的 Memory node 增删/整合
                                       #   payload = 最新完整 node
+                                      #   ADR-100：记忆归 `acowork-memory`，该进程不连
+                                      #   Broker，因此本主题组永不发布；面板靠 HTTP 重拉
                                       #   全量走 HTTP GET /api/agents/{id}/memory/graph
 ```
 
@@ -380,7 +382,7 @@ acowork/users/{user_id}/
 2. **Owner 单一**:每份数据由唯一的发布者(Gateway 拥有 `acowork/global/*`——所有 Runtime 共享的可用资源;Runtime 拥有 `agents/{id}/*` 下所有主题)。订阅者不修改数据本身。
 3. **Retained 本身就是快照，推送本身就是增量**：publisher 每次 PUBLISH retain=true 覆盖上条 retained，新订阅者连接后立即收到 retained（快照语义），后续变化时收到 push（增量语义）。全文档统一采用单主题 + retained（`acowork/global/{kind}`、`agents/{id}/meta`、`agents/{id}/config`、`agents/{id}/sessions/{sid}/meta`、`agents/{id}/sessions/{sid}/config` 均不拆 `current/update` 双主题）。
 4. **list 走 HTTP、变化走 MQTT**：session list 这类**频繁变化且仅在操作时点查询**的资源，全部走 HTTP；只有"列表中具体某条目的变化"才用 MQTT 通知（`created` / `deleted`），避免 retained list 频繁失效。
-5. **snapshot 走 HTTP、增量走 MQTT**：session messages / memory nodes 这类**会被大量读且会持续增长**的资源，全量走 HTTP，**增量事件**走 MQTT（payload 本身就是最新数据，无需订阅者回拉）。
+5. **snapshot 走 HTTP、增量走 MQTT**：session messages 这类**会被大量读且会持续增长**的资源，全量走 HTTP，**增量事件**走 MQTT（payload 本身就是最新数据，无需订阅者回拉）。记忆不适用本条：ADR-100 之后 `acowork-memory` 不连 Broker，面板读记忆全走 HTTP（变化靠重新拉取）。
 6. **Gateway 只透传不转发**:Gateway 是 broker 宿主 + `acowork/global/*`(可用状态)数据源权威 + HTTP server。**不**作为 session 事件的"中转站",**不**维护 session 状态视图——session 权威在 Runtime,Desktop 直连即可。
 7. **变化 payload 总是包含最新值**：订阅 `meta` / `agents/{id}/config` / `acowork/global/{kind}` / `sessions/{sid}/meta` / `sessions/{sid}/config` 时，payload 总是完整最新数据，订阅者无需回 HTTP 拉快照。其中 `agents/{id}/config` 是 Runtime 当前生效的完整 agent_config.json（合并 manifest 默认值后的有效配置）—— Gateway 完全不参与 config 同步，Runtime 启动时从本地 `<work_dir>/config/agent_config.json` 加载，Desktop 改 config 通过 `PUT /api/agents/{id}/config` → Gateway 透传 → Runtime 内部 IPC 写入本地文件 + PUBLISH 新值。
 8. **Gateway 不在 Runtime 与 Desktop 之间做事件转发**：Runtime 发布的 session 事件由 Desktop **直接订阅** `agents/{id}/sessions/{sid}/messages/...`；而 **Desktop 触发的一切用户操作都走 HTTP**（经 Gateway 鉴权 + 反代注入 `x-user-id`，ADR-076 §决策 4）——MQTT 上**不再有任何 Desktop → Runtime 的控制指令**。Runtime 是 session 权威，Gateway 不维护 session 状态视图。
@@ -800,8 +802,8 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | **Session messages 增量** | `messages/chunk` `tool_call` `done` `error` ... | — |
 | **Session messages 全量** | ❌ 不走（大数据） | ✅ `GET /api/agents/{id}/sessions/{sid}/messages` |
 | **Control 指令** | ⚠️ **已全部迁出 HTTP**（ADR-076 §决策 4）：`sessions/control/*` 上**已无任何用户操作命令**。proto 字段与 Runtime handler **已删除**——不是拒收，是发不出去。仅余 `intent`（Runtime → Runtime）与 `active_heartbeat`（Desktop → Runtime 存在性心跳）两条**非用户动作** | ✅ [http.md §5.6](./http.md)：生命周期 7 条 + 会话动作 7 条 |
-| **Memory 单 node 变更** | `agents/{id}/memory/nodes/{nid}/update`（payload = 最新 node） | `GET /api/agents/{id}/memory/nodes/{nid}`（兜底） |
-| **Memory graph 全量** | ❌ 不走（MB+） | ✅ `GET /api/agents/{id}/memory/graph` |
+| **Memory 单 node 变更** | ❌ **不存在**（预留主题组从未实现；ADR-100 之后记忆不在 Runtime，服务也不连 Broker） | `GET /api/agents/{id}/memory/nodes/{nid}`（`memory_proxy` 反代服务） |
+| **Memory graph 全量** | ❌ 不走（MB+，且服务不说 MQTT） | ✅ `GET /api/agents/{id}/memory/graph`（反代到记忆服务，ADR-100） |
 | **Sidecar 端点** | `sidecar/{kind}/status` Retained | `GET /api/sidecar/{kind}` |
 | **文件内容** | ❌ | ✅ `GET /api/files/{id}` |
 | **跨 agent 聚合查询** | ❌（单点推送无法聚合） | ✅ `GET /api/agents?status=active` 等 |
@@ -832,7 +834,7 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
   1. 维护 broker 进程（连接管理、ACL、retained 存储）
   2. 维护 `acowork/global/*` 主题（这是 Gateway 真正拥有的 MQTT 数据资源——所有 Runtime 共享的全局资源可用状态，**不区分 agent**）
   3. HTTP API 给 Desktop 和 Runtime 调用（CRUD、Runtime 注册、全局资源全量列表 CRUD、Desktop config 修改透传至 Runtime）；**不**提供任何"初始拉取"/"启动期拉取"接口——Runtime config 从本地 `<work_dir>/config/agent_config.json` 加载并通过 `agents/{id}/config` retained 同步，全局资源通过 MQTT retained 获取
-  4. **HTTP 反向代理**到 Runtime localhost HTTP server（全量 session 列表、message 列表、memory graph、文件内容等大数据——Gateway 不直接读 Runtime 本地文件）
+  4. **HTTP 反向代理**到后端 localhost HTTP server（全量 session 列表、message 列表、文件内容等大数据——Gateway 不直接读 Runtime 本地文件。记忆不再属于本条：ADR-100 之后 `memory graph` / `nodes` 等反代目标是 `acowork-memory`）
   5. **不**转发任何 session/agent 业务事件
 
 ### 7.4 数据归属与传输通道矩阵
@@ -860,8 +862,8 @@ Runtime 异常断开时（包括 `kill -9`、崩溃、网络断开），Broker �
 | Session config | Runtime | KB | `agents/{id}/sessions/{sid}/config` (R, 单主题) | `GET /api/agents/{id}/sessions/{sid}/config` |
 | Control 指令（用户操作） | Desktop | — | ⚠️ **已全部迁 HTTP**（ADR-076 §决策 4）；MQTT 上已无用户操作命令，仅余 `intent` + `active_heartbeat` 两条非用户动作 | ✅ [http.md §5.6](./http.md)（生命周期 7 条 + 会话动作 7 条） |
 | Sidecar 端点 | Sidecar | B | `sidecar/{kind}/status` (R) | `GET /api/sidecar/{kind}` |
-| Memory node 变更 | Runtime | KB | `agents/{id}/memory/nodes/{nid}/update` | `GET /api/agents/{id}/memory/nodes/{nid}` |
-| Memory graph 全量 | Runtime | MB+ | ❌ | ✅ `GET /api/agents/{id}/memory/graph`（Gateway 反向代理） |
+| Memory node 变更 | `acowork-memory`（ADR-100；该进程不发布 MQTT） | KB | ❌ 预留主题组从未实现 | `GET /api/agents/{id}/memory/nodes/{nid}`（Gateway `memory_proxy`） |
+| Memory graph 全量 | `acowork-memory`（ADR-100） | MB+ | ❌ | ✅ `GET /api/agents/{id}/memory/graph`（Gateway `memory_proxy`） |
 | 文件内容 | Runtime | 任意 | ❌ | ✅ `GET /api/files/{id}`（Gateway 反向代理） |
 | 用户↔用户聊天内容 | `acowork-user`（SQLite） | KB | ❌ 仅空门铃 `acowork/users/{uid}/chat/changed` (QoS 1, 非 R)——不携带会话/对端身份 | ✅ `GET /api/users/{uid}/chats`、`GET /api/users/{uid}/chats/{chat}/messages`（ADR-076 §决策 8） |
 
@@ -884,13 +886,14 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP 反向代理──▶ Ru
 
 - 启动：Runtime 启动时 `--http-port=0` 分配随机端口，仅绑定 `127.0.0.1`
 - 注册：Runtime 注册到 Gateway 时上报 `http_port`（见 §5.1 步骤 4）
-- 端点：仅暴露内部查询端点（session 列表、message 全量、memory graph、文件内容），**不**暴露任何配置修改端点（配置修改走 MQTT control）
+- 端点：仅暴露内部查询端点（session 列表、message 全量、文件内容），**不**暴露任何配置修改端点（配置修改走 MQTT control）。记忆查询端点已于 ADR-100 从此列表移出（现在 `acowork-memory` 服务面）
 - 生命周期：与 Runtime 进程同生命周期，进程退出时自动销毁
 
 **Gateway 反向代理**：
 
-- Gateway HTTP server 对特定路径（`/api/agents/{id}/sessions`、`/api/agents/{id}/sessions/{sid}/messages`、`/api/agents/{id}/memory/graph`、`/api/files/{id}`）不自行处理，而是查注册表获取对应 Runtime 的 `http_port`，将请求反向代理到 `http://127.0.0.1:{http_port}/...`
+- Gateway HTTP server 对特定路径（`/api/agents/{id}/sessions`、`/api/agents/{id}/sessions/{sid}/messages`、`/api/files/{id}`）不自行处理，而是查注册表获取对应 Runtime 的 `http_port`，将请求反向代理到 `http://127.0.0.1:{http_port}/...`
 - 如果 Runtime 未注册或已退出，Gateway 返回 `503 Service Unavailable`
+- **ADR-100 例外**：`/api/agents/{id}/memory/*` 与 `/api/memory/*` 同样由 Gateway 反代，但目标是 `acowork-memory`（端口来自 supervisor 写的 port-file，不走 MQTT 注册表），Runtime 下线不影响它，详见 [http.md §5.4](./http.md)
 
 **端点映射**：
 
@@ -898,8 +901,8 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP 反向代理──▶ Ru
 |-------------------|----------------------|------|
 | `GET /api/agents/{id}/sessions` | `GET /sessions` | 全量 session 列表 |
 | `GET /api/agents/{id}/sessions/{sid}/messages` | `GET /sessions/{sid}/messages` | 全量 message 列表 |
-| `GET /api/agents/{id}/memory/graph` | `GET /memory/graph` | 全量 memory graph |
-| `GET /api/agents/{id}/memory/consolidation/status` | `GET /memory/consolidation/status` | 整合定时器状态 |
+| `GET /api/agents/{id}/memory/graph` | `GET /memory/graph` | 全量 memory graph（ADR-100：反代到 `acowork-memory`，不是 Runtime） |
+| `GET /api/agents/{id}/memory/consolidation/status` | `GET /memory/consolidation/status` | 整合/遗忘管线状态（同上） |
 | `GET /api/agents/{id}/rag/status` | `GET /agents/{id}/rag/status` | RAG 配置状态 |
 | `POST /api/agents/{id}/rag/query` | `POST /agents/{id}/rag/query` | 直接查询 RAG |
 | `GET /api/files/{id}` | `GET /files/{id}` | 文件内容 |
@@ -1195,6 +1198,8 @@ publish_topics = [
     "acowork/agents/+/sessions/+/meta",
     "acowork/agents/+/sessions/+/config",
     "acowork/agents/+/sessions/+/messages/#",
+    # ADR-100：记忆已移出 Runtime，`acowork-memory` 也不连 Broker，因此以下 grant
+    # 无发布者；保留仅为回滚兼容（ADR-100 决策 12）。
     "acowork/agents/+/memory/#",
 ]
 subscribe_topics = [
@@ -1273,7 +1278,7 @@ graph TB
 ## 12. 注意事项
 
 1. **Desktop 不应在前端直接连 MQTT Broker**：浏览器 JS 无法走原生 TCP，统一由 Tauri Rust backend 用 `rumqttc` 直连更可靠安全。
-2. **MQTT payload ≤ 100KB 阈值**：单条消息超过此阈值必须改走 HTTP（通过 Gateway 反向代理到 Runtime HTTP）；超过 `max_packet_size`（10MB）Broker 直接断开连接。Retained 消息占用 Broker 内存，全量大数据（message 列表、memory graph）不应走 MQTT retained。
+2. **MQTT payload ≤ 100KB 阈值**：单条消息超过此阈值必须改走 HTTP（经 Gateway 反向代理到后端 HTTP：Runtime，或 ADR-100 之后的记忆服务）；超过 `max_packet_size`（10MB）Broker 直接断开连接。Retained 消息占用 Broker 内存，全量大数据（message 列表、memory graph）不应走 MQTT retained。
 3. **顺序保证**：MQTT 协议保证同一 topic 内消息有序（RFC）。Session messages 全部走 `agents/{id}/sessions/{sid}/messages/*` 下各子主题，同一子主题内顺序天然保证；不同子主题之间不保证顺序（chunk / tool_call 间无需严格有序）。
 4. **多用户 ACL（已暂缓）**：设计上按 user → agent 授权关系动态生成 ACL，但 rumqttd 0.20 无 per-topic ACL 能力，故**当前未实现**；多用户隔离目前只靠 HTTP 侧 owner 校验（见 §10）。
 5. **Gateway 单点**：当前架构 Gateway 已是单点（Agent 子进程管理、本地文件系统访问）；MQTT 不改变这一点。

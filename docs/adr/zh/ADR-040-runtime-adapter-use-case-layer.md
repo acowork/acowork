@@ -499,7 +499,7 @@ Day 7:   P1-F/G 清理 + 全测验证
 - [ ] `cargo clippy --all-targets -- -D warnings` 0 warning
 - [ ] `cargo test -p acowork-runtime` 586 个测试全通过
 - [ ] `cargo test -p acowork-gateway` 281 个测试全通过
-- [ ] Desktop 端手动验证���启动 agent / 发消息 / 切 session / 看右侧 Agent Status 面板累计 token 数字显示（不是 "—"）
+- [ ] Desktop 端手动验证：启动 agent / 发消息 / 切 session / 看右侧 Agent Status 面板累计 token 数字显示（不是 "—"）
 - [ ] `grep -rn "GatewayGrpcClient\|process_gateway_recv\|handle_list_sessions" core/` 返回 0 结果
 - [ ] Desktop dev Tauri side 引用清空（`grep -rn "grpc\|gRPC" apps/acowork-desktop/src-tauri/` 仅剩余 MQTT 相关）
 

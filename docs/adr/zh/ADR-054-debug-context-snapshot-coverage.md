@@ -14,7 +14,7 @@
 
 当前 Debug Panel 7 个 context 快照 section（`system_prompt` / `workspace_context` / `environment` / `tool_definitions` / `skill_instructions` / `retrieved_memory` / `identity_context`）与后端 `ContextBuilder::build()` 实际发给 LLM 的内容存在三类覆盖缺口：
 
-1. **对话消息（messages）完全不在快照里** —— `ChatRequest` 把 `history.messages()` 拼到 system message 之后一起发出（`context.rs:466-474`），��� `ConversationSnapshot` 只存 `message_count`，没有消息体（`controller.rs:31-49`、`handlers.rs:211` 仍是 TODO）。这是 debug 最大的盲区。
+1. **对话消息（messages）完全不在快照里** —— `ChatRequest` 把 `history.messages()` 拼到 system message 之后一起发出（`context.rs:466-474`），但 `ConversationSnapshot` 只存 `message_count`，没有消息体（`controller.rs:31-49`、`handlers.rs:211` 仍是 TODO）。这是 debug 最大的盲区。
 2. **三段 system prompt 段被合并或丢失**：`ambiguous_confirmation_hint`（P3-4 冲突确认提示）和 `todo_context`（active task list）完全没进快照；`workspace_prompt_file`（CLAUDE.md / AGENTS.md）被直接拼到 `system_prompt` 里，无法独立 patch。
 3. **ChatRequest 控制参数对调试不可见**：`temperature` / `max_tokens` / `reasoning_effort` / `thinking_mode` / 实际使用的 `model` 都不在快照里，排查"为何 LLM 返回异常"时第一手信息拿不到。
 
@@ -232,7 +232,7 @@ pub struct RequestParams {
 
 - 快照时 `Arc::clone(history.messages())` 浅引用持有，避免深拷贝。
 - `truncate_snapshots_after` 时按 iteration 清理（`controller.rs:314-318` 已有现成模式）。
-- `messages` section 的 `SectionContent` 只存元数据（`size_bytes` / `token_estimate` / `hash`），不存内容；`getSection(iteration, "messages")` 时从 `messages_by_iteration` 取 `Arc` 引用、序列化为 JSON 返回��
+- `messages` section 的 `SectionContent` 只存元数据（`size_bytes` / `token_estimate` / `hash`），不存内容；`getSection(iteration, "messages")` 时从 `messages_by_iteration` 取 `Arc` 引用、序列化为 JSON 返回。
 - 内存占用：每个 iteration 的消息体都是浅引用整段 history 的快照（`Arc<Vec<ChatMessage>>` 共享底层 buffer）。多个 iteration 共享同一底层数组（增量式），旧 iteration 多一份增量成本。
 
 #### observer_impl.rs 调整
@@ -432,7 +432,7 @@ export const SECTION_ORDER = [
 | `messages` section 元数据正确、懒加载路径可工作 | 单元测试：构造 ≥10 条消息的 `HistoryManager`，断言 snapshot 后 `messages_by_iteration` 持有、调用 `get_section(iter, "messages")` 返回的 JSON 与原消息数组 deep equal |
 | `truncate_snapshots_after` 同时清理 messages | 单元测试：插入 5 个 iteration，rewind 到 3，断言 `messages_by_iteration` 只剩 ≤ 3 |
 | PatchSet HashMap 序列化 / 反序列化 | serde 测试：构造含 4 种 section 类型的 PatchSet，序列化后用旧版 DebugPanel mock 反序列化能识别 |
-| 前端 DebugPanel 渲染 11 section 顺��� | snapshot 测试：手工构造一个完整 snapshot fixture，断言渲染顺序与 `SECTION_ORDER` 一致 |
+| 前端 DebugPanel 渲染 11 section 顺序 | snapshot 测试：手工构造一个完整 snapshot fixture，断言渲染顺序与 `SECTION_ORDER` 一致 |
 | `request_params` 元数据条显示 | snapshot 测试：mock 含 / 不含各项的 `RequestParams`，断言渲染元数据条正确折叠 |
 | 端到端：手动触发 patchContext 改 `messages` 后下一轮迭代 LLM 看到改后的消息 | 集成测试：构造 history，patch `messages` 替换为简化版本，触发下一轮 `build_chat_request`，断言 LLM 收到的 messages 与 patch 一致 |
 

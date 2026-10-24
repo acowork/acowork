@@ -36,6 +36,7 @@
     - [5.3.2 `GET /files/{document_id}`](#532-get-filesdocument_id)
     - [5.3.3 消息条目中的 `attached_items`](#533-消息条目中的-attached_items)
   - [5.4 记忆 (Memory)](#54-记忆-memory)
+    - [5.4.1 服务直通前缀 `/api/memory/*`（ADR-100）](#541-服务直通前缀-apimemoryadr-100)
   - [5.5 工作区 (Workspace)](#55-工作区-workspace)
   - [5.6 会话控制面（ADR-076 §决策 4）](#56-会话控制面adr-076-决策-4)
 - [6. 静态文件服务（直接流式返回原始字节）](#6-静态文件服务直接流式返回原始字节)
@@ -114,12 +115,14 @@ sequenceDiagram
 |---|---|---|
 | Gateway 原生 | Gateway 单点处理 | **否** |
 | Gateway → Runtime 反代 | Gateway 透传到 Runtime localhost HTTP | **是**（503 if offline） |
+| Gateway → 记忆服务反代（ADR-100） | Gateway 透传到 `acowork-memory` `127.0.0.1:18084` | **否**（Runtime 完全不参与记忆面；服务由 Gateway supervisor 常驻，未就绪时 503） |
 | 静态文件 | Gateway 直接读盘返回字节流 | **否**（仅要求文件存在） |
 | MQTT 事件流（后端 → 前端上报） | rumqttd Broker 中转 | 是（Runtime 发布事件，前端订阅） |
 | 全局资源主动拉取（`GET /api/global-resources`） | Gateway 单点响应 Runtime 主动拉取 | **否**（见 [§4.13](#413-全局资源快照runtime-主动拉取入口)） |
 
-Gateway **不持久化业务数据**：Memory、Skill、Agent 运行时配置、Session 状态等真实数据存于
-Runtime 本地文件 / SQLite 记忆层；Gateway 通过 HTTP 反向代理拉取快照、透传用户操作（并注入身份），
+Gateway **不持久化业务数据**：Skill、Agent 运行时配置、Session 状态等真实数据存于
+Runtime 本地文件 / SQLite；ADR-100 之后记忆另属于独立进程 `acowork-memory`（每实例一库，
+Gateway 只负责它的生命周期与反代）。Gateway 通过 HTTP 反向代理拉取快照、透传用户操作（并注入身份），
 命令 / 写入则通过 MQTT 控制主题，MQTT 同时承担 Runtime / Gateway → 前端的事件上报。
 
 ---
@@ -575,7 +578,8 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 > 未开启鉴权时无 header，行为与 Phase 4 之前完全一致。
 
 Gateway 不解析 Runtime 响应的 body，所有读写都 verbatim 透传。这意味着 Runtime 是
-**workspace config / memory / session state 的权威所有者**，Gateway 仅充当反代。
+**workspace config / session state 的权威所有者**，Gateway 仅充当反代。（记忆不在此列：
+ADR-100 之后它是 `acowork-memory` 的私有数据，见 [§5.4](#54-记忆-memory)。）
 
 ### 5.1 Agent 运行时配置
 
@@ -819,7 +823,7 @@ blob，消息 JSONL 中的引用也指向同一 ID）。
 **wire 形状**对应 Rust 端的 [`AttachedItem`](../../../core/acowork-core/src/protocol.rs)：
 serde tag `type` 用 snake_case（`file_upload` / `attached_selection` 等），**变体内字段
 用 camelCase**（`documentId` / `sizeBytes` / `absPath` / `startLine` / `endLine`）。
-runtime 在 `loop_memory.rs::write_attached_items` 把它映射到 JSONL 持久化的
+runtime 在 `loop_persist.rs::write_attached_items` 把它映射到 JSONL 持久化的
 [`AttachmentMeta`](../../../core/acowork-runtime/src/conversation.rs)（变体内字段转回
 snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_line`）。
 
@@ -848,11 +852,15 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 
 ### 5.4 记忆 (Memory)
 
-> **Runtime 真实持有 SQLite 存储**。HTTP 反代在 [mqtt.md §7.5](./mqtt.md) 详述。
-> Gateway `memory_api.rs` 本身**为空路由器**（ADR-033）：注册路径会与
-> `proxy_routes` 冲突，`Router::merge()` 启动时直接 panic。
+> **ADR-100：记忆已剥离为独立进程 `acowork-memory`**（Gateway supervisor 托管，默认
+> `127.0.0.1:18084`，每实例一库 `{data_dir}/instances/{instance_id}/memory.db`）。
+> 面板路径 `/api/agents/{id}/memory/*` 与响应 wire shape **字节不变**：
+> `memory_proxy`（`core/acowork-gateway/src/http/memory_proxy.rs`）把路径 id 转成
+> `?instance_id=` 后反代服务的 `/memory/*`。服务未启动/重启中 → Gateway 直接
+> `503 + Retry-After: 2`。Gateway `memory_api.rs` 仍**为空路由器**（ADR-033）：
+> 注册路径会与反代路由冲突，`Router::merge()` 启动时直接 panic。
 
-| 方法 | 路径 | 用途 | Runtime 路径 |
+| 方法 | 路径 | 用途 | 服务路径 |
 |---|---|---|---|
 | GET | `/api/agents/{id}/memory/nodes` | 节点列表（分页 + 过滤：`type` / `keyword` / `time_range`） | `/memory/nodes` |
 | GET | `/api/agents/{id}/memory/nodes/{nid}` | 读取单个节点 | `/memory/nodes/{nid}` |
@@ -860,11 +868,48 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 | PUT | `/api/agents/{id}/memory/nodes/{nid}` | 更新节点 | `/memory/nodes/{nid}` |
 | DELETE | `/api/agents/{id}/memory/nodes/{nid}` | 删除节点 | `/memory/nodes/{nid}` |
 | GET | `/api/agents/{id}/memory/stats` | 统计：总数、存储字节、按 type/status 分布、embedding 维度等 | `/memory/stats` |
-| POST | `/api/agents/{id}/memory/consolidate` | 触发记忆整合（`force`、`retention_days`） | `/memory/consolidate` |
 | GET | `/api/agents/{id}/memory/graph` | 整图拉取（前端图谱视图） | `/memory/graph` |
-| GET | `/api/agents/{id}/memory/consolidation/status` | 整合定时器状态（idle 时长、pending 数、调度配置） | `/memory/consolidation/status` |
+| POST | `/api/agents/{id}/memory/distill` | 触发一次 EpisodicDistiller（原 `consolidate` 已并入本端点） | `/memory/distill` |
+| GET | `/api/agents/{id}/memory/consolidation/status` | 整合/遗忘流水线状态与调度配置 | `/memory/consolidation/status` |
+| PUT | `/api/agents/{id}/memory/consolidation/status` | 写回调度配置 | `/memory/consolidation/status` |
+| GET | `/api/agents/{id}/memory/search` | 实例内检索（全局搜索走 §5.4.1 的短路径） | `/memory/search` |
+| POST | `/api/agents/{id}/memory/rebuild-embeddings` | 重建向量索引（`scope`: `all` / `repair`，202 后台跑） | `/memory/rebuild-embeddings` |
+| GET | `/api/agents/{id}/memory/rebuild-progress` | 重建进度轮询 | `/memory/rebuild-progress` |
+
+> 面板的 “Rebuild Index” 按钮**不直接**调 `rebuild-embeddings`：它走 Gateway 的
+> `POST /api/embedding-models/{id}/start-migration`（§4.7），由 Gateway 转发到该
+> 实例的服务端点并把进度写回 `migration-progress` 快照。
+>
+> 本节是 §5（Gateway → Runtime 反代）里**唯一的非 Runtime 后端**：ADR-100 之后
+> 记忆的存储与面板都在服务侧，其余小节仍是 Runtime 反代。
+
+RAG 不属记忆面，仍由 Runtime 持有：
+
+| 方法 | 路径 | 用途 | Runtime 路径 |
+|---|---|---|---|
 | GET | `/api/agents/{id}/rag/status` | RAG 配置状态（是否已配置、provider name） | `/agents/{id}/rag/status` |
 | POST | `/api/agents/{id}/rag/query` | 直接查询 RAG（绕过 LLM，用于调试/连通性验证） | `/agents/{id}/rag/query` |
+
+#### 5.4.1 服务直通前缀 `/api/memory/*`（ADR-100）
+
+| 方法 | 路径 | 调用方 | 服务路径 |
+|---|---|---|---|
+| GET | `/api/memory/search?instance_id={id}` | Desktop 全局搜索 memory tab | `/memory/search` |
+| POST | `/api/memory/mcp` | Agent Runtime（MCP 工具调用） | `/mcp` |
+| POST | `/api/memory/admin/bootstrap?instance_id={id}` | Agent Runtime 首启动引导（写入入口 D） | `/admin/bootstrap` |
+| POST | `/api/memory/admin/import?instance_id={id}` | **仅 Node**：遗留库一次性交接（ADR-100 决策 10） | `/admin/import` |
+
+映射与闸门规则：
+
+- `mcp` 与 `admin/*` 是服务自己的命名空间，其余短路径落到 `/memory/{rest}`。
+- 非 MCP 调用 **MUST** 带 `instance_id`（缺失 → `400`）；读（`GET`/`HEAD`）按
+  `Op::Use`、写按 `Op::Manage` 过 ACL（机器 actor 无 `AuthContext` → 直通，ADR-087）。
+- `X-MCP-Actor` 仅在 Gateway 校验过安装表后才注入；`X-ACowork-Node-Token` 到
+  Gateway 为止，**不会穿过反代**。
+- `/admin/import` 请求体是原始 SQLite 字节（`Content-Type: application/x-sqlite3`），
+  上限 64 MiB（与 Gateway `GLOBAL_BODY_LIMIT` 相等）；响应
+  `{imported_nodes, imported_vectors, imported_lexical_rows, imported_purge_log_rows, skipped_existing}`，
+  命名空间已有记忆时**不合并**，只回 `skipped_existing: true`。
 
 ### 5.5 工作区 (Workspace)
 
@@ -1083,59 +1128,97 @@ Content-Type: application/json
 
 > `attached_items` 数组的 wire 字段名是 **camelCase**（`documentId` / `sizeBytes` / `absPath` / `startLine` / `endLine`），与 Rust `AttachedItem` deserializer 一致。完整字段说明见 [§5.3.3](#533-消息条目中的-attached_items)。
 
-### 9.4 查询 Memory（反向代理）
+### 9.4 查询 Memory（反向代理 → 记忆服务）
 
 ```http
-GET /api/agents/{id}/memory/nodes?page=1&size=20&type=Episodic&time_range=7d HTTP/1.1
+GET /api/agents/com.acowork.senior-engineer/memory/nodes?page=1&size=20&type=Episodic&time_range=7d HTTP/1.1
 Authorization: Bearer <token>
 ```
 
-Gateway 收到后 → 查 `RuntimeHttpRegistry` 取 Runtime HTTP 端口 →
-反代 `127.0.0.1:{port}/memory/nodes?...` → verbatim 返回。
+Gateway 收到后由 `memory_proxy` 处理（ADR-100）：路径里的实例 id 是唯一坐标，
+代理把它写成 `?instance_id=`（调用方自带的 `instance_id` **丢弃、不合并**，因此
+任何人都无法寻址到自己未被授权的命名空间）→ 反代
+`http://127.0.0.1:{memory_port}/memory/nodes?...`（默认 `18084`）→ verbatim 返回。
 
-### 9.5 查询整合状态（反向代理）
+记忆服务进程不存在（未启动 / 重启中）时，Gateway 直接回 `503` +
+`Retry-After: 2`，与 `/api/doc/*`、`/api/pm/*`、`/api/user/*` 同契约。
+
+### 9.5 查询整合状态（反向代理 → 记忆服务）
 
 ```http
-GET /api/agents/{id}/memory/consolidation/status HTTP/1.1
+GET /api/agents/com.acowork.senior-engineer/memory/consolidation/status HTTP/1.1
 Authorization: Bearer <token>
 ```
 
-响应：
+响应（Desktop 的「记忆蒸馏」「记忆遗忘」两张卡直接渲染这个信封）：
 
 ```json
 {
   "idle_secs": 42,
-  "pending_count": 3,
-  "idle_timeout_secs": 1800,
-  "accumulation_threshold": 50,
-  "bg_task_running": true
+  "bg_task_running": true,
+  "distiller": {
+    "enabled": true,
+    "episode_backlog": 3,
+    "secs_since_distill": 120,
+    "interval_secs": 3600,
+    "accumulation_threshold": 50,
+    "idle_secs": 1800,
+    "models": [{ "provider_id": "openai", "model_id": "gpt-4o-mini" }],
+    "last_run": {
+      "at": "2026-10-23T02:11:07+00:00",
+      "episodes_scanned": 12,
+      "total_promoted": 7,
+      "facts_promoted": 4,
+      "preferences_promoted": 1,
+      "relations_promoted": 1,
+      "procedures_promoted": 1,
+      "autobio_promoted": 0,
+      "episodes_marked_consolidated": 9,
+      "error": null,
+      "funnel": { "scanned": 12, "backlog_remaining": 0, "llm_calls": 3 }
+    }
+  },
+  "forgetting": {
+    "enabled": true,
+    "half_life_days": 30,
+    "dormant_threshold": 0.15,
+    "archive_days": 180,
+    "interval_secs": 86400
+  }
 }
 ```
 
-Runtime 未启动整合管线时返回 `503 Service Unavailable`。
+`distiller.last_run` 为 `null` 表示该实例还没跑过蒸馏；`distiller.models` 是面板
+模型选择器读写的候选链（相对 Runtime 旧响应是**新增字段**）。同路径的 `PUT`
+写回调度配置，body 为 `{"distiller": {...}, "forgetting": {...}}`，省略的字段
+保持当前值，未知字段 `deny_unknown_fields` 直接 `400`。
 
-### 9.5.1 触发记忆整合（反向代理）
+### 9.5.1 触发记忆蒸馏（反向代理 → 记忆服务）
 
 ```http
-POST /api/agents/{id}/memory/consolidate HTTP/1.1
+POST /api/agents/com.acowork.senior-engineer/memory/distill HTTP/1.1
 Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "force": false,
-  "retention_days": 7
-}
 ```
 
-响应：
+无请求体（`?instance_id=` 由代理注入）。响应：
 
 ```json
 {
   "started": true,
-  "duration_ms": 142,
-  "episodes_consolidated": 12,
-  "knowledge_nodes_generated": 3,
-  "message": "Consolidated 12 episodes (8 upgraded, 2 dormant), generated 3 knowledge nodes, cleaned 1 episodic"
+  "episodes_scanned": 12,
+  "facts_promoted": 4,
+  "preferences_promoted": 1,
+  "relations_promoted": 1,
+  "procedures_promoted": 1,
+  "autobio_promoted": 0,
+  "episodes_marked_consolidated": 9,
+  "funnel": {
+    "scanned": 12, "backlog_remaining": 0, "llm_calls": 3, "llm_calls_failed": 0,
+    "llm_calls_truncated": 1, "below_importance": 2, "candidates_recalled": 9,
+    "projected": 8, "verdict_no_merge": 3, "verdict_merged": 4,
+    "verdict_superseded": 1, "episodes_consolidated": 9, "episodes_deferred": 2,
+    "errors": 0
+  }
 }
 ```
 
@@ -1143,16 +1226,63 @@ Content-Type: application/json
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `started` | `bool` | 整合是否实际执行（store 不可用时为 `false`） |
-| `duration_ms` | `u64` | 整合耗时（毫秒） |
-| `episodes_consolidated` | `u64` | 处理的 pending 节点总数（upgraded + kept_pending + marked_dormant） |
-| `knowledge_nodes_generated` | `u64` | 新生成的知识节点数（triples_extracted + procedural_created） |
-| `message` | `string` | 人类可读的摘要信息 |
+| `started` | `bool` | 本次是否真正跑完（恒为 `true`；跑不起来走下面的状态码） |
+| `episodes_scanned` | `usize` | 本轮读取的 pending episode 数 |
+| `facts_promoted` / `preferences_promoted` / `relations_promoted` / `procedures_promoted` / `autobio_promoted` | `usize` | 各记忆类型新写入（含合并后）的节点数 |
+| `episodes_marked_consolidated` | `usize` | 被标记为已整合、不再进入 backlog 的 episode 数 |
+| `funnel` | `object` | 漏斗计数：说清「扫了 12 条，其余去了哪里」 |
 
-> **注意**：HTTP 手动触发仅执行 Phase 2 基础策略（基于置信度的升级/降级），
-> 不包含 LLM triple extraction / conflict resolution / generalization。
-> 完整 Phase 3 pipeline 由后台 `ConsolidationTimer` 自动调度（idle 30min 或
-> pending ≥ 50 时触发）。
+状态码：`200` 跑完（backlog 为空也算跑完）· `409` 跑不了（memory provider 未初始化、
+embedding provider 未初始化、或 distiller 被禁用）· `500` 跑失败 ·
+`503` `distiller_not_available`（管线没给出任何结果）。
+
+> **ADR-100 变更**：Runtime 旧端的 `POST …/memory/consolidate`（`{force, retention_days}`
+> → `{started, duration_ms, episodes_consolidated, knowledge_nodes_generated, message}`）
+> 已不存在，手动触发统一走 `distill`，跑的就是后台那条完整 EpisodicDistiller 管线
+> （含 LLM 抽取与合并裁决），不存在「手动只跑基础策略」的分支。
+
+### 9.5.2 遗留记忆库交接（仅 Node → 记忆服务）
+
+ADR-100 决策 10：ADR-100 之前每个 Agent 工作区里的 `{workspace}/memory/private.sqlite`
+由 **`acowork-node` 单方面**交给服务——Node 是 node-local 文件系统的拥有者（ADR-055），
+Runtime 与 Gateway 都不参与。
+
+```http
+POST /api/memory/admin/import?instance_id=21212121-2121-4121-8121-212121212121 HTTP/1.1
+X-ACowork-Node-Token: <node token>
+Content-Type: application/x-sqlite3
+Content-Length: 1048576
+
+<private.sqlite 的原始字节（WAL 已 checkpoint）>
+```
+
+响应：
+
+```json
+{
+  "imported_nodes": 2,
+  "imported_vectors": 1,
+  "imported_lexical_rows": 2,
+  "imported_purge_log_rows": 0,
+  "skipped_existing": false
+}
+```
+
+契约要点：
+
+- 触发点只有两个：Node 启动后的后台 pass，以及 `acowork-node migrate-memory`。
+  每个实例成功后写 `{workspace}/memory/.migrated` 哨兵，后续 pass 直接跳过。
+- 目标是**原始字节体**（不引入 multipart），上限 64 MiB =
+  `acowork_core::workspace::STORE_IMPORT_MAX_BYTES`，刻意与 Gateway
+  `GLOBAL_BODY_LIMIT` 相等；更大的库由 Node 在上传前拒绝并提示转人工。
+- `X-ACowork-Node-Token` 到 Gateway 为止，**不穿过反代**；机器 actor 无
+  `AuthContext`，因此写路径的 `Op::Manage` ACL 直通（ADR-087）。
+- 目标命名空间**已有记忆则不合并**：`skipped_existing: true`、四张表零写入，
+  此时 Node **一行都不删**——遗留库原地保留，交接失败可重试。
+- 只有真实导入（`skipped_existing: false`）之后 Node 才 DELETE 本地记忆行；
+  文件本身保留给 Runtime 继续使用（sessions / ConversationMessage 仍在里面，ADR-082）。
+- 不是 SQLite 文件（magic 不符）→ `400`；缺 `instance_id` → `400`；服务未就绪 →
+  `503`（Node 按 6 轮 × 5s 退避重试）。
 
 ### 9.6 查询 RAG 状态（反向代理）
 
@@ -1278,11 +1408,14 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 
 ## 10. 注意事项
 
-1. **Gateway 不持久化业务数据**：Memory、Skill、Agent 运行时配置、Session 状态等真实数据
-   存于 Runtime 本地文件 / SQLite 记忆层；Gateway 通过 HTTP 反向代理拉取快照或透传请求。
-2. **反代端点要求 Runtime 在线**：Runtime 未注册 / 已退出时返回 503；MQTT 通道
+1. **Gateway 不持久化业务数据**：Skill、Agent 运行时配置、Session 状态等真实数据
+   存于 Runtime 本地文件 / SQLite，记忆则存于独立进程 `acowork-memory` 的每实例库
+   （ADR-100）；Gateway 通过 HTTP 反向代理拉取快照或透传请求。
+2. **反代端点要求后端在线**：Runtime 未注册 / 已退出时返回 503；MQTT 通道
    `acowork/agents/{id}/http_port` 是 Gateway 反代发现 Runtime 端口的唯一来源，
    **retained publish** 是关键（Gateway 重启后 broker 会重放上一次的端口）。
+   记忆面（§5.4 / §5.4.1）是唯一的例外：后端是 Gateway supervisor 自己拉起的
+   `acowork-memory`（端口来自 port-file，不走 MQTT），Runtime 下线不影响它。
 3. **多数写操作会触发热推送**：例如修改 Provider / MCP 配置后，Gateway 通过
    MQTT **retained publish** 向所有已连接的 Runtime 同步最新可用列表，
    详见 [mqtt.md §全局资源可用性广播](./mqtt.md)。

@@ -266,11 +266,10 @@ value = "https://api.weather.com"
 [[permissions]]
 type = "FilesystemRead"
 
-[[permissions]]
-type = "MemoryRead"
-
-[[permissions]]
-type = "MemoryWrite"
+# 记忆不再是权限域：ADR-100 把记忆剥离为 Gateway 托管的独立服务，
+# `memory_store` / `memory_recall` 变成该服务（MCP server id = `memory`）的工具，
+# 工具级开关闭在 `agent_mcp_tools.json`（前缀名 `mcp_memory__*`，ADR-069），
+# 包声明里已删除的 `MemoryRead` / `MemoryWrite` 会被当作未知类型拒绝。
 
 [[permissions]]
 type = "IntentSend"
@@ -363,7 +362,7 @@ Agent 客户端在渲染 Agent 头像时必须遵循以下优先级（与 [Avata
 3. **确定性随机内置图标**。根据 `agentId` 做哈希选择 `BUILTIN_ICONS[id]`，与 `ensureBuiltinAvatars` 即将分配的图标一致，避免首次渲染闪动。
 
 该优先级在远端 Gateway 场景下也必须保持一致（详见 [04-gateway.md § 9.6](./04-gateway.md#96-安全设计)）。
-- `permissions`：使用 TOML 数组表语法，每条包含 `type` 和可选的 `value`。支持 `Network`、`FilesystemRead`、`FilesystemWrite`、`MemoryRead`、`MemoryWrite`、`IntentSend` 等类型。
+- `permissions`：使用 TOML 数组表语法，每条包含 `type` 和可选的 `value`。支持 `Network`、`FilesystemRead`、`FilesystemWrite`、`IntentSend` 等类型（`MemoryRead` / `MemoryWrite` 已随 ADR-100 删除——记忆改由服务承载，不再有权限域）。
 - `triggers`：激活触发器数组。支持 `cron`、`event`、`manual` 类型。`cron` 使用标准 5 段表达式（UTC 时区），不支持秒级精度和特殊宏。
 - `llm.providers`：支持配置多个 LLM Provider，每个引用 Vault 中的密钥。
 - `llm.routing.strategy`：LLM 路由策略（`cost_priority` / `quality_priority` / `latency_priority`）。
@@ -445,7 +444,8 @@ permissions 数组中的每条权限字符串遵循统一的模式语法，Gatew
 | `filesystem:read:*` | 整个 filesystem:read 域 | `~/Documents`, `/tmp` | — |
 | `filesystem:*:*` | 整个 filesystem 域 | read/write 任意路径 | — |
 | `intent:send:*` | 可向任何 Agent 发 Intent | `com.example.calendar`, `com.acowork.system` | — |
-| `memory:read` | 无需 qualifier | — | — |
+
+> 旧版此处还有一行 `memory:read`；ADR-100 之后 memory 不再是权限域，通配规则也不再涉及它。
 
 **匹配算法**：
 
@@ -487,7 +487,6 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | network | `network:https://api.example.com` | http_request |
 | filesystem | `filesystem:read:~/Documents`, `filesystem:write:~/Documents` | file_read, file_write |
 | filesystem | `filesystem:read:/tmp` | file_read |
-| memory | `memory:read`, `memory:write` | memory_query, memory_store |
 | intent | `intent:send:com.example.calendar` | intent_send |
 | shell | （shell 工具无需声明 permission，由 Approval Gate 控制） | shell |
 | identity | （identity_store 仅系统 Agent 可用，通过 platform.system 声明授权） | identity_store |

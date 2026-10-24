@@ -3,8 +3,10 @@
 **报告日期**：2026-09
 **分支**：`bugfix/memory`
 **依据**：ADR-062 §5.2（指标与阈值）/ §5.4（报告存档）/ §6.4（auto_inject min_score）
-**harness**：`core/acowork-runtime/tests/memory_m4_bench.rs`
-**探针**：`core/acowork-runtime/tests/memory_m4_probe.rs`、`memory_m4_tiediag.rs`（临时，验证分数域与 MRR 波动）
+**harness**：`core/acowork-memory/tests/memory_m4_bench.rs`
+**探针**：`core/acowork-runtime/tests/memory_m4_probe.rs`、`memory_m4_tiediag.rs`（临时，验证分数域与 MRR 波动；已删除，见下方路径说明）
+
+> 路径说明：本报告的数字在 Runtime 内置记忆时代测得，当时这些文件位于 `core/acowork-runtime/tests/`。ADR-100 把记忆引擎拆成独立服务后，仍存在的 benchmark（m4/m5/retrieval_eval/lifecycle/chains）随逻辑迁入 `core/acowork-memory/tests/`，两个临时探针已删除——它们是一次性诊断，结论已在下文记录。指标数学（Precision@K / MRR / nDCG）与本报告各数字同源，统一定义在 dev-only 的 `core/acowork-eval`，因此本报告与迁入后的 harness 仍可逐列对比。
 
 ---
 
@@ -226,7 +228,7 @@ auto_inject min_score=None    → 1 result, score 0.6437
 | 2a. **keyword 写时质量门**（§6.2.1 前置） | `acowork-memory/src/keyword.rs`（新模块）+ [memory_store.rs](core/acowork-runtime/src/tools/builtin/memory_store.rs) + [instant.rs](core/acowork-grafeo/src/consolidation/instant.rs) 双向调用 | 单元测试覆盖 6 条规则边界 + 工具描述更新 + 现有 e2e 回归 |
 | 2b. keyword_index 写时拼入 `object`（依赖 2a） | [instant.rs](core/acowork-grafeo/src/consolidation/instant.rs) | 单元测试（清洗后 BM25 命中）+ benchmark |
 | 3. manifest `[memory.quality].keyword_index` / `auto_inject_enabled` 反序列化已就位（无需改动） | — | harness 显式设值覆盖验证 |
-| 4. 扩展 benchmark：keyword 专项查询集 + auto_inject 状态扫描 | [memory_m4_bench.rs](core/acowork-runtime/tests/memory_m4_bench.rs) | 重命名为 `memory_m5_bench` 或追加 keyword 配置开关 |
+| 4. 扩展 benchmark：keyword 专项查询集 + auto_inject 状态扫描 | [memory_m4_bench.rs](../../../core/acowork-memory/tests/memory_m4_bench.rs) | 重命名为 `memory_m5_bench` 或追加 keyword 配置开关 |
 | 5. 跑 before/after 对比 | — | 输出表格（Precision@5 / Recall@5 / MRR / Dormant / auto_inject hit / keyword hit） |
 
 **回滚路径**：所有改动参数化（`quality.auto_inject_enabled` / `quality.keyword_index`），回滚成本 = 改配置。代码逻辑无破坏性改动。
@@ -261,8 +263,8 @@ auto_inject min_score=None    → 1 result, score 0.6437
 
 ```bash
 cd core
-cargo test -p acowork-runtime --test memory_m4_bench   -- --nocapture   # 主 benchmark
-cargo test -p acowork-runtime --test memory_m4_probe    -- --nocapture   # 分数域探针
+cargo test -p acowork-memory --test memory_m4_bench   -- --nocapture   # 主 benchmark
+cargo test -p acowork-runtime --test memory_m4_probe    -- --nocapture   # 分数域探针（文件已删除，见开头路径说明）
 ```
 
 自包含、使用 in-memory `GrafeoStore`，不触碰运行中的 Gateway / Runtime / Desktop 进程或端口。
@@ -271,7 +273,7 @@ cargo test -p acowork-runtime --test memory_m4_probe    -- --nocapture   # 分�
 
 ## 8. M5 执行结果（2026-09）
 
-**harness**：`core/acowork-runtime/tests/memory_m5_bench.rs`（自 `15654af0` 安全快照恢复，`set_quality` 辅助因 `b117f901` 撤回而替换为 trait 方法 `apply_quality_config`）。
+**harness**：`core/acowork-memory/tests/memory_m5_bench.rs`（自 `15654af0` 安全快照恢复，`set_quality` 辅助因 `b117f901` 撤回而替换为 trait 方法 `apply_quality_config`）。
 
 ### 8.1 代码改动清单（对应 §6.5 步骤）
 
@@ -310,6 +312,6 @@ keyword any-rank rate (K* only)         0.0000      1.0000
 
 ```bash
 cd core
-cargo test -p acowork-runtime --test memory_m5_bench -- --nocapture   # M5 keyword before/after
+cargo test -p acowork-memory --test memory_m5_bench -- --nocapture   # M5 keyword before/after
 cargo test -p acowork-memory --lib keyword                             # 质量门规则单测
 ```
