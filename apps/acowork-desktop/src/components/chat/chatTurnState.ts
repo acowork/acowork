@@ -85,6 +85,10 @@ export function terminalNoticeKey(status?: string): string {
  * that contains no agent.
  */
 export function opensAgentTurn(row: ChatMessageRow): boolean {
+  // A card answer continues the EXISTING turn — it does not open a new one.
+  // Card ids have the deterministic format "card:{kind}:{request_id}" (see
+  // loop_interaction.rs::chat_card_id).
+  if (row.meta?.in_reply_to?.startsWith("card:")) return false;
   if (row.to?.trim()) return true;
   return (row.meta?.mentions?.length ?? 0) > 0;
 }

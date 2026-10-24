@@ -812,6 +812,12 @@ export function GroupChatPanel() {
       void useChatSessionStore
         .getState()
         .sendGroupText(activeGroupId, text, [], row.meta?.message_id);
+      // Optimistically dismiss the card in the execute session view
+      const execSid = row.meta?.agent_session_id;
+      const reqId = row.meta?.interaction?.request_id;
+      if (execSid && reqId && row.from) {
+        useChatStore.getState().resolveQuestion(row.from, reqId, execSid);
+      }
     },
     [activeGroupId, stickNow],
   );

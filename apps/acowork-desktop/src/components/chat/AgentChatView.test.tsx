@@ -55,6 +55,7 @@ vi.mock("../../stores/chatStore", () => ({
         // per resolved exec session; stubbed here — the store's own suite
         // (chatStore.sessionTitle.test.ts) covers its real behaviour.
         seedOptimisticTitle: vi.fn(),
+        resolveQuestion: vi.fn(),
       }),
     },
   ),
@@ -171,12 +172,13 @@ describe("AgentChatView event-log wiring", () => {
     expect(screen.getByText("hello there")).toBeTruthy();
 
     // The interaction_request row is a durable, actionable card: its question
-    // and option buttons render in the stream.
+    // and option list render in the stream.
     expect(screen.getByText("Pick one")).toBeTruthy();
 
-    // Choosing an option answers through the chat channel, bound to the card
-    // id (the answer channel's in_reply_to target).
+    // Select an option radio then submit to answer through the chat channel,
+    // bound to the card id (the answer channel's in_reply_to target).
     fireEvent.click(screen.getByText("A"));
+    fireEvent.click(screen.getByText("askQuestionCard.submit"));
     expect(sendTextMock).toHaveBeenCalledWith(SESSION, "A", "card2");
   });
 

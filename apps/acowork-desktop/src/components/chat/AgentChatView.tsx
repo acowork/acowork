@@ -413,6 +413,20 @@ const EMPTY_DRAFT: ChatSessionConfig = {};
  *  band sits here; scrolling into it fires the next older page. */
 const AUTO_LOAD_TOP_PX = 48;
 
+/** Optimistically dismiss the corresponding question/approval card in the
+ *  execute session view when the user answers from the chat surface. The
+ *  MQTT `event_cleared` path (zero-byte retained publish) is unreliable with
+ *  rumqttd for already-connected subscribers, so we clear local state
+ *  immediately rather than waiting for the signal. */
+function dismissExecCard(card: ChatMessageRow) {
+  const execSid = card.meta?.agent_session_id;
+  const reqId = card.meta?.interaction?.request_id;
+  const agentId = card.from;
+  if (execSid && reqId && agentId) {
+    useChatStore.getState().resolveQuestion(agentId, reqId, execSid);
+  }
+}
+
 export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const { t } = useTranslation();
   const win = useChatSessionStore((s) => s.windows[sessionId]);
@@ -566,6 +580,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     if (immediate && text) {
       stickNow();
       void sendText(sessionId, text, card.meta?.message_id);
+      dismissExecCard(card);
       return;
     }
     setAnswerTarget(card);
@@ -585,10 +600,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     // applied to a newly created one).
     const sessionConfig = replyTo ? undefined : (Object.keys(draft).length > 0 ? draft : undefined);
     setInput("");
+    const target = answerTarget;
     setAnswerTarget(null);
     setPendingAttachments([]);
     stickNow();
     void sendText(sessionId, text, replyTo, sessionConfig, attachmentIds);
+    if (target && replyTo) dismissExecCard(target);
   };
 
   // Upload each chosen file into the session's `files/` dir and stack a

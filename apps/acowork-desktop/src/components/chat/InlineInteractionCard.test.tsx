@@ -26,23 +26,43 @@ function cardRow(
   };
 }
 
-const opts = { kind: "ask_question", request_id: "q1", question: "Pick one", options: ["A", "B"] };
+const askOpts = { kind: "ask_question", request_id: "q1", question: "Pick one", options: ["A", "B"] };
 
 describe("InlineInteractionCard", () => {
-  it("answers an option in place through the immediate channel", () => {
+  it("renders a header bar with the ask title", () => {
+    const row = cardRow("card1", askOpts);
+    render(
+      <InlineInteractionCard row={row} closed={new Set()} answered={new Set()} onAnswer={vi.fn()} />,
+    );
+    expect(screen.getByText("chatView.cardAsk")).toBeTruthy();
+  });
+
+  it("list mode: selecting an option then submit fires onAnswer immediately", () => {
     const onAnswer = vi.fn();
-    const row = cardRow("card1", opts);
+    const row = cardRow("card1", askOpts);
     render(
       <InlineInteractionCard row={row} closed={new Set()} answered={new Set()} onAnswer={onAnswer} />,
     );
-    expect(screen.getByText("Pick one")).toBeTruthy();
+    // Click option "A" to select it
     fireEvent.click(screen.getByText("A"));
+    // Click submit
+    fireEvent.click(screen.getByText("askQuestionCard.submit"));
     expect(onAnswer).toHaveBeenCalledWith(row, "A", true);
   });
 
-  it("routes a free-text answer through the composer (non-immediate)", () => {
+  it("list mode: submit is disabled before selection", () => {
     const onAnswer = vi.fn();
-    const row = cardRow("card1", opts);
+    const row = cardRow("card1", askOpts);
+    render(
+      <InlineInteractionCard row={row} closed={new Set()} answered={new Set()} onAnswer={onAnswer} />,
+    );
+    const submitBtn = screen.getByText("askQuestionCard.submit");
+    expect(submitBtn.closest("button")?.disabled).toBe(true);
+  });
+
+  it("free-answer button opens composer (non-immediate)", () => {
+    const onAnswer = vi.fn();
+    const row = cardRow("card1", askOpts);
     render(
       <InlineInteractionCard row={row} closed={new Set()} answered={new Set()} onAnswer={onAnswer} />,
     );
@@ -50,9 +70,42 @@ describe("InlineInteractionCard", () => {
     expect(onAnswer).toHaveBeenCalledWith(row, "", false);
   });
 
-  it("shows a single answer button when the request has no options", () => {
+  it("approval: shows approve and reject buttons", () => {
     const onAnswer = vi.fn();
     const row = cardRow("card1", { kind: "approval", request_id: "a1", question: "Approve?" });
+    render(
+      <InlineInteractionCard row={row} closed={new Set()} answered={new Set()} onAnswer={onAnswer} />,
+    );
+    expect(screen.getByText("chatView.cardApproval")).toBeTruthy();
+    fireEvent.click(screen.getByText("chatView.cardApprove"));
+    // The sent text is the Chinese "批准" which is_affirmative recognises
+    expect(onAnswer).toHaveBeenCalledWith(row, "\u6279\u51c6", true);
+  });
+
+  it("approval: reject sends reject text", () => {
+    const onAnswer = vi.fn();
+    const row = cardRow("card1", { kind: "approval", request_id: "a1", question: "Approve?" });
+    render(
+      <InlineInteractionCard row={row} closed={new Set()} answered={new Set()} onAnswer={onAnswer} />,
+    );
+    fireEvent.click(screen.getByText("chatView.cardReject"));
+    expect(onAnswer).toHaveBeenCalledWith(row, "\u62d2\u7edd", true);
+  });
+
+  it("pause: shows continue and stop buttons", () => {
+    const onAnswer = vi.fn();
+    const row = cardRow("card1", { kind: "pause", request_id: "p1", question: "Step done" });
+    render(
+      <InlineInteractionCard row={row} closed={new Set()} answered={new Set()} onAnswer={onAnswer} />,
+    );
+    expect(screen.getByText("chatView.cardPause")).toBeTruthy();
+    fireEvent.click(screen.getByText("chatView.cardContinue"));
+    expect(onAnswer).toHaveBeenCalledWith(row, "\u7ee7\u7eed", true);
+  });
+
+  it("no options + no actions = single answer button", () => {
+    const onAnswer = vi.fn();
+    const row = cardRow("card1", { kind: "ask_question", request_id: "q2", question: "How?" });
     render(
       <InlineInteractionCard row={row} closed={new Set()} answered={new Set()} onAnswer={onAnswer} />,
     );
@@ -62,7 +115,7 @@ describe("InlineInteractionCard", () => {
 
   it("collapses an answered card into a read-only receipt", () => {
     const onAnswer = vi.fn();
-    const row = cardRow("card1", opts);
+    const row = cardRow("card1", askOpts);
     render(
       <InlineInteractionCard
         row={row}
@@ -77,7 +130,7 @@ describe("InlineInteractionCard", () => {
   });
 
   it("collapses a closed-but-unanswered card into a closed receipt", () => {
-    const row = cardRow("card1", opts);
+    const row = cardRow("card1", askOpts);
     render(
       <InlineInteractionCard
         row={row}
@@ -91,7 +144,7 @@ describe("InlineInteractionCard", () => {
 
   it("renders an answerable question with no affordance in read-only mode", () => {
     const onAnswer = vi.fn();
-    const row = cardRow("card1", opts);
+    const row = cardRow("card1", askOpts);
     render(
       <InlineInteractionCard
         row={row}
@@ -104,7 +157,7 @@ describe("InlineInteractionCard", () => {
     );
     expect(screen.getByText("Pick one")).toBeTruthy();
     expect(screen.getByText("Agent A")).toBeTruthy();
-    expect(screen.queryByText("A")).toBeNull();
+    expect(screen.queryByText("chatView.freeAnswer")).toBeNull();
     expect(onAnswer).not.toHaveBeenCalled();
   });
 });
