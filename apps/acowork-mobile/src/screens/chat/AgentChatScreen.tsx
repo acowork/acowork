@@ -112,7 +112,7 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed', 'aborted', 'timeout', 
 
 /** Notice types retired by the ADR-100 revision — never painted, even when an
  * old transcript still carries them. Mirrors the desktop renderer. */
-const RETIRED_NOTICES = new Set(['turn_dispatched', 'turn_started', 'router_fallback'])
+const RETIRED_NOTICES = new Set(['turn_dispatched', 'turn_started'])
 
 export function isTerminalReply(row: ChatMessageRow): boolean {
   return row.kind === 'agent_message' && TERMINAL_STATUSES.has(row.meta?.status ?? '')
@@ -568,14 +568,22 @@ function RowView(props: RowProps) {
 
   if (row.kind === 'system_notice') {
     const noticeType = row.meta?.notice_type ?? ''
-    // The milestones and the router-fallback receipt are retired (ADR-100
-    // revision): the runtime stopped writing them, and an old transcript's
-    // copies must not paint either — state belongs to the live surface, not to
-    // history.
+    // The milestones are retired (ADR-100 revision): the runtime stopped
+    // writing them, and an old transcript's copies must not paint either —
+    // state belongs to the live surface, not to history.
     if (RETIRED_NOTICES.has(noticeType)) return null
     // A card closure paints as the answered/closed receipt on its own card,
     // never a separate line; other receipts render their body.
     if (noticeType === 'interaction_resolved') return null
+    // The router-fallback receipt is keyed by notice_type (bodyless row);
+    // the surface owns the wording.
+    if (noticeType === 'router_fallback') {
+      return (
+        <div className="chat-notice">
+          <span className="chat-notice-pill">已自动分配任务</span>
+        </div>
+      )
+    }
     return row.body ? (
       <div className="chat-notice">
         <span className="chat-notice-pill">{row.body}</span>

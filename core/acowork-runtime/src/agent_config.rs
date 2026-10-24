@@ -329,7 +329,7 @@ pub struct ChatRouterConfig {
     /// Explicit router provider. `None` = whichever provider serves `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Router call timeout in ms. `None` = 8,000.
+    /// Router call timeout in ms. `None` = 60,000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     /// Chat messages projected into the router context. `None` = 32.
@@ -341,7 +341,7 @@ pub struct ChatRouterConfig {
 }
 
 impl ChatRouterConfig {
-    pub const DEFAULT_TIMEOUT_MS: u64 = 8_000;
+    pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
     pub const DEFAULT_HISTORY_WINDOW: usize = 32;
     pub const DEFAULT_MAX_CANDIDATES: usize = 10;
 
@@ -351,11 +351,15 @@ impl ChatRouterConfig {
     }
 
     /// Clamped call timeout; a zero / absurd value must never disable the
-    /// router by making every call time out instantly.
+    /// router by making every call time out instantly. The ceiling stays
+    /// strictly below `provider_request_timeout_ms` (default 600s,
+    /// `timeouts` in runtime.toml) so a slow provider surfaces as a
+    /// provider error — the router's own deadline firing first would erase
+    /// that distinction.
     pub fn timeout_ms(&self) -> u64 {
         self.timeout_ms
             .unwrap_or(Self::DEFAULT_TIMEOUT_MS)
-            .clamp(1_000, 60_000)
+            .clamp(1_000, 300_000)
     }
 
     /// Clamped history window. The lower bound keeps enough turns for a
@@ -1482,7 +1486,7 @@ mod tests {
             max_candidates: Some(usize::MAX),
             ..Default::default()
         };
-        assert_eq!(cfg.timeout_ms(), 60_000);
+        assert_eq!(cfg.timeout_ms(), 300_000);
         assert_eq!(cfg.history_window(), 200);
         assert_eq!(cfg.max_candidates(), 50);
     }

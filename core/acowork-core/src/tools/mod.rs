@@ -60,7 +60,7 @@ pub const BUILTIN_TOOLS: &[BuiltinToolInfo] = &[
     BuiltinToolInfo { name: "http_request",    description: "Make raw HTTP requests",                                    group: Some("Network") },
     BuiltinToolInfo { name: "web_fetch",       description: "Fetch and extract readable content from web pages",        group: Some("Network") },
     BuiltinToolInfo { name: "intent_send",     description: "Send messages to other agents via the Intent router",      group: Some("Communication") },
-    BuiltinToolInfo { name: "chat_history_read", description: "Read Chat session (group / agent-agent) history you participate in", group: Some("Communication") },
+    BuiltinToolInfo { name: "chat_history_read", description: "Read the bound Chat session's history (user-agent / agent-agent / group chat)", group: Some("Communication") },
     BuiltinToolInfo { name: "ask_user_question", description: "Ask the user a structured multi-option question",        group: Some("Communication") },
     BuiltinToolInfo { name: "todo_write",      description: "Maintain a structured todo list for the task at hand",      group: Some("Workflow") },
     BuiltinToolInfo { name: "mcp_install",     description: "Install an MCP server into the agent's MCP config",        group: Some("MCP") },

@@ -26,7 +26,7 @@ function noticeRow(noticeType: string, body = ""): ChatMessageRow {
 }
 
 describe("ChatNoticeEventRow", () => {
-  it.each(["turn_dispatched", "turn_started", "router_fallback"])(
+  it.each(["turn_dispatched", "turn_started"])(
     "paints nothing for the retired %s row, even in an old transcript",
     (noticeType) => {
       // ADR-100 revision: history records conversation, not progress. An old
@@ -36,6 +36,13 @@ describe("ChatNoticeEventRow", () => {
     },
   );
 
+  it("paints the router_fallback receipt — the degraded route tells the human", () => {
+    // The runtime writes this row again (router fallback notice); the localised
+    // pill must show, not vanish behind the retired-milestone filter.
+    // (The mocked `t` echoes the key — see the vi.mock above.)
+    const { container } = render(<ChatNoticeEventRow row={noticeRow("router_fallback")} />);
+    expect(container.textContent).toBe("chatView.routerFallback");
+  });
   it("folds an interaction_resolved receipt into nothing (the card paints it)", () => {
     const { container } = render(<ChatNoticeEventRow row={noticeRow("interaction_resolved")} />);
     expect(container.innerHTML).toBe("");

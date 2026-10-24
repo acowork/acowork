@@ -1395,17 +1395,17 @@ export function AgentSetupTab() {
               <StyledInput
                 type="number"
                 min={1000}
-                max={60000}
+                max={300000}
                 step={500}
                 value={profile.chatRouterTimeoutMs && profile.chatRouterTimeoutMs > 0 ? profile.chatRouterTimeoutMs : ""}
                 onChange={(e) => {
                   const v = e.target.value;
                   saveField(
                     "chatRouterTimeoutMs",
-                    v === "" ? undefined : Math.min(60000, Math.max(1000, parseInt(v, 10) || 0)),
+                    v === "" ? undefined : Math.min(300000, Math.max(1000, parseInt(v, 10) || 0)),
                   );
                 }}
-                placeholder="8000 (default)"
+                placeholder="60000 (default)"
                 className="rounded-md"
               />
               <p className="text-9 text-text-tertiary ">

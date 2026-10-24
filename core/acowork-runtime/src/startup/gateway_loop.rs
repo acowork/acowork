@@ -1340,7 +1340,7 @@ pub(crate) async fn finish_chat_turn(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     outcome: crate::agent::chat_router::runner::Outcome,
     designated_session_id: &str,
-    envelope: Box<crate::agent::inbound::IntentEnvelope>,
+    mut envelope: Box<crate::agent::inbound::IntentEnvelope>,
     node_token: &str,
 ) -> crate::error::Result<()> {
     use crate::agent::chat_router::runner::Outcome;
@@ -1357,12 +1357,38 @@ pub(crate) async fn finish_chat_turn(
             )
             .await
         }
-        Outcome::Fallback { reason } => {
+        Outcome::Fallback {
+            reason,
+            chat_excerpt,
+        } => {
             tracing::info!(
                 reason = %reason,
                 "Chat Router fell back to the deterministic route"
             );
-            // ADR-099 revision: a chat-sourced human message degraded by the
+            // The degraded route has no LLM-composed brief for a fresh
+            // session. When the router HAD read the conversation before it
+            // failed, hand that bounded mechanical tail along: it is what
+            // the router saw, not what it concluded, so it re-briefs the
+            // new session without re-introducing another task's noise.
+            // `envelope` is an owned Box and this arm is its only consumer
+            // — an in-place edit is free.
+            if let (Some(excerpt), Some(text)) = (
+                chat_excerpt,
+                envelope
+                    .params
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string),
+            ) && !text.trim().is_empty()
+                && let Some(map) = envelope.params.as_object_mut()
+            {
+                map.insert(
+                    "message".to_string(),
+                    serde_json::json!(format!(
+                        "{text}\n\n[recent chat — the routing assistant was unavailable; the conversation so far]\n{excerpt}"
+                    )),
+                );
+            }            // ADR-099 revision: a chat-sourced human message degraded by the
             // router gets a FRESH execution session, not the mapped one — the
             // mapping is not a semantic verdict and continuing an unrelated old
             // task on a guess is worse than starting a new one. PM tasks and
@@ -1922,6 +1948,7 @@ mod tests {
             Outcome::PassThrough,
             Outcome::Fallback {
                 reason: "stub: model unavailable".to_string(),
+                chat_excerpt: None,
             },
         ] {
             let chat = match &outcome {

@@ -52,13 +52,13 @@ impl Tool for ChatHistoryReadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "chat_history_read".to_string(),
-            description: "Read messages of a Chat session (project group chat or agent-agent chat) you are a participant of. Your bound chat session is resolved automatically; if you need to read a different Chat session, pass its id explicitly. Returns up to 50 messages per call, newest window first; read with increasing offset for more. Your own turns are NOT part of the chat history — do not expect them here (design 27 §5.3.2).".to_string(),
+            description: "Read a Chat session's message log. Every execution session is bound to the Chat session it was started from (1:1 user-agent chat, agent-agent chat, or group chat). Your task brief already comes from that Chat — do NOT read chat history to \"get context\": it mostly belongs to other tasks and will dilute yours. Legitimate uses: (1) the task itself is about the chat log (summarize a discussion, find an earlier message); (2) your brief references a message you were not given — read one small window (count <= 5) to recover it. Returns up to 50 messages per call, newest window first; page older with `offset` (design 27 §5.3.2).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "chat_session_id": {
                         "type": "string",
-                        "description": "Optional. A specific Chat session id to read. Defaults to your bound chat session."
+                        "description": "Optional. A different Chat session id to read. Omit to read the chat this session is bound to."
                     },
                     "offset": {
                         "type": "integer",
@@ -75,7 +75,9 @@ impl Tool for ChatHistoryReadTool {
     }
 
     async fn execute(&self, _params: Value, _work_dir: Option<&str>) -> CoreResult<ToolResult> {
-        Ok(Self::fail("chat_history_read requires session context"))
+        Ok(Self::fail(
+            "chat_history_read must be dispatched via execute_with_context (no session context reached the tool)",
+        ))
     }
 
     async fn execute_with_context(
@@ -95,7 +97,7 @@ impl Tool for ChatHistoryReadTool {
             Some(ref s) if !s.is_empty() => s.clone(),
             _ => {
                 return Ok(Self::fail(
-                    "No chat_session_id provided and this session is not bound to a Chat session",
+                    "No chat_session_id provided and this session is not bound to a Chat session — pass a chat_session_id explicitly if you have one.",
                 ));
             }
         };

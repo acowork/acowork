@@ -964,7 +964,7 @@
     "chatRouterModelAuto": "Auto (compact-model chain)",
     "chatRouterModelDesc": "Model used for the router LLM turn that decides whether to reply directly or dispatch to an execution session. It does NOT follow the session's chat-model selection. Leave on Auto to use the agent's compact-model chain.",
     "chatRouterTimeoutMs": "Router timeout (ms)",
-    "chatRouterTimeoutMsDesc": "Timeout for a single router LLM call before falling back to direct dispatch. Range 1000–60000, default 8000.",
+    "chatRouterTimeoutMsDesc": "Timeout for a single router LLM call before falling back to direct dispatch. Range 1000–300000, default 60000.",
     "chatRouterDisabledHint": "The chat router is off; every chat message is handled without a routing turn.",
     "resetTemperature": "Clear temperature override, revert to package default",
     "contextWindow": "Context Window",

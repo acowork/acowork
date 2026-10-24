@@ -639,7 +639,7 @@
     "chatRouterModelAuto": "자동(컴팩트 모델 체인)",
     "chatRouterModelDesc": "직접 답변 여부 또는 실행 세션으로의 전달 여부를 결정하는 라우터 LLM 턴에 사용되는 모델입니다. 세션에서 선택한 채팅 모델을 따르지 않습니다. '자동'으로 두면 에이전트의 컴팩트 모델 체인을 사용합니다.",
     "chatRouterTimeoutMs": "라우터 시간 초과(ms)",
-    "chatRouterTimeoutMsDesc": "직접 전달로 폴백하기까지 단일 라우터 LLM 호출의 시간 초과. 범위 1000–60000, 기본 8000.",
+    "chatRouterTimeoutMsDesc": "직접 전달로 폴백하기까지 단일 라우터 LLM 호출의 시간 초과. 범위 1000–300000, 기본 60000.",
     "chatRouterDisabledHint": "Chat 라우터가 꺼져 있습니다. 모든 채팅 메시지는 라우팅 턴 없이 처리됩니다.",
     "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
     "sectionAgentInfo": "Agent 정보",

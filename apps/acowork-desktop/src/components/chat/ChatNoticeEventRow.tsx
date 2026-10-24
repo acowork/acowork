@@ -18,8 +18,10 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
 /** Notice types the runtime stopped writing in the ADR-100 revision. They must
- *  not paint even when an old transcript still carries them. */
-const RETIRED_NOTICES = new Set(["turn_dispatched", "turn_started", "router_fallback"]);
+ *  not paint even when an old transcript still carries them. (`router_fallback`
+ *  is written again — the degraded route posts a receipt the human can see —
+ *  so it is NOT retired here.) */
+const RETIRED_NOTICES = new Set(["turn_dispatched", "turn_started"]);
 
 interface ChatNoticeEventRowProps {
   row: ChatMessageRow;
@@ -33,8 +35,17 @@ export function ChatNoticeEventRow({ row, className }: ChatNoticeEventRowProps) 
 
   // The closure is shown on its card as an answered/closed receipt.
   if (noticeType === "interaction_resolved") return null;
-  // Retired milestones and the fallback receipt: history only.
+  // Retired milestones: history only.
   if (RETIRED_NOTICES.has(noticeType)) return null;
+  // The router-fallback receipt is keyed by notice_type, not body: the
+  // runtime writes a bodyless row and every surface owns the wording.
+  if (noticeType === "router_fallback") {
+    return (
+      <div className={`flex items-center justify-center gap-2 py-1 text-10 text-text-tertiary ${className ?? ""}`}>
+        <span>{t("chatView.routerFallback")}</span>
+      </div>
+    );
+  }
 
   const text = row.body || row.meta?.status || "";
   if (!text) return null;

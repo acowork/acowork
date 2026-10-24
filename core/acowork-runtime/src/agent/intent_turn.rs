@@ -273,6 +273,21 @@ pub fn turn_routed_meta(
     })
 }
 
+/// The `meta` of the router-fallback receipt — the one channel fact a
+/// degraded Chat turn owes the human (design 29 §9): the router could not
+/// decide, so the message was forwarded automatically. Unlike the retired
+/// progress milestones (ADR-100 revision), this notice is still written: the
+/// fallback is a visible difference in behaviour, not a progress detail. The
+/// row carries no body; the surfaces paint the localised pill from
+/// `notice_type` (their `routerFallback` i18n key).
+pub fn router_fallback_meta(request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": format!("rf:{request_id}"),
+        "in_reply_to": request_id,
+        "notice_type": "router_fallback",
+    })
+}
+
 /// POST the responder's final output back through the Gateway write entry
 /// (`POST /api/intents/{request_id}/response`). The Gateway verifies the
 /// caller is the recorded target, appends the `intent_response` chat row,
