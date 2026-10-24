@@ -130,10 +130,10 @@ if ($NetworkMode -eq "local") {
 
 $targetDir = Join-Path $WorkspaceRoot "target\$Profile"
 # Step count:
-#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Copy resources, Start (11)
-#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Copy resources      (10)
-#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Copy resources (9)
-$totalSteps = if ($Start) { 11 } elseif ($Stop) { 10 } else { 9 }
+#   -Start : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Memory, Copy resources, Start (12)
+#   -Stop  : Stop, Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Memory, Copy resources      (11)
+#   else   :            Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, Memory, Copy resources (10)
+$totalSteps = if ($Start) { 12 } elseif ($Stop) { 11 } else { 10 }
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "ACowork Core Build Script" -ForegroundColor Cyan
@@ -268,6 +268,20 @@ if ($Start -or $Stop) {
         Write-Host "  User stopped." -ForegroundColor Green
     } else {
         Write-Host "  No User process running." -ForegroundColor Gray
+    }
+
+    # The Memory service mirrors the PM/Doc/User pattern (ADR-100): a standalone
+    # process (`acowork-memory`) spawned by the Gateway supervisor and listening
+    # on port 18084 by default. The ADR-018 watchdog self-exit lags on Windows,
+    # and the running exe keeps the file locked, so kill it explicitly to keep
+    # the stop step idempotent and the next build able to replace the binary.
+    $memoryProcs = Get-Process -Name "acowork-memory" -ErrorAction SilentlyContinue
+    if ($memoryProcs) {
+        Write-Host "  Found Memory processes: $($memoryProcs.Id -join ', ')" -ForegroundColor Gray
+        Stop-Process -Name "acowork-memory" -Force -ErrorAction SilentlyContinue
+        Write-Host "  Memory stopped." -ForegroundColor Green
+    } else {
+        Write-Host "  No Memory process running." -ForegroundColor Gray
     }
 
     # Ensure embed port 18080 is released before starting a new gateway.
@@ -654,6 +668,36 @@ try {
     Write-Host "  User service build completed." -ForegroundColor Green
 } catch {
     Write-Host "  User service build failed: $_" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
+
+# Step: Build Memory service (standalone binary, sibling of acowork-gateway.exe)
+#
+# ADR-100: memory (storage, distiller pipeline, panel REST and the
+# `memory_store` / `memory_recall` MCP tools) is a standalone process
+# (`acowork-memory`), located via
+# `current_exe().parent().join("acowork-memory.exe")` - so the binary MUST sit
+# next to acowork-gateway.exe. Without it the Gateway supervisor logs
+# "acowork-memory binary not found" and every memory route returns 503.
+$step++
+Write-Host "[$step/$totalSteps] Building Memory service ($Profile mode)..." -ForegroundColor Yellow
+try {
+    $cargoArgs = @("build")
+    if ($Profile -eq "release") { $cargoArgs += "--release" }
+    $cargoArgs += @("-p", "acowork-memory")
+    & cmd /c "cargo $($cargoArgs -join ' ')" 2>&1 | ForEach-Object {
+        if ($_ -match "error" -or $_ -match "Compiling") {
+            Write-Host "  $_" -ForegroundColor Gray
+        }
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "  Memory service build completed." -ForegroundColor Green
+} catch {
+    Write-Host "  Memory service build failed: $_" -ForegroundColor Red
     exit 1
 }
 

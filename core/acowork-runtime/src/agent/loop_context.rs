@@ -2519,29 +2519,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn auto_inject_does_not_set_flag_without_provider() {
-        // ADR-060 §6.3: `memory_retrieved_for_session` is set only on a
-        // SUCCESSFUL first retrieval. With no memory provider the call
-        // bails early and the flag must stay false — a transient provider
-        // absence must not permanently starve the session.
-        let mut loop_ = build_loop();
-        assert!(loop_.core.memory_provider().is_none());
-        let mut builder = ContextBuilder::new("Kernel".to_string());
-        loop_
-            .retrieve_and_inject_memories("hello", &mut builder)
-            .await;
-        assert!(
-            !loop_.memory_retrieved_for_session,
-            "no provider → no retrieval → flag stays false"
-        );
-        // Repeated calls keep retrying (flag still false).
-        loop_
-            .retrieve_and_inject_memories("hello again", &mut builder)
-            .await;
-        assert!(!loop_.memory_retrieved_for_session);
-    }
-
     #[test]
     fn tier1_global_default_is_picked_when_set_and_available() {
         // ADR-056 §1, §3.2: Global default wins when present and valid.

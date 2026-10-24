@@ -16,8 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use acowork_core::providers::traits::UsageInfo;
-use acowork_memory::session_meta::{SessionMeta, SessionVisibility};
-use acowork_memory::SessionMetaStore;
+use acowork_core::session_meta::{SessionMeta, SessionMetaStore, SessionVisibility};
 use acowork_runtime::agent::session_state::{SharedLatestSession, SharedSessionSnapshots};
 use acowork_runtime::http::server::RuntimeHttpServer;
 use acowork_runtime::usecases::agent_token::AgentTokenService;
@@ -103,7 +102,6 @@ async fn boot(work_dir: PathBuf) -> u16 {
         Arc::new(std::sync::RwLock::new(Vec::new())),
         Arc::new(tokio::sync::Mutex::new(None)),
         session_metadata,
-        Arc::new(tokio::sync::Mutex::new(None)),
         Arc::new(std::sync::RwLock::new(None)),
         Arc::new(tokio::sync::Mutex::new(None)),
         Arc::new(tokio::sync::Mutex::new(None)),
@@ -112,7 +110,6 @@ async fn boot(work_dir: PathBuf) -> u16 {
         Arc::new(tokio::sync::Mutex::new(None)),
         Arc::new(tokio::sync::Mutex::new(None)),
         Arc::new(tokio::sync::Mutex::new(None)),
-        Arc::new(std::sync::RwLock::new(None)),
         Arc::new(std::sync::RwLock::new(None)),
         Arc::new(tokio::sync::Mutex::new(None)),
         Arc::new(std::sync::RwLock::new(

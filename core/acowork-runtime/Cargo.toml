@@ -18,11 +18,13 @@ wasm-tools = ["wasmtime", "wasmtime-wasi"]
 interactive-cli = ["dialoguer"]
 [dependencies]
 acowork-core.workspace = true
-acowork-memory.workspace = true
+# ADR-100: `acowork-memory` is a standalone service now — the Runtime no
+# longer links it. `acowork-sqlite` stays because the conversation index and
+# the session-metadata rows still live in the Runtime's workspace SQLite file.
 
 # ADR-039 Phase 2: shared MQTT session lifecycle
 acowork-mqtt-session = { workspace = true, features = ["rumqttc-0-25"] }
-# ADR-082 D1: SQLite memory backend — the only storage engine.
+# ADR-082 D1: SQLite sidecars (conversation index + session meta).
 acowork-sqlite = { workspace = true }
 acowork-mcp.workspace = true
 indexmap.workspace = true
@@ -85,6 +87,9 @@ wasmtime-wasi = { workspace = true, optional = true }
 [dev-dependencies]
 acowork-core = { workspace = true }
 acowork-gateway = { workspace = true }
+# Test-only retrieval metric/dataset kernel, shared with acowork-memory's
+# harnesses so both sides score with one definition (see acowork-eval).
+acowork-eval = { workspace = true }
 # ADR-044 Phase 1: test-util enables paused time + auto-advance helpers used by
 # cancellation/integration_tests.rs (tokio::time::timeout + spawned tasks).
 tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

@@ -1889,104 +1889,16 @@ impl SessionTask {
                         "SessionTask: updating embedding provider"
                     );
 
-                    // Check if dimension migration is needed.
-                    // When the memory store already has data with a different
-                    // dimension, we must re-embed all nodes and rebuild the
-                    // HNSW indexes before switching to the new provider.
-                    //
-                    // ADR-051 P4: Uses `memory_admin` (dyn MemoryAdminService)
-                    // instead of concrete `grafeo_store`.
-                    let needs_migration = agent_loop
-                        .core
-                        .memory_admin
-                        .as_ref()
-                        .map(|admin| admin.embedding_dim() != embed_dimension)
-                        .unwrap_or(false);
+                    // ADR-100: the dimension migration that used to run here
+                    // re-embedded the agent's memory nodes. Those nodes now live
+                    // in the memory service, which owns re-embedding and is
+                    // reconfigured through `/api/memory/admin/*`. The Runtime
+                    // only swaps the provider used by the conversation index.
 
                     // S1-5c: cloud embedding provider needs the API key to
                     // authenticate. For local ONNX, the key is unused and we
                     // pass None to keep the original call shape.
                     let api_key_ref = embed_api_key.as_deref();
-
-                    if needs_migration && let Some(ref admin) = agent_loop.core.memory_admin {
-                        let admin = admin.clone();
-                        let old_dim = admin.embedding_dim();
-                        tracing::info!(
-                            old_dim,
-                            new_dim = embed_dimension,
-                            "Embedding dimension changed, starting migration"
-                        );
-
-                        // Build a temporary provider for the migration
-                        // re-embedding. We use the new provider directly
-                        // (not the fallback chain) to ensure consistent
-                        // embeddings during migration.
-                        let migration_provider =
-                            crate::embedding::remote::RemoteEmbeddingProvider::with_config_and_timeouts(
-                                &embed_endpoint,
-                                api_key_ref,
-                                &embed_model_id,
-                                embed_dimension,
-                                &agent_loop.core.config.timeouts,
-                            );
-                        let migration_provider = std::sync::Arc::new(migration_provider)
-                            as std::sync::Arc<dyn crate::embedding::EmbeddingProvider>;
-
-                        // `MemoryAdminService::migrate_embedding_dimension` is a
-                        // sync trait method, so re-embedding means driving the
-                        // async provider with `block_on`. That is only legal on a
-                        // thread that is not already polling a future. This code
-                        // used to call `Handle::current().block_on(...)` directly
-                        // here, on the session task's own async thread, and panicked
-                        // with "Cannot start a runtime from within a runtime" -
-                        // which promoted the session to Errored and the agent
-                        // stopped answering. Run the whole migration on a blocking
-                        // thread, the same pattern
-                        // `MemoryQueryUseCase::rebuild_embeddings_with_progress`
-                        // already uses for the identical job.
-                        let migration = tokio::task::spawn_blocking(move || {
-                            let handle = tokio::runtime::Handle::current();
-                            let provider_for_fn = migration_provider.clone();
-                            let embed_fn = move |text: &str| -> Option<Vec<f32>> {
-                                let text_owned = text.to_string();
-                                match handle.block_on(provider_for_fn.embed(&text_owned)) {
-                                    Ok(vec) => Some(vec),
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "Re-embedding failed during migration, skipping node"
-                                        );
-                                        None
-                                    }
-                                }
-                            };
-                            admin.migrate_embedding_dimension(&embed_fn, embed_dimension)
-                        })
-                        .await;
-
-                        match migration {
-                            Ok(Ok(stats)) => {
-                                tracing::info!(
-                                    rebuilt = stats.rebuilt,
-                                    skipped = stats.skipped_no_embedding + stats.skipped_no_content,
-                                    errors = stats.errors,
-                                    "Embedding migration complete"
-                                );
-                            }
-                            Ok(Err(e)) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "Embedding migration failed, vector search may be broken"
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "Embedding migration task died, vector search may be broken"
-                                );
-                            }
-                        }
-                    }
 
                     // Build the new embedding provider (local ONNX or cloud).
                     // `RemoteEmbeddingProvider::with_config_and_timeouts` already

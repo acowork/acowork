@@ -17,6 +17,11 @@ members = [
     "acowork-doc",
     "acowork-user",
     "acowork-relay",
+    # Dev-only: the retrieval-evaluation kernel the memory and runtime test
+    # harnesses share. It is a `[dev-dependencies]` entry of those two crates
+    # and must never be linked into a shipped binary — see
+    # `acowork-eval/tests/shipping_redline.rs`.
+    "acowork-eval",
 ]
 resolver = "2"
 
@@ -263,6 +268,9 @@ acowork-lsp-relay = { path = "acowork-lsp-relay" }
 acowork-mqtt-session = { path = "acowork-mqtt-session" }
 acowork-pm = { path = "acowork-pm" }
 acowork-relay = { path = "acowork-relay" }
+# Dev-only: see the workspace member note above. Referenced from
+# `[dev-dependencies]` only.
+acowork-eval = { path = "acowork-eval" }
 
 # The next build will work
 

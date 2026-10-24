@@ -317,7 +317,7 @@ pub struct CreateProject {
     pub metadata: IndexMap<String, serde_json::Value>,
 }
 
-/// `PATCH /api/pm/projects/:pid` ���求体。
+/// `PATCH /api/pm/projects/:pid` 请求体。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProject {

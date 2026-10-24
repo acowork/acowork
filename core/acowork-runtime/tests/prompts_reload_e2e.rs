@@ -81,16 +81,12 @@ async fn spawn_server(
     let degraded_reasons = Arc::new(std::sync::RwLock::new(Vec::new()));
     let mqtt_client = Arc::new(tokio::sync::Mutex::new(None));
     let session_metadata = Arc::new(tokio::sync::Mutex::new(None));
-    let memory_query = Arc::new(tokio::sync::Mutex::new(None));
     let workspace_query = Arc::new(tokio::sync::Mutex::new(None));
     let workspace_mutation = Arc::new(tokio::sync::Mutex::new(None));
     let agent_tools = Arc::new(tokio::sync::Mutex::new(None));
     let agent_config = Arc::new(tokio::sync::Mutex::new(None));
     let attachment = Arc::new(tokio::sync::Mutex::new(None));
     let session_config = Arc::new(tokio::sync::Mutex::new(None));
-    let consolidation_timer: Arc<
-        std::sync::RwLock<Option<Arc<acowork_runtime::memory::ConsolidationTimer>>>,
-    > = Arc::new(std::sync::RwLock::new(None));
     let rag_provider: Arc<std::sync::RwLock<Option<Arc<dyn acowork_core::rag::RagProvider>>>> =
         Arc::new(std::sync::RwLock::new(None));
     let debug_service = Arc::new(tokio::sync::Mutex::new(None));
@@ -116,7 +112,6 @@ async fn spawn_server(
         degraded_reasons,
         mqtt_client,
         session_metadata,
-        memory_query,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
         workspace_query,
         workspace_mutation,
@@ -125,7 +120,6 @@ async fn spawn_server(
         agent_config,
         attachment,
         session_config,
-        consolidation_timer,
         rag_provider,
         debug_service,
         workspace_resolver,

@@ -802,10 +802,11 @@ async fn write_migration_terminal(
     }
 }
 
-/// `POST /memory/rebuild-embeddings` request to each agent's Runtime
-/// localhost HTTP server (via the ADR-055 D3 endpoint registry). Each
-/// agent's progress is recorded in `RunningAgentInfo.migration` and
-/// surfaced through `GET /api/embedding-models/migration-progress`.
+/// `POST /memory/rebuild-embeddings` request to the memory service (ADR-100 —
+/// the rebuild used to be a Runtime reverse proxy; `memory_proxy` now injects
+/// the `?instance_id=` namespace). Each agent's progress is recorded in
+/// `RunningAgentInfo.migration` and surfaced through
+/// `GET /api/embedding-models/migration-progress`.
 pub async fn start_migration(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -944,9 +945,9 @@ pub async fn start_migration(
     //    `progress=(0,0,0,"reembed","starting")`) so the desktop's first
     //    `/api/embedding-models/migration-progress` poll sees an "in flight"
     //    snapshot, then spawn one background `tokio::task` per agent to
-    //    proxy the rebuild request to the Runtime and write the terminal
-    //    state when it completes. The handler returns immediately — slow
-    //    Runtimes can no longer block the Gateway HTTP request, and the
+    //    proxy the rebuild request to the memory service and write the terminal
+    //    state when it completes. The handler returns immediately — a slow
+    //    rebuild can no longer block the Gateway HTTP request, and the
     //    desktop polling loop can now observe the `progress` tuple while
     //    the work is actually running (Bug-UX-2: the previous synchronous
     //    implementation wrote `done=true` before the first 2s polling cycle
@@ -967,9 +968,9 @@ pub async fn start_migration(
             match gw.running_agents.get_mut(agent_id) {
                 Some(info) => {
                     // Do not stack a second migration on an agent that is still
-                    // working. Nothing downstream rejects a repeat: the Runtime
-                    // overwrites its progress slot and spawns another detached
-                    // task, so a second request re-embeds the same store
+                    // working. Nothing downstream rejects a repeat: the memory
+                    // service overwrites its progress slot and spawns another
+                    // detached task, so a second request re-embeds the same store
                     // concurrently, and the two tasks take turns writing the one
                     // progress slot the UI reads - the displayed numbers become
                     // noise. Reachable in practice because the desktop's memory
@@ -1012,7 +1013,7 @@ pub async fn start_migration(
             continue;
         }
 
-        // 3b. Build the body the Runtime's `rebuild_embeddings` handler
+        // 3b. Build the body the memory service's `rebuild_embeddings` handler
         //     expects. The endpoint / model_id / dimension are cloned here
         //     because they are still needed for the spawned task below.
         let body = serde_json::json!({
@@ -1029,14 +1030,14 @@ pub async fn start_migration(
             agent_id = %agent_id,
             request_id = %request_id,
             body = %body,
-            "start_migration: spawning background task to forward rebuild request to runtime"
+            "start_migration: spawning background task to forward rebuild request to the memory service"
         );
 
         // 3c. Spawn — `AppState: Clone` makes this safe; the spawned task
         //     owns its own copy. Content-Type is set explicitly on the
-        //     forwarded headers (Fix3): the Runtime's `Json<RebuildEmbeddingsBody>`
-        //     extractor rejects requests without `Content-Type: application/json`
-        //     with 415 Unsupported Media Type.
+        //     forwarded headers (Fix3): the service's
+        //     `Json<RebuildEmbeddingsBody>` extractor rejects requests without
+        //     `Content-Type: application/json` with 415 Unsupported Media Type.
         let state_for_task = state.clone();
         let agent_id_owned: String = agent_id.clone();
         let headers_for_task = headers.clone();
@@ -1046,21 +1047,26 @@ pub async fn start_migration(
                 target: "migration_diag",
                 agent_id = %agent_id_owned,
                 request_id = %request_id_owned,
-                "start_migration_bg: invoking runtime rebuild start endpoint"
+                "start_migration_bg: invoking memory service rebuild start endpoint"
             );
 
-            // 3c. POST /memory/rebuild-embeddings — the Runtime returns 202
-            //     immediately and runs the rebuild as its own detached task;
-            //     progress is polled below. Default proxy timeout (30 s) is
-            //     plenty since no work is done synchronously. The previous
-            //     600 s synchronous wait was scrapped: it still tripped the
-            //     proxy timeout on very large stores and made the UI look
-            //     hung for the entire duration.
-            let resp = crate::http::proxy::proxy_to_runtime_with_method(
+            // The call itself: POST /memory/rebuild-embeddings — the memory
+            // service returns 202 immediately and runs the rebuild as its own
+            // detached task; progress is polled below. Default proxy timeout
+            // (30 s) is plenty since no work is done synchronously. The previous
+            // 600 s synchronous wait was scrapped: it still tripped the proxy
+            // timeout on very large stores and made the UI look hung for the
+            // entire duration.
+            //
+            // ADR-100: this call used to be a Runtime reverse proxy. The rebuild
+            // now belongs to the memory service, so it goes through
+            // `memory_proxy` with the instance namespace injected — the agent key
+            // (`running_agents`, install table, memory instance namespace) is the
+            // same identity throughout.
+            let resp = crate::http::memory_proxy::proxy_to_memory_service(
                 &state_for_task,
                 &agent_id_owned,
                 "/memory/rebuild-embeddings",
-                "",
                 reqwest::Method::POST,
                 Some(body_bytes),
                 &headers_for_task,
@@ -1075,15 +1081,15 @@ pub async fn start_migration(
                         agent_id = %agent_id_owned,
                         request_id = %request_id_owned,
                         error = %e,
-                        "start_migration_bg: failed to read runtime response body"
+                        "start_migration_bg: failed to read memory service response body"
                     );
                     axum::body::Bytes::new()
                 }
             };
             let text = String::from_utf8_lossy(&body_bytes).to_string();
             if status_code == axum::http::StatusCode::CONFLICT {
-                // The Runtime refuses to run two rebuilds over one store. Not a
-                // failure: a Gateway restart re-queues agents whose Runtime task
+                // The memory service refuses to run two rebuilds over one store.
+                // Not a failure: a Gateway restart re-queues agents whose rebuild
                 // survived the restart, so what is happening is the run the user
                 // asked for. Fall through and watch the job that exists, rather
                 // than reporting "rebuild failed" while it is still working.
@@ -1091,7 +1097,7 @@ pub async fn start_migration(
                     target: "migration_diag",
                     agent_id = %agent_id_owned,
                     request_id = %request_id_owned,
-                    "start_migration_bg: runtime already rebuilding, attaching to the running job"
+                    "start_migration_bg: rebuild already running, attaching to the running job"
                 );
             } else if !status_code.is_success() {
                 let error_msg = if text.is_empty() {
@@ -1105,7 +1111,7 @@ pub async fn start_migration(
                     request_id = %request_id_owned,
                     http_status = %status_code,
                     error = %error_msg,
-                    "start_migration_bg: runtime rejected rebuild start"
+                    "start_migration_bg: memory service rejected rebuild start"
                 );
                 write_migration_terminal(
                     &state_for_task,
@@ -1119,19 +1125,18 @@ pub async fn start_migration(
             }
 
             // 3d. Poll GET /memory/rebuild-progress every 2 s until the
-            //     Runtime reports done/error. No time cap — a rebuild of a
+            //     service reports done/error. No time cap — a rebuild of a
             //     huge store legitimately runs for many minutes and the
             //     whole point of the poll model is to outlive any proxy
-            //     timeout. Three consecutive poll failures (e.g. Runtime
+            //     timeout. Three consecutive poll failures (e.g. the service
             //     restarted mid-rebuild) abort with an error.
             let mut consecutive_failures = 0u32;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                let resp = crate::http::proxy::proxy_to_runtime_with_method(
+                let resp = crate::http::memory_proxy::proxy_to_memory_service(
                     &state_for_task,
                     &agent_id_owned,
                     "/memory/rebuild-progress",
-                    "",
                     reqwest::Method::GET,
                     None,
                     &headers_for_task,
@@ -1146,7 +1151,7 @@ pub async fn start_migration(
                             agent_id = %agent_id_owned,
                             request_id = %request_id_owned,
                             error = %e,
-                            "start_migration_bg: failed to read runtime progress body"
+                            "start_migration_bg: failed to read rebuild progress body"
                         );
                         axum::body::Bytes::new()
                     }
@@ -1160,7 +1165,7 @@ pub async fn start_migration(
                         request_id = %request_id_owned,
                         http_status = %status_code,
                         failures = consecutive_failures,
-                        "start_migration_bg: runtime progress poll failed"
+                        "start_migration_bg: rebuild progress poll failed"
                     );
                     if consecutive_failures >= 3 {
                         let error_msg = if text.is_empty() {
@@ -1221,7 +1226,7 @@ pub async fn start_migration(
                         total,
                         done,
                         error = ?error,
-                        "start_migration_bg: runtime rebuild finished, writing terminal state"
+                        "start_migration_bg: rebuild finished, writing terminal state"
                     );
                     let final_progress = if error.is_none() {
                         Some((
@@ -1306,27 +1311,30 @@ mod tests {
     use tower::util::ServiceExt;
 
     /// Bug3 + Fix3 regression: `POST /api/embedding-models/{id}/start-migration`
-    /// must forward a rebuild request to the Runtime's
+    /// must forward a rebuild request to the memory service's
     /// `/memory/rebuild-embeddings` endpoint WITH `Content-Type: application/json`.
     ///
     /// Why this test exists (see session chat for full timeline):
     /// - Earlier buggy code appended `/memory/rebuild-embeddings` to a runtime
     ///   endpoint string that already contained `/agents/{id}`, producing a URL
     ///   the Runtime matched to a different handler and returned 403
-    ///   `invalid node token` from. The fix is to use `proxy_to_runtime_with_method`
-    ///   (same path every other `/api/agents/{id}/memory/*` endpoint takes).
-    /// - The first version of that fix still failed: `proxy_to_runtime_with_method`
-    ///   was called with an empty `HeaderMap`, so the Runtime's `Json<T>`
-    ///   extractor returned 415 Unsupported Media Type. The fix is to set
+    ///   `invalid node token` from. The fix was to use the shared reverse-proxy
+    ///   helper (the path every other `/api/agents/{id}/memory/*` endpoint took).
+    /// - The first version of that fix still failed: the proxy helper was
+    ///   called with an empty `HeaderMap`, so the `Json<T>` extractor returned
+    ///   415 Unsupported Media Type. The fix is to set
     ///   `Content-Type: application/json` explicitly on the proxied request.
+    ///
+    /// ADR-100 moved the endpoint from the Runtime to the memory service, so
+    /// the request now travels `memory_proxy` and carries `?instance_id=`.
     ///
     /// This test pins BOTH contracts. Without it, regression is silent and
     /// only shows up in the Desktop memory panel as "Migration started for 1
     /// agent(s) — then nothing" (same UI symptom as the original bug).
     #[tokio::test]
-    async fn test_start_migration_forwards_rebuild_request_to_runtime() {
-        // ── 1. Mock Runtime: capture every received request as a single
-        //    string for assertion. Single fallback route handles every path.
+    async fn test_start_migration_forwards_rebuild_request_to_memory_service() {
+        // ── 1. Mock memory service: capture every received request as a
+        //    single string for assertion. One fallback route handles every path.
         type Captured = (String, String, String, String); // (method, uri, headers_csv, body)
         let received: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
         let received_for_server = received.clone();
@@ -1350,10 +1358,10 @@ mod tests {
                     axum::body::to_bytes(req.into_body(), usize::MAX)
                         .await
                         .unwrap_or_default();
-                // Realistic Runtime contract (start/progress split): the
+                // Realistic service contract (start/progress split): the
                 // start endpoint returns 202 immediately, and the progress
                 // endpoint reports the run as finished on the first poll.
-                let is_progress = uri.ends_with("/memory/rebuild-progress");
+                let is_progress = uri.starts_with("/memory/rebuild-progress");
                 received_for_server.lock().unwrap().push((
                     method,
                     uri,
@@ -1381,9 +1389,9 @@ mod tests {
         // ── 2. Build AppState with:
         //    - embed_process ready (port 18080, bge-small-zh-v1.5, dim 512)
         //    - running_agents[com.test.architect] present
-        //    - runtime_http_registry pointing at the mock server, with the
-        //      "/agents/{id}" suffix that a real Runtime publishes on its
-        //      retained http_endpoint topic.
+        //    - memory_process pointing at the mock service (ADR-100: the
+        //      rebuild is the service's endpoint now, so `memory_proxy` must
+        //      have a port to route to)
         let dir = std::env::temp_dir().join(format!(
             "acowork-test-start-migration-{}",
             std::process::id()
@@ -1400,6 +1408,14 @@ mod tests {
             active_dimension: Some(512),
             ready: true,
         });
+        // ADR-100: the rebuild endpoints live in the memory service, so
+        // `memory_proxy` needs a port to forward to — point it at the mock.
+        gw_state.memory_process =
+            Some(crate::lifecycle::memory_supervisor::MemoryProcessState {
+                pid: 0,
+                port: mock_port,
+                ready: true,
+            });
         gw_state.running_agents.insert(
             "com.test.architect".to_string(),
             crate::gateway::state::RunningAgentInfo {
@@ -1425,13 +1441,6 @@ mod tests {
             Arc::new(crate::http::auth::HttpAuth::new(false)),
         );
         let registry = crate::http::proxy::new_shared_registry();
-        registry.write().await.register(
-            "com.test.architect",
-            &format!(
-                "http://127.0.0.1:{}/agents/com.test.architect",
-                mock_port
-            ),
-        );
         state.runtime_http_registry = Some(registry);
 
         // ── 3. Mount embedding_routes and fire the Desktop's exact request.
@@ -1520,31 +1529,28 @@ mod tests {
 
         assert_eq!(method, "POST", "must be POST, got {}", method);
 
-        // Bug3 regression: the registry endpoint already includes
-        // `/agents/com.test.architect`, and proxy appends
-        // `/memory/rebuild-embeddings`. Earlier buggy code appended to a
-        // path that was missing the `/agents/{id}` segment and produced
-        // a URL the runtime's `agents/{id}/memory/*` handler matched
-        // and rejected with 403. The fix uses `proxy_to_runtime_with_method`
-        // — assert the URL is what the proxy actually builds.
+        // ADR-100 regression: the request must land on the memory service's
+        // own path (`/memory/*`, no `/agents/{id}` prefix) with the instance
+        // namespace injected by the proxy — the service refuses to open a
+        // store without it.
         assert_eq!(
-            uri, "/agents/com.test.architect/memory/rebuild-embeddings",
-            "proxy must build /agents/{{id}}/memory/rebuild-embeddings, got {}",
+            uri, "/memory/rebuild-embeddings?instance_id=com.test.architect",
+            "proxy must build /memory/rebuild-embeddings?instance_id={{id}}, got {}",
             uri
         );
 
         // Start/progress split: the background task must also poll
-        // `GET /memory/rebuild-progress` (the Runtime's new contract —
+        // `GET /memory/rebuild-progress` (the service's contract —
         // the start endpoint returns 202 and the rebuild runs detached).
         assert!(
             got.iter().any(|(m, u, _, _)| {
-                m == "GET" && u == "/agents/com.test.architect/memory/rebuild-progress"
+                m == "GET" && u == "/memory/rebuild-progress?instance_id=com.test.architect"
             }),
             "spawned task must poll GET /memory/rebuild-progress; got: {:?}",
             got
         );
 
-        // Fix3 regression: the runtime's `Json<RebuildEmbeddingsBody>`
+        // Fix3 regression: the service's `Json<RebuildEmbeddingsBody>`
         // extractor rejects requests without `Content-Type: application/json`
         // with 415. Without this header, the Desktop sees
         // "Migration started for 1 agent(s) — then nothing" and the

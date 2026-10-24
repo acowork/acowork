@@ -2,8 +2,14 @@
 //!
 //! Defines `PackageOptions` for controlling which data items are included
 //! when building an `.agent` package, along with directory/pattern exclusion
-//! constants. The default excludes conversation files, Episode nodes, and
-//! private KnowledgeNode entries to protect user privacy.
+//! constants. The default excludes conversation files and user configs to
+//! protect user privacy.
+//!
+//! Memory-subset toggles (`include_episodes`, `include_procedural`, ...) used
+//! to live here. They were never effective — packaging already excluded the
+//! whole `memory/` directory — and ADR-100 removed them with the rest of the
+//! in-package memory: memories now live in the memory service's instance
+//! namespace, so a package directory has no memory to select a subset of.
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// These contain runtime data that should never be shipped inside a
 /// distributable `.agent` file.
 pub const PACKAGE_ALWAYS_EXCLUDE_DIRS: &[&str] = &[
-    "memory",    // Agent-private SQLite store (ADR-082)
+    "memory",    // Legacy in-workspace store dir (ADR-082, pre-ADR-100 layout)
     "workspace", // User workspace state
     "runtime",   // Runtime temporary files
 ];
@@ -38,8 +44,9 @@ pub const PACKAGE_DEFAULT_EXCLUDE_DIRS: &[&str] = &[
 ///
 /// Controls which data items are included when building an `.agent` package.
 /// Defaults follow the "exclude private data by default" principle from
-/// the design document (§5.2 of 15-conversation-persistence.md).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// the design document (§5.2 of 15-conversation-persistence.md): `Default`
+/// is derived, so every flag starts `false` (nothing private ships).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackageOptions {
     /// Include conversation JSONL files (default: false).
     ///
@@ -47,56 +54,11 @@ pub struct PackageOptions {
     /// When `true`, all `.jsonl` files under `conversations/` are included.
     pub include_conversations: bool,
 
-    /// Include Episode nodes from Grafeo (default: false).
-    ///
-    /// Episodes contain distilled conversation summaries that may include
-    /// user information. Default exclusion protects user privacy.
-    pub include_episodes: bool,
-
-    /// Include KnowledgeNode with Private privacy type (default: false).
-    ///
-    /// "Private" means the node's `metadata["privacy"]` is `"Personal"` or
-    /// `"Sensitive"` (as opposed to `"Public"`). These contain user-specific
-    /// knowledge that should not be shared by default.
-    pub include_private_knowledge: bool,
-
-    /// Include ProceduralNode (default: true).
-    ///
-    /// Procedural nodes capture reusable behavior patterns that belong to
-    /// the Agent's capability and should be shared.
-    pub include_procedural: bool,
-
-    /// Include AutobiographicalNode (default: true).
-    ///
-    /// Autobiographical nodes record the Agent's self-knowledge and growth,
-    /// which are part of the Agent's capability, not user private data.
-    pub include_autobiographical: bool,
-
-    /// Include KnowledgeNode with Public privacy type (default: true).
-    ///
-    /// Public knowledge nodes contain general facts that are not tied to
-    /// a specific user and should be shared with the Agent.
-    pub include_public_knowledge: bool,
-
     /// Include user config directory (default: false).
     ///
     /// User configurations may contain preferences or settings specific
     /// to a particular installation.
     pub include_config: bool,
-}
-
-impl Default for PackageOptions {
-    fn default() -> Self {
-        Self {
-            include_conversations: false,
-            include_episodes: false,
-            include_private_knowledge: false,
-            include_procedural: true,
-            include_autobiographical: true,
-            include_public_knowledge: true,
-            include_config: false,
-        }
-    }
 }
 
 /// Check whether a relative path should be excluded from the package.
@@ -151,47 +113,31 @@ mod tests {
             !opts.include_conversations,
             "conversations should default to excluded"
         );
-        assert!(
-            !opts.include_episodes,
-            "episodes should default to excluded"
-        );
-        assert!(
-            !opts.include_private_knowledge,
-            "private knowledge should default to excluded"
-        );
         assert!(!opts.include_config, "config should default to excluded");
-        assert!(
-            opts.include_procedural,
-            "procedural should default to included"
-        );
-        assert!(
-            opts.include_autobiographical,
-            "autobiographical should default to included"
-        );
-        assert!(
-            opts.include_public_knowledge,
-            "public knowledge should default to included"
-        );
     }
 
     #[test]
     fn test_package_options_all_included() {
         let opts = PackageOptions {
             include_conversations: true,
-            include_episodes: true,
-            include_private_knowledge: true,
-            include_procedural: true,
-            include_autobiographical: true,
-            include_public_knowledge: true,
             include_config: true,
         };
         assert!(opts.include_conversations);
-        assert!(opts.include_episodes);
-        assert!(opts.include_private_knowledge);
-        assert!(opts.include_procedural);
-        assert!(opts.include_autobiographical);
-        assert!(opts.include_public_knowledge);
         assert!(opts.include_config);
+    }
+
+    /// ADR-100 decision 11: memory data is not a packaging choice any more.
+    /// Whatever the toggles say, a `memory/` path never travels — and since the
+    /// service took the memories over, there is normally no such directory in a
+    /// package dir to begin with.
+    #[test]
+    fn memory_paths_are_excluded_whatever_the_options_say() {
+        let opts = PackageOptions {
+            include_conversations: true,
+            include_config: true,
+        };
+        assert!(should_exclude_path("memory/private.sqlite", &opts));
+        assert!(should_exclude_path("memory/private.sqlite-wal", &opts));
     }
 
     #[test]

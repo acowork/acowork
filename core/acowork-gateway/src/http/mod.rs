@@ -26,6 +26,7 @@ pub mod mcp_catalog_api;
 pub mod lsp_admin_proxy;
 pub mod lsp_proxy;
 pub mod memory_api;
+pub mod memory_proxy;
 pub mod models_api;
 pub mod nodes_api;
 pub mod pm_proxy;

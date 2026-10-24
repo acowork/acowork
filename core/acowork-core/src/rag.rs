@@ -5,8 +5,9 @@
 //! - `MemoryProvider` handles user memory (preferences, history, patterns).
 //! - `RagProvider` handles external knowledge (enterprise docs, product manuals).
 //!
-//! The Runtime holds both as separate trait objects and merges results
-//! in `loop_memory.rs` (dual-channel retrieval).
+//! Since ADR-100 the two channels are consumed independently: the Agent calls
+//! the `rag_query` builtin tool and the memory service's `memory_recall` tool,
+//! and the LLM sees both as tool results. There is no in-loop merge any more.
 //!
 //! Design ref: ADR-051 §5.1
 
@@ -124,8 +125,9 @@ pub struct AnnotatedRagResult {
 /// - `LocalRagProvider` (future, local vector store)
 /// - Any enterprise RAG service adapter
 ///
-/// This trait is **orthogonal** to `MemoryProvider`. The Runtime holds both
-/// as separate trait objects and merges results in `loop_memory.rs`.
+/// This trait is **orthogonal** to `MemoryProvider`: since ADR-100 the Agent
+/// reaches each through its own tool (`rag_query` vs the memory service's
+/// `memory_recall`), so a RAG answer never travels through the memory store.
 ///
 /// Design ref: ADR-051 §5.1
 #[async_trait]

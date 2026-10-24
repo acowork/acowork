@@ -499,7 +499,11 @@ impl ConversationIndexer {
 mod tests {
     use super::*;
     use crate::conversation::ENTRY_KIND_COMPACTION;
-    use acowork_memory::types::DEFAULT_EMBEDDING_DIM;
+
+    /// Embedding width used by the tests below (the bge-small-zh output).
+    /// ADR-100: the canonical constant lives in the memory service; the
+    /// Runtime only needs a fixed width to size its own conversation index.
+    const DEFAULT_EMBEDDING_DIM: usize = 384;
 
     /// The workspace's shared `memory/private.sqlite` — with ADR-082 §4 step 3
     /// the only place a conversation index lives.

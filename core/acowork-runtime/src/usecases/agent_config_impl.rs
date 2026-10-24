@@ -152,35 +152,8 @@ fn apply_field_patch(
         ConfigField::CompressionRatioThreshold => {
             cfg.compression_ratio_threshold = patch_typed::<f64>(field, op);
         }
-        ConfigField::DistillerEnabled => {
-            cfg.distiller_enabled = patch_typed::<bool>(field, op);
-        }
-        ConfigField::DistillerModels => {
-            cfg.distiller_models =
-                patch_typed::<Vec<acowork_core::protocol::CompactModelRef>>(field, op);
-        }
-        ConfigField::DistillerIntervalMinutes => {
-            cfg.distiller_interval_minutes = patch_typed::<u64>(field, op);
-        }
-        ConfigField::DistillerAccumulationThreshold => {
-            cfg.distiller_accumulation_threshold =
-                patch_typed::<u64>(field, op).map(|v| v as usize);
-        }
-        ConfigField::DistillerIdleMinutes => {
-            cfg.distiller_idle_minutes = patch_typed::<u64>(field, op);
-        }
-        ConfigField::MemoryForgettingEnabled => {
-            cfg.memory_forgetting_enabled = patch_typed::<bool>(field, op);
-        }
-        ConfigField::MemoryForgettingHalfLifeDays => {
-            cfg.memory_forgetting_half_life_days = patch_typed::<u64>(field, op);
-        }
-        ConfigField::MemoryForgettingDormantThreshold => {
-            cfg.memory_forgetting_dormant_threshold = patch_typed::<f32>(field, op);
-        }
-        ConfigField::MemoryForgettingArchiveDays => {
-            cfg.memory_forgetting_archive_days = patch_typed::<u64>(field, op);
-        }
+        // ADR-100: no distiller / forgetting arms — those knobs belong to the
+        // memory service and `AgentConfig` no longer writes them.
         ConfigField::SessionLanguage => {
             cfg.session_language = patch_typed::<String>(field, op);
         }
@@ -279,273 +252,16 @@ mod tests {
         }
     }
 
-    /// ADR-071 D4: the enabled switch accepts booleans, refuses wrong-typed
-    /// JSON (collapses to leave-on-disk), and Clear nulls it.
-    #[test]
-    fn test_distiller_enabled_patch() {
-        let mut cfg = AgentConfig::default();
-        apply(
-            &mut cfg,
-            &[patch(
-                ConfigField::DistillerEnabled,
-                serde_json::json!(true),
-            )],
-        );
-        assert_eq!(cfg.distiller_enabled, Some(true));
-
-        // Wrong-typed value: the shared dispatch collapses it to `None`
-        // (pre-existing semantics — `patch_typed` returns None on parse
-        // failure and `apply_field_patch` assigns unconditionally, so the
-        // field is CLEARED, not preserved; documented in review #33).
-        apply(
-            &mut cfg,
-            &[patch(
-                ConfigField::DistillerEnabled,
-                serde_json::json!("yes"),
-            )],
-        );
-        assert_eq!(cfg.distiller_enabled, None, "bad type clears the field");
-
-        apply(
-            &mut cfg,
-            &[patch(
-                ConfigField::DistillerEnabled,
-                serde_json::json!(false),
-            )],
-        );
-        assert_eq!(cfg.distiller_enabled, Some(false));
-
-        // Explicit clear -> None.
-        apply(&mut cfg, &[clear(ConfigField::DistillerEnabled)]);
-        assert_eq!(cfg.distiller_enabled, None);
-    }
-
-    /// ADR-071 D4/D5 (list form): the models patch accepts an array of
-    /// `{provider_id, model_id}` refs, refuses a plain string, and Clear
-    /// nulls it.
-    #[test]
-    fn test_distiller_models_patch() {
-        let mut cfg = AgentConfig::default();
-        apply(
-            &mut cfg,
-            &[patch(
-                ConfigField::DistillerModels,
-                serde_json::json!([
-                    {"provider_id": "openai", "model_id": "gpt-4o-mini"},
-                    {"provider_id": "ollama", "model_id": "qwen2.5:0.5b"},
-                ]),
-            )],
-        );
-        let models = cfg.distiller_models.as_ref().unwrap();
-        assert_eq!(models.len(), 2);
-        assert_eq!(models[0].provider_id, "openai");
-        assert_eq!(models[1].model_id, "qwen2.5:0.5b");
-
-        // Wrong-typed value: clears the field (see test_distiller_enabled_patch
-        // for the pre-existing dispatch semantics).
-        apply(
-            &mut cfg,
-            &[patch(
-                ConfigField::DistillerModels,
-                serde_json::json!("oops"),
-            )],
-        );
-        assert_eq!(cfg.distiller_models, None, "bad shape clears the field");
-
-        // Explicit clear.
-        apply(&mut cfg, &[clear(ConfigField::DistillerModels)]);
-        assert_eq!(cfg.distiller_models, None);
-    }
-
-    /// ADR-071 D1/D3: the three trigger fields accept u64 numbers (accumulation
-    /// narrows to usize), refuse strings, and Clear nulls them.
-    #[test]
-    fn test_distiller_numeric_patches() {
-        let mut cfg = AgentConfig::default();
-        apply(
-            &mut cfg,
-            &[
-                patch(ConfigField::DistillerIntervalMinutes, serde_json::json!(45)),
-                patch(
-                    ConfigField::DistillerAccumulationThreshold,
-                    serde_json::json!(80),
-                ),
-                patch(ConfigField::DistillerIdleMinutes, serde_json::json!(20)),
-            ],
-        );
-        assert_eq!(cfg.distiller_interval_minutes, Some(45));
-        assert_eq!(cfg.distiller_accumulation_threshold, Some(80usize));
-        assert_eq!(cfg.distiller_idle_minutes, Some(20));
-
-        // Wrong-typed values: clear the fields (see test_distiller_enabled_patch
-        // for the pre-existing dispatch semantics).
-        apply(
-            &mut cfg,
-            &[
-                patch(
-                    ConfigField::DistillerIntervalMinutes,
-                    serde_json::json!("fast"),
-                ),
-                patch(
-                    ConfigField::DistillerAccumulationThreshold,
-                    serde_json::json!("many"),
-                ),
-                patch(ConfigField::DistillerIdleMinutes, serde_json::json!(12.5)),
-            ],
-        );
-        assert_eq!(cfg.distiller_interval_minutes, None);
-        assert_eq!(cfg.distiller_accumulation_threshold, None);
-        assert_eq!(cfg.distiller_idle_minutes, None);
-
-        // Explicit clears.
-        apply(
-            &mut cfg,
-            &[
-                clear(ConfigField::DistillerIntervalMinutes),
-                clear(ConfigField::DistillerAccumulationThreshold),
-                clear(ConfigField::DistillerIdleMinutes),
-            ],
-        );
-        assert_eq!(cfg.distiller_interval_minutes, None);
-        assert_eq!(cfg.distiller_accumulation_threshold, None);
-        assert_eq!(cfg.distiller_idle_minutes, None);
-    }
-
-    /// ADR-071 D4: `from_request_fields` maps absent/null/value onto
-    /// skip/Clear/Set for the five distiller wire fields.
-    #[test]
-    fn test_distiller_wire_to_patch_translation() {
-        let body = PutAgentConfigBody::from_request_fields(
-            None, // max_output_tokens absent -> skip
-            None, // max_iterations absent -> skip
-            None, // max_sessions absent -> skip
-            None, // temperature absent -> skip
-            None, // context_window absent -> skip
-            None, // shell_approval_threshold absent -> skip
-            None, // approval_timeout_secs absent -> skip
-            None, // compression_ratio_threshold absent -> skip
-            Some(serde_json::json!(true)), // distiller_enabled
-            None, // distiller_model (legacy) absent
-            Some(serde_json::json!([
-                {"provider_id": "p", "model_id": "m"}
-            ])), // distiller_models
-            Some(serde_json::json!(30)),   // distiller_interval_minutes
-            Some(serde_json::json!(null)), // distiller_accumulation_threshold -> Clear
-            None,                          // distiller_idle_minutes absent -> skip
-            None,                          // memory_forgetting_enabled absent -> skip
-            None,                          // memory_forgetting_half_life_days absent -> skip
-            None,                          // memory_forgetting_dormant_threshold absent -> skip
-            None,                          // memory_forgetting_archive_days absent -> skip
-            None,                          // session_language absent -> skip
-            None,                          // intent_idle_rotate_hours absent -> skip
-            None,                          // intent_handoff_max_tokens absent -> skip
-            None,                          // chat_router_enabled absent -> skip
-            None,                          // chat_router_model absent -> skip
-            None,                          // chat_router_provider absent -> skip
-            None,                          // chat_router_timeout_ms absent -> skip
-        );
-
-        let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
-            body.patches.iter().map(|p| (p.field, &p.op)).collect();
-        assert_eq!(
-            fields.len(),
-            4,
-            "five present/clear + one absent -> four patches"
-        );
-        assert!(fields.contains(&(
-            ConfigField::DistillerEnabled,
-            &FieldPatch::Set(serde_json::json!(true))
-        )));
-        assert!(fields.contains(&(
-            ConfigField::DistillerModels,
-            &FieldPatch::Set(serde_json::json!([{"provider_id":"p","model_id":"m"}]))
-        )));
-        assert!(fields.contains(&(
-            ConfigField::DistillerIntervalMinutes,
-            &FieldPatch::Set(serde_json::json!(30))
-        )));
-        assert!(fields.contains(&(
-            ConfigField::DistillerAccumulationThreshold,
-            &FieldPatch::Clear
-        )));
-        assert!(
-            !fields
-                .iter()
-                .any(|(f, _)| *f == ConfigField::DistillerIdleMinutes)
-        );
-    }
-
-    /// Memory forgetting: `from_request_fields` maps absent/null/value
-    /// onto skip/Clear/Set for the four forgetting wire fields.
-    #[test]
-    fn test_forgetting_wire_to_patch_translation() {
-        let body = PutAgentConfigBody::from_request_fields(
-            None,                          // max_output_tokens absent -> skip
-            None,                          // max_iterations absent -> skip
-            None,                          // max_sessions absent -> skip
-            None,                          // temperature absent -> skip
-            None,                          // context_window absent -> skip
-            None,                          // shell_approval_threshold absent -> skip
-            None,                          // approval_timeout_secs absent -> skip
-            None,                          // compression_ratio_threshold absent -> skip
-            None,                          // distiller_enabled absent
-            None,                          // distiller_model absent
-            None,                          // distiller_models absent
-            None,                          // distiller_interval_minutes absent
-            None,                          // distiller_accumulation_threshold absent
-            None,                          // distiller_idle_minutes absent
-            Some(serde_json::json!(true)), // memory_forgetting_enabled
-            Some(serde_json::json!(180)),  // memory_forgetting_half_life_days
-            Some(serde_json::json!(null)), // memory_forgetting_dormant_threshold -> Clear
-            None,                          // memory_forgetting_archive_days absent -> skip
-            None,                          // session_language absent -> skip
-            None,                          // intent_idle_rotate_hours absent -> skip
-            None,                          // intent_handoff_max_tokens absent -> skip
-            None,                          // chat_router_enabled absent -> skip
-            None,                          // chat_router_model absent -> skip
-            None,                          // chat_router_provider absent -> skip
-            None,                          // chat_router_timeout_ms absent -> skip
-        );
-
-        let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
-            body.patches.iter().map(|p| (p.field, &p.op)).collect();
-        assert_eq!(
-            fields.len(),
-            3,
-            "two present/clear + one absent -> three patches"
-        );
-        assert!(fields.contains(&(
-            ConfigField::MemoryForgettingEnabled,
-            &FieldPatch::Set(serde_json::json!(true))
-        )));
-        assert!(fields.contains(&(
-            ConfigField::MemoryForgettingHalfLifeDays,
-            &FieldPatch::Set(serde_json::json!(180))
-        )));
-        assert!(fields.contains(&(
-            ConfigField::MemoryForgettingDormantThreshold,
-            &FieldPatch::Clear
-        )));
-        assert!(
-            !fields
-                .iter()
-                .any(|(f, _)| *f == ConfigField::MemoryForgettingArchiveDays)
-        );
-    }
-
     /// ADR-099: the flat `chat_router_*` wire fields translate onto
     /// sub-field patches (present -> Set, null -> Clear, absent -> skip)
     /// so the Desktop's per-field write-through composes without a
-    /// read-modify-write race on the nested block. The distiller /
-    /// forgetting wire tests already pin the absent->skip path for these
-    /// four args; this test pins the present/null mapping to the right
-    /// `ConfigField`.
+    /// read-modify-write race on the nested block. This test pins the
+    /// present/null mapping to the right `ConfigField`; the absent->skip
+    /// path is covered by every other call in this module passing `None`.
     #[test]
     fn test_chat_router_wire_to_patch_translation() {
         let body = PutAgentConfigBody::from_request_fields(
             None, None, None, None, None, None, None, None, // 8 core knobs
-            None, None, None, None, None, None, // 6 distiller
-            None, None, None, None, // 4 memory-forgetting
             None, None, None, // session_language / intent_idle / intent_handoff
             Some(serde_json::json!(true)),   // chat_router_enabled -> Set
             Some(serde_json::json!("fast")), // chat_router_model -> Set
@@ -639,5 +355,12 @@ mod tests {
             &[patch(ConfigField::ChatRouterProvider, serde_json::json!(""))],
         );
         assert_eq!(cfg.chat_router.as_ref().unwrap().provider, None);
+
+        // `FieldPatch::Clear` (wire `null`) nulls a sub-field exactly like the
+        // empty string does, and still leaves every sibling alone.
+        apply(&mut cfg, &[clear(ConfigField::ChatRouterTimeoutMs)]);
+        let router = cfg.chat_router.as_ref().unwrap();
+        assert_eq!(router.timeout_ms, None, "Clear nulls the target");
+        assert_eq!(router.enabled, Some(false), "sibling preserved");
     }
 }

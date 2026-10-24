@@ -8,7 +8,6 @@
 //! - `filesystem:read:<path>`  → WASI preopen directory (readonly)
 //! - `filesystem:write:<path>` → WASI preopen directory (readwrite)
 //! - `network:<url>`           → WASI socket capability (or deny if unsupported)
-//! - `memory:read/write`       → No WASI mapping needed (internal API)
 //! - `shell`/`wasm`/`identity`/`intent` → No WASI mapping (host-controlled)
 
 use acowork_core::Permission;
@@ -41,7 +40,8 @@ pub struct WasiCapabilities {
 /// Map a single ACowork Permission to WASI capabilities.
 ///
 /// Returns None for permissions that don't need WASI mapping
-/// (e.g., memory, identity, shell, wasm, intent).
+/// (e.g., identity, shell, wasm, intent). Memory is not a permission any
+/// more — it is a hosted service now (ADR-100).
 pub fn map_permission_to_wasi(perm: &Permission) -> Option<WasiCapabilities> {
     match perm {
         Permission::FilesystemRead(path) => {
@@ -75,9 +75,7 @@ pub fn map_permission_to_wasi(perm: &Permission) -> Option<WasiCapabilities> {
         }
         // These permissions don't map to WASI capabilities.
         // They are controlled by host functions or are internal.
-        Permission::MemoryRead
-        | Permission::MemoryWrite
-        | Permission::IdentityRead
+        Permission::IdentityRead
         | Permission::IdentityWrite
         | Permission::Shell
         | Permission::Wasm
@@ -191,12 +189,6 @@ mod tests {
         let caps = map_permission_to_wasi(&perm).unwrap();
         assert_eq!(caps.networks.len(), 1);
         assert_eq!(caps.networks[0].url_pattern, "https://api.example.com");
-    }
-
-    #[test]
-    fn test_map_memory_no_wasi() {
-        assert!(map_permission_to_wasi(&Permission::MemoryRead).is_none());
-        assert!(map_permission_to_wasi(&Permission::MemoryWrite).is_none());
     }
 
     #[test]

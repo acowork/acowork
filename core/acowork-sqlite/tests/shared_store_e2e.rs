@@ -8,8 +8,7 @@
 use std::sync::Arc;
 
 use acowork_core::error::Result as AcoworkResult;
-use acowork_memory::SessionMetaStore;
-use acowork_memory::session_meta::SessionMeta;
+use acowork_core::session_meta::{SessionMeta, SessionMetaStore};
 use acowork_sqlite::{ConversationStore, SqliteSessionMetaStore, SqliteStore};
 
 const DIM: usize = 4;
@@ -44,6 +43,24 @@ fn meta(sid: &str, title: &str) -> SessionMeta {
     }
 }
 
+fn episode(content: &str) -> acowork_memory::Episode {
+    acowork_memory::Episode {
+        session_id: "s1".into(),
+        turn_index: 0,
+        role: "user".into(),
+        content: content.into(),
+        embedding: None,
+        timestamp: chrono::DateTime::parse_from_rfc3339("2026-02-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        consolidated: false,
+        metadata: std::collections::HashMap::new(),
+        importance: 1.0,
+        knowledge_subtype: None,
+        normalized: None,
+    }
+}
+
 #[test]
 fn memory_session_meta_and_conversation_index_share_one_file() -> AcoworkResult<()> {
     let dir = tempfile::tempdir().unwrap();
@@ -65,21 +82,7 @@ fn memory_session_meta_and_conversation_index_share_one_file() -> AcoworkResult<
     sessions.upsert(&meta("s1", "migration talk"))?;
 
     // ── memory node write (through the ordinary write path) ─────────────
-    let episode = acowork_memory::Episode {
-        session_id: "s1".into(),
-        turn_index: 0,
-        role: "user".into(),
-        content: "remember this fact".into(),
-        embedding: None,
-        timestamp: chrono::DateTime::parse_from_rfc3339("2026-02-02T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        consolidated: false,
-        metadata: std::collections::HashMap::new(),
-        importance: 1.0,
-        knowledge_subtype: None,
-        normalized: None,
-    };
+    let episode = episode("remember this fact");
     // ── memory node write ──────────────────────────────────────────────
     let node_id = store.store_episode(&episode)?;
 
@@ -108,5 +111,39 @@ fn memory_session_meta_and_conversation_index_share_one_file() -> AcoworkResult<
         reopened_meta.get("s1")?.unwrap().title.as_deref(),
         Some("migration talk")
     );
+    Ok(())
+}
+
+/// The package-clone `Full` mode copies the source agent's store and must drop
+/// every conversation-related row (index nodes + session meta) while keeping the
+/// curated memory nodes.
+#[test]
+fn purge_conversation_state_drops_sessions_and_messages_but_keeps_memory() -> AcoworkResult<()> {
+    let store = Arc::new(SqliteStore::open_in_memory(DIM)?);
+    let conversation = ConversationStore::from_store(store.clone())?;
+    let sessions = SqliteSessionMetaStore::new(store.clone());
+
+    // Three sessions + four indexed messages.
+    for sid in ["s1", "s2", "s3"] {
+        sessions.upsert(&meta(sid, "x"))?;
+    }
+    for (sid, idx) in [("s1", 0usize), ("s1", 1), ("s2", 0), ("s3", 0)] {
+        conversation.index_message(sid, idx, "user", "hello", &[0.0; DIM])?;
+    }
+    // Memory node the user curated — must survive.
+    store.store_episode(&episode("remembered fact"))?;
+
+    let purged = store.purge_conversation_state()?;
+    assert_eq!(purged, 3, "purge must report the deleted session count");
+
+    // Sessions gone.
+    assert!(sessions.list_recent(usize::MAX)?.is_empty());
+    // Conversation-index nodes gone.
+    assert_eq!(
+        store.node_count_by_label(acowork_sqlite::conversation::LABEL)?,
+        0
+    );
+    // Memory node preserved.
+    assert_eq!(store.node_count_by_label("Episodic")?, 1);
     Ok(())
 }

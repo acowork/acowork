@@ -375,6 +375,22 @@ pub struct GatewayState {
     /// `build_available_mcps` 应把 doc MCP 注入到 `acowork/global/mcps` 资源
     /// （每个 Agent 的 catalog），使 Agent 自动获得 `doc_*` 工具。
     pub doc_mcp_url: Option<String>,
+    /// acowork-memory standalone process state (supervisor-managed, ADR-100).
+    ///
+    /// Written by the memory supervisor once the process answers `/health`;
+    /// `None` means the service was not started (`memory.enabled=false`), is
+    /// restarting, or gave up. `http/memory_proxy.rs` reads `port` to build the
+    /// forward target and answers 503 + `Retry-After` while it is `None`.
+    pub memory_process: Option<crate::lifecycle::memory_supervisor::MemoryProcessState>,
+    /// memory MCP HTTP endpoint URL
+    /// (`http://{advertise_host}:{http.port}{memory.mcp_http_path}`).
+    ///
+    /// Set at startup when `memory.auto_inject_mcp`; `Some` tells
+    /// `build_available_mcps` to publish the `memory` server in every Agent's
+    /// catalog, which is what gives the Agent `memory_store` / `memory_recall`.
+    /// `None` is the pluggability switch — no server in the catalog, no tools,
+    /// and the Desktop hides the memory panel.
+    pub memory_mcp_url: Option<String>,
 }
 
 impl GatewayState {
@@ -412,6 +428,8 @@ impl GatewayState {
             user_verifier: None,
             user_snapshot: None,
             doc_mcp_url: None,
+            memory_process: None,
+            memory_mcp_url: None,
         }
     }
 

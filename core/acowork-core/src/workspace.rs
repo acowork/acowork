@@ -33,6 +33,32 @@ pub const STORE_FILE: &str = "private.sqlite";
 /// Sidecar files SQLite may leave next to an open database.
 pub const STORE_SIDECAR_SUFFIXES: [&str; 2] = ["-wal", "-shm"];
 
+/// Sentinel written beside a legacy store once the Node migration pass has
+/// handed its memory rows to the memory service (ADR-100 decision 10).
+///
+/// The store file itself is NOT renamed: since ADR-082 the same
+/// `private.sqlite` also carries the session meta and the conversation index
+/// the Runtime still reads, so only the memory rows leave. The sentinel is what
+/// stops every later Node start from re-uploading a store that was already
+/// dealt with, and it records the outcome (see `acowork-node`'s
+/// `memory_migration`) for the operator to read.
+pub const MIGRATED_MARKER_FILE: &str = ".migrated";
+
+/// Path of the migration sentinel: `{work_dir}/memory/.migrated`.
+pub fn migrated_marker_path(work_dir: impl AsRef<Path>) -> PathBuf {
+    work_dir.as_ref().join(MEMORY_DIR).join(MIGRATED_MARKER_FILE)
+}
+
+/// Ceiling on the legacy store a migration may hand over in one request.
+///
+/// Spelled once here because both halves of the transfer enforce it and must
+/// not drift: the Node refuses to read a bigger file (and tells the operator to
+/// copy it back by hand), and the memory service refuses a bigger body. It is
+/// deliberately equal to the Gateway's global reverse-proxy body limit — a
+/// larger value would be rejected by the Gateway before it ever reached the
+/// service, so the service-side check would be unreachable code.
+pub const STORE_IMPORT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Path of the workspace store: `{work_dir}/memory/private.sqlite`.
 pub fn store_path(work_dir: impl AsRef<Path>) -> PathBuf {
     work_dir.as_ref().join(MEMORY_DIR).join(STORE_FILE)
@@ -108,6 +134,14 @@ mod tests {
                 .join(STORE_FILE)
         );
         assert!(path.ends_with("memory/private.sqlite"));
+    }
+
+    #[test]
+    fn migration_sentinel_sits_beside_the_store() {
+        let marker = migrated_marker_path("/tmp/agent/workspace");
+        assert!(marker.ends_with("memory/.migrated"));
+        // Same directory as the store it describes — one `ls` shows both.
+        assert_eq!(marker.parent(), store_path("/tmp/agent/workspace").parent());
     }
 
     #[test]

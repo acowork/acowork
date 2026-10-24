@@ -378,7 +378,6 @@ async fn async_main(
         if let Some(provider) = agent_ctx.emb_provider.clone() {
             agent_loop.core.update_embedding_provider(provider);
         }
-        agent_loop.core.memory_session = Some(agent_ctx.memory_session.clone());
         // ADR-053: this branch bypasses `phase_b_init_session`, so the
         // agent-specific compaction prompt (prompts/summary.md) must be
         // injected here — mirroring the Phase B injection for Gateway mode.
@@ -397,12 +396,8 @@ async fn async_main(
         *agent_loop.core.title_prompt.write().unwrap() = agent_ctx.title_prompt.clone();
         *agent_loop.core.abstention_prompt.write().unwrap() = agent_ctx.abstention_prompt.clone();
 
-        // ADR-071 D7/D9: mirror the two distiller prompt overrides for the
-        // standalone path (see session_init.rs Phase B for Gateway mode).
-        *agent_loop.core.distiller_merge_prompt.write().unwrap() =
-            agent_ctx.distiller_merge_prompt.clone();
         let work_dir_path = std::path::Path::new(&config.work_dir);
-        agent_loop.init_memory_store(work_dir_path);
+        agent_loop.core.init_runtime_sqlite(work_dir_path);
 
         // ADR-046: Mirror the Phase B attachment injection for the
         // standalone (CLI) path. Gateway mode runs through

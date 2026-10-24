@@ -1647,14 +1647,15 @@ mod tests {
         // schema — the model could never call `dispatch`. Neither side's
         // own unit tests cross this boundary; this one does.
         use crate::agent::chat_router::tool::{
-            router_tools, DISPATCH_TOOL, HTTP_REQUEST_TOOL, MEMORY_RECALL_TOOL,
+            memory_recall_tool_name, router_tools, DISPATCH_TOOL, HTTP_REQUEST_TOOL,
         };
-        let tools = router_tools(&[MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL]);
+        let memory_tool = memory_recall_tool_name();
+        let tools = router_tools(Some(&memory_tool), true);
         let native = convert_tools(Some(&tools)).expect("router tools convert");
         let names: Vec<&str> = native.iter().map(|t| t.function.name.as_str()).collect();
         assert_eq!(
             names,
-            vec![DISPATCH_TOOL, MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL]
+            vec![DISPATCH_TOOL, memory_tool.as_str(), HTTP_REQUEST_TOOL]
         );
         // Parameters must survive too — `dispatch` with an empty schema is
         // just as uncallable as a misnamed one.

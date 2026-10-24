@@ -167,6 +167,72 @@ pub struct FusedHit {
     pub fused_rank: usize,
 }
 
+/// Per-source retrieval signals for one hit, as the API payloads carry them.
+///
+/// This is the **shared** projection of [`FusedHit`]: memory hits (produced by
+/// the memory service) and conversation hits (produced by the Runtime's
+/// conversation index) both report the same shape, so it lives in `acowork-core`
+/// rather than in either producer.
+///
+/// Ranks are **in-source** (position inside each candidate pool), not
+/// comparable across sources; `fused_score` is the in-source RRF signal and
+/// must not be presented as a similarity.
+#[derive(Debug, Clone)]
+pub struct RetrievalEvidence {
+    pub matched_by: MatchedBy,
+    pub vector_rank: Option<usize>,
+    pub text_rank: Option<usize>,
+    pub cosine: Option<f64>,
+    pub fused_score: f64,
+    /// `None` when the answering source has no fusion to rank (the legacy
+    /// single-path search).
+    pub fused_rank: Option<usize>,
+}
+
+impl RetrievalEvidence {
+    /// The **whitelisted** client-facing projection of these signals.
+    ///
+    /// Lives on the type rather than at each call site on purpose: `cosine` and
+    /// `fused_score` must not reach the list payload (design 28 §4.2 — a cosine
+    /// in a UI payload gets rendered as a confidence percentage, and this one
+    /// is not calibrated). Putting the projection here means adding a field to
+    /// the struct does not silently publish it to Desktop.
+    ///
+    /// Absent signals are omitted, not emitted as `null`: a consumer reading
+    /// `matched_by` then sees "unknown" instead of inventing a category.
+    pub fn to_payload(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        self.write_into(&mut map);
+        serde_json::Value::Object(map)
+    }
+
+    /// Merge the evidence keys into an existing scope payload.
+    ///
+    /// Evidence is **additive**: a hit is only actionable if the UI keeps its
+    /// locate keys (`node_id`, `session_id`, ...). Building the evidence object
+    /// and assigning it as the whole payload silently drops those, which is why
+    /// this helper exists and why every scope uses it.
+    pub fn merge_into(&self, payload: &mut serde_json::Map<String, serde_json::Value>) {
+        self.write_into(payload);
+    }
+
+    fn write_into(&self, map: &mut serde_json::Map<String, serde_json::Value>) {
+        map.insert(
+            "matched_by".to_string(),
+            serde_json::json!(self.matched_by),
+        );
+        if let Some(r) = self.vector_rank {
+            map.insert("vector_rank".to_string(), serde_json::json!(r));
+        }
+        if let Some(r) = self.text_rank {
+            map.insert("text_rank".to_string(), serde_json::json!(r));
+        }
+        if let Some(r) = self.fused_rank {
+            map.insert("fused_rank".to_string(), serde_json::json!(r));
+        }
+    }
+}
+
 /// Per-source fusion knobs (ADR-095 D3).
 ///
 /// The weights are rank-fusion weights, **not** probabilities or

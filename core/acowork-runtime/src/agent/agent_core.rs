@@ -19,16 +19,11 @@ use acowork_core::protocol::{ModelCapabilitiesInfo, ProtocolType, ProviderKeyEnt
 use acowork_core::providers::traits::{Provider, UsageInfo};
 use acowork_core::rag::RagProvider;
 use acowork_core::tools::traits::Tool;
-use acowork_memory::MemoryProvider;
-use acowork_memory::admin::MemoryAdminService;
-use acowork_memory::consolidation::SchedulerConfig;
-use acowork_memory::types::EpisodicDecayConfig;
 
 use crate::agent::session::session_manager::RuntimeConfigOverrides;
 use crate::config::RuntimeConfig;
 use crate::debug::DebugObserverSlot;
 use crate::embedding::EmbeddingProvider;
-use crate::memory::{MemoryManager, MemoryManagerConfig};
 use crate::security::approval_gate::ApprovalGate;
 use acowork_core::ShellApprovalThreshold;
 
@@ -154,18 +149,6 @@ pub struct AgentCore {
     /// [`crate::agent::compression_constants::MIN_COMPRESSION_RATIO`] (0.90
     /// default = "compress until at most 10% remains").
     pub(crate) compression_ratio_threshold: Option<f64>,
-    /// ADR-071 D4/D6: runtime distiller settings (`agent_config.json`).
-    /// Layer 1 of the distiller config chain, above the manifest
-    /// `[memory.distiller]` section. Written by the memory-panel PUT
-    /// (`distiller_enabled` / `distiller_models` / …) and applied when the
-    /// consolidation pipeline starts or is rebuilt.
-    pub(crate) distiller_runtime: DistillerRuntimeSettings,
-    /// Episodic forgetting runtime settings (`agent_config.json`). Layer 1
-    /// of the forgetting config chain (defaults live in
-    /// [`acowork_memory::EpisodicDecayConfig::default`]). Written by the
-    /// memory-panel PUT (`memory_forgetting_*`) and applied when the
-    /// consolidation pipeline starts or is rebuilt.
-    pub(crate) forgetting_runtime: ForgettingRuntimeSettings,
     /// Context window cap from manifest.toml [llm].context_window (Layer 2).
     /// Seeded at agent startup in cli.rs; independent of context_window_override
     /// so the resolution chain is self-contained in AgentCore.
@@ -224,8 +207,10 @@ pub struct AgentCore {
     /// `{user_message}` placeholders.
     pub(crate) title_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
-    /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
-    /// (`prompts/abstention.md`). Same reload caveat.
+    /// The package asset override (`prompts/abstention.md`). There is no
+    /// built-in default since ADR-100: the memory service removed its
+    /// retrieval-side abstention chain (decision 5), so `None` means no
+    /// abstention guidance is injected. Same reload caveat.
     ///
     /// **ADR-068 note**: Three grafeo-specific override fields
     /// (`extraction_prompt`, `conflict_classification_prompt`,
@@ -237,27 +222,6 @@ pub struct AgentCore {
     /// private to the distiller module in `acowork-memory`.
     pub(crate) abstention_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
-    // ── ADR-071 D7/D9: per-agent EpisodicDistiller prompt overrides ──
-    //
-    // Follows the same `Arc<RwLock<Option<String>>>` pattern as the
-    // ADR-063 fields above. The ADR-068 revision removed three
-    // grafeo-specific overrides (`extraction.md`,
-    // `conflict-classification.md`, `generalization.md`) because the
-    // LLM→memory boundary was rewritten to be Episode-only; ADR-071
-    // re-adds two distiller overrides because the offline
-    // `EpisodicDistiller` pipeline now needs per-agent prompt control
-    // (independent of the compaction/title prompts). Resolved via
-    // `distiller_scheduler_config()`, which projects this slot onto
-    // `DistillerConfig.merge_prompt_override`.
-    /// Override for the built-in `MERGE_SYSTEM_PROMPT` in `acowork-memory`
-    /// (the distiller's merge decision, `prompts/distiller-merge.md`).
-    /// Inner `None` = use the built-in constant.
-    ///
-    /// ADR-071 D7 defined two slots (extraction + judge); the projection +
-    /// merge rewrite collapsed both pipelines into one LLM call, so one slot
-    /// remains.
-    pub(crate) distiller_merge_prompt: Arc<std::sync::RwLock<Option<String>>>,
-
     /// ADR-099: optional Chat Router persona (`prompts/chat.md`). Replaces
     /// ONLY the persona section of the chat-layer system prompt — the
     /// Runtime-owned role / tool contract / decision rules stay built-in.
@@ -266,20 +230,12 @@ pub struct AgentCore {
     /// `reload_prompts_into_core`; never folded into the execute prompt.
     pub(crate) chat_persona: Arc<std::sync::RwLock<Option<String>>>,
 
-    /// Memory store (SQLite, shared across all sessions of this agent).
-    /// ADR-051 P4: Primary field is `memory_provider` (trait object).
-    /// `memory_admin` is the admin interface for HTTP endpoints and
-    /// embedding migration.
-    pub(crate) memory_provider: Option<Arc<dyn MemoryProvider>>,
-    /// Admin service for HTTP memory endpoints and embedding migration.
-    /// ADR-051 P4: Replaces the former `grafeo_store` compat field.
-    pub(crate) memory_admin: Option<Arc<dyn MemoryAdminService>>,
-    /// The open SQLite store, when the SQLite backend is selected (ADR-082 §4).
+    /// The Runtime-local SQLite store (ADR-082 §4, revised by ADR-100).
     ///
-    /// Kept so the conversation index can share the same connection (and
-    /// file) instead of opening a second one — `memory/private.sqlite` holds
-    /// memory nodes, session meta and the conversation index together.
-    /// `None` on the grafeo backend.
+    /// Memory nodes live in the memory service since ADR-100, so this file
+    /// now only carries session metadata and the conversation vector index.
+    /// Kept on the core so the conversation index can share one connection
+    /// (and one file) instead of opening a second one.
     pub(crate) sqlite_store: Option<Arc<acowork_sqlite::SqliteStore>>,
     /// RAG provider (enterprise knowledge retrieval, orthogonal to MemoryProvider).
     /// ADR-051 C3: New field, independent from memory_provider.
@@ -326,8 +282,6 @@ pub struct AgentCore {
     /// `new_with_observer` would touch every construction site (tests
     /// included) for no ordering benefit.
     pub(crate) git_nudge: Option<crate::agent::git_nudge::GitNudgeSlots>,
-    /// Memory session handle — shared between agent loop and memory tools.
-    pub(crate) memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     /// Embedding provider for vector-based memory retrieval.
     ///
     /// This field is the *private* view of the provider. Anything outside this
@@ -339,20 +293,6 @@ pub struct AgentCore {
     /// The provider as one shared cell, identical across every clone of this
     /// core. See [`crate::embedding::SharedEmbedProvider`].
     pub(crate) embedding_provider_shared: crate::embedding::SharedEmbedProvider,
-    /// P3-1: Retrieval quality metrics aggregator (shared across sessions).
-    /// ADR-051 C3: Replaced grafeo MetricsAggregator with Runtime-internal
-    /// RetrievalMetricsAggregator (data from acowork_memory::RetrievalMetrics).
-    pub(crate) metrics_aggregator: Arc<std::sync::Mutex<crate::memory::RetrievalMetricsAggregator>>,
-    // ADR-051 C3: consolidation_scheduler field removed.
-    // Consolidation control is delegated to MemoryProvider trait.
-    // Background task handle kept for lifecycle management.
-    pub(crate) consolidation_bg_task: Option<crate::memory::ConsolidationBgTask>,
-    /// ADR-051 P4: Runtime-internal consolidation timer.
-    /// Replaces grafeo's `ConsolidationScheduler`. The timer implements
-    /// idle-timeout + accumulation-threshold scheduling policy without
-    /// holding a store reference. `notify_consolidation_active()` resets
-    /// the idle timer so consolidation doesn't run during active use.
-    pub(crate) consolidation_timer: Option<Arc<crate::memory::ConsolidationTimer>>,
     /// ADR-028: cumulative input tokens across every LLM call made by this
     /// agent process. Sourced from `accumulate_llm_usage` on every LLM call
     /// and from `merge_token_totals` on every `list_sessions` scan. Not
@@ -380,65 +320,6 @@ pub struct AgentCore {
     /// call made by this agent process (Anthropic
     /// `cache_creation_input_tokens`; OpenAI has no concept → always 0).
     pub(crate) agent_total_cache_write_tokens: Arc<AtomicU64>,
-}
-
-/// ADR-071 D4/D6: runtime distiller settings, layered over the manifest
-/// `[memory.distiller]` section.
-///
-/// These fields are the `agent_config.json` projection (the Desktop
-/// memory panel writes them). `None` = "not set at runtime → fall
-/// through to the manifest default". They feed the consolidation
-/// pipeline's `SchedulerConfig` + model resolution chain.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct DistillerRuntimeSettings {
-    /// Master switch (overrides `[memory.distiller].enabled`).
-    pub enabled: Option<bool>,
-    /// Ordered distiller model candidate list (overrides the manifest
-    /// pair). Tried in order; when all are unusable the chain continues
-    /// manifest pair → global `default_compact_models` → first provider
-    /// model. Empty provider_id = the agent's active provider.
-    pub models: Vec<acowork_core::protocol::CompactModelRef>,
-    /// Periodic trigger interval in minutes (overrides manifest).
-    pub interval_minutes: Option<u64>,
-    /// Unconsolidated-episode backlog threshold (overrides manifest).
-    pub accumulation_threshold: Option<usize>,
-    /// Idle threshold in minutes (overrides manifest).
-    pub idle_minutes: Option<u64>,
-}
-
-/// Runtime settings for episodic memory forgetting, projected from
-/// `agent_config.json` (the Desktop "记忆遗忘" card writes them). `None` =
-/// "not set at runtime → fall through to system defaults". Forgetting is
-/// opt-in: `enabled` defaults to false.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct ForgettingRuntimeSettings {
-    /// Master switch (default off).
-    pub enabled: Option<bool>,
-    /// Episodic decay half-life in days.
-    pub half_life_days: Option<u64>,
-    /// Retention threshold below which an episodic node becomes Dormant.
-    pub dormant_threshold: Option<f32>,
-    /// Days a Dormant node is retained before archiving to the PurgeLog.
-    pub archive_days: Option<u64>,
-}
-
-/// Map a manifest `[memory.distiller]` section to a [`DistillerConfig`].
-///
-/// ADR-068 M4/M7: fields that are absent keep the `DistillerConfig` defaults;
-/// returns `None` when no section is present (distiller stays disabled).
-fn manifest_distiller_to_config(
-    manifest: &acowork_core::manifest::ManifestDistillerConfig,
-) -> Option<acowork_memory::consolidation::DistillerConfig> {
-    let base = acowork_memory::consolidation::DistillerConfig::default();
-    Some(acowork_memory::consolidation::DistillerConfig {
-        batch_size: manifest.batch_size.unwrap_or(base.batch_size),
-        min_importance: manifest.min_importance.unwrap_or(base.min_importance),
-        // Recall width and threshold are not manifest-exposed: they are tuned
-        // against the store's own similarity distribution, not per agent.
-        // ADR-071 D7: the prompt override slot is layered on top of this
-        // manifest-derived config at the AgentCore slots, so it stays `None`.
-        ..base
-    })
 }
 
 /// ADR-093 follow-up: which resolution tier
@@ -499,13 +380,6 @@ impl AgentCore {
         self.abstention_prompt.read().unwrap().clone()
     }
 
-    /// ADR-071 D7/D9: override accessor — `prompts/distiller-merge.md`.
-    /// Consumed by `distiller_scheduler_config()` when assembling the
-    /// `DistillerConfig` handed to the grafeo EpisodicDistiller.
-    pub fn distiller_merge_prompt(&self) -> Option<String> {
-        self.distiller_merge_prompt.read().unwrap().clone()
-    }
-
     /// ADR-099: Chat Router persona (`prompts/chat.md`), if the package
     /// ships one. Only the persona section of the chat prompt is replaced;
     /// the kernel (role boundary, dispatch contract, decision rules) is not
@@ -560,8 +434,6 @@ impl AgentCore {
             manifest_temperature,
             context_window_override: None,
             compression_ratio_threshold: None,
-            distiller_runtime: DistillerRuntimeSettings::default(),
-            forgetting_runtime: ForgettingRuntimeSettings::default(),
             manifest_context_window,
             approval_timeout_secs: None,
             system_prompt_override: None,
@@ -582,18 +454,11 @@ impl AgentCore {
             compact_template: Arc::new(std::sync::RwLock::new(None)),
             title_prompt: Arc::new(std::sync::RwLock::new(None)),
             abstention_prompt: Arc::new(std::sync::RwLock::new(None)),
-            // ADR-071 D7: distiller prompt overrides — same lazy-fill
-            // pattern, populated in Phase B / cli.rs standalone path and
-            // hot-reloadable via `reload_prompts_into_core`.
-            distiller_merge_prompt: Arc::new(std::sync::RwLock::new(None)),
             // ADR-099: chat router persona — same lazy-fill pattern; the
             // fallback (manifest metadata) is resolved at prompt build time.
             chat_persona: Arc::new(std::sync::RwLock::new(None)),
-            memory_provider: None,
-            memory_admin: None,
             sqlite_store: None,
             rag_provider: None,
-            memory_session: None,
             debug_observer: observer,
             pending_debug_handles: None,
             approval_gate: None,
@@ -607,11 +472,6 @@ impl AgentCore {
             git_nudge: None,
             embedding_provider: None,
             embedding_provider_shared: Arc::new(std::sync::RwLock::new(None)),
-            metrics_aggregator: Arc::new(std::sync::Mutex::new(
-                crate::memory::RetrievalMetricsAggregator::with_defaults(1.0),
-            )),
-            consolidation_bg_task: None,
-            consolidation_timer: None,
             // ADR-046: blob store slot is empty by default; Phase B
             // populates it via `set_attachment_service` once the work_dir
             // is known. Until then, multimodal image parts cannot be
@@ -1043,141 +903,44 @@ impl AgentCore {
             );
             self.compression_ratio_threshold = Some(threshold);
         }
-        // ADR-071 D4/D6: distiller runtime settings. Each `Some` overwrites
-        // the stored value; `None` (field absent on the wire) leaves the
-        // previous runtime value alone — matching the global agent_config.json
-        // partial-PUT semantics used by every other live-editable field.
-        // When anything changed and the consolidation pipeline is already
-        // running, hot-swap the scheduler policy on the shared timer
-        // (ADR-071 D8: RwLock config, takes effect on the next loop tick —
-        // no background-task teardown needed).
-        let mut distiller_changed = false;
-        if let Some(v) = overrides.distiller_enabled
-            && self.distiller_runtime.enabled != Some(v)
-        {
-            self.distiller_runtime.enabled = Some(v);
-            distiller_changed = true;
-        }
-        if let Some(ref v) = overrides.distiller_models
-            && self.distiller_runtime.models != *v
-        {
-            self.distiller_runtime.models = v.clone();
-            distiller_changed = true;
-        }
-        if let Some(v) = overrides.distiller_interval_minutes
-            && self.distiller_runtime.interval_minutes != Some(v)
-        {
-            self.distiller_runtime.interval_minutes = Some(v);
-            distiller_changed = true;
-        }
-        if let Some(v) = overrides.distiller_accumulation_threshold
-            && self.distiller_runtime.accumulation_threshold != Some(v)
-        {
-            self.distiller_runtime.accumulation_threshold = Some(v);
-            distiller_changed = true;
-        }
-        if let Some(v) = overrides.distiller_idle_minutes
-            && self.distiller_runtime.idle_minutes != Some(v)
-        {
-            self.distiller_runtime.idle_minutes = Some(v);
-            distiller_changed = true;
-        }
-        if distiller_changed {
-            tracing::info!(
-                enabled = ?self.distiller_runtime.enabled,
-                models = ?self.distiller_runtime.models,
-                interval_minutes = ?self.distiller_runtime.interval_minutes,
-                accumulation_threshold = ?self.distiller_runtime.accumulation_threshold,
-                idle_minutes = ?self.distiller_runtime.idle_minutes,
-                "runtime config: distiller settings updated (ADR-071 D6) — rebuilding consolidation pipeline if running"
-            );
-            self.update_consolidation_scheduler_config_if_running();
-        }
-        // Memory forgetting runtime settings. Each `Some` overwrites the
-        // stored value; `None` leaves the previous runtime value alone —
-        // matching the distiller partial-PUT semantics above. When anything
-        // changed and the consolidation pipeline is running, hot-swap the
-        // scheduler policy (the forgetting scan gate re-reads config each
-        // tick, so the change takes effect on the next poll).
-        let mut forgetting_changed = false;
-        if let Some(v) = overrides.memory_forgetting_enabled
-            && self.forgetting_runtime.enabled != Some(v)
-        {
-            self.forgetting_runtime.enabled = Some(v);
-            forgetting_changed = true;
-        }
-        if let Some(v) = overrides.memory_forgetting_half_life_days
-            && self.forgetting_runtime.half_life_days != Some(v)
-        {
-            self.forgetting_runtime.half_life_days = Some(v);
-            forgetting_changed = true;
-        }
-        if let Some(v) = overrides.memory_forgetting_dormant_threshold
-            && self.forgetting_runtime.dormant_threshold != Some(v)
-        {
-            self.forgetting_runtime.dormant_threshold = Some(v);
-            forgetting_changed = true;
-        }
-        if let Some(v) = overrides.memory_forgetting_archive_days
-            && self.forgetting_runtime.archive_days != Some(v)
-        {
-            self.forgetting_runtime.archive_days = Some(v);
-            forgetting_changed = true;
-        }
-        if forgetting_changed {
-            tracing::info!(
-                enabled = ?self.forgetting_runtime.enabled,
-                half_life_days = ?self.forgetting_runtime.half_life_days,
-                dormant_threshold = ?self.forgetting_runtime.dormant_threshold,
-                archive_days = ?self.forgetting_runtime.archive_days,
-                "runtime config: memory forgetting settings updated — rebuilding consolidation pipeline if running"
-            );
-            self.update_consolidation_scheduler_config_if_running();
-            // ADR-057 §5.3 redesign: `memory_recall` reads its
-            // MemoryManagerConfig from the shared MemorySessionHandle
-            // (auto-inject builds a fresh manager each turn, so it was
-            // already live after the core update above). Refresh the handle
-            // so the retrieval-side time-decay takes effect for in-flight
-            // sessions immediately instead of at the next runtime restart.
-            if let Some(session) = &self.memory_session {
-                session.set_memory_config(self.memory_manager_config());
-            }
-        }
     }
 
-    pub fn init_memory_provider(&mut self, work_dir: &std::path::Path) {
-        if self.memory_provider.is_some() {
-            tracing::debug!("init_memory_provider: already initialized, skipping");
+    /// Open the Runtime-local SQLite store for `work_dir`.
+    ///
+    /// ADR-100: memory nodes moved to the memory service, so this store no
+    /// longer backs a `MemoryProvider`. It stays in the Runtime because the
+    /// conversation vector index (ADR-081) and session metadata (ADR-082 §4)
+    /// are Runtime-owned and rebuildable from the JSONL history.
+    pub fn init_runtime_sqlite(&mut self, work_dir: &std::path::Path) {
+        if self.sqlite_store.is_some() {
+            tracing::debug!("init_runtime_sqlite: already initialized, skipping");
             return;
         }
-        let memory_dir = work_dir.join(acowork_core::workspace::MEMORY_DIR);
-        if let Err(e) = std::fs::create_dir_all(&memory_dir) {
-            tracing::warn!(error = %e, dir = %memory_dir.display(), "Failed to create memory directory, memory features disabled");
-            return;
-        }
-        self.init_sqlite_backend(work_dir);
-    }
-
-    /// Create and initialise the workspace store as the memory provider
-    /// (ADR-082 D1).
-    fn init_sqlite_backend(&mut self, work_dir: &std::path::Path) {
         let db_path = acowork_core::workspace::store_path(work_dir);
-        let embedding_dim = self.memory_embedding_dim();
-        match acowork_sqlite::SqliteStore::open(&db_path, embedding_dim) {
+        let opened = match self.embedding_provider.as_ref() {
+            Some(provider) => acowork_sqlite::SqliteStore::open(&db_path, provider.dimension()),
+            None => {
+                // No provider yet: open without recording a dimension, so a
+                // later provider can still claim the real width.
+                tracing::warn!(
+                    path = %db_path.display(),
+                    "Embedding provider unavailable - opening the runtime SQLite store without a recorded dimension"
+                );
+                acowork_sqlite::SqliteStore::open_dim_agnostic(&db_path)
+            }
+        };
+        match opened {
             Ok(store) => {
                 let store = std::sync::Arc::new(store);
                 // ADR-082 §4 step 3: the same .sqlite file also carries
                 // session meta. Install it as the process backend.
                 self.install_session_meta_backend(store.clone(), work_dir);
-                // Keep a handle so the conversation index shares this
-                // connection instead of opening a second one.
-                self.sqlite_store = Some(store.clone());
-                self.install_memory_backend(store, &db_path)
+                self.sqlite_store = Some(store);
             }
             Err(e) => tracing::warn!(
                 error = %e,
                 path = %db_path.display(),
-                "Failed to open SQLite memory store, memory features disabled"
+                "Failed to open the runtime SQLite store - conversation search disabled"
             ),
         }
     }
@@ -1198,348 +961,12 @@ impl AgentCore {
         );
     }
 
-    /// Expected embedding width, warning when the provider is unavailable.
-    fn memory_embedding_dim(&self) -> usize {
-        self.embedding_provider
-            .as_ref()
-            .map(|p| p.dimension())
-            .unwrap_or_else(|| {
-                let default_dim = acowork_memory::types::DEFAULT_EMBEDDING_DIM;
-                tracing::warn!(
-                    default_dim,
-                    "⚠️ Embedding provider unavailable - opening the memory store with the                      default dim {}. If the on-disk store was created with a different dim,                      vector search will fail and memory will fall back to text-only search.                      Restart runtime after the embedding service is back online to use vector                      search.",
-                    default_dim
-                );
-                default_dim
-            })
-    }
-
-    /// Wire an opened store into the session, admin handle and consolidation
-    /// pipeline.
-    ///
-    /// Generic over the concrete store so the backend choice never leaks past
-    /// this function — every memory consumer downstream already holds a trait
-    /// object (ADR-051).
-    fn install_memory_backend<T>(&mut self, store: std::sync::Arc<T>, db_path: &std::path::Path)
-    where
-        T: acowork_memory::MemoryProvider + acowork_memory::MemoryAdminService + 'static,
-    {
-        // Backend-agnostic node count: the trait reports it, so this does not
-        // reach into engine internals any more.
-        let existing = store
-            .stats()
-            .map(|stats| stats.episode_count + stats.node_count)
-            .unwrap_or(0);
-        tracing::info!(path = %db_path.display(), existing_nodes = existing, "Memory store opened");
-
-        let quality = self.memory_quality_config();
-        if let Err(e) = store.apply_quality_config(&quality) {
-            tracing::warn!(error = %e, "Failed to apply memory quality config, using defaults");
-        }
-
-        self.bootstrap_autobiographical_from_manifest(&*store);
-        if let Some(ref session) = self.memory_session {
-            session.set_provider(store.clone());
-            // Config consistency: the memory_recall tool reads the
-            // SAME MemoryManagerConfig as auto-inject (ADR-062 M5),
-            // so per-agent quality settings apply to both paths.
-            session.set_memory_config(self.memory_manager_config());
-        }
-        self.memory_admin = Some(store.clone());
-        self.memory_provider = Some(store);
-        self.start_consolidation_pipeline();
-    }
-
-    pub fn memory_provider(&self) -> Option<&Arc<dyn MemoryProvider>> {
-        self.memory_provider.as_ref()
-    }
-
-    /// The open workspace store (ADR-082 §4).
+    /// The open Runtime-local store (ADR-082 §4).
     ///
     /// Consumed by the conversation-index bootstrap so the index shares the
-    /// memory file and connection.
+    /// same file and connection.
     pub fn sqlite_store(&self) -> Option<Arc<acowork_sqlite::SqliteStore>> {
         self.sqlite_store.clone()
-    }
-
-    /// Admin service for HTTP memory endpoints and embedding migration.
-    /// ADR-051 P4: Replaces the former `grafeo_store()` accessor.
-    pub fn memory_admin(&self) -> Option<&Arc<dyn MemoryAdminService>> {
-        self.memory_admin.as_ref()
-    }
-
-    /// Backward-compat alias for memory_provider(). ADR-051 C3.
-    pub fn memory_store(&self) -> Option<&Arc<dyn MemoryProvider>> {
-        self.memory_provider.as_ref()
-    }
-
-    fn bootstrap_autobiographical_from_manifest(&self, provider: &dyn MemoryProvider) {
-        // ADR-068 M8 — bootstrap scope is intentionally narrow (Identity +
-        // Capability only; see module docs). The logic lives in the free
-        // function `bootstrap_autobio::bootstrap_autobiographical_from_manifest`
-        // so the e2e suite can drive it without a full AgentCore (ADR-068 E1).
-        let outcome = crate::agent::bootstrap_autobio::bootstrap_autobiographical_from_manifest(
-            &self.manifest,
-            provider,
-        );
-        tracing::debug!(?outcome, "Manifest autobiographical bootstrap finished");
-    }
-
-    /// Resolve the agent's `MemoryManagerConfig` (manifest overrides +
-    /// defaults).
-    ///
-    /// Shared by `init_memory_manager` (auto-inject path) and the
-    /// `memory_recall` tool (via `MemorySessionHandle`) so both retrieval
-    /// paths use identical quality settings (ADR-062 M5).
-    pub(crate) fn memory_manager_config(&self) -> MemoryManagerConfig {
-        // auto-inject defaults OFF: the LLM recalls memories explicitly via
-        // the `memory_recall` tool (same user-message query), so first-turn
-        // injection would duplicate already-present context. Per-agent
-        // opt-in via `[memory.quality].auto_inject_enabled = true`.
-        // The override is read straight from the manifest — it is a
-        // `MemoryManagerConfig` field, not part of `MemoryQualityConfig`.
-        let manifest_auto_inject = self
-            .manifest
-            .memory
-            .quality
-            .as_ref()
-            .and_then(|q| q.auto_inject_enabled);
-        MemoryManagerConfig {
-            quality: self.memory_quality_config(),
-            auto_inject_enabled: manifest_auto_inject.unwrap_or(false),
-            // Retrieval-side forgetting: runtime agent_config.json layer
-            // (forgetting_enabled / half_life_days) → system defaults.
-            // Reuses the scan-side `EpisodicDecayConfig` so both paths share
-            // one type + one retention curve (ADR-057 §5.3 redesign).
-            forgetting: EpisodicDecayConfig {
-                enabled: self.forgetting_runtime.enabled.unwrap_or(false),
-                half_life_days: self
-                    .forgetting_runtime
-                    .half_life_days
-                    .unwrap_or_else(|| EpisodicDecayConfig::default().half_life_days),
-                ..EpisodicDecayConfig::default()
-            },
-            ..MemoryManagerConfig::default()
-        }
-    }
-
-    pub fn init_memory_manager(&self) -> MemoryManager {
-        MemoryManager::new(self.memory_manager_config())
-    }
-
-    /// Resolve the agent's memory quality config (ADR-062 D2).
-    ///
-    /// Source: the `.agent` manifest `[memory.quality]` section (package
-    /// author default). An absent section yields `MemoryQualityConfig::default()`
-    /// ("zero configuration = current behaviour").
-    pub(crate) fn memory_quality_config(&self) -> acowork_memory::quality::MemoryQualityConfig {
-        self.manifest
-            .memory
-            .quality
-            .clone()
-            .map(Into::into)
-            .unwrap_or_default()
-    }
-
-    /// Resolve the EpisodicDistiller config from the agent manifest
-    /// `[memory.distiller]` section (ADR-068 M4/M7).
-    ///
-    /// Returns `Some(config)` only when the section is present; fields that
-    /// are absent keep the `DistillerConfig` defaults. The caller gates the
-    /// step itself on `enabled`.
-    pub(crate) fn distiller_config(
-        &self,
-    ) -> Option<acowork_memory::consolidation::DistillerConfig> {
-        self.manifest
-            .memory
-            .distiller
-            .as_ref()
-            .and_then(manifest_distiller_to_config)
-    }
-
-    /// ADR-071 D4/D6: build the effective distiller scheduler policy from
-    /// the runtime `agent_config.json` layer (Layer 1) over the manifest
-    /// `[memory.distiller]` section (Layer 2), falling back to
-    /// [`SchedulerConfig`] defaults for any field both layers leave unset.
-    ///
-    /// The `[memory.distiller]` manifest section already supplies
-    /// interval / accumulation / idle fields (ADR-071 D1 additions), so the
-    /// merge keeps the per-agent package defaults while letting the Desktop
-    /// memory panel override them at runtime without an agent restart.
-    pub(crate) fn distiller_scheduler_config(&self) -> SchedulerConfig {
-        let manifest = self.manifest.memory.distiller.as_ref();
-        // Minutes → seconds (SchedulerConfig uses seconds internally).
-        let minutes_to_secs = |v: Option<u64>| v.map(|m| m.saturating_mul(60));
-        let default = SchedulerConfig::default();
-        // ADR-071 D7: the per-agent prompt override (distiller-merge.md) is
-        // layered on top of the manifest-derived DistillerConfig. A package
-        // without the `[memory.distiller]` section still gets a
-        // `Some(config)` when an override file exists, so the distiller never
-        // silently uses built-in prompts the package author replaced.
-        let mut distiller_config = self.distiller_config();
-        let merge_override = self.distiller_merge_prompt();
-        if merge_override.is_some() {
-            let mut cfg = distiller_config.take().unwrap_or_default();
-            cfg.merge_prompt_override = merge_override;
-            distiller_config = Some(cfg);
-        }
-        SchedulerConfig {
-            distiller_enabled: self
-                .distiller_runtime
-                .enabled
-                .unwrap_or_else(|| self.manifest.memory.distiller_enabled()),
-            distiller_config,
-            distiller_interval_secs: minutes_to_secs(self.distiller_runtime.interval_minutes)
-                .or_else(|| manifest.and_then(|m| m.interval_minutes.map(|v| v.saturating_mul(60))))
-                .unwrap_or(default.distiller_interval_secs),
-            distiller_accumulation: self
-                .distiller_runtime
-                .accumulation_threshold
-                .or_else(|| manifest.and_then(|m| m.accumulation_threshold))
-                .unwrap_or(default.distiller_accumulation),
-            distiller_idle_secs: minutes_to_secs(self.distiller_runtime.idle_minutes)
-                .or_else(|| manifest.and_then(|m| m.idle_minutes.map(|v| v.saturating_mul(60))))
-                .unwrap_or(default.distiller_idle_secs),
-            // Episodic forgetting: Layer 1 runtime overrides (agent_config.json)
-            // → system defaults (no manifest section — forgetting is a
-            // runtime-only, opt-in feature).
-            forgetting_enabled: self
-                .forgetting_runtime
-                .enabled
-                .unwrap_or(default.forgetting_enabled),
-            forgetting_half_life_days: self
-                .forgetting_runtime
-                .half_life_days
-                .unwrap_or(default.forgetting_half_life_days),
-            forgetting_dormant_threshold: self
-                .forgetting_runtime
-                .dormant_threshold
-                .unwrap_or(default.forgetting_dormant_threshold),
-            forgetting_archive_days: self
-                .forgetting_runtime
-                .archive_days
-                .unwrap_or(default.forgetting_archive_days),
-            ..default
-        }
-    }
-
-    /// ADR-071 D6: apply a live distiller config change to the running
-    /// consolidation pipeline without restarting the background task.
-    ///
-    /// The shared `ConsolidationTimer` holds the scheduler policy in an
-    /// internal `RwLock`; swapping the value takes effect on the next loop
-    /// tick (≤60s). The timer's idle/backlog/last-run state is preserved, so
-    /// a config change never spuriously fires (or delays) a distillation.
-    pub(crate) fn update_consolidation_scheduler_config_if_running(&self) {
-        let Some(timer) = self.consolidation_timer.as_ref() else {
-            tracing::debug!(
-                "Distiller config changed but consolidation timer not running (pipeline not started yet)"
-            );
-            return;
-        };
-        timer.update_config(self.distiller_scheduler_config());
-    }
-
-    /// ADR-071 D4/D5 (+ list follow-up): resolve the ordered distiller model
-    /// candidate list used by the EpisodicDistiller.
-    ///
-    /// Chain (mirrors the summary/distill model selection used by
-    /// `resolve_distill_model` in the session layer):
-    ///   1. `agent_config.json` `distiller_models` (runtime, Layer 1) — list
-    ///   2. manifest `[memory.distiller].model_*` (Layer 2) — single, prepended
-    ///   3. global `default_compact_models` (ADR-056) — list
-    ///   4. first model in the provider list (legacy fallback)
-    ///
-    /// Entries are `(provider_id, model_id)`; an empty `provider_id` means
-    /// "the agent's active provider" (manifest pairs and the legacy fallback
-    /// historically carried only a model id). `ProviderLlmAdapter` walks the
-    /// list in order, rebuilding a provider only for cross-provider
-    /// candidates.
-    pub(crate) fn resolve_distiller_targets(&self) -> Vec<acowork_core::protocol::CompactModelRef> {
-        use acowork_core::protocol::CompactModelRef;
-        let mut out: Vec<CompactModelRef> = Vec::new();
-        let push = |pid: String, mid: String, out: &mut Vec<CompactModelRef>| {
-            if !out
-                .iter()
-                .any(|r| r.provider_id == pid && r.model_id == mid)
-            {
-                out.push(CompactModelRef {
-                    provider_id: pid,
-                    model_id: mid,
-                });
-            }
-        };
-        // Layer 1: agent_config.json (runtime memory-panel choice, ordered).
-        for m in &self.distiller_runtime.models {
-            push(m.provider_id.clone(), m.model_id.clone(), &mut out);
-        }
-        // Layer 2: manifest [memory.distiller] (single author-declared pair;
-        // empty/absent provider = active provider, same as before).
-        if let Some(d) = self.manifest.memory.distiller.as_ref()
-            && let Some(mid) = d.model_id.as_ref()
-        {
-            push(
-                d.model_provider_id.clone().unwrap_or_default(),
-                mid.clone(),
-                &mut out,
-            );
-        }
-        // Layer 3: global compact-model candidate list (Harness pick).
-        for (pid, mid) in self.default_compact_models.read().unwrap().iter() {
-            push(pid.clone(), mid.clone(), &mut out);
-        }
-        // Layer 4: first model in the provider list (legacy convention —
-        // model id against the active provider).
-        if out.is_empty() {
-            let list = self.global_provider_list.read().unwrap();
-            let first = list.iter().flat_map(|p| p.models.iter()).next();
-            match first {
-                Some(m) => push(String::new(), m.id.clone(), &mut out),
-                None => push(String::new(), "default".to_string(), &mut out),
-            }
-        }
-        out
-    }
-
-    /// Build the distiller LLM adapter from [`Self::resolve_distiller_targets`]:
-    /// one [`DistillCandidate`] per target, with a per-candidate provider
-    /// (cross-provider targets rebuild their own `Provider`, mirroring
-    /// `SessionCore::build_provider_for` minus the session retry-UX wiring).
-    /// Targets whose provider cannot be built are skipped; if nothing
-    /// survives, the active provider is used so the adapter always has ≥1
-    /// candidate.
-    pub(crate) fn build_distiller_llm(&self) -> Arc<crate::memory::llm_adapter::ProviderLlmAdapter> {
-        use crate::memory::llm_adapter::{DistillCandidate, ProviderLlmAdapter};
-        let targets = self.resolve_distiller_targets();
-        let mut candidates: Vec<DistillCandidate> = Vec::with_capacity(targets.len());
-        for t in targets {
-            let provider = if t.provider_id.is_empty() {
-                self.provider.clone()
-            } else {
-                match self.build_compact_provider(&t.provider_id) {
-                    Some(p) => p,
-                    None => {
-                        tracing::warn!(
-                            provider_id = %t.provider_id,
-                            model_id = %t.model_id,
-                            "Distiller target provider unavailable, skipping candidate"
-                        );
-                        continue;
-                    }
-                }
-            };
-            candidates.push(DistillCandidate {
-                provider,
-                model: t.model_id,
-            });
-        }
-        if candidates.is_empty() {
-            candidates.push(DistillCandidate {
-                provider: self.provider.clone(),
-                model: "default".to_string(),
-            });
-        }
-        Arc::new(ProviderLlmAdapter::with_candidates(candidates))
     }
 
     /// ADR-093: narrow `(Provider, model)` snapshot for the search-summary
@@ -1689,128 +1116,6 @@ impl AgentCore {
         Some(Arc::new(crate::providers::reliable::ReliableProvider::new(
             raw, retry_config,
         )))
-    }
-
-    /// ADR-071 D2: run one EpisodicDistiller pass on demand (manual trigger).
-    ///
-    /// Force semantics: bypasses the periodic gate (`ConsolidationTimer`
-    /// interval / backlog / idle checks) and runs `run_episodic_distiller_step`
-    /// immediately — the exact same execution path as the background loop.
-    ///
-    /// The effective `distiller_enabled` switch is STILL respected (opt-in,
-    /// ADR-068 + ADR-071 D4 runtime layer): a manual trigger on a distiller
-    /// that is explicitly disabled is refused instead of silently producing
-    /// semantic-layer nodes. The UI only exposes the manual button while the
-    /// distiller is enabled, and the endpoint defends the same invariant
-    /// server-side.
-    ///
-    /// Returns `Ok(Some(result))` after a run and `Err(...)` when the
-    /// distiller is disabled or the memory/embedding provider is unavailable.
-    pub(crate) async fn run_episodic_distill_once(
-        &self,
-    ) -> Result<Option<acowork_memory::consolidation::DistillerResult>, String> {
-        use crate::memory::consolidation_bg::run_episodic_distiller_step_once;
-        use acowork_memory::consolidation::{SchedulerConfig, ConsolidationLlm};
-
-        if !self.distiller_scheduler_config().distiller_enabled {
-            return Err(
-                "distiller is disabled (agent_config.json / manifest [memory.distiller].enabled = false)"
-                    .to_string(),
-            );
-        }
-        let provider = self
-            .memory_provider
-            .clone()
-            .ok_or_else(|| "memory provider not initialized".to_string())?;
-        let embedding = self
-            .embedding_provider
-            .clone()
-            .ok_or_else(|| "embedding provider not initialized".to_string())?;
-        let llm: Arc<dyn ConsolidationLlm> = self.build_distiller_llm();
-        // Manual run uses the effective runtime-over-manifest distiller
-        // parameters when present; defaults otherwise. Enabled is forced
-        // true (the gate above already checked the effective switch).
-        let scheduler_config = SchedulerConfig {
-            distiller_enabled: true,
-            ..self.distiller_scheduler_config()
-        };
-        let result =
-            run_episodic_distiller_step_once(provider, llm, embedding, scheduler_config).await;
-        // Manual runs also reset the interval gate so the periodic scheduler
-        // does not immediately re-trigger right after a manual run, and store
-        // the run summary for the status endpoint (ADR-071 D2).
-        if let Some(ref timer) = self.consolidation_timer {
-            match &result {
-                Some(result) => {
-                    let record = crate::memory::consolidation_bg::DistillRunRecord::from_result(
-                        chrono::Utc::now(),
-                        result,
-                    );
-                    timer.record_distill_result(&record).await;
-                }
-                None => {
-                    // Record the failure, not just the timestamp: a run that
-                    // died must be distinguishable from a run that had
-                    // nothing to do.
-                    timer
-                        .record_distill_result(
-                            &crate::memory::consolidation_bg::DistillRunRecord::from_error(
-                                chrono::Utc::now(),
-                                "distiller run failed (see logs)",
-                                Default::default(),
-                            ),
-                        )
-                        .await;
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    pub fn start_consolidation_pipeline(&mut self) {
-        let Some(ref provider) = self.memory_provider else {
-            tracing::debug!("Cannot start consolidation: memory provider not initialized");
-            return;
-        };
-        let Some(ref embedding) = self.embedding_provider else {
-            tracing::warn!(
-                "Cannot start consolidation pipeline: embedding provider not available. Background memory consolidation (generalization, conflict resolution) is disabled until embedding service is back."
-            );
-            return;
-        };
-        if self.consolidation_bg_task.is_some() {
-            tracing::debug!("Consolidation pipeline already running");
-            return;
-        }
-        use crate::memory::consolidation_bg::{ConsolidationParams, start_consolidation_pipeline};
-        use std::time::Duration;
-        let llm_adapter = self.build_distiller_llm();
-        // ADR-068 M4/M7 + ADR-071 D4/D6: resolve the distiller switch and
-        // scheduler parameters from the runtime `agent_config.json` layer
-        // (memory-panel) over the manifest `[memory.distiller]` section.
-        // Off-by-default (opt-in): an absent section / `enabled = false`
-        // keeps the distiller disabled unless the runtime layer turns it on.
-        let scheduler_config = self.distiller_scheduler_config();
-        let params = ConsolidationParams {
-            provider: provider.clone(),
-            llm_adapter,
-            embedding_provider: embedding.clone(),
-            scheduler_config,
-            poll_interval: Duration::from_secs(60),
-            work_dir: Some(std::path::PathBuf::from(&self.config.work_dir)),
-        };
-        let (timer, bg_task) = start_consolidation_pipeline(params);
-        self.consolidation_bg_task = Some(bg_task);
-        self.consolidation_timer = Some(timer);
-        tracing::info!("Consolidation background pipeline started");
-    }
-
-    pub async fn notify_consolidation_active(&self) {
-        // ADR-051 P4: Reset the Runtime-internal ConsolidationTimer's idle
-        // timer so consolidation doesn't run during active use.
-        if let Some(ref timer) = self.consolidation_timer {
-            timer.notify_active().await;
-        }
     }
 
     pub(crate) fn get_model_capabilities(&self, model_name: &str) -> Option<ModelCapabilitiesInfo> {
@@ -2081,8 +1386,6 @@ impl Clone for AgentCore {
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,
             compression_ratio_threshold: self.compression_ratio_threshold,
-            distiller_runtime: self.distiller_runtime.clone(),
-            forgetting_runtime: self.forgetting_runtime.clone(),
             manifest_context_window: self.manifest_context_window,
             approval_timeout_secs: self.approval_timeout_secs,
             system_prompt_override: self.system_prompt_override.clone(),
@@ -2098,13 +1401,9 @@ impl Clone for AgentCore {
             compact_template: Arc::clone(&self.compact_template),
             title_prompt: Arc::clone(&self.title_prompt),
             abstention_prompt: Arc::clone(&self.abstention_prompt),
-            distiller_merge_prompt: Arc::clone(&self.distiller_merge_prompt),
             chat_persona: Arc::clone(&self.chat_persona),
-            memory_provider: self.memory_provider.clone(),
-            memory_admin: self.memory_admin.clone(),
             sqlite_store: self.sqlite_store.clone(),
             rag_provider: self.rag_provider.clone(),
-            memory_session: self.memory_session.clone(),
             debug_observer: self.debug_observer.clone_production(),
             // ADR-048: the pending-debug channel is intentionally NOT
             // carried across clones — it is per-session state bound by
@@ -2123,9 +1422,6 @@ impl Clone for AgentCore {
             // snapshot and the session's working copy must see one provider,
             // or an adopted model reaches only one of them.
             embedding_provider_shared: Arc::clone(&self.embedding_provider_shared),
-            metrics_aggregator: self.metrics_aggregator.clone(),
-            consolidation_bg_task: None, // sessions don't own bg task
-            consolidation_timer: self.consolidation_timer.clone(), // shared timer for idle reset
             attachment_service: self.attachment_service.clone(),
             // ADR-028: agent-scoped counters are genuinely SHARED across
             // clones — `Arc::clone` keeps all four pointing at the same
@@ -2584,291 +1880,6 @@ mod tests {
         );
     }
 
-    // ── Consolidation timer integration tests (ADR-051 P4) ──────────
-
-    /// G1: Verify that `start_consolidation_pipeline` stores the timer
-    /// in `AgentCore.consolidation_timer` and that `notify_consolidation_active`
-    /// resets the timer's idle clock.
-    ///
-    /// This is the integration-level regression for the P0 bug where the
-    /// timer was created but immediately dropped (not stored), causing
-    /// `notify_consolidation_active` to be a no-op and consolidation to
-    /// fire unconditionally on every idle-timeout tick.
-    #[tokio::test]
-    async fn test_consolidation_timer_stored_and_notify_resets_idle() {
-        use acowork_core::embedding::EmbeddingProvider;
-
-        let mut core = make_core(Some(8192), None, None, 0);
-
-        // A real in-memory store as the memory provider.
-        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
-            acowork_sqlite::SqliteStore::open_in_memory(768).unwrap(),
-        );
-        core.memory_provider = Some(store);
-
-        // Set up a dummy embedding provider (required by start_consolidation_pipeline).
-        struct DummyEmbeddingProvider;
-        #[async_trait::async_trait]
-        impl EmbeddingProvider for DummyEmbeddingProvider {
-            fn name(&self) -> &str {
-                "dummy"
-            }
-            async fn embed(
-                &self,
-                _text: &str,
-            ) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
-                Ok(vec![0.0; 384])
-            }
-            async fn embed_batch(
-                &self,
-                texts: &[&str],
-            ) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
-                Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
-            }
-            fn dimension(&self) -> usize {
-                384
-            }
-            async fn is_available(&self) -> bool {
-                true
-            }
-        }
-        core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
-
-        // Before starting: timer is None.
-        assert!(core.consolidation_timer.is_none());
-        assert!(core.consolidation_bg_task.is_none());
-
-        // Start the consolidation pipeline.
-        core.start_consolidation_pipeline();
-
-        // After starting: timer must be stored.
-        let timer = core
-            .consolidation_timer
-            .clone()
-            .expect("consolidation_timer must be Some after start_consolidation_pipeline");
-        assert!(core.consolidation_bg_task.is_some());
-
-        // Wait a moment to let some "idle" time accumulate.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Call notify_consolidation_active - should reset idle timer.
-        core.notify_consolidation_active().await;
-
-        // Verify idle is near 0 via public accessor.
-        let idle_secs = timer.idle_secs().await;
-        assert!(
-            idle_secs < 5,
-            "Idle should be < 5s after notify_consolidation_active, got {idle_secs}s"
-        );
-
-        // Legacy `should_run()` Pending-trigger assertion removed with the
-        // method (ADR-057 §5.3 redesign — Pending has no producer).
-
-        // Clean up: abort the bg task.
-        if let Some(bg) = core.consolidation_bg_task.take() {
-            bg.abort();
-        }
-    }
-
-    /// G1b: Verify that `clone_for_session` shares the same timer Arc.
-    /// When a session clone calls `notify_consolidation_active`, the
-    /// original AgentCore's timer must also be reset (shared Arc).
-    #[tokio::test]
-    async fn test_consolidation_timer_shared_across_session_clone() {
-        use acowork_core::embedding::EmbeddingProvider;
-
-        let mut core = make_core(Some(8192), None, None, 0);
-
-        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
-            acowork_sqlite::SqliteStore::open_in_memory(768).unwrap(),
-        );
-        core.memory_provider = Some(store);
-
-        struct DummyEmbeddingProvider;
-        #[async_trait::async_trait]
-        impl EmbeddingProvider for DummyEmbeddingProvider {
-            fn name(&self) -> &str {
-                "dummy"
-            }
-            async fn embed(
-                &self,
-                _text: &str,
-            ) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
-                Ok(vec![0.0; 384])
-            }
-            async fn embed_batch(
-                &self,
-                texts: &[&str],
-            ) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
-                Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
-            }
-            fn dimension(&self) -> usize {
-                384
-            }
-            async fn is_available(&self) -> bool {
-                true
-            }
-        }
-        core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
-
-        core.start_consolidation_pipeline();
-        let original_timer = core.consolidation_timer.clone().unwrap();
-
-        // Clone the core (simulates session creation).
-        let session_core = core.clone();
-
-        // The session clone must share the same timer Arc.
-        let session_timer = session_core
-            .consolidation_timer
-            .as_ref()
-            .expect("session clone must have consolidation_timer");
-        assert!(
-            Arc::ptr_eq(session_timer, &original_timer),
-            "session clone must share the same timer Arc (not a copy)"
-        );
-
-        // Session clone resets the timer.
-        session_core.notify_consolidation_active().await;
-
-        // The original core's timer must reflect the reset.
-        let idle_secs = original_timer.idle_secs().await;
-        assert!(
-            idle_secs < 5,
-            "Original timer must reflect session clone's notify_active (shared Arc)"
-        );
-
-        // Clean up.
-        if let Some(bg) = core.consolidation_bg_task.take() {
-            bg.abort();
-        }
-    }
-
-    // ── ADR-071 D7: distiller prompt override projection ─────────────
-
-    /// D7a: the per-agent prompt override (AgentCore slot) is layered on top
-    /// of the manifest-derived `DistillerConfig` — manifest fields survive
-    /// the overlay.
-    #[test]
-    fn test_distiller_scheduler_config_projects_prompt_overrides() {
-        let core =
-            make_core_with_memory_toml("[memory.distiller]
-enabled = true
-batch_size = 20
-");
-        // Without an override file the slot is `None` -> manifest values.
-        let cfg = core.distiller_scheduler_config();
-        assert!(cfg.distiller_enabled);
-        let dc = cfg.distiller_config.expect("manifest section present");
-        assert_eq!(dc.batch_size, 20);
-        assert!(dc.merge_prompt_override.is_none());
-
-        // Write the distiller prompt override (as `reload_prompts_into_core`
-        // would after a Debug panel save).
-        *core.distiller_merge_prompt.write().unwrap() = Some("MG_OVERRIDE".to_string());
-
-        let cfg2 = core.distiller_scheduler_config();
-        let dc2 = cfg2.distiller_config.expect("manifest section present");
-        assert_eq!(dc2.merge_prompt_override.as_deref(), Some("MG_OVERRIDE"));
-        assert_eq!(
-            dc2.batch_size, 20,
-            "manifest-derived fields must survive the prompt overlay"
-        );
-    }
-
-    /// D7b: even without a `[memory.distiller]` manifest section, a
-    /// package that ships the distiller prompt override must still surface a
-    /// `Some(DistillerConfig)` (so the override reaches the distiller) —
-    /// while the opt-in `distiller_enabled` stays OFF.
-    #[test]
-    fn test_distiller_scheduler_config_override_without_manifest_section() {
-        let core = make_core_with_memory_toml("");
-        assert!(!core.manifest.memory.distiller_enabled());
-
-        *core.distiller_merge_prompt.write().unwrap() = Some("MG_OVERRIDE".to_string());
-
-        let cfg = core.distiller_scheduler_config();
-        assert!(!cfg.distiller_enabled, "opt-in invariant must hold");
-        let dc = cfg
-            .distiller_config
-            .expect("override must force Some(config)");
-        assert_eq!(dc.merge_prompt_override.as_deref(), Some("MG_OVERRIDE"));
-        // No manifest fields -> defaults for the rest.
-        assert_eq!(
-            dc.batch_size,
-            acowork_memory::consolidation::DistillerConfig::default().batch_size
-        );
-    }
-
-    // ── ADR-071 D2: manual distill trigger (AgentCore-level) ─────────
-
-    /// G1c: A manual distill on a distiller that is explicitly OFF must be
-    /// refused — opt-in invariant (ADR-068 / ADR-071): a disabled distiller
-    /// must never produce semantic-layer nodes, even when force-triggered.
-    #[tokio::test]
-    async fn test_manual_distill_refused_when_disabled() {
-        let core = make_core(Some(8192), None, None, 0);
-        // Default manifest: no `[memory.distiller]` section → disabled.
-        assert!(!core.manifest.memory.distiller_enabled());
-
-        let err = core.run_episodic_distill_once().await.unwrap_err();
-        assert!(
-            err.contains("distiller is disabled"),
-            "disabled distiller must refuse manual runs, got: {err}"
-        );
-    }
-
-    /// G1d: With the distiller enabled and providers wired, a manual run
-    /// completes and returns a real DistillerResult (empty backlog → zero
-    /// promotions, but the pipeline runs).
-    #[tokio::test]
-    async fn test_manual_distill_runs_when_enabled() {
-        use acowork_core::embedding::EmbeddingProvider;
-
-        let mut core = make_core_with_memory_toml("[memory.distiller]\nenabled = true\n");
-        assert!(core.manifest.memory.distiller_enabled());
-
-        let store: Arc<dyn acowork_memory::MemoryProvider> = Arc::new(
-            acowork_sqlite::SqliteStore::open_in_memory(768).unwrap(),
-        );
-        core.memory_provider = Some(store);
-
-        struct DummyEmbeddingProvider;
-        #[async_trait::async_trait]
-        impl EmbeddingProvider for DummyEmbeddingProvider {
-            fn name(&self) -> &str {
-                "dummy"
-            }
-            async fn embed(
-                &self,
-                _text: &str,
-            ) -> Result<Vec<f32>, acowork_core::embedding::EmbeddingError> {
-                Ok(vec![0.0; 384])
-            }
-            async fn embed_batch(
-                &self,
-                texts: &[&str],
-            ) -> Result<Vec<Vec<f32>>, acowork_core::embedding::EmbeddingError> {
-                Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
-            }
-            fn dimension(&self) -> usize {
-                384
-            }
-            async fn is_available(&self) -> bool {
-                true
-            }
-        }
-        core.embedding_provider = Some(Arc::new(DummyEmbeddingProvider));
-
-        let result = core
-            .run_episodic_distill_once()
-            .await
-            .expect("manual distill should succeed when enabled");
-        let result = result.expect("manual distill returns a result");
-        // Empty store: the distiller scans nothing and promotes nothing.
-        assert_eq!(result.episodes_scanned, 0);
-        assert_eq!(result.facts_promoted, 0);
-    }
-
     /// G9: Verify that `AgentCore.rag_provider` is None by default
     /// and can be set / accessed. This tests the accessor path that
     /// `session_init` uses to propagate the RAG provider from boot
@@ -2989,109 +2000,6 @@ batch_size = 20
         let clone = core.clone();
         assert!(clone.pending_debug_handles.is_none());
         assert!(clone.take_pending_debug_handles().is_none());
-    }
-
-    // ── auto_inject manifest opt-in (per-agent switch) ─────────────
-
-    /// Build an AgentCore whose manifest carries the given TOML fragment
-    /// appended after the `[llm]` section (e.g. a `[memory.quality]`
-    /// block). An empty fragment leaves `[memory]` absent entirely.
-    fn make_core_with_memory_toml(extra_toml: &str) -> AgentCore {
-        let config = RuntimeConfig::default();
-        let manifest = acowork_core::AgentManifest::from_toml(&format!(
-            r#"
-            agent_id = "com.test.cw"
-            version = "1.0.0"
-            name = "Test CW"
-            description = "auto-inject opt-in test agent"
-            author = "test"
-            runtime_version = "0.1.0"
-
-            [llm]
-            provider = "mock"
-            model = "test-model"
-
-            {extra_toml}
-            "#
-        ))
-        .unwrap();
-        let provider = Arc::new(MockProvider::single_text("test"));
-        AgentCore::new(config, manifest, provider, vec![])
-    }
-
-    #[test]
-    fn test_auto_inject_defaults_off_when_manifest_absent() {
-        // Zero-config = current behaviour: auto-inject stays OFF, the LLM
-        // recalls memories via the explicit `memory_recall` tool.
-        let core = make_core_with_memory_toml("");
-        assert!(
-            !core.init_memory_manager().config().auto_inject_enabled,
-            "auto_inject_enabled must default to false"
-        );
-    }
-
-    #[test]
-    fn test_auto_inject_manifest_opt_in_true() {
-        // Per-agent opt-in: `[memory.quality].auto_inject_enabled = true`.
-        let core = make_core_with_memory_toml("[memory.quality]\nauto_inject_enabled = true\n");
-        assert!(
-            core.init_memory_manager().config().auto_inject_enabled,
-            "manifest opt-in must enable auto-inject"
-        );
-    }
-
-    #[test]
-    fn test_auto_inject_manifest_opt_in_false() {
-        // Explicit opt-out is still honored.
-        let core = make_core_with_memory_toml("[memory.quality]\nauto_inject_enabled = false\n");
-        assert!(
-            !core.init_memory_manager().config().auto_inject_enabled,
-            "manifest opt-out must disable auto-inject"
-        );
-    }
-
-    #[test]
-    fn test_forgetting_live_update_refreshes_session_handle_config() {
-        // ADR-057 §5.3 redesign: toggling memory forgetting via a live
-        // runtime-config PUT must refresh the shared `MemorySessionHandle`
-        // config — the `memory_recall` tool reads it from there (whereas
-        // auto-inject builds a fresh manager per turn). Without this
-        // refresh an in-flight session would keep the boot-time config
-        // (forgetting OFF) until the next runtime restart.
-        let mut core = make_core_with_memory_toml("");
-        let handle = Arc::new(crate::memory::MemorySessionHandle::new(None));
-        core.memory_session = Some(handle.clone());
-        assert!(
-            handle.memory_config().is_none(),
-            "handle config is unset until memory init"
-        );
-
-        // Simulate the memory-panel PUT: forgetting ON, half-life 90 days.
-        let overrides = RuntimeConfigOverrides {
-            memory_forgetting_enabled: Some(true),
-            memory_forgetting_half_life_days: Some(90),
-            ..Default::default()
-        };
-        core.apply_runtime_config(&overrides);
-
-        let cfg = handle
-            .memory_config()
-            .expect("handle config must be refreshed after the forgetting PUT");
-        assert!(
-            cfg.forgetting.enabled,
-            "retrieval-side decay must become live without a restart"
-        );
-        assert_eq!(cfg.forgetting.half_life_days, 90);
-
-        // Auto-inject reads the same settings straight from the core.
-        assert!(core.init_memory_manager().config().forgetting.enabled);
-        assert_eq!(
-            core.init_memory_manager()
-                .config()
-                .forgetting
-                .half_life_days,
-            90
-        );
     }
 
     // ─────────────────────────────────────────────────────────────────────

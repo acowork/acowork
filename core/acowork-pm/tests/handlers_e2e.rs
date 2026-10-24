@@ -102,7 +102,7 @@ async fn body_json(resp: axum::response::Response) -> (StatusCode, serde_json::V
     (status, json)
 }
 
-/// 读取���应 body 为 UTF-8 文本（不要求 JSON）。
+/// 读取响应 body 为 UTF-8 文本（不要求 JSON）。
 ///
 /// 用于断言 axum 默认 `Json`/`Path` 提取器的错误响应（plain text），
 /// 这类错误当前未通过自定义 extractor 包装到 `PmError::ErrorEnvelope`。

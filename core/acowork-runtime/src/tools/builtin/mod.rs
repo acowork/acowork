@@ -6,8 +6,6 @@
 //!
 //! | Tool | Permission |
 //! |------|------------|
-//! | memory_recall | memory:read |
-//! | memory_store | memory:write |
 //! | http_request | network:<url> |
 //! | web_fetch | network:<url> |
 //! | shell | filesystem:exec |
@@ -50,8 +48,6 @@ pub mod intent_send;
 pub mod load_skill;
 pub mod mcp_install;
 pub mod mcp_uninstall;
-pub mod memory_recall;
-pub mod memory_store;
 pub mod rag_query;
 pub mod shell;
 pub mod todo_write;
@@ -115,9 +111,7 @@ use crate::tools::workspace_resolver::SharedResolver;
 ///
 /// # Arguments
 /// * `resolver` - Workspace directory resolver (single source of truth)
-/// * `agent_id` - Agent ID for memory isolation and identity management
 /// * `tool_http_timeout_ms` - Default HTTP timeout in milliseconds for built-in tools
-/// * `memory_session` - Optional MemorySessionHandle for memory_recall and memory_store late-binding store access.
 /// * `mcp_notifier` - Optional McpConfigNotifier for mcp_install/mcp_uninstall event notification.
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
 ///   for config persistence — MCP configs are per-agent, stored in `{agent_home}/config/agent_mcp.json`,
@@ -134,9 +128,7 @@ use crate::tools::workspace_resolver::SharedResolver;
 #[allow(clippy::too_many_arguments)]
 pub fn all_builtin_tools(
     resolver: &SharedResolver,
-    agent_id: &str,
     tool_http_timeout_ms: u64,
-    memory_session: Option<Arc<crate::memory::MemorySessionHandle>>,
     mcp_notifier: McpNotifyRef,
     agent_home: String,
     intent_send_config: crate::tools::builtin::intent_send::IntentSendConfig,
@@ -156,19 +148,7 @@ pub fn all_builtin_tools(
         })
         .collect();
 
-    // Clone memory_session for MemoryStoreTool before the first use
-    // (MemoryRecallTool takes ownership of the original).
-    let memory_session_for_store = memory_session.clone();
-
     let mut tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(memory_recall::MemoryRecallTool::new(
-            agent_id,
-            memory_session,
-        )),
-        Arc::new(memory_store::MemoryStoreTool::new(
-            agent_id,
-            memory_session_for_store,
-        )),
         Arc::new(http_request::HttpRequestTool::new()),
         Arc::new(web_fetch::WebFetchTool::with_timeout(
             Duration::from_millis(tool_http_timeout_ms),
@@ -203,7 +183,6 @@ pub fn all_builtin_tools(
 mod tests {
     use super::*;
     use crate::mcp_notify::McpConfigNotifier;
-    use crate::memory::MemorySessionHandle;
     use crate::tools::workspace_resolver::WorkspaceResolver;
 
     /// Build a minimal set of dependencies for `all_builtin_tools` testing.
@@ -216,9 +195,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn make_test_deps() -> (
         SharedResolver,
-        String, // agent_id
         u64,    // tool_http_timeout_ms
-        Option<Arc<MemorySessionHandle>>,
         McpNotifyRef,
         String, // agent_home
         crate::tools::builtin::intent_send::IntentSendConfig,
@@ -228,7 +205,6 @@ mod tests {
         let resolver = Arc::new(std::sync::RwLock::new(WorkspaceResolver::new(
             dir.path().to_str().unwrap(),
         )));
-        let memory_session = Some(Arc::new(MemorySessionHandle::new(None)));
         let mcp_notifier: McpNotifyRef = Some(Arc::new(McpConfigNotifier::default()));
         let intent_cfg = crate::tools::builtin::intent_send::IntentSendConfig {
             instance_id: "3f8c2a1b-4d5e-6f7a-8b9c-0d1e2f3a4b5c".to_string(),
@@ -237,9 +213,7 @@ mod tests {
         };
         (
             resolver,
-            "com.test.agent".to_string(),
             30_000,
-            memory_session,
             mcp_notifier,
             "/tmp/test-agent".to_string(),
             intent_cfg,
@@ -264,11 +238,10 @@ mod tests {
         // fails if someone re-adds the registration without also restoring
         // the `codebase` branch in `handle_lsp_relay_update` and the
         // `BUILTIN_TOOLS` catalog entry.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, intent_cfg, package_dir) =
-            make_test_deps();
+        let (resolver, timeout, mcp, agent_home, intent_cfg, package_dir) = make_test_deps();
 
         let tools = all_builtin_tools(
-            &resolver, &agent_id, timeout, mem, mcp, agent_home, intent_cfg, package_dir,
+            &resolver, timeout, mcp, agent_home, intent_cfg, package_dir,
         );
 
         let names = tool_names(&tools);
@@ -285,11 +258,10 @@ mod tests {
         // tool surface (ADR-061 §10). `context_retrieve` was deleted
         // outright once it turned out to scan every session file instead of
         // the current one; `context_abandon` survives as dead code.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, intent_cfg, package_dir) =
-            make_test_deps();
+        let (resolver, timeout, mcp, agent_home, intent_cfg, package_dir) = make_test_deps();
 
         let tools = all_builtin_tools(
-            &resolver, &agent_id, timeout, mem, mcp, agent_home, intent_cfg, package_dir,
+            &resolver, timeout, mcp, agent_home, intent_cfg, package_dir,
         );
 
         let names = tool_names(&tools);
@@ -304,18 +276,15 @@ mod tests {
     fn test_all_builtin_tools_default_includes_core_tools() {
         // Regression: platform-tool changes only affect the compression
         // tools; all other core tools are always present.
-        let (resolver, agent_id, timeout, mem, mcp, agent_home, intent_cfg, package_dir) =
-            make_test_deps();
+        let (resolver, timeout, mcp, agent_home, intent_cfg, package_dir) = make_test_deps();
 
         let tools = all_builtin_tools(
-            &resolver, &agent_id, timeout, mem, mcp, agent_home, intent_cfg, package_dir,
+            &resolver, timeout, mcp, agent_home, intent_cfg, package_dir,
         );
 
         let names = tool_names(&tools);
         // Core tools that must always be present (sanity check)
         for required in [
-            "memory_recall",
-            "memory_store",
             "http_request",
             "web_fetch",
             "file_read",

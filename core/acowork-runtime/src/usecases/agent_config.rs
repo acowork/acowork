@@ -112,28 +112,12 @@ pub enum ConfigField {
     /// ADR-061 compression ratio bar for levels 1-7 (0.90 default =
     /// "compress until at most 10% remains").
     CompressionRatioThreshold,
-    /// `AgentConfig::distiller_enabled` — `Option<bool>`.
-    /// ADR-071 D4 runtime switch for the EpisodicDistiller.
-    DistillerEnabled,
-    /// `AgentConfig::distiller_models` — `Option<Vec<CompactModelRef>>`.
-    /// ADR-071 D4/D5 runtime-chosen distiller model candidate list
-    /// (ordered; tried in order on call failure).
-    DistillerModels,
-    /// `AgentConfig::distiller_interval_minutes` — `Option<u64>`.
-    DistillerIntervalMinutes,
-    /// `AgentConfig::distiller_accumulation_threshold` — `Option<usize>`.
-    DistillerAccumulationThreshold,
-    /// `AgentConfig::distiller_idle_minutes` — `Option<u64>`.
-    DistillerIdleMinutes,
-    /// `AgentConfig::memory_forgetting_enabled` — `Option<bool>`.
-    /// Runtime switch for episodic memory forgetting (default off).
-    MemoryForgettingEnabled,
-    /// `AgentConfig::memory_forgetting_half_life_days` — `Option<u64>`.
-    MemoryForgettingHalfLifeDays,
-    /// `AgentConfig::memory_forgetting_dormant_threshold` — `Option<f32>`.
-    MemoryForgettingDormantThreshold,
-    /// `AgentConfig::memory_forgetting_archive_days` — `Option<u64>`.
-    MemoryForgettingArchiveDays,
+    // ADR-100: the distiller / forgetting knobs (`distiller_enabled`,
+    // `distiller_models`, `distiller_interval_minutes`,
+    // `distiller_accumulation_threshold`, `distiller_idle_minutes`,
+    // `memory_forgetting_*`) moved into the memory service and are gone from
+    // `AgentConfig` entirely — there is neither a read nor a write path. An
+    // older client PUT carrying them is dropped by serde as an unknown field.
     /// `AgentConfig::session_language` — `Option<String>`.
     /// Per-agent override for the LLM session language hint baked into
     /// the identity-context system prompt (replaces
@@ -182,15 +166,6 @@ impl ConfigField {
             ConfigField::ShellApprovalThreshold => "shell_approval_threshold",
             ConfigField::ApprovalTimeoutSecs => "approval_timeout_secs",
             ConfigField::CompressionRatioThreshold => "compression_ratio_threshold",
-            ConfigField::DistillerEnabled => "distiller_enabled",
-            ConfigField::DistillerModels => "distiller_models",
-            ConfigField::DistillerIntervalMinutes => "distiller_interval_minutes",
-            ConfigField::DistillerAccumulationThreshold => "distiller_accumulation_threshold",
-            ConfigField::DistillerIdleMinutes => "distiller_idle_minutes",
-            ConfigField::MemoryForgettingEnabled => "memory_forgetting_enabled",
-            ConfigField::MemoryForgettingHalfLifeDays => "memory_forgetting_half_life_days",
-            ConfigField::MemoryForgettingDormantThreshold => "memory_forgetting_dormant_threshold",
-            ConfigField::MemoryForgettingArchiveDays => "memory_forgetting_archive_days",
             ConfigField::SessionLanguage => "session_language",
             ConfigField::IntentIdleRotateHours => "intent_idle_rotate_hours",
             ConfigField::IntentHandoffMaxTokens => "intent_handoff_max_tokens",
@@ -250,7 +225,7 @@ impl PutAgentConfigBody {
     ///   - `Some(v)` → `FieldPatch::Set(v)`
     ///
     /// `from_request_fields` exists so the HTTP handler can pass its
-    /// 9 raw wire fields directly without an intermediate struct —
+    /// raw wire fields directly without an intermediate struct —
     /// see the call site in `http/server.rs::put_agent_config`.
     #[allow(clippy::too_many_arguments)]
     pub fn from_request_fields(
@@ -262,16 +237,6 @@ impl PutAgentConfigBody {
         shell_approval_threshold: Option<serde_json::Value>,
         approval_timeout_secs: Option<serde_json::Value>,
         compression_ratio_threshold: Option<serde_json::Value>,
-        distiller_enabled: Option<serde_json::Value>,
-        distiller_model: Option<serde_json::Value>,
-        distiller_models: Option<serde_json::Value>,
-        distiller_interval_minutes: Option<serde_json::Value>,
-        distiller_accumulation_threshold: Option<serde_json::Value>,
-        distiller_idle_minutes: Option<serde_json::Value>,
-        memory_forgetting_enabled: Option<serde_json::Value>,
-        memory_forgetting_half_life_days: Option<serde_json::Value>,
-        memory_forgetting_dormant_threshold: Option<serde_json::Value>,
-        memory_forgetting_archive_days: Option<serde_json::Value>,
         session_language: Option<serde_json::Value>,
         intent_idle_rotate_hours: Option<serde_json::Value>,
         intent_handoff_max_tokens: Option<serde_json::Value>,
@@ -326,71 +291,6 @@ impl PutAgentConfigBody {
         if let Some(v) = compression_ratio_threshold {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::CompressionRatioThreshold,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = distiller_enabled {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::DistillerEnabled,
-                op: value_to_patch(&v),
-            });
-        }
-        // New list field wins when present; the legacy single-value field
-        // is folded into a one-element list for older Desktop builds.
-        if let Some(v) = distiller_models {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::DistillerModels,
-                op: value_to_patch(&v),
-            });
-        } else if let Some(v) = distiller_model {
-            let folded = match &v {
-                serde_json::Value::Null => serde_json::Value::Null,
-                other => serde_json::Value::Array(vec![other.clone()]),
-            };
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::DistillerModels,
-                op: value_to_patch(&folded),
-            });
-        }
-        if let Some(v) = distiller_interval_minutes {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::DistillerIntervalMinutes,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = distiller_accumulation_threshold {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::DistillerAccumulationThreshold,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = distiller_idle_minutes {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::DistillerIdleMinutes,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = memory_forgetting_enabled {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::MemoryForgettingEnabled,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = memory_forgetting_half_life_days {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::MemoryForgettingHalfLifeDays,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = memory_forgetting_dormant_threshold {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::MemoryForgettingDormantThreshold,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = memory_forgetting_archive_days {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::MemoryForgettingArchiveDays,
                 op: value_to_patch(&v),
             });
         }

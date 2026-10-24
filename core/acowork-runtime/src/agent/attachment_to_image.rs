@@ -6,7 +6,7 @@
 //! ADR-046 splits attachments into 5 variants in [`AttachedItem`]:
 //! `file_upload`, `image_upload`, `attached_file`, `attached_selection`,
 //! `attached_folder`. Each one is persisted to JSONL as a separate
-//! `system` entry (handled by [`crate::agent::loop_memory`]'s
+//! `system` entry (handled by [`crate::agent::loop_persist`]'s
 //! `write_attached_items`), but only `image_upload` payloads need to
 //! flow into the LLM request as multimodal content.
 //!
@@ -484,7 +484,7 @@ mod tests {
 
     /// Images over [`MAX_INLINE_IMAGE_BYTES`] are silently dropped with a
     /// warn log. JSONL system entry is still written (handled by
-    /// `loop_memory::write_attached_items` upstream), so the agent sees
+    /// `loop_persist::write_attached_items` upstream), so the agent sees
     /// the filename but the LLM doesn't see the picture.
     #[tokio::test]
     async fn derive_image_parts_drops_oversized_images() {

@@ -16,7 +16,7 @@
 //!
 //! - **统一收口**：所有「取前 N 个字节/字符用于预览/截断」的需求都走这里。
 //! - **tracing 友好**：`Preview<'_>` 实现 `Display`，可以直接放进 `tracing::field`
-//!   的 `%` 占位符，不会产生额外堆分配（截断时一次性 collect��。
+//!   的 `%` 占位符，不会产生额外堆分配（截断时一次性 collect）。
 //! - **与现有 `truncate_utf8` 等价**：本模块承接 `tools/output.rs::truncate_utf8`
 //!   的语义（原本该函数被孤立、未被复用），所有调用点都迁移过来。
 //!
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(truncate_utf8(s, 2), "");
         assert_eq!(truncate_utf8(s, 1), "");
         // 混合：CJK 3 字节 + ASCII 1 字节
-        let mixed = "中a"; // 3 + 1 = 4 ���节
+        let mixed = "中a"; // 3 + 1 = 4 字节
         assert_eq!(truncate_utf8(mixed, 3), "中");
         assert_eq!(truncate_utf8(mixed, 2), "");
         assert_eq!(truncate_utf8(mixed, 1), "");

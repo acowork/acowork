@@ -330,6 +330,10 @@ pub fn build_router(state: AppState) -> Router {
         // acowork-doc 独立进程反向代理（`/api/doc/*` → `127.0.0.1:{doc_port}/*`）。
         // 未就绪时返回 503（带 Retry-After），与 PM 同一契约。
         .merge(crate::http::doc_proxy::doc_proxy_routes())
+        // ADR-100: memory service reverse proxy (`/api/memory/*` plus the
+        // agent-scoped panel paths `/api/agents/{id}/memory/*`, which until now
+        // were Runtime proxies). Not-ready → 503 + `Retry-After`, same contract.
+        .merge(crate::http::memory_proxy::memory_proxy_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
         // Design doc 24 §6.3: relay tunnel management.
@@ -459,6 +463,25 @@ pub struct SystemStatusResponse {
     /// `false` in `local` mode or after setup is finished.
     #[serde(default)]
     pub requires_setup: bool,
+    /// ADR-100: the memory service's availability, for the Desktop's panel /
+    /// search-tab gating. Always present so the frontend never has to tell
+    /// "disabled" and "not started yet" apart by looking for a missing key.
+    pub memory_service: MemoryServiceStatus,
+}
+
+/// ADR-100: memory service readiness projection.
+///
+/// `ready` is the supervisor's own flag (`memory_process.ready`), so it is
+/// `false` both when `[memory].enabled = false` and while the service is
+/// starting / restarting — the Desktop's behavior in both cases is to hide the
+/// memory surface rather than to render a panel that 503s.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryServiceStatus {
+    /// Whether `/api/memory/*` can be served right now.
+    pub ready: bool,
+    /// The MCP endpoint advertised to Agents (`None` when `auto_inject_mcp` is
+    /// off, or when no advertise URL has been derived yet).
+    pub mcp_url: Option<String>,
 }
 
 /// `GET /api/status` — system status
@@ -513,6 +536,10 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
             .as_ref()
             .is_some_and(|s| s.registration_open),
         requires_setup: gw.user_snapshot.as_ref().is_some_and(|s| s.requires_setup),
+        memory_service: MemoryServiceStatus {
+            ready: gw.memory_process.as_ref().is_some_and(|p| p.ready),
+            mcp_url: gw.memory_mcp_url.clone(),
+        },
     })
 }
 

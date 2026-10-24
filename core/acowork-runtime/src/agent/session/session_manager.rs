@@ -171,25 +171,10 @@ pub struct RuntimeConfigOverrides {
     /// "compress until at most 10% remains"). `None` = use the built-in
     /// default. See [`crate::agent::compression_constants::MIN_COMPRESSION_RATIO`].
     pub compression_ratio_threshold: Option<f64>,
-    /// ADR-071 D4: EpisodicDistiller runtime switch (`agent_config.json`).
-    pub distiller_enabled: Option<bool>,
-    /// ADR-071 D4/D5: ordered distiller model candidate list
-    /// (`agent_config.json`). `Some(vec![])` clears the runtime layer.
-    pub distiller_models: Option<Vec<acowork_core::protocol::CompactModelRef>>,
-    /// ADR-071 D4: distiller interval (minutes).
-    pub distiller_interval_minutes: Option<u64>,
-    /// ADR-071 D4: distiller accumulation threshold.
-    pub distiller_accumulation_threshold: Option<usize>,
-    /// ADR-071 D4: distiller idle threshold (minutes).
-    pub distiller_idle_minutes: Option<u64>,
-    /// Memory forgetting runtime switch (`agent_config.json`). Default off.
-    pub memory_forgetting_enabled: Option<bool>,
-    /// Episodic decay half-life (days).
-    pub memory_forgetting_half_life_days: Option<u64>,
-    /// Retention threshold below which an episodic node becomes Dormant.
-    pub memory_forgetting_dormant_threshold: Option<f32>,
-    /// Days a Dormant node is retained before archiving to the PurgeLog.
-    pub memory_forgetting_archive_days: Option<u64>,
+    // ADR-100: the `distiller_*` / `memory_forgetting_*` overrides were dropped
+    // from this struct together with their `AgentConfig` counterparts — the
+    // memory service owns that policy and exposes it over its own REST API, so
+    // the Runtime has no state to cache or broadcast.
     /// Per-agent LLM session language override (e.g. `"zh-CN"`, `"en"`).
     /// When `Some(_)`, replaces `UserProfile.language` in the
     /// identity-context text block sent to the LLM (see
@@ -219,15 +204,6 @@ impl RuntimeConfigOverrides {
             && self.shell_approval_threshold.is_none()
             && self.approval_timeout_secs.is_none()
             && self.compression_ratio_threshold.is_none()
-            && self.distiller_enabled.is_none()
-            && self.distiller_models.is_none()
-            && self.distiller_interval_minutes.is_none()
-            && self.distiller_accumulation_threshold.is_none()
-            && self.distiller_idle_minutes.is_none()
-            && self.memory_forgetting_enabled.is_none()
-            && self.memory_forgetting_half_life_days.is_none()
-            && self.memory_forgetting_dormant_threshold.is_none()
-            && self.memory_forgetting_archive_days.is_none()
             && self.session_language.is_none()
     }
 
@@ -257,33 +233,6 @@ impl RuntimeConfigOverrides {
         }
         if other.compression_ratio_threshold.is_some() {
             self.compression_ratio_threshold = other.compression_ratio_threshold;
-        }
-        if other.distiller_enabled.is_some() {
-            self.distiller_enabled = other.distiller_enabled;
-        }
-        if other.distiller_models.is_some() {
-            self.distiller_models = other.distiller_models.clone();
-        }
-        if other.distiller_interval_minutes.is_some() {
-            self.distiller_interval_minutes = other.distiller_interval_minutes;
-        }
-        if other.distiller_accumulation_threshold.is_some() {
-            self.distiller_accumulation_threshold = other.distiller_accumulation_threshold;
-        }
-        if other.distiller_idle_minutes.is_some() {
-            self.distiller_idle_minutes = other.distiller_idle_minutes;
-        }
-        if other.memory_forgetting_enabled.is_some() {
-            self.memory_forgetting_enabled = other.memory_forgetting_enabled;
-        }
-        if other.memory_forgetting_half_life_days.is_some() {
-            self.memory_forgetting_half_life_days = other.memory_forgetting_half_life_days;
-        }
-        if other.memory_forgetting_dormant_threshold.is_some() {
-            self.memory_forgetting_dormant_threshold = other.memory_forgetting_dormant_threshold;
-        }
-        if other.memory_forgetting_archive_days.is_some() {
-            self.memory_forgetting_archive_days = other.memory_forgetting_archive_days;
         }
         if other.session_language.is_some() {
             self.session_language = other.session_language.clone();
@@ -325,33 +274,6 @@ impl RuntimeConfigOverrides {
         if let Some(v) = self.compression_ratio_threshold {
             cfg.compression_ratio_threshold = Some(v);
         }
-        if let Some(v) = self.distiller_enabled {
-            cfg.distiller_enabled = Some(v);
-        }
-        if let Some(v) = &self.distiller_models {
-            cfg.distiller_models = Some(v.clone());
-        }
-        if let Some(v) = self.distiller_interval_minutes {
-            cfg.distiller_interval_minutes = Some(v);
-        }
-        if let Some(v) = self.distiller_accumulation_threshold {
-            cfg.distiller_accumulation_threshold = Some(v);
-        }
-        if let Some(v) = self.distiller_idle_minutes {
-            cfg.distiller_idle_minutes = Some(v);
-        }
-        if let Some(v) = self.memory_forgetting_enabled {
-            cfg.memory_forgetting_enabled = Some(v);
-        }
-        if let Some(v) = self.memory_forgetting_half_life_days {
-            cfg.memory_forgetting_half_life_days = Some(v);
-        }
-        if let Some(v) = self.memory_forgetting_dormant_threshold {
-            cfg.memory_forgetting_dormant_threshold = Some(v);
-        }
-        if let Some(v) = self.memory_forgetting_archive_days {
-            cfg.memory_forgetting_archive_days = Some(v);
-        }
         if let Some(ref v) = self.session_language {
             cfg.session_language = Some(v.clone());
         }
@@ -374,15 +296,6 @@ impl From<&AgentConfig> for RuntimeConfigOverrides {
             shell_approval_threshold: cfg.shell_approval_threshold.clone(),
             approval_timeout_secs: cfg.approval_timeout_secs,
             compression_ratio_threshold: cfg.compression_ratio_threshold,
-            distiller_enabled: cfg.distiller_enabled,
-            distiller_models: cfg.distiller_models.clone(),
-            distiller_interval_minutes: cfg.distiller_interval_minutes,
-            distiller_accumulation_threshold: cfg.distiller_accumulation_threshold,
-            distiller_idle_minutes: cfg.distiller_idle_minutes,
-            memory_forgetting_enabled: cfg.memory_forgetting_enabled,
-            memory_forgetting_half_life_days: cfg.memory_forgetting_half_life_days,
-            memory_forgetting_dormant_threshold: cfg.memory_forgetting_dormant_threshold,
-            memory_forgetting_archive_days: cfg.memory_forgetting_archive_days,
             session_language: cfg.session_language.clone(),
         }
     }

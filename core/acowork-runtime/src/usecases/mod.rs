@@ -9,7 +9,6 @@ pub mod agent_tools;
 pub mod attachment;
 pub mod debug_service;
 pub mod git_query;
-pub mod memory_query;
 pub(crate) mod package_workspace;
 pub mod session_config;
 pub mod session_control;
@@ -36,7 +35,6 @@ pub use git_query::{
     GitLogParams, GitLogResponse, GitQueryService, GitStatusParams, GitStatusResponse,
     GitWorktreeStatus,
 };
-pub use memory_query::MemoryQueryService;
 pub use session_config::SessionConfigService;
 pub use session_control::SessionControlService;
 pub use session_metadata::SessionMetadataService;
@@ -50,7 +48,6 @@ pub mod agent_tools_impl;
 pub mod attachment_impl;
 pub mod debug_service_impl;
 pub mod git_query_impl;
-pub mod memory_query_impl;
 pub mod session_config_impl;
 pub mod session_metadata_impl;
 pub mod workspace_mutation_impl;
@@ -62,7 +59,6 @@ pub use agent_tools_impl::RuntimeAgentToolsService;
 pub use attachment_impl::RuntimeAttachmentService;
 pub use debug_service_impl::RuntimeDebugService;
 pub use git_query_impl::RuntimeGitQueryService;
-pub use memory_query_impl::MemoryAdminAdapter;
 pub use session_config_impl::{RuntimeSessionConfigService, SharedSessionConfigs};
 pub use session_metadata_impl::RuntimeSessionMetadataService;
 pub use workspace_mutation_impl::RuntimeWorkspaceMutationService;

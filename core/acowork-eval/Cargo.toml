@@ -1,0 +1,12 @@
+[package]
+name = "acowork-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+description = "Offline retrieval-evaluation kernel shared by the runtime and memory test harnesses. Dev-only: it must never appear in a shipped binary's dependency graph (enforced by tests/shipping_redline.rs)."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

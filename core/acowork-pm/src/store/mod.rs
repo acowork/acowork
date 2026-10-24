@@ -2,7 +2,7 @@
 //!
 //! ## 子模块
 //!
-//! - [`atomic`] —— 原子��� + 路径校验工具
+//! - [`atomic`] —— 原子写 + 路径校验工具
 //! - [`index`] —— 二级内存索引（按 project / assignee / 状态 / 反向依赖图）
 //! - [`tree`] —— `TreePmStore` + `PmStore` trait（基于目录树的实现）
 //!

@@ -408,7 +408,7 @@ mod tests {
         let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
         dir.refresh().await;
 
-        // cache 应为空（抽不到 instance_id 字段）—— 用任何 UUID 查�� miss
+        // cache 应为空（抽不到 instance_id 字段）—— 用任何 UUID 查都 miss
         let cache = dir.cache.read().await;
         assert!(
             cache.is_empty(),

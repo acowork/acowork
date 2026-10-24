@@ -1,10 +1,14 @@
 //! `GET /search` — single-agent aggregate search (ADR-081 §4.1).
 //!
-//! Aggregates the agent's memory / file / git scopes in-process by
+//! Aggregates the agent's conversation / file / git scopes in-process by
 //! locking the existing usecase slots and running each requested scope
-//! in parallel (`tokio::join!`). The conversation scope (P1-2, vector
-//! conversation index) is not built yet — it reports
-//! `{"status":"not_indexed"}` and yields no hits.
+//! in parallel (`tokio::join!`).
+//!
+//! ADR-100: the `memory` scope is **retired** here — memory nodes moved to the
+//! standalone memory service, and the Desktop's memory tab queries
+//! `/api/memory/search?instance_id=` directly. A request that still asks for
+//! `memory` gets an honest `{"status":"not_available"}` instead of an empty
+//! result that would look like "no matches".
 //!
 //! The Gateway reverse-proxies `/api/agents/{id}/search` to this route
 //! (ADR-009: agent-private data stays inside the Runtime; the Gateway
@@ -23,10 +27,9 @@ use serde_json::{json, Map, Value};
 
 use crate::http::server::HttpState;
 use crate::usecases::git_query::GitLogParams;
-use acowork_core::retrieval::LexicalQuery;
+use acowork_core::retrieval::{LexicalQuery, RetrievalEvidence};
 
 use crate::search::analyzer::AnalyzerMode;
-use crate::usecases::memory_query::{RetrievalEvidence, SemanticMemoryQuery};
 use crate::usecases::workspace_query::SearchFilesParams;
 
 /// Query parameters for `GET /search` (ADR-081 §4.1).
@@ -39,10 +42,6 @@ pub struct GlobalSearchParams {
     pub scopes: String,
     #[serde(default = "default_limit")]
     pub limit: usize,
-    /// Semantic mode for the memory scope: `vector` | `hybrid` |
-    /// `keyword`. Empty = `hybrid`.
-    #[serde(default)]
-    pub mode: String,
     /// Workspace id for the file / git scopes. When omitted those scopes
     /// are skipped (reported as `{"status":"skipped"}`) — the Desktop
     /// file/git tabs use their dedicated endpoints anyway.
@@ -65,7 +64,7 @@ pub struct SearchHit {
     pub title: String,
     pub snippet: String,
     /// In-source ranking signal. Semantics depend on the scope:
-    /// - `memory`, `conversation`: the real RRF fused score
+    /// - `conversation`: the real RRF fused score
     ///   (`Σ w / (60 + rank + 1)`) from the shared engine. It is a
     ///   **rank-position signal, not a similarity**: not comparable across
     ///   queries, not comparable to another scope's values, and it can repeat
@@ -82,7 +81,7 @@ pub struct SearchHit {
 #[derive(Debug, serde::Serialize)]
 pub struct GlobalSearchResponse {
     pub hits: Vec<SearchHit>,
-    /// Per-scope metadata: `{"memory": {"status","count"}, ...}`, plus a
+    /// Per-scope metadata: `{"conversation": {"status","count"}, ...}`, plus a
     /// `search_meta` block describing how the query was processed (analyzer
     /// mode, term count, embedding availability) — the observability half of
     /// ADR-095 D2/D6: without it, a retrieval regression is invisible.
@@ -133,38 +132,6 @@ async fn resolve_search_policy(state: &HttpState) -> crate::search::policy::Sear
     let resp = svc.get_config(&state.agent_id).await;
     // Absent config section ⇒ `Default`, which is `analyzer_mode = off`.
     resp.config.and_then(|c| c.search).unwrap_or_default()
-}
-
-/// Set/order difference between two ranked id lists.
-///
-/// Ids and counts only — never content. Shadow logging must not become a
-/// channel for copying user data into the logs (ADR-095 §6), which is why this
-/// takes `u64` ids rather than hits.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct RetrievalSetDiff {
-    common: usize,
-    only_production: usize,
-    only_shadow: usize,
-    /// True when the shared ids appear in a different relative order, i.e. the
-    /// analyzer changed *ranking* and not merely the result set.
-    order_changed: bool,
-}
-
-fn diff_retrieval_sets(first: &[u64], second: &[u64]) -> RetrievalSetDiff {
-    use std::collections::HashSet;
-    let s2: HashSet<u64> = second.iter().copied().collect();
-    let s1: HashSet<u64> = first.iter().copied().collect();
-    let common: Vec<u64> = first.iter().copied().filter(|id| s2.contains(id)).collect();
-    // Compare the shared ids' relative order, projected out of each list.
-    let order_in = |list: &[u64]| -> Vec<u64> {
-        list.iter().copied().filter(|id| s1.contains(id) && s2.contains(id)).collect()
-    };
-    RetrievalSetDiff {
-        common: common.len(),
-        only_production: first.iter().filter(|id| !s2.contains(id)).count(),
-        only_shadow: second.iter().filter(|id| !s1.contains(id)).count(),
-        order_changed: order_in(first) != order_in(second),
-    }
 }
 
 /// Build `git`-scope hits with CommitPicker-identical semantics
@@ -298,11 +265,6 @@ pub(crate) async fn global_search(
 
     // Clone service handles out of their slots so the guards are dropped
     // before the parallel await points below (also makes the futures Send).
-    let memory_svc = if want_memory {
-        state.memory_query.lock().await.clone()
-    } else {
-        None
-    };
     let file_svc = if want_file {
         state.workspace_query.lock().await.clone()
     } else {
@@ -324,7 +286,6 @@ pub(crate) async fn global_search(
     // scope would let memory and conversation disagree about what the user
     // asked for.
     let policy = resolve_search_policy(&state).await;
-    let memory_policy = policy.memory_policy();
     let conversation_policy = policy.conversation_policy();
     let analyzer_mode = policy.analyzer_mode();
     let analyzer_cfg = policy.analyzer_config();
@@ -350,101 +311,6 @@ pub(crate) async fn global_search(
         "analyzer_mode": analyzer_mode.as_str(),
         "lexical_term_count": lexical_terms.len(),
     });
-
-    let qq = q.clone();
-    let mode = params.mode.clone();
-    let lexical_memory = lexical_terms.to_vec();
-    // `HttpState` is `Clone` and every field is an `Arc`/handle, so each
-    // `async move` future takes its own copy rather than borrowing across the
-    // join (the futures run concurrently and cannot share a borrow).
-    let state_mem = state.clone();
-    // Shadow runs the analyzed path *additionally*; production still uses raw.
-    let dual_memory_terms = dual.lexical_terms.clone();
-    let analyzer_mode_m = analyzer_mode;
-    let memory_fut = async move {
-        let state = &state_mem;
-        let Some(svc) = memory_svc else {
-            return (json!({"status": "unavailable"}), vec![], false);
-        };
-        let embedding = embed_query(state, &qq).await;
-        let embedded = embedding.is_some();
-        let semantic_mode = if mode.is_empty() { "hybrid" } else { mode.as_str() };
-        let query = SemanticMemoryQuery {
-            query_text: qq,
-            mode: semantic_mode.to_string(),
-            limit,
-            embedding,
-            lexical_terms: lexical_memory,
-        };
-        match svc.semantic_search_detailed(&query, &memory_policy).await {
-            Ok(nodes) => {
-                // Collected before `nodes` is consumed by the map below.
-                let production_node_ids: Vec<u64> = nodes.iter().map(|s| s.node.node_id).collect();
-                let hits: Vec<SearchHit> = nodes
-                    .into_iter()
-                    .map(|scored| {
-                        let node = scored.node;
-                        let ev = scored.evidence;
-                        // Locate keys first, then evidence merged in — the same
-                        // shape the conversation scope builds. Assigning the
-                        // evidence object as the whole payload dropped
-                        // `node_id`, and the preview panel then fetched node 0
-                        // (GlobalSearchDialog maps a missing node_id to 0).
-                        let mut payload = json!({
-                            "node_id": node.node_id,
-                            "node_type": node.node_type,
-                            "sub_type": node.sub_type,
-                        });
-                        if let (Some(map), Some(e)) = (payload.as_object_mut(), ev.as_ref()) {
-                            e.merge_into(map);
-                        }
-                        SearchHit {
-                            scope: "memory".to_string(),
-                            title: node.node_type.clone(),
-                            snippet: node.content.clone(),
-                            // Real fused score from the shared engine. The
-                            // synthetic 1.0-i*1e-4 this replaces was an order
-                            // index wearing a float's clothes (D4).
-                            score: ev.as_ref().map_or(0.0, |e| e.fused_score),
-                            payload,
-                        }
-                    })
-                    .collect();
-                let count = hits.len();
-                // Shadow rollout (design 28 §4.2): production answered with the
-                // raw query, so re-run the *analyzed* path here and log how the
-                // two differ. This is the only way to decide whether `on` is
-                // safe, and it must be measured on live traffic rather than the
-                // eval fixture.
-                if analyzer_mode_m == AnalyzerMode::Shadow {
-                    let shadow_query = SemanticMemoryQuery {
-                        query_text: query.query_text.clone(),
-                        mode: query.mode.clone(),
-                        limit: query.limit,
-                        embedding: query.embedding.clone(),
-                        lexical_terms: dual_memory_terms.clone(),
-                    };
-                    if let Ok(shadow) = svc.semantic_search_detailed(&shadow_query, &memory_policy).await {
-                        let production_ids: Vec<u64> = production_node_ids;
-                        let shadow_ids: Vec<u64> = shadow.iter().map(|s| s.node.node_id).collect();
-                        let diff = diff_retrieval_sets(&production_ids, &shadow_ids);
-                        tracing::info!(
-                            scope = "memory",
-                            production = production_ids.len(),
-                            shadow = shadow_ids.len(),
-                            only_production = diff.only_production,
-                            only_shadow = diff.only_shadow,
-                            common = diff.common,
-                            order_changed = diff.order_changed,
-                            "global search: shadow retrieval comparison"
-                        );
-                    }
-                }
-                (json!({"status": "ok", "count": count}), hits, embedded)
-            }
-            Err(e) => (json!({"status": "error", "message": e.to_string()}), vec![], embedded),
-        }
-    };
 
     let qq = q.clone();
     let workspace_id = params.workspace_id.clone();
@@ -543,22 +409,20 @@ pub(crate) async fn global_search(
     };
 
     let (
-        (memory_meta, memory_hits, memory_embedded),
         (file_meta, file_hits),
         (git_meta, git_hits),
         (conversation_meta, conversation_hits, conversation_embedded),
-    ) = tokio::join!(memory_fut, file_fut, git_fut, conversation_fut);
+    ) = tokio::join!(file_fut, git_fut, conversation_fut);
 
     // Presentation order, deliberately **not** a score sort (ADR-095 D4).
     //
-    // A fused score is an in-source rank signal: comparing a memory hit's
+    // A fused score is an in-source rank signal: comparing a conversation hit's
     // 0.016 against a file hit's synthetic 0.9999 would rank two unrelated
     // number systems against each other and silently bury the scopes that
     // report honest numbers. Each scope therefore keeps its own engine order
     // (`fused_rank`), and the scopes are concatenated in a fixed priority.
     // Consumers render this order as-is.
     let mut hits: Vec<SearchHit> = Vec::new();
-    hits.extend(memory_hits);
     hits.extend(conversation_hits);
     hits.extend(file_hits);
     hits.extend(git_hits);
@@ -573,7 +437,16 @@ pub(crate) async fn global_search(
         scopes_map.insert("conversation".to_string(), conversation_meta);
     }
     if want_memory {
-        scopes_map.insert("memory".to_string(), memory_meta);
+        // ADR-100: memory nodes live in the memory service. Reporting an
+        // empty result would read as "nothing matched", so the scope says
+        // plainly that this Runtime no longer answers it.
+        scopes_map.insert(
+            "memory".to_string(),
+            json!({
+                "status": "not_available",
+                "message": "memory search moved to the memory service (/api/memory/search)",
+            }),
+        );
     }
     if want_file {
         scopes_map.insert("file".to_string(), file_meta);
@@ -588,7 +461,6 @@ pub(crate) async fn global_search(
     let search_meta = json!({
         "analyzer_mode": analyzer_meta["analyzer_mode"],
         "lexical_term_count": analyzer_meta["lexical_term_count"],
-        "memory": { "embedded": memory_embedded },
         "conversation": { "embedded": conversation_embedded },
     });
 
@@ -696,52 +568,6 @@ mod tests {
         assert_eq!(hits.len(), 3);
         // Newest first preserved (commit 0 first in the seeded order).
         assert_eq!(hits[0].title, "commit 0");
-    }
-
-    #[test]
-    fn shadow_diff_reports_the_added_and_dropped_ids() {
-        let production = vec![1u64, 2, 3];
-        let shadow = vec![1u64, 3, 4];
-        let diff = diff_retrieval_sets(&production, &shadow);
-        assert_eq!(diff.common, 2);
-        assert_eq!(diff.only_production, 1); // id 2
-        assert_eq!(diff.only_shadow, 1); // id 4
-        // Shared ids keep the same relative order (1 before 3) in both.
-        assert!(!diff.order_changed);
-    }
-
-    #[test]
-    fn shadow_diff_detects_reordering_of_the_shared_ids() {
-        // Same set, different ranking: the analyzer changed *order*, which is the
-        // subtler shadow signal — a set-only comparison would report no change.
-        let production = vec![1u64, 2, 3];
-        let shadow = vec![3, 2, 1];
-        let diff = diff_retrieval_sets(&production, &shadow);
-        assert_eq!(diff.common, 3);
-        assert_eq!(diff.only_production, 0);
-        assert_eq!(diff.only_shadow, 0);
-        assert!(diff.order_changed);
-    }
-
-    #[test]
-    fn shadow_diff_of_identical_lists_reports_no_change() {
-        let a = vec![5u64, 6, 7];
-        let diff = diff_retrieval_sets(&a, &a);
-        assert_eq!(diff.only_production, 0);
-        assert_eq!(diff.only_shadow, 0);
-        assert!(!diff.order_changed);
-        assert_eq!(diff.common, 3);
-    }
-
-    #[test]
-    fn shadow_diff_handles_an_empty_side() {
-        // The analyzed path yielding nothing is the fallback case; it must read as
-        // "production had N, shadow had 0", not as an error.
-        let diff = diff_retrieval_sets(&[1, 2, 3], &[]);
-        assert_eq!(diff.only_production, 3);
-        assert_eq!(diff.only_shadow, 0);
-        assert_eq!(diff.common, 0);
-        assert!(!diff.order_changed);
     }
 
     #[test]

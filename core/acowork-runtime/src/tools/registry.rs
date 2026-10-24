@@ -198,7 +198,7 @@ mod tests {
             type = "Network"
 
             [[permissions]]
-            type = "MemoryWrite"
+            type = "Wasm"
 
             {}
             "#,

@@ -699,6 +699,44 @@ impl Gateway {
             tracing::info!("user supervisor disabled (user.enabled=false)");
         }
 
+        // acowork-memory: standalone process `acowork-memory`, lifecycle managed
+        // by the Gateway supervisor (spawn + `/health` poll + exponential-
+        // backoff restart). Memory left the Runtime with ADR-100, so this is the
+        // only place that decides whether an Agent has a memory at all:
+        // `memory.enabled=false` means no process, no `memory` MCP server in any
+        // catalog, and `/api/memory/*` answers 503.
+        //
+        // Non-fatal like the others — a memory outage must not take the Gateway
+        // or the agents down with it.
+        if self.config.memory.enabled {
+            let memory_bin = crate::lifecycle::process::sibling_binary("acowork-memory");
+            let supervisor_cfg = crate::lifecycle::memory_supervisor::MemorySupervisorConfig {
+                memory_bin,
+                port: self.config.memory.port,
+                port_file: data_dir_path.join("memory.port"),
+                log_dir: data_dir_path.join("logs"),
+                gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
+                // The service pulls its distiller / embedding credentials over
+                // HTTP (ADR-100 decision 7), so it needs the loopback API
+                // address, not the advertise host.
+                gateway_url: format!("http://127.0.0.1:{}", http_config.port),
+                gateway_token: Some(internal_service_token.clone()),
+                data_dir: self.config.memory.data_dir.clone(),
+                config: self.config.memory.config.clone(),
+            };
+            crate::lifecycle::memory_supervisor::start_memory_supervisor(
+                supervisor_cfg,
+                shared_state.clone(),
+            );
+            tracing::info!(
+                port = self.config.memory.port,
+                enabled = true,
+                "memory supervisor started (ADR-100)"
+            );
+        } else {
+            tracing::info!("memory supervisor disabled (memory.enabled=false)");
+        }
+
         // doc_mcp_url: MCP endpoint exposed via the Gateway reverse proxy
         // (Desktop goes through /api/doc/mcp).
         {
@@ -709,6 +747,23 @@ impl Gateway {
                     gw.advertise_host.clone(),
                     http_config.port,
                     self.config.doc.mcp_http_path
+                ))
+            } else {
+                None
+            };
+        }
+
+        // memory_mcp_url: same pattern (ADR-100). Written unconditionally so a
+        // stale value from a previous branch can never survive: `Some` only when
+        // the service is enabled *and* injection is on.
+        {
+            let mut gw = shared_state.write().await;
+            gw.memory_mcp_url = if self.config.memory.enabled && self.config.memory.auto_inject_mcp {
+                Some(format!(
+                    "http://{}:{}{}",
+                    gw.advertise_host.clone(),
+                    http_config.port,
+                    self.config.memory.mcp_http_path
                 ))
             } else {
                 None
@@ -1258,6 +1313,16 @@ impl Gateway {
                     } else {
                         None
                     },
+                    // ADR-100: same gate as the initial `memory_mcp_url` write
+                    // below — a disabled supervisor must not be re-advertised
+                    // by an IP-change pass.
+                    memory_mcp_path: if self.config.memory.enabled
+                        && self.config.memory.auto_inject_mcp
+                    {
+                        Some(self.config.memory.mcp_http_path.clone())
+                    } else {
+                        None
+                    },
                 };
                 crate::lifecycle::advertise_watchdog::spawn_advertise_watchdog(
                     shared_state.clone(),
@@ -1656,8 +1721,8 @@ impl Gateway {
                     }
                 }
 
-                // The other Gateway-hosted services (doc / pm / user) are
-                // spawned by this process, so this process owns their
+                // The other Gateway-hosted services (doc / pm / user / memory)
+                // are spawned by this process, so this process owns their
                 // lifetime — same reason as `acowork-embed` above. Without
                 // this they outlive a restart until their ADR-018 watchdog
                 // notices the Gateway is gone (5 min default): duplicate
@@ -1669,6 +1734,7 @@ impl Gateway {
                         ("acowork-doc", gw.doc_process.as_ref().map(|p| p.pid)),
                         ("acowork-pm", gw.pm_process.as_ref().map(|p| p.pid)),
                         ("acowork-user", gw.user_process.as_ref().map(|p| p.pid)),
+                        ("acowork-memory", gw.memory_process.as_ref().map(|p| p.pid)),
                     ];
                     drop(gw);
                     for (name, pid) in hosted {
@@ -1789,6 +1855,7 @@ mod tests {
             pm: crate::config::PmConfig::default(),
             doc: crate::config::DocConfig::default(),
             user: crate::config::UserConfig::default(),
+            memory: crate::config::MemoryConfig::default(),
             security: crate::config::SecurityConfig::default(),
             auth_mode: None,
             relay: crate::config::RelayClientConfig::default(),

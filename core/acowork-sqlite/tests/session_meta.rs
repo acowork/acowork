@@ -20,10 +20,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use acowork_core::error::Result as AcoworkResult;
-use acowork_memory::session_meta::{
-    SessionMeta, SessionMetaStore, SessionVisibility, last_active_at_ms,
+use acowork_core::session_meta::{
+    SessionMeta, SessionMetaStore, SessionPerf, SessionTokens, SessionVisibility, TodoItem,
+    TodoStatus, last_active_at_ms,
 };
-use acowork_memory::{SessionTokens, TodoItem, TodoStatus};
 use acowork_sqlite::{SqliteSessionMetaStore, SqliteStore};
 
 const DIM: usize = 4;
@@ -68,7 +68,7 @@ fn make_meta(
         // Deliberately different sample counts per figure: the storage
         // layer must round-trip the two independent denominators, not just
         // the derived means.
-        perf: Some(acowork_memory::SessionPerf {
+        perf: Some(SessionPerf {
             tps_sum: 105.0,
             tps_samples: 2,
             ttft_ms_sum: 1290.0,

@@ -4,7 +4,6 @@
 //! - `"network:https://api.weather.com"` — Network access with URL scope
 //! - `"filesystem:read:~/Documents"` — Filesystem read with path scope
 //! - `"filesystem:write:~/workdir"` — Filesystem write with path scope
-//! - `"memory:read"` / `"memory:write"` — Memory access
 //! - `"intent:send:com.example.calendar"` — Intent send
 //! - `"intent:receive:com.example.weather"` — Intent receive
 //! - `"identity:read"` / `"identity:write"` — Identity access
@@ -24,8 +23,9 @@ enum PermissionTag {
     Network = 0,
     FilesystemRead = 1,
     FilesystemWrite = 2,
-    MemoryRead = 3,
-    MemoryWrite = 4,
+    // Tags 3 and 4 are retired, not renumbered (ADR-100 moved memory behind a hosted
+    // service, so no permission gates it any more). Leaving the gap in place keeps
+    // every other tag at its historic byte value.
     IntentSend = 5,
     IntentReceive = 6,
     IdentityRead = 7,
@@ -41,8 +41,6 @@ impl Permission {
             Permission::Network(_) => PermissionTag::Network as u8,
             Permission::FilesystemRead(_) => PermissionTag::FilesystemRead as u8,
             Permission::FilesystemWrite(_) => PermissionTag::FilesystemWrite as u8,
-            Permission::MemoryRead => PermissionTag::MemoryRead as u8,
-            Permission::MemoryWrite => PermissionTag::MemoryWrite as u8,
             Permission::IntentSend(_) => PermissionTag::IntentSend as u8,
             Permission::IntentReceive(_) => PermissionTag::IntentReceive as u8,
             Permission::IdentityRead => PermissionTag::IdentityRead as u8,
@@ -97,8 +95,6 @@ impl Permission {
             0 => Ok(Permission::Network(value)),
             1 => Ok(Permission::FilesystemRead(value)),
             2 => Ok(Permission::FilesystemWrite(value)),
-            3 => Ok(Permission::MemoryRead),
-            4 => Ok(Permission::MemoryWrite),
             5 => Ok(Permission::IntentSend(value)),
             6 => Ok(Permission::IntentReceive(value)),
             7 => Ok(Permission::IdentityRead),
@@ -126,10 +122,6 @@ pub enum Permission {
     /// None = full filesystem write; Some(path) = restricted to that path
     /// e.g., "filesystem:write:~/workdir"
     FilesystemWrite(Option<String>),
-    /// Memory read access
-    MemoryRead,
-    /// Memory write access
-    MemoryWrite,
     /// Intent send to specific agent
     /// e.g., "intent:send:com.example.calendar"
     IntentSend(Option<String>),
@@ -187,7 +179,7 @@ impl PermissionParseError {
         Self::new(
             input,
             &format!(
-                "unknown category '{}'. Expected one of: network, filesystem, memory, intent, identity, shell, wasm, rag",
+                "unknown category '{}'. Expected one of: network, filesystem, intent, identity, shell, wasm, rag",
                 category
             ),
         )
@@ -281,17 +273,6 @@ impl Permission {
                     )),
                 }
             }
-            "memory" => match rest {
-                "read" => Ok(Permission::MemoryRead),
-                "write" => Ok(Permission::MemoryWrite),
-                other => Err(PermissionParseError::new(
-                    s,
-                    &format!(
-                        "invalid memory operation '{}'. Expected 'read' or 'write'",
-                        other
-                    ),
-                )),
-            },
             "intent" => {
                 let (direction, target) = rest.split_once(':').ok_or_else(|| {
                     PermissionParseError::missing_component(s, "direction:target")
@@ -350,8 +331,6 @@ impl Permission {
             Permission::FilesystemRead(None) => "filesystem:read".to_string(),
             Permission::FilesystemWrite(Some(path)) => format!("filesystem:write:{path}"),
             Permission::FilesystemWrite(None) => "filesystem:write".to_string(),
-            Permission::MemoryRead => "memory:read".to_string(),
-            Permission::MemoryWrite => "memory:write".to_string(),
             Permission::IntentSend(Some(target)) => format!("intent:send:{target}"),
             Permission::IntentSend(None) => "intent:send".to_string(),
             Permission::IntentReceive(Some(source)) => format!("intent:receive:{source}"),
@@ -381,8 +360,6 @@ impl Permission {
             (Permission::FilesystemRead(a), Permission::FilesystemRead(b)) => a == b,
             (Permission::FilesystemWrite(None), Permission::FilesystemWrite(_)) => true,
             (Permission::FilesystemWrite(a), Permission::FilesystemWrite(b)) => a == b,
-            (Permission::MemoryRead, Permission::MemoryRead) => true,
-            (Permission::MemoryWrite, Permission::MemoryWrite) => true,
             (Permission::IntentSend(None), Permission::IntentSend(_)) => true,
             (Permission::IntentSend(a), Permission::IntentSend(b)) => a == b,
             (Permission::IntentReceive(None), Permission::IntentReceive(_)) => true,
@@ -402,7 +379,6 @@ impl Permission {
         match self {
             Permission::Network(_) => "network",
             Permission::FilesystemRead(_) | Permission::FilesystemWrite(_) => "filesystem",
-            Permission::MemoryRead | Permission::MemoryWrite => "memory",
             Permission::IntentSend(_) | Permission::IntentReceive(_) => "intent",
             Permission::IdentityRead | Permission::IdentityWrite => "identity",
             Permission::Shell => "shell",
@@ -418,8 +394,6 @@ impl Permission {
             Permission::Network(_) => "Network",
             Permission::FilesystemRead(_) => "FilesystemRead",
             Permission::FilesystemWrite(_) => "FilesystemWrite",
-            Permission::MemoryRead => "MemoryRead",
-            Permission::MemoryWrite => "MemoryWrite",
             Permission::IntentSend(_) => "IntentSend",
             Permission::IntentReceive(_) => "IntentReceive",
             Permission::IdentityRead => "IdentityRead",
@@ -440,9 +414,7 @@ impl Permission {
             Permission::IntentSend(v) => v.as_deref(),
             Permission::IntentReceive(v) => v.as_deref(),
             Permission::RagQuery(v) => v.as_deref(),
-            Permission::MemoryRead
-            | Permission::MemoryWrite
-            | Permission::IdentityRead
+            Permission::IdentityRead
             | Permission::IdentityWrite
             | Permission::Shell
             | Permission::Wasm => None,
@@ -484,8 +456,6 @@ impl<'de> Deserialize<'de> for Permission {
             "Network" => Ok(Permission::Network(repr.value)),
             "FilesystemRead" => Ok(Permission::FilesystemRead(repr.value)),
             "FilesystemWrite" => Ok(Permission::FilesystemWrite(repr.value)),
-            "MemoryRead" => Ok(Permission::MemoryRead),
-            "MemoryWrite" => Ok(Permission::MemoryWrite),
             "IntentSend" => Ok(Permission::IntentSend(repr.value)),
             "IntentReceive" => Ok(Permission::IntentReceive(repr.value)),
             "IdentityRead" => Ok(Permission::IdentityRead),
@@ -571,12 +541,15 @@ mod tests {
     }
 
     #[test]
-    fn test_permission_parse_memory() {
-        let p = Permission::parse("memory:read").unwrap();
-        assert_eq!(p, Permission::MemoryRead);
-
-        let p2 = Permission::parse("memory:write").unwrap();
-        assert_eq!(p2, Permission::MemoryWrite);
+    fn memory_permissions_are_retired_not_parsed() {
+        // ADR-100: memory lives behind a hosted service now, so no permission gates it.
+        // A package that still declares `memory:*` has to fail loudly at parse time
+        // instead of carrying a permission that nothing reads any more.
+        for input in ["memory:read", "memory:write"] {
+            let err = Permission::parse(input).unwrap_err();
+            assert!(err.reason.contains("unknown category"), "{input}");
+        }
+        assert!(serde_json::from_str::<Permission>(r#"{"type":"MemoryRead"}"#).is_err());
     }
 
     #[test]
@@ -626,7 +599,7 @@ mod tests {
     fn test_permission_toml_roundtrip() {
         let perms = vec![
             Permission::Network(Some("https://api.weather.com".into())),
-            Permission::MemoryRead,
+            Permission::IdentityRead,
             Permission::Shell,
         ];
         // Use JSON for Vec roundtrip (TOML array-of-tables format is verbose)
@@ -639,7 +612,6 @@ mod tests {
     fn test_permission_category() {
         assert_eq!(Permission::Network(None).category(), "network");
         assert_eq!(Permission::FilesystemRead(None).category(), "filesystem");
-        assert_eq!(Permission::MemoryRead.category(), "memory");
         assert_eq!(Permission::IntentSend(None).category(), "intent");
         assert_eq!(Permission::IdentityRead.category(), "identity");
         assert_eq!(Permission::Shell.category(), "shell");

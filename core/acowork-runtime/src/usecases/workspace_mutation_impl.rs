@@ -307,7 +307,7 @@ pub(crate) fn resolve_within_static(
     Ok((canonical_root, abs_path, rel_path))
 }
 
-// ── Trait impl ────────────────────────────────────��────────────────────────
+// ── Trait impl ────────────────────────────────────────────────────────────
 
 #[async_trait]
 impl WorkspaceMutationService for RuntimeWorkspaceMutationService {

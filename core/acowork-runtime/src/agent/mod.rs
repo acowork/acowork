@@ -22,7 +22,7 @@ pub mod loop_detector;
 pub mod loop_inbound;
 pub mod loop_interaction;
 pub mod loop_llm;
-pub mod loop_memory;
+pub mod loop_persist;
 pub mod loop_session;
 pub mod loop_tools;
 pub mod retry;

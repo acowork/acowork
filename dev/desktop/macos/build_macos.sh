@@ -267,7 +267,7 @@ echo -e "${YELLOW}[1/$TOTAL_STEPS] Stopping old processes...${NC}"
 # mirrors PM (ADR-064): standalone process `acowork-doc` on port 18081, same
 # watchdog caveat applies. User likewise mirrors PM/Doc (ADR-084): standalone
 # process `acowork-user` on port 18083.
-for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node acowork-pm acowork-doc acowork-user; do
+for proc in acowork-gateway acowork-runtime acowork-embed acowork-lsp-relay acowork-node acowork-pm acowork-doc acowork-user acowork-memory; do
     pids=$(pgrep -f "$proc" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         pkill -f "$proc" 2>/dev/null || true
@@ -493,6 +493,28 @@ else
 fi
 echo ""
 
+# ── Step 4.10: Build Memory service ────────────────────────────────────────
+#
+# Mirrors the services above: the Memory service is a standalone process
+# (`acowork-memory`, ADR-100), located via
+# `current_exe().parent().join("acowork-memory")` — so the binary MUST sit
+# next to acowork-gateway. Without it the Gateway supervisor logs
+# "acowork-memory binary not found" and the memory panel plus the agent's
+# `memory_store` / `memory_recall` tools are gone.
+echo -e "${YELLOW}[4.10/$TOTAL_STEPS] Building Memory service ($PROFILE)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-memory)
+else
+    cargo_args=(cargo build -p acowork-memory)
+fi
+if "${cargo_args[@]}" 2>&1 | tail -20; then
+    echo -e "${GREEN}  ✓ Memory service compiled successfully${NC}"
+else
+    echo -e "${RED}  ✗ Memory service compile failed${NC}"
+    exit 1
+fi
+echo ""
+
 # ── Step 5: Copy resource files ─────────────────────────────────────────────
 #
 # The gateway (and embed) read these from `{exe_dir}/`. We only stage into the
@@ -704,7 +726,7 @@ fi
 echo -e "${YELLOW}[$TOTAL_STEPS/$TOTAL_STEPS] Done!${NC}"
 echo ""
 echo -e "${CYAN}Build artifacts:${NC}"
-ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" "$TARGET_DIR/acowork-pm" "$TARGET_DIR/acowork-doc" "$TARGET_DIR/acowork-user" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
+ls -lh "$TARGET_DIR/acowork-gateway" "$TARGET_DIR/acowork-runtime" "$TARGET_DIR/acowork-embed" "$TARGET_DIR/acowork-lsp-relay" "$TARGET_DIR/acowork-pm" "$TARGET_DIR/acowork-doc" "$TARGET_DIR/acowork-user" "$TARGET_DIR/acowork-memory" 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
 echo ""
 
 if [ "$START_GATEWAY" = "true" ]; then

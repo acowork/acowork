@@ -5,10 +5,17 @@
 //! `agents list/logs/kill`. The remaining command face (`rename`,
 //! `leave`, `service install`) lands in Phase 3.
 //!
+//! ADR-100 adds `migrate-memory`: the operator-triggered half of the
+//! one-shot hand-over of the legacy per-agent memory store to the memory
+//! service (the daemon runs the same pass automatically at startup).
+//!
 //! Design principle (§6.13.5): the node-local CLI is read-only +
 //! node-self-lifecycle tooling — it is NOT a second control plane.
 //! install/uninstall/start/stop for agents always go through the
-//! Gateway.
+//! Gateway. The two write-shaped exceptions are both operator escape
+//! hatches: `agents kill` (emergency stop) and `migrate-memory`
+//! (ADR-100 one-shot data hand-over, which only the Node can perform
+//! because the store it reads is node-local).
 
 use std::path::{Path, PathBuf};
 
@@ -160,6 +167,34 @@ pub enum Command {
     Service {
         #[command(subcommand)]
         cmd: ServiceCommands,
+    },
+    /// Hand the memories that still live in an agent's workspace store to the
+    /// memory service (ADR-100 decision 10). Idempotent: an instance already
+    /// dealt with is marked by `{workspace}/memory/.migrated` and skipped
+    /// unless `--force` is given. The daemon runs this pass at every start;
+    /// this command is the operator's retry once a refusal has been fixed.
+    MigrateMemory {
+        /// Gateway HTTP base URL (the reverse proxy in front of the memory
+        /// service). Default: `http://{gateway-host}:{mqtt-port + 1}`.
+        #[arg(long, value_name = "URL", env = "ACOWORK_GATEWAY_HTTP")]
+        gateway_http: Option<String>,
+        /// Gateway MQTT broker `HOST:PORT`, used only to derive the HTTP base
+        /// when `--gateway-http` is absent (ADR-055 shipped pairing).
+        #[arg(long, value_name = "HOST:PORT")]
+        gateway: Option<String>,
+        /// Migrate one instance only (ADR-073 instance id).
+        #[arg(long, value_name = "INSTANCE_ID")]
+        instance: Option<String>,
+        /// Re-run past the `.migrated` sentinel.
+        #[arg(long)]
+        force: bool,
+        /// Machine-readable report on stdout (one object per instance).
+        #[arg(long)]
+        json: bool,
+        #[arg(long, visible_alias = "work-dir", env = "ACOWORK_NODE_HOME")]
+        home: Option<PathBuf>,
+        #[arg(long, env = "ACOWORK_NODE_PACKAGES_DIR")]
+        packages_dir: Option<PathBuf>,
     },
 }
 
@@ -360,6 +395,7 @@ impl Cli {
                     packages_dir,
                     gateway_host,
                     gateway_mqtt_port,
+                    gateway_http,
                     name,
                     gateway_managed,
                     token,
@@ -386,9 +422,7 @@ impl Cli {
                         let enrolled = NodeIdentity::load(&config.home)?
                             .is_some_and(|i| i.node_token.is_some());
                         if !enrolled {
-                            let http = gateway_http.unwrap_or_else(|| {
-                                format!("http://{}:{}", config.gateway_host, config.gateway_mqtt_port + 1)
-                            });
+                            let http = config.gateway_http_base();
                             if let Some(token) = interactive_enrollment_token(&http).await? {
                                 config.token = Some(token);
                             }
@@ -521,6 +555,35 @@ impl Cli {
                     crate::service::uninstall_service(&config)
                 }
             },
+            Some(Command::MigrateMemory {
+                gateway_http,
+                gateway,
+                instance,
+                force,
+                json,
+                home,
+                packages_dir,
+            }) => {
+                let mut config = NodeConfig {
+                    home: resolve_home(home.as_deref()),
+                    packages_dir,
+                    gateway_http,
+                    ..NodeConfig::default()
+                };
+                // Only the HTTP base matters here; `--gateway` is accepted so
+                // a one-liner copied from `start` derives the same URL.
+                if let Some(gateway) = gateway.as_deref() {
+                    let (host, port) = split_gateway(gateway)?;
+                    config.gateway_host = host;
+                    config.gateway_mqtt_port = port;
+                }
+                init_tracing(&config);
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| NodeError::Config(format!("tokio runtime: {e}")))?;
+                rt.block_on(migrate_memory(&config, instance.as_deref(), force, json))
+            }
             None => {
                 // No subcommand = start (daemon in foreground), per
                 // §6.13.2 `acowork-node` with no args.
@@ -561,6 +624,97 @@ fn print_status(identity: &Option<NodeIdentity>, snapshot: Option<&crate::state:
             println!("No node identity found — run `acowork-node start` to create one.");
         }
     }
+}
+
+/// Run one memory-migration pass over the local install table (ADR-100).
+///
+/// A single round, no backoff: an operator watching this output wants an
+/// immediate answer, and every refusal already carries its reason. Exit status
+/// is non-zero when at least one instance did not migrate, so a deployment
+/// script cannot mistake a partial pass for a finished one.
+async fn migrate_memory(
+    config: &NodeConfig,
+    instance: Option<&str>,
+    force: bool,
+    json: bool,
+) -> Result<(), NodeError> {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::RwLock;
+
+    let identity = NodeIdentity::load(&config.home)?.ok_or_else(|| {
+        NodeError::Identity("No identity.json — run `acowork-node start` first".to_string())
+    })?;
+
+    // The install table comes off the packages dir, exactly as the daemon and
+    // `agents list` build it (§6.5). A running agent's store is skipped by the
+    // pass itself, so this needs no live daemon to consult.
+    let mut state = NodeState::new(config.max_agents);
+    crate::package::restore_installed_agents(&mut state, &config.packages_dir());
+    let mut targets = crate::memory_migration::plan(&state);
+    if let Some(instance) = instance {
+        targets.retain(|t| t.instance_id == instance);
+        if targets.is_empty() {
+            return Err(NodeError::AgentNotFound(format!(
+                "instance '{instance}' not installed (run `agents list` to see installed instances)"
+            )));
+        }
+    }
+    if targets.is_empty() {
+        if json {
+            println!("[]");
+        } else {
+            println!("No agents installed on this node.");
+        }
+        return Ok(());
+    }
+
+    let gateway_http = config.gateway_http_base();
+    if !json {
+        println!("Migrating agent memories to {gateway_http} ({} instances)", targets.len());
+    }
+    let identity = Arc::new(RwLock::new(identity));
+    let options = crate::memory_migration::PassOptions {
+        rounds: 1,
+        pause: Duration::ZERO,
+        force,
+    };
+    let results =
+        crate::memory_migration::run_pass(&targets, &gateway_http, &identity, &options).await;
+
+    let mut failed = 0usize;
+    let mut rows = Vec::with_capacity(results.len());
+    for (instance_id, outcome) in &results {
+        let (status, detail) = match outcome {
+            Ok(outcome) => ("ok", outcome.to_string()),
+            Err(error) => {
+                failed += 1;
+                ("failed", error.to_string())
+            }
+        };
+        rows.push(serde_json::json!({
+            "instance_id": instance_id,
+            "status": status,
+            "detail": detail,
+        }));
+        if !json {
+            println!("  {:<38} {detail}", instance_id.as_str());
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows)
+                .map_err(|e| NodeError::Config(format!("serialize report: {e}")))?
+        );
+    }
+    if failed > 0 {
+        return Err(NodeError::MemoryMigration(format!(
+            "{failed} of {} instances did not migrate (see the lines above)",
+            results.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Print locally installed agents with version / running state / PID.

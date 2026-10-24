@@ -130,5 +130,21 @@ else
     echo -e "${YELLOW}      Without it, /api/auth/*, /api/users/* and /api/user/* return 503.${NC}"
 fi
 
+# Bundle Memory service binary (sibling of acowork-gateway, ADR-100).
+# Mirrors the User service above: the Gateway supervisor locates it via
+# `current_exe().parent().join("acowork-memory")`; without this copy the
+# memory supervisor logs "acowork-memory binary not found" and the memory
+# panel plus the agent's `memory_store` / `memory_recall` tools are gone
+# (`/api/memory/*` and `/api/agents/{id}/memory/*` return 503).
+MEMORY_BIN="$WORKSPACE_ROOT/target/release/acowork-memory"
+if [ -f "$MEMORY_BIN" ]; then
+    cp "$MEMORY_BIN" "$BIN_DIR/acowork-memory"
+    echo -e "${GREEN}Bundled Memory service binary: $MEMORY_BIN${NC}"
+else
+    echo -e "${YELLOW}WARN: acowork-memory not found at $MEMORY_BIN.${NC}"
+    echo -e "${YELLOW}      Run ./dev/common/build_core.sh (release) first.${NC}"
+    echo -e "${YELLOW}      Without it, /api/memory/* returns 503 (memory unavailable).${NC}"
+fi
+
 cd "$DESKTOP_DIR"
 npm run tauri build

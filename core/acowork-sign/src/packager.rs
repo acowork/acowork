@@ -285,14 +285,11 @@ mod tests {
         create_test_agent_dir(&agent_dir);
 
         let output_path = tmp_dir.join("output.agent");
-        // Even with all include flags set, memory/workspace/runtime should be excluded
+        // Every option the type offers is switched on: a `memory/` directory
+        // left over from the pre-ADR-100 layout still must not travel
+        // (ADR-100 decision 11).
         let opts = PackageOptions {
             include_conversations: true,
-            include_episodes: true,
-            include_private_knowledge: true,
-            include_procedural: true,
-            include_autobiographical: true,
-            include_public_knowledge: true,
             include_config: true,
         };
 

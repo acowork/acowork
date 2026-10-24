@@ -346,6 +346,16 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
         servers.push(gateway_hosted_mcp_ref("doc", doc_url.clone()));
     }
 
+    // ADR-100: auto-inject the memory MCP. `memory_mcp_url` is set in
+    // `Gateway::run` (`Some` ⇔ the memory supervisor is enabled and
+    // `memory.auto_inject_mcp = true`) and re-derived by the advertise-host
+    // watchdog on IP change, exactly like doc's. The URL points at the
+    // Gateway-facing `/api/memory/mcp` path, not at the service port, so the
+    // Gateway stays the single authentication/forwarding hop (ADR-009).
+    if let Some(memory_url) = &gw.memory_mcp_url {
+        servers.push(gateway_hosted_mcp_ref("memory", memory_url.clone()));
+    }
+
     AvailableMcps {
         version: cache.version,
         servers,
@@ -586,9 +596,10 @@ mod tests {
         let mut gw = GatewayState::new("/tmp/test-vault");
         gw.pm_mcp_url = Some("http://192.168.1.50:19876/api/pm/mcp".to_string());
         gw.doc_mcp_url = Some("http://192.168.1.50:19876/api/doc/mcp".to_string());
+        gw.memory_mcp_url = Some("http://192.168.1.50:19876/api/memory/mcp".to_string());
 
         let payload = build_available_mcps(&gw);
-        for id in ["pm", "doc"] {
+        for id in ["pm", "doc", "memory"] {
             let s = payload
                 .servers
                 .iter()
@@ -663,6 +674,54 @@ mod tests {
         assert!(
             !payload.servers.iter().any(|s| s.id == "doc"),
             "doc MCP must NOT be injected when doc_mcp_url is None"
+        );
+    }
+
+    /// ADR-100: `memory_mcp_url` set ⇒ the memory MCP is injected like doc's,
+    /// on HTTP transport with the instance-identity template.
+    #[test]
+    fn test_build_available_mcps_injects_memory_mcp_when_url_set() {
+        let mut gw = GatewayState::new("/tmp/test-vault");
+        gw.memory_mcp_url = Some("http://192.168.1.50:19876/api/memory/mcp".to_string());
+
+        let payload = build_available_mcps(&gw);
+
+        let memory = payload
+            .servers
+            .iter()
+            .find(|s| s.id == "memory")
+            .expect("memory MCP should be injected when memory_mcp_url is set");
+        assert_eq!(memory.name, "memory");
+        assert_eq!(memory.url, "http://192.168.1.50:19876/api/memory/mcp");
+        assert_eq!(
+            memory.transport,
+            map_mcp_transport(&McpTransportDef::Http) as i32,
+            "memory MCP must use HTTP transport"
+        );
+        assert_eq!(
+            memory
+                .headers
+                .get("X-MCP-Actor")
+                .map(|s| s.as_str()),
+            Some("{instance_id}"),
+            "memory MCP must carry X-MCP-Actor identity template (ADR-100 instance namespace)"
+        );
+        assert_eq!(memory.tool_timeout_secs, 60);
+    }
+
+    /// ADR-100 reverse: the memory MCP stays out of the catalog when
+    /// `memory_mcp_url` is `None` (supervisor disabled, or the restart cap was
+    /// hit) — a reachable-looking endpoint with no process behind it would
+    /// turn every `memory_*` call into a tool timeout.
+    #[test]
+    fn test_build_available_mcps_skips_memory_when_url_none() {
+        let gw = GatewayState::new("/tmp/test-vault");
+        assert!(gw.memory_mcp_url.is_none());
+
+        let payload = build_available_mcps(&gw);
+        assert!(
+            !payload.servers.iter().any(|s| s.id == "memory"),
+            "memory MCP must NOT be injected when memory_mcp_url is None"
         );
     }
 }

@@ -11,7 +11,7 @@ use serde_json::json;
 /// 构建 PM 服务的 `/health` 路由。
 ///
 /// `data_dir` 被捕获进响应 `details` 供诊断（supervisor 日志可确认 PM
-/// 数据目录解析正���，与 `acowork-gateway/`、`acowork-node/` 平级）。
+/// 数据目录解析正确，与 `acowork-gateway/`、`acowork-node/` 平级）。
 pub fn health_route(data_dir: PathBuf) -> axum::Router {
     axum::Router::new().route(
         "/health",

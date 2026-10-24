@@ -112,10 +112,6 @@ fn db_path(dir: &Path) -> PathBuf {
     dir.join("search.sqlite")
 }
 
-fn messages_path(dir: &Path) -> PathBuf {
-    dir.join("messages.jsonl")
-}
-
 /// The speech kinds whose non-empty body counts as searchable text. Legacy
 /// `intent_*` rows are folded in through [`normalize_kind`] the same way the
 /// read path labels them (write new, read old); `system_notice` and
@@ -262,7 +258,8 @@ fn insert_row(conn: &Connection, line_pos: i64, m: &SessionMessage) -> Result<()
 /// (matching `lines.index`) but yields no searchable row; blank lines occupy
 /// neither.
 fn rebuild(conn: &mut Connection, dir: &Path, log_line_count: u64) -> Result<(), String> {
-    let path = messages_path(dir);
+    // The session directory layout is `chat_sessions`' property, not ours.
+    let path = crate::chat_sessions::messages_path(dir);
     let raw = match fs::read_to_string(&path) {
         Ok(s) => s,
         // A brand-new session legitimately has no log yet.

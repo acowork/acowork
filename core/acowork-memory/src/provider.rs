@@ -1,7 +1,8 @@
 //! MemoryProvider trait - standardized interface for memory storage backends.
 //!
-//! This trait extends the original `MemoryStore` trait with additional methods
-//! that cover all operations the Runtime needs from a memory engine:
+//! The single storage abstraction of the memory layer (ADR-100 retired the old
+//! `MemoryStore` trait, which had no implementation left). Its methods cover
+//! everything a memory engine has to offer the service:
 //! - Hybrid retrieval (vector + full-text)
 //! - Memory store tool entry (conflict detection, dedup, node creation)
 //! - Ambiguous conflict confirmation
@@ -9,10 +10,10 @@
 //! - Node CRUD (procedural, autobiographical, edges)
 //! - Consolidation lifecycle (start, stop, notify, run offline)
 //!
-//! Implementations: GrafeoStore (default), InMemoryProvider (testing),
-//! RemoteMemoryProvider (future).
+//! Implementation: [`crate::sqlite::SqliteStore`] (ADR-082), one database per
+//! agent instance.
 //!
-//! Design ref: ADR-051
+//! Design ref: ADR-051, ADR-082, ADR-100
 
 use std::time::Duration;
 
@@ -29,14 +30,14 @@ use crate::types::{
 
 /// MemoryProvider trait - standardized interface for memory storage backends.
 ///
-/// This is the primary abstraction layer between the Runtime and the memory
-/// engine. The Runtime holds a `dyn MemoryProvider` and never accesses the
-/// concrete storage engine (GrafeoStore) directly.
+/// This is the abstraction layer between the memory service and the storage
+/// engine. The service holds a `dyn MemoryProvider` and never touches the
+/// concrete engine directly.
 ///
-/// Implementations can be: GrafeoStore (current), InMemoryProvider (testing),
-/// RemoteMemoryProvider (future), or any custom storage engine.
+/// Implementations: [`crate::sqlite::SqliteStore`] (ADR-082) and the test
+/// doubles in this crate.
 ///
-/// Design ref: ADR-051, docs/05-memory.md §10.3
+/// Design ref: ADR-051, ADR-082, ADR-100
 #[async_trait]
 pub trait MemoryProvider: Send + Sync {
     // ── Episodic layer ───────────────────────────────────────────────────
@@ -259,14 +260,6 @@ pub trait MemoryProvider: Send + Sync {
         query_text: &str,
         k: usize,
     ) -> Result<Vec<(u64, f64)>>;
-
-    // ── Phase 1: Ambiguous conflict confirmation ────────────────────────
-
-    /// Check whether any ambiguous conflicts are pending user confirmation.
-    fn should_trigger_confirmation(&self) -> Result<bool>;
-
-    /// Generate a human-readable hint for the pending ambiguous conflict.
-    fn generate_confirmation_hint(&self) -> Result<Option<String>>;
 
     // ── Phase 1: Node CRUD ──────────────────────────────────────────────
 

@@ -123,7 +123,7 @@ pub enum SkillParseError {
 /// triggers:
 ///   - weekly report
 /// tool_deps:
-///   - memory_recall
+///   - mcp_memory__memory_recall
 /// ---
 ///
 /// # Weekly Report Skill

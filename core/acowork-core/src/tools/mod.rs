@@ -48,9 +48,13 @@ pub struct BuiltinToolInfo {
 /// the dynamic one (depends on platform, LSP relay presence, etc.),
 /// and a const-time derivation would require `inventory` / linker
 /// tricks that are not worth their weight for a wizard checkbox list.
+///
+/// Memory tools are absent by the same rule as `codebase` (ADR-100):
+/// `memory_store` / `memory_recall` are no longer built-ins — they are
+/// tools of the Gateway-hosted memory MCP server, opted in through
+/// `agent_mcp_tools.json` under their prefixed names (ADR-069), so a
+/// builtin checkbox for them could never take effect.
 pub const BUILTIN_TOOLS: &[BuiltinToolInfo] = &[
-    BuiltinToolInfo { name: "memory_recall",   description: "Recall information from agent's long-term memory",          group: Some("Memory") },
-    BuiltinToolInfo { name: "memory_store",    description: "Store information into agent's long-term memory",          group: Some("Memory") },
     BuiltinToolInfo { name: "file_read",       description: "Read file contents (with line range)",                     group: Some("Filesystem") },
     BuiltinToolInfo { name: "file_write",      description: "Create or overwrite files",                                group: Some("Filesystem") },
     BuiltinToolInfo { name: "file_edit",       description: "Edit files via line-based patches",                        group: Some("Filesystem") },
@@ -93,5 +97,19 @@ mod tests {
             !BUILTIN_TOOLS.iter().any(|t| t.name == "codebase"),
             "codebase must not be offered in the wizard catalog"
         );
+    }
+
+    #[test]
+    fn builtin_tool_catalog_excludes_service_owned_memory_tools() {
+        // ADR-100 moved memory out of the Runtime: `memory_store` /
+        // `memory_recall` are MCP tools of the hosted memory service and are
+        // opted in per ADR-069 under their prefixed names
+        // (`mcp_memory__memory_recall`), not as builtins.
+        for name in ["memory_recall", "memory_store"] {
+            assert!(
+                !BUILTIN_TOOLS.iter().any(|t| t.name == name),
+                "{name} must not be offered as a builtin tool (ADR-100)"
+            );
+        }
     }
 }

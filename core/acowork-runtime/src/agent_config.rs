@@ -190,65 +190,11 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_ratio_threshold: Option<f64>,
 
-    // ── EpisodicDistiller runtime config (ADR-071 D3/D4) ─────────────
-    //
-    // Layer 1 (highest priority) of the distiller config chain. The Desktop
-    // "记忆蒸馏" card reads/writes these fields; `None` = fall through to
-    // manifest `[memory.distiller]` → system defaults (same convention as
-    // temperature / context_window above).
-    /// Runtime switch for the EpisodicDistiller. `None` = use the manifest
-    /// `[memory.distiller].enabled` initial value (default false).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distiller_enabled: Option<bool>,
-    /// Runtime-chosen distiller model candidate list (ordered, tried in
-    /// order on call failure). `None` = fall through to manifest model →
-    /// global `default_compact_models` → first provider model
-    /// (ADR-071 D5 resolution chain).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distiller_models: Option<Vec<acowork_core::protocol::CompactModelRef>>,
-    /// Legacy single-value form of `distiller_models` (pre-list
-    /// `agent_config.json`). Read-on-migrate only — folded into
-    /// `distiller_models` by `migrate_legacy_fields()`; never serialized.
-    #[serde(default, skip_serializing, alias = "distiller_model")]
-    pub distiller_model_legacy: Option<acowork_core::protocol::CompactModelRef>,
-    /// Distiller periodic trigger interval (minutes). `None` = manifest /
-    /// default (60).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distiller_interval_minutes: Option<u64>,
-    /// Distiller backlog accumulation threshold. `None` = manifest / default
-    /// (50).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distiller_accumulation_threshold: Option<usize>,
-    /// Distiller idle threshold (minutes). `None` = manifest / default (30).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distiller_idle_minutes: Option<u64>,
-
-    // ── Memory forgetting runtime config (episodic decay) ────────────
-    //
-    // Layer 1 (highest priority) of the forgetting config chain. The
-    // Desktop "记忆遗忘" card reads/writes these fields; `None` = fall
-    // through to system defaults (same convention as the distiller
-    // fields above). The forgetting mechanism is opt-in: when
-    // `memory_forgetting_enabled` is false (default), the episodic
-    // decay scan is a no-op and episodic nodes never age out.
-    /// Runtime switch for episodic memory forgetting. `None` = disabled
-    /// (default). When enabled, episodic nodes decay by pure time
-    /// (`retention = exp(-ln2 * age_days / half_life_days)`) and are
-    /// progressively down-weighted in retrieval, then Dormant → archived
-    /// after `archive_days`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_forgetting_enabled: Option<bool>,
-    /// Episodic decay half-life in days. `None` = default (180).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_forgetting_half_life_days: Option<u64>,
-    /// Retention threshold below which an episodic node becomes Dormant.
-    /// `None` = default (0.1, ≈ 3.3× half-life).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_forgetting_dormant_threshold: Option<f32>,
-    /// Days a Dormant node is retained before being archived to the
-    /// PurgeLog (30-day recovery window). `None` = default (90).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_forgetting_archive_days: Option<u64>,
+    // ADR-100: the distiller schedule and the episodic-decay policy belong to
+    // the memory service (its own `consolidation.json` is the write target), so
+    // the ten `distiller_*` / `memory_forgetting_*` fields that used to sit here
+    // are gone. `agent_config.json` files written before the move still parse —
+    // serde drops the unknown keys and the next save rewrites the file clean.
 
     /// Per-agent LLM session language override (e.g. `"zh-CN"`, `"en"`).
     ///
@@ -381,16 +327,6 @@ impl ChatRouterConfig {
 // — see `cli::resolve_skill_mode` for the priority chain.
 
 impl AgentConfig {
-    /// Fold the legacy single `distiller_model` into `distiller_models`.
-    /// Idempotent; called once after loading from disk.
-    pub fn migrate_legacy_fields(&mut self) {
-        if let Some(legacy) = self.distiller_model_legacy.take()
-            && self.distiller_models.is_none()
-        {
-            self.distiller_models = Some(vec![legacy]);
-        }
-    }
-
     /// Effective Chat Router config: the stored block or the design defaults.
     pub fn chat_router_config(&self) -> ChatRouterConfig {
         self.chat_router.clone().unwrap_or_default()
@@ -418,9 +354,8 @@ pub fn load_agent_config(work_dir: &Path) -> Result<Option<AgentConfig>, String>
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let mut cfg: AgentConfig = serde_json::from_str(&raw)
+    let cfg: AgentConfig = serde_json::from_str(&raw)
         .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
-    cfg.migrate_legacy_fields();
 
     tracing::info!(
         work_dir = %work_dir.display(),

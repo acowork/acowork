@@ -19,11 +19,6 @@
 //! GET    /sessions/{sid}/messages                // retained
 //! POST   /sessions/{sid}/files                   // ADR-046: upload file/image
 //! GET    /files/{document_id}                    // ADR-046: download blob
-//! GET    /memory/graph                           // reads the memory store
-//! GET    /memory/nodes                           // retained
-//! GET    /memory/nodes/{nid}                     // NEW: memory_query::get_node
-//! DELETE /memory/nodes/{nid}                     // retained
-//! GET    /memory/stats                           // retained
 //! GET    /files/{id}                             // retained
 //! GET    /workspaces                             // retained
 //! POST   /workspaces                             // NEW
@@ -40,8 +35,6 @@
 //! DELETE /workspaces/dir                         // NEW: delete dir
 //! POST   /workspaces/copy                        // NEW: copy file/dir tree
 //! POST   /workspaces/rename                      // NEW: atomic rename (move)
-//! POST   /memory/nodes                           // NEW: create memory node
-//! PUT    /memory/nodes/{nid}                     // NEW: update memory node
 //! GET    /agents/{id}/config                     // NEW: panel 1
 //! GET    /agents/{id}/tools                      // NEW: panel 3
 //! GET    /agents/{id}/status                     // NEW: panel 5
@@ -55,12 +48,6 @@
 //!   ~~POST /sessions/{sid}/question~~     → routed via MQTT
 //!   ~~POST /sessions/{sid}/continue~~     → routed via MQTT
 //! ```
-//!
-//! The three Grafeo-backed `/memory/*` endpoints (`/memory/nodes`,
-//! `/memory/nodes/{nid}`, `/memory/stats`) share their business logic
-//! with the legacy gRPC path through [`crate::http::memory_query`], so
-//! HTTP and gRPC responses stay
-//! consistent.
 //!
 //! The server binds to `127.0.0.1:0` (random port) and is intended
 //! for Gateway reverse proxy access only — not direct Desktop access.
@@ -131,33 +118,16 @@ const GLOBAL_BODY_LIMIT: usize = 64 * 1024 * 1024;
 pub type SharedDispatchSender =
     Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<(String, InboundMessage)>>>>;
 
-/// Shared handle to the Runtime's memory admin service.
-///
-/// `None` until Phase B (`init_memory_provider`) finishes; HTTP handlers
-/// report a graceful "no store" response when it is still empty
-/// (see [`memory_query`]).
-///
-/// ADR-051 P4: type changed from `Arc<GrafeoStore>` to
-/// `Arc<dyn MemoryAdminService>` so the Runtime does not depend on
-/// the concrete grafeo type for HTTP admin endpoints.
-pub type SharedMemoryStore =
-    Arc<std::sync::RwLock<Option<Arc<dyn acowork_memory::admin::MemoryAdminService>>>>;
-
 /// Shared slot for the conversation vector index (ADR-081 §4.2, P1-2).
 ///
-/// Late-bind from Phase B: `ConversationIndex` is built on the memory
-/// backend's SQLite store once the memory store is up, and a
+/// Late-bind from Phase B: `ConversationIndex` is built on the Runtime's
+/// local SQLite store once it is open, and a
 /// [`crate::conversation_index::ConversationIndexer`] task tails the
 /// JSONL conversation logs. `None` until then — the `/search`
 /// conversation scope reports `not_indexed` and search degrades to the
 /// other scopes.
 pub type SharedConversationIndex =
     Arc<std::sync::RwLock<Option<Arc<crate::conversation_index::ConversationIndex>>>>;
-
-/// Shared slot for the consolidation timer (late-bind from AgentCore).
-/// Used by `GET /memory/consolidation/status` to report idle time, pending count.
-pub type SharedConsolidationTimer =
-    Arc<std::sync::RwLock<Option<Arc<crate::memory::ConsolidationTimer>>>>;
 
 /// Shared slot for the RAG provider (late-bind from AgentCore).
 /// Used by `GET /agents/{id}/rag/status` and `POST /agents/{id}/rag/query`.
@@ -293,20 +263,8 @@ pub(crate) struct HttpState {
     /// to memory_store or agent_core is required.
     session_metadata:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
-    pub(crate) memory_query:
-        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
     /// ADR-081 §4.2: conversation vector index (late-bind slot, Phase B).
     pub(crate) conversation_index: SharedConversationIndex,
-    /// Live state of a background `/memory/rebuild-embeddings` run.
-    ///
-    /// The rebuild is started as a detached task (the HTTP handler
-    /// returns immediately with `{"status":"started"}`) and progress is
-    /// read back via `GET /memory/rebuild-progress`. Keeping the slot
-    /// here (not as a constructor argument) means the many test
-    /// construction sites of `HttpState` are untouched. `std::sync::Mutex`
-    /// (not tokio) because the progress callback fires from the
-    /// `spawn_blocking` migration thread — a sync context.
-    rebuild_progress: Arc<std::sync::Mutex<Option<RebuildProgress>>>,
     pub(crate) workspace_query:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>>,
     workspace_mutation:
@@ -339,9 +297,6 @@ pub(crate) struct HttpState {
     attachment: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::AttachmentService>>>>,
     /// ADR-047: Session config service for GET/PUT /sessions/{sid}/config.
     session_config: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
-    /// Consolidation timer (late-bind from AgentCore Phase B).
-    /// Used by `GET /memory/consolidation/status`.
-    consolidation_timer: SharedConsolidationTimer,
     /// RAG provider (late-bind from AgentCore Phase B).
     /// Used by `GET /agents/{id}/rag/status` and `POST /agents/{id}/rag/query`.
     rag_provider: SharedRagProvider,
@@ -479,7 +434,7 @@ impl RuntimeHttpServer {
         session_metadata: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
         >,
-        memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+
         conversation_index: SharedConversationIndex,
         workspace_query: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>,
@@ -494,7 +449,7 @@ impl RuntimeHttpServer {
         session_config: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
         >,
-        consolidation_timer: SharedConsolidationTimer,
+
         rag_provider: SharedRagProvider,
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
         workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
@@ -514,7 +469,6 @@ impl RuntimeHttpServer {
             degraded_reasons,
             mqtt_client,
             session_metadata,
-            memory_query,
             conversation_index,
             workspace_query,
             workspace_mutation,
@@ -523,7 +477,6 @@ impl RuntimeHttpServer {
             agent_config,
             attachment,
             session_config,
-            consolidation_timer,
             rag_provider,
             debug_service,
             workspace_resolver,
@@ -559,7 +512,7 @@ impl RuntimeHttpServer {
         session_metadata: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
         >,
-        memory_query: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
+
         conversation_index: SharedConversationIndex,
         workspace_query: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::WorkspaceQueryService>>>,
@@ -574,7 +527,7 @@ impl RuntimeHttpServer {
         session_config: Arc<
             tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
         >,
-        consolidation_timer: SharedConsolidationTimer,
+
         rag_provider: SharedRagProvider,
         debug_service: Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::DebugService>>>>,
         workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
@@ -612,9 +565,7 @@ impl RuntimeHttpServer {
             degraded_reasons,
             mqtt_client,
             session_metadata,
-            memory_query,
             conversation_index,
-            rebuild_progress: Arc::new(std::sync::Mutex::new(None)),
             workspace_query,
             workspace_mutation,
             git_query,
@@ -622,7 +573,6 @@ impl RuntimeHttpServer {
             agent_config,
             attachment,
             session_config,
-            consolidation_timer,
             rag_provider,
             debug_service,
             workspace_resolver,
@@ -733,24 +683,6 @@ impl RuntimeHttpServer {
             // over the user-facing limit.
             .route("/sessions/{sid}/files", post(upload_file))
             .route("/files/{document_id}", get(read_file))
-            .route("/memory/graph", get(get_memory_graph))
-            .route(
-                "/memory/nodes",
-                get(get_memory_nodes).post(create_memory_node),
-            )
-            // GET + DELETE retained from Phase 3; PUT (update) added now
-            // so HTTP CRUD is complete and the gateway can proxy all 4 ops
-            // through the same path shape.
-            .route(
-                "/memory/nodes/{nid}",
-                get(get_memory_node)
-                    .delete(delete_memory_node)
-                    .put(update_memory_node),
-            )
-            .route("/memory/stats", get(get_memory_stats))
-            .route("/memory/distill", post(post_memory_distill))
-            .route("/memory/rebuild-embeddings", post(rebuild_embeddings))
-            .route("/memory/rebuild-progress", get(rebuild_progress))
             .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
             // NOTE: the legacy `GET /files/{id}` handler was removed as part
             // of the ADR-040 / ADR-009 v2 workspace consolidation. Workspace
@@ -890,13 +822,8 @@ impl RuntimeHttpServer {
             // proxies GET /api/agents/{id}/providers here so the
             // frontend can verify what the Runtime actually has.
             .route("/agents/{id}/providers", get(get_agent_providers))
-            // N1: Consolidation status - reports timer idle, pending count.
             // N2: RAG status - reports whether RAG is configured.
             // N3: RAG query - direct query bypassing LLM (for debugging).
-            .route(
-                "/memory/consolidation/status",
-                get(get_consolidation_status),
-            )
             .route("/agents/{id}/rag/status", get(get_rag_status))
             .route("/agents/{id}/rag/query", post(post_rag_query))
             // Shell risk rules — read effective content or write user override.
@@ -933,13 +860,13 @@ impl RuntimeHttpServer {
             // the Runtime — not on the Gateway.
             .merge(crate::http::avatar::avatar_routes())
             .with_state(state);
-        // Diagnostic: confirms the migration route was wired into the Router
-        // during this build. Runs once at server boot. If this log never
-        // appears, the .route() call above was lost in a refactor and
-        // Gateway start-migration requests will silently 404.
+        // Diagnostic: confirms the Runtime-internal admin route is wired
+        // into the Router during this build. If this log never appears,
+        // the .route() call above was lost in a refactor and the matching
+        // admin requests will silently 404.
         tracing::info!(
             target: "migration_diag",
-            "runtime HTTP server: registered POST /memory/rebuild-embeddings"
+            "runtime HTTP server: registered POST /conversation/index/rebuild"
         );
 
         // Bind to the Node-allocated loopback port (ADR-055 §6.4);
@@ -1396,103 +1323,6 @@ async fn get_messages(
     })?))
 }
 
-/// `GET /memory/graph` — full memory graph (ADR-034 §11.2 #10).
-///
-/// Phase 3 (ADR-034): reads from the memory store via
-/// [`memory_query::list_nodes`] (with no pagination), instead of the
-/// legacy `.jsonl` file fallback. Returns all four user-visible memory
-/// labels (`Episodic`/`Knowledge`/`Procedural`/`Autobiographical`) so
-/// the desktop's Memory panel can render the full graph without having
-/// to chain multiple paginated calls.
-///
-/// On a store that has not been initialised yet (HTTP server starts
-/// before Phase B), the response is a well-formed empty graph. The
-/// response shape (`agent_id` + `node_count` + `nodes` + `edges`) is
-/// kept stable from the legacy handler so the desktop panel does not
-/// have to branch on `node_count == 0`.
-async fn get_memory_graph(
-    State(state): State<HttpState>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // ADR-040: usecase trait is the sole implementation path.
-    let svc = state.memory_query.lock().await;
-    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-
-    let query = crate::usecases::memory_query::MemoryNodeQuery {
-        page: 1,
-        size: 100_000,
-        node_type: String::new(),
-        sub_type: String::new(),
-        keyword: String::new(),
-        time_range: "all".to_string(),
-    };
-    let resp = svc
-        .list_nodes(&query)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let nodes: Vec<serde_json::Value> = resp
-        .nodes
-        .iter()
-        .map(|n| {
-            serde_json::json!({
-                "node_id": n.node_id,
-                "node_type": n.node_type,
-                "content": n.content,
-                "confidence": n.confidence,
-                "decay_score": n.decay_score,
-                "created_at": n.created_at,
-                "last_accessed_at": n.last_accessed_at,
-                "access_count": n.access_count,
-                "status": n.status,
-            })
-        })
-        .collect();
-
-    Ok(Json(serde_json::json!({
-        "agent_id": state.agent_id,
-        "node_count": nodes.len(),
-        "nodes": nodes,
-        "edges": [],
-    })))
-}
-
-// ── Memory API (ADR-033 — Grafeo-backed) ─────────────────────
-
-/// Query parameters for `GET /memory/nodes`.
-///
-/// Matches the `MemoryNodesQuery` contract documented in
-/// `docs/zh/protocols/http.md` §7.7.
-#[derive(Debug, Deserialize)]
-struct ListNodesQuery {
-    #[serde(default)]
-    page: Option<u32>,
-    #[serde(default)]
-    size: Option<u32>,
-    /// Filter by node type ("Episodic" / "Knowledge" / "Procedural" / "Autobiographical").
-    #[serde(default, rename = "type")]
-    node_type: Option<String>,
-    /// Sub-classification filter (Knowledge / Autobiographical only):
-    /// `Fact` | `Preference` | `Relation` | `Procedure` for Knowledge;
-    /// `Identity` | `Capability` | `Limitation` | `Preference` | `History`
-    /// | `Relationship` for Autobiographical. Ignored for other types.
-    #[serde(default)]
-    sub_type: Option<String>,
-    /// Case-insensitive substring filter.
-    #[serde(default)]
-    keyword: Option<String>,
-    /// Time-range bucket: "1h" / "1d" / "7d" / "30d" / "all".
-    #[serde(default)]
-    time_range: Option<String>,
-    /// Semantic search query text (ADR-081 P1-1). Only used when `mode`
-    /// is "vector" or "hybrid"; ignored otherwise.
-    #[serde(default)]
-    q: Option<String>,
-    /// Semantic search mode: "vector" / "hybrid" / "keyword" (ADR-081
-    /// P1-1). Empty string or "keyword" keeps the legacy substring path.
-    #[serde(default)]
-    mode: Option<String>,
-}
-
 /// `POST /conversation/index/rebuild` — reset the conversation vector
 /// index and let the tailer rebuild from the JSONL history (ADR-081
 /// §4.2 "索引目录独立，可删重建"). The index is append-only-derivable,
@@ -1511,390 +1341,6 @@ async fn rebuild_conversation_index(
     };
     index.rebuild();
     Ok(Json(serde_json::json!({"status": "rebuilding"})))
-}
-
-/// `GET /memory/nodes` — list memory nodes (paginated, filtered, searched).
-async fn get_memory_nodes(
-    State(state): State<HttpState>,
-    Query(params): Query<ListNodesQuery>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // ADR-081 P1-1: `?q=&mode=vector|hybrid` switches to semantic search.
-    // `mode=keyword` (or no `q`) keeps the legacy substring path below.
-    let semantic_mode = params.mode.as_deref().unwrap_or("").trim();
-    if semantic_mode != "keyword" && !semantic_mode.is_empty() {
-        let Some(q) = params.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Json(serde_json::json!({"nodes": [], "total": 0, "page": 1, "size": 0, "model_dim": 0})));
-        };
-        // Clone the provider out of AgentCore first: the read guard is not
-        // Send, so it cannot be held across the async `embed` await.
-        let embedding = global_search::embed_query(&state, q).await;
-        let query = crate::usecases::memory_query::SemanticMemoryQuery {
-            query_text: q.to_string(),
-            mode: semantic_mode.to_string(),
-            limit: params.size.unwrap_or(20) as usize,
-            embedding,
-            // This panel endpoint has no query analyzer: `q` drives both
-            // sources, which is what an empty term list means to the engine.
-            lexical_terms: Vec::new(),
-        };
-        let svc = state.memory_query.lock().await;
-        let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-        let resp = svc
-            .semantic_search(&query)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        return Ok(Json(
-            serde_json::to_value(resp).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-        ));
-    }
-
-    // ADR-040: usecase trait is the sole implementation path.
-    let svc = state.memory_query.lock().await;
-    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-
-    let query = crate::usecases::memory_query::MemoryNodeQuery {
-        page: params.page.unwrap_or(1),
-        size: params.size.unwrap_or(20),
-        node_type: params.node_type.unwrap_or_default(),
-        sub_type: params.sub_type.unwrap_or_default(),
-        keyword: params.keyword.unwrap_or_default(),
-        time_range: params.time_range.unwrap_or_default(),
-    };
-    let resp = svc
-        .list_nodes(&query)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(
-        serde_json::to_value(resp).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    ))
-}
-
-/// `GET /memory/nodes/{nid}` — single memory node detail (ADR-034 §11.2 #12).
-///
-/// Added in Phase 3 so the Memory panel can render node detail views
-/// without having to download the entire graph. The business logic
-/// lives in [`memory_query::get_node`] so the same shape can be
-/// surfaced over gRPC in the future.
-async fn get_memory_node(
-    State(state): State<HttpState>,
-    Path(nid): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let node_id: u64 = nid.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    // ADR-040: usecase trait is the sole implementation path.
-    let svc = state.memory_query.lock().await;
-    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let val = svc
-        .get_node(node_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(val))
-}
-
-/// `GET /memory/stats` — memory statistics.
-///
-/// Returns the full `MemoryStats` contract (defined in
-/// `crate::usecases::memory_query`). The same contract is produced by
-/// both the ADR-040 service path and the pre-ADR-040 fallback path;
-/// keeping the struct `Serialize` and using `serde_json::to_value`
-/// directly avoids any drift between the two paths.
-async fn get_memory_stats(
-    State(state): State<HttpState>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    // ADR-040: usecase trait is the sole implementation path.
-    let svc = state.memory_query.lock().await;
-    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let stats = svc
-        .get_stats()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(
-        serde_json::to_value(&stats).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    ))
-}
-
-/// `DELETE /memory/nodes/{nid}` — delete a memory node.
-async fn delete_memory_node(
-    State(state): State<HttpState>,
-    Path(nid): Path<String>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let node_id: u64 = nid.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    // ADR-040: usecase trait is the sole implementation path.
-    let svc = state.memory_query.lock().await;
-    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    svc.delete_node(node_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(
-        serde_json::json!({"deleted": true, "node_id": node_id}),
-    ))
-}
-
-/// Request body for `POST /memory/nodes`.
-///
-/// `properties` is a flat `key → JSON value` map. The implementation is
-/// responsible for serialising values into the underlying store (see
-/// [`crate::http::memory_query::json_to_grafeo_value`]).
-#[derive(Deserialize)]
-struct CreateMemoryNodeBody {
-    label: String,
-    #[serde(default)]
-    properties: std::collections::HashMap<String, serde_json::Value>,
-}
-
-/// `POST /memory/nodes` — create a new memory node.
-///
-/// Returns `{"node_id": <u64>, "label": "..."}` on success. The handler
-/// relies on the ADR-040 usecase trait so memory-store initialisation
-/// timing (the Runtime HTTP server starts before Phase B) reports a clean
-/// 503 instead of a panic.
-async fn create_memory_node(
-    State(state): State<HttpState>,
-    Json(body): Json<CreateMemoryNodeBody>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    use crate::usecases::memory_query::CreateMemoryNodeInput;
-    let input = CreateMemoryNodeInput {
-        label: body.label,
-        properties: body.properties,
-    };
-    let svc = state.memory_query.lock().await;
-    let svc = svc.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let node_id = svc
-        .create_node(&input)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(serde_json::json!({
-        "node_id": node_id,
-        "label": input.label,
-    })))
-}
-
-/// Request body for `PUT /memory/nodes/{nid}`.
-#[derive(Deserialize)]
-struct UpdateMemoryNodeBody {
-    #[serde(default)]
-    properties: std::collections::HashMap<String, serde_json::Value>,
-}
-
-/// `PUT /memory/nodes/{nid}` — update (merge) properties on an existing node.
-///
-/// Returns 404 if the node is missing (mapped from
-/// `RuntimeError::Memory("not found")`).
-async fn update_memory_node(
-    State(state): State<HttpState>,
-    Path(nid): Path<String>,
-    Json(body): Json<UpdateMemoryNodeBody>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let node_id: u64 = nid.parse().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "node_id must be a non-negative integer"})),
-        )
-    })?;
-
-    let svc = state.memory_query.lock().await;
-    let svc = svc.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({"error": "memory store not ready"})),
-    ))?;
-
-    match svc.update_node(node_id, &body.properties).await {
-        Ok(()) => Ok(Json(serde_json::json!({
-            "updated": true,
-            "node_id": node_id,
-        }))),
-        Err(crate::error::RuntimeError::Memory(msg)) if msg.contains("not found") => Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": msg, "node_id": node_id})),
-        )),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "failed to update memory node"})),
-        )),
-    }
-}
-
-/// Request body for `POST /memory/rebuild-embeddings`.
-///
-/// Carries the new embedding model the Gateway has switched to. The
-/// Runtime builds a temporary provider and re-embeds stored nodes,
-/// rebuilding the HNSW indexes (Bug3 — restores the dimension-migration
-/// feature lost in the gRPC→MQTT refactor).
-#[derive(Debug, Deserialize)]
-struct RebuildEmbeddingsBody {
-    /// Embedding endpoint, e.g. `http://127.0.0.1:18080/v1`.
-    #[serde(default)]
-    endpoint: String,
-    /// Embedding model ID.
-    #[serde(default)]
-    model_id: String,
-    /// Target embedding dimension.
-    dimension: usize,
-    /// Which rows to re-embed. Absent on the wire means `All` — the only
-    /// scope that existed before the memory panel grew targeted repair, and
-    /// what a Gateway that predates the field effectively asks for.
-    #[serde(default)]
-    scope: acowork_memory::admin::RebuildScope,
-}
-
-/// Live progress of a background `/memory/rebuild-embeddings` run.
-///
-/// Serialized verbatim by `GET /memory/rebuild-progress` so the Gateway
-/// can poll and forward `rebuilt/total` to the UI.
-#[derive(Debug, Clone, Serialize)]
-struct RebuildProgress {
-    rebuilt: u64,
-    total: u64,
-    /// `true` once the background task has finished (success or error).
-    done: bool,
-    /// Set when the run fails; `None` while running or on success.
-    error: Option<String>,
-}
-
-/// `POST /memory/rebuild-embeddings` — start a background re-embed and
-/// return immediately (`202`).
-///
-/// The rebuild may take minutes on a large store; the client polls
-/// `GET /memory/rebuild-progress` for `rebuilt/total` instead of holding
-/// the connection open (a single synchronous call would trip the
-/// Gateway's 30s proxy timeout and give the UI a bogus failure).
-async fn rebuild_embeddings(
-    State(state): State<HttpState>,
-    Json(body): Json<RebuildEmbeddingsBody>,
-) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
-    tracing::info!(
-        target: "migration_diag",
-        endpoint = %body.endpoint,
-        model_id = %body.model_id,
-        dimension = body.dimension,
-        ?body.scope,
-        "rebuild_embeddings: received start request"
-    );
-
-    // ADR-040: usecase trait is the sole implementation path.
-    let svc = {
-        let guard = state.memory_query.lock().await;
-        guard.clone()
-    };
-    let Some(svc) = svc else {
-        tracing::warn!(
-            target: "migration_diag",
-            "rebuild_embeddings: memory_query service not ready, returning 503"
-        );
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    };
-
-    // Reject a second concurrent rebuild of this store. The Gateway already
-    // refuses to re-queue an agent whose migration is in flight, but this is
-    // the layer that spawns the work, and a repeat would run two migrations
-    // over the same rows at once - double the embedding cost, and both tasks
-    // writing the single progress slot below, so the numbers the UI reads stop
-    // meaning anything. A finished run (`done == true`) is not a collision:
-    // re-running is how a partially-completed rebuild gets retried.
-    {
-        let slot = state
-            .rebuild_progress
-            .lock()
-            .expect("rebuild progress mutex poisoned");
-        if slot.as_ref().is_some_and(|p| !p.done) {
-            tracing::warn!(
-                target: "migration_diag",
-                "rebuild_embeddings: rejected - a rebuild is already running in this runtime"
-            );
-            return Err(StatusCode::CONFLICT);
-        }
-    }
-
-    // Mark the slot as running so GET /memory/rebuild-progress returns a
-    // live (0/total) answer even before the first progress callback fires.
-    *state
-        .rebuild_progress
-        .lock()
-        .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
-        rebuilt: 0,
-        total: 0,
-        done: false,
-        error: None,
-    });
-
-    // Detached task: hold the service Arc and a clone of the shared state,
-    // write progress from the migration's blocking thread, flip `done`
-    // when finished. The HTTP handler returns before the work starts.
-    let state_for_task = state.clone();
-    // Clone the progress slot once; the `move` closure below consumes this
-    // clone while the outer task still needs it to write the final state.
-    let progress_slot = state_for_task.rebuild_progress.clone();
-    let endpoint = body.endpoint.clone();
-    let model_id = body.model_id.clone();
-    let dimension = body.dimension;
-    let scope = body.scope;
-    tokio::spawn(async move {
-        let progress: Arc<dyn Fn(u64, u64) + Send + Sync> = Arc::new(move |rebuilt, total| {
-            *progress_slot
-                .lock()
-                .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
-                rebuilt,
-                total,
-                done: false,
-                error: None,
-            });
-        });
-        let report = svc
-            .rebuild_embeddings_with_progress(&endpoint, &model_id, dimension, scope, Some(progress))
-            .await;
-        let (rebuilt, total, error) = match report {
-            Ok(r) => {
-                tracing::info!(
-                    target: "migration_diag",
-                    total_scanned = r.total_scanned,
-                    rebuilt = r.rebuilt,
-                    skipped_no_embedding = r.skipped_no_embedding,
-                    errors = r.errors,
-                    "rebuild_embeddings: completed"
-                );
-                (r.rebuilt, r.total_scanned, None)
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                tracing::warn!(
-                    target: "migration_diag",
-                    error = %msg,
-                    "rebuild_embeddings: background task failed"
-                );
-                (0, 0, Some(msg))
-            }
-        };
-        *state_for_task
-            .rebuild_progress
-            .lock()
-            .expect("rebuild progress mutex poisoned") = Some(RebuildProgress {
-            rebuilt,
-            total,
-            done: true,
-            error,
-        });
-    });
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({"status": "started"})),
-    ))
-}
-
-/// `GET /memory/rebuild-progress` — current state of the background
-/// rebuild started by `POST /memory/rebuild-embeddings`.
-async fn rebuild_progress(
-    State(state): State<HttpState>,
-) -> Result<Json<RebuildProgress>, StatusCode> {
-    let slot = state
-        .rebuild_progress
-        .lock()
-        .expect("rebuild progress mutex poisoned");
-    match slot.as_ref() {
-        Some(p) => Ok(Json(p.clone())),
-        None => Err(StatusCode::NOT_FOUND),
-    }
 }
 
 // ── Session detail (ADR-034 §11.2 #4 — panel 4) ──────────────
@@ -2946,16 +2392,6 @@ async fn put_agent_config(
         req.shell_approval_threshold,
         req.approval_timeout_secs,
         req.compression_ratio_threshold,
-        req.distiller_enabled,
-        req.distiller_model,
-        req.distiller_models,
-        req.distiller_interval_minutes,
-        req.distiller_accumulation_threshold,
-        req.distiller_idle_minutes,
-        req.memory_forgetting_enabled,
-        req.memory_forgetting_half_life_days,
-        req.memory_forgetting_dormant_threshold,
-        req.memory_forgetting_archive_days,
         req.session_language,
         req.intent_idle_rotate_hours,
         req.intent_handoff_max_tokens,
@@ -3093,41 +2529,10 @@ struct UpdateAgentConfigRequest {
     /// leave the on-disk value alone (partial PUT).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compression_ratio_threshold: Option<serde_json::Value>,
-    /// ADR-071 D4: distiller runtime switch (记忆蒸馏 card). Absent =
-    /// leave the on-disk value alone (partial PUT).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    distiller_enabled: Option<serde_json::Value>,
-    /// ADR-071 D4/D5: legacy single distiller model ref
-    /// `{"provider_id":…,"model_id":…}` (folded into a one-element list
-    /// when `distiller_models` is absent).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    distiller_model: Option<serde_json::Value>,
-    /// Ordered distiller model candidate list
-    /// `[{"provider_id":…,"model_id":…}, …]`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    distiller_models: Option<serde_json::Value>,
-    /// ADR-071 D4: distiller periodic interval (minutes).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    distiller_interval_minutes: Option<serde_json::Value>,
-    /// ADR-071 D4: distiller accumulation threshold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    distiller_accumulation_threshold: Option<serde_json::Value>,
-    /// ADR-071 D4: distiller idle threshold (minutes).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    distiller_idle_minutes: Option<serde_json::Value>,
-    /// Memory forgetting runtime switch (记忆遗忘 card). Absent =
-    /// leave the on-disk value alone (partial PUT).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    memory_forgetting_enabled: Option<serde_json::Value>,
-    /// Episodic decay half-life in days.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    memory_forgetting_half_life_days: Option<serde_json::Value>,
-    /// Retention threshold below which an episodic node becomes Dormant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    memory_forgetting_dormant_threshold: Option<serde_json::Value>,
-    /// Days a Dormant node is retained before archiving to PurgeLog.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    memory_forgetting_archive_days: Option<serde_json::Value>,
+    // ADR-100: `distiller_*` / `memory_forgetting_*` are intentionally not
+    // accepted here any more. Those knobs belong to the memory service, and the
+    // fields no longer exist on `AgentConfig` — an older client that still
+    // sends them is dropped by serde as an unknown field.
     /// Per-agent LLM session language override (e.g. `"zh-CN"`, `"en"`).
     /// Replaces `UserProfile.language` in the identity-context text
     /// block when formatted for the LLM (see
@@ -4171,151 +3576,6 @@ async fn put_shell_risk_rules(
     Ok(Json(serde_json::json!({"written": true})))
 }
 
-// ── N1: Consolidation status endpoint ──────────────────────────
-
-/// `GET /memory/consolidation/status` - report consolidation timer state.
-///
-/// ADR-071 D2 extension: reports the distiller trigger state (enabled,
-/// episode backlog, seconds since the last run) alongside the legacy
-/// lifecycle state (idle / pending). The UI reads this to render the
-/// "记忆蒸馏" card without polling the manifest.
-async fn get_consolidation_status(
-    State(state): State<HttpState>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let timer = state
-        .consolidation_timer
-        .read()
-        .ok()
-        .and_then(|g| g.clone())
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-
-    let idle_secs = timer.idle_secs().await;
-    let episode_count = timer.episode_count().await;
-    let secs_since_distill = timer.secs_since_distill().await;
-    let last_distill = timer.last_distill_result().await;
-    let config = timer.config();
-
-    let last_run = last_distill.as_ref().map(|r| {
-        serde_json::json!({
-            "at": r.at.to_rfc3339(),
-            "episodes_scanned": r.episodes_scanned,
-            "total_promoted": r.total_promoted(),
-            "facts_promoted": r.facts_promoted,
-            "preferences_promoted": r.preferences_promoted,
-            "relations_promoted": r.relations_promoted,
-            "procedures_promoted": r.procedures_promoted,
-            "autobio_promoted": r.autobio_promoted,
-            "episodes_marked_consolidated": r.episodes_marked_consolidated,
-            // Why the run produced what it produced. `error` is the difference
-            // between "the distiller had nothing to do" and "the distiller
-            // died every hour for a week" — both used to look like an empty
-            // memory panel.
-            "error": r.error,
-            "funnel": {
-                "scanned": r.funnel.scanned,
-                "backlog_remaining": r.funnel.backlog_remaining,
-                "llm_calls": r.funnel.llm_calls,
-                "llm_calls_failed": r.funnel.llm_calls_failed,
-                "llm_calls_truncated": r.funnel.llm_calls_truncated,
-                "below_importance": r.funnel.below_importance,
-                "candidates_recalled": r.funnel.candidates_recalled,
-                "projected": r.funnel.projected,
-                "verdict_no_merge": r.funnel.verdict_no_merge,
-                "verdict_merged": r.funnel.verdict_merged,
-                "verdict_superseded": r.funnel.verdict_superseded,
-                "episodes_consolidated": r.funnel.episodes_consolidated,
-                "episodes_deferred": r.funnel.episodes_deferred,
-                "errors": r.funnel.errors,
-            },
-        })
-    });
-
-    Ok(Json(serde_json::json!({
-        "idle_secs": idle_secs,
-        "bg_task_running": true,
-        // ADR-071 D1/D2: distiller trigger state.
-        "distiller": {
-            "enabled": config.distiller_enabled,
-            "episode_backlog": episode_count,
-            "secs_since_distill": secs_since_distill,
-            "interval_secs": config.distiller_interval_secs,
-            "accumulation_threshold": config.distiller_accumulation,
-            "idle_secs": config.distiller_idle_secs,
-            "last_run": last_run,
-        },
-        // ADR-057 §5.3 redesign: episodic forgetting state.
-        "forgetting": {
-            "enabled": config.forgetting_enabled,
-            "half_life_days": config.forgetting_half_life_days,
-            "dormant_threshold": config.forgetting_dormant_threshold,
-            "archive_days": config.forgetting_archive_days,
-            "interval_secs": config.forgetting_interval_secs,
-        },
-    })))
-}
-
-/// `POST /memory/distill` - trigger one EpisodicDistiller pass immediately.
-///
-/// ADR-071 D2 manual trigger: force semantics — bypasses the periodic gate
-/// (interval / backlog / idle) and runs the same `run_episodic_distiller_step`
-/// that the background loop uses. The response carries the distilled-run
-/// summary when the run produced one.
-///
-/// Status codes:
-/// - `200` run completed (empty episode backlog is still a completed run)
-/// - `409` run not possible (memory/embedding provider unavailable)
-/// - `500` run failed (distiller error)
-/// - `503` AgentCore not ready yet, or the `grafeo-backend` feature is off
-async fn post_memory_distill(
-    State(state): State<HttpState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let core = {
-        let slot = state
-            .agent_core
-            .read()
-            .map_err(|_| err_json(StatusCode::SERVICE_UNAVAILABLE, "agent_core_lock"))?;
-        slot.clone()
-            .ok_or_else(|| err_json(StatusCode::SERVICE_UNAVAILABLE, "agent_core_not_ready"))?
-    };
-    match core.run_episodic_distill_once().await {
-        Ok(Some(result)) => Ok(Json(serde_json::json!({
-            "started": true,
-            "episodes_scanned": result.episodes_scanned,
-            "facts_promoted": result.facts_promoted,
-            "preferences_promoted": result.preferences_promoted,
-            "relations_promoted": result.relations_promoted,
-            "procedures_promoted": result.procedures_promoted,
-            "autobio_promoted": result.autobio_promoted,
-            "episodes_marked_consolidated": result.episodes_marked_consolidated,
-            // The counters above say what came out; the funnel says where the
-            // rest went. A manual trigger is exactly when someone is watching,
-            // so it answers without a second round-trip to /status.
-            "funnel": result.funnel,
-        }))),
-        Ok(None) => Err(err_json(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "distiller_not_available",
-        )),
-        Err(e) => {
-            tracing::warn!(error = %e, "Manual distiller run failed");
-            if e.contains("memory provider not initialized")
-                || e.contains("embedding provider not initialized")
-                || e.contains("distiller is disabled")
-            {
-                Err(err_json(StatusCode::CONFLICT, &e))
-            } else {
-                Err(err_json(StatusCode::INTERNAL_SERVER_ERROR, &e))
-            }
-        }
-    }
-}
-
-/// Build an error JSON response `{"error": code}` for endpoints that return
-/// `Result<Json<_>, (StatusCode, Json<_>)>`.
-fn err_json(status: StatusCode, code: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({ "error": code })))
-}
-
 // ── N2: RAG status endpoint ────────────────────────────────────
 
 /// `GET /agents/{id}/rag/status` - report RAG provider status.
@@ -4422,36 +3682,6 @@ async fn post_rag_query(
 mod tests {
     use super::*;
 
-    /// Wire-compat for `POST /memory/rebuild-embeddings`: the `scope` field
-    /// is an extension, and a body without it (every Gateway built before
-    /// this field existed, plus the model-swap flow that never sends one)
-    /// must read as the only scope those clients could mean - `All`.
-    #[test]
-    fn rebuild_body_scope_absent_reads_as_all() {
-        let body: RebuildEmbeddingsBody =
-            serde_json::from_str(r#"{"endpoint":"e","model_id":"m","dimension":1024}"#)
-                .expect("pre-scope wire format must still deserialize");
-        assert!(matches!(body.scope, acowork_memory::admin::RebuildScope::All));
-
-        let body: RebuildEmbeddingsBody = serde_json::from_str(
-            r#"{"endpoint":"e","model_id":"m","dimension":1024,"scope":"repair"}"#,
-        )
-        .expect("repair scope must deserialize");
-        assert!(matches!(
-            body.scope,
-            acowork_memory::admin::RebuildScope::Repair
-        ));
-
-        // An unknown scope is a caller bug, not a silent downgrade: the
-        // request must fail rather than quietly re-embed the whole store.
-        assert!(
-            serde_json::from_str::<RebuildEmbeddingsBody>(
-                r#"{"dimension":1024,"scope":"everything"}"#
-            )
-            .is_err()
-        );
-    }
-
     /// ADR-085 D4 ("扫描未完成" row): an empty `latest_session` cache
     /// is only a definitive 404 once the SESSIONS_READY stamp landed
     /// (the stamp is set after the startup scan seeded the cache).
@@ -4490,50 +3720,6 @@ mod tests {
             Arc::new(crate::usecases::agent_token_impl::NoopAgentTokenService),
             snapshots,
             latest,
-        ))
-    }
-
-    /// A provider cell reporting a fixed dimension, for tests that assert the
-    /// `model_dim` the memory endpoints report. `0` means "no provider bound",
-    /// matching a runtime whose embed sidecar never came up.
-    fn embed_cell_with_dim(
-        dim: usize,
-    ) -> crate::embedding::SharedEmbedProvider {
-        struct FixedDim(usize);
-        #[async_trait::async_trait]
-        impl crate::embedding::EmbeddingProvider for FixedDim {
-            fn name(&self) -> &str {
-                "fixed-dim-test-stub"
-            }
-            async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embedding::EmbeddingError> {
-                Ok(vec![0.0; self.0])
-            }
-            async fn embed_batch(
-                &self,
-                texts: &[&str],
-            ) -> Result<Vec<Vec<f32>>, crate::embedding::EmbeddingError> {
-                Ok(texts.iter().map(|_| vec![0.0; self.0]).collect())
-            }
-            fn dimension(&self) -> usize {
-                self.0
-            }
-            async fn is_available(&self) -> bool {
-                true
-            }
-        }
-        let provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>> = (dim > 0)
-            .then(|| Arc::new(FixedDim(dim)) as Arc<dyn crate::embedding::EmbeddingProvider>);
-        Arc::new(std::sync::RwLock::new(provider))
-    }
-
-    /// Build a memory-query service backed by a (possibly None) Grafeo store.
-    fn new_test_memory_query(
-        memory_store: SharedMemoryStore,
-        embed_dim: crate::embedding::SharedEmbedProvider,
-    ) -> Arc<dyn crate::usecases::MemoryQueryService> {
-        Arc::new(crate::usecases::MemoryAdminAdapter::new(
-            memory_store,
-            embed_dim,
         ))
     }
 
@@ -4625,14 +3811,12 @@ mod tests {
 
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let session_metadata =
             new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
             std::sync::Arc::new(tokio::sync::RwLock::new(None));
@@ -4648,10 +3832,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -4672,7 +3852,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -4766,14 +3945,12 @@ mod tests {
 
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
 
         let session_metadata =
             new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
             std::sync::Arc::new(tokio::sync::RwLock::new(None));
@@ -4789,10 +3966,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -4813,7 +3986,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -4860,113 +4032,6 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][2]["content"], "Done");
         assert_eq!(body["messages"][2]["role"], "system");
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[tokio::test]
-    async fn test_http_server_memory_endpoints_without_store() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-memory");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let snapshots: SharedSessionSnapshots =
-            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let embed_dim = embed_cell_with_dim(512);
-        let degraded_reasons: SharedDegradation =
-            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
-        )
-        .await
-        .expect("server should start");
-
-        // /memory/nodes should return a well-formed empty list.
-        let url = format!("http://127.0.0.1:{}/memory/nodes", server.port);
-        let response = reqwest::get(&url).await.unwrap();
-        assert!(response.status().is_success());
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["total"], 0);
-        assert_eq!(body["page"], 1);
-        assert_eq!(body["size"], 20);
-        assert!(body["nodes"].as_array().unwrap().is_empty());
-
-        // /memory/stats must report the full contract — both the
-        // ADR-040 service path and the pre-ADR-040 fallback funnel
-        // through the same `MemoryStats` struct, so the response shape
-        // is identical. The contract is documented in
-        // `acowork-gateway::http::memory_api::MemoryStatsResponse` and
-        // mirrored in `usecases::memory_query::MemoryStats`. Every
-        // field below must be present — missing fields crash the
-        // desktop Memory panel (see git history for the by_status bug).
-        let url = format!("http://127.0.0.1:{}/memory/stats", server.port);
-        let response = reqwest::get(&url).await.unwrap();
-        assert!(response.status().is_success());
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["index_health"], "no_store");
-        assert_eq!(body["model_dim"], 512);
-        assert_eq!(body["total_nodes"], 0);
-        assert_eq!(body["storage_bytes"], 0);
-        assert_eq!(body["by_type"], serde_json::json!({}));
-        assert_eq!(body["by_status"], serde_json::json!({}));
-        assert_eq!(body["stored_dim"], 0);
-        assert_eq!(body["nodes_with_embedding"], 0);
-        assert_eq!(body["schema_version"], 0);
-
-        // DELETE /memory/nodes/{nid} — store is None, adapter returns Ok(()) trivially.
-        let url = format!("http://127.0.0.1:{}/memory/nodes/12345", server.port);
-        let response = reqwest::Client::new().delete(&url).send().await.unwrap();
-        assert!(response.status().is_success());
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["deleted"], true);
-        assert_eq!(body["node_id"], 12345);
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -5038,7 +4103,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5051,7 +4115,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -5158,146 +4221,6 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// ADR-071 D4: the five distiller fields round-trip through
-    /// `PUT /agents/{id}/config` → `agent_config.json` → `GET /config`,
-    /// including the explicit-clear (`null`) semantics on a numeric field.
-    #[tokio::test]
-    async fn test_put_agent_config_distiller_fields_roundtrip() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-put-config-distiller");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(temp_dir.join("config")).unwrap();
-
-        let snapshots: SharedSessionSnapshots =
-            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let degraded_reasons: SharedDegradation =
-            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore needed
-        )
-        .await
-        .expect("server should start");
-
-        let url = format!(
-            "http://127.0.0.1:{}/agents/{TEST_INSTANCE_ID}/config",
-            server.port
-        );
-        let client = reqwest::Client::new();
-
-        // 1. PUT all five distiller fields.
-        let resp = client
-            .put(&url)
-            .json(&serde_json::json!({
-                "distiller_enabled": true,
-                "distiller_model": {"provider_id": "openai", "model_id": "gpt-4o-mini"},
-                "distiller_interval_minutes": 45,
-                "distiller_accumulation_threshold": 80,
-                "distiller_idle_minutes": 20,
-            }))
-            .send()
-            .await
-            .expect("PUT distiller fields");
-        assert!(resp.status().is_success(), "PUT got {}", resp.status());
-
-        // 2. On-disk agent_config.json carries every field.
-        let reloaded = crate::agent_config::load_agent_config(std::path::Path::new(&temp_dir))
-            .expect("load ok")
-            .expect("config exists");
-        assert_eq!(reloaded.distiller_enabled, Some(true));
-        // Legacy single-value wire field folds into the ordered list.
-        let models = reloaded.distiller_models.as_ref().expect("distiller_models set");
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].model_id, "gpt-4o-mini");
-        assert_eq!(reloaded.distiller_interval_minutes, Some(45));
-        assert_eq!(reloaded.distiller_accumulation_threshold, Some(80usize));
-        assert_eq!(reloaded.distiller_idle_minutes, Some(20));
-
-        // 3. GET /config surfaces them (the Setup/memory-panel read path).
-        let get: serde_json::Value = client.get(&url).send().await.unwrap().json().await.unwrap();
-        let cfg = get["config"].as_object().expect("config envelope");
-        assert_eq!(cfg["distiller_enabled"], serde_json::json!(true));
-        assert_eq!(
-            cfg["distiller_models"],
-            serde_json::json!([{"provider_id": "openai", "model_id": "gpt-4o-mini"}])
-        );
-        assert_eq!(cfg["distiller_interval_minutes"], serde_json::json!(45));
-        assert_eq!(
-            cfg["distiller_accumulation_threshold"],
-            serde_json::json!(80)
-        );
-        assert_eq!(cfg["distiller_idle_minutes"], serde_json::json!(20));
-
-        // 4. Partial PUT: the wire layer collapses JSON `null` and
-        //    absent-field into the same `None` (see UpdateAgentConfigRequest
-        //    doc), so "clearing" a field is done by NOT sending it — the
-        //    Desktop memory panel omits empty inputs. Here we flip the
-        //    switch off while omitting `distiller_interval_minutes`; the
-        //    untouchd field must be preserved (partial-PUT semantics).
-        let resp = client
-            .put(&url)
-            .json(&serde_json::json!({
-                "distiller_enabled": false,
-            }))
-            .send()
-            .await
-            .expect("PUT partial");
-        assert!(
-            resp.status().is_success(),
-            "PUT partial got {}",
-            resp.status()
-        );
-
-        let reloaded = crate::agent_config::load_agent_config(std::path::Path::new(&temp_dir))
-            .expect("load ok")
-            .expect("config exists");
-        assert_eq!(reloaded.distiller_enabled, Some(false));
-        assert_eq!(
-            reloaded.distiller_interval_minutes,
-            Some(45),
-            "omitted field is preserved (partial PUT)"
-        );
-        assert_eq!(
-            reloaded.distiller_accumulation_threshold,
-            Some(80usize),
-            "untouched distiller fields are preserved"
-        );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
     /// ADR-099: the Chat Router sub-fields round-trip through
     /// `PUT /agents/{id}/config` → nested `chat_router` block on
     /// `agent_config.json` → `GET /config`. The flat `chat_router_*` wire
@@ -5332,7 +4255,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5345,7 +4267,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -5549,7 +4470,6 @@ mod tests {
                 std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
                 std::sync::Arc::new(std::sync::RwLock::new(None)),
             )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5564,7 +4484,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -5759,7 +4678,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5768,7 +4686,6 @@ mod tests {
             agent_config_slot,
             attachment_slot,
             session_config_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -5934,7 +4851,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -5943,7 +4859,6 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -6055,7 +4970,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -6064,7 +4978,6 @@ mod tests {
             agent_config_slot,
             attachment_slot,
             session_config_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -6160,7 +5073,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_mutation_slot,
@@ -6169,7 +5081,6 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_resolver.clone(),
@@ -6256,7 +5167,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_mutation_slot,
@@ -6265,7 +5175,6 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             workspace_resolver.clone(),
@@ -6414,13 +5323,11 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
             new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
             std::sync::Arc::new(tokio::sync::RwLock::new(None));
@@ -6436,10 +5343,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -6460,7 +5363,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -6898,598 +5800,6 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
-    /// End-to-end smoke test for the four memory-write endpoints
-    /// (POST /memory/nodes, GET /memory/nodes/{nid}, PUT
-    /// /memory/nodes/{nid}, DELETE /memory/nodes/{nid}) backed by a real
-    /// store.
-    #[tokio::test]
-    async fn test_http_server_memory_crud_endpoints() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mem-crud");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        // Build a real store — `open_in_memory` keeps the test hermetic and
-        // lets the adapter report `index_health = healthy`.
-        let store = std::sync::Arc::new(
-            acowork_sqlite::SqliteStore::open_in_memory(
-                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
-            )
-            .expect("in-memory store should open"),
-        );
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(Some(store)));
-
-        let snapshots: SharedSessionSnapshots =
-            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
-        let degraded_reasons: SharedDegradation =
-            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata =
-            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
-        )
-        .await
-        .expect("server should start");
-
-        let base = format!("http://127.0.0.1:{}", server.port);
-        let client = reqwest::Client::new();
-
-        // 1) POST /memory/nodes — create a new node.
-        let url = format!("{}/memory/nodes", base);
-        let resp = client
-            .post(&url)
-            .json(&serde_json::json!({
-                "label": "Knowledge",
-                "properties": { "name": "alpha", "weight": 1 },
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200, "create node should be 200");
-        let body: serde_json::Value = resp.json().await.unwrap();
-        let node_id = body["node_id"].as_u64().expect("node_id u64");
-        assert!(node_id < u64::MAX, "node_id must be a real id");
-        assert_eq!(body["label"], "Knowledge");
-
-        // 2) GET /memory/nodes/{nid} — must report `found: true`.
-        let url = format!("{}/memory/nodes/{}", base, node_id);
-        let resp = client.get(&url).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["found"], true);
-        assert_eq!(body["node_type"], "Knowledge");
-
-        // 3) PUT /memory/nodes/{nid} — update must succeed.
-        let url = format!("{}/memory/nodes/{}", base, node_id);
-        let resp = client
-            .put(&url)
-            .json(&serde_json::json!({
-                "properties": { "weight": 99, "extra": "added" },
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200, "update should be 200");
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["updated"], true);
-
-        // 4) PUT on a missing node — must 404.
-        let url = format!("{}/memory/nodes/99999999", base);
-        let resp = client
-            .put(&url)
-            .json(&serde_json::json!({ "properties": { "x": 1 } }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 404, "update of missing node must 404");
-
-        // 5) DELETE /memory/nodes/{nid} — must remove the node.
-        let url = format!("{}/memory/nodes/{}", base, node_id);
-        let resp = client.delete(&url).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-
-        // 6) GET on the just-deleted node — must report `found: false`.
-        let resp = client.get(&url).send().await.unwrap();
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["found"], false);
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    /// G3-G6: Comprehensive test for memory HTTP endpoints with a real
-    /// GrafeoStore containing data. Covers:
-    ///
-    /// - G3: `GET /memory/graph` with populated store (returns nodes array)
-    /// - G5: `GET /memory/stats` with real nodes (by_type / by_status non-empty)
-    /// - G6: `GET /memory/nodes` with pagination + type filter
-    #[tokio::test]
-    async fn test_http_server_memory_endpoints_with_data() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-mem-data");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let store = std::sync::Arc::new(
-            acowork_sqlite::SqliteStore::open_in_memory(
-                acowork_memory::types::DEFAULT_EMBEDDING_DIM,
-            )
-            .expect("in-memory store should open"),
-        );
-
-        let memory_store: SharedMemoryStore =
-            std::sync::Arc::new(std::sync::RwLock::new(Some(store)));
-        let snapshots: SharedSessionSnapshots =
-            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
-        let degraded_reasons: SharedDegradation =
-            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata =
-            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
-        )
-        .await
-        .expect("server should start");
-
-        let base = format!("http://127.0.0.1:{}", server.port);
-        let client = reqwest::Client::new();
-
-        // Seed data via POST /memory/nodes (the same endpoint tested in CRUD test).
-        for i in 0..5 {
-            let label = if i < 3 { "Knowledge" } else { "Episodic" };
-            let url = format!("{}/memory/nodes", base);
-            let resp = client
-                .post(&url)
-                .json(&serde_json::json!({
-                    "label": label,
-                    "properties": {
-                        "name": format!("node-{}", i),
-                        "weight": i,
-                    },
-                }))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), 200, "seed node {} should be created", i);
-        }
-
-        // ── G3: GET /memory/graph with populated store ──────────────
-        let url = format!("{}/memory/graph", base);
-        let resp = client.get(&url).send().await.unwrap();
-        assert_eq!(resp.status(), 200, "GET /memory/graph should be 200");
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(body["agent_id"], "com.test.agent");
-        let node_count = body["node_count"].as_u64().unwrap_or(0);
-        assert!(
-            node_count >= 5,
-            "GET /memory/graph should return >= 5 nodes, got {node_count}"
-        );
-        let nodes = body["nodes"].as_array().expect("nodes should be array");
-        assert_eq!(nodes.len() as u64, node_count);
-        // Each node should have the expected fields.
-        if let Some(first) = nodes.first() {
-            assert!(first["node_id"].is_u64(), "node should have node_id");
-            assert!(first["node_type"].is_string(), "node should have node_type");
-        }
-
-        // ── G5: GET /memory/stats with real nodes ───────────────────
-        let url = format!("{}/memory/stats", base);
-        let resp = client.get(&url).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert!(
-            body["total_nodes"].as_u64().unwrap_or(0) >= 5,
-            "total_nodes should be >= 5 with seeded data"
-        );
-        // by_type should contain at least one entry.
-        let by_type = body["by_type"]
-            .as_object()
-            .expect("by_type should be object");
-        assert!(
-            !by_type.is_empty(),
-            "by_type should have at least one type with seeded data"
-        );
-        // by_status should contain Active nodes.
-        let by_status = body["by_status"]
-            .as_object()
-            .expect("by_status should be object");
-        assert!(
-            !by_status.is_empty(),
-            "by_status should have at least one status with seeded data"
-        );
-
-        // ── G6: GET /memory/nodes with pagination + type filter ─────
-        // First: list all nodes (page 1, size 10).
-        let url = format!("{}/memory/nodes?page=1&size=10", base);
-        let resp = client.get(&url).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-        let body: serde_json::Value = resp.json().await.unwrap();
-        let total = body["total"].as_u64().unwrap_or(0);
-        assert!(total >= 5, "total should be >= 5 with seeded data");
-        assert_eq!(body["page"], 1);
-        assert_eq!(body["size"], 10);
-        let nodes = body["nodes"].as_array().expect("nodes should be array");
-        assert!(!nodes.is_empty(), "nodes list should not be empty");
-
-        // Second: paginate with size=2 (should return 2 nodes, total unchanged).
-        let url = format!("{}/memory/nodes?page=1&size=2", base);
-        let resp = client.get(&url).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(
-            body["total"], total,
-            "total should be the same regardless of page size"
-        );
-        assert_eq!(body["size"], 2);
-        assert_eq!(body["nodes"].as_array().unwrap().len(), 2);
-
-        // Third: filter by node_type=Knowledge.
-        let url = format!("{}/memory/nodes?page=1&size=100&node_type=Knowledge", base);
-        let resp = client.get(&url).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-        let body: serde_json::Value = resp.json().await.unwrap();
-        // The filter should return a subset (may be empty if Grafeo
-        // stores labels differently, but the endpoint must succeed).
-        assert!(
-            body["nodes"].is_array(),
-            "Knowledge filter should return a nodes array"
-        );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    /// N1: `GET /memory/consolidation/status` - verify the endpoint
-    /// returns timer state when a consolidation timer is available.
-    #[tokio::test]
-    async fn test_http_consolidation_status() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-http-consolidation-status");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        // Create a real consolidation timer.
-        use crate::memory::consolidation_bg::ConsolidationTimer;
-        use acowork_memory::consolidation::SchedulerConfig;
-        let timer = Arc::new(ConsolidationTimer::new(SchedulerConfig {
-            idle_timeout_secs: 1800,
-            accumulation_threshold: 50,
-            ..Default::default()
-        }));
-        let consolidation_timer_slot: SharedConsolidationTimer =
-            Arc::new(std::sync::RwLock::new(Some(timer)));
-
-        let memory_store: SharedMemoryStore = Arc::new(std::sync::RwLock::new(None));
-        let snapshots: SharedSessionSnapshots =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
-        let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata =
-            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            consolidation_timer_slot,
-            Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
-        )
-        .await
-        .expect("server should start");
-
-        let url = format!(
-            "http://127.0.0.1:{}/memory/consolidation/status",
-            server.port
-        );
-        let resp = reqwest::get(&url).await.unwrap();
-        assert_eq!(resp.status(), 200, "consolidation status should be 200");
-        let body: serde_json::Value = resp.json().await.unwrap();
-        assert!(body["idle_secs"].is_i64(), "should have idle_secs");
-        assert_eq!(body["bg_task_running"], true);
-        // ADR-071 D2: distiller trigger state surfaced for the UI card.
-        assert_eq!(body["distiller"]["enabled"], false);
-        assert_eq!(body["distiller"]["episode_backlog"], 0);
-        assert!(body["distiller"]["interval_secs"].is_u64());
-        assert_eq!(body["distiller"]["accumulation_threshold"], 50);
-        assert_eq!(body["distiller"]["idle_secs"], 1800);
-        // ADR-057 §5.3 redesign: episodic forgetting state.
-        assert_eq!(body["forgetting"]["enabled"], false);
-        assert_eq!(body["forgetting"]["half_life_days"], 180);
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    /// N1b: `GET /memory/consolidation/status` returns 503 when no timer.
-    #[tokio::test]
-    async fn test_http_consolidation_status_no_timer() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-http-consolidation-noop");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let memory_store: SharedMemoryStore = Arc::new(std::sync::RwLock::new(None));
-        let snapshots: SharedSessionSnapshots =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
-        let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata =
-            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
-        )
-        .await
-        .expect("server should start");
-
-        let url = format!(
-            "http://127.0.0.1:{}/memory/consolidation/status",
-            server.port
-        );
-        let resp = reqwest::get(&url).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            503,
-            "should return 503 when no timer configured"
-        );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    /// N1c: `POST /memory/distill` (ADR-071 D2) degrades to 503 when no
-    /// AgentCore has been constructed yet (Phase B not complete). A full
-    /// end-to-end run (episodes -> promoted nodes) is covered by the
-    /// adr071 memory e2e suite which wires a real AgentCore.
-    #[tokio::test]
-    async fn test_http_memory_distill_no_agent_core() {
-        let temp_dir = std::env::temp_dir().join("acowork-test-http-memory-distill");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
-
-        let memory_store: SharedMemoryStore = Arc::new(std::sync::RwLock::new(None));
-        let snapshots: SharedSessionSnapshots =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
-        let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
-        let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
-        let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
-        let session_metadata =
-            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-
-        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
-            std::sync::Arc::new(tokio::sync::RwLock::new(None));
-
-        let server = RuntimeHttpServer::start(
-            temp_dir.clone(),
-            temp_dir.clone(),
-            "com.test.agent".to_string(),
-            TEST_INSTANCE_ID.to_string(), // ADR-073: URL paths address the runtime's UUID instance, not the package name
-            snapshots,
-            latest,
-            dispatch_tx,
-            degraded_reasons,
-            mqtt_client,
-            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
-                temp_dir.clone(),
-            )))),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
-            new_test_workspace_resolver(),
-            session_manager_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
-        )
-        .await
-        .expect("server should start");
-
-        let url = format!("http://127.0.0.1:{}/memory/distill", server.port);
-        let resp = reqwest::Client::new().post(&url).send().await.unwrap();
-        assert_eq!(
-            resp.status(),
-            503,
-            "manual distill without AgentCore should be 503"
-        );
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
     /// N2: `GET /agents/{id}/rag/status` - verify RAG status reporting.
     #[tokio::test]
     async fn test_http_rag_status() {
@@ -7522,12 +5832,10 @@ mod tests {
         let rag_provider_slot: SharedRagProvider =
             Arc::new(std::sync::RwLock::new(Some(Arc::new(DummyRag))));
 
-        let memory_store: SharedMemoryStore = Arc::new(std::sync::RwLock::new(None));
         let snapshots: SharedSessionSnapshots =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7547,10 +5855,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -7571,7 +5875,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
             rag_provider_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -7603,12 +5906,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        let memory_store: SharedMemoryStore = Arc::new(std::sync::RwLock::new(None));
         let snapshots: SharedSessionSnapshots =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7628,10 +5929,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -7652,7 +5949,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -7717,12 +6013,10 @@ mod tests {
         let rag_provider_slot: SharedRagProvider =
             Arc::new(std::sync::RwLock::new(Some(Arc::new(MockRag))));
 
-        let memory_store: SharedMemoryStore = Arc::new(std::sync::RwLock::new(None));
         let snapshots: SharedSessionSnapshots =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7742,10 +6036,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -7766,7 +6056,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
             rag_provider_slot,
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -7817,12 +6106,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        let memory_store: SharedMemoryStore = Arc::new(std::sync::RwLock::new(None));
         let snapshots: SharedSessionSnapshots =
             Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
@@ -7842,10 +6129,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -7866,7 +6149,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(std::sync::RwLock::new(None)),
             Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -7940,7 +6222,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -7949,7 +6230,6 @@ mod tests {
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             attachment_slot,
             session_config_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -8161,7 +6441,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8170,7 +6449,6 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             session_config_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -8297,7 +6575,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8306,7 +6583,6 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             session_config_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -8440,7 +6716,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8449,7 +6724,6 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -8640,7 +6914,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8649,7 +6922,6 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             session_config_slot,
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -8752,7 +7024,6 @@ mod tests {
             Arc::new(std::sync::RwLock::new(Vec::new())),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
@@ -8761,7 +7032,6 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -8855,13 +7125,11 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
             new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         // SessionManager slot populated; the real handle is the one we
         // built above (cloned — the HTTP server holds a reference, the
@@ -8880,10 +7148,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -8904,7 +7168,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
@@ -8991,13 +7254,11 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
         let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let embed_dim = embed_cell_with_dim(0);
         let degraded_reasons: SharedDegradation =
             std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
         let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let session_metadata =
             new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
-        let memory_store: SharedMemoryStore = std::sync::Arc::new(std::sync::RwLock::new(None));
 
         // SessionManager slot is empty — mimics Phase B not yet finished.
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
@@ -9014,10 +7275,6 @@ mod tests {
             degraded_reasons,
             mqtt_client,
             Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
-            Arc::new(tokio::sync::Mutex::new(Some(new_test_memory_query(
-                memory_store,
-                embed_dim.clone(),
-            )))),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
                 temp_dir.clone(),
@@ -9038,7 +7295,6 @@ mod tests {
                 temp_dir.clone(),
             )))),
             Arc::new(tokio::sync::Mutex::new(None)),
-            std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),

@@ -10,8 +10,7 @@
 use std::sync::Arc;
 
 use acowork_core::error::AcoworkError;
-use acowork_memory::SessionMetaStore;
-use acowork_memory::session_meta::SessionMeta;
+use acowork_core::session_meta::{SessionMeta, SessionMetaStore};
 use acowork_sqlite::{SqliteSessionMetaStore, SqliteStore};
 
 use acowork_runtime::conversation::{

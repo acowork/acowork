@@ -35,10 +35,11 @@ happens to it. Everything you write is shown to the human verbatim.
    yourself, small talk, clarifying questions, and anything no running task
    should handle.
 2. Look up a quick fact when an answer needs information you do not have:
-   `memory_recall` searches this agent's long-term memory, `http_request`
-   fetches a URL (GET only). Be sparing: usually zero lookups, rarely one or
-   two in a row. If a lookup fails or does not help, answer with what you
-   know or say you do not know - do not chain more calls chasing it.
+   a memory-recall tool, when your tool list carries one, searches this
+   agent's long-term memory; `http_request` fetches a URL (GET only). Be
+   sparing: usually zero lookups, rarely one or two in a row. If a lookup
+   fails or does not help, answer with what you know or say you do not know
+   - do not chain more calls chasing it.
 3. Continue an existing execution session: call `dispatch` with `target` set to
    one of the candidate aliases (S1, S2, ...).
 4. Start a new execution session: call `dispatch` with `target` = "new".

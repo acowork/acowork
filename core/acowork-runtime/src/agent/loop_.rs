@@ -420,15 +420,6 @@ pub struct AgentLoop {
     /// it to the replayed turn).
     pub(crate) current_turn_user_message: Option<String>,
 
-    /// ADR-060 §6.3: whether auto-inject has already run for this session.
-    ///
-    /// `auto_inject_enabled` (default false, per-agent opt-in via manifest
-    /// `[memory.quality].auto_inject_enabled = true`) triggers at most
-    /// once, on the session's FIRST user message; later turns skip the
-    /// retrieval. Explicit `memory_recall` tool calls use an independent
-    /// path and do not touch this flag.
-    pub(crate) memory_retrieved_for_session: bool,
-
     /// ADR-032 C4b: Compression action receiver.
     ///
     /// Set by the creator (SessionTask / Gateway wiring) to enable
@@ -532,7 +523,6 @@ impl AgentLoop {
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             current_turn_user_message: None,
-            memory_retrieved_for_session: false,
             compress_action_rx: None,
             pending_intent: None,
             chat_writeback: None,
@@ -605,7 +595,6 @@ impl AgentLoop {
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             current_turn_user_message: None,
-            memory_retrieved_for_session: false,
             compress_action_rx: None,
             pending_intent: None,
             chat_writeback: None,
@@ -617,10 +606,10 @@ impl AgentLoop {
         (session_loop, inbound_tx)
     }
 
-    // ── Memory system methods moved to loop_memory.rs (ADR-014 Phase 6) ──
-    //   - init_memory_store
-    //   - retrieve_and_inject_memories
-    //   - write_attached_items
+    // ── ADR-014 Phase 6 moved the memory methods (init_memory_store,
+    // retrieve_and_inject_memories, write_attached_items) into loop_memory.rs;
+    // ADR-100 deleted that module together with the Runtime's memory code.
+    // Attachment persistence survived as session history, now in loop_persist.rs. ──
 
     /// Execute a built-in tool by name, simulating an LLM tool call.
     ///
@@ -1013,13 +1002,9 @@ impl AgentLoop {
             }
         }
 
-        // Retrieve relevant long-term memories and inject into context.
-        self.retrieve_and_inject_memories(user_message, context_builder)
-            .await;
-
-        // P3: Notify consolidation scheduler that agent is active —
-        // resets idle timer so consolidation doesn't run during active use.
-        self.core.notify_consolidation_active().await;
+        // ADR-100: memory retrieval/injection is gone from the Runtime — the
+        // agent reaches the memory service through the MCP catalog like any
+        // other tool. Nothing to inject before the first LLM call.
 
         // Title persistence is now handled lazily by flush_pending_title()
         // called at the end of each execute_single_iteration(). The async

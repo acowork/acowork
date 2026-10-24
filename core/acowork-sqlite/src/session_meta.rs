@@ -1,10 +1,10 @@
 //! `SqliteSessionMetaStore` — SQLite-backed implementation of the
-//! [`acowork_memory::SessionMetaStore`] trait (ADR-082 §4 step 3).
+//! [`acowork_core::session_meta::SessionMetaStore`] trait (ADR-082 §4 step 3).
 //!
 //! Lives next to the `SqliteStore` memory and `ConversationStore` index
 //! tables inside the same `.sqlite` file. The schema lives in
 //! [`schema::SCHEMA_SQL`] (the `sessions` table and `fts_sessions` virtual
-//! table); this module only knows how to map a [`acowork_memory::SessionMeta`]
+//! table); this module only knows how to map a [`acowork_core::session_meta::SessionMeta`]
 //! row to the columns.
 //!
 //! # Concurrency
@@ -17,7 +17,7 @@
 //!
 //! `last_active_at` is persisted as INTEGER epoch-ms so
 //! `ORDER BY last_active_at DESC` is a numeric scan (no parse on every
-//! comparison), and the helper [`acowork_memory::last_active_at_ms`] converts
+//! comparison), and the helper [`acowork_core::session_meta::last_active_at_ms`] converts
 //! the RFC3339 string both ways.
 //!
 //! # Derived index
@@ -32,7 +32,7 @@ use std::sync::Arc;
 use rusqlite::params;
 
 use acowork_core::error::{AcoworkError, Result as AcoworkResult};
-use acowork_memory::session_meta::{
+use acowork_core::session_meta::{
     SessionMeta, SessionMetaStore, SessionVisibility, last_active_at_ms,
 };
 
@@ -117,7 +117,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     {
         None
     } else {
-        Some(acowork_memory::SessionTokens {
+        Some(acowork_core::session_meta::SessionTokens {
             last_input: token_last_input.max(0) as u64,
             last_output: token_last_output.max(0) as u64,
             total_input: token_total_input.max(0) as u64,
@@ -130,7 +130,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     };
 
     let todos = match todos_json.as_deref() {
-        Some(s) => serde_json::from_str::<Vec<acowork_memory::TodoItem>>(s).ok(),
+        Some(s) => serde_json::from_str::<Vec<acowork_core::session_meta::TodoItem>>(s).ok(),
         None => None,
     };
 
@@ -150,7 +150,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     ) {
         (None, None, None, None) => None,
         (tps_sum, tps_n, ttft_sum, ttft_n) => {
-            let perf = acowork_memory::SessionPerf {
+            let perf = acowork_core::session_meta::SessionPerf {
                 tps_sum: tps_sum.unwrap_or(0.0).max(0.0),
                 tps_samples: tps_n.unwrap_or(0).clamp(0, u32::MAX as i64) as u32,
                 ttft_ms_sum: ttft_sum.unwrap_or(0.0).max(0.0),
@@ -370,7 +370,7 @@ impl SessionMetaStore for SqliteSessionMetaStore {
 
 }
 
-// ── SQL building blocks ────────────────────────────────���───────────────
+// ── SQL building blocks ───────────────────────────────────────────────
 
 const SELECT_ALL_COLUMNS: &str = "SELECT \
     session_id, agent_id, created_at, last_active_at, \

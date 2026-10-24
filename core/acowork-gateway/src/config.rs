@@ -171,6 +171,20 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub user: UserConfig,
 
+    /// Memory service config (acowork-memory, standalone process, ADR-100).
+    ///
+    /// Mirrors `DocConfig`: the Gateway spawns and supervises the binary and
+    /// reverse-proxies `/api/memory/*` plus the agent-scoped panel routes to it.
+    /// This section keeps only what the supervisor and the MCP catalog injection
+    /// need — distiller thresholds, forgetting policy and the embedding endpoint
+    /// are resolved by the service from its own `config.toml`.
+    ///
+    /// `enabled = false` is the pluggability switch: no process is spawned, the
+    /// `memory` MCP server disappears from every catalog, and the Desktop hides
+    /// its memory panel.
+    #[serde(default)]
+    pub memory: MemoryConfig,
+
     /// Peer IP allowlist — the "who may connect to this Gateway" backstop.
     ///
     /// `allowed_node_ips` restricts which peer IPs may reach the HTTP API
@@ -457,6 +471,74 @@ pub struct UserConfig {
 
 fn default_user_port() -> u16 {
     18083
+}
+
+/// Memory service config (Gateway side, ADR-100).
+///
+/// Only what the Gateway needs to manage the `acowork-memory` process and to
+/// advertise its MCP endpoint. The service owns its own defaults
+/// (`$HOME/.acowork/acowork-memory/`), tuning knobs included.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Whether to spawn the `acowork-memory` subprocess.
+    ///
+    /// Default `true`. `false` → the Gateway does not spawn it, no `memory` MCP
+    /// server is injected, and every `/api/memory/*` route returns 503.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Desired listen port.
+    ///
+    /// Default `18084` (18080 embed / 18081 doc / 18082 pm / 18083 user are
+    /// taken). The service auto-increments on conflict (max +20); the actual
+    /// port is reported via `--port-file` and read into `memory_process` by the
+    /// supervisor.
+    #[serde(default = "default_memory_port")]
+    pub port: u16,
+
+    /// Optional data-directory override forwarded to the subprocess
+    /// (`--data-dir`). `None` → the service resolves
+    /// `$HOME/.acowork/acowork-memory/` itself.
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
+
+    /// TOML file forwarded to the service as `--config`.
+    ///
+    /// This is where an operator sets `[distiller]`, `[forgetting]` and
+    /// `[embedding]` — those knobs belong to the service, not to the Gateway.
+    #[serde(default)]
+    pub config: Option<PathBuf>,
+
+    /// Whether to auto-inject the memory MCP HTTP endpoint into every Agent's
+    /// MCP catalog. Default `true`.
+    #[serde(default = "default_true")]
+    pub auto_inject_mcp: bool,
+
+    /// Public path of the memory MCP endpoint (via Gateway reverse proxy).
+    /// Default `/api/memory/mcp`.
+    #[serde(default = "default_memory_mcp_http_path")]
+    pub mcp_http_path: String,
+}
+
+fn default_memory_port() -> u16 {
+    18084
+}
+
+fn default_memory_mcp_http_path() -> String {
+    "/api/memory/mcp".to_string()
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            port: default_memory_port(),
+            data_dir: None,
+            config: None,
+            auto_inject_mcp: default_true(),
+            mcp_http_path: default_memory_mcp_http_path(),
+        }
+    }
 }
 
 impl Default for UserConfig {
@@ -918,6 +1000,10 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.user.clone())
                 .unwrap_or_default(),
+            memory: file_config
+                .as_ref()
+                .map(|c| c.memory.clone())
+                .unwrap_or_default(),
             security: {
                 // Boot-time only (see `SecurityConfig` docs). Env override
                 // wins over TOML; never part of runtime update paths.
@@ -1073,6 +1159,7 @@ impl Default for GatewayConfig {
             pm: PmConfig::default(),
             doc: DocConfig::default(),
             user: UserConfig::default(),
+            memory: MemoryConfig::default(),
             security: SecurityConfig::default(),
             auth_mode: None,
             relay: RelayClientConfig::default(),

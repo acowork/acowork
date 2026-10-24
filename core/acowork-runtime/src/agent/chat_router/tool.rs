@@ -23,13 +23,26 @@ use crate::agent::session::intent_routing::SessionSeed;
 
 /// Tool name, fixed across turns — it is part of the cached prefix.
 pub const DISPATCH_TOOL: &str = "dispatch";
-/// Read-only memory lookup exposed on a router turn. Same name as the
-/// execute-side builtin so the runtime can resolve it off `all_tools`.
-pub const MEMORY_RECALL_TOOL: &str = "memory_recall";
+/// MCP server name the official memory service registers under (ADR-100).
+pub const MEMORY_SERVER_NAME: &str = "memory";
+/// The recall tool the memory service exposes (ADR-100 §MCP).
+pub const MEMORY_RECALL_SERVICE_TOOL: &str = "memory_recall";
 /// HTTP lookup exposed on a router turn, **GET only** (see
 /// [`http_request_router_spec`]). The router-side schema drops every
 /// mutating field so a chat turn cannot issue a side-effecting request.
 pub const HTTP_REQUEST_TOOL: &str = "http_request";
+
+/// The `all_tools` name of the memory service's recall tool.
+///
+/// ADR-100: the Runtime no longer carries a builtin `memory_recall`, so the
+/// router resolves the official service's MCP wrapper by name instead. The
+/// shape is `<server>__<tool>` as built by `acowork_mcp::wrapper` (the
+/// `mcp_` prefix marks MCP tools vs built-ins). A third-party memory MCP
+/// with a different server name or tool name is deliberately **not** picked
+/// up here — it stays an ordinary tool the execution session can call.
+pub fn memory_recall_tool_name() -> String {
+    format!("mcp_{MEMORY_SERVER_NAME}__{MEMORY_RECALL_SERVICE_TOOL}")
+}
 
 /// Alias → real session id for one router turn.
 pub type AliasTable = HashMap<String, String>;
@@ -81,12 +94,14 @@ pub fn dispatch_tools() -> Vec<Value> {
     })]
 }
 
-/// Router-facing `memory_recall` definition. A deliberate subset of the
-/// builtin's full schema (ADR-099 D3): keyword/time query, read-only.
-/// Flat shape — see [`dispatch_tools`].
-pub fn memory_recall_router_spec() -> Value {
+/// Router-facing memory-recall definition. A deliberate subset of the
+/// service's full schema (ADR-099 D3): keyword/time query, read-only.
+/// `tool_name` is the resolved MCP wrapper name so the model calls the tool
+/// under the same name the executor resolves. Flat shape — see
+/// [`dispatch_tools`].
+pub fn memory_recall_router_spec(tool_name: &str) -> Value {
     json!({
-        "name": MEMORY_RECALL_TOOL,
+        "name": tool_name,
         "description": "Search this agent's long-term memory for a fact or preference needed to answer. Returns scored results. Provide 'query' (keywords) and/or a time range. Look up at most what the answer needs.",
         "parameters": {
             "type": "object",
@@ -140,14 +155,16 @@ pub fn http_request_router_spec() -> Value {
 }
 
 /// Assemble the request's `tools` array from `dispatch` plus the enabled
-/// information tool names (order fixed: dispatch, memory_recall,
-/// http_request).
-pub fn router_tools(info_enabled: &[&str]) -> Vec<Value> {
+/// information tools (order fixed: dispatch, memory recall, http_request).
+///
+/// `memory_tool` is `None` when the catalog has no official memory server —
+/// the router then simply has no memory tool for that turn (ADR-100).
+pub fn router_tools(memory_tool: Option<&str>, http_enabled: bool) -> Vec<Value> {
     let mut tools = dispatch_tools();
-    if info_enabled.contains(&MEMORY_RECALL_TOOL) {
-        tools.push(memory_recall_router_spec());
+    if let Some(name) = memory_tool {
+        tools.push(memory_recall_router_spec(name));
     }
-    if info_enabled.contains(&HTTP_REQUEST_TOOL) {
+    if http_enabled {
         tools.push(http_request_router_spec());
     }
     tools
@@ -337,23 +354,37 @@ mod tests {
 
     #[test]
     fn router_tools_keeps_a_fixed_order_and_get_only_http() {
-        let all = router_tools(&[MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL]);
+        let memory = memory_recall_tool_name();
+        let all = router_tools(Some(&memory), true);
         let names: Vec<&str> = all
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec![DISPATCH_TOOL, MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL]);
+        assert_eq!(names, vec![DISPATCH_TOOL, memory.as_str(), HTTP_REQUEST_TOOL]);
         // The router-side http schema must not offer a way to mutate anything.
         let http_params = &all[2]["parameters"];
         assert!(!http_params["properties"].as_object().unwrap().contains_key("method"));
         assert!(!http_params["properties"].as_object().unwrap().contains_key("body"));
         assert_eq!(http_params["required"], json!(["url"]));
         // With nothing enabled the array is exactly the pre-tool-router one.
-        assert_eq!(router_tools(&[]).len(), 1);
+        assert_eq!(router_tools(None, false).len(), 1);
         // Deterministic bytes for a fixed enablement set (cached prefix).
         assert_eq!(
             serde_json::to_string(&all).unwrap(),
-            serde_json::to_string(&router_tools(&[MEMORY_RECALL_TOOL, HTTP_REQUEST_TOOL])).unwrap()
+            serde_json::to_string(&router_tools(Some(&memory), true)).unwrap()
         );
+    }
+
+    /// ADR-100: the memory lookup is resolved from the catalog, so with no
+    /// official memory server the router exposes no memory tool at all —
+    /// a third-party memory MCP must not be silently half-wired.
+    #[test]
+    fn router_tools_omits_memory_when_catalog_has_no_memory_server() {
+        let lister = router_tools(None, true);
+        let names: Vec<&str> = lister
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec![DISPATCH_TOOL, HTTP_REQUEST_TOOL]);
     }
 }

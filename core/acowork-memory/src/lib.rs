@@ -1,31 +1,46 @@
-//! acowork-memory - MemoryProvider trait and shared memory types
+//! acowork-memory - MemoryProvider trait, shared memory types, and the SQLite
+//! workspace store that implements them.
 //!
 //! This crate defines the MemoryProvider trait abstraction, the shared memory
-//! types, and the storage-agnostic logic built on top of them (the episodic
-//! distiller, retrieval-quality metrics). Storage backends live elsewhere
-//! (`acowork-sqlite`).
+//! types, the storage-agnostic logic built on top of them (the episodic
+//! distiller and the retrieval manager), and the SQLite storage engine
+//! ([`sqlite::SqliteStore`]) that backs them. It also hosts the standalone
+//! memory **service** ([`service`], ADR-100) and the panel-facing wire format
+//! ([`wire`]) that both the service and the Runtime endpoints it replaces speak.
 //!
-//! The `MemoryProvider` trait (ADR-051) extends the original `MemoryStore`
-//! trait with additional methods for consolidation, CRUD, and lifecycle
-//! control. During the migration period, both traits coexist:
-//! - `MemoryStore` (16 methods) - existing impls remain valid
-//! - `MemoryProvider` (35+ methods) - full trait for Runtime decoupling
+//! The store lives here, not in a separate backend crate, because the memory
+//! service binary (ADR-100) is hosted by this crate and must link a concrete
+//! backend: a backend crate cannot depend on the crate whose traits it
+//! implements. `acowork-sqlite` keeps only the Runtime-side sidecars that share
+//! the same connection (conversation index, session meta) and re-export the
+//! store type.
 //!
-//! Design ref: ADR-051, docs/05-memory.md §10
+//! [`MemoryProvider`] (ADR-051) is the single storage abstraction: consolidation,
+//! CRUD and lifecycle control all sit on it.
+//!
+//! Design ref: ADR-051, ADR-082, ADR-100, docs/05-memory.md §10
 
 pub mod admin;
 pub mod consolidation;
-pub mod judge;
 pub mod keyword;
 pub mod manager;
 pub mod provider;
 pub mod quality;
-pub mod retrieval_metrics;
-pub mod session_meta;
-pub mod store;
+pub mod service;
+pub mod sqlite;
 pub mod types;
+pub mod wire;
 
-// Re-exports: MemoryProvider trait (new, for ADR-051 migration)
+// Re-exports: the standalone service (ADR-100) — config, process entry parts.
+pub use service::{Cli, MemoryService, MemoryServiceConfig, MemoryState, ServiceError};
+
+// Re-exports: the SQLite workspace store (ADR-082) and its error surface.
+pub use sqlite::{
+    Error as SqliteError, ImportCounts, Result as SqliteResult, SqliteStore, CONVERSATION_LABEL,
+    MAX_EXECUTED_TERMS, RRF_K, SCHEMA_SQL, SCHEMA_VERSION, TRIGRAM_MIN, has_sqlite_magic,
+};
+
+// Re-exports: MemoryProvider trait (ADR-051 — the only storage abstraction)
 pub use provider::MemoryProvider;
 
 // Re-exports: MemoryAdminService trait (ADR-051 P4, admin/management operations)
@@ -34,14 +49,8 @@ pub use admin::{
     AdminNodeRecord, AdminStats, MemoryAdminService, RebuildStats,
 };
 
-// Re-exports: MemoryStore trait (original, for backward compatibility)
-pub use store::MemoryStore;
-
 // Re-exports: MemoryManager + associated types (ADR-051 P2, moved from runtime)
-pub use manager::{
-    InjectedMemory, MemoryManager, MemoryManagerConfig,
-    RetrieveAndInjectResult, RetrievalResult, RetrievedMemory,
-};
+pub use manager::{MemoryManager, MemoryManagerConfig, RetrievalResult, RetrievedMemory};
 
 // Re-exports: consolidation types
 pub use consolidation::{
@@ -49,31 +58,25 @@ pub use consolidation::{
     AutobioAspect, BehaviorPattern, ConflictAction, ConflictResolutionDetail, DistillerConfig,
     DistillerResult, EmbeddingFn,
     GeneralizationConfig, GeneralizationResult, LlmMessage, LlmResponse, MemoryStoreInput,
-    MemoryStoreResult, OfflineConsolidationConfig, OfflineConsolidationResult, PatternCategory,
+    MemoryStoreResult, OfflineConsolidationConfig, PatternCategory,
     PromotionDecision, PromotionEvaluation, PromotionKind, PromotionMetadata, SchedulerConfig,
     ConsolidationLlm,
 };
-
-// Backward-compatible alias: grafeo used `ProcessResult` for this type.
-pub use consolidation::MemoryStoreResult as ProcessResult;
-
-// Re-exports: judge types (ADR-051 P4, moved from acowork_grafeo)
-pub use judge::{JudgeConfig, JudgeResult, should_sample};
 
 // Re-exports: memory quality config (ADR-062 D2)
 pub use quality::{ConsolidationQuality, DedupQuality, MemoryQualityConfig};
 
 // Re-exports: core memory types
+//
+// Session-metadata types are deliberately not re-exported here (ADR-100): they
+// live in `acowork_core::session_meta`, which both the Runtime and the SQLite
+// store can name without pulling in this crate.
 pub use types::{
     AutobioCategory, AutobiographicalNode, CollaborationSpan, ConflictSignal, ConflictType,
     ContextSource, DEFAULT_EMBEDDING_DIM, DecayScanResult, DistilledEpisode, Episode,
     EpisodicDecayConfig, KnowledgeNode, KnowledgeSubType, MemoryContext, MemoryNode, MemoryQuery,
-    NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource, RetrievalMetrics,
+    NodeStatus, PrivacyLevel, ProceduralNode, PurgeResult, ResultSource,
     SearchResult, StoreHealth, StoreStats,
-};
-pub use session_meta::{
-    SessionMeta, SessionMetaStore, SessionPerf, SessionScope, SessionTokens, SessionVisibility,
-    TodoItem, TodoStatus,
 };
 
 // Label constants

@@ -1,11 +1,14 @@
 //! Memory management HTTP API handlers
 //!
-//! ADR-033: All memory endpoints are reverse-proxied to Runtime by
-//! `crate::http::proxy::proxy_routes()` (see `proxy_routes()` in that module).
-//! This module therefore exposes no HTTP routes of its own — registering any
-//! path here would collide with the proxy and cause `Router::merge()` to
-//! panic at gateway startup (e.g. "Overlapping method route" on
-//! `POST /api/agents/{id}/memory/nodes`).
+//! ADR-100: the memory endpoints are reverse-proxied to the standalone
+//! `acowork-memory` service by [`crate::http::memory_proxy`]. This module
+//! therefore exposes no HTTP routes of its own — registering a path here would
+//! collide with that proxy and make `Router::merge()` panic at gateway startup
+//! (e.g. "Overlapping method route" on `/api/agents/{id}/memory/nodes`).
+//!
+//! Before ADR-100 the same paths were proxied to the Runtime by
+//! `crate::http::proxy::proxy_routes()`; the public contract did not change
+//! with that move.
 //!
 //! The request/response types below remain here as the canonical contract
 //! for the gateway↔desktop Memory API and are reused by tests and the
@@ -18,11 +21,10 @@ use crate::http::routes::AppState;
 
 /// Build the memory management router.
 ///
-/// Per ADR-033 this router is intentionally empty: every `/api/agents/{id}/memory/*`
-/// path is owned by `proxy_routes()` and reverse-proxied to the Runtime's
-/// localhost HTTP server. Returning an empty router keeps the `merge(...)`
-/// call in `routes::build_router` working without introducing overlapping
-/// routes.
+/// Per ADR-100 this router is intentionally empty: every memory path is owned
+/// by [`crate::http::memory_proxy`] and forwarded to the memory service. Keeping
+/// the function (rather than deleting it) preserves the `merge(...)` call in
+/// `routes::build_router` and this module's contract types in one place.
 pub fn memory_routes() -> Router<AppState> {
     Router::new()
 }

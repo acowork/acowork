@@ -178,6 +178,12 @@ async fn node_binary_speaks_the_control_plane_contract() {
             "--home",
         ])
         .arg(&node_home)
+        // ADR-087: on a fresh home the node asks for account credentials on
+        // stdin when stdin is a TTY. `cargo test` from an interactive terminal
+        // inherits the console, so the child would block on the "Username:"
+        // prompt and never write identity.json — close stdin to keep the
+        // service-style (credential-less) startup the assertions expect.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -409,6 +415,7 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
             "--home",
         ])
         .arg(&node_home)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -490,6 +497,7 @@ async fn node_enrolls_and_reconnects_with_node_token_under_auth() {
             "--home",
         ])
         .arg(&node_home)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -740,6 +748,7 @@ async fn node_control_rejects_invalid_instance_id_before_spawn() {
             "--home",
         ])
         .arg(&node_home)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -978,6 +987,7 @@ async fn node_rename_updates_display_name_without_touching_uuid() {
             "--home",
         ])
         .arg(&node_home)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -1113,6 +1123,7 @@ async fn node_booted_with_gateway_managed_marker_is_visible_to_registry() {
             "--home",
         ])
         .arg(&node_home)
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

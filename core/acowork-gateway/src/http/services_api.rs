@@ -2,15 +2,15 @@
 //!
 //! `GET /api/services/diagnose` — a **Gateway-perspective** snapshot of
 //! every service the Desktop's diagnostic panel renders (gateway, mqtt,
-//! embed, pm, doc, nodes). This is the "server-side aggregate" half of
-//! P2: instead of the Desktop issuing 3+ separate probes (each with its
+//! embed, pm, doc, memory, nodes). This is the "server-side aggregate" half
+//! of P2: instead of the Desktop issuing 3+ separate probes (each with its
 //! own timeout budget) it can fetch this one endpoint and learn the
 //! Gateway's ground truth about its own subsystems.
 //!
 //! Why the Gateway (and not the Node) answers this:
-//! - The Gateway *supervises* embed / pm / doc (`embed_process`,
-//!   `pm_process`, `doc_process`) — it holds their pid / port / ready
-//!   state. No other process has this view.
+//! - The Gateway *supervises* embed / pm / doc / memory (`embed_process`,
+//!   `pm_process`, `doc_process`, `memory_process`) — it holds their
+//!   pid / port / ready state. No other process has this view.
 //! - The Gateway's `NodeRegistry` is the LWT-driven source of truth for
 //!   node online state.
 //! - LSP relay is a **node-local** sidecar (ADR-055 §6.7) — the Gateway
@@ -109,6 +109,8 @@ pub struct ServicesDiagnoseResponse {
     pub embed: SubsystemSnapshot,
     pub pm: SubsystemSnapshot,
     pub doc: SubsystemSnapshot,
+    /// ADR-100: the standalone memory service (Gateway-spawned supervisor).
+    pub memory: SubsystemSnapshot,
     pub nodes: NodesSnapshot,
     /// RFC 3339 UTC timestamp of this snapshot.
     pub diagnosed_at: String,
@@ -163,6 +165,19 @@ pub async fn diagnose_services(State(state): State<AppState>) -> Json<ServicesDi
         None => not_running(),
     };
     let doc = match gw.doc_process.as_ref() {
+        Some(p) => SubsystemSnapshot {
+            running: true,
+            ready: p.ready,
+            port: p.port,
+            pid: p.pid,
+            active_model_id: None,
+        },
+        None => not_running(),
+    };
+    // ADR-100: the memory service is supervised exactly like doc, so its row
+    // reuses the shape — a `running: false` row is what tells the panel the
+    // `/api/memory/*` surface is currently 503.
+    let memory = match gw.memory_process.as_ref() {
         Some(p) => SubsystemSnapshot {
             running: true,
             ready: p.ready,
@@ -239,6 +254,7 @@ pub async fn diagnose_services(State(state): State<AppState>) -> Json<ServicesDi
         embed,
         pm,
         doc,
+        memory,
         nodes,
         diagnosed_at: chrono::Utc::now().to_rfc3339(),
     })
@@ -327,6 +343,7 @@ mod tests {
         // pm/doc rows must NOT carry the embed-only field.
         assert!(json["pm"].get("active_model_id").is_none());
         assert!(json["doc"].get("active_model_id").is_none());
+        assert!(json["memory"].get("active_model_id").is_none());
     }
 
     /// When a supervisor process state is present, its fields flow

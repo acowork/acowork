@@ -37,7 +37,7 @@
 //! │      └─ acowork/agents/B/control_rx ← chat                         │
 //! │                                                                     │
 //! │  Wildcard subscriber on acowork/agents/+/status:  sees A + B       │
-//! └───────────────────────────────────────────��─────────────────────────┘
+//! └──────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! No real Runtime/Gateway binary needed — uses module-level clients

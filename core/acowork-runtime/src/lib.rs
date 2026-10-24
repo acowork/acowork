@@ -16,7 +16,6 @@ pub mod error;
 pub mod http;
 pub mod mcp_ensure;
 pub mod mcp_notify;
-pub mod memory;
 pub mod mqtt;
 pub mod package;
 pub mod platform;
@@ -26,8 +25,6 @@ pub mod search;
 pub mod security;
 pub mod skills;
 pub mod startup;
-#[cfg(test)]
-pub mod test_support;
 pub mod token;
 pub mod tools;
 pub mod usecases;

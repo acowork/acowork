@@ -21,7 +21,7 @@
 //!
 //! 1. Compare against the currently cached `advertise_host`;
 //! 2. If different, update `GatewayState.advertise_host` +
-//!    `pm_mcp_url` / `doc_mcp_url`;
+//!    `pm_mcp_url` / `doc_mcp_url` / `memory_mcp_url`;
 //! 3. Trigger [`crate::mqtt::MqttPublisherTrigger::trigger`]
 //!    so every subscribed Runtime receives a fresh retained
 //!    `acowork/global/mcps` and rewrites its `agent_mcp.json`.
@@ -59,6 +59,10 @@ pub struct AdvertiseWatchdogConfig {
     /// `doc.mcp_http_path` (e.g. `/api/doc/mcp`); `None` ⇒
     /// `doc_mcp_url` is not auto-injected and we leave it alone.
     pub doc_mcp_path: Option<String>,
+    /// `memory.mcp_http_path` (e.g. `/api/memory/mcp`); `None` ⇒
+    /// `memory_mcp_url` is not auto-injected and we leave it alone
+    /// (ADR-100: the memory MCP endpoint is advertised exactly like doc's).
+    pub memory_mcp_path: Option<String>,
 }
 
 /// Spawn the advertise-host watchdog and return immediately.
@@ -149,7 +153,7 @@ async fn reconcile(
     };
 
     // Scope the write lock — never hold it across the republish notify.
-    let (old, new_pm, new_doc) = {
+    let (old, new_pm, new_doc, new_memory) = {
         let mut gw = shared_state.write().await;
         if gw.advertise_host == new_ip {
             // No-op: same IP as before. Avoid spurious republish.
@@ -164,13 +168,20 @@ async fn reconcile(
             .doc_mcp_path
             .as_ref()
             .map(|path| format!("http://{}:{}{}", new_ip, cfg.http_port, path));
+        let new_memory = cfg
+            .memory_mcp_path
+            .as_ref()
+            .map(|path| format!("http://{}:{}{}", new_ip, cfg.http_port, path));
         if let Some(url) = new_pm.as_ref() {
             gw.pm_mcp_url = Some(url.clone());
         }
         if let Some(url) = new_doc.as_ref() {
             gw.doc_mcp_url = Some(url.clone());
         }
-        (old, new_pm, new_doc)
+        if let Some(url) = new_memory.as_ref() {
+            gw.memory_mcp_url = Some(url.clone());
+        }
+        (old, new_pm, new_doc, new_memory)
     };
 
     tracing::warn!(
@@ -178,6 +189,7 @@ async fn reconcile(
         new = %new_ip,
         pm_mcp_url = ?new_pm,
         doc_mcp_url = ?new_doc,
+        memory_mcp_url = ?new_memory,
         "advertise-host changed; refreshing published MCP catalog"
     );
     publisher_handle.trigger();

@@ -1,11 +1,11 @@
 //! Retrieval policy loading (ADR-095 D3, design 28 §3.2).
 //!
-//! Owns **configuration装载 only** — it reads the agent's `search` section,
+//! Owns **configuration loading only** — it reads the agent's `search` section,
 //! applies defaults, and produces the [`FusionPolicy`] values the engine
 //! consumes. The policy *types* live in `acowork-core::retrieval` because
-//! `acowork-memory`, `acowork-sqlite` and the evaluation harness all need the
-//! same vocabulary; this module is the one place that decides what the values
-//! are for this agent.
+//! `acowork-memory`, `acowork-sqlite` and both retrieval harnesses need the same
+//! vocabulary; this module is the one place that decides what the values are for
+//! this agent.
 //!
 //! Weights are rank-fusion weights, not probabilities. Nothing here is
 //! calibrated yet: the numbers are the ADR-specified starting points, and

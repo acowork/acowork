@@ -56,6 +56,13 @@ pub enum NodeError {
     /// Package signature / signing failure.
     #[error("Sign error: {0}")]
     Sign(String),
+
+    /// One-shot memory migration failure (ADR-100 decision 10): the legacy
+    /// workspace store could not be read, was too large to hand over, or the
+    /// memory service refused it. Never retried silently — see
+    /// [`crate::memory_migration`].
+    #[error("Memory migration error: {0}")]
+    MemoryMigration(String),
 }
 
 pub type Result<T> = std::result::Result<T, NodeError>;

@@ -18,14 +18,14 @@ use crate::error::Result;
 
 use crate::agent::session_state::TodoItem;
 
-// Re-export session meta types from `acowork_memory::session_meta` so callers
+// Re-export session meta types from `acowork_core::session_meta` so callers
 // using `crate::conversation::SessionMeta` keep compiling while the data model
 // lives where the `SessionMetaStore` trait lives.
 //
 // `TodoItem` / `TodoStatus` are NOT re-exported here: they live in
 // `crate::agent::session_state` (kept as a thin re-export) and the two
 // surfaces use the same type via `pub use` aliasing.
-pub use acowork_memory::{
+pub use acowork_core::session_meta::{
     SessionMeta, SessionMetaStore, SessionPerf, SessionScope, SessionTokens, SessionVisibility,
 };
 use acowork_core::protocol::ContextUsageSection;

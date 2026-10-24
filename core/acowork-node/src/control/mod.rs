@@ -880,6 +880,9 @@ impl NodeControlPlane {
         // The install executor reads the token per download, so it needs
         // its own handle (cloned before the bootstrap closure takes one).
         let install_identity = bs_identity.clone();
+        // So does the memory migration pass: the credential is re-read per
+        // retry round, because a first boot mints it WHILE the pass waits.
+        let migration_identity = bs_identity.clone();
 
         // ADR-055 Phase 5a: live CONNECT credential — starts as the
         // node_token (reconnect) or the enrollment token (first boot)
@@ -1190,6 +1193,22 @@ impl NodeControlPlane {
             let gate = crate::package::install_gate::InstallGate::new();
             state.write().await.set_install_gate(gate.clone());
             tokio::spawn(async move { gate.run_worker(executor, sink).await });
+        }
+
+        // ADR-100 decision 10: hand the memories that still live in each
+        // instance's workspace store over to the memory service, once. A
+        // background task — the Gateway spawns that service as one of its own
+        // startup steps, so the pass waits for it (bounded retry) instead of
+        // delaying the control plane, and an instance already dealt with is
+        // recognised from its `.migrated` sentinel.
+        {
+            let migration_state = state.clone();
+            let migration_config = config.clone();
+            tokio::spawn(crate::memory_migration::startup_pass(
+                migration_state,
+                migration_config,
+                migration_identity,
+            ));
         }
 
         // ADR-055 §6.4: start the node reverse proxy (`:19900`) so the

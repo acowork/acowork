@@ -1,13 +1,14 @@
-//! MemoryStore trait for storage backend abstraction
+//! Shared memory value types.
 //!
-//! This trait defines the interface for memory storage backends.
-//! Grafeo is the primary implementation (Phase 2).
+//! Only the wire-stable node types live here, because several crates have to
+//! name them (`acowork-gateway` intent privacy, `acowork-memory`,
+//! `acowork-runtime`) without depending on the storage layer. The storage
+//! abstraction itself is `acowork_memory::MemoryProvider` (ADR-051); the old
+//! `MemoryStore` trait stub that used to sit in this module had no
+//! implementation left and was removed with ADR-100.
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::error::Result;
 
 /// Memory node with metadata
 ///
@@ -28,31 +29,13 @@ pub struct MemoryNode {
 /// Privacy level for memory nodes
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum PrivacyLevel {
-    /// 可跨 Agent 共享（如用户姓名）— 打包分享时保留
+    /// Shareable across agents (e.g. the user's name) — kept when a package is
+    /// packed and shared.
     Public,
-    /// Agent 私有（如用户偏好风格）— 打包分享时剥离（保守默认）
+    /// Private to this agent (e.g. preferred coding style) — stripped when a
+    /// package is shared (the conservative default).
     #[default]
     Personal,
-    /// 敏感信息 — 打包分享时剥离
+    /// Sensitive information — stripped when a package is shared.
     Sensitive,
-}
-
-/// MemoryStore trait for abstracting storage backends
-#[async_trait]
-pub trait MemoryStore: Send + Sync {
-    /// Store a memory node
-    async fn store(&self, node: MemoryNode) -> Result<()>;
-
-    /// Retrieve a memory node by ID
-    async fn retrieve(&self, id: &str) -> Result<Option<MemoryNode>>;
-
-    /// Search memories by query (keyword search for Phase 1)
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryNode>>;
-
-    /// Delete a memory node
-    async fn delete(&self, id: &str) -> Result<()>;
-
-    /// List all memory nodes in a zone
-    /// ⚠️ NOT IMPLEMENTED in GrafeoStore (Phase 1-3). Reserved for Phase 4+.
-    async fn list_by_zone(&self, zone: &str) -> Result<Vec<MemoryNode>>;
 }

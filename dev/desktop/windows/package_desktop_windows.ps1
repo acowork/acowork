@@ -118,6 +118,22 @@ if (Test-Path $UserBin) {
     Write-Host "      Without it, /api/auth/*, /api/users/* and /api/user/* return 503." -ForegroundColor Yellow
 }
 
+# Bundle Memory service binary (sibling of acowork-gateway.exe, ADR-100).
+# Mirrors the User service above: the Gateway supervisor locates it via
+# `current_exe().parent().join("acowork-memory.exe")`; without this copy the
+# memory supervisor logs "acowork-memory binary not found" and the memory
+# panel plus the agent's `memory_store` / `memory_recall` tools are gone
+# (`/api/memory/*` and `/api/agents/{id}/memory/*` return 503).
+$MemoryBin = Join-Path $WorkspaceRoot "target\release\acowork-memory.exe"
+if (Test-Path $MemoryBin) {
+    Copy-Item -Path $MemoryBin -Destination (Join-Path $BinDir "acowork-memory.exe") -Force
+    Write-Host "Bundled Memory service binary: $MemoryBin" -ForegroundColor Green
+} else {
+    Write-Host "WARN: acowork-memory.exe not found at $MemoryBin." -ForegroundColor Yellow
+    Write-Host "      Run .\dev\common\build_core.ps1 (release) first." -ForegroundColor Yellow
+    Write-Host "      Without it, /api/memory/* returns 503 (memory unavailable)." -ForegroundColor Yellow
+}
+
 Push-Location $DesktopDir
 try {
     npm run tauri build

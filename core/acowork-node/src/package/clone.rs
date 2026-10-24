@@ -790,7 +790,7 @@ mod tests {
     /// moment (after the file copy, before the cloned agent boots).
     #[test]
     fn full_clone_strips_session_and_conversation_rows_but_keeps_memory_nodes() {
-        use acowork_memory::session_meta::{SessionMeta, SessionMetaStore};
+        use acowork_core::session_meta::{SessionMeta, SessionMetaStore};
         use acowork_memory::types::Episode;
         use acowork_sqlite::{SqliteSessionMetaStore, SqliteStore};
 

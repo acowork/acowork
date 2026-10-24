@@ -135,14 +135,14 @@ pub fn pending_preview(text: &str) -> String {
 
 /// A single item in the session-level todo list.
 ///
-/// Re-exported from `acowork_memory::session_meta::TodoItem` (canonical
+/// Re-exported from `acowork_core::session_meta::TodoItem` (canonical
 /// definition, since the `SessionMetaStore` trait needs it there). Kept
 /// here under the original name so existing call sites
 /// (`crate::agent::session_state::TodoItem`) keep compiling.
-pub use acowork_memory::session_meta::TodoItem as TodoItem;
+pub use acowork_core::session_meta::TodoItem;
 
 /// Status of a todo item. Re-exported alongside [`TodoItem`].
-pub use acowork_memory::session_meta::TodoStatus as TodoStatus;
+pub use acowork_core::session_meta::TodoStatus;
 
 /// Lifecycle status of a session, managed by Runtime as the source of truth.
 ///

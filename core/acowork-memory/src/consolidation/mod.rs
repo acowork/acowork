@@ -209,8 +209,6 @@ pub struct ConflictResolutionDetail {
 }
 
 /// Result of processing a `memory_store` tool call.
-///
-/// Also re-exported as `ProcessResult` for backward compatibility.
 #[derive(Debug, Clone)]
 pub struct MemoryStoreResult {
     /// The ID of the newly created (or updated) knowledge node.
@@ -353,35 +351,6 @@ impl Default for OfflineConsolidationConfig {
             min_pending_age_hours: 1,
         }
     }
-}
-
-/// Result of an offline consolidation run.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct OfflineConsolidationResult {
-    /// Number of nodes upgraded from Pending -> Active.
-    pub upgraded: usize,
-    /// Number of nodes kept as Pending (not old enough or not enough evidence).
-    pub kept_pending: usize,
-    /// Number of nodes marked Dormant (low confidence after re-evaluation).
-    pub marked_dormant: usize,
-    /// Number of new ProceduralNodes created by generalization.
-    pub procedural_created: usize,
-    /// Number of existing ProceduralNodes boosted by generalization.
-    pub procedural_boosted: usize,
-    /// Number of History nodes compressed into summaries.
-    pub history_compressed: usize,
-    /// Number of triples extracted from unconsolidated episodes.
-    pub triples_extracted: usize,
-    /// Number of conflicts resolved by LLM arbitration.
-    pub conflicts_resolved: usize,
-    /// Number of conflicts classified as Evolution (old -> Dormant, new -> Active).
-    pub conflicts_evolution: usize,
-    /// Number of conflicts classified as Correction (old -> Dormant, new -> Active).
-    pub conflicts_correction: usize,
-    /// Number of conflicts classified as Ambiguous (both kept, user confirmation needed).
-    pub conflicts_ambiguous: usize,
-    /// Number of episodic nodes cleaned up (transitioned to Dormant by §2 rules).
-    pub episodic_cleaned: usize,
 }
 
 // ============================================================================

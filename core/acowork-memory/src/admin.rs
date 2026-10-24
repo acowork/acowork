@@ -7,15 +7,15 @@
 //! Interface Segregation:
 //!
 //! - `MemoryProvider`: retrieve, inject, record, consolidation lifecycle
-//!   — used by `loop_memory.rs`, `MemoryManager`, tools.
+//!   — used by the service's `memory_recall` / `memory_store` MCP tools and by
+//!   `MemoryManager`.
 //! - `MemoryAdminService`: list/get/create/update/delete nodes, stats,
 //!   consolidation trigger, embedding migration — used by HTTP admin
 //!   endpoints and session bootstrap.
 //!
-//! A concrete engine (e.g., `GrafeoStore`) typically implements both
-//! traits. A remote/test provider may implement only `MemoryProvider`
-//! and skip `MemoryAdminService` (admin endpoints will report
-//! "unavailable").
+//! The engine behind both traits (`SqliteStore`) implements them together.
+//! A test provider may implement only `MemoryProvider` and skip
+//! `MemoryAdminService` (admin endpoints will report "unavailable").
 //!
 //! Design ref: ADR-051 §4.4.1
 

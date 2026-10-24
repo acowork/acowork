@@ -178,7 +178,7 @@ async fn push_path_carries_total_cache_fields_after_resume() {
         None,
         Some(&persisted),
         None,
-        Some(&acowork_memory::SessionPerf {
+        Some(&acowork_runtime::conversation::SessionPerf {
             tps_sum: 184.5,
             tps_samples: 3,
             ttft_ms_sum: 720.0,
@@ -240,7 +240,7 @@ async fn cumulative_cache_accumulates_across_calls() {
         None,
         Some(&persisted),
         None,
-        Some(&acowork_memory::SessionPerf {
+        Some(&acowork_runtime::conversation::SessionPerf {
             tps_sum: 184.5,
             tps_samples: 3,
             ttft_ms_sum: 720.0,
@@ -285,7 +285,7 @@ async fn openai_zero_cache_write_surfaces_as_some_zero() {
         None,
         Some(&persisted),
         None,
-        Some(&acowork_memory::SessionPerf {
+        Some(&acowork_runtime::conversation::SessionPerf {
             tps_sum: 184.5,
             tps_samples: 3,
             ttft_ms_sum: 720.0,
@@ -334,7 +334,7 @@ async fn anthropic_cache_write_round_trips() {
         None,
         Some(&persisted),
         None,
-        Some(&acowork_memory::SessionPerf {
+        Some(&acowork_runtime::conversation::SessionPerf {
             tps_sum: 184.5,
             tps_samples: 3,
             ttft_ms_sum: 720.0,

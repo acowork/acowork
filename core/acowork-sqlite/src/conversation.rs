@@ -24,7 +24,11 @@ use acowork_core::retrieval::{FusedHit, FusionPolicy, LexicalQuery, MatchedBy};
 use crate::{Result, SqliteStore};
 
 /// Label for every indexed conversation-message node (unchanged from grafeo).
-pub const LABEL: &str = "ConversationMessage";
+///
+/// An alias of [`acowork_memory::sqlite::CONVERSATION_LABEL`]: the store's FTS
+/// routing and `purge_conversation_state` have to recognise the same string,
+/// and they live in that crate (ADR-100).
+pub const LABEL: &str = acowork_memory::sqlite::CONVERSATION_LABEL;
 
 /// File name of the conversation index database.
 ///

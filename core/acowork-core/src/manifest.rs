@@ -428,14 +428,9 @@ pub struct ManifestDistillerConfig {
 /// `From<ManifestMemoryQuality> for MemoryQualityConfig`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ManifestMemoryQuality {
-    /// Enable per-turn auto-injection of retrieved memories (default: false,
-    /// per-agent opt-in). When enabled, the first user message of each
-    /// session triggers one `retrieve_and_inject` (ADR-060 §6.3). Rationale
-    /// for OFF by default: the LLM already recalls memories via the explicit
-    /// `memory_recall` tool on the same user-message query, so auto-inject
-    /// would duplicate that context.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_inject_enabled: Option<bool>,
+    // ADR-100 decision 5: `auto_inject_enabled` is gone along with the
+    // auto-injection path it gated — recall happens through the memory tools
+    // the agent calls.
     /// Exclude Dormant nodes from retrieval results (default: true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_dormant: Option<bool>,
@@ -682,13 +677,13 @@ mod tests {
             value = "wttr.in"
 
             [[permissions]]
-            type = "MemoryRead"
+            type = "IdentityRead"
 
             [[tools]]
             name = "weather"
 
             [[tools]]
-            name = "memory_store"
+            name = "file_read"
 
             [[triggers]]
             type = "manual"
@@ -779,7 +774,10 @@ mod tests {
     fn test_manifest_has_tool() {
         let manifest = AgentManifest::from_toml(sample_manifest_toml()).unwrap();
         assert!(manifest.has_tool("weather"));
-        assert!(manifest.has_tool("memory_store"));
+        assert!(manifest.has_tool("file_read"));
+        // ADR-100: memory tools left the builtin registry, so a package no longer
+        // declares them here.
+        assert!(!manifest.has_tool("memory_store"));
         assert!(!manifest.has_tool("shell"));
     }
 

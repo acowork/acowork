@@ -13,8 +13,8 @@
 //! Compaction is no longer a writer to Grafeo (was: `write_summary_to_provider`
 //! called from `loop_context` after every successful compact). Session-close
 //! tail distillation also no longer writes to Grafeo (`loop_session`).
-//! Memory persistence is delegated to the agent itself via the `memory_store`
-//! tool, driven by prompt guidance in the agent's `prompts/system.md`.
+//! Memory persistence is the agent's own decision through the memory service's
+//! `memory_store` MCP tool (ADR-100); the Runtime does not write memories.
 //! Rationale: keeping memory writes user-visible and agent-decided instead of
 //! a silent system side-effect.
 //!
@@ -30,11 +30,8 @@ use regex::Regex;
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider, UsageInfo};
 
-// ADR-051 P2: DistilledEpisode moved to acowork-memory.
-// ADR-057 (triples-removed): Triple / KnowledgeSubType re-export dropped —
-// `<triples>` is no longer parsed; sub_type is no longer relevant for the
-// compact-model output path.
-pub use acowork_memory::DistilledEpisode;
+// ADR-100: `DistilledEpisode` is a memory-service type; the Runtime does not
+// name it any more (the re-export is gone with the acowork-memory dependency).
 
 use crate::agent::loop_session::strip_think_block;
 use crate::error::{Result, RuntimeError};
@@ -43,8 +40,9 @@ use crate::error::{Result, RuntimeError};
 // Data types
 // ---------------------------------------------------------------------------
 
-// DistilledEpisode is defined in acowork-memory (ADR-051 P2) and re-exported
-// at the top of this file. Triple was removed in ADR-057 (triples-removed).
+// `DistilledEpisode` lives in `acowork-memory` (ADR-051 P2), which since ADR-100
+// is the memory service — the Runtime no longer names it. `Triple` was removed
+// in ADR-057 (triples-removed).
 
 // ---------------------------------------------------------------------------
 // Prompt templates
@@ -974,20 +972,6 @@ mod tests {
             text.contains("Normal tool output"),
             "content must be preserved"
         );
-    }
-
-    #[test]
-    fn test_distilled_episode_construction() {
-        // Triples-removed: DistilledEpisode now carries only the summary.
-        let episode = DistilledEpisode {
-            session_id: "sess-1".to_string(),
-            summary: "User asked about Rust async programming".to_string(),
-            source_session_id: "sess-1".to_string(),
-            consolidated: false,
-        };
-        assert_eq!(episode.session_id, "sess-1");
-        assert!(!episode.summary.is_empty());
-        assert!(!episode.consolidated);
     }
 
     #[test]

@@ -433,7 +433,12 @@ fn session_path(dir: &Path) -> PathBuf {
     dir.join("session.json")
 }
 
-fn messages_path(dir: &Path) -> PathBuf {
+/// The session's append-only message log.
+///
+/// `pub(crate)` because the search sidecar (`search_index`) reads the same
+/// file: the session directory layout belongs to this module, so a second
+/// module must never hand-roll `messages.jsonl` and risk disagreeing with it.
+pub(crate) fn messages_path(dir: &Path) -> PathBuf {
     dir.join("messages.jsonl")
 }
 

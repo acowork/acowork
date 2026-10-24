@@ -21,6 +21,13 @@ pub struct NodeConfig {
     pub gateway_host: String,
     /// Gateway MQTT broker port to connect to.
     pub gateway_mqtt_port: u16,
+    /// Gateway HTTP base URL, explicit (`--gateway-http` /
+    /// `ACOWORK_GATEWAY_HTTP`). `None` means derive it — see
+    /// [`Self::gateway_http_base`]. Two consumers need it: the ADR-087
+    /// first-boot credential exchange and the ADR-100 memory migration pass,
+    /// both of which talk to the Gateway over HTTP while the control plane
+    /// runs on MQTT.
+    pub gateway_http: Option<String>,
     /// Explicit node name (`--name`). When `None`, a new identity is
     /// derived from the hostname. Display only (ADR-075 D2).
     pub name: Option<String>,
@@ -78,6 +85,7 @@ impl Default for NodeConfig {
             packages_dir: None,
             gateway_host: acowork_core::defaults::GATEWAY_MQTT_HOST.to_string(),
             gateway_mqtt_port: acowork_core::defaults::GATEWAY_MQTT_PORT,
+            gateway_http: None,
             name: None,
             gateway_managed: false,
             token: None,
@@ -98,6 +106,21 @@ impl NodeConfig {
     /// Gateway address as `host:port` (the MQTT broker endpoint).
     pub fn gateway_addr(&self) -> String {
         format!("{}:{}", self.gateway_host, self.gateway_mqtt_port)
+    }
+
+    /// Gateway HTTP base URL (no trailing slash).
+    ///
+    /// The shipped pairing is HTTP = MQTT port + 1 (19875 / 19876), which is
+    /// what a single-machine deployment gets without configuration; an
+    /// operator who moved the HTTP listener passes `--gateway-http`.
+    pub fn gateway_http_base(&self) -> String {
+        self.gateway_http.clone().unwrap_or_else(|| {
+            format!(
+                "http://{}:{}",
+                self.gateway_host,
+                self.gateway_mqtt_port + 1
+            )
+        })
     }
 
     /// ADR-055 §6.3: the base URL of this node's reverse proxy as it
@@ -181,6 +204,25 @@ mod tests {
             ..NodeConfig::default()
         };
         assert_eq!(cfg.gateway_addr(), "192.168.1.10:19875");
+    }
+
+    /// The HTTP base is derived from the MQTT endpoint unless it was given,
+    /// so a Node started with only `--gateway` still reaches the Gateway API
+    /// (ADR-087 enrollment, ADR-100 memory migration).
+    #[test]
+    fn gateway_http_base_is_derived_unless_configured() {
+        let derived = NodeConfig {
+            gateway_host: "192.168.1.10".to_string(),
+            gateway_mqtt_port: 19875,
+            ..NodeConfig::default()
+        };
+        assert_eq!(derived.gateway_http_base(), "http://192.168.1.10:19876");
+
+        let explicit = NodeConfig {
+            gateway_http: Some("https://gw.internal:8443".to_string()),
+            ..derived
+        };
+        assert_eq!(explicit.gateway_http_base(), "https://gw.internal:8443");
     }
 
     #[test]

@@ -348,6 +348,15 @@ pub(crate) async fn phase_b_init_session(
         crate::usecases::RuntimeAttachmentService::new(work_dir_path.to_path_buf()),
     );
 
+    // ADR-100: the agent's MCP catalog (pushed by the Gateway) decides whether
+    // the official memory service is wired for this agent. Read once here; the
+    // manifest hand-off below keys on it and nothing else.
+    let catalog_mcps = crate::agent_config::load_agent_mcp_config(work_dir_path)
+        .ok()
+        .flatten()
+        .map(|cfg| cfg.catalog)
+        .unwrap_or_default();
+
     // Inject global provider list, key vault, and memory into AgentCore.
     if let Some(c) = Arc::get_mut(&mut core) {
         // Inject the per-agent compatibility cache so `build_provider_for`
@@ -376,12 +385,6 @@ pub(crate) async fn phase_b_init_session(
         *c.compact_template.write().unwrap() = ctx.compact_template.clone();
         *c.title_prompt.write().unwrap() = ctx.title_prompt.clone();
         *c.abstention_prompt.write().unwrap() = ctx.abstention_prompt.clone();
-
-        // ADR-071 D7/D9: mirror the same Phase B injection for the two
-        // distiller prompt override (distiller-merge.md). Consumed later by
-        // `distiller_scheduler_config()` when the consolidation pipeline
-        // starts (see `start_consolidation_pipeline` / `apply_runtime_config`).
-        *c.distiller_merge_prompt.write().unwrap() = ctx.distiller_merge_prompt.clone();
 
         // ADR-099: chat router persona (prompts/chat.md). Read only by the
         // chat-layer prompt builder; never folded into the execute prompt.
@@ -459,7 +462,7 @@ pub(crate) async fn phase_b_init_session(
             }
         }
 
-        c.memory_session = Some(ctx.memory_session.clone());
+        c.rag_provider = ctx.rag_provider.take();
         // Through the setter, not by assignment: assignment updates this clone
         // only, and the cell is what the conversation indexer and the HTTP
         // layer read. A provider bound here but not there leaves the two halves
@@ -467,63 +470,35 @@ pub(crate) async fn phase_b_init_session(
         if let Some(provider) = ctx.emb_provider.clone() {
             c.update_embedding_provider(provider);
         }
-        c.rag_provider = ctx.rag_provider.take();
         // Per-turn skill command injection: carry the Phase A SkillRegistry
         // (skills/*/SKILL.md) on AgentCore so `dispatch_inbound` can resolve
         // a chat `command` (skill name) into instructions — the runtime is
         // the authoritative source, the frontend only sends names.
         c.skill_registry = Arc::new(std::sync::RwLock::new(ctx.skill_registry.clone()));
-        // ADR-071 D4/D6: seed the AgentCore runtime distiller layer from
-        // `agent_config.json` BEFORE the consolidation pipeline starts
-        // (init_memory_provider → start_consolidation_pipeline reads
-        // `distiller_scheduler_config()`). `None` fields fall through to the
-        // manifest `[memory.distiller]` section inside the scheduler-config
-        // merge, so an absent runtime layer keeps the package defaults.
-        c.distiller_runtime.enabled = agent_cfg.distiller_enabled;
-        c.distiller_runtime.models = agent_cfg.distiller_models.clone().unwrap_or_default();
-        c.distiller_runtime.interval_minutes = agent_cfg.distiller_interval_minutes;
-        c.distiller_runtime.accumulation_threshold = agent_cfg.distiller_accumulation_threshold;
-        c.distiller_runtime.idle_minutes = agent_cfg.distiller_idle_minutes;
-        c.init_memory_provider(work_dir_path);
+        // ADR-100: open the Runtime-local SQLite store. It backs only session
+        // metadata + the conversation vector index now — memory nodes belong
+        // to the memory service.
+        c.init_runtime_sqlite(work_dir_path);
 
-        // ADR-033 (Phase 2): Publish the late-bound memory admin service
-        // to the shared handle consumed by the Runtime HTTP server. The
-        // HTTP server was already started in Phase A holding this same
-        // Arc, so handlers that fired while `init_memory_provider` was
-        // still running will get a stable "no store" response until this
-        // mutation completes. After this point every memory_* endpoint
-        // (/memory/nodes, /memory/stats, /memory/nodes/{nid},
-        // /memory/distill) sees the live store.
-        //
-        // ADR-051 P4: publishes `dyn MemoryAdminService` instead of
-        // concrete `GrafeoStore`.
-        let published_admin = c.memory_admin().cloned();
-        if let Some(admin) = published_admin {
-            match ctx.memory_store_shared.write() {
-                Ok(mut slot) => *slot = Some(admin),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to publish memory_store_shared — HTTP memory endpoints will report 'no store'"
-                    );
-                }
-            }
-        } else {
-            tracing::warn!(
-                "init_memory_store completed but no store was assigned — HTTP memory endpoints will report 'no store'"
-            );
-        }
-
-        // ADR-040: Publish MemoryAdminAdapter to the HTTP server's
-        // late-bind slot so memory handlers can use the trait path.
-        {
-            let adapter: Arc<dyn crate::usecases::MemoryQueryService> =
-                Arc::new(crate::usecases::memory_query_impl::MemoryAdminAdapter::new(
-                    ctx.memory_store_shared.clone(),
-                    c.embedding_provider_shared.clone(),
-                ));
-            let mut slot = ctx.memory_query_slot.lock().await;
-            *slot = Some(adapter);
+        // ADR-100 decision 12: manifest hand-off to the memory service.
+        // Keyed on the MCP catalog only — no official `memory` server means
+        // no coupling at all. Fire-and-forget: agent startup must not block
+        // on (or fail with) the service, which may still be booting.
+        if let Some(base) = crate::agent::bootstrap_autobio::service_base(&catalog_mcps) {
+            let client = reqwest::Client::new();
+            let instance_id = config.agent_instance_id.clone();
+            let node_token = config.mqtt_password.clone().unwrap_or_default();
+            let manifest = ctx.loaded.manifest.clone();
+            tokio::spawn(async move {
+                crate::agent::bootstrap_autobio::import_manifest(
+                    &client,
+                    &base,
+                    &instance_id,
+                    &node_token,
+                    &manifest,
+                )
+                .await;
+            });
         }
 
         // ADR-081 §4.2 (P1-2): open the conversation vector index and
@@ -729,67 +704,12 @@ pub(crate) async fn phase_b_init_session(
             }
             c.approval_timeout_secs = updated.approval_timeout_secs;
 
-            // ── ADR-071 D4: distiller runtime fields — first-boot seed ──
-            // Global semantics: `agent_config.json` is the single runtime
-            // source of truth for the memory-panel controls. On first boot
-            // (no distiller fields in agent_config.json yet) we seed the
-            // manifest `[memory.distiller]` initial values so the Desktop
-            // memory panel restores them from disk, exactly like the other
-            // agent_config.json fields above. After that only
-            // agent_config.json is read/written (PUT /agents/{id}/config).
-            // The AgentCore runtime layer (`distiller_runtime`) was already
-            // seeded from `agent_cfg` before `init_memory_provider` above;
-            // this block only persists the manifest defaults when absent.
-            {
-                let manifest_distiller = ctx.loaded.manifest.memory.distiller.clone();
-                if updated.distiller_enabled.is_none() {
-                    updated.distiller_enabled = Some(
-                        manifest_distiller
-                            .as_ref()
-                            .map(|d| d.enabled)
-                            .unwrap_or(false),
-                    );
-                    dirty = true;
-                }
-                if updated.distiller_models.is_none()
-                    && let Some(d) = manifest_distiller.as_ref()
-                    && (d.model_provider_id.is_some() || d.model_id.is_some())
-                {
-                    updated.distiller_models =
-                        Some(vec![acowork_core::protocol::CompactModelRef {
-                            provider_id: d.model_provider_id.clone().unwrap_or_default(),
-                            model_id: d.model_id.clone().unwrap_or_default(),
-                        }]);
-                    dirty = true;
-                }
-                if updated.distiller_interval_minutes.is_none() {
-                    updated.distiller_interval_minutes = Some(
-                        manifest_distiller
-                            .as_ref()
-                            .and_then(|d| d.interval_minutes)
-                            .unwrap_or(60),
-                    );
-                    dirty = true;
-                }
-                if updated.distiller_accumulation_threshold.is_none() {
-                    updated.distiller_accumulation_threshold = Some(
-                        manifest_distiller
-                            .as_ref()
-                            .and_then(|d| d.accumulation_threshold)
-                            .unwrap_or(50),
-                    );
-                    dirty = true;
-                }
-                if updated.distiller_idle_minutes.is_none() {
-                    updated.distiller_idle_minutes = Some(
-                        manifest_distiller
-                            .as_ref()
-                            .and_then(|d| d.idle_minutes)
-                            .unwrap_or(30),
-                    );
-                    dirty = true;
-                }
-            }
+            // ── ADR-100: distiller / forgetting knobs are service-owned ──
+            // The old first-boot seed wrote manifest `[memory.distiller]`
+            // defaults into `agent_config.json` so the Runtime's scheduler
+            // could read them. Both the scheduler and the seed moved to the
+            // memory service, which receives the manifest policy once via
+            // `POST /admin/bootstrap` and then owns it.
 
             if dirty {
                 if let Err(e) = crate::agent_config::save_agent_config(work_dir_path, &updated) {
@@ -895,26 +815,19 @@ pub(crate) async fn phase_b_init_session(
             *slot = Some(session_config);
         }
 
-        // Publish consolidation timer + RAG provider to the HTTP server's
-        // late-bind slots. These are set during Phase B (init_memory_provider
-        // calls start_consolidation_pipeline; rag_provider was set above).
+        // Publish the RAG provider to the HTTP server's late-bind slot. It was
+        // set on the core above; the memory consolidation timer that used to
+        // share this block is gone with ADR-100 (the service owns it).
         {
             // core_clone was moved into RuntimeAgentTokenService above; use
             // agent_core_shared (which holds a clone) to access the fields.
             let shared = ctx.agent_core_shared.read();
             if let Ok(ref guard) = shared
                 && let Some(core) = guard.as_ref()
+                && let Some(ref rag) = core.rag_provider
+                && let Ok(mut slot) = ctx.rag_provider_slot.write()
             {
-                if let Some(ref timer) = core.consolidation_timer
-                    && let Ok(mut slot) = ctx.consolidation_timer_slot.write()
-                {
-                    *slot = Some(timer.clone());
-                }
-                if let Some(ref rag) = core.rag_provider
-                    && let Ok(mut slot) = ctx.rag_provider_slot.write()
-                {
-                    *slot = Some(rag.clone());
-                }
+                *slot = Some(rag.clone());
             }
         }
     }

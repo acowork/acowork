@@ -44,8 +44,8 @@ use super::context::{
 use super::decision::{append_decision, DecisionRecord};
 use super::prompt::{build_block_a, surface_label, PersonaSource};
 use super::tool::{
-    parse_dispatch, router_tools, AliasTable, DispatchArgs, DispatchError, DISPATCH_TOOL,
-    HTTP_REQUEST_TOOL, MEMORY_RECALL_TOOL,
+    memory_recall_tool_name, parse_dispatch, router_tools, AliasTable, DispatchArgs, DispatchError,
+    DISPATCH_TOOL, HTTP_REQUEST_TOOL,
 };
 use super::ChatSlot;
 use crate::agent::agent_core::AgentCore;
@@ -286,15 +286,16 @@ async fn run_turn(
         // The router only ever runs the two read-only lookups, resolved by
         // name off the enabled dispatch list. A disabled or missing tool is
         // neither exposed nor executed.
+        //
+        // ADR-100: the memory lookup is the official memory service's MCP
+        // wrapper (when the Gateway put it in this agent's catalog), not a
+        // builtin. Resolving by name keeps the router free of memory
+        // business logic: no catalog entry, no memory tool on a chat turn.
+        let memory_tool = memory_recall_tool_name();
         let info_tools: Vec<Arc<dyn Tool>> = core
             .all_tools
             .iter()
-            .filter(|t| {
-                matches!(
-                    t.name().as_str(),
-                    MEMORY_RECALL_TOOL | HTTP_REQUEST_TOOL
-                )
-            })
+            .filter(|t| t.name() == memory_tool || t.name() == HTTP_REQUEST_TOOL)
             .cloned()
             .collect();
         Prepared {
@@ -381,22 +382,18 @@ async fn run_turn(
     .render();
 
     // ── Stateless call(s) ──────────────────────────────────────────────
-    let mut info_names: Vec<&str> = Vec::new();
-    if prepared
+    let memory_tool = prepared
         .info_tools
         .iter()
-        .any(|t| t.name() == MEMORY_RECALL_TOOL)
-    {
-        info_names.push(MEMORY_RECALL_TOOL);
-    }
-    if prepared
+        .find(|t| t.name() == memory_recall_tool_name());
+    let http_enabled = prepared
         .info_tools
         .iter()
-        .any(|t| t.name() == HTTP_REQUEST_TOOL)
-    {
-        info_names.push(HTTP_REQUEST_TOOL);
-    }
-    let tools = router_tools(&info_names);
+        .any(|t| t.name() == HTTP_REQUEST_TOOL);
+    let tools = router_tools(
+        memory_tool.map(|t| t.name()).as_deref(),
+        http_enabled,
+    );
     let tools_json = serde_json::to_string(&tools).unwrap_or_default();
     let mut system = ChatMessage::system(prepared.block_a.clone());
     system.cache_control = Some(CacheControl::Ephemeral);
@@ -770,8 +767,13 @@ async fn execute_info_tool(
 ) -> String {
     let name = call.function.name.as_str();
     let Some(tool) = tools.iter().find(|t| t.name() == name) else {
+        let available = tools
+            .iter()
+            .map(|t| t.name())
+            .collect::<Vec<_>>()
+            .join(", ");
         return format!(
-            "Error: `{name}` is not available on a chat turn — valid tools: {DISPATCH_TOOL}, {MEMORY_RECALL_TOOL}, {HTTP_REQUEST_TOOL} (GET only)"
+            "Error: `{name}` is not available on a chat turn — valid tools: {DISPATCH_TOOL}, {available} (GET only for {HTTP_REQUEST_TOOL})"
         );
     };
     let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
@@ -1199,7 +1201,7 @@ mod tests {
     /// A tool that echoes the params it was called with, so the test can see
     /// exactly what the runner handed to the builtin layer.
     struct EchoTool {
-        name: &'static str,
+        name: String,
     }
 
     #[async_trait::async_trait]
@@ -1230,7 +1232,9 @@ mod tests {
     async fn http_info_calls_are_forced_to_a_bounded_get() {
         // Even if the model invents mutating arguments, only a GET with the
         // url (+ string headers) reaches the tool (ADR-099 D3).
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool { name: HTTP_REQUEST_TOOL })];
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool {
+            name: HTTP_REQUEST_TOOL.to_string(),
+        })];
         let call = info_call(
             HTTP_REQUEST_TOOL,
             r#"{"url":"https://example.com/time","method":"DELETE","body":{"evil":1},"headers":{"a":"b","c":42},"timeout_secs":9999}"#,
@@ -1263,8 +1267,11 @@ mod tests {
         assert!(out.contains("not available"));
 
         // Malformed argument JSON degrades to Null params, not a panic.
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool { name: MEMORY_RECALL_TOOL })];
-        let out = execute_info_tool(&tools, &info_call(MEMORY_RECALL_TOOL, "{oops"), &deps(), "x", 1000).await;
+        let memory = memory_recall_tool_name();
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool {
+            name: memory.clone(),
+        })];
+        let out = execute_info_tool(&tools, &info_call(&memory, "{oops"), &deps(), "x", 1000).await;
         assert!(!out.starts_with("Error:"), "got: {out}");
     }
 

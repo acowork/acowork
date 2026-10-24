@@ -235,15 +235,20 @@ run_session_full_read_redline() {
     echo "Session full-read red line: OK"
 }
 
-# ADR-076 §决策 3/4 (+ADR-084 §决策 7): identity injection has exactly two
-# trusted writers, both deriving the identity from a verified token —
-# `auth_middleware` (`x-user-id`, consumed by the Runtime) and `user_proxy`
-# (`X-Auth-*`, consumed by the user service). Inbound headers are forwarded
-# verbatim, so any other write of either family is a client-asserted identity
-# that could claim another user's sessions or admin role. Both the constants
-# and the raw literals may only appear in those two files (definition sites
-# and their tests) — matching the literals closes the hole where a new writer
-# spells the header out as a string and bypasses the lint.
+# ADR-076 §决策 3/4 (+ADR-084 §决策 7): identity injection has exactly three
+# trusted writers, all deriving the identity from a verified token —
+# `auth_middleware` (`x-user-id`, consumed by the Runtime), `user_proxy`
+# (`X-Auth-*`, consumed by the user service) and `doc_proxy` (`X-Auth-Role`
+# only, consumed by the doc service to gate permission *management* on admin —
+# doc ACL design §9). Inbound headers are forwarded verbatim, so any other
+# write of either family is a client-asserted identity that could claim another
+# user's sessions or admin role. Both the constants and the raw literals may
+# only appear in those three files (definition sites and their tests) —
+# matching the literals closes the hole where a new writer spells the header
+# out as a string and bypasses the lint. Every listed writer must drop the
+# client's own claim first and re-derive from `AuthContext`; `doc_proxy`'
+# tests pin both directions (forged role replaced on the REST path, absent on
+# the MCP path).
 run_gateway_auth_scope_redline() {
     echo "Checking ADR-076 identity-injection red line..."
     local root="$SCRIPT_DIR/../core/acowork-gateway/src"
@@ -251,12 +256,13 @@ run_gateway_auth_scope_redline() {
     offenders=$(grep -rnE '(USER_SCOPE_HEADER|"x-user-id"|AUTH_USER_HEADER|AUTH_ROLE_HEADER|AUTH_AS_USER_HEADER|"x-auth-)' --include='*.rs' "$root" \
         | grep -vE "^$root/http/auth_middleware\.rs:" \
         | grep -vE "^$root/http/user_proxy\.rs:" \
+        | grep -vE "^$root/http/doc_proxy\.rs:" \
         || true)
     if [ -n "$offenders" ]; then
-        echo "ERROR: identity header (constant or literal) referenced outside auth_middleware.rs / user_proxy.rs (ADR-076 §决策 4):"
+        echo "ERROR: identity header (constant or literal) referenced outside auth_middleware.rs / user_proxy.rs / doc_proxy.rs (ADR-076 §决策 4):"
         echo "$offenders"
-        echo "The Gateway reverse proxy must never assert a user identity itself —"
-        echo "the scope is injected once, in auth_middleware, from the verified token."
+        echo "The Gateway reverse proxy must never assert a user identity from a client claim —"
+        echo "the scope is written only by the listed proxies, from the verified token."
         exit 1
     fi
     echo "Identity-injection red line: OK"
@@ -604,6 +610,12 @@ run_integration() {
     cargo test -p acowork-core --test node_proto_golden
     echo "=== Running acowork-node dependency red-line test ==="
     cargo test -p acowork-node --test dependency_redline
+    # ADR-100: the retrieval-eval kernel is shared by the memory and runtime
+    # harnesses but must stay off the shipping path (dev-dependency only), and
+    # the checked-in stand-in vectors must match the kernel's own tokenizer.
+    echo "=== Running acowork-eval shipping red-line + dataset freshness tests ==="
+    cargo test -p acowork-eval --test shipping_redline
+    cargo test -p acowork-eval --test regenerate_stand_in_embeddings
 }
 
 # Frontend smoke suite (dev/e2e_frontend_smoke/smoke_test.py): boots a

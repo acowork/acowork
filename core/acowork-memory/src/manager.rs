@@ -1,8 +1,13 @@
-//! MemoryManager - orchestrates the three-phase memory lifecycle.
+//! MemoryManager - retrieval and write-side lifecycle over a `MemoryProvider`.
 //!
-//! 1. Retrieve - search relevant memories before LLM generation
-//! 2. Inject  - format and inject memories into the system prompt
-//! 3. Record  - persist distilled episodes (via `record_distilled`)
+//! 1. Retrieve - hybrid search, dedup, decay, rank (the `memory_recall` read path)
+//! 2. Record  - persist distilled episodes (via `record_distilled`)
+//!
+//! The former "Inject" phase — formatting a retrieved block for the system
+//! prompt, with its three per-category token budgets — died with ADR-100
+//! decision 5. Recall is a tool call now: the Agent asks, the tool handler in
+//! `crate::service::mcp::tools` formats the answer, and the result lands in the
+//! conversation as a tool result rather than a prompt section.
 //!
 //! Conversation turns are NOT automatically recorded as episodic memory
 //! (the former `record_turn` / `ConversationRecord` channel was removed —
@@ -16,7 +21,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::{
-    labels, Episode, HintType, MemoryProvider, MemoryQuery, RetrievalMetrics,
+    labels, Episode, HintType, MemoryProvider, MemoryQuery,
 };
 use crate::consolidation::EmbeddingFn;
 use crate::quality::MemoryQualityConfig;
@@ -41,14 +46,6 @@ use acowork_core::retrieval::{FusedHit, LexicalQuery, MatchedBy};
 
 /// Default embedding dimension. Must match `HnswConfig::default().vector_dim`.
 pub const PROCEDURAL_FALLBACK_DIM: usize = 384;
-
-/// Default abstention guidance prompt (G9).
-///
-/// Mirrors the offline distiller's `AbstentionConfig::default().abstention_prompt`.
-/// Kept as a constant here so `acowork-memory` never depends on a storage
-/// backend; `MemoryManagerConfig.abstention_prompt` overrides it.
-pub const DEFAULT_ABSTENTION_PROMPT: &str = "When you are not confident about the \
-    information from memory, respond with 'I'm not sure about this' rather than guessing.";
 
 /// Deterministic, dependency-free fallback embedding for procedural nodes when
 /// no `EmbeddingFn` is available. The result is not semantically meaningful,
@@ -89,25 +86,6 @@ pub fn procedural_embedding_for(
 /// Configuration for MemoryManager.
 #[derive(Debug, Clone)]
 pub struct MemoryManagerConfig {
-    /// Token budget for non-autobiographical memory injection (default: 2000).
-    ///
-    /// Applies to Episodic, Knowledge, Procedural, and RAG results only.
-    /// Autobiographical memories have separate budgets (see below).
-    pub max_inject_tokens: usize,
-    /// Token budget for autobiographical core memories — Identity, Capability,
-    /// Limitation (default: 100).
-    ///
-    /// These are the agent's "self-concept" and are always injected first.
-    /// Per design §3.3, Identity/Capability are always relevant; this budget
-    /// controls how much detail to include when nodes are numerous.
-    pub max_autobio_core_tokens: usize,
-    /// Token budget for autobiographical history memories — History and
-    /// Relationship (default: 100).
-    ///
-    /// Per design §3.3: History Top-5 summaries, Relationship Top-3.
-    /// Combined with `max_autobio_core_tokens`, the total autobiographical
-    /// budget is 200 tokens (≈150 Chinese characters), matching the design spec.
-    pub max_autobio_history_tokens: usize,
     /// Default number of results to retrieve (default: 10).
     pub default_k: usize,
     /// Centralized memory quality parameters (ADR-062 D2).
@@ -130,53 +108,23 @@ pub struct MemoryManagerConfig {
     /// The same type is used by the background scan (`EpisodicDecayConfig`),
     /// so scan-side and retrieval-side semantics can never drift apart.
     pub forgetting: EpisodicDecayConfig,
-    /// Abstention guidance prompt injected when retrieval returns nothing
-    /// and `query.abstention_enabled` is true (G9).
-    ///
-    /// When `None` (default), the built-in default text is used — mirroring
-    /// the offline distiller's `AbstentionConfig::default().abstention_prompt`.
-    /// This layer must not depend on a storage backend (dependency direction),
-    /// hence the constant lives here.
-    pub abstention_prompt: Option<String>,
-    /// Record episodes asynchronously (default: true).
-    pub record_async: bool,
-    /// Per-turn auto-injection of retrieved memories (default: **true**,
-    /// ADR-062 M5 — first-turn trigger per session, ADR-060 §6.3).
-    ///
-    /// When enabled, the agent loop calls `MemoryManager::retrieve_and_inject`
-    /// at most ONCE per session, on the session's FIRST user message
-    /// (`AgentLoop.memory_retrieved_for_session` guards later turns).
-    ///
-    /// When disabled, auto-injection is NOT called — the LLM can still
-    /// trigger explicit deep recall via the `memory_recall` tool
-    /// (`MemoryQuery::deep_recall`).
-    ///
-    /// **History**: off by default since 2026-09-12 (unmature memory layer,
-    /// low-precision raw-message queries). Temporarily re-opened by ADR-062
-    /// M5 once the P2 benchmark cleared the §5.2 gates (Dormant exclusion +
-    /// min_score fix + keyword quality gate), then reverted to OFF by
-    /// default: with auto-inject ON, the first-turn injection duplicates
-    /// what the LLM already retrieves via an explicit `memory_recall` call
-    /// (both paths query on the same user message). The LLM is now relied
-    /// upon for explicit recall; auto-inject is a per-agent opt-in.
-    ///
-    /// **Per-agent opt-in**: an agent can enable it via the manifest
-    /// `[memory.quality].auto_inject_enabled = true` (ADR-062 §6.1).
-    pub auto_inject_enabled: bool,
+    // ADR-100 decision 5: per-turn auto-injection is gone — recall is driven by
+    // the agent calling the memory tools. That also removed the three injection
+    // token budgets (`max_inject_tokens` / `max_autobio_core_tokens` /
+    // `max_autobio_history_tokens`) and `record_async` (the knob of the deleted
+    // `record_turn` path): nothing read them once their consumer was gone.
+    // The `auto_inject_enabled` switch went the same way, and so did G9's
+    // `abstention_prompt`: no caller ever set `abstention_enabled`, and
+    // abstention guidance is a prompt-layer concern the Runtime already owns
+    // through its `prompts/abstention.md` package asset.
 }
 
 impl Default for MemoryManagerConfig {
     fn default() -> Self {
         Self {
-            max_inject_tokens: 2000,
-            max_autobio_core_tokens: 100,
-            max_autobio_history_tokens: 100,
             default_k: 10,
             quality: MemoryQualityConfig::default(),
             forgetting: EpisodicDecayConfig::default(),
-            abstention_prompt: None,
-            record_async: true,
-            auto_inject_enabled: false,
         }
     }
 }
@@ -190,12 +138,6 @@ impl Default for MemoryManagerConfig {
 pub struct RetrievalResult {
     /// Retrieved memories sorted by relevance (highest first).
     pub memories: Vec<RetrievedMemory>,
-    /// Metrics collected during retrieval.
-    pub metrics: RetrievalMetrics,
-    /// Abstention guidance prompt to inject into the system prompt when
-    /// abstention triggered (empty result set + `abstention_enabled`).
-    /// `None` when abstention was not triggered or is disabled.
-    pub abstention_prompt: Option<String>,
 }
 
 /// One retrieval candidate between the per-label search and the final
@@ -249,45 +191,16 @@ pub struct RetrievedMemory {
     pub text_rank: Option<usize>,
 }
 
-/// Formatted memory block ready for prompt injection.
-#[derive(Debug)]
-pub struct InjectedMemory {
-    /// Ready to insert into system prompt.
-    pub formatted_text: String,
-    /// Approximate token count.
-    pub token_count: usize,
-    /// Number of memories included.
-    pub memory_count: usize,
-    /// Whether results were truncated by token budget.
-    pub truncated: bool,
-}
-
-/// Result of `retrieve_and_inject()` - the combined retrieve+inject+activate
-/// operation. ADR-051 P3.
-#[derive(Debug)]
-pub struct RetrieveAndInjectResult {
-    /// Injected memory text ready for ContextBuilder.
-    pub injected: InjectedMemory,
-    /// Retrieval metrics for monitoring.
-    pub metrics: RetrievalMetrics,
-    /// Node IDs of retrieved memories (for traceability/debugging).
-    pub memory_ids: Vec<String>,
-    /// Pending ambiguous conflict hint, if any.
-    pub ambiguous_hint: Option<String>,
-    /// Abstention guidance prompt to inject into the system prompt when
-    /// abstention triggered (G9). `None` otherwise.
-    pub abstention_prompt: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // MemoryManager
 // ---------------------------------------------------------------------------
 
-/// Orchestrates the three-phase memory lifecycle.
+/// Retrieval and record orchestration over a [`MemoryProvider`].
 ///
-/// ADR-051 C4: RAG channel removed from MemoryManager.
-/// RAG retrieval is now handled by `loop_memory.rs` which calls
-/// `rag_provider.query()` separately and merges results by score.
+/// ADR-051 C4: RAG channel removed from MemoryManager — RAG retrieval is
+/// issued by the caller against its own provider and merged by score.
+/// ADR-100 decision 5: the injection/formatting phase is removed too; the
+/// recall tool handler owns the output format.
 pub struct MemoryManager {
     config: MemoryManagerConfig,
 }
@@ -310,12 +223,11 @@ impl MemoryManager {
     /// proceeding to hybrid search. On timeout or failure, falls back to
     /// text-only search (graceful degradation).
     ///
-    /// Pipeline: (auto-embed) → hybrid_search → dedup → merge & rank
-    /// + RAG channel (if rag_provider is Some, run in parallel).
+    /// Pipeline: (auto-embed) → hybrid_search → dedup → merge & rank.
     ///
-    /// RAG channel uses the user message as query with default top_k=3.
-    /// Results from both channels are merged and sorted by score.
-    /// Source annotations distinguish [Grafeo] vs [RAG:<tool_name>].
+    /// RAG is not a channel here (ADR-051 C4): whoever needs enterprise
+    /// knowledge queries its own `RagProvider` and merges the results with
+    /// these by score, so every entry below is a memory node.
     pub async fn retrieve(
         &self,
         provider: &dyn MemoryProvider,
@@ -627,211 +539,12 @@ impl MemoryManager {
         let result_count = memories.len().min(k);
         memories.truncate(result_count);
 
-        // Compute metrics.
-        let max_score = memories
-            .iter()
-            .map(|m| m.score as f32)
-            .fold(0.0f32, f32::max);
-        let avg_score = if result_count > 0 {
-            memories.iter().map(|m| m.score as f32).sum::<f32>() / result_count as f32
-        } else {
-            0.0
-        };
-        let abstention_triggered = result_count == 0 && query.abstention_enabled;
+        // The fused score is a rank signal, not a similarity (ADR-095), so the
+        // only aggregate worth logging here is how much came back.
+        tracing::debug!("Retrieved {} memories", result_count);
 
-        // G9: When abstention triggers, attach the abstention guidance prompt
-        // so the caller can inject it into the system prompt. This prevents
-        // the LLM from fabricating answers based on an empty result set.
-        // The prompt text comes from `MemoryManagerConfig.abstention_prompt`
-        // (defaults to the built-in constant, mirroring grafeo's
-        // `AbstentionConfig::default().abstention_prompt`).
-        let abstention_prompt = if abstention_triggered {
-            Some(
-                self.config
-                    .abstention_prompt
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_ABSTENTION_PROMPT.to_string()),
-            )
-        } else {
-            None
-        };
-
-        let metrics = RetrievalMetrics {
-            result_count,
-            avg_score,
-            max_score,
-            abstention_triggered,
-            filtered_count: 0,
-            retrieval_level: 0,
-            hint_type: query.hint_type,
-        };
-
-        tracing::debug!(
-            "Retrieved {} memories (max_score={:.3}, avg_score={:.3})",
-            result_count,
-            max_score,
-            avg_score,
-        );
-
-        Ok(RetrievalResult {
-            memories,
-            metrics,
-            abstention_prompt,
-        })
+        Ok(RetrievalResult { memories })
     }
-
-    /// Format retrieved memories for system prompt injection.
-    ///
-    /// Three-phase injection with separate token budgets:
-    ///
-    /// - **Pass 1**: Autobiographical core (Identity/Capability/Limitation) —
-    ///   the agent's self-concept. Always injected first, bounded by
-    ///   `max_autobio_core_tokens` (default 100). These memories are never
-    ///   skipped entirely; if the first one exceeds the budget it is still
-    ///   included to avoid empty identity.
-    ///
-    /// - **Pass 2**: Autobiographical history (History/Relationship/Preference) —
-    ///   contextual self-knowledge. Injected in score-descending order,
-    ///   bounded by `max_autobio_history_tokens` (default 100).
-    ///
-    /// - **Pass 3**: Non-autobiographical memories (Episodic/Knowledge/
-    ///   Procedural/RAG) — bounded by `max_inject_tokens` (default 2000).
-    ///
-    /// Per design §3.3, the total autobiographical budget is 200 tokens
-    /// (≈150 Chinese characters). Each memory is kept intact (no mid-content
-    /// truncation); memories that would exceed the budget are skipped entirely.
-    pub fn inject(&self, retrieval: &RetrievalResult) -> InjectedMemory {
-        if retrieval.memories.is_empty() {
-            return InjectedMemory {
-                formatted_text: String::new(),
-                token_count: 0,
-                memory_count: 0,
-                truncated: false,
-            };
-        }
-
-        let core_budget = self.config.max_autobio_core_tokens;
-        let history_budget = self.config.max_autobio_history_tokens;
-        let other_budget = self.config.max_inject_tokens;
-
-        let mut lines: Vec<String> = Vec::new();
-        let mut token_count: usize = 0;
-        let mut truncated = false;
-
-        // Partition autobiographical memories into core vs history.
-        let mut autobio_core: Vec<&RetrievedMemory> = Vec::new();
-        let mut autobio_history: Vec<&RetrievedMemory> = Vec::new();
-
-        for memory in &retrieval.memories {
-            if memory.label != labels::AUTOBIOGRAPHICAL {
-                continue;
-            }
-            match autobio_subcategory(&memory.content) {
-                AutobioGroup::Core => autobio_core.push(memory),
-                AutobioGroup::History => autobio_history.push(memory),
-            }
-        }
-
-        // Pass 1: inject autobiographical core (Identity/Capability/Limitation).
-        let mut core_tokens: usize = 0;
-        for memory in &autobio_core {
-            let line = format!("[{}] {}", memory.label, memory.content);
-            let line_tokens = estimate_tokens(&line);
-
-            // Always include at least one core memory (agent identity).
-            if core_tokens > 0 && core_tokens + line_tokens > core_budget {
-                truncated = true;
-                break;
-            }
-
-            lines.push(line);
-            core_tokens += line_tokens;
-        }
-        token_count += core_tokens;
-
-        // Pass 2: inject autobiographical history (History/Relationship/Preference).
-        let mut history_tokens: usize = 0;
-        for memory in &autobio_history {
-            let line = format!("[{}] {}", memory.label, memory.content);
-            let line_tokens = estimate_tokens(&line);
-
-            if history_tokens + line_tokens > history_budget {
-                truncated = true;
-                break;
-            }
-
-            lines.push(line);
-            history_tokens += line_tokens;
-        }
-        token_count += history_tokens;
-
-        // Pass 3: inject non-autobiographical memories within token budget.
-        let mut other_tokens: usize = 0;
-        for memory in &retrieval.memories {
-            if memory.label == labels::AUTOBIOGRAPHICAL {
-                continue; // already handled in passes 1-2
-            }
-            let line = format!("[{}] {}", memory.label, memory.content);
-            let line_tokens = estimate_tokens(&line);
-
-            // Keep memory intact: skip entirely if it would exceed budget
-            if other_tokens + line_tokens > other_budget {
-                truncated = true;
-                break;
-            }
-
-            lines.push(line);
-            other_tokens += line_tokens;
-        }
-        token_count += other_tokens;
-
-        // Edge case: if nothing was injected (not even autobiographical),
-        // include the first result anyway to avoid empty injection.
-        if lines.is_empty() && !retrieval.memories.is_empty() {
-            let first = &retrieval.memories[0];
-            let line = format!("[{}] {}", first.label, first.content);
-            let line_tokens = estimate_tokens(&line);
-            lines.push(line);
-            token_count = line_tokens;
-            truncated = true;
-        }
-
-        let formatted_text = lines.join("\n");
-
-        InjectedMemory {
-            formatted_text,
-            token_count,
-            memory_count: lines.len(),
-            truncated,
-        }
-    }
-
-    /// Format retrieved memories and append ambiguous conflict confirmation hints.
-    ///
-    /// Same as `inject()` but also checks the GrafeoStore for pending
-    /// ambiguous conflicts. If `should_trigger_confirmation()` returns true,
-    /// appends a confirmation hint that the LLM can use to naturally ask
-    /// the user about the conflicting values.
-    pub fn inject_with_ambiguous_hints(
-        &self,
-        retrieval: &RetrievalResult,
-        provider: &dyn MemoryProvider,
-    ) -> InjectedMemory {
-        let mut injected = self.inject(retrieval);
-
-        // Check for pending ambiguous conflicts.
-        if let Ok(true) = provider.should_trigger_confirmation()
-            && let Ok(Some(hint)) = provider.generate_confirmation_hint() {
-                let hint_line = format!("[Ambiguous] {}", hint);
-                let hint_tokens = estimate_tokens(&hint_line);
-                injected.formatted_text = format!("{}\n{}", injected.formatted_text, hint_line);
-                injected.token_count += hint_tokens;
-                injected.memory_count += 1;
-            }
-
-        injected
-    }
-
     /// Record a distilled/compacted episode into the episodic layer.
     ///
     /// ADR-057 → triples removal (this PR): only the natural-language
@@ -884,87 +597,24 @@ impl MemoryManager {
         Ok(())
     }
 
-    /// Full memory lifecycle for a single turn:
-    /// 1. Retrieve memories for the query
-    /// 2. Format for injection
-    /// 3. Return injection text + metrics
-    pub async fn process_turn(
-        &self,
-        provider: &dyn MemoryProvider,
-        query: &mut MemoryQuery,
-        embedding_provider: Option<&dyn EmbeddingProvider>,
-    ) -> Result<(InjectedMemory, RetrievalMetrics)> {
-        let retrieval = self.retrieve(provider, query, embedding_provider).await?;
-        let metrics = retrieval.metrics.clone();
-        let injected = self.inject(&retrieval);
-        Ok((injected, metrics))
-    }
-
     // ── ADR-051 P3: High-level semantic methods ─────────────────────────
     //
-    // These methods encapsulate all direct provider CRUD operations.
-    // loop_memory.rs should only call these, never raw provider methods.
-
-    /// Retrieve memories, inject them, activate procedural nodes, and check
-    /// for ambiguous conflicts - all in one call.
-    ///
-    /// This is the primary entry point for per-turn memory injection.
-    /// The caller receives the formatted text, metrics, memory IDs for
-    /// traceability, and an optional ambiguous conflict hint to inject
-    /// into the context.
-    ///
-    /// ADR-051 P3: Replaces the inline retrieve+inject+activate+ambiguity
-    /// logic that was in loop_memory.rs.
-    pub async fn retrieve_and_inject(
-        &self,
-        provider: &dyn MemoryProvider,
-        query: &mut MemoryQuery,
-        embedding_provider: Option<&dyn EmbeddingProvider>,
-    ) -> Result<RetrieveAndInjectResult> {
-        let retrieval = self.retrieve(provider, query, embedding_provider).await?;
-        let metrics = retrieval.metrics.clone();
-
-        // Capture node IDs before inject (for traceability).
-        let memory_ids: Vec<String> = retrieval
-            .memories
-            .iter()
-            .filter(|m| m.node_id != 0)
-            .map(|m| m.node_id.to_string())
-            .collect();
-
-        // Activate ProceduralNodes that were retrieved.
-        self.activate_procedural_nodes(provider, &retrieval.memories);
-
-        // Inject with ambiguous conflict hints.
-        let injected = self.inject_with_ambiguous_hints(&retrieval, provider);
-
-        // Extract ambiguous hint separately for the caller.
-        let ambiguous_hint = if injected.formatted_text.contains("[Ambiguous]") {
-            // Extract the hint text after the last "[Ambiguous] " marker.
-            injected
-                .formatted_text
-                .rsplit_once("[Ambiguous] ")
-                .map(|(_, hint)| hint.to_string())
-        } else {
-            None
-        };
-
-        Ok(RetrieveAndInjectResult {
-            injected,
-            metrics,
-            memory_ids,
-            ambiguous_hint,
-            abstention_prompt: retrieval.abstention_prompt,
-        })
-    }
+    // These methods encapsulate all direct provider CRUD operations. Callers —
+    // the memory service's tool handlers — go through them, never raw provider
+    // methods.
+    //
+    // ADR-100 decision 5 removed `retrieve_and_inject` together with the
+    // Runtime's per-turn auto-injection path: a recall is now a tool call the
+    // agent makes, and its handler composes `retrieve` with its own formatting.
 
     /// Activate ProceduralNodes that were retrieved and matched the context.
     ///
     /// For each retrieved memory with label "Procedural", increments the
     /// `activation_count`. This tracks how often a procedure is actually
     /// used, feeding into confidence boosting (ADR-057 P1) and future
-    /// activation-based retrieval ranking.
-    fn activate_procedural_nodes(
+    /// activation-based retrieval ranking. Called by the recall tool so the
+    /// signal survives the removal of the auto-injection path (ADR-100).
+    pub(crate) fn activate_procedural_nodes(
         &self,
         provider: &dyn MemoryProvider,
         memories: &[RetrievedMemory],
@@ -1050,48 +700,6 @@ fn hint_weights(hint_type: HintType) -> (f64, f64) {
         HintType::Relational => (0.6, 0.2),
         HintType::Identity => (0.3, 0.7),
     }
-}
-
-/// Classification of autobiographical memory subcategory for budget
-/// allocation. Core (Identity/Capability/Limitation) always gets first
-/// priority; History (History/Relationship/Preference) is secondary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AutobioGroup {
-    /// Identity, Capability, Limitation — agent self-concept.
-    Core,
-    /// History, Relationship, Preference — contextual self-knowledge.
-    History,
-}
-
-/// Determine the autobiographical group from the content prefix.
-///
-/// `extract_node_content()` formats autobiographical nodes as
-/// `"Category: key: value"` or `"Category: value"`, so we parse the
-/// prefix before the first colon to determine the subcategory.
-fn autobio_subcategory(content: &str) -> AutobioGroup {
-    // Parse the category prefix (e.g., "Identity: name: ACowork" → "Identity").
-    let category = content.split(':').next().unwrap_or("").trim();
-    match category {
-        "Identity" | "Capability" | "Limitation" => AutobioGroup::Core,
-        "History" | "Relationship" | "Preference" => AutobioGroup::History,
-        // Unknown prefix — default to Core for safety (agent identity is
-        // always important and the content is typically compact).
-        _ => AutobioGroup::Core,
-    }
-}
-
-/// Simple token estimation heuristic.
-///
-/// - ASCII characters: ~4 chars per token
-/// - Non-ASCII (CJK, etc.): ~2 chars per token
-fn estimate_tokens(text: &str) -> usize {
-    let ascii_count = text.chars().filter(|c| c.is_ascii()).count();
-    let non_ascii_count = text.chars().count() - ascii_count;
-
-    let ascii_tokens = ascii_count.div_ceil(4);
-    let non_ascii_tokens = non_ascii_count.div_ceil(2);
-
-    ascii_tokens + non_ascii_tokens
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,439 +817,19 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = MemoryManagerConfig::default();
-        assert_eq!(config.max_inject_tokens, 2000);
-        assert_eq!(config.max_autobio_core_tokens, 100);
-        assert_eq!(config.max_autobio_history_tokens, 100);
         assert_eq!(config.default_k, 10);
         assert_eq!(config.quality.min_cosine, 0.3);
         assert!(config.quality.exclude_dormant, "D1 Dormant exclusion on by default");
-        assert!(config.record_async);
-        // auto-injection is OFF by default (per-agent opt-in via manifest
-        // `[memory.quality].auto_inject_enabled = true`). Rationale: the LLM
-        // already recalls memories via the explicit `memory_recall` tool on
-        // the same user-message query, so first-turn auto-inject would
-        // duplicate that context.
-        assert!(!config.auto_inject_enabled);
     }
 
     #[test]
     fn test_manager_new() {
         let config = MemoryManagerConfig::default();
         let manager = MemoryManager::new(config.clone());
-        assert_eq!(manager.config.max_inject_tokens, config.max_inject_tokens);
+        assert_eq!(manager.config.default_k, config.default_k);
     }
 
-    #[test]
-    fn test_inject_normal() {
-        let retrieval = RetrievalResult {
-            memories: vec![
-                RetrievedMemory {
-                    content: "User likes Rust.".to_string(),
-                    label: "Knowledge".to_string(),
-                    score: 0.95,
-                    source: "hybrid".to_string(),
-                    node_id: 1,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "Previous discussion about traits.".to_string(),
-                    label: "Episodic".to_string(),
-                    score: 0.85,
-                    source: "hybrid".to_string(),
-                    node_id: 2,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-            ],
-            metrics: RetrievalMetrics::default(),
-            abstention_prompt: None,
-        };
-
-        let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let injected = manager.inject(&retrieval);
-
-        assert!(!injected.formatted_text.is_empty());
-        assert!(injected.formatted_text.contains("[Knowledge]"));
-        assert!(injected.formatted_text.contains("[Episodic]"));
-        assert_eq!(injected.memory_count, 2);
-        assert!(!injected.truncated);
-    }
-
-    #[test]
-    fn test_inject_all_memories_no_truncation() {
-        let retrieval = RetrievalResult {
-            memories: vec![
-                RetrievedMemory {
-                    content: "User likes Rust programming language for systems development."
-                        .to_string(),
-                    label: "Knowledge".to_string(),
-                    score: 0.95,
-                    source: "hybrid".to_string(),
-                    node_id: 1,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "Another very long memory content that takes up many tokens."
-                        .to_string(),
-                    label: "Episodic".to_string(),
-                    score: 0.85,
-                    source: "hybrid".to_string(),
-                    node_id: 2,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "Third memory with even more text content to exceed token budget."
-                        .to_string(),
-                    label: "Procedural".to_string(),
-                    score: 0.75,
-                    source: "hybrid".to_string(),
-                    node_id: 3,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-            ],
-            metrics: RetrievalMetrics::default(),
-            abstention_prompt: None,
-        };
-
-        let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let injected = manager.inject(&retrieval);
-
-        // All 3 memories should be included, no truncation.
-        assert_eq!(injected.memory_count, 3);
-        assert!(!injected.truncated);
-        assert!(injected.formatted_text.contains("User likes Rust"));
-        assert!(injected.formatted_text.contains("Another very long memory"));
-        assert!(injected.formatted_text.contains("Third memory"));
-    }
-
-    #[test]
-    fn test_inject_empty() {
-        let retrieval = RetrievalResult {
-            memories: vec![],
-            metrics: RetrievalMetrics::default(),
-            abstention_prompt: None,
-        };
-
-        let manager = MemoryManager::new(MemoryManagerConfig::default());
-        let injected = manager.inject(&retrieval);
-
-        assert!(injected.formatted_text.is_empty());
-        assert_eq!(injected.memory_count, 0);
-        assert_eq!(injected.token_count, 0);
-        assert!(!injected.truncated);
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn test_inject_autobio_core_budget() {
-        let retrieval = RetrievalResult {
-            memories: vec![
-                RetrievedMemory {
-                    content: "Identity: name: WeatherBot".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 1.0,
-                    source: "hybrid".to_string(),
-                    node_id: 1,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "Identity: role: weather assistant that provides detailed forecasts and climate analysis".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 0.99,
-                    source: "hybrid".to_string(),
-                    node_id: 2,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "Capability: forecast: can provide 7-day weather forecasts with temperature and precipitation details".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 0.98,
-                    source: "hybrid".to_string(),
-                    node_id: 3,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-            ],
-            metrics: RetrievalMetrics::default(),
-            abstention_prompt: None,
-        };
-
-        // Tight budget: only the first identity should fit.
-        let mut config = MemoryManagerConfig::default();
-        config.max_autobio_core_tokens = 15;
-        let manager = MemoryManager::new(config);
-        let injected = manager.inject(&retrieval);
-
-        // At least one core memory is always included.
-        assert!(
-            injected
-                .formatted_text
-                .contains("Identity: name: WeatherBot")
-        );
-        // The long role and capability should be truncated by budget.
-        assert!(injected.truncated);
-        assert!(injected.memory_count < 3);
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn test_inject_autobio_history_budget() {
-        let retrieval = RetrievalResult {
-            memories: vec![
-                RetrievedMemory {
-                    content: "Identity: name: Bot".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 1.0,
-                    source: "hybrid".to_string(),
-                    node_id: 1,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "History: milestone: first release on 2024-01-01, successfully deployed to production environment".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 0.9,
-                    source: "hybrid".to_string(),
-                    node_id: 2,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "History: milestone: version 2.0 release with major feature improvements".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 0.89,
-                    source: "hybrid".to_string(),
-                    node_id: 3,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "Relationship: user: collaborates with Alice on data analysis".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 0.85,
-                    source: "hybrid".to_string(),
-                    node_id: 4,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-            ],
-            metrics: RetrievalMetrics::default(),
-            abstention_prompt: None,
-        };
-
-        // Generous core budget but tight history budget.
-        let mut config = MemoryManagerConfig::default();
-        config.max_autobio_core_tokens = 200;
-        config.max_autobio_history_tokens = 20;
-        let manager = MemoryManager::new(config);
-        let injected = manager.inject(&retrieval);
-
-        // Core should be fully included.
-        assert!(injected.formatted_text.contains("Identity: name: Bot"));
-        // History should be truncated.
-        assert!(injected.truncated);
-    }
-
-    #[test]
-    #[allow(clippy::field_reassign_with_default)]
-    fn test_inject_three_phase_budget_independence() {
-        let retrieval = RetrievalResult {
-            memories: vec![
-                RetrievedMemory {
-                    content: "Identity: name: TestBot".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 1.0,
-                    source: "hybrid".to_string(),
-                    node_id: 1,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "History: event: deployed to production".to_string(),
-                    label: labels::AUTOBIOGRAPHICAL.to_string(),
-                    score: 0.9,
-                    source: "hybrid".to_string(),
-                    node_id: 2,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-                RetrievedMemory {
-                    content: "User prefers concise answers in technical discussions about programming languages".to_string(),
-                    label: "Knowledge".to_string(),
-                    score: 0.8,
-                    source: "hybrid".to_string(),
-                    node_id: 3,
-                    source_url: None,
-                    chunk_id: None,
-                    // Tests exercise the inject/compact pipeline, not the
-                    // retrieval signals, so leave them absent.
-                    matched_by: None,
-                    vector_rank: None,
-                    text_rank: None,
-                },
-            ],
-            metrics: RetrievalMetrics::default(),
-            abstention_prompt: None,
-        };
-
-        // Tight non-autobiographical budget — should not affect autobiographical.
-        let mut config = MemoryManagerConfig::default();
-        config.max_autobio_core_tokens = 200;
-        config.max_autobio_history_tokens = 200;
-        config.max_inject_tokens = 5; // Very tight — Knowledge won't fit.
-        let manager = MemoryManager::new(config);
-        let injected = manager.inject(&retrieval);
-
-        // Autobiographical memories should be injected.
-        assert!(injected.formatted_text.contains("Identity: name: TestBot"));
-        assert!(injected.formatted_text.contains("History: event: deployed"));
-        // Knowledge should be truncated.
-        assert!(injected.truncated);
-        assert!(!injected.formatted_text.contains("Knowledge"));
-    }
-
-    #[test]
-    fn test_autobio_subcategory() {
-        assert_eq!(
-            autobio_subcategory("Identity: name: Bot"),
-            AutobioGroup::Core
-        );
-        assert_eq!(
-            autobio_subcategory("Capability: language: Rust"),
-            AutobioGroup::Core
-        );
-        assert_eq!(
-            autobio_subcategory("Limitation: max_days: 7"),
-            AutobioGroup::Core
-        );
-        assert_eq!(
-            autobio_subcategory("History: milestone: v1"),
-            AutobioGroup::History
-        );
-        assert_eq!(
-            autobio_subcategory("Relationship: user: Alice"),
-            AutobioGroup::History
-        );
-        assert_eq!(
-            autobio_subcategory("Preference: style: concise"),
-            AutobioGroup::History
-        );
-        // Unknown prefix defaults to Core.
-        assert_eq!(autobio_subcategory("unknown content"), AutobioGroup::Core);
-    }
-
-    #[test]
-    fn test_procedural_injection_format() {
-        // Directly construct a RetrievedMemory for a Procedural node
-        // to test the injection format without relying on retrieval
-        // (retrieval text search uses "content" field which Procedural
-        // nodes don't have — a separate retrieval integration fix).
-        let manager = MemoryManager::new(MemoryManagerConfig::default());
-
-        let retrieval = RetrievalResult {
-            memories: vec![RetrievedMemory {
-                content: "当 user asks for summary 时，优先 reply in 3 sentences max".to_string(),
-                label: labels::PROCEDURAL.to_string(),
-                score: 0.9,
-                source: "hybrid".to_string(),
-                node_id: 1,
-                source_url: None,
-                chunk_id: None,
-                matched_by: None,
-                vector_rank: None,
-                text_rank: None,
-            }],
-            metrics: RetrievalMetrics::default(),
-            abstention_prompt: None,
-        };
-
-        let injected = manager.inject(&retrieval);
-
-        // The procedural node should be injected with the behavioral guideline format.
-        assert!(
-            injected.formatted_text.contains("当") && injected.formatted_text.contains("优先"),
-            "Procedural injection should use '当 X 时，优先 Y' format, got: {}",
-            injected.formatted_text
-        );
-    }
-
-    // ── ADR-057 P0: ProceduralNode embedding 必填 ─────────────────────────
+    // ── ADR-057 P0: ProceduralNode embedding is mandatory ────────────────
     //
     // Verifies that the procedural embedding fallback is deterministic and
     // dimension-compatible with HNSW, and that `procedural_embedding_for`

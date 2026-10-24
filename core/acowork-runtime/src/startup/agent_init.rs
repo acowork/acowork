@@ -96,13 +96,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let http_dispatch_shared: crate::http::SharedDispatchSender =
         Arc::new(tokio::sync::Mutex::new(Some(http_dispatch_tx)));
 
-    // ADR-033: Shared handle to the Grafeo memory store. Created empty here
-    // and populated by Phase B (`init_memory_store`) so the HTTP server can
-    // start serving requests before the store is ready. The HTTP handlers
-    // return a stable "no store" response when this is still `None`.
-    let memory_store_shared: crate::http::SharedMemoryStore =
-        Arc::new(std::sync::RwLock::new(None));
-
     // Shared degradation reasons. Created empty here and populated by
     // Phase B if session persistence fails. The same Arc is passed to
     // the HTTP server so `/health` can surface non-fatal startup errors.
@@ -122,14 +115,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>,
     > = Arc::new(tokio::sync::Mutex::new(None));
 
-    // ADR-040: Late-bind slot for memory query service.
-    let memory_query_slot: Arc<
-        tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>,
-    > = Arc::new(tokio::sync::Mutex::new(None));
-
     // ADR-081 §4.2: Late-bind slot for the conversation vector index.
-    // Populated in Phase B (session_init.rs) once the memory store is up;
-    // the indexer task tails the JSONL conversation logs from there.
+    // Populated in Phase B (session_init.rs) once the Runtime SQLite store is
+    // open; the indexer task tails the JSONL conversation logs from there.
     let conversation_index_slot: crate::http::SharedConversationIndex =
         Arc::new(std::sync::RwLock::new(None));
 
@@ -176,8 +164,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let session_config_slot: Arc<
         tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>,
     > = Arc::new(tokio::sync::Mutex::new(None));
-    let consolidation_timer_slot: crate::http::server::SharedConsolidationTimer =
-        Arc::new(std::sync::RwLock::new(None));
     let rag_provider_slot: crate::http::server::SharedRagProvider =
         Arc::new(std::sync::RwLock::new(None));
     // ADR-048: late-bind slot for the Debug service. Empty in Phase A;
@@ -270,7 +256,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             degraded_reasons.clone(),
             mqtt_client_slot.clone(),
             session_metadata_slot.clone(),
-            memory_query_slot.clone(),
             conversation_index_slot.clone(),
             workspace_query_slot.clone(),
             workspace_mutation_slot.clone(),
@@ -279,7 +264,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
             agent_config_slot.clone(),
             attachment_slot.clone(),
             session_config_slot.clone(),
-            consolidation_timer_slot.clone(),
             rag_provider_slot.clone(),
             debug_service_slot.clone(),
             workspace_resolver.clone(),
@@ -633,15 +617,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     };
     let compact_template = load_or_trace("compact-template.md", "COMPACT_PROMPT");
     let title_prompt = load_or_trace("title.md", "TITLE_PROMPT");
-    let abstention_prompt = load_or_trace("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)");
+    let abstention_prompt = load_or_trace("abstention.md", "abstention guidance (no built-in default)");
 
-    // ADR-071 D7/D9: the distiller prompt override. The offline distiller
-    // owns its built-in `MERGE_SYSTEM_PROMPT`; when a package ships
-    // `prompts/distiller-merge.md` it replaces the built-in per-agent.
-    // Loaded in Phase A like the ADR-063 overrides above so Gateway and
-    // Standalone modes agree.
-    let distiller_merge_prompt =
-        load_or_trace("distiller-merge.md", "distiller merge-decision prompt");
+    // ADR-071 D7/D9: the distiller prompt override.
+    // ADR-100: the distiller moved to the memory service, so the override moved
+    // with it — the Runtime no longer loads `prompts/distiller-merge.md`.
 
     // ADR-099: optional chat router persona. Replaces only the persona
     // section of the chat-layer system prompt; the kernel stays built-in.
@@ -900,10 +880,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
 
     // ── Step 4: Build tool registry + activate by manifest ──────────
 
-    let memory_session = Arc::new(crate::memory::MemorySessionHandle::new(
-        emb_provider.clone(),
-    ));
-
     let mut registry = ToolRegistry::new();
     // Tech-debt plan D1: intent_send now POSTs to the Gateway delivery
     // entry — it needs this agent's instance identity, the Gateway host,
@@ -919,9 +895,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     };
     for tool in builtin::all_builtin_tools(
         &workspace_resolver,
-        &config.agent_id,
         config.timeouts.tool_http_timeout_ms,
-        Some(memory_session.clone()),
         Some(mcp_notifier.clone()),
         config.work_dir.clone(),
         intent_send_config,
@@ -1333,12 +1307,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         compact_template,
         title_prompt,
         abstention_prompt,
-        // ADR-071 D7/D9: two distiller prompt overrides (see load_or_trace
-        // above). They ride the same `AgentBootContext` → `AgentCore`
-        // injection chain as the ADR-063 fields.
-        distiller_merge_prompt,
         chat_persona,
-        memory_session,
         mcp_notifier,
         workspace_resolver,
         rag_provider,
@@ -1352,10 +1321,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         latest_session,
         agent_id,
         http_dispatch_rx: Some(http_dispatch_rx),
-        // ADR-033: shared memory store is populated by Phase B and read by the
-        // Runtime HTTP memory handlers. The HTTP server was already given a
-        // clone of that Arc in the `start(...)` call above.
-        memory_store_shared,
         degraded_reasons,
         // Same Arc as the local `mqtt_client_slot` above — both Phase C
         // (subsystems) and the runtime `/api/debug/enable` route read
@@ -1363,7 +1328,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         mqtt_client_slot: mqtt_client_slot.clone(),
         agent_core_shared,
         session_metadata_slot,
-        memory_query_slot,
         conversation_index_slot,
         workspace_query_slot,
         workspace_mutation_slot,
@@ -1372,7 +1336,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         agent_config_slot,
         attachment_slot,
         session_config_slot,
-        consolidation_timer_slot,
         rag_provider_slot,
         debug_service_slot,
         session_manager_slot,

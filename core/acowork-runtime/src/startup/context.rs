@@ -137,9 +137,10 @@ pub(crate) struct AgentBootContext {
     /// `{language}` and `{user_message}` placeholders per their style.
     pub title_prompt: Option<String>,
 
-    /// Override for `acowork-memory::manager::DEFAULT_ABSTENTION_PROMPT`
-    /// (package file: `prompts/abstention.md`). Note: memory holds a
-    /// process-level singleton; L2 reload is out of scope here too.
+    /// Package file: `prompts/abstention.md`. No built-in default since
+    /// ADR-100 — the memory service removed its retrieval-side abstention
+    /// chain, so an absent file means nothing is injected. L2 reload is out of
+    /// scope here too.
     ///
     /// **ADR-068 note**: Three grafeo-specific override fields
     /// (`extraction_prompt`, `conflict_classification_prompt`,
@@ -149,12 +150,6 @@ pub(crate) struct AgentBootContext {
     /// `EpisodicDistiller` owns its own internal prompts.
     pub abstention_prompt: Option<String>,
 
-    /// ADR-071 D7/D9: override for the offline distiller's merge-decision
-    /// system prompt (package file: `prompts/distiller-merge.md`).
-    /// `None` → the built-in `MERGE_SYSTEM_PROMPT` in
-    /// `acowork_memory::consolidation::distiller` is used.
-    pub distiller_merge_prompt: Option<String>,
-
     /// ADR-099: optional Chat Router persona (package file:
     /// `prompts/chat.md`). Replaces only the persona section of the
     /// chat-layer system prompt; `None` falls back to the manifest's
@@ -162,7 +157,6 @@ pub(crate) struct AgentBootContext {
     pub chat_persona: Option<String>,
 
     // Shared handles
-    pub memory_session: Arc<crate::memory::MemorySessionHandle>,
     pub mcp_notifier: Arc<crate::mcp_notify::McpConfigNotifier>,
     pub workspace_resolver: crate::tools::workspace_resolver::SharedResolver,
 
@@ -216,18 +210,6 @@ pub(crate) struct AgentBootContext {
         tokio::sync::mpsc::UnboundedReceiver<(String, crate::agent::inbound::InboundMessage)>,
     >,
 
-    /// ADR-033: Shared handle to the Grafeo memory store. Cloned into
-    /// the Runtime HTTP server at Phase A and populated by Phase B once
-    /// [`crate::agent::AgentCore::init_memory_store`] succeeds. Memory
-    /// endpoints gracefully report "no store" when this is still `None`.
-    pub memory_store_shared: crate::http::SharedMemoryStore,
-
-    /// ADR-033: Shared embedding-provider dimension. Initialised to 0
-    /// in Phase A and updated once the embed provider is built. Read
-    /// by the memory-stats endpoint as `model_dim` for HNSW
-    /// dimension-mismatch detection.
-    ///
-    /// The HTTP server already holds a clone of the same `Arc` passed
     /// Late-bind slot for the Runtime's MQTT client. Same lifecycle as
     /// `mqtt_client: Option<RuntimeMqttClient>` above, but the slot is
     /// the handle the HTTP server holds and that Phase C's DevMode
@@ -253,9 +235,6 @@ pub(crate) struct AgentBootContext {
     /// ADR-040: Late-bind slot for session metadata service.
     pub session_metadata_slot:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionMetadataService>>>>,
-    /// ADR-040: Late-bind slot for memory query service.
-    pub memory_query_slot:
-        Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::MemoryQueryService>>>>,
     /// ADR-081 §4.2: Late-bind slot for the conversation vector index.
     pub conversation_index_slot: crate::http::SharedConversationIndex,
     /// ADR-040: Late-bind slot for workspace query service
@@ -291,10 +270,6 @@ pub(crate) struct AgentBootContext {
     /// (`GET/PUT /sessions/{sid}/config`). Populated in Phase B.
     pub session_config_slot:
         Arc<tokio::sync::Mutex<Option<Arc<dyn crate::usecases::SessionConfigService>>>>,
-    /// Late-bind slot for the consolidation timer. Populated in Phase B
-    /// after `AgentCore::start_consolidation_pipeline()` stores the timer.
-    /// Used by `GET /memory/consolidation/status`.
-    pub consolidation_timer_slot: crate::http::server::SharedConsolidationTimer,
     /// Late-bind slot for the RAG provider. Populated in Phase B from
     /// `AgentBootContext.rag_provider`. Used by `GET /agents/{id}/rag/status`
     /// and `POST /agents/{id}/rag/query`.

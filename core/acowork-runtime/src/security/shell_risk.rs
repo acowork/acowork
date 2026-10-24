@@ -1871,7 +1871,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── REPRODUCER ───────────────────────────��────────────────────────────
+    // ── REPRODUCER ──────────────────────────────────────────────────────────
     // User report: with threshold=High, the command
     //   rm -rf ./shell-approval-test-dir
     // does not trigger the approval dialog. Expected: High (because the

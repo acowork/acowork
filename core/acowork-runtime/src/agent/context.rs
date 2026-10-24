@@ -33,8 +33,11 @@ pub struct ContextBuilder {
     /// Model override (set by `model_switch` or session initialization;
     /// takes precedence over session default).
     override_model: Option<String>,
-    /// Retrieved memory context (from Grafeo) for injection into system prompt.
-    /// Set by AgentLoop before each build via `set_retrieved_memory()`.
+    /// Retrieved memory text shown in the `retrieved_memory` debug section.
+    /// ADR-100 moved memory retrieval into the memory service (the Agent reads
+    /// memory through the MCP `recall` tool, whose output is a tool result, not
+    /// a context section), so nothing fills this slot any more — it only ever
+    /// becomes non-empty through a DevMode patch.
     retrieved_memory: Option<String>,
     /// P3-4: Ambiguous conflict confirmation hint — when ≥ 3 pending
     /// ambiguous conflicts exist, this hint guides the Agent to naturally
@@ -228,20 +231,6 @@ impl ContextBuilder {
         self.environment_override = None;
     }
 
-    /// Set retrieved memory context for injection into the system prompt.
-    ///
-    /// Called by AgentLoop before each `build()` invocation with memories
-    /// retrieved from Grafeo via MemoryManager.
-    pub fn set_retrieved_memory(&mut self, memory_text: String) {
-        if !memory_text.is_empty() {
-            tracing::debug!(
-                memory_len = memory_text.len(),
-                "ContextBuilder retrieved memory context set"
-            );
-            self.retrieved_memory = Some(memory_text);
-        }
-    }
-
     /// Set the base system prompt (for debug patching).
     pub fn set_system_prompt(&mut self, prompt: String) {
         tracing::info!(
@@ -353,8 +342,7 @@ impl ContextBuilder {
     }
 
     /// Set retrieved memory text in-place (for debug patching).
-    /// Note: this differs from `set_retrieved_memory` in that it doesn't
-    /// skip empty strings (allows clearing the memory section).
+    /// An empty string clears the section.
     pub fn set_retrieved_memory_patch(&mut self, memory_text: String) {
         if memory_text.is_empty() {
             tracing::debug!("ContextBuilder retrieved memory cleared via debug patch");
@@ -419,24 +407,6 @@ impl ContextBuilder {
             }
         }
         Ok(())
-    }
-
-    /// Clear retrieved memory context.
-    ///
-    /// Must be called at the start of each `run()` invocation to prevent
-    /// stale memory from previous turns leaking into the next LLM call.
-    /// See P0 fix: ContextBuilder reused across turns in SessionTask loop.
-    pub fn clear_retrieved_memory(&mut self) {
-        if self.retrieved_memory.is_some() {
-            tracing::debug!("ContextBuilder retrieved memory context cleared (stale prevention)");
-            self.retrieved_memory = None;
-        }
-        if self.ambiguous_confirmation_hint.is_some() {
-            self.ambiguous_confirmation_hint = None;
-        }
-        if self.abstention_prompt.is_some() {
-            self.abstention_prompt = None;
-        }
     }
 
     /// P3-4: Set ambiguous conflict confirmation hint for injection into
@@ -1270,17 +1240,17 @@ mod tests {
             "Block A must contain the abstention prompt text"
         );
 
-        // clear_abstention_prompt removes it (stale prevention path).
+        // clear_abstention_prompt removes it.
         let mut builder =
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
         builder.set_abstention_prompt("prompt".to_string());
-        builder.clear_retrieved_memory(); // clears memory + hint + abstention
+        builder.clear_abstention_prompt();
         let request = builder.build(&manifest, &history, None, 32_768);
         assert!(
             !request.messages[0]
                 .content
                 .contains("Memory Abstention Guidance"),
-            "abstention prompt must be cleared with stale memory prevention"
+            "abstention prompt must be cleared by clear_abstention_prompt"
         );
     }
 
@@ -1602,7 +1572,7 @@ mod tests {
             .with_workspace_context(Some(workspace.into()))
             .with_workspace_prompt_file(Some(prompt_file.into()))
             .with_tools(vec![builtin_tool.clone()]);
-        builder.set_retrieved_memory(retrieved.into());
+        builder.set_retrieved_memory_patch(retrieved.into());
         builder.set_skill_summary(skills.into());
         builder.set_ambiguous_confirmation_hint(hint.into());
         builder.set_abstention_prompt(abstention.into());

@@ -36,6 +36,8 @@
 //! ├── lsp_install.rs # install-script discovery + execution (ADR-091 D15)
 //! ├── lsp_converge.rs # relay-probe → persisted install state (ADR-091 §5.8)
 //! ├── node_api.rs   # node-local identity HTTP (rename, ADR-075 D4)
+//! ├── memory_migration.rs # one-shot hand-over of the legacy workspace
+//! │                 # memory store to the memory service (ADR-100 decision 10)
 //! ├── state.rs      # NodeState — the GatewayState replacement
 //! └── cli.rs        # §6.13.2 command surface (thin orchestration shell)
 //! ```
@@ -51,6 +53,7 @@ pub mod lsp_api;
 pub mod lsp_converge;
 pub mod lsp_install;
 pub mod lsp_registry;
+pub mod memory_migration;
 pub mod node_api;
 pub mod package;
 pub mod process;

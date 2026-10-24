@@ -253,6 +253,12 @@ if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
     # port 18083 by default. The ADR-018 watchdog self-exit can lag, so kill it
     # explicitly to keep the stop step idempotent and to release 18083.
     stop_process "acowork-user" "User"
+    # The Memory service mirrors the PM/Doc/User pattern (ADR-100). It is a
+    # standalone process (`acowork-memory`) spawned by the Gateway supervisor
+    # and listens on port 18084 by default. The ADR-018 watchdog self-exit can
+    # lag, and on Windows the old exe keeps the file locked, so kill it
+    # explicitly to keep the stop step idempotent.
+    stop_process "acowork-memory" "Memory"
 
     # Ensure embed port is released before starting a new gateway.
     # On Unix, pkill may not have finished releasing port 18080 within the
@@ -637,6 +643,32 @@ else
     exit 1
 fi
 rm -f /tmp/user_build.log
+echo ""
+
+# Step 3.11: Build Memory service (standalone binary, sibling of acowork-gateway)
+#
+# Mirrors the services above: the Memory service is a standalone process
+# (`acowork-memory`, ADR-100), located via `current_exe().parent().join("acowork-memory")` —
+# so the binary MUST sit next to acowork-gateway. Without it the Gateway
+# supervisor logs "acowork-memory binary not found" and the memory panel plus
+# the agent's `memory_store` / `memory_recall` tools are gone.
+echo -e "${YELLOW}[3.11/8] Building Memory service ($PROFILE mode)...${NC}"
+if [ "$PROFILE" = "release" ]; then
+    cargo_args=(cargo build --release -p acowork-memory)
+else
+    cargo_args=(cargo build -p acowork-memory)
+fi
+if "${cargo_args[@]}" 2>&1 | tee /tmp/memory_build.log; then
+    if grep -q "error\[" /tmp/memory_build.log 2>/dev/null; then
+        echo -e "${RED}  Memory service build failed with errors.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}  Memory service build completed.${NC}"
+else
+    echo -e "${RED}  Memory service build failed.${NC}"
+    exit 1
+fi
+rm -f /tmp/memory_build.log
 echo ""
 
 # Step 4: Copy offline_providers.json from assets to target dir

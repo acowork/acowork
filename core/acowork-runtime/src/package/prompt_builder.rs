@@ -76,20 +76,17 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
         "COMPACT_PROMPT (must keep {messages_text} placeholder)",
     ),
     ("title.md", "TITLE_PROMPT"),
-    // ADR-068 — only the memory-side abstention override remains of
-    // the original ADR-063 grafeo/memory set. The other three grafeo
+    // ADR-068 — only the abstention override remains of the original ADR-063
+    // grafeo/memory set. The other three grafeo
     // overrides (`extraction.md`, `conflict-classification.md`,
     // `generalization.md`) were removed: see module-level docs.
-    ("abstention.md", "DEFAULT_ABSTENTION_PROMPT (memory)"),
-    // ADR-071 D7/D9 — per-agent EpisodicDistiller prompt overrides.
-    // Consumed by the offline distiller pipeline
-    // (`acowork_memory::consolidation::distiller`), NOT by the main
-    // dialog / compaction call sites: `merge_prompt_override` replaces the
-    // built-in `MERGE_SYSTEM_PROMPT`.
-    (
-        "distiller-merge.md",
-        "distiller merge-decision system prompt (ADR-071)",
-    ),
+    // ADR-100 — the memory side no longer carries a default to override: the
+    // retrieval-side abstention chain was removed with decision 5, so an
+    // absent `abstention.md` means no guidance is injected at all.
+    ("abstention.md", "abstention guidance (no built-in default)"),
+    // ADR-100 — `distiller-merge.md` retired: the EpisodicDistiller prompt is
+    // owned by the memory service, which reads it from its own instance
+    // directory. The Runtime no longer lists or dispatches it.
     // ADR-099 — Chat Router persona. Replaces ONLY the persona section of
     // the chat-layer system prompt; the Runtime-owned role/tool/decision
     // kernel is not overridable. Excluded from the execute system prompt by
@@ -227,9 +224,6 @@ pub fn reload_prompts_into_core(
             }
             "abstention.md" => {
                 *core.abstention_prompt.write().unwrap() = loaded;
-            }
-            "distiller-merge.md" => {
-                *core.distiller_merge_prompt.write().unwrap() = loaded;
             }
             "chat.md" => {
                 *core.chat_persona.write().unwrap() = loaded;
@@ -645,7 +639,6 @@ Be friendly and welcoming.
             ("compact-template.md", "compact-template-from-disk"),
             ("title.md", "title-from-disk"),
             ("abstention.md", "abstention-from-disk"),
-            ("distiller-merge.md", "distiller-merge-from-disk"),
             ("chat.md", "chat-persona-from-disk"),
         ];
         for (file, content) in fixtures {
@@ -672,10 +665,6 @@ Be friendly and welcoming.
         assert_eq!(
             core.abstention_prompt.read().unwrap().as_deref(),
             Some("abstention-from-disk")
-        );
-        assert_eq!(
-            core.distiller_merge_prompt.read().unwrap().as_deref(),
-            Some("distiller-merge-from-disk")
         );
         assert_eq!(
             core.chat_persona.read().unwrap().as_deref(),
@@ -721,7 +710,7 @@ Be friendly and welcoming.
     }
 
     #[test]
-    fn test_overridable_prompts_stays_at_6_entries() {
+    fn test_overridable_prompts_stays_at_5_entries() {
         // Sanity check: the closed-set invariant holds. A future
         // maintainer who adds an entry to `OVERRIDABLE_PROMPTS` without
         // teaching `reload_prompts_into_core` about the matching field
@@ -736,11 +725,12 @@ Be friendly and welcoming.
         // 5 -> 7 (ADR-071 added distiller-extraction.md + distiller-judge.md),
         // 7 -> 6 (web-search removal), 6 -> 5 (projection + merge rewrite
         // collapsed the two distiller slots into distiller-merge.md),
-        // 5 -> 6 (ADR-099 added the chat router persona).
+        // 5 -> 6 (ADR-099 added the chat router persona),
+        // 6 -> 5 (ADR-100 moved the distiller prompt into the memory service).
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
-            6,
-            "OVERRIDABLE_PROMPTS must stay at 6 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
+            5,
+            "OVERRIDABLE_PROMPTS must stay at 5 — every entry maps 1:1 to an AgentCore field; drift here breaks reload"
         );
     }
 
@@ -906,27 +896,6 @@ Be friendly and welcoming.
     }
 
     // ── ADR-063: OVERRIDABLE_PROMPTS + is_overridable_prompt + load_optional_prompt ──
-
-    /// Pin the OVERRIDABLE_PROMPTS entry count. A change here means the
-    /// Debug panel list, the main-prompt exclusion set, and the LLM-call
-    /// resolution chain all need to be updated together — a silent drift
-    /// is the most expensive failure mode, so make it loud.
-    ///
-    /// ADR-068: count is now 5 (was 8 before removing the 3 grafeo
-    /// overrides).
-    /// ADR-071 D7/D9: count was 7 (5 + distiller-extraction.md +
-    /// distiller-judge.md); the built-in web-search removal dropped
-    /// `search.md` to 6, and the projection + merge rewrite collapsed the two
-    /// distiller slots into one, so it was 5 again.
-    /// ADR-099: `chat.md` (Chat Router persona) brought it to 6.
-    #[test]
-    fn test_overridable_prompts_count_is_6() {
-        assert_eq!(
-            OVERRIDABLE_PROMPTS.len(),
-            6,
-            "OVERRIDABLE_PROMPTS must have 6 entries: 1 compaction (ADR-053) + 2 prompt.rs + 1 memory abstention + 1 distiller merge prompt (ADR-071) + 1 chat router persona (ADR-099). Update AgentCore fields, LLM call sites, and Debug panel list together."
-        );
-    }
 
     /// Every canonical filename must be recognised. Pins the contract
     /// that `OVERRIDABLE_PROMPTS` and `is_overridable_prompt` agree.
