@@ -1,32 +1,34 @@
 # ADR-099：Chat Session 的 LLM 语义路由（Chat Router）
 
 - **编号**：ADR-099
-- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下。2026-10-23 修订：D8 降级语义——chat 来源的人类消息降级时**新建**执行会话，见 D8）
+- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下。2026-10-23 修订：D8 降级语义——chat 来源的人类消息降级时**新建**执行会话，见 D8。2026-10-24 修订：**推翻 D1 的「执行层保留物理轮转」，T1/T2 轮转整体删除**——执行会话长命、压缩就地处理、开新会话只由语义决定，见「修订（2026-10-24）」）
 - **日期**：2026-10-21
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊）、设计 29（Chat Session 上下文编排）、ADR-060（Prompt Cache 友好的上下文块重排）、ADR-063（包级 Prompt 覆盖）、ADR-066（Provider Cache Tokens）、ADR-076（多用户账号体系）、ADR-085（Agent 生命周期状态机）、ADR-092（用户消息身份与有界读取）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
 
 ## 摘要
 
-Chat session 目前不是 LLM 的上下文：用户消息进哪个 execute session，完全由代码规则（`routing_key` + T1 空闲 / T2 压缩 / T3 配置冲突）决定。这套规则同时回答了两个不同的问题——「语义上该由哪个任务接着做」和「物理上该不该换一个上下文窗口」——因此产生三个不合理现象：
+**（本 ADR 立项时的现状）** Chat session 不是 LLM 的上下文：用户消息进哪个 execute session，完全由代码规则（`routing_key` + T1 空闲 / T2 压缩 / T3 配置冲突）决定。这套规则同时回答了两个不同的问题——「语义上该由哪个任务接着做」和「物理上该不该换一个上下文窗口」——因此产生三个不合理现象：
 
 1. chat 里改了 model/workspace 就强制新建 execute session；
 2. 没改参数就一律复用当前 working session，不管语义是否相关；
 3. T2 轮转把旧任务摘要带进新任务，摘要 token 远大于用户输入，新 session 还在干旧活。
 
-本 ADR 决定分层：**Chat 层引入一次受限工具集的 LLM turn（Chat Router）做语义决策；执行层保留物理轮转作为上下文安全阀**。T3 删除，T1 从硬规则降级为 prompt 信号，T2 只在 router 选定的同一逻辑任务内发生，从而让摘要不再污染无关任务。
+本 ADR 决定分层：**Chat 层引入一次受限工具集的 LLM turn（Chat Router）做语义决策**（立项时执行层保留物理轮转作为上下文安全阀：T3 删除，T1 降级为 prompt 信号，T2 只在 router 选定的同一逻辑任务内发生）。该安全阀已由 2026-10-24 修订**整体删除**：开新执行会话的唯一来源是语义决定（`dispatch(target="new")` / PM 任务终态 close / 用户手动新建），上下文膨胀由 compaction 就地处理，见「修订（2026-10-24）」。
 
 路由的载体是 `ChatSessionManager`（按 `chat_session_id` 隔离，群聊中每个 agent 天然独立），router 的工具面是 `dispatch` 加两个只读信息工具（D3），上下文按「稳定前缀 + 末尾追加」三段式编排（详见设计 29）。
 
 ## 背景
 
-### 1. 现状：routing_key 与三态轮转
+### 1. 现状（已废止）：routing_key 与三态轮转
 
 `routing_key` 的命名空间优先级为 `task:` > `chat:` > `conv:` > `msg:`（[intent_routing.rs](../../../core/acowork-runtime/src/agent/session/intent_routing.rs)）。1:1 chat 与群聊 @Agent 的 `conversation_id` 为空，因此都落到 `chat:{chat_session_id}`；PM 派单是 `conv:task:{project}:{task}`。`route_intent_session` 依次检查：
 
 - mapped session 是否命中 T1（idle 超过 `intent_idle_rotate_hours`）或 T2（compaction 发生）；
 - `SessionSeed`（chat 侧 draft 的 model/provider/workspace/reasoning）是否与映射 session 冲突（T3）；
 - 命中任一条件就新建 session，并把 handoff 指针或摘要写进新 session。
+
+> 三态轮转已全部废止（T3 由本 ADR 删除，T1/T2 由 2026-10-24 修订删除）。现在 `route_intent_session` 只做一件事：键有映射就复用，没有映射才新建——上下文卫生由 compaction 单独负责，开新会话永远是显式决定。
 
 ### 2. 三个不合理现象
 
@@ -48,10 +50,10 @@ Chat session 目前不是 LLM 的上下文：用户消息进哪个 execute sessi
 
 ## 决策
 
-### D1 — 分层：Chat 层语义路由，执行层物理轮转
+### D1 — 分层：Chat 层语义路由，执行层不做轮转
 
 - Chat 层：每条人类 `user_message`（1:1 与群聊 @）先经过一次 router turn，产出「回答 / 转交已有会话 / 新建会话」。
-- 执行层：保留 T1/T2 作为物理安全阀，但只在 router 选定的同一逻辑任务内生效；T3 删除。
+- 执行层：本 ADR 立项时保留 T1/T2 作为物理安全阀、删除 T3；**2026-10-24 修订删除 T1/T2**——执行会话长命，上下文卫生只由 ADR-011 / ADR-061 的压缩机制负责，不再有代码级的轮转点。
 - 卡片回答、PM 派单、agent-agent 不经过 router。
 
 ### D2 — Router turn 无状态，ChatSessionManager 按 chat 隔离
@@ -123,11 +125,11 @@ execute prompt（`prompts/system.md` + `constraints.md` + 其他 `prompts/*.md` 
 - agent-agent：`conv:{conversation_id}` 确定性映射，不绑定 chat、不进入候选。
 - 群聊 @ fanout 的 per-target `message_id` 与 `in_reply_to`（共享 `user_message` row id）在 router 转发时原样保留。
 
-### D8 — T1/T2/T3 语义、执行位置与失败降级
+### D8 — 三态轮转的处置（均已废止）、执行位置与失败降级
 
-- T3 删除；
-- T1 仅用于降级路径，正常路径把「闲置时长」作为 prompt 信号；
-- T2 保留为执行侧物理轮转；
+- T3 删除（本 ADR）；
+- T1 删除（2026-10-24 修订，含其 `intent_idle_rotate_hours` 配置项与降级路径硬触发）；
+- T2 删除（2026-10-24 修订，含 handoff 摘要蒸馏与 successor）；
 - router 超时/报错/连续两次非法工具参数 → 降级；回退发生在该 chat 的 drain task 上，消息不丢。**降级的落点按来源分（2026-10-23 修订）**：chat 来源的人类消息不再回退到 `route_intent_session` 的映射复用，改走 `chat_dispatch(Target::New)` **新建**执行会话（绑定同一 chat、intent_map 重指向）——降级意味着 router 没有给出语义判断，而映射也不是语义判断：把一条可能开新话题的消息猜塞进不相关的历史会话，比新建更糟（实测事故：模型超时降级后新话题被塞进旧任务的执行会话，chat 界面无从察觉）。`PassThrough`（PM 任务 / agent-agent / response / kill switch 关闭态）的确定性复用不变——那些链路上 `conversation_id` / `msg:` 键**就是**任务身份，复用是有据的，不是猜测。反应行（ADR-100 D11 `turn_routed`）在两条路径下由同一 builder 写入，降级新建同样落一条"启动新任务"。
 - router 链路上的每个 Gateway HTTP 都有界：chat 历史读用 `chat_router.timeout_ms`（默认 8 s，clamp 1–60 s），写回 15 s，附件拉取 60 s。挂起的 Gateway 的代价是这一轮降级，而不是该 chat 的 drainer 被永久 park；
 - 候选清单的目录扫描在 `SessionManager` 锁外完成，锁内只做映射解析（一次全局锁不得覆盖磁盘 IO）；
@@ -140,7 +142,7 @@ execute prompt（`prompts/system.md` + `constraints.md` + 其他 `prompts/*.md` 
 - `+` 触发时 `POST /api/agents/{id}/sessions` 带上当前 `chat_session_id`，Runtime 校验调用者的 chat 归属后 stamp 与 `dispatch(new)` 完全相同的绑定对（`chat_session_id` + `Members`）；
 - 创建成功后切到 exec 视图，消息直达该会话、不经过 router——绑定加切视图本身就构成逃生舱，不需要 `target_session_id` 之类的新 wire 字段；
 - Gateway 零改动（`POST /sessions` 是透明转发）；
-- 自动创建（首次打开的补建、关闭最后一个 exec tab 的补建）不绑定——「系统需要一个 tab」不等于「用户在这个对话里发起了一个任务」。绑定是群聊候选的硬门槛（D4：群聊只列绑定本群的会话）；在 1:1 里未绑定的本人会话仍会按 D4 第三条款列为候选，由 router 自己按标题与最近活动判断相关性；
+- 自动创建（首次打开的补建、无 Chat tab 的旧纯执行界面上关闭最后一个 exec tab 的补建）不绑定——「系统需要一个 tab」不等于「用户在这个对话里发起了一个任务」。绑定是群聊候选的硬门槛（D4：群聊只列绑定本群的会话）；在 1:1 里未绑定的本人会话仍会按 D4 第三条款列为候选，由 router 自己按标题与最近活动判断相关性；
 - 校验失败只跳过绑定、不拒绝创建：chat 归属由 Gateway 尽力注入，用户服务抖动时「新建任务」仍须可用（绑定 fail-soft，访问 fail-closed）；
 - 绑定一旦成立，`visibility` 就归绑定所有：（`chat_session_id`, `Members`）是群聊读检查依赖的成对契约，请求体不得把一个已绑定会话改回 `public`（泄给其他 chat 的读者）或 `private`（本群看不到自己的任务）；被丢弃的请求值记 WARN，响应回显实际生效值而不是请求值。
 
@@ -170,7 +172,7 @@ graph TD
 
 1. **改参数不再强制新建**：router 判断「同一任务 + 参数变更」时复用现有 session；只有新任务才新建。复用时 draft 的 model / provider / reasoning_effort 必须落到被路由到的会话——走 `ConversationSession::apply_config`（ADR-047 的唯一配置入口：立即持久化、`config_version` 递增、SessionTask 在下一个 turn boundary 应用），即「配置下一轮生效」。`workspace` 是唯一例外：把活任务换工作目录不是配置微调，必须走 `route_workspace_switch`（ADR-034 §8 的单入口，含改 per-agent 默认的副作用），因此 workspace 建议只在新建会话时生效，复用时记录分歧日志而不是静默丢弃。
 2. **语义无关不再复用**：router 对无关输入选择 `dispatch(new)`。
-3. **摘要不污染新任务**：新任务从空白 session 开始；T2 只发生在 router 选定的同一任务内。
+3. **摘要不污染新任务**：新任务从空白 session 开始；已选定任务内的上下文膨胀由压缩就地处理，不产生 successor。
 
 附加验收：
 
@@ -180,11 +182,13 @@ graph TD
 
 ## 兼容与迁移
 
-- `chat_router.enabled` 默认开启；关闭时 Chat 消息回到 ADR-098 的内联确定性路由，唯一差异是 T3 已退役（见 D8）。
+- `chat_router.enabled` 默认开启；关闭时 Chat 消息回到 ADR-098 的内联确定性路由，唯一差异是三态轮转已全部退役（T3 由本 ADR、T1/T2 由 2026-10-24 修订，见 D8）——该路径同样只做「键有映射就复用、没有才新建」。
 - router turn 改到 per-chat drain task 执行，不改变任何对外协议：MQTT 载荷、`routing_key`、`intent-sessions.json`、写回频道全部原样。
 - 存量 package 无需新增文件：`prompts/chat.md` 缺失时人格回退 manifest 元数据。
 - 存量 `intent-sessions.json` 映射继续可用；router 的候选包含当前映射，首次运行无需迁移。
 - 终态清单使用旁挂 `terminal-sessions.json`，不修改 SQLite schema。
+- 存量 JSONL 里带 `rotation_handoff` 标记的行不清理、不提升为 User，渲染层继续过滤；该机制已废止，因此不再有新增。
+- SQLite 的 `sessions.last_compaction_summary` 由 migration 7 删除（它是 T2 摘要蒸馏的写时缓存，已无读者）；`last_compaction_offset` 保留。
 
 ## 非目标
 
@@ -202,11 +206,23 @@ graph TD
 | ADR-063 | `prompts/chat.md` 作为新的包级 override 文件 |
 | ADR-066 | 复用 cache token 统计与命中率口径 |
 | ADR-076 / ADR-092 | 候选与写回的身份过滤沿用 envelope `from` 与 chat scope |
-| ADR-096 | 候选只读元数据，不读 JSONL 正文 |
+| ADR-096 | 候选只读元数据，不读 JSONL 正文；其 `last_compaction_summary` 派生列已随轮转删除（migration 7） |
+
+## 修订（2026-10-24）：删除执行会话物理轮转
+
+本修订推翻 D1 的第二条（执行层保留 T1/T2 物理安全阀），删除整个轮转机制：`RotateReason` / `needs_rotation` / `plan_rotation` / `rekey` / `pending_successor`、`handoff_note` 通道、`record_intent_handoff`、transcript 的 `rotation_handoff` 标记、`last_compaction_summary` 派生列、`intent_idle_rotate_hours` 与 `intent_handoff_max_tokens` 配置项（含桌面 Session 卡片与 5 份 locale）。
+
+理由：
+
+1. **execute session 本就可以一直追加、持续交互**。每一轮都重新读全量 JSONL（ADR-032），发生过压缩的历史 session 同样能继续接 dispatch、继续迭代——「压缩过就该换窗口」没有依据。
+2. **轮转是「没有 LLM 做路由判断」时代的产物**。T1 用闲置时长、T2 用压缩事件猜测「任务该结束了」；D1 把语义决策上提到 Chat 层之后，这两个物理信号就不再承担任何路由含义，留着反而与背景 §2 的第三个现象自相矛盾——T2 的 handoff 摘要正是本 ADR 要消灭的污染。
+3. **单一规则**：开新执行会话只有三个来源，全部是显式决定——router 的 `dispatch(target="new")`、PM 任务终态 close、用户手动新建（D9）；上下文卫生只有 ADR-011 / ADR-061 的压缩；文件规模只有设计 15 的 100,000 行 / 50 MiB 硬上限。
+
+不受本修订影响的：`turn_mode` 仍只有 new / continue 两态（ADR-100 D11）；`dispatch(target="new")` 仍是新开一条任务而非轮转（无 predecessor、不携带 handoff）；transcript 不新增 tag；映射可指向已压缩的会话，不做健康检查。压缩自身的恢复跳过仍用 `last_compaction_offset`。
 
 ## 测试
 
 - 单元：候选过滤、dispatch 解析、prompt 分层、工具可见性（含 router 侧 GET-only schema 与运行时强制）、上下文投影确定性与前缀稳定性、降级、信息工具轮次（工具失败作为 tool result 回馈、超长结果边界截断）；队列不变量（单 drainer、FIFO、drainer 收尾时到达的消息不滞留、空闲队列回收）；kill switch 下不排队且内联投递；router 交还控制权（`PassThrough`/`Fallback`）时消息仍被投递且 `Handled` 不重复投递；`session_config` 在两条复用分支（目标是当前映射会话 / 目标是另一活会话）都生效；chat 绑定优先于请求体里的 `visibility`。决策日志记录 `info_rounds`（本轮信息工具轮数），为「该转的没转 / 不该转的转了」提供审计面。
-- 集成：MockProvider 驱动回答/转交/新建/降级四条路径；T2 在选定会话内仍发生；群聊多话题并行；PM 任务进入群聊候选且终态后消失；agent-agent 映射不受影响。
+- 集成：MockProvider 驱动回答/转交/新建/降级四条路径；选定会话内发生压缩时不新建 successor（原地继续）；群聊多话题并行；PM 任务进入群聊候选且终态后消失；agent-agent 映射不受影响。
 - E2E：router 关闭保持现有断言；开启后验证 1:1 与群聊 @ 的 `agent_message` 与 `turn_started`；PM task-dispatch 直达 `conv:task:`。
 - 回归：`cargo clippy --all-targets -- -D warnings`、`cargo test`、桌面端 `npm test`。

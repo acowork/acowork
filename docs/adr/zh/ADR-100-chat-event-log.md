@@ -1,8 +1,8 @@
 # ADR-100：Chat 事件日志化——移除执行状态卡片，在途轮次落时间点事件行
 
 - **编号**：ADR-100
-- **状态**：已接受（Rev. 4，2026-10-23：执行视图的输入改走 chat 入口 + 定向直投，见 D12；Rev. 3：路由反应行落盘 + 头像不变量，见 D11；Rev. 2：撤销中间状态落盘，见 D10）
-- **日期**：2026-10-22（Rev. 2 / Rev. 3 / Rev. 4：2026-10-23）
+- **状态**：已接受（Rev. 5，2026-10-24：ADR-099 删除轮转后 `opened_new` 的取值面收敛，见 D11；Rev. 4，2026-10-23：执行视图的输入改走 chat 入口 + 定向直投，见 D12；Rev. 3：路由反应行落盘 + 头像不变量，见 D11；Rev. 2：撤销中间状态落盘，见 D10）
+- **日期**：2026-10-22（Rev. 2 / Rev. 3 / Rev. 4：2026-10-23；Rev. 5：2026-10-24）
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊 §5.5.4 / §5.5.5 / §6）、ADR-099（Chat Router，D3 投递时锚定 pointer）、ADR-086（移动端多会话）、ADR-049（Session 状态子态）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
 
@@ -17,6 +17,8 @@ v2.1（ADR-099 同期）在 chat 事件日志之上叠加了一块 **live 状态
 > **修订 Rev. 3（2026-10-23）**：Rev. 2 把"派发了 / 开轮了"这类**进度**全部赶出历史，是对的；但它连带删掉了 D8 的**对话反馈**——用户发出消息后，从"{{name}}正在处理…"的派生等待行到最终回复之间（可能是几十分钟到几小时），chat 里没有任何一条 agent 的话。聊天界面的基本交互感是**有来有回**：人类消息之后必须紧跟一条 agent 头像 + 名字 + 气泡，无论内容。因此恢复**一条**（且仅一条）durable 反应行 `turn_routed`：路由结论得出时立即写入，气泡文案为"启动新任务：{任务名}"或"继续之前的任务：{任务名}"——它不是进度，是"你的消息去了哪里"这一**对话事实**的回答，历史读者同样需要。同时确立头像不变量：空正文终态行渲染为居中状态行，其**后**的 agent 气泡不得因它折叠头像。Rev. 2 的其余决定（进度不落盘、派生等待行）不变。详见 D11。
 
 > **修订 Rev. 4（2026-10-23）**：D9 把绑定 chat 的执行会话的**输出**回写进了 chat，但那条回合的**人类消息本身**仍只存在执行会话的 JSONL 里——chat 因此呈现"只有回答、没有提问"的半轮对话。最省事修法（Runtime 以用户身份代写一行）被否决：写入口的身份必须是发起人。Rev. 4 把入口换掉而非补写：**执行视图的 composer 改走 chat 入口**（`POST /api/intents/chat-message`），并携带 `for_execution_session` 指名目标执行会话；Runtime 收到带指名的消息后**跳过 Chat Router** 直投该会话，以 `SessionMessage::ChatMessage`（不是 Intent）进入原执行面同一套处理，因此技能、附件、JSONL 用户行零能力回写。一个过期 id 只多花一次路由，不丢一条消息。详见 D12。
+
+> **修订 Rev. 5（2026-10-24）**：ADR-099 的 2026-10-24 修订删除了执行会话的物理轮转，`chat_dispatch` / `route_intent_session` 的返回值随之从三元收回**二元**（`(session_id, opened_new)`）。D11 的 `opened_new` 语义不变：它仍是"这一轮是否物理新建了会话"的一次性事实，只是取值面不再包含 rotation 分支——reuse（含 `dispatch(existing)` 切换到另一存活会话）报 `false`，仅物理新建报 `true`。`turn_mode` 的两态、durable 写法与渲染契约均不变。
 
 ## 背景
 
@@ -75,7 +77,7 @@ chat 是对话：用户说完一句，agent 必须"接话"。`turn_dispatched` /
 
 D7 的反应是单一"好的，我来处理"，每个轮次读起来都一样，用户无法从 chat 侧分辨"开了个新任务"还是"接着之前的任务做"。本决策把 `turn_started` 反应进一步分成两种口吻，判据由**后端在路由时点的权威判定**给出并落进 durable meta，前端只渲染、不推断：
 
-- **`turn_mode` meta（新增 durable 字段）**：`chat_dispatch` 与 `route_intent_session` 的返回增第三元素 `opened_new`——reuse（已映射 / 切换到存活会话）与 rotation（带 handoff、换 successor session 延续同一上下文）都报 `false`（同一任务的延续），仅 fresh-create 报 `true`（`Target::New` 恒 `true`）。该值随路由锚点透传进 `SessionMessage::Intent.opened_new`，由 `dispatch_pointer_meta` / `started_pointer_meta` 落成 `"turn_mode": "new" | "continue"`，**同时写进 `td:` 与 `ts:` 两行**（折叠后展示的一般是 `ts:`，两行都带才不丢信息）。它是路由时点的一次性事实，读时不再反推。
+- **`turn_mode` meta（新增 durable 字段）**：`chat_dispatch` 与 `route_intent_session` 的返回增 `opened_new`（Rev. 5：轮转删除后返回值是 `(session_id, opened_new)` 二元）——reuse（已映射 / 切换到存活会话）报 `false`（同一任务的延续），仅 fresh-create 报 `true`（`Target::New` 恒 `true`）。该值随路由锚点透传进 `SessionMessage::Intent.opened_new`，由 `dispatch_pointer_meta` / `started_pointer_meta` 落成 `"turn_mode": "new" | "continue"`，**同时写进 `td:` 与 `ts:` 两行**（折叠后展示的一般是 `ts:`，两行都带才不丢信息）。它是路由时点的一次性事实，读时不再反推。
 - **两态文案**：`turn_started` 且 `turn_mode=new` → `chatView.notice.turnStartedNew`（"好的，启动新任务来处理：{任务名}"）；`turn_mode=continue` → `chatView.notice.turnStartedContinue`（"好的，继续之前的任务：{任务名}"）。`turn_dispatched` 保持中性"收到，排队中"不分裂。
 - **任务名解析（呈现层，不动 durable 行）**：优先执行会话自身标题（Desktop `useSessionTitle` 读 live overlay / 快照；Mobile 读 agent store 的 session 列表，"新会话"占位视同空）；标题为空（新建 run 尚未命名）回退到触发消息正文（父层 `in_reply_to → body` 索引，`truncateTaskName` 截断）。两者都解析不出时回退到原单一条 `chatView.notice.turnStarted`，绝不渲染"：（空）"这类无名残句。`ViewRunButton` 的 tooltip 同步显示该任务名。
 - **范围与兼容**：Desktop 两视图 + Mobile 反应行，五语 locale 全量补 `turnStartedNew` / `turnStartedContinue`。新增的是**一个 durable meta 字段**，向后兼容——旧 `turn_started` 行无 `turn_mode` 即走单一条，无需迁移。写入方仍是这两个 builder 与两个 dispatch 站点，不新增写入口、不触碰 Gateway fs 红线（ADR-009 §5）。
@@ -113,7 +115,7 @@ D2 / D3 / D6 / D7 / D8 的共同前提是“在途轮次必须落成 durable 行
 
 Rev. 2 把"派发了 / 开轮了"这类**进度**赶出历史是正确的，但它连带取消了 D8 的**对话反馈**，实测留下一个更基本的缺口：用户发出消息后，chat 里只有居中的派生等待行（"{{name}}正在处理…"），从路由结论得出到最终回复之间（几十分钟到几小时）没有任何一条 agent 的话。聊天界面的交互感来自**有来有回**——人类气泡之后必须紧跟 agent 头像 + 名字 + 气泡；缺了这条即时反应，用户无法确认消息被接住、更不知道它去了哪个任务（本 ADR 落地当天即发生的事故：一条新话题消息被降级路由塞进不相关的历史会话，chat 界面全程只有"正在处理"，无任何下文）。
 
-1. **恢复且仅恢复一条 durable 反应行。**Runtime 在路由目标解析成功、intent 投递之后，写一条 `system_notice`，meta 由共享 builder `turn_routed_meta` 构造：`message_id = "tr:{request_id}"`（按触发行幂等，重投递不重复）、`in_reply_to = {request_id}`（线程挂到触发的人类消息下——这正是"紧跟用户消息"的判据）、`agent_session_id`（可下钻）、`turn_mode = new | continue`（路由时一次性事实：仅物理新建为 `new`，reuse 与 rotation 均为 `continue`——同一逻辑任务在继续）、`notice_type = "turn_routed"`。body 恒为空：文案是界面语言的事，由渲染层从 i18n 出，不把用户语言烙进 durable 数据。写入点两处：chat_router drain 的 `dispatch` 成功分支（覆盖 1:1 / 群聊 @ / 降级前的正常路由），以及 `route_intent_legacy` 中"欠 chat 一个回写"的回合（覆盖 router 关闭时的人类消息与 PM 派发），与 Rev. 2 移除的三个写入点相比只剩这一条。
+1. **恢复且仅恢复一条 durable 反应行。**Runtime 在路由目标解析成功、intent 投递之后，写一条 `system_notice`，meta 由共享 builder `turn_routed_meta` 构造：`message_id = "tr:{request_id}"`（按触发行幂等，重投递不重复）、`in_reply_to = {request_id}`（线程挂到触发的人类消息下——这正是"紧跟用户消息"的判据）、`agent_session_id`（可下钻）、`turn_mode = new | continue`（路由时一次性事实：仅物理新建为 `new`，复用已有会话（含映射不变时的原地追加）均为 `continue`——同一逻辑任务在继续）、`notice_type = "turn_routed"`。body 恒为空：文案是界面语言的事，由渲染层从 i18n 出，不把用户语言烙进 durable 数据。写入点两处：chat_router drain 的 `dispatch` 成功分支（覆盖 1:1 / 群聊 @ / 降级前的正常路由），以及 `route_intent_legacy` 中"欠 chat 一个回写"的回合（覆盖 router 关闭时的人类消息与 PM 派发），与 Rev. 2 移除的三个写入点相比只剩这一条。
 2. **它不是进度，是对话事实。**"你的消息被派发了"对历史读者是零信息量的进度；"**这条消息由哪个任务处理、是新任务还是旧任务的继续**"是会话本身的事实——几个月后翻记录的人需要知道这条消息的去向。这正是 Rev. 2"历史不记进度"原则与对话价值之间的边界，`turn_routed` 落在价值一侧。派生等待行（D10.3）不因此撤销：反应行落地后运行仍在进行，等待行继续覆盖到终态，两者职责不同（一个是 agent 的回答，一个是运行时状态）。
 3. **渲染为 agent 归属气泡，永不居中。**Desktop `AgentChatView` / `GroupChatPanel` 与 Mobile `AgentChatScreen` 把 `turn_routed` 行合成进普通 agent 气泡路径：头像 + 名字 + 气泡，文案 `启动新任务：{{task}}` / `继续之前的任务：{{task}}`（五语 locale key `chatView.notice.turnRoutedNew` / `turnRoutedContinue`）。任务名取执行会话标题，未生成时回退触发消息正文（截断），与 D8 的命名规则一致。`RETIRED_NOTICES` 不变——`turn_dispatched` / `turn_started` / `router_fallback` 仍然永不渲染。
 4. **头像不变量。**凡真正渲染成 agent 气泡的行必须携带头像 + 名字归属；判定"上一条已是气泡从而折叠本条头像"时，**空正文终态行不算气泡**（它是居中状态行，D10.4），`turn_routed` 反应行与其后的真实回复各自独立带头像（两者间隔可能以小时计，是同一条消息的"接住"与"回答"，不是一条发言的续行）。Rev. 2 后 `AgentChatView` 的 `showHeader` 判据只看 `kind === "agent_message"`，把居中终态行误算成气泡，导致其后的回复孤零零无头像——本条把判据钉死为"上一条**渲染为**气泡"。执行会话视图同理：用户消息后紧跟的 agent 消息必须带头像。
@@ -153,7 +155,7 @@ D9 让绑定 chat 的执行会话把**本地回合的输出**回写进 chat，�
 4. **无 live 投影残留**：两端 store 不再有 `projectLiveTurn` / `projectInFlight` / `live` / `inFlight`；仅保留 card receipt 所需的 `closedCardIds` / `humanAnsweredCardIds`。
 5. **跳转可用**：事件行与 `agent_message` 的"查看执行"跳转对 PM 任务会话天然可用（`agent_session_id` 在 pointer meta 里，依 ADR-099 D5 绑定到群）。
 6. **呈现归属化（D7）**：turn 指针在 1:1 与群聊都渲染为 agent 侧、带头像 / 名字的归属反应行；同一轮的派发 + 开始折叠为一行（`hideSupersededDispatchIds` 读时投影，Desktop / Mobile 同一契约）；紧邻回复落库时反应行并入回复气泡作 caption、一轮只剩一个"查看执行"（`groupTurnReactions` 读时配对，回复未到时反应行独立显示）；`router_fallback` 仍居中、无归属。
-7. **反应区分新/继续（D8）**：`turn_started` 反应依 durable `turn_mode` 渲染"启动新任务"或"继续之前的任务"并命名执行会话（标题为空回退触发正文，都无则回退单一条）；`turn_dispatched` 恒为中性"收到，排队中"；`chat_dispatch` / `route_intent_session` 对 reuse 与 rotation 报 `opened_new=false`、仅 fresh-create 报 `true`（builder 单测与 dispatch 单测锁定）。
+7. **反应区分新/继续（D8）**：`turn_started` 反应依 durable `turn_mode` 渲染"启动新任务"或"继续之前的任务"并命名执行会话（标题为空回退触发正文，都无则回退单一条）；`turn_dispatched` 恒为中性"收到，排队中"；`chat_dispatch` / `route_intent_session` 对 reuse 报 `opened_new=false`、仅 fresh-create 报 `true`（builder 单测与 dispatch 单测锁定）。
 8. **续聊回写（D9）**：chat 发起的执行会话中，用户在执行会话 composer 本地发起的回合（含 stop 之后的续做）结束时，其最终输出以 standalone `agent_message` 回写到该 chat（`exec:{message_id}` 幂等、`sender_session_id` 可下钻、广播）；chat 路由回合仍走请求 / 响应回写、不双写；`chat-append` 接受 `agent_message`、仍拒绝 `user_message` 与未知 kind。
 9. **中间状态不落盘**：新建一轮（1:1 / 群聊 @ / PM 派发）并等到终态后，chat 日志不出现 `turn_dispatched` / `turn_started` / `router_fallback` 行；两个 pointer builder 已下线，旧 builder 单测改为断言“不再写入”。
 10. **历史隐藏**：人为构造携带三类旧 notice 的窗口，Desktop 两视图与 Mobile 均不渲染任何文本；真正的频道回执（`budget_exhausted` / `delivery_failed` / `truncated` / `unavailable`）仍渲染。
@@ -222,7 +224,7 @@ D9 让绑定 chat 的执行会话把**本地回合的输出**回写进 chat，�
 
 ## 测试
 
-- 后端：共享 builder 单测 `pointer_metas_lock_the_dispatch_and_start_rename` 锁定派发/开轮两行的 `message_id` 前缀与 `notice_type`（这是改名回归网），并断言 `opened_new=true/false` 落成 `turn_mode="new"/"continue"`（D8）；`chat_dispatch_applies_the_seed_on_every_reuse_branch` 断言 reuse / rotation / 切换都报 `opened_new=false`、fresh 报 `true`；store 层单测 `dispatch_and_start_rows_coexist_and_each_dedups` 验证 `td:`/`ts:` 各存一行且各自幂等去重；`bodyless_notice_rows_do_not_inflate_unread` 验证空 body 的 `system_notice` 事件行不计入未读。三链路（1:1 / 群聊 @ / PM 派发）均经这两个 builder 落地，契约一致；PM `request` 终态经 `deliver_response` 落群聊 `agent_message`（含 sweeper 超时 `failed` 回执）。
+- 后端：共享 builder 单测 `pointer_metas_lock_the_dispatch_and_start_rename` 锁定派发/开轮两行的 `message_id` 前缀与 `notice_type`（这是改名回归网），并断言 `opened_new=true/false` 落成 `turn_mode="new"/"continue"`（D8）；`chat_dispatch_applies_the_seed_on_every_reuse_branch` 断言 reuse / 切换都报 `opened_new=false`、fresh 报 `true`；store 层单测 `dispatch_and_start_rows_coexist_and_each_dedups` 验证 `td:`/`ts:` 各存一行且各自幂等去重；`bodyless_notice_rows_do_not_inflate_unread` 验证空 body 的 `system_notice` 事件行不计入未读。三链路（1:1 / 群聊 @ / PM 派发）均经这两个 builder 落地，契约一致；PM `request` 终态经 `deliver_response` 落群聊 `agent_message`（含 sweeper 超时 `failed` 回执）。
 - 后端（D9）：`exec_echo_meta_is_a_standalone_agent_message` 锁定 `exec:` 幂等 id、`sender_session_id`、`status` 且无 `in_reply_to`、不与 `td:` / `ts:` 冲突；Gateway `chat_append_kind_whitelist_includes_continuation_echo` 锁定白名单接受 `agent_message`、拒绝 `user_message` 与未知 kind。`ConversationSession::chat_session_id()` 读取绑定；`SessionMessage::ChatMessage` 回合结束时按绑定回写（best-effort）。
 - Desktop：删除 `ExecSessionStatusCard.test.tsx`；更新 `AgentChatView.test.tsx`（断言派发/开始事件行可见、`InlineInteractionCard` 就地可答、乐观标题种子经事件行触发）；更新 `chatSessionStore.test.ts`（移除 live 投影用例，保留 `closedCardIds` / `humanAnsweredCardIds`）；新增 `ChatNoticeEventRow.test.tsx`（四类 notice 文案 + 跳转 + `interaction_resolved` 折叠为无 + 无文案无跳转不渲染 + D7 归属：turn 反应带头像 / 名字、`router_fallback` 无归属、`hideSupersededDispatchIds` 折叠契约、`groupTurnReactions` 配对——紧邻折叠、非紧邻 / 异发送者 / 异触发 / 异执行各自独立）与 `InlineInteractionCard.test.tsx`（可答选项 / 自由回答 / 无选项 / answered 收据 / closed 收据 / readOnly）。`AgentChatView.test.tsx` 额外断言一轮一气泡：紧邻回复吸收其反应作 caption、一轮只渲染一个"查看执行"。`ChatNoticeEventRow.test.tsx` 另加 D8 两态用例：`turn_mode=new`/`continue` 分别渲染 `turnStartedNew`/`turnStartedContinue` 并插值任务名、无标题时回退触发正文、`turn_mode` 存在但无名时回退单一条、`turn_dispatched` 不分裂。
 - Mobile：更新 `agent-chat-session.test.ts`（移除 `projectInFlight` 漂移守卫套件）。
@@ -237,7 +239,7 @@ D9 让绑定 chat 的执行会话把**本地回合的输出**回写进 chat，�
 
 **Rev. 3（D11）补充：**
 
-- 后端：`intent_turn.rs` 的 `turn_routed_meta_threads_the_reaction_to_its_trigger` 锁定 `tr:` 幂等 id、`in_reply_to`、`turn_mode` 二值与 `notice_type` 字面量；`session_manager.rs` 的 `opened_new_tracks_physical_creation_not_dispatch_intent` 锁定 `chat_dispatch` / `route_intent_session` 第三返回值仅在物理新建为 `true`（reuse / rotation / `dispatch(existing)` 均为 `false`），即 `turn_mode` 的唯一诚实来源。
+- 后端：`intent_turn.rs` 的 `turn_routed_meta_threads_the_reaction_to_its_trigger` 锁定 `tr:` 幂等 id、`in_reply_to`、`turn_mode` 二值与 `notice_type` 字面量；`session_manager.rs` 的 `opened_new_tracks_physical_creation_not_dispatch_intent` 锁定 `chat_dispatch` / `route_intent_session` 的 `opened_new` 仅在物理新建为 `true`（reuse / `dispatch(existing)` 均为 `false`），即 `turn_mode` 的唯一诚实来源。
 - Desktop：`chatTurnState.test.ts` 覆盖 `isTurnRoutedNotice` 判定与"反应行不终结等待"；`AgentChatView.test.tsx` 断言反应行渲染为带头像气泡（文案 key + 触发正文回退命名）且等待行仍在其后、空终态行之后的回复重新带头像（`showHeader` 不再被居中行折叠）。
 - Mobile：`chat-routing-reaction.test.ts` 锁定同一谓词与等待规则（drift guard）；`AgentChatScreen` 的反应行气泡由 `tsc` + smoke 覆盖。
 

@@ -1,7 +1,7 @@
 # ADR-096: No Full Session-File Reads on Request Paths — Write-Time Derived State and Bounded Reads
 
 - **Number**: ADR-096
-- **Status**: Accepted
+- **Status**: Accepted (revised 2026-10-24: D7's `last_compaction_summary` column is deleted — its only reader was the ADR-099 execution-session rotation handoff, which is retired (migration 7); the iron rule and the other derived state are unchanged)
 - **Date**: 2026-10-20
 - **Deciders**: ACowork Architecture Group
 - **Related**: ADR-092 (user-chat bounded reads; this ADR generalizes its discipline), ADR-024 (conversation meta / token usage), ADR-082 (SQLite vector + FTS storage), ADR-084 (user standalone process), ADR-076 (chat doorbell); design doc 27 §4.6
@@ -13,7 +13,7 @@ Chat history and execution-session history grow without bound. The review that p
 This ADR states an implementation-wide iron rule and the derived-state model that satisfies it:
 
 1. **No request path and no tool read may take a full read of a session file** — neither a whole-file `read_to_string` nor a per-line full scan/parse done only to derive a row count, a sequence number, an idempotency id, a tail preview, or a compaction summary. This covers both `messages.jsonl` (user chat) and `{sid}.jsonl` (execution conversation).
-2. **Every statistic is served from write-time derived state** — session meta (`message_count`, `last_message_preview`, `last_compaction_summary`), an in-memory log index (spans with byte offsets and a data-row counter), or a small SQLite side table (`conversation_state`).
+2. **Every statistic is served from write-time derived state** — session meta (`message_count`, `last_message_preview`, `last_compaction_offset`), an in-memory log index (spans with byte offsets and a data-row counter), or a small SQLite side table (`conversation_state`).
 3. **A full pass is legitimate only as a once-per-process first-touch reconcile / open-calibration / migration / startup-backfill** — low frequency, not on the real-time path, never per request and never per append.
 
 The wire contract is unchanged: `total`, `offset`, paging and preview semantics stay byte-for-byte identical, so the frontend is not touched.
@@ -23,7 +23,7 @@ The wire contract is unchanged: `total`, `offset`, paging and preview semantics 
 ### 1. The two session surfaces
 
 - **User chat** (`core/acowork-user/src/chat_sessions.rs`): `chat-sessions/{id}/messages.jsonl` + `session.json`. Served to Desktop/Mobile over HTTP through the Gateway; the empty-payload doorbell (ADR-076 §Decision 8) turns every event into a read.
-- **Execution conversation** (`core/acowork-runtime/src/conversation.rs`): `conversations/{sid}.jsonl` + a SQLite `SessionMeta`. Read on user pagination, on incremental poll (`read_messages_since*`), by the handoff path (latest compaction summary), and indexed by a background tailer (`conversation_index.rs`).
+- **Execution conversation** (`core/acowork-runtime/src/conversation.rs`): `conversations/{sid}.jsonl` + a SQLite `SessionMeta`. Read on user pagination and on incremental poll (`read_messages_since*`), and indexed by a background tailer (`conversation_index.rs`).
 
 ADR-092 already fixed the user-chat *read* hot path (seq identity + reverse tail-chunk seek + `message_count`). What remained across both surfaces were the *auxiliary* full reads that had nothing to do with serving a page: counting, dedup lookup, preview projection, list fan-out, watermark recovery.
 
@@ -70,9 +70,11 @@ User chat keeps a small per-session sidecar `ids.index` (`message_id\tseq` per l
 
 `last_message_preview` becomes a write-time persisted field of `session.json` (its doc is re-scoped from "read-path projection" to "write-time derived state"). The session list, group-preview attachment, and project-group listing return this stored value directly; `list_project_groups` walks the existing `chat-sessions.projects.json` index instead of scanning session directories. A full `scan_all_sessions` survives only on the startup / backfill path.
 
-### D7 — Compaction summary lives in `SessionMeta`
+### D7 — The compaction event lives in the JSONL; `SessionMeta` keeps only the offset
 
-`append_compaction_event` stores the summary text in `SessionMeta.last_compaction_summary` alongside the existing offset. The handoff read is O(1). For a session whose meta predates the field, the first read does one legacy scan and self-heals the value back into meta; a session with no meta row returns `None` rather than scanning per request (a live session always has meta).
+`append_compaction_event` writes the summary text as a `kind=compaction` entry into `{sid}.jsonl` and persists `last_compaction_offset` into `SessionMeta` alongside the existing offset; resuming by that offset still skips the distilled prefix in O(1).
+
+> **Revised 2026-10-24**: this decision used to also copy the summary text into `SessionMeta.last_compaction_summary` so the handoff read was O(1). The handoff existed only to feed ADR-099's T2 rotation distillation, and that rotation has been deleted outright — which left the column as write-only derived state, so migration 7 drops it physically (a write-time cache is no longer needed either: the summary is the last `compaction` entry in the JSONL, reachable with one tail read). `last_compaction_offset` and its self-healing back-write (a legacy session scans once on first read, then stores the value) stay as they were.
 
 ### D8 — The conversation indexer keeps a `conversation_state` tail pointer
 
@@ -100,7 +102,7 @@ The writer commits an appended line by pushing its known `(offset, len)` span di
 
 - The write path now maintains several derived-state stores (session meta fields, the in-memory log index, `ids.index`, `conversation_state`); each is new state whose correctness is pinned by a first-touch reconcile / open calibration and per-session locks.
 - Crash-window consistency shifts from "calibrate on every write" to "calibrate once per process at first touch"; a crash between a line landing and its meta save is healed at the next process's first touch, not the next append.
-- The SQLite schema gains `last_compaction_summary` on `sessions` and the `conversation_state` table (migration 5).
+- The SQLite schema gains `last_compaction_summary` on `sessions` and the `conversation_state` table (migration 5). (2026-10-24: the former is dropped by migration 7, having lost its reader; `conversation_state` remains.)
 
 ## Alternatives Considered
 

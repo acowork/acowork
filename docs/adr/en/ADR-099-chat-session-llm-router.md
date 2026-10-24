@@ -1,32 +1,34 @@
 # ADR-099: LLM Semantic Routing for Chat Sessions (Chat Router)
 
 - **Number**: ADR-099
-- **Status**: Accepted (revised 2026-10-22: D3/D6 add read-only information tools to the router; D3 adds the routing-time delivery anchor and the execution-side pending queue, see below. Revised 2026-10-23: D8 fallback semantics — a degraded Chat-sourced human message now CREATES an execution session, see D8)
+- **Status**: Accepted (revised 2026-10-22: D3/D6 add read-only information tools to the router; D3 adds the routing-time delivery anchor and the execution-side pending queue, see below. Revised 2026-10-23: D8 fallback semantics — a degraded Chat-sourced human message now CREATES an execution session, see D8. Revised 2026-10-24: **D1's "the execution layer keeps physical rotation" is reversed — the T1/T2 rotation is deleted outright**; execution sessions are long-lived, compaction runs in place, and starting a new session is a semantic decision only, see the "Revision (2026-10-24)" section)
 - **Date**: 2026-10-21
 - **Deciders**: ACowork Architecture Group
 - **Related**: Design 27 (Intent Messaging and Group Chat), Design 29 (Chat Session Context Orchestration), ADR-060 (Prompt-Cache-Friendly Context Block Reorganization), ADR-063 (Package-Level Prompt Override), ADR-066 (Provider Cache Tokens), ADR-076 (Multi-User Account System), ADR-085 (Agent Lifecycle State Machine), ADR-092 (User Message Identity and Bounded Reads), ADR-096 (No Full Session Reads), ADR-098 (Unified Standard Group Model)
 
 ## Summary
 
-A chat session is not currently an LLM context: which execute session receives a user message is decided entirely by code rules (`routing_key` + T1 idle / T2 compaction / T3 config conflict). Those rules answer two different questions at once — "which task should semantically continue this work" and "should the physical context window be replaced" — and therefore produce three unreasonable behaviours:
+**(The status quo when this ADR was written)** A chat session is not an LLM context: which execute session receives a user message is decided entirely by code rules (`routing_key` + T1 idle / T2 compaction / T3 config conflict). Those rules answer two different questions at once — "which task should semantically continue this work" and "should the physical context window be replaced" — and therefore produce three unreasonable behaviours:
 
 1. Changing model/workspace in the chat forces a new execute session;
 2. With no parameter change, the message always reuses the current working session regardless of semantic relevance;
 3. A T2 rotation carries the old task's summary into the new task; the summary tokens far exceed the user input, and the new session keeps working on the old job.
 
-This ADR decides on a layered approach: **the chat layer introduces one restricted-tool LLM turn (Chat Router) for the semantic decision; the execution layer keeps physical rotation as a context safety valve**. T3 is deleted, T1 is demoted from a hard rule to a prompt signal, and T2 only happens inside the same logical task chosen by the router, so summaries no longer pollute unrelated tasks.
+This ADR decides on a layered approach: **the chat layer introduces one restricted-tool LLM turn (Chat Router) for the semantic decision** (at the time, the execution layer kept physical rotation as a context safety valve: T3 deleted, T1 demoted from a hard rule to a prompt signal, T2 only inside the same logical task chosen by the router). That safety valve was **deleted outright by the 2026-10-24 revision**: the only way a new execution session starts is a semantic decision (`dispatch(target="new")` / a PM task reaching a terminal state / the user creating one explicitly), and context growth is handled by compaction in place — see the "Revision (2026-10-24)" section.
 
 The routing carrier is `ChatSessionManager` (isolated per `chat_session_id`; in a group chat each agent is naturally separate), the router's tool surface is `dispatch` plus two read-only information tools (D3), and the context is orchestrated as "stable prefix + append at the tail" (see Design 29).
 
 ## Background
 
-### 1. Current state: routing_key and three rotation triggers
+### 1. Current state (retired): routing_key and three rotation triggers
 
 The `routing_key` namespace priority is `task:` > `chat:` > `conv:` > `msg:` ([intent_routing.rs](../../../core/acowork-runtime/src/agent/session/intent_routing.rs)). 1:1 chats and group @Agent mentions have an empty `conversation_id`, so both fall into `chat:{chat_session_id}`; a PM dispatch is `conv:task:{project}:{task}`. `route_intent_session` checks, in order:
 
 - whether the mapped session hits T1 (idle beyond `intent_idle_rotate_hours`) or T2 (a compaction happened);
 - whether the `SessionSeed` (model/provider/workspace/reasoning from the chat draft) conflicts with the mapped session (T3);
 - any hit creates a new session and writes a handoff pointer or summary into it.
+
+> All three triggers are now retired (T3 by this ADR, T1/T2 by the 2026-10-24 revision). `route_intent_session` does one thing now: reuse the mapped session if the key has a mapping, create one if it does not — compaction alone owns context hygiene, and starting a new session is always an explicit decision.
 
 ### 2. Three unreasonable behaviours
 
@@ -48,10 +50,10 @@ The `routing_key` namespace priority is `task:` > `chat:` > `conv:` > `msg:` ([i
 
 ## Decisions
 
-### D1 — Layering: semantic routing in the chat layer, physical rotation in the execution layer
+### D1 — Layering: semantic routing in the chat layer, no rotation in the execution layer
 
 - Chat layer: every human `user_message` (1:1 and group @) first goes through a router turn that produces "answer / hand off to an existing session / create a new session".
-- Execution layer: T1/T2 remain as physical safety valves, but only inside the same logical task chosen by the router; T3 is deleted.
+- Execution layer: when this ADR was written it kept T1/T2 as physical safety valves and deleted T3; **the 2026-10-24 revision deletes T1/T2** — execution sessions are long-lived, context hygiene belongs solely to the ADR-011 / ADR-061 compaction machinery, and there is no code-level rotation point any more.
 - Card answers, PM dispatch, and agent-agent messages do not pass through the router.
 
 ### D2 — Stateless router turns, ChatSessionManager isolated per chat
@@ -123,11 +125,11 @@ The execute prompt (`prompts/system.md` + `constraints.md` + other `prompts/*.md
 - Agent-agent: deterministic `conv:{conversation_id}` mapping, no chat binding, never a candidate.
 - The per-target `message_id` and `in_reply_to` (the shared `user_message` row id) of a group @ fan-out are preserved verbatim when the router forwards.
 
-### D8 — T1/T2/T3 semantics, execution location, and failure fallback
+### D8 — What became of the three rotation triggers (all retired), execution location, and failure fallback
 
-- T3 is deleted;
-- T1 is used only on the fallback path; the normal path treats "idle duration" as a prompt signal;
-- T2 remains a physical rotation on the execution side;
+- T3 is deleted (by this ADR);
+- T1 is deleted (2026-10-24 revision, together with its `intent_idle_rotate_hours` setting and its hard trigger on the fallback path);
+- T2 is deleted (2026-10-24 revision, together with the handoff summary distillation and the successor);
 - router timeout/error/two consecutive invalid tool calls → degrade; the fallback runs on that chat's drain task, so the message is not lost. **Where the degradation lands depends on the source (revised 2026-10-23)**: a Chat-sourced human message no longer falls back to `route_intent_session`'s mapping reuse — it goes through `chat_dispatch(Target::New)`, **creating** a fresh execution session (bound to the same chat, intent_map re-pointed). A degradation means the router produced no semantic verdict, and the registry mapping is not a verdict either: guessing an unrelated old task with a possibly-new-topic message is worse than starting clean (the incident that surfaced this: a model timeout degraded a fresh "review this repo" message into an unrelated historical session's queue, invisibly to the chat). The deterministic reuse for `PassThrough` (PM task / agent-agent / response / kill-switch-off) is unchanged — on those paths the `conversation_id` / `msg:` key **is** the task identity, so reuse is evidence-based, not a guess. The routing reaction row (ADR-100 D11 `turn_routed`) is written through the same builder on both paths, so a degraded create still lands a visible "Starting a new task" bubble.
 - every Gateway HTTP call on the router path is bounded: reading chat history uses `chat_router.timeout_ms` (default 8 s, clamped to 1–60 s), write-back 15 s, attachment pull 60 s. A stalled Gateway costs that one turn a degradation instead of parking the chat's drainer indefinitely;
 - scanning the candidate list happens **outside** the `SessionManager` lock; the lock only covers mapping resolution (one global lock must never span disk IO);
@@ -140,7 +142,7 @@ The deterministic escape hatch adds no composer button; it reuses the `+` alread
 - When `+` is pressed, `POST /api/agents/{id}/sessions` carries the current `chat_session_id`, and the Runtime — after checking the caller's chat membership — stamps exactly the same binding pair as `dispatch(new)` (`chat_session_id` + `Members`);
 - On success the UI switches to the exec view, where messages go straight to that session and never pass through the router: the binding plus the view switch *is* the escape hatch, so no new wire field such as `target_session_id` is needed;
 - The Gateway needs no change (`POST /sessions` is forwarded transparently);
-- Automatic creations (the session opened on first visit, the successor spawned when the last exec tab closes) stay unbound — "the system needs a tab" is not "the user started a task in this conversation". A binding is a hard gate for group-chat candidates (D4: a group lists only sessions bound to it); in 1:1 the speaker's own unbound sessions still appear as candidates under D4's third clause, and the router judges their relevance by title and recent activity;
+- Automatic creations (the session opened on first visit, the session auto-created when the last exec tab closes on the legacy exec-only surface) stay unbound — "the system needs a tab" is not "the user started a task in this conversation". A binding is a hard gate for group-chat candidates (D4: a group lists only sessions bound to it); in 1:1 the speaker's own unbound sessions still appear as candidates under D4's third clause, and the router judges their relevance by title and recent activity;
 - A failed check skips only the binding, never the creation: chat membership is injected best-effort by the Gateway, so "new task" must still work when the user service is degraded (fail-soft on binding, fail-closed on access);
 - once a binding exists the binding owns `visibility`: the (`chat_session_id`, `Members`) pair is the contract the group read check depends on, so a request body may not turn a bound session back to `public` (leaking it to other chats' readers) or `private` (hiding the group's own task from it). A dropped request value is logged at WARN, and the response echoes what actually took effect rather than what was asked.
 
@@ -170,7 +172,7 @@ Mapped to the three behaviours in the background:
 
 1. **Parameter changes no longer force a new session**: when the router judges "same task + config change", it reuses the session; only a new task creates a new one. On a reuse the draft's model / provider / reasoning_effort must reach the session that was routed to, through `ConversationSession::apply_config` (ADR-047's single config entry point: persists immediately, bumps `config_version`, and the SessionTask applies it at the next turn boundary) — that is what "effective from the next turn" means. `workspace` is the one exception: moving a live task's working directory is not a config tweak and must go through `route_workspace_switch` (ADR-034 §8, the single entry point, with its per-agent-default side effect), so a workspace suggestion only takes effect when a session is created; on a reuse the divergence is logged instead of silently dropped.
 2. **Unrelated input no longer reuses a session**: the router chooses `dispatch(new)`.
-3. **Summaries no longer pollute a new task**: a new task starts from an empty session; T2 only happens inside the same task chosen by the router.
+3. **Summaries no longer pollute a new task**: a new task starts from an empty session; context growth inside a chosen task is handled by compaction in place, so no successor is ever created.
 
 Additional acceptance:
 
@@ -180,11 +182,13 @@ Additional acceptance:
 
 ## Compatibility and migration
 
-- `chat_router.enabled` defaults to true; when disabled a Chat message goes back to ADR-098's inline deterministic route, the only difference being that T3 is retired (see D8).
+- `chat_router.enabled` defaults to true; when disabled a Chat message goes back to ADR-098's inline deterministic route, the only difference being that all three rotation triggers are retired (T3 by this ADR, T1/T2 by the 2026-10-24 revision; see D8) — that path too now only reuses an existing mapping and creates a session when there is none.
 - Moving a router turn onto a per-chat drain task changes no external contract: MQTT payloads, `routing_key`, `intent-sessions.json` and the write-back channels are all as before.
 - Existing packages need no new file: without `prompts/chat.md` the persona falls back to manifest metadata.
 - Existing `intent-sessions.json` mappings remain valid; candidates include the current mapping, so first run needs no migration.
 - The terminal list is a sidecar `terminal-sessions.json`; no SQLite schema change.
+- Existing JSONL rows tagged `rotation_handoff` are neither cleaned nor promoted to User; the render layer keeps filtering them. The mechanism is retired, so no new such rows appear.
+- SQLite's `sessions.last_compaction_summary` is dropped by migration 7 (it was the write-time cache for the T2 summary distillation and no longer has a reader); `last_compaction_offset` stays.
 
 ## Non-goals
 
@@ -202,11 +206,23 @@ Additional acceptance:
 | ADR-063 | `prompts/chat.md` is a new package-level override file |
 | ADR-066 | Reuses cache token accounting and hit-rate semantics |
 | ADR-076 / ADR-092 | Candidate and write-back identity filtering reuse envelope `from` and chat scope |
-| ADR-096 | Candidates read metadata only, never JSONL bodies |
+| ADR-096 | Candidates read metadata only, never JSONL bodies; its `last_compaction_summary` derived column was dropped together with the rotation (migration 7) |
+
+## Revision (2026-10-24): the execution-session rotation is deleted
+
+This revision reverses D1's second bullet (the execution layer keeping T1/T2 as physical safety valves) and removes the whole rotation mechanism: `RotateReason` / `needs_rotation` / `plan_rotation` / `rekey` / `pending_successor`, the `handoff_note` channel, `record_intent_handoff`, the `rotation_handoff` transcript tag, the `last_compaction_summary` derived column, and the `intent_idle_rotate_hours` / `intent_handoff_max_tokens` settings (including the desktop Session card and all 5 locales).
+
+Rationale:
+
+1. **An execute session can be appended to indefinitely.** Every turn re-reads the full JSONL (ADR-032), so a session that has already been compacted can keep receiving dispatches and keep iterating — "a compaction happened, therefore swap the window" has no basis.
+2. **Rotation is an artefact of the era before an LLM made the routing decision.** T1 guessed "this task should be over" from idle time and T2 from compaction events; once D1 lifted the semantic decision into the chat layer, neither physical signal carries any routing meaning any more, and keeping them contradicts behaviour 3 in §2 — T2's handoff summary is exactly the pollution this ADR set out to eliminate.
+3. **One single rule**: a new execution session has only three origins, all explicit decisions — the router's `dispatch(target="new")`, a PM task reaching a terminal state, and the user creating one (D9); context hygiene belongs solely to ADR-011 / ADR-061 compaction; file size is bounded solely by Design 15's 100,000-line / 50 MiB hard ceiling.
+
+Unaffected by this revision: `turn_mode` still has only the new / continue states (ADR-100 D11); `dispatch(target="new")` is still a new task rather than a rotation (no predecessor, no handoff carried over); the transcript gains no new tag; a mapping may point at a compacted session and is not health-checked. Compaction's own resume skipping still uses `last_compaction_offset`.
 
 ## Tests
 
 - Unit: candidate filtering, dispatch parsing, prompt layering, tool visibility (including the router-side GET-only schema and its runtime enforcement), deterministic projection and prefix stability, fallback, information-tool rounds (a failed lookup comes back as a tool result, oversized results are cut on char boundaries); the queue invariants (one drainer per chat, FIFO, a turn arriving while the drainer finishes is not left behind, an idle queue is dropped and reclaimed); the kill switch neither queues nor fails to deliver inline; a turn the router hands back (`PassThrough` / `Fallback`) is still delivered while a `Handled` one is not delivered twice; `session_config` applies on both reuse branches (target is the mapped session / target is another live session); a chat binding outranks the requested `visibility`. The decision log records `info_rounds` (information-tool rounds this turn ran), the audit surface for "should have routed but answered / should have answered but routed".
-- Integration: MockProvider drives the four paths (answer/hand off/create/fallback); T2 still happens inside the chosen session; parallel topics in a group chat; PM tasks appear in group candidates and disappear when terminal; agent-agent mappings unaffected.
+- Integration: MockProvider drives the four paths (answer/hand off/create/fallback); a compaction inside the chosen session does not create a successor (the session continues in place); parallel topics in a group chat; PM tasks appear in group candidates and disappear when terminal; agent-agent mappings unaffected.
 - E2E: router disabled keeps existing assertions; enabled verifies `agent_message` and `turn_started` for 1:1 and group @; PM task-dispatch still lands on `conv:task:`.
 - Regression: `cargo clippy --all-targets -- -D warnings`, `cargo test`, desktop `npm test`.
