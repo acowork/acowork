@@ -5,6 +5,7 @@ import { OutlineFolderOpenIcon, FilledFolderOpenIcon } from "../common/FolderOpe
 import { OutlineGaugeIcon, FilledGaugeIcon } from "../common/GaugeIcon";
 import { OutlineBugIcon, FilledBugIcon } from "../common/BugIcon";
 import { useTranslation } from "../../i18n/useTranslation";
+import { memoryTabAvailable } from "./rightPanelGate";
 import { Wrench } from "lucide-react";
 import type { ComponentType } from "react";
 
@@ -15,6 +16,10 @@ interface RightNavBarProps {
   onTabChange: (tab: PanelTab) => void;
   agentRunning: boolean;
   collapsed: boolean;
+  /** ADR-100: `memory_service.ready` from the Gateway. The memory tile needs
+   *  the standalone service, not just a running agent — without it every
+   *  panel request answers 503. Unknown (never read) counts as false. */
+  memoryServiceReady: boolean;
 }
 
 interface NavItem {
@@ -25,7 +30,7 @@ interface NavItem {
   show: boolean;
 }
 
-export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }: RightNavBarProps) {
+export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, memoryServiceReady }: RightNavBarProps) {
   const { t } = useTranslation();
 
   const items: NavItem[] = [
@@ -45,7 +50,15 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed }:
     // memory uses the shared FilledDatabaseIcon/OutlineDatabaseIcon so the
     // middle disk-separator line stays visible on selection; `icon` is
     // intentionally omitted.
-    { tab: "memory", i18nKey: "rightPanel.memory", show: agentRunning },
+    // ADR-100: memory left the Runtime, so the tile needs the standalone
+    // service to be up as well as the agent — otherwise the panel would be a
+    // column of 503s. `AppLayout` bounces an active memory tab back to status
+    // off the same rule (`memoryTabAvailable`).
+    {
+      tab: "memory",
+      i18nKey: "rightPanel.memory",
+      show: memoryTabAvailable({ agentRunning, memoryServiceReady }),
+    },
     { tab: "tools", icon: Wrench, i18nKey: "rightPanel.tools", show: agentRunning },
     // debug uses the shared FilledBugIcon/OutlineBugIcon so the filled
     // state preserves the central spine line via SVG mask. Without the

@@ -33,6 +33,7 @@ import {
   type GatewayAlive,
 } from "../../stores/gatewayStore";
 import { applyGatewayTransition, onMqttConnectionEdge } from "./gatewayTransition";
+import { memoryTabFallback } from "./rightPanelGate";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useServicesStore } from "../../stores/servicesStore";
@@ -223,6 +224,12 @@ export function AppLayout() {
   const gatewayStatus = useGatewayStore((s) => s.status);
   const gatewayAlive = useGatewayStore((s) => s.gatewayAlive);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
+  // ADR-100: the memory panel talks to the standalone memory service, so the
+  // Gateway's `/api/status` projection is what decides whether the tab exists.
+  // `null` (never read, or a Gateway older than ADR-100) means "not ready" —
+  // hiding is always the safe reading of an unknown.
+  const memoryServiceReady = useGatewayStore((s) => s.memoryService?.ready ?? false);
+  const refreshMemoryService = useGatewayStore((s) => s.refreshMemoryService);
   const setStatus = useStatusBarStore((s) => s.setStatus);
   const statusMsg = useStatusBarStore((s) => s.message);
   const statusType = useStatusBarStore((s) => s.type);
@@ -549,6 +556,19 @@ export function AppLayout() {
     prevAlive.current = isAlive;
   }, [selectedAgent?.alive, activeTab]);
 
+  // ── Bounce off the memory tab when the service goes away (ADR-100) ──
+  // The agent-stop bounce above keys on the Runtime; this one keys on the
+  // memory service, which is a separate process with a separate lifecycle. A
+  // tile that is no longer drawn must not stay the active tab — the panel
+  // would keep issuing requests that the Gateway proxy answers with 503.
+  useEffect(() => {
+    const fallBackTo = memoryTabFallback(activeTab, {
+      agentRunning: selectedAgent?.alive ?? false,
+      memoryServiceReady,
+    });
+    if (fallBackTo) setActiveTab(fallBackTo);
+  }, [activeTab, memoryServiceReady, selectedAgent?.alive, setActiveTab]);
+
   // ── Reveal workspace panel on locate-in-tree requests ────────────
   // The FileEditorPanel's "locate" button publishes a request via
   // workspaceStore.requestLocate; here we ensure the right-side
@@ -587,6 +607,10 @@ export function AppLayout() {
   // shape for `error`-class steady-state outages.
   useEffect(() => {
     checkHealth();
+    // ADR-100: one-shot readiness read beside the health probe — `/api/status`
+    // is the only surface that carries `memory_service`, and the memory tile
+    // stays hidden until it answers. Not a poll (ADR-052).
+    void refreshMemoryService();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -630,6 +654,10 @@ export function AppLayout() {
       clearAgentSessions: (id) => useChatStore.getState().clearAgentSessions(id),
       refreshServices: () => {
         void useServicesStore.getState().diagnose();
+        // ADR-100: the memory service is supervised by this Gateway, so a
+        // Gateway rise can land before the service has bound its port. Re-read
+        // its readiness with the same edge that re-probes every other service.
+        void useGatewayStore.getState().refreshMemoryService();
       },
       markNodesOffline: () => useAgentStore.getState().markNodesOffline(),
       fetchAgents: () => useAgentStore.getState().fetchAgents(),
@@ -1183,6 +1211,7 @@ export function AppLayout() {
                 }
               }}
               agentRunning={selectedAgent?.alive ?? false}
+              memoryServiceReady={memoryServiceReady}
               collapsed={rightPanelCollapsed}
             />
           ) : activeGroupId && !activeIsDm ? (

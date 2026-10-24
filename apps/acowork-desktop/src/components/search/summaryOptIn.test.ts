@@ -33,11 +33,15 @@ const SRC = readFileSync(join(__dirname, "GlobalSearchDialog.tsx"), "utf8");
 function runSearchBody(): string {
     const start = SRC.indexOf("const runSearch = useCallback(");
     expect(start, "runSearch not found — did the search stage move?").toBeGreaterThan(-1);
-    // The callback ends at its dependency array, which is unique enough
-    // here: runSearch takes [agentId, workspaceId, caseSensitive, wholeWord].
-    const end = SRC.indexOf("[agentId, workspaceId, caseSensitive, wholeWord]", start);
-    expect(end, "runSearch dependency array not found").toBeGreaterThan(start);
-    return SRC.slice(start, end);
+    // The callback ends at its dependency array — the first bare `[…],`
+    // line followed by the closing `);`. Located structurally rather than
+    // by the exact member list, because that list is edited by unrelated
+    // work (ADR-100 appended `memoryServiceReady`) and a literal match
+    // here would break on those edits without protecting anything.
+    const rel = SRC.slice(start);
+    const end = rel.match(/\n\s*\[[^\]]*\],\n\s*\);/);
+    expect(end, "runSearch dependency array not found").not.toBeNull();
+    return rel.slice(0, end!.index);
 }
 
 describe("retrieval stage never triggers the summary stage", () => {

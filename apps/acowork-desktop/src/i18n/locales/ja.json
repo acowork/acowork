@@ -479,7 +479,7 @@
     "skeleton": "スケルトン",
     "skeletonDesc": "エージェント自身のファイル（manifest、prompts、skills、assets）をコピー。会話履歴とメモリは含みません。",
     "full": "フル",
-    "fullDesc": "スケルトンの内容に加え、元のエージェントの workspace/config（モデル選択、MCP サーバー、カスタム作業ディレクトリ）とメモリストア（ユーザーが整理���たメモリーノード）をコピー。会話履歴、files/、logs/ はスキップ —— クローンは新しい対話を始めます。",
+    "fullDesc": "スケルトンの内容に加え、元のエージェントの workspace/config（モデル選択、MCP サーバー、カスタム作業ディレクトリ）とメモリストア（ユーザーが整理したメモリーノード）をコピー。会話履歴、files/、logs/ はスキップ —— クローンは新しい対話を始めます。",
     "title": "Agent をクローン",
     "cloningFrom": "クローン元：",
     "newAgentIdLabel": "新しい Agent ID",

@@ -108,9 +108,10 @@ export function MemoryPanel() {
     void fetchDistillerStatus(selectedAgentId);
     void fetchForgettingStatus(selectedAgentId);
     // `clearMemory` above drops the rebuild flag along with everything else,
-    // but the rebuild itself is running in the Gateway and Runtime and does
-    // not care that we switched agents. Re-attach, or this button comes back
-    // offering to queue a second migration over the same store.
+    // but the rebuild itself is running in the Gateway and the memory service
+    // (ADR-100) and does not care that we switched agents. Re-attach, or this
+    // button comes back offering to queue a second migration over the same
+    // store.
     void resumeRebuild(selectedAgentId);
   }, [
     selectedAgentId,

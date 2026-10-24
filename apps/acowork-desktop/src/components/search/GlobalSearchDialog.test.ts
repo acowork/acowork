@@ -22,6 +22,8 @@ import {
     toConversationHits,
     pickFirstResultTab,
     formatTokenCount,
+    memorySearchUrl,
+    visibleTabOrder,
     TAB_ORDER,
 } from "./GlobalSearchDialog";
 
@@ -253,5 +255,55 @@ describe("formatTokenCount", () => {
     it("truncates non-integer values so the formatter never lies about precision", () => {
         expect(formatTokenCount(1234.9)).toBe("1.2k");
         expect(formatTokenCount(7.4)).toBe("7");
+    });
+});
+
+/* ─── ADR-100: the memory scope talks to the standalone service ─────── */
+
+describe("visibleTabOrder", () => {
+    it("keeps all six tabs while the memory service is ready", () => {
+        expect(visibleTabOrder({ memoryServiceReady: true })).toEqual([...TAB_ORDER]);
+    });
+
+    it("drops only the memory tab when it is not", () => {
+        const tabs = visibleTabOrder({ memoryServiceReady: false });
+        expect(tabs).not.toContain("memory");
+        expect(tabs).toEqual(TAB_ORDER.filter((t) => t !== "memory"));
+    });
+
+    it("keeps the auto-switch off a memory-only result set when the tab is hidden", () => {
+        const counts = { memory: 5 };
+        // `memory` is last in TAB_ORDER, so it only wins when nothing else
+        // landed — exactly the case where hiding it must mean "stay put",
+        // never "switch to a tab that is not in the strip".
+        expect(pickFirstResultTab(counts, TAB_ORDER)).toBe("memory");
+        expect(pickFirstResultTab(counts, visibleTabOrder({ memoryServiceReady: false }))).toBeNull();
+    });
+
+    it("lets the auto-switch fall through to the next reachable tab", () => {
+        const counts = { memory: 5, file: 2 };
+        expect(pickFirstResultTab(counts, visibleTabOrder({ memoryServiceReady: false }))).toBe("file");
+    });
+});
+
+describe("memorySearchUrl", () => {
+    it("targets the Gateway's flat memory proxy, not the agent runtime", () => {
+        const url = new URL(memorySearchUrl("http://gw.test", "inst-1", "hello", 20));
+        expect(url.origin).toBe("http://gw.test");
+        expect(url.pathname).toBe("/api/memory/search");
+    });
+
+    it("carries instance_id plus the aggregate defaults", () => {
+        const url = new URL(memorySearchUrl("http://gw.test", "6f9d0c2e-1234-4abc-8def-0123456789ab", "hello world", 20));
+        expect(url.searchParams.get("instance_id")).toBe("6f9d0c2e-1234-4abc-8def-0123456789ab");
+        expect(url.searchParams.get("q")).toBe("hello world");
+        expect(url.searchParams.get("mode")).toBe("hybrid");
+        expect(url.searchParams.get("limit")).toBe("20");
+    });
+
+    it("encodes the query so a sigil in the text cannot rewrite the params", () => {
+        const url = new URL(memorySearchUrl("http://gw.test", "inst-1", "a?b&c=d", 5));
+        expect(url.searchParams.get("q")).toBe("a?b&c=d");
+        expect(url.searchParams.get("limit")).toBe("5");
     });
 });

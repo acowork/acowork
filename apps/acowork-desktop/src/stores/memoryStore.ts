@@ -60,18 +60,22 @@ interface MemoryStore {
   consolidateMessage: string | null;
 
   /**
-   * Runtime distiller trigger state (ADR-071) — `GET /memory/consolidation/
+   * Distiller trigger state (ADR-071) — `GET /memory/consolidation/
    * status` `distiller` payload. `null` until the first successful fetch.
-   * Drives the "记忆蒸馏" card (enabled switch reflects the runtime state;
+   * Drives the "记忆蒸馏" card (enabled switch reflects the service state;
    * the card also shows backlog / last-run summary).
+   *
+   * ADR-100: since the panel paths are frozen, the `GET /memory/*` routes
+   * below are answered by the standalone memory service through the Gateway's
+   * `/api/agents/{id}/memory/*` proxy, not by the agent's Runtime.
    */
   distillerStatus: DistillerStatus | null;
 
   /**
-   * Runtime episodic forgetting state (ADR-057 §5.3 redesign) —
+   * Episodic forgetting state (ADR-057 §5.3 redesign) —
    * `GET /memory/consolidation/status` `forgetting` payload. `null` until
    * the first successful fetch. Drives the "记忆遗忘" card (enabled switch
-   * reflects the runtime state).
+   * reflects the service state).
    */
   forgettingStatus: ForgettingStatus | null;
 
@@ -109,13 +113,13 @@ interface MemoryStore {
    */
   distill: (agentId: string) => Promise<DistillResponse | null>;
   /**
-   * Fetch the runtime distiller trigger state — `GET /memory/
+   * Fetch the distiller trigger state — `GET /memory/
    * consolidation/status`. Best-effort: failures leave the previous
    * status in place (the card falls back to agent_config-driven state).
    */
   fetchDistillerStatus: (agentId: string) => Promise<void>;
   /**
-   * Fetch the runtime episodic forgetting state — `GET /memory/
+   * Fetch the episodic forgetting state — `GET /memory/
    * consolidation/status` `forgetting` payload (ADR-057 §5.3 redesign).
    * Best-effort: failures leave the previous status in place.
    */
@@ -124,7 +128,7 @@ interface MemoryStore {
    * Rebuild the vector index for `agentId` using the currently active
    * embedding model.
    *
-   * `scope` decides what the Runtime re-embeds: `"all"` re-embeds every node
+   * `scope` decides what the service re-embeds: `"all"` re-embeds every node
    * (a model swap — every vector changes meaning), `"repair"` re-embeds only
    * the rows retrieval cannot see (foreign-width or unembedded). The Memory
    * panel passes the scope its health banner decided on; omitting it asks for
@@ -168,9 +172,9 @@ function stopRebuildPoll() {
  * Watch the Gateway's migration state for one agent until it settles.
  *
  * Shared by the Rebuild button and the re-attach path below: the rebuild runs
- * detached in the Gateway and Runtime and outlives any particular panel, so
- * this poll is only the UI's handle on it - dropping the handle never stopped
- * the work, which is what made the button lie.
+ * detached in the Gateway and the memory service and outlives any particular
+ * panel, so this poll is only the UI's handle on it - dropping the handle never
+ * stopped the work, which is what made the button lie.
  */
 function watchRebuild(agentId: string) {
   stopRebuildPoll();
@@ -236,9 +240,10 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       if (filters.keyword) params.set("keyword", filters.keyword);
       if (filters.timeRange !== "all") params.set("time_range", filters.timeRange);
 
-      // Bug B v3 fix: memory endpoints proxy through the Runtime and
-      // 503 during the boot window between Gateway discovery and
-      // Runtime HTTP port registration. `with503Retry` rides out
+      // Bug B v3 fix: the memory endpoints are proxied to the memory
+      // service (ADR-100) and answer 503 during the boot window between
+      // Gateway discovery and the supervisor publishing the service port.
+      // `with503Retry` rides out
       // transient 503s transparently so the MemoryPanel does not
       // have to gate on a UI-side `isAgentReady` flag (see
       // MemoryPanel.tsx — `isAgentReady` was removed in v3).
@@ -289,10 +294,11 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
 
   deleteNode: async (agentId, nodeId) => {
     try {
-      // Bug B v3: the Runtime answers 503 until its memory service slot is
-      // populated, and that check (`svc.as_ref().ok_or(503)`) runs BEFORE
-      // `delete_node()` — so a retry can never double-delete. Uses the
-      // write policy: the user is watching a button, not a background list.
+      // Bug B v3: the Gateway answers 503 while its memory supervisor holds
+      // no live process (`memory_process` is `None`), and that check runs
+      // BEFORE the request is forwarded — so a retry can never double-delete.
+      // Uses the write policy: the user is watching a button, not a background
+      // list.
       const res = await with503Retry(
         () =>
           fetch(`${getGatewayUrl()}/api/agents/${agentId}/memory/nodes/${nodeId}`, {
@@ -328,7 +334,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       );
       if (!res.ok) {
         // 403 permission denial → localized "ask the owner" copy;
-        // 409 "distiller is disabled" / 503 "not ready" keep the runtime
+        // 409 "distiller is disabled" / 503 "not ready" keep the backend
         // error string so the user knows why the run didn't go.
         const err = await httpApiError(res);
         set({
@@ -404,7 +410,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
           "No active embedding model is configured. Configure one in the Harness tab first.",
         );
       }
-      // `scope` decides what the Runtime re-embeds: the panel passes the scope
+      // `scope` decides what the service re-embeds: the panel passes the scope
       // its health banner chose (a two-row defect must not cost a 5000-row
       // re-embed); callers that do not know the defect omit it and get "all".
       const resp = await startMigration(activeModelId, [agentId], scope);

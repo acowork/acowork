@@ -30,6 +30,9 @@
  *               client-side subject/author/hash filter → virtual log file
  * - 文档 tab  : GET /api/doc/search (doc process) → DocEditor
  * - 项目 tab  : GET /api/pm/search (pm process) → ProjectBoard / TaskDetailDialog
+ * - 记忆 tab  : GET /api/memory/search?instance_id= (memory service, ADR-100)
+ *               → MemoryPanel node — the tab is hidden while the service is
+ *               not ready, because the Runtime no longer answers this scope
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
@@ -43,6 +46,7 @@ import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmTaskDetailStore } from "../../stores/pm/taskDetailStore";
 import { useDocEditorStore } from "../../stores/doc/editorStore";
 import { useMemoryStore } from "../../stores/memoryStore";
+import { useGatewayStore } from "../../stores/gatewayStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { searchDocs } from "../../lib/doc-api";
@@ -196,6 +200,43 @@ export const TAB_ORDER: readonly Tab[] = [
     "conversation",
     "memory",
 ] as const;
+
+/**
+ * The tabs a run can actually reach and show (ADR-100).
+ *
+ * `memory` is conditional: the scope moved out of the Runtime into the
+ * standalone memory service, so without a ready service there is nothing to
+ * ask — the tab is dropped from both the strip and the auto-switch order
+ * rather than being rendered and failing. Extracted so the strip, the
+ * auto-switch policy and the tests cannot drift apart.
+ */
+export function visibleTabOrder(flags: { memoryServiceReady: boolean }): Tab[] {
+    return TAB_ORDER.filter((t) => t !== "memory" || flags.memoryServiceReady);
+}
+
+/**
+ * `GET /api/memory/search` — the memory service's own search endpoint,
+ * reached through the Gateway's flat `/api/memory/*` proxy (ADR-100).
+ *
+ * Same envelope as the aggregate Runtime endpoint used to return for this
+ * scope (`hits[]` with `scope` / `title` / `snippet` / `payload`), so
+ * `toMemoryHits` is unchanged. `instance_id` is the namespace key the service
+ * partitions its databases by — the same UUID the agent-scoped panel paths
+ * carry in the URL.
+ */
+export function memorySearchUrl(
+    baseUrl: string,
+    instanceId: string,
+    q: string,
+    limit: number,
+): string {
+    const params = new URLSearchParams();
+    params.set("q", q);
+    params.set("mode", "hybrid");
+    params.set("limit", String(limit));
+    params.set("instance_id", instanceId);
+    return `${baseUrl}/api/memory/search?${params}`;
+}
 
 /* ─── Pure helpers (unit-tested) ────────────────────────────────────── */
 
@@ -471,6 +512,11 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
 
     const agents = useAgentStore((s) => s.agents);
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
+    // ADR-100: the memory scope is served by the standalone memory service, so
+    // the Gateway's readiness projection decides whether that tab exists at
+    // all. `undefined` / never-read counts as not ready (a hidden tab beats a
+    // tab that errors).
+    const memoryServiceReady = useGatewayStore((s) => s.memoryService?.ready ?? false);
     const agentList = useMemo(
         () =>
             Object.values(agents).filter((a) => a.meta.alive),
@@ -498,6 +544,15 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         const ws = s.sessionWorkspaceMap[activeSessionId];
         return !ws || ws === "__agent_home__" ? undefined : ws;
     });
+
+    /* ── ADR-100: the memory tab can disappear underneath an open dialog ──
+       (the service stopped, or the readiness read simply landed after the
+       user had already switched to it). A tab that is no longer in the strip
+       must not stay the active one — the pane below would show an orphaned
+       list. */
+    useEffect(() => {
+        if (tab === "memory" && !memoryServiceReady) setTab("file");
+    }, [tab, memoryServiceReady]);
 
     /* ── Reset when opened ──────────────────────────────────────────── */
     useEffect(() => {
@@ -660,19 +715,29 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             let runFileTotal: number | undefined;
             let runGitCommits: GitCommitDto[] | undefined;
 
-            const runtimeSearch = async (
-                scope: "memory" | "conversation",
-                signal: AbortSignal,
-            ): Promise<RowHit[]> => {
+            const conversationSearch = async (signal: AbortSignal): Promise<RowHit[]> => {
                 const params = new URLSearchParams();
                 params.set("q", q);
-                params.set("scopes", scope);
+                params.set("scopes", "conversation");
                 params.set("mode", "hybrid");
                 params.set("limit", String(GLOBAL_SOURCE_LIMIT));
                 const resp = await fetch(`${baseUrl}/api/agents/${agentId}/search?${params}`, { signal });
                 if (!resp.ok) throw new Error(`status ${resp.status}`);
                 const data = (await resp.json()) as GlobalSearchResponse;
-                return scope === "memory" ? toMemoryHits(data.hits ?? []) : toConversationHits(data.hits ?? []);
+                return toConversationHits(data.hits ?? []);
+            };
+
+            // ADR-100: memory no longer comes out of the aggregate Runtime
+            // endpoint — its own service answers it, through the Gateway proxy,
+            // with the same hit shape.
+            const memorySearch = async (signal: AbortSignal): Promise<RowHit[]> => {
+                const resp = await fetch(
+                    memorySearchUrl(baseUrl, agentId, q, GLOBAL_SOURCE_LIMIT),
+                    { signal },
+                );
+                if (!resp.ok) throw new Error(`status ${resp.status}`);
+                const data = (await resp.json()) as GlobalSearchResponse;
+                return toMemoryHits(data.hits ?? []);
             };
 
             const results = await runSearchSources<RowHit[]>({
@@ -704,8 +769,13 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     },
                     doc: async (signal) => toDocHits(await searchDocs(q, GLOBAL_SOURCE_LIMIT, signal)),
                     project: async (signal) => toProjectHits(await searchPm(q, GLOBAL_SOURCE_LIMIT, signal)),
-                    memory: (signal) => runtimeSearch("memory", signal),
-                    conversation: (signal) => runtimeSearch("conversation", signal),
+                    memory: (signal) =>
+                        // No service, no scope: resolve empty rather than fire a
+                        // request that can only fail — the tab is not on screen
+                        // either, and a fake error would land in the summary's
+                        // `failedScopes` list.
+                        memoryServiceReady ? memorySearch(signal) : Promise.resolve([] as RowHit[]),
+                    conversation: conversationSearch,
                 },
                 onSource: (source, r) => {
                     if (gen !== seqRef.current) return; // stale generation
@@ -784,7 +854,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             };
             setPhase("done");
         },
-        [agentId, workspaceId, caseSensitive, wholeWord],
+        [agentId, workspaceId, caseSensitive, wholeWord, memoryServiceReady],
     );
 
     /* ── Explicit submit: commit the typed query to a new run ─────────── */
@@ -826,7 +896,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             memory: memoryHits.length,
             conversation: conversationHits.length,
         };
-        const first = pickFirstResultTab(counts, TAB_ORDER);
+        const first = pickFirstResultTab(counts, visibleTabOrder({ memoryServiceReady }));
         if (first && first !== tab) {
             setTab(first);
             setFocusedIdx(0);
@@ -840,6 +910,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         memoryHits,
         conversationHits,
         tab,
+        memoryServiceReady,
     ]);
 
     /* ── Explicit submit (Enter / re-run button) ────────────────────── */
@@ -1015,7 +1086,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
 
     if (!open) return null;
 
-    const TABS: { key: Tab; label: string }[] = [
+    const allTabs: { key: Tab; label: string }[] = [
         { key: "file", label: t("globalSearch.tabs.file") },
         { key: "git", label: t("globalSearch.tabs.git") },
         { key: "doc", label: t("globalSearch.tabs.doc") },
@@ -1023,6 +1094,8 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         { key: "conversation", label: t("globalSearch.tabs.conversation") },
         { key: "memory", label: t("globalSearch.tabs.memory") },
     ];
+    const reachableTabs = visibleTabOrder({ memoryServiceReady });
+    const TABS = allTabs.filter((d) => reachableTabs.includes(d.key));
 
     const focusedHit = hits[focusedIdx] ?? null;
     const focusedGit = focusedHit?.type === "git"

@@ -167,7 +167,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
   it("a non-admin sees other users from /api/users/directory and can open a DM", async () => {
     // Regression for the contact-picker fix: a non-admin used to see only
     // themselves in the sidebar, with no way to start a 1:1 thread.
-    // /api/users/directory (ADR-076 ��决策 8) is the non-admin endpoint.
+    // /api/users/directory (ADR-076 §§决策 8) is the non-admin endpoint.
     const peer = account("user", "u-peer", "Charlie");
     await signIn("user", false);
     vi.stubGlobal(

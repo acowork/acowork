@@ -87,6 +87,8 @@ function formatDuration(ms: number): string {
  *  - mcp_uninstall      : name
  *  - codebase           : action [language] [file:Lline]
  *  - other (MCP/external): no special handling — falls through to first field
+ *    (exception: the hosted memory MCP, ADR-100 — its two tools keep their
+ *    cards via the explicit `mcp_memory__*` cases below)
  */
 function summarizeToolCall(
   toolName: string,
@@ -160,7 +162,8 @@ function summarizeToolCall(
       const total = extractTotal(/Total:\s*(\d+)\s*files/i, "no matches");
       return total ? `${s} (${total})` : s;
     }
-    case "memory_recall": {
+    case "memory_recall":
+    case "mcp_memory__memory_recall": {
       const q = asString(params.query);
       const total = extractTotal(/Found\s+(\d+)|Total:\s*(\d+)/i, "0 hits");
       // Note: regex may put capture in group 1 OR 2; pick whichever matched.
@@ -171,7 +174,8 @@ function summarizeToolCall(
       }
       return q || "(recall)";
     }
-    case "memory_store": {
+    case "memory_store":
+    case "mcp_memory__memory_store": {
       const content = truncate(asString(params.content), 40);
       const category = asString(params.category);
       return category ? `${content} (${category})` : content;

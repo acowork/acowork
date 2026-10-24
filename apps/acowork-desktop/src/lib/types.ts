@@ -77,6 +77,20 @@ export interface AgentModelResponse {
   available_models: string[];
 }
 
+/** ADR-100: memory service availability, as projected by `GET /api/status`.
+ *
+ *  `ready` is false both when the operator turned the service off
+ *  (`[memory].enabled = false`) and while it is still starting — the backend
+ *  deliberately does not tell those apart, because the frontend's reaction is
+ *  the same in both cases: hide the memory surface rather than render a panel
+ *  that answers 503. */
+export interface MemoryServiceStatus {
+  ready: boolean;
+  /** MCP endpoint advertised to Agents; `null` when `auto_inject_mcp` is off
+   *  or no advertise URL has been derived yet. Display/diagnostic only. */
+  mcp_url?: string | null;
+}
+
 /** System status response */
 export interface SystemStatusResponse {
   version: string;
@@ -88,6 +102,10 @@ export interface SystemStatusResponse {
   /** ADR-076 §决策 12: resolved deployment auth mode. `undefined` when the
    *  Gateway is older than ADR-076 (treated as `local` — no login gate). */
   auth_mode?: AuthMode;
+  /** ADR-100: memory service gating signal. `undefined` on a Gateway older
+   *  than ADR-100 — which has no standalone memory service to talk to, so
+   *  the memory panel and the search tab stay hidden. */
+  memory_service?: MemoryServiceStatus;
 }
 
 /** Node Agent entry — matches Gateway HTTP API GET /api/nodes (ADR-055 §6.13.3). */

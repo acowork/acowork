@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "core:build:debug": "node ../../dev/ort_env.js cargo build --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed -p acowork-lsp-relay -p acowork-node -p acowork-pm -p acowork-user -p acowork-doc",
-    "core:build:release": "node ../../dev/ort_env.js cargo build --release --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed -p acowork-lsp-relay -p acowork-node -p acowork-pm -p acowork-user -p acowork-doc",
+    "core:build:debug": "node ../../dev/ort_env.js cargo build --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed -p acowork-lsp-relay -p acowork-node -p acowork-pm -p acowork-user -p acowork-doc -p acowork-memory",
+    "core:build:release": "node ../../dev/ort_env.js cargo build --release --manifest-path ../../core/Cargo.toml -p acowork-gateway -p acowork-runtime -p acowork-embed -p acowork-lsp-relay -p acowork-node -p acowork-pm -p acowork-user -p acowork-doc -p acowork-memory",
     "check:i18n": "node scripts/check-i18n.mjs",
     "check:html-preview": "tsx scripts/check-html-preview.mts",
     "build": "npm run check:i18n && npm run check:html-preview && tsc && vite build",

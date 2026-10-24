@@ -22,7 +22,7 @@ function normalizeUrl(candidate: string): string | null {
     }
 }
 
-// ── Dispose registry ───────────────────────────��────────────────────────────
+// ── Dispose registry ─────────────────────────────────────────────────────────
 //
 // FileEditorPanel owns the Monaco TextModel for each opened file (plus its
 // LSP didClose side-effect). When any caller closes a file — UI X button,

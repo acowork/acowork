@@ -157,7 +157,7 @@ const markdownComponents = {
   ),
 };
 
-// ── Message Bubble ─────���──────────────────────────────────────────────
+// ── Message Bubble ────────────────────────────────────────────────────
 
 /** Single message bubble */
 const MessageBubble = React.memo(function MessageBubble({
