@@ -12,7 +12,7 @@ min_score)
 verify the score domain and MRR fluctuation; since removed — see the path note below)
 
 > Path note: the numbers in this report were measured while memory was built into the Runtime, and
-> these files then lived under `core/acowork-runtime/tests/`. After ADR-100 split the memory engine
+> these files then lived under `core/acowork-runtime/tests/`. After ADR-101 split the memory engine
 > into its own service, the benchmarks that still exist (m4 / m5 / retrieval_eval / lifecycle /
 > chains) moved with the logic to `core/acowork-memory/tests/`; the two temporary probes were
 > deleted — they were one-off diagnostics whose conclusions are recorded below. The metric math
@@ -452,3 +452,4 @@ cd core
 cargo test -p acowork-memory --test memory_m5_bench -- --nocapture   # M5 keyword before/after
 cargo test -p acowork-memory --lib keyword                             # quality gate rule unit tests
 ```
+

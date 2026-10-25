@@ -1,5 +1,5 @@
 /**
- * ADR-100 P4: the right-panel memory gate.
+ * ADR-101 P4: the right-panel memory gate.
  *
  * The memory tab needs TWO facts now — a running agent (it always did) and a
  * ready memory service (it is no longer Runtime-internal). Both `RightNavBar`
@@ -50,3 +50,4 @@ describe("memoryTabFallback", () => {
         expect(memoryTabFallback("memory", { ...ON, agentRunning: false })).toBe("status");
     });
 });
+

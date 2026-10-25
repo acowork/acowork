@@ -1,4 +1,4 @@
-//! Consolidation status + distill trigger routes (ADR-100 P1e).
+//! Consolidation status + distill trigger routes (ADR-101 P1e).
 //!
 //! `GET /memory/consolidation/status` and `POST /memory/distill` are ports of the
 //! Runtime handlers of the same name: same field names, same nesting, same
@@ -242,3 +242,4 @@ pub async fn distill(
         }
     }
 }
+

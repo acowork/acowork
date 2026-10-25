@@ -16,7 +16,7 @@ interface RightNavBarProps {
   onTabChange: (tab: PanelTab) => void;
   agentRunning: boolean;
   collapsed: boolean;
-  /** ADR-100: `memory_service.ready` from the Gateway. The memory tile needs
+  /** ADR-101: `memory_service.ready` from the Gateway. The memory tile needs
    *  the standalone service, not just a running agent — without it every
    *  panel request answers 503. Unknown (never read) counts as false. */
   memoryServiceReady: boolean;
@@ -50,7 +50,7 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, m
     // memory uses the shared FilledDatabaseIcon/OutlineDatabaseIcon so the
     // middle disk-separator line stays visible on selection; `icon` is
     // intentionally omitted.
-    // ADR-100: memory left the Runtime, so the tile needs the standalone
+    // ADR-101: memory left the Runtime, so the tile needs the standalone
     // service to be up as well as the agent — otherwise the panel would be a
     // column of 503s. `AppLayout` bounces an active memory tab back to status
     // off the same rule (`memoryTabAvailable`).
@@ -164,3 +164,4 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, m
     </nav>
   );
 }
+

@@ -34,7 +34,7 @@ pub struct ContextBuilder {
     /// takes precedence over session default).
     override_model: Option<String>,
     /// Retrieved memory text shown in the `retrieved_memory` debug section.
-    /// ADR-100 moved memory retrieval into the memory service (the Agent reads
+    /// ADR-101 moved memory retrieval into the memory service (the Agent reads
     /// memory through the MCP `recall` tool, whose output is a tool result, not
     /// a context section), so nothing fills this slot any more — it only ever
     /// becomes non-empty through a DevMode patch.
@@ -2331,3 +2331,4 @@ pub fn patch_agent_totals(
     info.agent_total_cache_read_tokens = Some(agent_totals.2);
     info.agent_total_cache_write_tokens = Some(agent_totals.3);
 }
+

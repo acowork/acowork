@@ -107,7 +107,7 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 |------|------|------|
 | **Gateway**（`acowork-gateway`） | 每个集群一个常驻 Rust 进程 | `:19876` 上的 HTTP API，`:19875` 上内嵌的 MQTT broker；反代到所有 Node / Runtime；包管理；Intent 路由；全局资源（LLM providers / MCP / budget / cron / rate-limit）。 |
 | **Node Agent**（`acowork-node`） | 每台承载 Runtime 的主机一个 | 进程表（spawn / kill / reap Runtime）、本地包存储、向 Gateway 的 MQTT 接入、本地反代 `:19900`、LSP sidecar 监督、节点级 fs 浏览。 |
-| **Runtime**（`acowork-runtime`） | 每个运行中的 `.agent` 实例一个 | 通用 Rust 二进制：加载 `.agent` 包、跑 LLM 主循环、工具执行（记忆访问是对记忆服务的工具调用，ADR-100）、loopback 上的 per-agent HTTP。 |
+| **Runtime**（`acowork-runtime`） | 每个运行中的 `.agent` 实例一个 | 通用 Rust 二进制：加载 `.agent` 包、跑 LLM 主循环、工具执行（记忆访问是对记忆服务的工具调用，ADR-101）、loopback 上的 per-agent HTTP。 |
 
 除了这三层之外，五个常驻服务挂在同一条 Gateway 协议路径上，对 Runtime 暴露的 REST + MCP 接口与人类一致：
 
@@ -116,7 +116,7 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 | `acowork-user` | 用户域——账号、凭据、角色、档案/头像、用户↔用户聊天。 |
 | `acowork-pm`   | 项目与任务管理——一等公民服务，Agent 和人读写/订阅同一棵项目树。 |
 | `acowork-doc`  | 在线文档库，支持多人实时编辑（Tiptap + Yjs）。 |
-| `acowork-memory` | 独立记忆服务（ADR-100）——Grafeo 存储引擎 + distill / consolidation 流水线，按 Agent 实例 id 一实例一库，以 REST + MCP 暴露，由 Gateway 托管。 |
+| `acowork-memory` | 独立记忆服务（ADR-101）——Grafeo 存储引擎 + distill / consolidation 流水线，按 Agent 实例 id 一实例一库，以 REST + MCP 暴露，由 Gateway 托管。 |
 | `acowork-embed` / `acowork-lsp-relay` / `acowork-vault` / `acowork-sqlite` / `acowork-sign` | Embedding 模型 runner、LSP relay、加密 KV、存储后端、包签名——支撑层。 |
 
 ### Standalone vs. 集群
@@ -177,7 +177,7 @@ cd ACowork
 ./dev/common/build_core.sh --debug              # bash
 ```
 
-macOS Apple Silicon 用户也可使用 `./dev/desktop/macos/build_macos.sh` 一键编译（自动启用 CoreML）。
+macOS 用户直接用 `./dev/common/build_core.sh` 即可一键编译：Apple Silicon 上会自动通过 cargo 下载 ONNX Runtime 并启用 CoreML 加速（加 `--cpu` 可强制 CPU 推理）。
 
 ### Step 3 — 启动 Desktop App
 
@@ -361,3 +361,4 @@ Apache-2.0 —— 详见 [`LICENSE`](./LICENSE)。
   <b>ACowork — AI agents协作平台</b><br>
   <i>一个为人与AI智能体协作打造的一站式平台。</i>
 </p>
+

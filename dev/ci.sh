@@ -610,7 +610,7 @@ run_integration() {
     cargo test -p acowork-core --test node_proto_golden
     echo "=== Running acowork-node dependency red-line test ==="
     cargo test -p acowork-node --test dependency_redline
-    # ADR-100: the retrieval-eval kernel is shared by the memory and runtime
+    # ADR-101: the retrieval-eval kernel is shared by the memory and runtime
     # harnesses but must stay off the shipping path (dev-dependency only), and
     # the checked-in stand-in vectors must match the kernel's own tokenizer.
     echo "=== Running acowork-eval shipping red-line + dataset freshness tests ==="
@@ -693,3 +693,4 @@ case "$MODE" in
 esac
 
 echo "=== CI completed successfully ==="
+

@@ -7,7 +7,7 @@
 //! rows and never drift:
 //!
 //! - **1:1** — the chat belongs to one human. Candidates are the sessions
-//!   bound to this chat (the current one plus every rotation predecessor) and
+//!   bound to this chat (the current one plus any predecessor bound to it) and
 //!   the sessions that human started by hand (unbound, same owner). Another
 //!   account's sessions are invisible, whatever their binding.
 //! - **group** — membership *is* the permission (design 27 §8.2). Candidates
@@ -97,10 +97,10 @@ pub fn scan_rows(work_dir: &str) -> Vec<(String, SessionMeta)> {
 /// Where the execution session came from, as far as the router may know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateOrigin {
-    /// Bound to a Chat session (this one, or a rotation predecessor).
+    /// Bound to a Chat session (this one, or a predecessor bound to it).
     Chat,
     /// A PM task chain (`conv:task:…` mapping). Design 27 §6.2: the task is
-    /// the lifecycle boundary, so these are never rotated by the router.
+    /// the lifecycle boundary — the mapping lives until the task closes.
     Task,
 }
 
@@ -285,8 +285,8 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
+            model_usage: None,
         }
     }
 

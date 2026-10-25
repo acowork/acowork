@@ -208,7 +208,7 @@ pub struct AgentCore {
     pub(crate) title_prompt: Arc<std::sync::RwLock<Option<String>>>,
 
     /// The package asset override (`prompts/abstention.md`). There is no
-    /// built-in default since ADR-100: the memory service removed its
+    /// built-in default since ADR-101: the memory service removed its
     /// retrieval-side abstention chain (decision 5), so `None` means no
     /// abstention guidance is injected. Same reload caveat.
     ///
@@ -230,9 +230,9 @@ pub struct AgentCore {
     /// `reload_prompts_into_core`; never folded into the execute prompt.
     pub(crate) chat_persona: Arc<std::sync::RwLock<Option<String>>>,
 
-    /// The Runtime-local SQLite store (ADR-082 §4, revised by ADR-100).
+    /// The Runtime-local SQLite store (ADR-082 §4, revised by ADR-101).
     ///
-    /// Memory nodes live in the memory service since ADR-100, so this file
+    /// Memory nodes live in the memory service since ADR-101, so this file
     /// now only carries session metadata and the conversation vector index.
     /// Kept on the core so the conversation index can share one connection
     /// (and one file) instead of opening a second one.
@@ -508,13 +508,15 @@ impl AgentCore {
     /// - Agent startup (after `builtin_tools` is initialized with flags)
     /// - MCP connect/disconnect
     /// - `RuntimeConfigUpdate.builtin_tools_enabled` toggle
-    ///   (tool-result compression is retired, so there is no
-    ///   platform-tool hot-reload path anymore)
+    ///
+    /// Platform-protected tools (`chat_history_read`, `intent_send`) are
+    /// always included regardless of the `enabled` flag — disabling them
+    /// would silently break the Chat ↔ Execution session architecture.
     pub(crate) fn rebuild_all_tools(&mut self) {
         let mut merged: Vec<Arc<dyn Tool>> = self
             .builtin_tools
             .iter()
-            .filter(|e| e.enabled)
+            .filter(|e| e.enabled || crate::agent_config::is_protected_tool(&e.name()))
             .map(|e| e.tool.clone())
             .collect();
         if let Some(ref mcp) = self.mcp_tools {
@@ -907,7 +909,7 @@ impl AgentCore {
 
     /// Open the Runtime-local SQLite store for `work_dir`.
     ///
-    /// ADR-100: memory nodes moved to the memory service, so this store no
+    /// ADR-101: memory nodes moved to the memory service, so this store no
     /// longer backs a `MemoryProvider`. It stays in the Runtime because the
     /// conversation vector index (ADR-081) and session metadata (ADR-082 §4)
     /// are Runtime-owned and rebuildable from the JSONL history.
@@ -2654,3 +2656,5 @@ mod tests {
         assert_eq!(model, "session-model");
     }
 }
+
+

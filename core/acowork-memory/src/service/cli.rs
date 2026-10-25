@@ -1,4 +1,4 @@
-//! CLI argument parsing for the standalone acowork-memory process (ADR-100).
+//! CLI argument parsing for the standalone acowork-memory process (ADR-101).
 //!
 //! Mirrors `acowork-doc` / `acowork-pm` / `acowork-user`: the Gateway
 //! supervisor owns only the process lifecycle and therefore passes just the
@@ -15,7 +15,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(
     name = "acowork-memory",
-    about = "ACowork memory service (standalone process, ADR-100)"
+    about = "ACowork memory service (standalone process, ADR-101)"
 )]
 pub struct Cli {
     /// HTTP listen address.
@@ -73,7 +73,7 @@ pub struct Cli {
     pub mqtt_password: Option<String>,
 
     /// Internal service token for the Gateway HTTP API, presented as
-    /// `Authorization: Bearer` on the global-resources pull (ADR-100
+    /// `Authorization: Bearer` on the global-resources pull (ADR-101
     /// decision 7). The supervisor generates it at boot and passes it at
     /// spawn — the same mechanism `acowork-pm` uses — because this process has
     /// no user account and no node enrollment of its own.
@@ -84,7 +84,7 @@ pub struct Cli {
     #[arg(long, env = "ACOWORK_MEMORY_GATEWAY_TOKEN")]
     pub gateway_token: Option<String>,
 
-    /// Gateway base URL for the global-resources pull (ADR-100 decision 7),
+    /// Gateway base URL for the global-resources pull (ADR-101 decision 7),
     /// e.g. `http://127.0.0.1:19876`. Unset → loopback on the default Gateway
     /// HTTP port. Without a reachable Gateway the distiller still runs, on the
     /// `[distiller].models` chain in `config.toml` alone.
@@ -95,3 +95,4 @@ pub struct Cli {
     #[arg(long, default_value = "info")]
     pub log_level: String,
 }
+

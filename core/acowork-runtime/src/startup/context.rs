@@ -138,7 +138,7 @@ pub(crate) struct AgentBootContext {
     pub title_prompt: Option<String>,
 
     /// Package file: `prompts/abstention.md`. No built-in default since
-    /// ADR-100 — the memory service removed its retrieval-side abstention
+    /// ADR-101 — the memory service removed its retrieval-side abstention
     /// chain, so an absent file means nothing is injected. L2 reload is out of
     /// scope here too.
     ///
@@ -346,3 +346,4 @@ pub(crate) fn build_session_manager_config(
         package_dir: ctx.loaded.package_dir.clone(),
     }
 }
+

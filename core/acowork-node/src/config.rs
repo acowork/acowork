@@ -24,7 +24,7 @@ pub struct NodeConfig {
     /// Gateway HTTP base URL, explicit (`--gateway-http` /
     /// `ACOWORK_GATEWAY_HTTP`). `None` means derive it — see
     /// [`Self::gateway_http_base`]. Two consumers need it: the ADR-087
-    /// first-boot credential exchange and the ADR-100 memory migration pass,
+    /// first-boot credential exchange and the ADR-101 memory migration pass,
     /// both of which talk to the Gateway over HTTP while the control plane
     /// runs on MQTT.
     pub gateway_http: Option<String>,
@@ -208,7 +208,7 @@ mod tests {
 
     /// The HTTP base is derived from the MQTT endpoint unless it was given,
     /// so a Node started with only `--gateway` still reaches the Gateway API
-    /// (ADR-087 enrollment, ADR-100 memory migration).
+    /// (ADR-087 enrollment, ADR-101 memory migration).
     #[test]
     fn gateway_http_base_is_derived_unless_configured() {
         let derived = NodeConfig {
@@ -243,3 +243,4 @@ mod tests {
         assert!(!system_hostname().is_empty());
     }
 }
+

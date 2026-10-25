@@ -1,4 +1,4 @@
-﻿# Memory 仿生分层架构
+# Memory 仿生分层架构
 
 > 版本：v3.7 | 更新日期：2026-04-22
 
@@ -10,7 +10,7 @@
 
 > **v4.0 变更**：记忆层切到 SQLite（单库 + WAL + FTS5 + sqlite-vss 向量；沉淀层图关系由应用层 `MemoryNode.edges` 边表承担，不再依赖存储引擎原生 LPG/GQL；详见 [ADR-082](../../adr/zh/ADR-082-sqlite-memory-cutover.md)）。`acowork-grafeo` crate 已删除，记忆引擎代码（`EpisodicDistiller` / `RetrievalMetrics`）迁移至 `core/acowork-memory/`。
 
-> **v4.1 变更（已实施，2026-10-23）**：记忆模块已从 Runtime 剥离为 Gateway 托管的独立进程 `acowork-memory`；Agent 侧经 MCP 调用该服务的工具（注册名 `mcp_memory__memory_store` / `mcp_memory__memory_recall`，工具级 opt-in 走 `agent_mcp_tools.json`，ADR-069），面板经 Gateway 反代访问；auto-inject 移除、`memory:read` / `memory:write` 权限项删除，Runtime 达到零记忆业务代码——详见 [ADR-100](../../adr/zh/ADR-100-memory-standalone-mcp-service.md)。**本文档其余章节仍以剥离前的（内置）形态行文**；分层数据模型（瞬态 / 经历 / 沉淀）、蒸馏与遗忘流水线语义不变，变的只是进程归属与访问通道。
+> **v4.1 变更（已实施，2026-10-23）**：记忆模块已从 Runtime 剥离为 Gateway 托管的独立进程 `acowork-memory`；Agent 侧经 MCP 调用该服务的工具（注册名 `mcp_memory__memory_store` / `mcp_memory__memory_recall`，工具级 opt-in 走 `agent_mcp_tools.json`，ADR-069），面板经 Gateway 反代访问；auto-inject 移除、`memory:read` / `memory:write` 权限项删除，Runtime 达到零记忆业务代码——详见 [ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)。**本文档其余章节仍以剥离前的（内置）形态行文**；分层数据模型（瞬态 / 经历 / 沉淀）、蒸馏与遗忘流水线语义不变，变的只是进程归属与访问通道。
 
 ---
 
@@ -1734,3 +1734,4 @@ Phase 2 交付前必须通过以下验证：
 - BEAM MDS < -0.12
 - Accuracy@1M > 50%
 - 离线巩固能发现即时提取无法捕获的隐式关联（人工评估）
+

@@ -1638,18 +1638,18 @@ describe("ADR-083: compaction cancellation", () => {
   });
 });
 
-// ── Design 27 §2.1/§4.1: rotation handoff note ─────────────────────────
+// ── Legacy rotation-handoff notes: kept hidden ─────────────────────────
 
-// The Runtime persists the "[intent rotation] ..." note so a rotated session
-// can still find its predecessor's history. It is context for the model, not
-// for the user: loading history must drop it, or it renders as a grey system
-// bubble mid-transcript (design 27 §2.1 keeps it out of the User message, but
-// the JSONL entry itself survives and comes back through HTTP).
+// The retired intent-rotation mechanism persisted an "[intent rotation] ..."
+// note so a successor session could find its predecessor's history. It was
+// context for the model, not for the user, and transcripts written while it
+// existed still carry the row: loading history must drop it, or it renders as
+// a grey system bubble mid-transcript.
 describe("rotation_handoff entries stay out of the transcript", () => {
   beforeEach(() => clearTestState());
   afterEach(() => clearTestState());
 
-  it("drops the handoff note but keeps the user turn that carried it", async () => {
+  it("drops a legacy handoff note but keeps the user turn that carried it", async () => {
     seedSessionState([]);
     const entries: ConversationEntry[] = [
       {

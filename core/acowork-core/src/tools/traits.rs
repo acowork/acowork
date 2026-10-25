@@ -62,6 +62,12 @@ pub struct ToolContext {
     /// call. Vector-source memory recall uses it as full-sentence query
     /// text; absent for non-user-triggered executions (e.g. debug replay).
     pub current_user_message: Option<String>,
+    /// Design 27 §5.3.2 / ADR-100 D9: the Chat session this execution session
+    /// is bound to (persistent `chat_session_id` in conversation meta).
+    /// Populated by the loop from the session's conversation binding so tools
+    /// like `chat_history_read` can resolve the source chat without requiring
+    /// the agent to carry internal ids in its text output.
+    pub chat_session_id: Option<String>,
 }
 
 /// Core Tool trait that all tools must implement

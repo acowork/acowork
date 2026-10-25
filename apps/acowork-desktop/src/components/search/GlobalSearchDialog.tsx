@@ -30,7 +30,7 @@
  *               client-side subject/author/hash filter → virtual log file
  * - 文档 tab  : GET /api/doc/search (doc process) → DocEditor
  * - 项目 tab  : GET /api/pm/search (pm process) → ProjectBoard / TaskDetailDialog
- * - 记忆 tab  : GET /api/memory/search?instance_id= (memory service, ADR-100)
+ * - 记忆 tab  : GET /api/memory/search?instance_id= (memory service, ADR-101)
  *               → MemoryPanel node — the tab is hidden while the service is
  *               not ready, because the Runtime no longer answers this scope
  */
@@ -202,7 +202,7 @@ export const TAB_ORDER: readonly Tab[] = [
 ] as const;
 
 /**
- * The tabs a run can actually reach and show (ADR-100).
+ * The tabs a run can actually reach and show (ADR-101).
  *
  * `memory` is conditional: the scope moved out of the Runtime into the
  * standalone memory service, so without a ready service there is nothing to
@@ -216,7 +216,7 @@ export function visibleTabOrder(flags: { memoryServiceReady: boolean }): Tab[] {
 
 /**
  * `GET /api/memory/search` — the memory service's own search endpoint,
- * reached through the Gateway's flat `/api/memory/*` proxy (ADR-100).
+ * reached through the Gateway's flat `/api/memory/*` proxy (ADR-101).
  *
  * Same envelope as the aggregate Runtime endpoint used to return for this
  * scope (`hits[]` with `scope` / `title` / `snippet` / `payload`), so
@@ -512,7 +512,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
 
     const agents = useAgentStore((s) => s.agents);
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
-    // ADR-100: the memory scope is served by the standalone memory service, so
+    // ADR-101: the memory scope is served by the standalone memory service, so
     // the Gateway's readiness projection decides whether that tab exists at
     // all. `undefined` / never-read counts as not ready (a hidden tab beats a
     // tab that errors).
@@ -545,7 +545,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         return !ws || ws === "__agent_home__" ? undefined : ws;
     });
 
-    /* ── ADR-100: the memory tab can disappear underneath an open dialog ──
+    /* ── ADR-101: the memory tab can disappear underneath an open dialog ──
        (the service stopped, or the readiness read simply landed after the
        user had already switched to it). A tab that is no longer in the strip
        must not stay the active one — the pane below would show an orphaned
@@ -727,7 +727,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                 return toConversationHits(data.hits ?? []);
             };
 
-            // ADR-100: memory no longer comes out of the aggregate Runtime
+            // ADR-101: memory no longer comes out of the aggregate Runtime
             // endpoint — its own service answers it, through the Gateway proxy,
             // with the same hit shape.
             const memorySearch = async (signal: AbortSignal): Promise<RowHit[]> => {
@@ -1727,4 +1727,5 @@ function ToggleBtn({
         </button>
     );
 }
+
 

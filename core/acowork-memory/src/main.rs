@@ -1,4 +1,4 @@
-//! acowork-memory — standalone memory service process (ADR-100).
+//! acowork-memory — standalone memory service process (ADR-101).
 //!
 //! Lifecycle is managed by the Gateway supervisor (spawn / monitor / restart).
 //! The process listens on its own port (default 18084) and serves the full
@@ -77,7 +77,7 @@ async fn main() {
     };
 
     // Distiller / embedding credentials arrive from the Gateway snapshot, not
-    // from config.toml (ADR-100 decision 7). The bearer token is the internal
+    // from config.toml (ADR-101 decision 7). The bearer token is the internal
     // service credential the supervisor generated at boot (same as PM); with
     // `local` auth there is none and the loopback route is open.
     let resource_client = match &cli.gateway_url {
@@ -167,3 +167,4 @@ fn spawn_gateway_health_watchdog(health_url: String, interval: Duration, timeout
         }
     });
 }
+

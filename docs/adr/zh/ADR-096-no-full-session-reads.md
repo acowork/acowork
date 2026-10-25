@@ -1,7 +1,7 @@
 # ADR-096：请求路径禁止全量读会话文件——写时派生状态与有界读取
 
 - **编号**：ADR-096
-- **状态**：已接受
+- **状态**：已接受（2026-10-24 修订：D7 的 `last_compaction_summary` 列已删除——它的唯一读者是 ADR-099 的执行会话轮转 handoff，该机制已废止（migration 7）；本 ADR 的铁律与其余派生状态不变）
 - **日期**：2026-10-20
 - **决策者**：ACowork 架构组
 - **关联**：ADR-092（user chat 有界读取；本 ADR 将其纪律推广到全实现）、ADR-024（会话 meta / token 用量）、ADR-082（SQLite 向量与 FTS 存储）、ADR-084（user 独立进程）、ADR-076（chat 门铃）；设计文档 27 §4.6
@@ -13,7 +13,7 @@
 本 ADR 确立一条实现级铁律，以及满足该铁律的派生状态模型：
 
 1. **任何 HTTP 请求路径、任何工具读路径都不得对会话文件做全量读**——既不得 `read_to_string` 全文读取，也不得仅仅为了派生行数、seq、幂等 id、尾行预览或 compaction 摘要而逐行全量扫描/解析。同时覆盖 `messages.jsonl`（user chat）与 `{sid}.jsonl`（执行会话）。
-2. **一切统计量都来自写时维护的派生状态**——会话 meta（`message_count`、`last_message_preview`、`last_compaction_summary`）、内存态日志索引（带字节偏移的 span 与 data 行计数），或一张小型 SQLite 侧表（`conversation_state`）。
+2. **一切统计量都来自写时维护的派生状态**——会话 meta（`message_count`、`last_message_preview`、`last_compaction_offset`）、内存态日志索引（带字节偏移的 span 与 data 行计数），或一张小型 SQLite 侧表（`conversation_state`）。
 3. **全量扫描只允许作为每进程每会话一次的首触协调 / open 校准 / 迁移 / 启动 backfill**——低频、非实时，绝不发生在每次请求、每条写入时。
 
 wire 契约不变：`total`、`offset`、分页与预览语义逐字节保持一致，前端不改动。
@@ -23,7 +23,7 @@ wire 契约不变：`total`、`offset`、分页与预览语义逐字节保持一
 ### 1. 两个会话表面
 
 - **user chat**（`core/acowork-user/src/chat_sessions.rs`）：`chat-sessions/{id}/messages.jsonl` + `session.json`。经 Gateway 以 HTTP 服务 Desktop/Mobile；空载荷门铃（ADR-076 §决策 8）把每个事件都变成一次读。
-- **执行会话**（`core/acowork-runtime/src/conversation.rs`）：`conversations/{sid}.jsonl` + 一份 SQLite `SessionMeta`。在用户分页、增量轮询（`read_messages_since*`）、handoff 路径（最近一次 compaction 摘要）被读，并由后台 tailer（`conversation_index.rs`）索引。
+- **执行会话**（`core/acowork-runtime/src/conversation.rs`）：`conversations/{sid}.jsonl` + 一份 SQLite `SessionMeta`。在用户分页、增量轮询（`read_messages_since*`）被读，并由后台 tailer（`conversation_index.rs`）索引。
 
 ADR-092 已经修好了 user chat 的*读取*热路径（seq 身份 + 尾部反向分块 seek + `message_count`）。跨两个表面残留的，是与"服务一页"无关的*辅助*全量读：计数、去重查找、预览投影、列表扇出、水印恢复。
 
@@ -70,9 +70,11 @@ user chat 每会话保留一个小型 sidecar `ids.index`（逐行 `message_id\t
 
 `last_message_preview` 变为 `session.json` 的写时持久字段（其 doc 语义从"读路径投影"改为"写时派生状态"）。会话列表、群预览附加、项目群列表都直接返回该存储值；`list_project_groups` 遍历既有 `chat-sessions.projects.json` 索引而非扫会话目录。全量 `scan_all_sessions` 只保留在启动 / backfill 路径。
 
-### D7 — compaction 摘要入 `SessionMeta`
+### D7 — compaction 事件只落 JSONL，`SessionMeta` 只存 offset
 
-`append_compaction_event` 写盘时把摘要文本存入 `SessionMeta.last_compaction_summary`，与既有 offset 并存。handoff 读为 O(1)。对于 meta 早于该字段的会话，首次读做一次 legacy 扫描并把值自愈回写进 meta；无 meta 行的会话返回 `None` 而非每请求重扫（活动会话必有 meta）。
+`append_compaction_event` 把摘要文本作为一条件 `kind=compaction` 的条目写进 `{sid}.jsonl`，并与既有 offset 并存地把 `last_compaction_offset` 存进 `SessionMeta`；恢复时按 offset 跳过已摘要前缀仍为 O(1)。
+
+> **2026-10-24 修订**：本决策原先额外把摘要文本存一份进 `SessionMeta.last_compaction_summary`，使 handoff 读为 O(1)。handoff 的存在理由是 ADR-099 的 T2 轮转蒸馏，而该轮转已整体删除，于是该列成为只写不读的派生状态，已由 migration 7 物理删除（写时缓存本身不再是必要——摘要就在 JSONL 末条 compaction 条目里，需要时一次尾部读）。`last_compaction_offset` 与其自愈回写（legacy 会话首次读扫一次后写回 meta）保持不变。
 
 ### D8 — 会话索引器保留 `conversation_state` 尾指针
 
@@ -100,7 +102,7 @@ writer 提交追加行时把已知的 `(offset, len)` span 直接 push 进日志
 
 - 写路径现在维护若干派生状态存储（session meta 字段、内存日志索引、`ids.index`、`conversation_state`）；每个都是新状态，其正确性由首触协调 / open 校准与每会话锁固定。
 - 崩溃窗口一致性策略从"每次写全量校准"改为"每进程首触校准一次"；行已落盘但 meta 保存失败的崩溃，在下一进程首触时愈合，而非下一次追加时。
-- SQLite schema 新增 `sessions.last_compaction_summary` 列与 `conversation_state` 表（migration 5）。
+- SQLite schema 新增 `sessions.last_compaction_summary` 列与 `conversation_state` 表（migration 5）。（2026-10-24：前者已由 migration 7 删除，失去读者；`conversation_state` 保留。）
 
 ## 已考虑的替代方案
 

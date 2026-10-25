@@ -1,4 +1,4 @@
-//! acowork-memory process supervisor (ADR-100, the ADR-064 pattern).
+//! acowork-memory process supervisor (ADR-101, the ADR-064 pattern).
 //!
 //! Spawns the standalone `acowork-memory` binary, waits for `/health` ready,
 //! monitors liveness and restarts with exponential backoff on crash — the same
@@ -66,7 +66,7 @@ pub struct MemorySupervisorConfig {
     /// Gateway `/health` URL (ADR-018: the service self-exits when the
     /// Gateway dies).
     pub gateway_health_url: String,
-    /// Gateway HTTP base URL for the global-resources pull (ADR-100 decision
+    /// Gateway HTTP base URL for the global-resources pull (ADR-101 decision
     /// 7), forwarded verbatim as `--gateway-url`.
     pub gateway_url: String,
     /// [`crate::gateway::state::GatewayState::internal_service_token`],
@@ -303,3 +303,4 @@ async fn clear_state(state: &SharedState) {
     let mut gw = state.write().await;
     gw.memory_process = None;
 }
+

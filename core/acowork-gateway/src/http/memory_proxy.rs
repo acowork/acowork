@@ -1,4 +1,4 @@
-//! acowork-memory service HTTP reverse proxy (ADR-100).
+//! acowork-memory service HTTP reverse proxy (ADR-101).
 //!
 //! The Gateway reverse-proxies the memory service (`127.0.0.1:{memory_port}/*`)
 //! on two public surfaces, reusing the transparent-proxy mode (ADR-033) of
@@ -9,11 +9,11 @@
 //! | `/api/agents/{id}/memory/{*rest}` | `/memory/{rest}?instance_id={id}` | Desktop memory panel |
 //! | `/api/memory/memory/{*rest}` (via the short form below) | `/memory/{rest}` | Desktop global search |
 //! | `/api/memory/mcp` | `/mcp` | Agent Runtime (MCP tool calls) |
-//! | `/api/memory/admin/{*rest}` | `/admin/{rest}` | Agent Runtime (bootstrap) · Node (legacy-store import, ADR-100) |
+//! | `/api/memory/admin/{*rest}` | `/admin/{rest}` | Agent Runtime (bootstrap) · Node (legacy-store import, ADR-101) |
 //!
 //! ## Why two surfaces
 //!
-//! The panel paths are frozen (ADR-100 keeps `memoryStore.ts` byte-identical),
+//! The panel paths are frozen (ADR-101 keeps `memoryStore.ts` byte-identical),
 //! so `/api/agents/{id}/memory/*` still carries the agent identity **in the
 //! path** and the proxy turns it into the service's `?instance_id=` — the
 //! client's own `instance_id` query parameter is dropped, never merged, so a
@@ -70,7 +70,7 @@ pub fn memory_proxy_routes() -> Router<AppState> {
 /// `http://127.0.0.1:{memory_port}/memory/{rest}?instance_id={id}`.
 ///
 /// The public path and the response body are exactly what the Desktop saw when
-/// the Runtime answered these (ADR-100: panel contract frozen), so
+/// the Runtime answered these (ADR-101: panel contract frozen), so
 /// `memoryStore.ts` needs no change beyond the readiness gate added in P4.
 async fn agent_memory_proxy_handler(
     State(state): State<AppState>,
@@ -621,7 +621,7 @@ mod tests {
     }
 
     /// The contract the Node's one-shot migration pass writes against
-    /// (ADR-100 decision 10): a raw SQLite body, a `?instance_id=` namespace,
+    /// (ADR-101 decision 10): a raw SQLite body, a `?instance_id=` namespace,
     /// and no machine credential past the reverse proxy. A machine actor has no
     /// `AuthContext`, so the write-tier ACL must let it through.
     #[tokio::test]
@@ -698,3 +698,4 @@ mod tests {
         });
     }
 }
+

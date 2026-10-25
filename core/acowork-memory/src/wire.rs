@@ -1,4 +1,4 @@
-//! Memory panel wire types (ADR-100).
+//! Memory panel wire types (ADR-101).
 //!
 //! These are the **single source of truth** for the memory-query wire format
 //! (HTTP JSON shape documented in `docs/protocols/http.md` §7.7, plus the
@@ -279,3 +279,4 @@ mod retrieval_evidence_tests {
         assert!(v["error"].is_null());
     }
 }
+

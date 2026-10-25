@@ -701,7 +701,7 @@ impl Gateway {
 
         // acowork-memory: standalone process `acowork-memory`, lifecycle managed
         // by the Gateway supervisor (spawn + `/health` poll + exponential-
-        // backoff restart). Memory left the Runtime with ADR-100, so this is the
+        // backoff restart). Memory left the Runtime with ADR-101, so this is the
         // only place that decides whether an Agent has a memory at all:
         // `memory.enabled=false` means no process, no `memory` MCP server in any
         // catalog, and `/api/memory/*` answers 503.
@@ -717,7 +717,7 @@ impl Gateway {
                 log_dir: data_dir_path.join("logs"),
                 gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
                 // The service pulls its distiller / embedding credentials over
-                // HTTP (ADR-100 decision 7), so it needs the loopback API
+                // HTTP (ADR-101 decision 7), so it needs the loopback API
                 // address, not the advertise host.
                 gateway_url: format!("http://127.0.0.1:{}", http_config.port),
                 gateway_token: Some(internal_service_token.clone()),
@@ -731,7 +731,7 @@ impl Gateway {
             tracing::info!(
                 port = self.config.memory.port,
                 enabled = true,
-                "memory supervisor started (ADR-100)"
+                "memory supervisor started (ADR-101)"
             );
         } else {
             tracing::info!("memory supervisor disabled (memory.enabled=false)");
@@ -753,7 +753,7 @@ impl Gateway {
             };
         }
 
-        // memory_mcp_url: same pattern (ADR-100). Written unconditionally so a
+        // memory_mcp_url: same pattern (ADR-101). Written unconditionally so a
         // stale value from a previous branch can never survive: `Some` only when
         // the service is enabled *and* injection is on.
         {
@@ -1313,7 +1313,7 @@ impl Gateway {
                     } else {
                         None
                     },
-                    // ADR-100: same gate as the initial `memory_mcp_url` write
+                    // ADR-101: same gate as the initial `memory_mcp_url` write
                     // below — a disabled supervisor must not be re-advertised
                     // by an IP-change pass.
                     memory_mcp_path: if self.config.memory.enabled
@@ -1897,3 +1897,4 @@ mod tests {
         assert!(display.contains("running"));
     }
 }
+

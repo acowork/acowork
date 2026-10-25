@@ -620,7 +620,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let abstention_prompt = load_or_trace("abstention.md", "abstention guidance (no built-in default)");
 
     // ADR-071 D7/D9: the distiller prompt override.
-    // ADR-100: the distiller moved to the memory service, so the override moved
+    // ADR-101: the distiller moved to the memory service, so the override moved
     // with it — the Runtime no longer loads `prompts/distiller-merge.md`.
 
     // ADR-099: optional chat router persona. Replaces only the persona
@@ -1513,3 +1513,4 @@ mod tests {
         assert_eq!(tool.spec().name, "rag_query");
     }
 }
+

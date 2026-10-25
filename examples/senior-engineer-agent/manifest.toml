@@ -37,7 +37,7 @@ type = "Shell"
 #                   access on every platform — `init_tools_config_from_manifest`
 #                   silently drops names that the runtime hasn't registered.
 
-# --- Memory (ADR-100) ---
+# --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
 # here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
 # `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
@@ -104,3 +104,4 @@ description = "Design system architecture with module breakdown and interface de
 
 [capabilities.debug_assist]
 description = "Debug and troubleshoot issues with systematic root-cause analysis"
+

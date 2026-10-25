@@ -1,4 +1,4 @@
-//! MCP tool manifest for the memory service (ADR-100).
+//! MCP tool manifest for the memory service (ADR-101).
 //!
 //! The two Agent-facing tools are the service-side port of the Runtime
 //! builtins `memory_store` / `memory_recall`. Parameter names, defaults and
@@ -118,3 +118,4 @@ mod tests {
         );
     }
 }
+

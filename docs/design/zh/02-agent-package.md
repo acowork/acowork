@@ -1,4 +1,4 @@
-﻿# Agent 打包格式（.agent）
+# Agent 打包格式（.agent）
 
 > 版本：v3.3 | 更新日期：2026-04-17
 
@@ -266,7 +266,7 @@ value = "https://api.weather.com"
 [[permissions]]
 type = "FilesystemRead"
 
-# 记忆不再是权限域：ADR-100 把记忆剥离为 Gateway 托管的独立服务，
+# 记忆不再是权限域：ADR-101 把记忆剥离为 Gateway 托管的独立服务，
 # `memory_store` / `memory_recall` 变成该服务（MCP server id = `memory`）的工具，
 # 工具级开关闭在 `agent_mcp_tools.json`（前缀名 `mcp_memory__*`，ADR-069），
 # 包声明里已删除的 `MemoryRead` / `MemoryWrite` 会被当作未知类型拒绝。
@@ -362,7 +362,7 @@ Agent 客户端在渲染 Agent 头像时必须遵循以下优先级（与 [Avata
 3. **确定性随机内置图标**。根据 `agentId` 做哈希选择 `BUILTIN_ICONS[id]`，与 `ensureBuiltinAvatars` 即将分配的图标一致，避免首次渲染闪动。
 
 该优先级在远端 Gateway 场景下也必须保持一致（详见 [04-gateway.md § 9.6](./04-gateway.md#96-安全设计)）。
-- `permissions`：使用 TOML 数组表语法，每条包含 `type` 和可选的 `value`。支持 `Network`、`FilesystemRead`、`FilesystemWrite`、`IntentSend` 等类型（`MemoryRead` / `MemoryWrite` 已随 ADR-100 删除——记忆改由服务承载，不再有权限域）。
+- `permissions`：使用 TOML 数组表语法，每条包含 `type` 和可选的 `value`。支持 `Network`、`FilesystemRead`、`FilesystemWrite`、`IntentSend` 等类型（`MemoryRead` / `MemoryWrite` 已随 ADR-101 删除——记忆改由服务承载，不再有权限域）。
 - `triggers`：激活触发器数组。支持 `cron`、`event`、`manual` 类型。`cron` 使用标准 5 段表达式（UTC 时区），不支持秒级精度和特殊宏。
 - `llm.providers`：支持配置多个 LLM Provider，每个引用 Vault 中的密钥。
 - `llm.routing.strategy`：LLM 路由策略（`cost_priority` / `quality_priority` / `latency_priority`）。
@@ -445,7 +445,7 @@ permissions 数组中的每条权限字符串遵循统一的模式语法，Gatew
 | `filesystem:*:*` | 整个 filesystem 域 | read/write 任意路径 | — |
 | `intent:send:*` | 可向任何 Agent 发 Intent | `com.example.calendar`, `com.acowork.system` | — |
 
-> 旧版此处还有一行 `memory:read`；ADR-100 之后 memory 不再是权限域，通配规则也不再涉及它。
+> 旧版此处还有一行 `memory:read`；ADR-101 之后 memory 不再是权限域，通配规则也不再涉及它。
 
 **匹配算法**：
 
@@ -527,3 +527,4 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 ### 5.5 Debug Platform Key（在线申请）
 
 开发者通过平台账号认证申请 Debug Platform Key（有效期 30 天，可远程吊销），用于在本地调试 system=true 的 Agent。替代当前 Phase 1 的本地信任配置方案。
+

@@ -214,6 +214,7 @@ async fn emit_fallback_receipt(
             status: "failed".to_string(),
             has_human: req.has_human,
             chat_attachment_ids: Vec::new(),
+            for_execution_session: String::new(),
         };
         // A failed push does not undo the durable chat row; the initiator
         // can still read it via the Chat history surface.

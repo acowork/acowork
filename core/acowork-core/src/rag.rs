@@ -5,7 +5,7 @@
 //! - `MemoryProvider` handles user memory (preferences, history, patterns).
 //! - `RagProvider` handles external knowledge (enterprise docs, product manuals).
 //!
-//! Since ADR-100 the two channels are consumed independently: the Agent calls
+//! Since ADR-101 the two channels are consumed independently: the Agent calls
 //! the `rag_query` builtin tool and the memory service's `memory_recall` tool,
 //! and the LLM sees both as tool results. There is no in-loop merge any more.
 //!
@@ -125,7 +125,7 @@ pub struct AnnotatedRagResult {
 /// - `LocalRagProvider` (future, local vector store)
 /// - Any enterprise RAG service adapter
 ///
-/// This trait is **orthogonal** to `MemoryProvider`: since ADR-100 the Agent
+/// This trait is **orthogonal** to `MemoryProvider`: since ADR-101 the Agent
 /// reaches each through its own tool (`rag_query` vs the memory service's
 /// `memory_recall`), so a RAG answer never travels through the memory store.
 ///
@@ -249,3 +249,4 @@ mod tests {
         assert_eq!(result.item.score, 0.9);
     }
 }
+

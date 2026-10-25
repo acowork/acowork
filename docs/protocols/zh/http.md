@@ -1,4 +1,4 @@
-﻿# HTTP 协议
+# HTTP 协议
 
 > Gateway 暴露在 `127.0.0.1:19876`（默认）的 REST API。底层为 Axum。
 > 详细路由聚合见源码：[`core/acowork-gateway/src/http/routes.rs`](../../../core/acowork-gateway/src/http/routes.rs)
@@ -36,7 +36,7 @@
     - [5.3.2 `GET /files/{document_id}`](#532-get-filesdocument_id)
     - [5.3.3 消息条目中的 `attached_items`](#533-消息条目中的-attached_items)
   - [5.4 记忆 (Memory)](#54-记忆-memory)
-    - [5.4.1 服务直通前缀 `/api/memory/*`（ADR-100）](#541-服务直通前缀-apimemoryadr-100)
+    - [5.4.1 服务直通前缀 `/api/memory/*`（ADR-101）](#541-服务直通前缀-apimemoryadr-100)
   - [5.5 工作区 (Workspace)](#55-工作区-workspace)
   - [5.6 会话控制面（ADR-076 §决策 4）](#56-会话控制面adr-076-决策-4)
 - [6. 静态文件服务（直接流式返回原始字节）](#6-静态文件服务直接流式返回原始字节)
@@ -115,13 +115,13 @@ sequenceDiagram
 |---|---|---|
 | Gateway 原生 | Gateway 单点处理 | **否** |
 | Gateway → Runtime 反代 | Gateway 透传到 Runtime localhost HTTP | **是**（503 if offline） |
-| Gateway → 记忆服务反代（ADR-100） | Gateway 透传到 `acowork-memory` `127.0.0.1:18084` | **否**（Runtime 完全不参与记忆面；服务由 Gateway supervisor 常驻，未就绪时 503） |
+| Gateway → 记忆服务反代（ADR-101） | Gateway 透传到 `acowork-memory` `127.0.0.1:18084` | **否**（Runtime 完全不参与记忆面；服务由 Gateway supervisor 常驻，未就绪时 503） |
 | 静态文件 | Gateway 直接读盘返回字节流 | **否**（仅要求文件存在） |
 | MQTT 事件流（后端 → 前端上报） | rumqttd Broker 中转 | 是（Runtime 发布事件，前端订阅） |
 | 全局资源主动拉取（`GET /api/global-resources`） | Gateway 单点响应 Runtime 主动拉取 | **否**（见 [§4.13](#413-全局资源快照runtime-主动拉取入口)） |
 
 Gateway **不持久化业务数据**：Skill、Agent 运行时配置、Session 状态等真实数据存于
-Runtime 本地文件 / SQLite；ADR-100 之后记忆另属于独立进程 `acowork-memory`（每实例一库，
+Runtime 本地文件 / SQLite；ADR-101 之后记忆另属于独立进程 `acowork-memory`（每实例一库，
 Gateway 只负责它的生命周期与反代）。Gateway 通过 HTTP 反向代理拉取快照、透传用户操作（并注入身份），
 命令 / 写入则通过 MQTT 控制主题，MQTT 同时承担 Runtime / Gateway → 前端的事件上报。
 
@@ -579,7 +579,7 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 
 Gateway 不解析 Runtime 响应的 body，所有读写都 verbatim 透传。这意味着 Runtime 是
 **workspace config / session state 的权威所有者**，Gateway 仅充当反代。（记忆不在此列：
-ADR-100 之后它是 `acowork-memory` 的私有数据，见 [§5.4](#54-记忆-memory)。）
+ADR-101 之后它是 `acowork-memory` 的私有数据，见 [§5.4](#54-记忆-memory)。）
 
 ### 5.1 Agent 运行时配置
 
@@ -852,7 +852,7 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 
 ### 5.4 记忆 (Memory)
 
-> **ADR-100：记忆已剥离为独立进程 `acowork-memory`**（Gateway supervisor 托管，默认
+> **ADR-101：记忆已剥离为独立进程 `acowork-memory`**（Gateway supervisor 托管，默认
 > `127.0.0.1:18084`，每实例一库 `{data_dir}/instances/{instance_id}/memory.db`）。
 > 面板路径 `/api/agents/{id}/memory/*` 与响应 wire shape **字节不变**：
 > `memory_proxy`（`core/acowork-gateway/src/http/memory_proxy.rs`）把路径 id 转成
@@ -880,7 +880,7 @@ snake_case：`document_id` / `size_bytes` / `abs_path` / `start_line` / `end_lin
 > `POST /api/embedding-models/{id}/start-migration`（§4.7），由 Gateway 转发到该
 > 实例的服务端点并把进度写回 `migration-progress` 快照。
 >
-> 本节是 §5（Gateway → Runtime 反代）里**唯一的非 Runtime 后端**：ADR-100 之后
+> 本节是 §5（Gateway → Runtime 反代）里**唯一的非 Runtime 后端**：ADR-101 之后
 > 记忆的存储与面板都在服务侧，其余小节仍是 Runtime 反代。
 
 RAG 不属记忆面，仍由 Runtime 持有：
@@ -890,14 +890,14 @@ RAG 不属记忆面，仍由 Runtime 持有：
 | GET | `/api/agents/{id}/rag/status` | RAG 配置状态（是否已配置、provider name） | `/agents/{id}/rag/status` |
 | POST | `/api/agents/{id}/rag/query` | 直接查询 RAG（绕过 LLM，用于调试/连通性验证） | `/agents/{id}/rag/query` |
 
-#### 5.4.1 服务直通前缀 `/api/memory/*`（ADR-100）
+#### 5.4.1 服务直通前缀 `/api/memory/*`（ADR-101）
 
 | 方法 | 路径 | 调用方 | 服务路径 |
 |---|---|---|---|
 | GET | `/api/memory/search?instance_id={id}` | Desktop 全局搜索 memory tab | `/memory/search` |
 | POST | `/api/memory/mcp` | Agent Runtime（MCP 工具调用） | `/mcp` |
 | POST | `/api/memory/admin/bootstrap?instance_id={id}` | Agent Runtime 首启动引导（写入入口 D） | `/admin/bootstrap` |
-| POST | `/api/memory/admin/import?instance_id={id}` | **仅 Node**：遗留库一次性交接（ADR-100 决策 10） | `/admin/import` |
+| POST | `/api/memory/admin/import?instance_id={id}` | **仅 Node**：遗留库一次性交接（ADR-101 决策 10） | `/admin/import` |
 
 映射与闸门规则：
 
@@ -1135,7 +1135,7 @@ GET /api/agents/com.acowork.senior-engineer/memory/nodes?page=1&size=20&type=Epi
 Authorization: Bearer <token>
 ```
 
-Gateway 收到后由 `memory_proxy` 处理（ADR-100）：路径里的实例 id 是唯一坐标，
+Gateway 收到后由 `memory_proxy` 处理（ADR-101）：路径里的实例 id 是唯一坐标，
 代理把它写成 `?instance_id=`（调用方自带的 `instance_id` **丢弃、不合并**，因此
 任何人都无法寻址到自己未被授权的命名空间）→ 反代
 `http://127.0.0.1:{memory_port}/memory/nodes?...`（默认 `18084`）→ verbatim 返回。
@@ -1236,14 +1236,14 @@ Authorization: Bearer <token>
 embedding provider 未初始化、或 distiller 被禁用）· `500` 跑失败 ·
 `503` `distiller_not_available`（管线没给出任何结果）。
 
-> **ADR-100 变更**：Runtime 旧端的 `POST …/memory/consolidate`（`{force, retention_days}`
+> **ADR-101 变更**：Runtime 旧端的 `POST …/memory/consolidate`（`{force, retention_days}`
 > → `{started, duration_ms, episodes_consolidated, knowledge_nodes_generated, message}`）
 > 已不存在，手动触发统一走 `distill`，跑的就是后台那条完整 EpisodicDistiller 管线
 > （含 LLM 抽取与合并裁决），不存在「手动只跑基础策略」的分支。
 
 ### 9.5.2 遗留记忆库交接（仅 Node → 记忆服务）
 
-ADR-100 决策 10：ADR-100 之前每个 Agent 工作区里的 `{workspace}/memory/private.sqlite`
+ADR-101 决策 10：ADR-101 之前每个 Agent 工作区里的 `{workspace}/memory/private.sqlite`
 由 **`acowork-node` 单方面**交给服务——Node 是 node-local 文件系统的拥有者（ADR-055），
 Runtime 与 Gateway 都不参与。
 
@@ -1410,7 +1410,7 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 
 1. **Gateway 不持久化业务数据**：Skill、Agent 运行时配置、Session 状态等真实数据
    存于 Runtime 本地文件 / SQLite，记忆则存于独立进程 `acowork-memory` 的每实例库
-   （ADR-100）；Gateway 通过 HTTP 反向代理拉取快照或透传请求。
+   （ADR-101）；Gateway 通过 HTTP 反向代理拉取快照或透传请求。
 2. **反代端点要求后端在线**：Runtime 未注册 / 已退出时返回 503；MQTT 通道
    `acowork/agents/{id}/http_port` 是 Gateway 反代发现 Runtime 端口的唯一来源，
    **retained publish** 是关键（Gateway 重启后 broker 会重放上一次的端口）。

@@ -1,4 +1,4 @@
-﻿# HTTP Protocol
+# HTTP Protocol
 
 > Gateway exposes a REST API at `127.0.0.1:19876` (default). Built on Axum.
 > For detailed route aggregation see source: [`core/acowork-gateway/src/http/routes.rs`](../../../core/acowork-gateway/src/http/routes.rs)
@@ -35,7 +35,7 @@
     - [5.3.2 `GET /files/{document_id}`](#532-get-filesdocument_id)
     - [5.3.3 `attached_items` in message entries](#533-attached_items-in-message-entries)
   - [5.4 Memory](#54-memory)
-    - [5.4.1 Service-direct prefix `/api/memory/*` (ADR-100)](#541-service-direct-prefix-apimemoryadr-100)
+    - [5.4.1 Service-direct prefix `/api/memory/*` (ADR-101)](#541-service-direct-prefix-apimemoryadr-100)
   - [5.5 Workspace](#55-workspace)
 - [6. Static File Service (direct streaming of raw bytes)](#6-static-file-service-direct-streaming-of-raw-bytes)
 - [7. Migrated to MQTT (HTTP endpoints removed)](#7-migrated-to-mqtt-http-endpoints-removed)
@@ -92,12 +92,12 @@ sequenceDiagram
 |---|---|---|
 | Gateway native | Gateway single‑point processing | **No** |
 | Gateway → Runtime reverse proxy | Gateway passthrough to Runtime localhost HTTP | **Yes** (503 if offline) |
-| Gateway → memory-service reverse proxy (ADR-100) | Gateway passthrough to `acowork-memory` `127.0.0.1:18084` | **No** (Runtime is not involved in the memory surface at all; the service is kept alive by the Gateway supervisor, 503 while it is not ready) |
+| Gateway → memory-service reverse proxy (ADR-101) | Gateway passthrough to `acowork-memory` `127.0.0.1:18084` | **No** (Runtime is not involved in the memory surface at all; the service is kept alive by the Gateway supervisor, 503 while it is not ready) |
 | Static files | Gateway reads disk and returns byte stream | **No** (only file existence required) |
 | MQTT commands / streaming | rumqttd Broker relay | Yes (Runtime responds via MQTT subscription) |
 | Global resource active pull (`GET /api/global-resources`) | Gateway single‑point responds to Runtime active pull | **No** (see [§4.13](#413-global-resource-snapshot-runtime-active-pull-entry)) |
 
-Gateway **does not persist business data**: Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite; since ADR-100 memory belongs to a separate process, `acowork-memory` (one database per agent instance — Gateway only supervises its lifecycle and reverse-proxies it). Gateway pulls snapshots or passthrough requests via HTTP reverse proxy, while commands / writes go through MQTT control topics.
+Gateway **does not persist business data**: Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite; since ADR-101 memory belongs to a separate process, `acowork-memory` (one database per agent instance — Gateway only supervises its lifecycle and reverse-proxies it). Gateway pulls snapshots or passthrough requests via HTTP reverse proxy, while commands / writes go through MQTT control topics.
 
 ---
 
@@ -406,7 +406,7 @@ Runtime consumption rule: `503` **does not update local cache**, backs off per `
 >
 > **Node reverse‑proxy authentication (ADR-055 Phase 5a)**: when `mqtt.auth_enabled` is enabled, Gateway, on outbound reverse‑proxy, resolves the agent's hosting Node via `installed_agents.node_id` → node registry, and automatically injects `X-ACowork-Node-Token: <node_token>` header; Node inbound validates this header (an enrolled Node must match `identity.node_token`; mismatch → 403 + `X-Error-Origin: node`). When auth is disabled, no header is sent, behaviour identical to pre‑Phase 4.
 
-Gateway does not parse the Runtime response body; all reads and writes are verbatim passthrough. This means Runtime is the **authoritative owner of workspace config / session state**, and Gateway acts purely as a reverse proxy. (Memory is not in that list: since ADR-100 it is private data of `acowork-memory`, see [§5.4](#54-memory).)
+Gateway does not parse the Runtime response body; all reads and writes are verbatim passthrough. This means Runtime is the **authoritative owner of workspace config / session state**, and Gateway acts purely as a reverse proxy. (Memory is not in that list: since ADR-101 it is private data of `acowork-memory`, see [§5.4](#54-memory).)
 
 ### 5.1 Agent Runtime Configuration
 
@@ -511,7 +511,7 @@ Runtime receives the **typed** attachment item array pushed from the frontend vi
 
 ### 5.4 Memory
 
-> **ADR-100: memory has been split out into a separate process, `acowork-memory`**
+> **ADR-101: memory has been split out into a separate process, `acowork-memory`**
 > (supervised by the Gateway, default `127.0.0.1:18084`, one database per instance at
 > `{data_dir}/instances/{instance_id}/memory.db`). The panel paths
 > `/api/agents/{id}/memory/*` and the response wire shape are **byte-identical**:
@@ -543,7 +543,7 @@ Runtime receives the **typed** attachment item array pushed from the frontend vi
 > `migration-progress` snapshot.
 >
 > This section is the **only non-Runtime backend** inside §5 (Gateway → Runtime reverse
-> proxy): since ADR-100 storage and panel data for memory live on the service side, all
+> proxy): since ADR-101 storage and panel data for memory live on the service side, all
 > other subsections are still Runtime reverse proxies.
 
 RAG is not part of the memory surface and stays with the Runtime:
@@ -553,14 +553,14 @@ RAG is not part of the memory surface and stays with the Runtime:
 | GET | `/api/agents/{id}/rag/status` | RAG configuration status (whether configured, provider name) | `/agents/{id}/rag/status` |
 | POST | `/api/agents/{id}/rag/query` | Direct RAG query (bypasses LLM, for debugging/connectivity verification) | `/agents/{id}/rag/query` |
 
-#### 5.4.1 Service-direct prefix `/api/memory/*` (ADR-100)
+#### 5.4.1 Service-direct prefix `/api/memory/*` (ADR-101)
 
 | Method | Path | Caller | Service path |
 |---|---|---|---|
 | GET | `/api/memory/search?instance_id={id}` | Desktop global search memory tab | `/memory/search` |
 | POST | `/api/memory/mcp` | Agent Runtime (MCP tool calls) | `/mcp` |
 | POST | `/api/memory/admin/bootstrap?instance_id={id}` | Agent Runtime first-start bootstrap (write entry D) | `/admin/bootstrap` |
-| POST | `/api/memory/admin/import?instance_id={id}` | **Node only**: one-shot legacy-store handover (ADR-100 decision 10) | `/admin/import` |
+| POST | `/api/memory/admin/import?instance_id={id}` | **Node only**: one-shot legacy-store handover (ADR-101 decision 10) | `/admin/import` |
 
 Mapping and gating rules:
 
@@ -748,7 +748,7 @@ GET /api/agents/com.acowork.senior-engineer/memory/nodes?page=1&size=20&type=Epi
 Authorization: Bearer <token>
 ```
 
-`memory_proxy` handles this on the Gateway (ADR-100): the instance id in the path is the
+`memory_proxy` handles this on the Gateway (ADR-101): the instance id in the path is the
 sole coordinate — the proxy writes it as `?instance_id=` (a caller-supplied
 `instance_id` is **dropped, never merged**, so nobody can address a namespace they were
 not authorized for) → reverse-proxies
@@ -854,7 +854,7 @@ not possible (memory provider not initialized, embedding provider not initialize
 distiller is disabled) · `500` run failed · `503` `distiller_not_available` (the pipeline
 produced no result at all).
 
-> **ADR-100 change**: the Runtime's former `POST …/memory/consolidate`
+> **ADR-101 change**: the Runtime's former `POST …/memory/consolidate`
 > (`{force, retention_days}` → `{started, duration_ms, episodes_consolidated,
 > knowledge_nodes_generated, message}`) no longer exists; manual triggers go through
 > `distill` and run the same complete EpisodicDistiller pipeline as the background loop
@@ -862,8 +862,8 @@ produced no result at all).
 
 ### 9.5.2 Legacy memory store handover (Node only → memory service)
 
-ADR-100 decision 10: the `{workspace}/memory/private.sqlite` that every Agent workspace
-held before ADR-100 is handed to the service **unilaterally by `acowork-node`** — Node
+ADR-101 decision 10: the `{workspace}/memory/private.sqlite` that every Agent workspace
+held before ADR-101 is handed to the service **unilaterally by `acowork-node`** — Node
 owns the node-local filesystem (ADR-055), and neither the Runtime nor the Gateway takes
 part.
 
@@ -1031,7 +1031,7 @@ if body["instance_id"] != cache.bootstrap_instance_id().unwrap_or("") {
 
 ## 10. Notes
 
-1. **Gateway does not persist business data**: Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite, and memory in the separate `acowork-memory` process's per-instance database (ADR-100); Gateway pulls snapshots or passthrough via HTTP reverse proxy.
+1. **Gateway does not persist business data**: Skill, Agent runtime config, Session state, etc. are stored in Runtime local files / SQLite, and memory in the separate `acowork-memory` process's per-instance database (ADR-101); Gateway pulls snapshots or passthrough via HTTP reverse proxy.
 2. **Proxy endpoints require the backend online**: if Runtime is not registered / has exited, returns 503; the MQTT channel `acowork/agents/{id}/http_port` is the **sole source** for Gateway to discover the Runtime port — **retained publish** is critical (after Gateway restart, broker replays the last port). The memory surface (§5.4 / §5.4.1) is the only exception: its backend is the `acowork-memory` process the Gateway supervisor starts itself (port read from the port-file, not from MQTT), so a down Runtime does not affect it.
 3. **Most writes trigger hot pushes**: for example, after modifying Provider / MCP config, Gateway synchronises the latest available list to all connected Runtimes via MQTT **retained publish**; see [mqtt.md §Global resource availability broadcast](./mqtt.md).
 4. **CORS**: always enabled as `CorsLayer::permissive()` (any origin, any method, any header; **without** `allow_credentials(true)` — `*` wildcard conflicts with `Access-Control-Allow-Credentials: true`, tower-http panics at build; also frontend `fetch` defaults to `credentials: 'same-origin'`, so this header is unnecessary). Dev mode Vite (`:5173`) and production Tauri custom protocol (`tauri://localhost` / `http(s)://tauri.localhost`) both cross‑origin access Gateway (`:19876`); any hardcoded allowlist would be broken when browsers resolve `localhost` to different IP literals. Local bind defaults to `127.0.0.1` — an attacker would already need access to the loopback to exploit permissive CORS, so it's zero‑risk on loopback. For remote deployments, CSRF protection relies on `Authorization: Bearer <token>` (`[http].auth_enabled = true`); Gateway does not send Set‑Cookie, and browsers by default do not send cookies with `credentials: 'same-origin'`.

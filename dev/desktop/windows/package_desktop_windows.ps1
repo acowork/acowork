@@ -118,7 +118,7 @@ if (Test-Path $UserBin) {
     Write-Host "      Without it, /api/auth/*, /api/users/* and /api/user/* return 503." -ForegroundColor Yellow
 }
 
-# Bundle Memory service binary (sibling of acowork-gateway.exe, ADR-100).
+# Bundle Memory service binary (sibling of acowork-gateway.exe, ADR-101).
 # Mirrors the User service above: the Gateway supervisor locates it via
 # `current_exe().parent().join("acowork-memory.exe")`; without this copy the
 # memory supervisor logs "acowork-memory binary not found" and the memory
@@ -140,3 +140,4 @@ try {
 } finally {
     Pop-Location
 }
+

@@ -220,7 +220,7 @@ impl FusionPolicy {
 
   覆盖矩阵（D6 最低要求）：英文/中文/混合 × 短关键词/整句/精确实体/仅语义/无相关结果/对话与记忆重复候选。
 - **语料 fixture**：`corpus.jsonl`（38 行：22 memory + 16 conversation）→ 每个 harness 只建自己 scope 的临时 store（memory label 表 / 对话索引）。向量是 `dev/eval/retrieval/embeddings.json` 里的**确定性 hashed-token 占位投影**（非生产模型；生产模型的预生成缓存是它预留的接缝，不是它当前的内容），因此两次运行可字节比较。该文件是 `corpus.jsonl` 的派生数据，`EvalDataset::load` 会拒绝与内核分词器不一致的旧文件——语料与查询必须由同一个分词器投影，否则语义权重静默变味；改分词器/维度/语料文本后用 `cargo test -p acowork-eval --test regenerate_stand_in_embeddings -- --ignored` 重生成。
-- **runner 按 ADR-100 的二进制边界拆分**（不再存在"一个 harness 同时喂两个引擎"的形态）：
+- **runner 按 ADR-101 的二进制边界拆分**（不再存在"一个 harness 同时喂两个引擎"的形态）：
 
 | runner | scope | 位置 | 变体 |
 |---|---|---|---|
@@ -475,7 +475,7 @@ export interface CandidateInput {
 |---|---|---|
 | `MatchedBy` / `FusedHit` / `FusionPolicy` | `acowork-core::retrieval`（**唯一公共契约点**） | sqlite 引擎、memory manager、Runtime search 模块与 API |
 | `DualQuery` | `acowork-runtime::search`（Runtime 内部编排类型，非跨 crate 契约） | analyzer 产出、global_search 消费；memory 路径经 `MemoryQuery` 字段传值，不 import 此类型 |
-| `MemoryProvider::hybrid_search_detailed` | trait 与实现均在 `acowork-memory`（`src/provider.rs` + `src/sqlite/`，随 ADR-100 迁入） | memory manager；返回 core 契约类型 |
+| `MemoryProvider::hybrid_search_detailed` | trait 与实现均在 `acowork-memory`（`src/provider.rs` + `src/sqlite/`，随 ADR-101 迁入） | memory manager；返回 core 契约类型 |
 | `retrieval_eval`（指标数学 / 数据集读取 / stand-in 投影 / 报告形状） | `acowork-eval`（**dev-only crate**） | 仅 `acowork-memory/tests/` 与 `acowork-runtime/tests/` 的检索 harness；以 `[dev-dependencies]` 被依赖 |
 
 依赖红线（评审/CI 检查项）：`acowork-memory` ✗→ `acowork-runtime::search`；`acowork-runtime::search` ✗→ `acowork-memory`；`acowork-sqlite::conversation` ✗→ `acowork-memory` 域类型。三者只允许各自指向 `acowork-core::retrieval`。测量面另有一条：`acowork-eval` ✗→ 任何发布二进制（它不得出现在 `[dependencies]`/`[build-dependencies]` 下，也不得回住 `acowork-core`），且两个引擎的测试不得互相引用——由 `acowork-eval/tests/shipping_redline.rs` 与 `dev/ci.sh` 的对应步骤强制。
@@ -517,7 +517,7 @@ export interface CandidateInput {
 | 单元 | analyzer：中英混合、上限截断、空结果回退、CJK Keep/Trigram 开关 | `search/analyzer.rs` tests |
 | 单元 | `text_search_terms`：转义、词项数防御截断、<3 字符 LIKE 回退、label 隔离 | `acowork-sqlite/tests.rs` 扩展 |
 | 单元 | `hybrid_search_detailed`：matched_by 正确性（vector-only/text-only/both）、floor 仅作用向量路、rank 语义、稳定序 | `retrieval.rs` tests（沿用现有 `hybrid_search_keeps_lexical_hit_whose_embedding_is_far` 并扩展） |
-| 集成 | `GET /search` 新 payload 字段；memory scope 已按 ADR-100 下线（返回 `not_available` 且零命中），断言归位 `global_search_e2e.rs` Tier 1 | `core/acowork-runtime/tests/global_search_e2e.rs` |
+| 集成 | `GET /search` 新 payload 字段；memory scope 已按 ADR-101 下线（返回 `not_available` 且零命中），断言归位 `global_search_e2e.rs` Tier 1 | `core/acowork-runtime/tests/global_search_e2e.rs` |
 | 集成 | summary 校验：`matched_by` 枚举白名单、旧请求（无新字段）通过 | `global_search_e2e.rs` Tier 3（走真实 HTTP） |
 | 前端 | `selectSummaryCandidates`：多样性、去重、欠预算、0 候选不发请求 | `searchRun.test.ts` 扩展 |
 | 离线 | 分 scope 的变体对比 + 指标（CI 手动/定时任务，不入 PR 阻塞） | memory：`cargo test -p acowork-memory --test retrieval_eval -- --ignored`；conversation：`cargo test -p acowork-runtime --test retrieval_eval -- --ignored`；指标定义共用 `core/acowork-eval` |
@@ -537,3 +537,4 @@ export interface CandidateInput {
 
 - 2026-10-16：初稿。核心结论：不新建检索引擎，将 `acowork-sqlite::hybrid_search_full` 升级为保留来源内信号的共享融合原语；`memory_recall` 的双查询形态（embedding_text/query_text）泛化为 `DualQuery`，analyzer 与 LLM 关键词作为并列的词项生产者；摘要候选选择升级为消费 `matched_by`/rank 的确定性后处理。
 - 2026-10-16（评审意见）：按"memory 与 search 不得互调，各自依赖公共模块"的要求，检索公共契约（`MatchedBy`/`FusedHit`/`FusionPolicy`）从原稿的 `acowork-memory::types` 改放 `acowork-core::retrieval`；取消 `FusionPolicyView` 垫片；`hint_weights` 留在 memory 内部，跨路径共享的是常量语义而非代码依赖。
+

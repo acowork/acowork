@@ -1,4 +1,4 @@
-﻿# Skill System（技能系统）
+# Skill System（技能系统）
 
 > 版本：v3.2 | 更新日期：2026-04-14
 
@@ -72,7 +72,7 @@ triggers:
 
 # === 工具依赖 ===
 tool_deps:
-  # 记忆工具不再是内置工具，而是 Gateway 托管记忆服务的 MCP 工具（ADR-100）；
+  # 记忆工具不再是内置工具，而是 Gateway 托管记忆服务的 MCP 工具（ADR-101）；
   # 注册名带 `mcp_<server>__` 前缀，工具级开关在 `agent_mcp_tools.json`（ADR-069）。
   - mcp_memory__memory_recall
   - file_write
@@ -666,3 +666,4 @@ System Prompt 组装（步骤 5：Skill Instructions）
 - 是否需要在 SKILL.md 中显式声明降级策略（类似 `on_tool_unavailable: skip_step | skip_skill | fallback`）？
 
 这些问题需要在 Skill 系统稳定运行后，通过实际场景积累答案后再做详细设计。
+

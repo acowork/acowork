@@ -330,7 +330,7 @@ pub fn build_router(state: AppState) -> Router {
         // acowork-doc 独立进程反向代理（`/api/doc/*` → `127.0.0.1:{doc_port}/*`）。
         // 未就绪时返回 503（带 Retry-After），与 PM 同一契约。
         .merge(crate::http::doc_proxy::doc_proxy_routes())
-        // ADR-100: memory service reverse proxy (`/api/memory/*` plus the
+        // ADR-101: memory service reverse proxy (`/api/memory/*` plus the
         // agent-scoped panel paths `/api/agents/{id}/memory/*`, which until now
         // were Runtime proxies). Not-ready → 503 + `Retry-After`, same contract.
         .merge(crate::http::memory_proxy::memory_proxy_routes())
@@ -463,13 +463,13 @@ pub struct SystemStatusResponse {
     /// `false` in `local` mode or after setup is finished.
     #[serde(default)]
     pub requires_setup: bool,
-    /// ADR-100: the memory service's availability, for the Desktop's panel /
+    /// ADR-101: the memory service's availability, for the Desktop's panel /
     /// search-tab gating. Always present so the frontend never has to tell
     /// "disabled" and "not started yet" apart by looking for a missing key.
     pub memory_service: MemoryServiceStatus,
 }
 
-/// ADR-100: memory service readiness projection.
+/// ADR-101: memory service readiness projection.
 ///
 /// `ready` is the supervisor's own flag (`memory_process.ready`), so it is
 /// `false` both when `[memory].enabled = false` and while the service is
@@ -1179,3 +1179,4 @@ mod tests {
         assert!(structured_err.structured.is_some());
     }
 }
+

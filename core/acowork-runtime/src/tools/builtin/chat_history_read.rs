@@ -52,13 +52,13 @@ impl Tool for ChatHistoryReadTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "chat_history_read".to_string(),
-            description: "Read messages of a Chat session (project group chat or agent-agent chat) you are a participant of. Use the source_chat_session_id from an intent envelope. Returns up to 50 messages per call, newest window first; read with increasing offset for more. Your own turns are NOT part of the chat history — do not expect them here (design 27 §5.3.2).".to_string(),
+            description: "Read a Chat session's message log. Every execution session is bound to the Chat session it was started from (1:1 user-agent chat, agent-agent chat, or group chat). Your task brief already comes from that Chat — do NOT read chat history to \"get context\": it mostly belongs to other tasks and will dilute yours. Legitimate uses: (1) the task itself is about the chat log (summarize a discussion, find an earlier message); (2) your brief references a message you were not given — read one small window (count <= 5) to recover it. Returns up to 50 messages per call, newest window first; page older with `offset` (design 27 §5.3.2).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "chat_session_id": {
                         "type": "string",
-                        "description": "The Chat session id (from source_chat_session_id in the intent envelope)."
+                        "description": "Optional. A different Chat session id to read. Omit to read the chat this session is bound to."
                     },
                     "offset": {
                         "type": "integer",
@@ -69,27 +69,37 @@ impl Tool for ChatHistoryReadTool {
                         "description": "Messages to return, 1-50 (server hard cap). Default 20."
                     }
                 },
-                "required": ["chat_session_id"]
+                "required": []
             }),
         }
     }
 
     async fn execute(&self, _params: Value, _work_dir: Option<&str>) -> CoreResult<ToolResult> {
-        Ok(Self::fail("chat_history_read requires session context"))
+        Ok(Self::fail(
+            "chat_history_read must be dispatched via execute_with_context (no session context reached the tool)",
+        ))
     }
 
     async fn execute_with_context(
         &self,
         params: Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> CoreResult<ToolResult> {
-        let Some(session_id) = params
+        // Resolve the target Chat session: explicit parameter first, then
+        // the session's persistent chat binding (from ToolContext). The agent
+        // does not need to know internal ids — the runtime binding is enough.
+        let param_id = params
             .get("chat_session_id")
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        else {
-            return Ok(Self::fail("Missing required parameter 'chat_session_id'"));
+            .filter(|s| !s.is_empty());
+        let session_id = match param_id.or_else(|| ctx.chat_session_id.clone()) {
+            Some(ref s) if !s.is_empty() => s.clone(),
+            _ => {
+                return Ok(Self::fail(
+                    "No chat_session_id provided and this session is not bound to a Chat session — pass a chat_session_id explicitly if you have one.",
+                ));
+            }
         };
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let count = params

@@ -11,7 +11,7 @@
 //! The type lives here (rather than in the former `acowork-sqlite` crate)
 //! because the memory service binary is the primary owner of this storage
 //! engine, and a backend crate cannot be linked *into* the trait crate that
-//! declares the traits it implements (ADR-100). `acowork-sqlite` now keeps only
+//! declares the traits it implements (ADR-101). `acowork-sqlite` now keeps only
 //! the two Runtime-side sidecars that share this connection — the conversation
 //! index (`ConversationStore`) and session meta (`SqliteSessionMetaStore`) —
 //! and re-exports [`SqliteStore`] for its callers. [`SqliteStore::lock`] and the
@@ -1315,3 +1315,4 @@ mod blob_tests {
         assert_eq!(blob_to_embedding(&blob), vec![1.0, 2.0, 3.0]);
     }
 }
+

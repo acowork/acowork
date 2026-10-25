@@ -1,4 +1,4 @@
-//! Distiller + forgetting background pipeline (ADR-100 decision 7).
+//! Distiller + forgetting background pipeline (ADR-101 decision 7).
 //!
 //! This is the memory service's own scheduler: what the Runtime ran per Agent
 //! process (`consolidation_bg.rs` + `AgentCore::run_episodic_distill_once`) now
@@ -1512,3 +1512,4 @@ mod tests {
         pipeline.shutdown();
     }
 }
+

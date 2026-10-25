@@ -150,10 +150,11 @@ pub fn render_intent_message(
 
 /// POST a Runtime-owned chat row through the Gateway relay
 /// (`POST /api/intents/chat-append`, plan 3.0): `interaction_request`
-/// cards (§5.5.4) and `system_notice / turn_started` pointers (§5.5.5).
+/// cards (§5.5.4) and the terminal `agent_message` echoes a chat-bound
+/// execution session writes back for locally-composed turns (ADR-100 D9).
 /// Same source as the §5.5.1 write-back — the Runtime never speaks to
 /// the user service directly. Idempotent by `meta.message_id`: a
-/// redelivered turn produces no second row.
+/// redelivered turn produces no second row of the same kind.
 ///
 /// Best-effort by contract: a lost pointer or card degrades the surface,
 /// it does not lose the conversation; callers log and continue.
@@ -192,6 +193,99 @@ pub async fn append_chat_row(
         let body = resp.text().await.unwrap_or_default();
         Err(format!("chat-append rejected (HTTP {status}): {body}"))
     }
+}
+
+/// The `meta` of a continuation echo — the standalone `agent_message` a
+/// chat-bound execution session writes back for a turn the user composed
+/// there directly (ADR-100 D9).
+///
+/// A turn composed straight against the execution surface carries no request
+/// context (unlike a routed Chat turn), so it has no `in_reply_to` to thread
+/// under and no response entry to answer. The row is therefore standalone: an
+/// `exec:`-prefixed id (never collides with a request/response row, and the
+/// store's idempotency key so a redelivered turn cannot double the echo),
+/// `sender_session_id` so the surface can drill into the session that produced
+/// it, and `status` so an empty body still reads as a finished run rather than
+/// an unanswered one.
+///
+/// `in_reply_to` is the exception, and ADR-100 D12 is what created it: a
+/// **pinned** turn — composed in the execution view but delivered through the
+/// Chat entry point — already has its `user_message` row in the chat, keyed by
+/// `trigger_message_id`. Threading the echo under that row is what makes the
+/// chat read as one round (the question the human asked, the answer that came
+/// back) instead of an orphan result with no head. `None` keeps the
+/// standalone shape the echo has always had.
+///
+/// `status` is the turn's terminal outcome (ADR-100 revision: intermediate
+/// milestones such as dispatch/start are runtime-only and never persisted, so
+/// the echo is the only row a locally-composed turn can leave). A stopped
+/// local turn writes `aborted` with an empty body — the chat can then explain
+/// why its previous message has no answer.
+pub fn exec_echo_meta(
+    local_message_id: &str,
+    agent_session_id: &str,
+    status: &str,
+    trigger_message_id: Option<&str>,
+) -> serde_json::Value {
+    let mut meta = serde_json::json!({
+        "message_id": format!("exec:{local_message_id}"),
+        "sender_session_id": agent_session_id,
+        "status": if status.is_empty() { "completed" } else { status },
+    });
+    if let Some(trigger) = trigger_message_id.filter(|s| !s.is_empty()) {
+        meta["in_reply_to"] = serde_json::Value::String(trigger.to_string());
+    }
+    meta
+}
+
+/// The `meta` of a routing reaction row (ADR-100 D11).
+///
+/// A routed Chat turn owes the chat an immediate in-conversation answer to
+/// "where did my message go": the Runtime appends one `system_notice` with
+/// `notice_type = turn_routed` at the moment the routing target is resolved,
+/// carrying the routing-time verdict as durable data:
+///
+/// - `message_id = "tr:{request_id}"` — idempotent per trigger row, so a
+///   redelivered envelope cannot double the reaction;
+/// - `in_reply_to` — the trigger `user_message`, what threads the reaction
+///   under it and what the surface uses to name the task (fallback: the
+///   trigger body, see design 27 §5.5.5);
+/// - `agent_session_id` — the execution session that will run the turn, the
+///   drill target and the title source;
+/// - `turn_mode` — `"new"` when the routing **created** a physical session,
+///   `"continue"` for every reuse (the same logical task
+///   carries on). It is a one-time routing-time fact, never re-derived.
+///
+/// The body stays empty: the row is rendered from i18n by the surface, in
+/// the executing agent's attribution (avatar + name), never as a centered
+/// system line and never in the agent's model voice.
+pub fn turn_routed_meta(
+    request_id: &str,
+    agent_session_id: &str,
+    opened_new: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": format!("tr:{request_id}"),
+        "in_reply_to": request_id,
+        "agent_session_id": agent_session_id,
+        "turn_mode": if opened_new { "new" } else { "continue" },
+        "notice_type": "turn_routed",
+    })
+}
+
+/// The `meta` of the router-fallback receipt — the one channel fact a
+/// degraded Chat turn owes the human (design 29 §9): the router could not
+/// decide, so the message was forwarded automatically. Unlike the retired
+/// progress milestones (ADR-100 revision), this notice is still written: the
+/// fallback is a visible difference in behaviour, not a progress detail. The
+/// row carries no body; the surfaces paint the localised pill from
+/// `notice_type` (their `routerFallback` i18n key).
+pub fn router_fallback_meta(request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": format!("rf:{request_id}"),
+        "in_reply_to": request_id,
+        "notice_type": "router_fallback",
+    })
 }
 
 /// POST the responder's final output back through the Gateway write entry
@@ -450,5 +544,69 @@ mod tests {
         // Human 1:1 / mention turns: nothing hidden.
         assert!(h(false, Some(true)).is_empty());
         assert!(h(false, None).is_empty());
+    }
+
+    #[test]
+    fn exec_echo_meta_is_a_standalone_agent_message() {
+        // ADR-100 D9: a locally-composed turn in a chat-bound session echoes
+        // its output as a standalone agent_message. There is no request to
+        // thread under, so no in_reply_to; the `exec:` id is the store's
+        // idempotency key (a redelivered turn cannot double the row).
+        // `sender_session_id` is what makes the row drillable back into the
+        // execution session that produced it.
+        let m = exec_echo_meta("local-7", "exec-3", "completed", None);
+        assert_eq!(m["message_id"], "exec:local-7");
+        assert_eq!(m["sender_session_id"], "exec-3");
+        assert_eq!(m["status"], "completed");
+        assert!(m.get("in_reply_to").is_none());
+
+        // A stopped local turn still owes the chat a terminal row — it is the
+        // only way the surface can tell an interrupted run from a silent one.
+        let aborted = exec_echo_meta("local-8", "exec-3", "aborted", None);
+        assert_eq!(aborted["message_id"], "exec:local-8");
+        assert_eq!(aborted["status"], "aborted");
+
+        // Empty status degrades to the ordinary completed echo.
+        assert_eq!(
+            exec_echo_meta("local-9", "exec-3", "", None)["status"],
+            "completed"
+        );
+    }
+
+    #[test]
+    fn exec_echo_meta_threads_a_pinned_turn_under_its_chat_row() {
+        // ADR-100 D12: a pinned turn was written to the chat as a real
+        // `user_message` before it reached the agent, so the echo answers that
+        // row. This is what pairs the two surfaces into one round — without it
+        // the chat would hold an orphan result with no question above it, the
+        // exact shape the pin exists to remove.
+        let m = exec_echo_meta("row-1", "exec-3", "completed", Some("row-1"));
+        assert_eq!(m["in_reply_to"], "row-1");
+        // The id keeps the `exec:` prefix: idempotency must not depend on the
+        // trigger, or a redelivered turn doubles the answer row.
+        assert_eq!(m["message_id"], "exec:row-1");
+
+        // An empty trigger is not a thread — it degrades to the standalone
+        // shape rather than pointing the answer at a nonexistent row.
+        let blank = exec_echo_meta("row-2", "exec-3", "completed", Some(""));
+        assert!(blank.get("in_reply_to").is_none());
+    }
+
+    #[test]
+    fn turn_routed_meta_threads_the_reaction_to_its_trigger() {
+        // ADR-100 D11: the routing reaction row is keyed `tr:{request}` — one
+        // per trigger message, so a redelivered envelope cannot double it —
+        // and threaded under that trigger, which is what puts the agent
+        // avatar + bubble immediately after the user's own message.
+        let m = turn_routed_meta("msg-42", "20261023_131156_a3bb7d", true);
+        assert_eq!(m["message_id"], "tr:msg-42");
+        assert_eq!(m["in_reply_to"], "msg-42");
+        assert_eq!(m["agent_session_id"], "20261023_131156_a3bb7d");
+        assert_eq!(m["turn_mode"], "new");
+        assert_eq!(m["notice_type"], "turn_routed");
+
+        // Every reuse reads as "continue" — the same logical
+        // task carries on; only physical creation is "new".
+        assert_eq!(turn_routed_meta("msg-43", "s-1", false)["turn_mode"], "continue");
     }
 }

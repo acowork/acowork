@@ -286,8 +286,8 @@ mod tests {
 
         let output_path = tmp_dir.join("output.agent");
         // Every option the type offers is switched on: a `memory/` directory
-        // left over from the pre-ADR-100 layout still must not travel
-        // (ADR-100 decision 11).
+        // left over from the pre-ADR-101 layout still must not travel
+        // (ADR-101 decision 11).
         let opts = PackageOptions {
             include_conversations: true,
             include_config: true,
@@ -370,3 +370,4 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp_dir);
     }
 }
+

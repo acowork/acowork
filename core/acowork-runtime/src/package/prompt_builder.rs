@@ -80,11 +80,11 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
     // grafeo/memory set. The other three grafeo
     // overrides (`extraction.md`, `conflict-classification.md`,
     // `generalization.md`) were removed: see module-level docs.
-    // ADR-100 — the memory side no longer carries a default to override: the
+    // ADR-101 — the memory side no longer carries a default to override: the
     // retrieval-side abstention chain was removed with decision 5, so an
     // absent `abstention.md` means no guidance is injected at all.
     ("abstention.md", "abstention guidance (no built-in default)"),
-    // ADR-100 — `distiller-merge.md` retired: the EpisodicDistiller prompt is
+    // ADR-101 — `distiller-merge.md` retired: the EpisodicDistiller prompt is
     // owned by the memory service, which reads it from its own instance
     // directory. The Runtime no longer lists or dispatches it.
     // ADR-099 — Chat Router persona. Replaces ONLY the persona section of
@@ -726,7 +726,7 @@ Be friendly and welcoming.
         // 7 -> 6 (web-search removal), 6 -> 5 (projection + merge rewrite
         // collapsed the two distiller slots into distiller-merge.md),
         // 5 -> 6 (ADR-099 added the chat router persona),
-        // 6 -> 5 (ADR-100 moved the distiller prompt into the memory service).
+        // 6 -> 5 (ADR-101 moved the distiller prompt into the memory service).
         assert_eq!(
             OVERRIDABLE_PROMPTS.len(),
             5,
@@ -1094,3 +1094,4 @@ Be friendly and welcoming.
         }
     }
 }
+

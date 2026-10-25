@@ -9,7 +9,7 @@
 //! The runtime holds an `Arc<dyn SessionMetaStore>` the same way it holds any
 //! other late-bound store, so the storage backend and the call sites stay apart.
 //!
-//! **ADR-100 note**: these types live in `acowork-core` rather than the memory
+//! **ADR-101 note**: these types live in `acowork-core` rather than the memory
 //! crate. Session metadata never was memory business — it only shared the
 //! SQLite file — and the Runtime must be able to name the trait without
 //! depending on `acowork-memory`, which is now a standalone service.
@@ -33,7 +33,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{AcoworkError, Result};
 
 /// Default maximum pruned-after-pick when pruning is disabled.
 pub const PRUNE_DISABLED: usize = 0;
@@ -43,6 +43,64 @@ pub const PRUNE_DISABLED: usize = 0;
 /// session listing (`scan_sessions_async`) stays readable.
 pub type SessionTotals = (u64, u64, u64, u64);
 
+/// Sentinel segment for an unattributable provider/model in a
+/// [`ModelUsageEntry`] map key (legacy rows backfilled by the v6 migration,
+/// or a call site whose session never stamped a provider id).
+pub const UNKNOWN_USAGE_SEGMENT: &str = "unknown";
+
+/// Build a [`ModelUsageEntry`] map key: `"{provider}|{model}"`, with
+/// [`UNKNOWN_USAGE_SEGMENT`] standing in for a missing segment.
+///
+/// A `|` inside a provider or model id would corrupt the split; provider
+/// ids and model ids are config-declared identifiers that do not contain
+/// one, and [`split_model_usage_key`] splits on the FIRST `|` so a stray
+/// separator lands in the model half rather than misattributing the
+/// provider.
+pub fn model_usage_key(provider: Option<&str>, model: Option<&str>) -> String {
+    format!(
+        "{}|{}",
+        provider.unwrap_or(UNKNOWN_USAGE_SEGMENT),
+        model.unwrap_or(UNKNOWN_USAGE_SEGMENT)
+    )
+}
+
+/// Inverse of [`model_usage_key`]: split on the first `|`. A key without a
+/// separator reads as `(key, "unknown")` rather than failing.
+pub fn split_model_usage_key(key: &str) -> (&str, &str) {
+    match key.split_once('|') {
+        Some((p, m)) => (p, m),
+        None => (key, UNKNOWN_USAGE_SEGMENT),
+    }
+}
+
+
+
+/// Per-provider/model token breakdown of one session (token statistics
+/// feature). The map key is `"{provider_id}|{model_id}"`; either segment
+/// falls back to the literal `"unknown"` when the call site could not
+/// attribute it (pre-upgrade data, or a session whose provider id was
+/// never stamped).
+///
+/// Persisted as the `sessions.model_usage` JSON column. This breakdown is
+/// the **source of truth** for the agent-scoped `token_stats` aggregate
+/// table: the aggregate is maintained as a same-transaction diff of these
+/// maps (see `SqliteSessionMetaStore`) and can be rebuilt from them at any
+/// time — the disposable-derived-index pattern of ADR-082.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelUsageEntry {
+    /// Cumulative prompt tokens attributed to this provider/model.
+    pub input: u64,
+    /// Cumulative completion tokens attributed to this provider/model.
+    pub output: u64,
+    /// Cumulative cache-read tokens attributed to this provider/model.
+    pub cache_read: u64,
+    /// Cumulative cache-write tokens attributed to this provider/model.
+    pub cache_write: u64,
+    /// Cumulative estimated cost in USD. `None` = "no price known" — the
+    /// "宁可 miss 也不估计" policy: a fabricated 0 would read as "free".
+    pub cost: Option<f64>,
+}
 
 /// Per-session token counters (ADR-027 snapshot + cumulative).
 ///
@@ -149,6 +207,25 @@ fn mean(sum: f64, samples: u32) -> Option<f64> {
     }
     let m = sum / samples as f64;
     m.is_finite().then_some(m)
+}
+
+/// One row of the agent-scoped `token_stats` aggregate table.
+///
+/// Derived state: the aggregate of every session's [`SessionMeta::model_usage`]
+/// breakdown for one (provider, model) pair. Reads of the model-share panel
+/// go through this; a drifted or corrupted aggregate is repairable from the
+/// breakdowns via [`SessionMetaStore::rebuild_token_stats`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenStatsRow {
+    pub provider: String,
+    pub model: String,
+    pub total_input: u64,
+    pub total_output: u64,
+    pub total_cache_read: u64,
+    pub total_cache_write: u64,
+    /// Cumulative estimated cost in USD. `None` = at least one contributing
+    /// call had no known price — never a fabricated 0.
+    pub total_cost: Option<f64>,
 }
 
 /// One todo entry (ADR-060). Lives inside `SessionMeta.todos`.
@@ -380,6 +457,15 @@ pub struct SessionMeta {
     pub last_active_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<SessionTokens>,
+    /// Per-provider/model breakdown of the session's cumulative tokens —
+    /// the source of truth behind the agent-scoped `token_stats` aggregate.
+    /// `None` on rows written before the column existed; the v6 migration
+    /// seeds those with a single `"unknown|unknown"` entry carrying the
+    /// historical totals (old usage is deliberately NOT attributed to
+    /// `SessionMeta.model` — a model switch mid-session would misbill it).
+    /// `BTreeMap` so a serialised map is byte-stable across writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usage: Option<std::collections::BTreeMap<String, ModelUsageEntry>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_call_counter: Option<u32>,
     /// Session-level LLM speed / responsiveness averages. `None` until the
@@ -391,12 +477,6 @@ pub struct SessionMeta {
     pub model_ratio: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compaction_offset: Option<u64>,
-    /// Text of the most recent compaction summary, persisted at write time
-    /// (design 27 §4 iron rule: the T2-handoff read must never rescan the
-    /// JSONL). `None` on sessions created before this field existed — the
-    /// reader then falls back to a one-time legacy scan and heals the row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_compaction_summary: Option<String>,
 
     #[serde(default)]
     pub corrupted: bool,
@@ -521,6 +601,36 @@ pub trait SessionMetaStore: Send + Sync {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<SessionMeta>>;
     /// Returns the deleted session_ids so the caller can clean up JSONL.
     fn prune_to(&self, max_sessions: usize) -> Result<Vec<String>>;
+    /// Agent-scoped per-(provider, model) token aggregate (`token_stats`).
+    /// Backends without a statistics table return `Err`.
+    fn token_stats(&self) -> Result<Vec<TokenStatsRow>> {
+        Err(AcoworkError::Memory(
+            "token_stats not supported by this backend".to_string(),
+        ))
+    }
+    /// Drop the aggregate table and re-derive it from every row's
+    /// `model_usage` breakdown (disposable-derived-index repair path). Not a
+    /// request-path call — invoked manually when the aggregate is suspected
+    /// to have drifted from the breakdowns.
+    fn rebuild_token_stats(&self) -> Result<()> {
+        Err(AcoworkError::Memory(
+            "token_stats not supported by this backend".to_string(),
+        ))
+    }
+    /// Cheap consistency verdict for the `token_stats` aggregate: does
+    /// Σ(aggregate rows) still equal Σ(per-session `model_usage`
+    /// breakdowns)? Backends without the aggregate table return `Err`.
+    ///
+    /// Token dimensions compare exactly. The cost dimension follows the
+    /// aggregate's poison-to-NULL rule: a NULL aggregate cost counts as
+    /// consistent (unpriced contributions permanently poison the row
+    /// until [`SessionMetaStore::rebuild_token_stats`]), a priced
+    /// aggregate must match Σ detail costs.
+    fn token_stats_consistent(&self) -> Result<bool> {
+        Err(AcoworkError::Memory(
+            "token_stats not supported by this backend".to_string(),
+        ))
+    }
 }
 
 /// Converts `last_active_at` (RFC3339 string) to the epoch-ms `i64` the
@@ -650,3 +760,4 @@ mod perf_tests {
         assert_eq!(perf.avg_ttft_ms(), None);
     }
 }
+

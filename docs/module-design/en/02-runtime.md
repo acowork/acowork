@@ -1,4 +1,4 @@
-﻿# acowork-runtime — Agent Runtime
+# acowork-runtime — Agent Runtime
 
 **Position**: Unified binary that loads .agent package and executes Agent logic. Each Agent is an independent process.
 
@@ -11,7 +11,7 @@ crates/acowork-runtime/
     ├── agent/
     │   ├── mod.rs
     │   ├── loop_.rs               # main loop
-    │   ├── context.rs             # context building (prompt + history + identity + skills; the memory-RAG injection was removed by ADR-100 — the `retrieved_memory` slot can now only be filled by a DevMode override)
+    │   ├── context.rs             # context building (prompt + history + identity + skills; the memory-RAG injection was removed by ADR-101 — the `retrieved_memory` slot can now only be filled by a DevMode override)
     │   ├── history.rs             # conversation history management (token budget, trim)
     │   ├── loop_detector.rs       # loop detection
     │   └── budget_guard.rs        # local budget pre-check
@@ -51,7 +51,7 @@ crates/acowork-runtime/
     │   │   ├── image_gen.rs       # text-to-image (fal.ai)
     │   │   ├── llm_task.rs        # LLM sub-call (no tools, pure text/JSON)
     │   │   └── identity_query.rs  # query identity from system Agent (ACowork-specific)
-    │   ├── memory/                # ← deleted by ADR-100: memory tools left the Runtime.
+    │   ├── memory/                # ← deleted by ADR-101: memory tools left the Runtime.
     │   │   (`memory_store` / `memory_recall` are now tools of the Gateway-hosted memory
     │   │    MCP, prefixed names `mcp_memory__*`, opted in per-tool via ADR-069's
     │   │    `agent_mcp_tools.json`)
@@ -134,7 +134,7 @@ crates/acowork-runtime/
     │   ├── tool_search.rs         # deferred tool search
     │   └── node.rs                # Node device capability tool
     ├── memory/
-    │   └── (emptied by ADR-100: the Memory facade / `MemorySessionHandle` / memory-layer
+    │   └── (emptied by ADR-101: the Memory facade / `MemorySessionHandle` / memory-layer
     │       read-write wrapper all moved into the `acowork-memory` service. Embedding for
     │       memory is no longer supplied by the Runtime either — the service owns its client)
     ├── skills/
@@ -169,7 +169,7 @@ Main loop flow:
    ├─ UserMessage / SystemNotification / IntentMessage three types
    └─ Skip when no new messages
 ① Budget pre-check → budget_guard.check()
-② Build context → context.build(manifest, history, …)   // no memory injection (ADR-100)
+② Build context → context.build(manifest, history, …)   // no memory injection (ADR-101)
 ③ Call LLM → provider.chat_stream(request)  // streaming
 ④ Parse response → parse text / tool_calls
 ④.5 Tool Call dedup → dedup (tool_name, params)
@@ -226,7 +226,7 @@ ACowork-AI **Tool System Design Principles**:
 
 1. **Runtime provides complete tool pool** (~77 core tools), but not every Agent can use all tools
 2. **Manifest declaration-driven activation**: `.agent` package's `tools` and `permissions` fields determine which tools are available to the Agent
-3. **Tools organized in directories by category**: builtin / schedule / integration / agent / browser / dev / skill / mcp / wasm / sop (`memory/` was removed by ADR-100 — memory tools come from the hosted MCP now)
+3. **Tools organized in directories by category**: builtin / schedule / integration / agent / browser / dev / skill / mcp / wasm / sop (`memory/` was removed by ADR-101 — memory tools come from the hosted MCP now)
 4. **Security wrapper composition**: Adopt `RateLimitedTool` + `PathGuardedTool` decorator pattern, achieve composable security policies with rate limiting and path validation
 
 ```rust
@@ -256,12 +256,12 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 
 **Tool classification reference (complete design space, actual activation depends on manifest declaration)**:
 
-> ⚠️ The following table describes the **complete design space** of ACowork tool system. ACowork **Phase 1 only implements 13 built-in tools** (memory×2, network×2, web×2, shell, file×4, intent×1, search×1) and WASM tools. Of those, memory×2 left the builtin surface with ADR-100 (they are memory-MCP tools now). Other categories (Notion/Jira integration, browser, dev tools, MCP, SOP etc.) are Phase 2+ on-demand implementation.
+> ⚠️ The following table describes the **complete design space** of ACowork tool system. ACowork **Phase 1 only implements 13 built-in tools** (memory×2, network×2, web×2, shell, file×4, intent×1, search×1) and WASM tools. Of those, memory×2 left the builtin surface with ADR-101 (they are memory-MCP tools now). Other categories (Notion/Jira integration, browser, dev tools, MCP, SOP etc.) are Phase 2+ on-demand implementation.
 
 | Category | ACowork Directory | Tool Count | Phase 1 Implemented |
 |----------|-------------------|------------|---------------------|
 | Core Builtin | `builtin/` | 17 | ✅ 13 (weather/git/pdf/screenshot/image series moved to WASM or Agent built-in) |
-| Memory | ~~`memory/`~~ | 0 | ❌ Removed from the Runtime by ADR-100: `memory_store` / `memory_recall` are served by the Gateway-hosted memory MCP |
+| Memory | ~~`memory/`~~ | 0 | ❌ Removed from the Runtime by ADR-101: `memory_store` / `memory_recall` are served by the Gateway-hosted memory MCP |
 | Scheduled tasks | `schedule/` | 7 | ❌ Phase 2 |
 | Third-party integration | `integration/` | 8 | ❌ Provided by independent Agents |
 | Agent collaboration | `agent/` | 6 | ✅ intent_send/receive implemented, others Phase 2 |
@@ -323,7 +323,7 @@ impl DevModeController {
 ## Dependencies
 
 - `acowork-core` — shared types
-- `acowork-sqlite` — conversation vector index + session meta only (still the same `private.sqlite`); the **memory engine is no longer in this dependency** — `acowork-memory` is a standalone service the Runtime does not link (ADR-100)
+- `acowork-sqlite` — conversation vector index + session meta only (still the same `private.sqlite`); the **memory engine is no longer in this dependency** — `acowork-memory` is a standalone service the Runtime does not link (ADR-101)
 - `acowork-vault` — not directly depended on, Key obtained via IPC from Gateway
 - `tokio`, `reqwest`, `clap`, `serde_json`
 - `wasmtime` (feature-gated: `wasm-tools`)

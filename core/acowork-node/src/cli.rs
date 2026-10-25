@@ -5,7 +5,7 @@
 //! `agents list/logs/kill`. The remaining command face (`rename`,
 //! `leave`, `service install`) lands in Phase 3.
 //!
-//! ADR-100 adds `migrate-memory`: the operator-triggered half of the
+//! ADR-101 adds `migrate-memory`: the operator-triggered half of the
 //! one-shot hand-over of the legacy per-agent memory store to the memory
 //! service (the daemon runs the same pass automatically at startup).
 //!
@@ -14,7 +14,7 @@
 //! install/uninstall/start/stop for agents always go through the
 //! Gateway. The two write-shaped exceptions are both operator escape
 //! hatches: `agents kill` (emergency stop) and `migrate-memory`
-//! (ADR-100 one-shot data hand-over, which only the Node can perform
+//! (ADR-101 one-shot data hand-over, which only the Node can perform
 //! because the store it reads is node-local).
 
 use std::path::{Path, PathBuf};
@@ -169,7 +169,7 @@ pub enum Command {
         cmd: ServiceCommands,
     },
     /// Hand the memories that still live in an agent's workspace store to the
-    /// memory service (ADR-100 decision 10). Idempotent: an instance already
+    /// memory service (ADR-101 decision 10). Idempotent: an instance already
     /// dealt with is marked by `{workspace}/memory/.migrated` and skipped
     /// unless `--force` is given. The daemon runs this pass at every start;
     /// this command is the operator's retry once a refusal has been fixed.
@@ -626,7 +626,7 @@ fn print_status(identity: &Option<NodeIdentity>, snapshot: Option<&crate::state:
     }
 }
 
-/// Run one memory-migration pass over the local install table (ADR-100).
+/// Run one memory-migration pass over the local install table (ADR-101).
 ///
 /// A single round, no backoff: an operator watching this output wants an
 /// immediate answer, and every refusal already carries its reason. Exit status
@@ -1117,3 +1117,4 @@ mod tests {
         }
     }
 }
+

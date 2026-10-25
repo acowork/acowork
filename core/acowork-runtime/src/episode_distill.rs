@@ -14,7 +14,7 @@
 //! called from `loop_context` after every successful compact). Session-close
 //! tail distillation also no longer writes to Grafeo (`loop_session`).
 //! Memory persistence is the agent's own decision through the memory service's
-//! `memory_store` MCP tool (ADR-100); the Runtime does not write memories.
+//! `memory_store` MCP tool (ADR-101); the Runtime does not write memories.
 //! Rationale: keeping memory writes user-visible and agent-decided instead of
 //! a silent system side-effect.
 //!
@@ -30,7 +30,7 @@ use regex::Regex;
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, ChatRequest, MessageRole, Provider, UsageInfo};
 
-// ADR-100: `DistilledEpisode` is a memory-service type; the Runtime does not
+// ADR-101: `DistilledEpisode` is a memory-service type; the Runtime does not
 // name it any more (the re-export is gone with the acowork-memory dependency).
 
 use crate::agent::loop_session::strip_think_block;
@@ -40,7 +40,7 @@ use crate::error::{Result, RuntimeError};
 // Data types
 // ---------------------------------------------------------------------------
 
-// `DistilledEpisode` lives in `acowork-memory` (ADR-051 P2), which since ADR-100
+// `DistilledEpisode` lives in `acowork-memory` (ADR-051 P2), which since ADR-101
 // is the memory service — the Runtime no longer names it. `Triple` was removed
 // in ADR-057 (triples-removed).
 
@@ -1340,3 +1340,4 @@ mod tests {
         );
     }
 }
+

@@ -39,7 +39,6 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
           windows: {
             [GROUP]: { older: [], tail, tailLoaded: tail.length, total: tail.length, loadingOlder: false },
           },
-          live: { [GROUP]: { inFlight: null } },
           sending: { [GROUP]: false },
         }),
       {
@@ -55,9 +54,13 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
 });
 
 vi.mock("../../stores/chatStore", () => ({
-  useChatStore: {
-    getState: () => ({ openSession: (...a: unknown[]) => openSessionMock(...(a as [])) }),
-  },
+  useChatStore: Object.assign(
+    // The "view run" tooltip reads the live exec-session title through this
+    // hook; an empty `agentStates` resolves to no name (tooltip falls back to
+    // the label), which is exactly what these drill-routing tests expect.
+    (selector: (state: unknown) => unknown) => selector({ agentStates: {} }),
+    { getState: () => ({ openSession: (...a: unknown[]) => openSessionMock(...(a as [])) }) },
+  ),
 }));
 
 vi.mock("../../stores/agentStore", () => ({

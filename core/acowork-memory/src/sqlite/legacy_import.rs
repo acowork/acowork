@@ -1,6 +1,6 @@
-//! One-shot import of a legacy agent-private store (ADR-100 decision 10).
+//! One-shot import of a legacy agent-private store (ADR-101 decision 10).
 //!
-//! Before ADR-100 an instance's memories lived in its own workspace,
+//! Before ADR-101 an instance's memories lived in its own workspace,
 //! `{work_dir}/memory/private.sqlite`, opened by the Runtime. The memory
 //! service keeps them at `{data_dir}/instances/{instance_id}/memory.db`, so the
 //! rows have to move exactly once. The Node owns the node-local filesystem
@@ -47,7 +47,7 @@ const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
 /// A cheap pre-flight for both halves of the transfer: the Node refuses to
 /// upload anything else, and the service refuses to open it. A pre-ADR-082
 /// grafeo store does not match and must be exported by hand — inventing a
-/// second reader for a format that is already gone was rejected (ADR-100
+/// second reader for a format that is already gone was rejected (ADR-101
 /// "no compatibility code").
 pub fn has_sqlite_magic(bytes: &[u8]) -> bool {
     bytes.starts_with(SQLITE_MAGIC)
@@ -368,3 +368,4 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
         .unwrap_or(None);
     Ok(exists.is_some())
 }
+

@@ -232,7 +232,7 @@ export interface GatewayCandidate {
   latencyMs: number;
 }
 
-// ── ADR-100: memory service availability ──────────────────────────────
+// ── ADR-101: memory service availability ──────────────────────────────
 //
 // `/api/status` is the only place the Gateway publishes the memory
 // supervisor's readiness, and the Desktop must read it to decide whether the
@@ -251,7 +251,7 @@ const MEMORY_READY_RETRY_DELAY_MS = 2_000;
 
 /** Read `GET /api/status` and project the memory service slice.
  *  Returns `null` when the read says nothing usable: transport failure, a
- *  non-2xx, or a pre-ADR-100 Gateway with no such field. */
+ *  non-2xx, or a pre-ADR-101 Gateway with no such field. */
 async function readMemoryServiceStatus(): Promise<MemoryServiceStatus | null> {
   try {
     const resp = await fetch(`${getGatewayUrl()}/api/status`);
@@ -291,7 +291,7 @@ interface GatewayStore {
   gatewayUnreachable: boolean;
   health: HealthResponse | null;
   /**
-   * ADR-100: memory service availability, read from `GET /api/status`.
+   * ADR-101: memory service availability, read from `GET /api/status`.
    * `null` = never read (or the Gateway does not publish it) — which the
    * gating helpers treat as "not ready", so the memory surface stays hidden
    * until a read proves otherwise.
@@ -343,7 +343,7 @@ interface GatewayStore {
   candidates: GatewayCandidate[];
   checkHealth: () => Promise<void>;
   /**
-   * ADR-100: re-read the memory service readiness from `GET /api/status`.
+   * ADR-101: re-read the memory service readiness from `GET /api/status`.
    * Called on mount and on the liveness edges that re-pull Gateway state.
    * A failed read leaves the previous value alone (it says nothing).
    *
@@ -632,3 +632,4 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
     })),
   clearCandidates: () => set({ candidates: [] }),
 }));
+

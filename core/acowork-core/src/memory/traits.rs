@@ -5,7 +5,7 @@
 //! `acowork-runtime`) without depending on the storage layer. The storage
 //! abstraction itself is `acowork_memory::MemoryProvider` (ADR-051); the old
 //! `MemoryStore` trait stub that used to sit in this module had no
-//! implementation left and was removed with ADR-100.
+//! implementation left and was removed with ADR-101.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,3 +39,4 @@ pub enum PrivacyLevel {
     /// Sensitive information — stripped when a package is shared.
     Sensitive,
 }
+

@@ -28,12 +28,12 @@ type = "Network"
 # Figma/feature review, and launch planning. Tools cover those workflows:
 #   - file_*/doc_reader/glob_search/content_search → PRDs, specs, references
 #   - http_request/web_fetch                      → market & competitor research
-#   - mcp_memory__* (hosted memory MCP, ADR-100)   → long-term project context
+#   - mcp_memory__* (hosted memory MCP, ADR-101)   → long-term project context
 #   - intent_send                                  → coordinate with engineering agents
 #   - ask_user_question, todo_write                → gather requirements & track plans
 # No shell tools — PM does not hold a Shell permission.
 
-# --- Memory (ADR-100) ---
+# --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
 # here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
 # `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
@@ -122,3 +122,4 @@ description = "Validate implemented features against PRD, Figma, acceptance crit
 
 [capabilities.launch_planning]
 description = "Plan product launches with rollout, communication, analytics, support readiness, risks, and post-launch learning"
+

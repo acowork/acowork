@@ -1,4 +1,4 @@
-//! End-to-end global-search test for the **Runtime binary** (ADR-095, ADR-100).
+//! End-to-end global-search test for the **Runtime binary** (ADR-095, ADR-101).
 //!
 //! ## Why this file exists
 //!
@@ -10,7 +10,7 @@
 //! it is also the only place the `/search` **wire contract** is asserted — the
 //! shape the Desktop renders, not the arithmetic that produced it.
 //!
-//! ## Scope discipline (ADR-100)
+//! ## Scope discipline (ADR-101)
 //!
 //! Runtime and the memory service are separate binaries, so this file covers the
 //! Runtime half only: the conversation scope, plus the *absence* of the memory
@@ -338,7 +338,7 @@ async fn tier1_wire_contract_and_retired_memory_scope() {
         "conversation scope must report ok, got {conv}"
     );
 
-    // ADR-100: this binary no longer holds memory nodes. The scope has to say so
+    // ADR-101: this binary no longer holds memory nodes. The scope has to say so
     // — an empty-but-ok result would read to the Desktop as "nothing matched".
     let mem = &body["scopes"]["memory"];
     assert_eq!(
@@ -1108,3 +1108,4 @@ fn percentile(values: &[f64], q: f64) -> f64 {
     let idx = ((v.len() - 1) as f64 * q).round() as usize;
     v[idx]
 }
+

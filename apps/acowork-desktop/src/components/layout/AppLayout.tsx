@@ -224,9 +224,9 @@ export function AppLayout() {
   const gatewayStatus = useGatewayStore((s) => s.status);
   const gatewayAlive = useGatewayStore((s) => s.gatewayAlive);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
-  // ADR-100: the memory panel talks to the standalone memory service, so the
+  // ADR-101: the memory panel talks to the standalone memory service, so the
   // Gateway's `/api/status` projection is what decides whether the tab exists.
-  // `null` (never read, or a Gateway older than ADR-100) means "not ready" —
+  // `null` (never read, or a Gateway older than ADR-101) means "not ready" —
   // hiding is always the safe reading of an unknown.
   const memoryServiceReady = useGatewayStore((s) => s.memoryService?.ready ?? false);
   const refreshMemoryService = useGatewayStore((s) => s.refreshMemoryService);
@@ -556,7 +556,7 @@ export function AppLayout() {
     prevAlive.current = isAlive;
   }, [selectedAgent?.alive, activeTab]);
 
-  // ── Bounce off the memory tab when the service goes away (ADR-100) ──
+  // ── Bounce off the memory tab when the service goes away (ADR-101) ──
   // The agent-stop bounce above keys on the Runtime; this one keys on the
   // memory service, which is a separate process with a separate lifecycle. A
   // tile that is no longer drawn must not stay the active tab — the panel
@@ -607,7 +607,7 @@ export function AppLayout() {
   // shape for `error`-class steady-state outages.
   useEffect(() => {
     checkHealth();
-    // ADR-100: one-shot readiness read beside the health probe — `/api/status`
+    // ADR-101: one-shot readiness read beside the health probe — `/api/status`
     // is the only surface that carries `memory_service`, and the memory tile
     // stays hidden until it answers. Not a poll (ADR-052).
     void refreshMemoryService();
@@ -654,7 +654,7 @@ export function AppLayout() {
       clearAgentSessions: (id) => useChatStore.getState().clearAgentSessions(id),
       refreshServices: () => {
         void useServicesStore.getState().diagnose();
-        // ADR-100: the memory service is supervised by this Gateway, so a
+        // ADR-101: the memory service is supervised by this Gateway, so a
         // Gateway rise can land before the service has bound its port. Re-read
         // its readiness with the same edge that re-probes every other service.
         void useGatewayStore.getState().refreshMemoryService();
@@ -1450,3 +1450,4 @@ function formatTokenCount(n: number | null | undefined): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toString();
 }
+

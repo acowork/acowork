@@ -5,7 +5,7 @@
  *
  *   - `agentRunning`      — every agent-scoped tab reads that agent's Runtime,
  *                           so a stopped agent removes them (pre-existing rule).
- *   - `memoryServiceReady` — ADR-100 moved memory out of the Runtime into a
+ *   - `memoryServiceReady` — ADR-101 moved memory out of the Runtime into a
  *                           standalone service. When the supervisor holds no
  *                           live process, `/api/agents/{id}/memory/*` answers
  *                           503, so the memory tile must not be drawn at all —
@@ -44,3 +44,4 @@ export function memoryTabFallback(
   if (activeTab !== "memory") return null;
   return memoryTabAvailable(flags) ? null : "status";
 }
+

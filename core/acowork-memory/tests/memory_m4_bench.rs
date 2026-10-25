@@ -5,7 +5,7 @@
 //! query set with ground truth, so the numbers can be archived as the M5 gate
 //! evidence (ADR-062 §5.2/§5.4).
 //!
-//! D2 was a fix on the per-turn auto-injection path, which ADR-100 decision 5
+//! D2 was a fix on the per-turn auto-injection path, which ADR-101 decision 5
 //! removed. The measurement is kept because it is about the *query shape*, not
 //! about who issues it: "a no-filtering, all-labels query returns a hit". That
 //! query is what the `memory_recall` tool sends today, so the bench drives
@@ -380,3 +380,4 @@ async fn m4_benchmark_before_after() {
         before.dr_hit * 100.0
     );
 }
+

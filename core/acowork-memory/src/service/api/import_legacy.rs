@@ -1,4 +1,4 @@
-//! `POST /admin/import` — the one-shot legacy store upload (ADR-100 P5).
+//! `POST /admin/import` — the one-shot legacy store upload (ADR-101 P5).
 //!
 //! The write entrypoint that is not a tool call, a panel edit, a distiller run
 //! or the manifest bootstrap: it moves an instance's existing memories out of
@@ -435,3 +435,4 @@ mod tests {
         );
     }
 }
+

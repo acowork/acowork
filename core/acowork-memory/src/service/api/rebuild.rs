@@ -1,4 +1,4 @@
-//! Embedding-index rebuild routes (ADR-100 P1d).
+//! Embedding-index rebuild routes (ADR-101 P1d).
 //!
 //! `POST /memory/rebuild-embeddings` starts a **detached** re-embed and returns
 //! `202` immediately; `GET /memory/rebuild-progress` is the polling half. A
@@ -221,3 +221,4 @@ async fn migrate(
         ))
     })?
 }
+

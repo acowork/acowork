@@ -375,7 +375,7 @@ pub struct GatewayState {
     /// `build_available_mcps` 应把 doc MCP 注入到 `acowork/global/mcps` 资源
     /// （每个 Agent 的 catalog），使 Agent 自动获得 `doc_*` 工具。
     pub doc_mcp_url: Option<String>,
-    /// acowork-memory standalone process state (supervisor-managed, ADR-100).
+    /// acowork-memory standalone process state (supervisor-managed, ADR-101).
     ///
     /// Written by the memory supervisor once the process answers `/health`;
     /// `None` means the service was not started (`memory.enabled=false`), is
@@ -879,3 +879,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

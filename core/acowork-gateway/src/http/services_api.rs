@@ -109,7 +109,7 @@ pub struct ServicesDiagnoseResponse {
     pub embed: SubsystemSnapshot,
     pub pm: SubsystemSnapshot,
     pub doc: SubsystemSnapshot,
-    /// ADR-100: the standalone memory service (Gateway-spawned supervisor).
+    /// ADR-101: the standalone memory service (Gateway-spawned supervisor).
     pub memory: SubsystemSnapshot,
     pub nodes: NodesSnapshot,
     /// RFC 3339 UTC timestamp of this snapshot.
@@ -174,7 +174,7 @@ pub async fn diagnose_services(State(state): State<AppState>) -> Json<ServicesDi
         },
         None => not_running(),
     };
-    // ADR-100: the memory service is supervised exactly like doc, so its row
+    // ADR-101: the memory service is supervised exactly like doc, so its row
     // reuses the shape — a `running: false` row is what tells the panel the
     // `/api/memory/*` surface is currently 503.
     let memory = match gw.memory_process.as_ref() {
@@ -435,3 +435,4 @@ mod tests {
         assert!(!resp.nodes.items[0].has_lsp_relay);
     }
 }
+

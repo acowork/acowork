@@ -186,6 +186,7 @@ pub fn proxy_routes() -> Router<AppState> {
             put(proxy_put_session_workspace),
         )
         .route("/api/agents/{id}/latest-session", get(proxy_latest_session))
+        .route("/api/agents/{id}/token-stats", get(proxy_token_stats))
         .route(
             "/api/agents/{id}/sessions/{sid}/messages",
             get(proxy_get_messages).post(proxy_post_message),
@@ -218,7 +219,7 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/compress",
             post(proxy_post_session_compress),
         )
-        // ADR-100: the `/api/agents/{id}/memory/*` panel surface is no longer
+        // ADR-101: the `/api/agents/{id}/memory/*` panel surface is no longer
         // proxied here — the standalone memory service answers it, through
         // `crate::http::memory_proxy` (one catch-all, `instance_id` injected
         // from the path). Public paths and response shapes are unchanged.
@@ -803,6 +804,18 @@ async fn proxy_latest_session(
     headers: HeaderMap,
 ) -> Response {
     proxy_to_runtime(&state, &id, "/sessions/latest", "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/token-stats` to Runtime's `GET /sessions/token-stats`.
+///
+/// Per-model token statistics are read off the runtime's own SQLite
+/// aggregate — no Gateway-side filesystem access (redline unchanged).
+async fn proxy_token_stats(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_to_runtime(&state, &id, "/sessions/token-stats", "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/health` to Runtime's `GET /health`.
@@ -3491,3 +3504,4 @@ mod tests {
         assert_eq!(body_json["error"], "session_not_ready");
     }
 }
+

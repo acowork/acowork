@@ -2,14 +2,14 @@
 
 **定位**：Agent 私有 Memory 的存储 + 检索 + 离线蒸馏 + **独立服务进程** 双 crate 描述。
 
-- `acowork-memory`：记忆 trait / 类型 / 离线蒸馏 / 检索质量指标 **加上** SQLite 存储引擎（`src/sqlite/`）**加上** `acowork-memory` 服务进程（`src/main.rs` + `src/service/`，ADR-100）。
+- `acowork-memory`：记忆 trait / 类型 / 离线蒸馏 / 检索质量指标 **加上** SQLite 存储引擎（`src/sqlite/`）**加上** `acowork-memory` 服务进程（`src/main.rs` + `src/service/`，ADR-101）。
 - `acowork-sqlite`：仅保留仍属 Runtime 的两个旁路子系统——会话向量索引 `ConversationStore`（ADR-081）与 `SqliteSessionMetaStore`（ADR-082 §4 step 3）；两者都挂在已打开的 `SqliteStore` 上，并 re-export 该类型。
 
-**ADR-100 拆分了三件事**：
+**ADR-101 拆分了三件事**：
 
 1. **存储引擎上移**：`SqliteStore` / schema / hybrid retrieval / admin 实现从 `acowork-sqlite` 搬进 `acowork-memory::sqlite`。理由在服务二进制：二进制所在的 crate 必须能 link 一个具体后端，而后端 crate 不能反过来依赖它实现的 trait 所在 crate。`acowork-sqlite::SqliteStore` 作为 re-export 保留，旧调用方无需修改。
 2. **进程形态改变**：记忆不再是 Runtime 进程内能力，而是 Gateway supervisor 托管的独立进程 `acowork-memory`（默认 `127.0.0.1:18084`，一个进程服务所有实例）。每实例一库 `{data_dir}/instances/{instance_id}/memory.db`（`data_dir` 默认 `$HOME/.acowork/acowork-memory/`）。
-3. **Runtime 归零**：Runtime 不持 `Arc<dyn MemoryProvider>`，也不碰记忆库；写记忆只通过 MCP `memory_store` / `memory_recall`（经 Gateway `memory_proxy`），面板读只通过 REST 反代。`{workspace}/memory/private.sqlite` 仍作为 Runtime 侧 sessions / 会话索引的共享文件存在（ADR-082），但其中的记忆行已由 Node 一次性交接给服务并 DELETE（ADR-100 决策 10）。
+3. **Runtime 归零**：Runtime 不持 `Arc<dyn MemoryProvider>`，也不碰记忆库；写记忆只通过 MCP `memory_store` / `memory_recall`（经 Gateway `memory_proxy`），面板读只通过 REST 反代。`{workspace}/memory/private.sqlite` 仍作为 Runtime 侧 sessions / 会话索引的共享文件存在（ADR-082），但其中的记忆行已由 Node 一次性交接给服务并 DELETE（ADR-101 决策 10）。
 
 ---
 
@@ -23,7 +23,7 @@
 | 关系表达          | 关系是 `Knowledge(subtype=Relation)` 节点，不是图边；独立的 `edges` 表与 `graph_expand_*` / `create_memory_edge` API 已随 ADR-082 D4（triples-removed 起于 ADR-057）下线 |
 | Embedding          | 服务自持 OpenAI-compatible 客户端（`service/embedding.rs`），端点从 Gateway 全局资源快照解析（`service/resources.rs`）；库只存向量字节 |
 | 生命周期          | 启动 O(1)（无 WAL replay、无 BM25 rebuild），详见 ADR-082 §3                         |
-| 进程形态           | **独立二进制**（ADR-100）：axum 一路由同时供 REST（面板 + admin）与 MCP（`POST /mcp`）；由 Gateway supervisor spawn / 写 port-file / 重启 |
+| 进程形态           | **独立二进制**（ADR-101）：axum 一路由同时供 REST（面板 + admin）与 MCP（`POST /mcp`）；由 Gateway supervisor spawn / 写 port-file / 重启 |
 | Schema 演进       | `PRAGMA user_version` + 幂等迁移步，详见 ADR-082 D2                                  |
 | 隔离              | 按 **Agent 实例** 一库：`{data_dir}/instances/{instance_id}/memory.db`，id 是 ADR-073 的安装期不可变 UUID；请求不带可用 id 即 4xx，不存在跨实例路径 |
 
@@ -35,7 +35,7 @@
 
 ```
 crates/acowork-memory/
-├── Cargo.toml                # lib + [[bin]] acowork-memory（ADR-100）
+├── Cargo.toml                # lib + [[bin]] acowork-memory（ADR-101）
 └── src/
     ├── lib.rs                  # Pub re-exports of trait/types/store/service
     ├── main.rs                 # 服务进程入口：clap Cli → MemoryService::run
@@ -49,20 +49,20 @@ crates/acowork-memory/
     ├── types.rs                # Episode / KnowledgeNode / ProceduralNode
     │                           # AutobiographicalNode / MemoryQuery / SearchResult
     │                           # MemoryContext / DecayConfig / DecayScanResult ...
-    ├── wire.rs                 # 面板 wire 格式（服务与它取代的 Runtime 端点同形，ADR-100）
+    ├── wire.rs                 # 面板 wire 格式（服务与它取代的 Runtime 端点同形，ADR-101）
     ├── consolidation/
     │   ├── mod.rs              # EpisodicDistiller trait + SchedulerConfig
     │   └── distiller.rs        # DefaultEpisodicDistiller（LLM 蒸馏实现）
     ├── retrieval_metrics.rs    # 检索质量指标（Abstention / 冲突 / 去重维度评估）
-    ├── sqlite/                 # ← ADR-100：存储引擎从 acowork-sqlite 搬进来
+    ├── sqlite/                 # ← ADR-101：存储引擎从 acowork-sqlite 搬进来
     │   ├── mod.rs              # SqliteStore + 工厂 + 错误类型
     │   ├── schema.rs           # SCHEMA_SQL + SCHEMA_VERSION + MIGRATIONS + apply_migrations
     │   ├── provider.rs         # MemoryProvider / MemoryStore trait 实现
     │   ├── retrieval.rs        # hybrid_search / vector_search / text_search / RRF_K
     │   ├── admin.rs            # MemoryAdminService 实现
-    │   ├── legacy_import.rs    # ADR-100 决策 10：import_legacy_store / purge_memory_rows / has_sqlite_magic
+    │   ├── legacy_import.rs    # ADR-101 决策 10：import_legacy_store / purge_memory_rows / has_sqlite_magic
     │   └── tests.rs            # trait round-trip 断言（每类节点字段必现）
-    └── service/                # ADR-100 服务层（lib 之上的 additive）
+    └── service/                # ADR-101 服务层（lib 之上的 additive）
         ├── mod.rs              # 导出 Cli / MemoryService / MemoryServiceConfig / MemoryState
         ├── cli.rs              # 进程参数（端口 / data_dir / config / 日志）
         ├── config.rs           # `{data_dir}/config.toml`：蒸馏与遗忘调度的权威来源
@@ -78,7 +78,7 @@ crates/acowork-memory/
         └── resources.rs        # 从 Gateway `GET /api/global-resources` 拉 provider / embedding 快照
 ```
 
-> `session_meta.rs` 已从本 crate 移除（ADR-100）：类型与 `SessionMetaStore` trait 的
+> `session_meta.rs` 已从本 crate 移除（ADR-101）：类型与 `SessionMetaStore` trait 的
 > 权威定义在 `acowork-core::session_meta`，本 crate 只在旧路径上 re-export，以免
 > Runtime 为了拿到会话元数据而依赖记忆 crate。
 
@@ -91,12 +91,12 @@ crates/acowork-memory/
 - `consolidation/distiller.rs`：离线蒸馏 6 步流水线（ADR-068 §3.4），按 `MemoryProvider` 接口做写读；由 `service/pipeline.rs` 调度。
 - `retrieval_metrics.rs`：检索质量指标（见 §6）。
 - `quality.rs` / `keyword.rs` / `judge.rs`：蒸馏侧门控配置。
-- `sqlite/legacy_import.rs`：遗留库一次性交接的唯一写入入口（ADR-100 决策 10）。
+- `sqlite/legacy_import.rs`：遗留库一次性交接的唯一写入入口（ADR-101 决策 10）。
 - `service/`：进程、路由、鉴权后的实例命名空间、调度与外部依赖（LLM / embedding）解析。
 
 ### 2.2 `core/acowork-sqlite/`
 
-ADR-100 后本 crate 只剩 **两个仍属 Runtime 的旁路子系统**（存储引擎已上移到 `acowork-memory::sqlite`）：
+ADR-101 后本 crate 只剩 **两个仍属 Runtime 的旁路子系统**（存储引擎已上移到 `acowork-memory::sqlite`）：
 
 ```
 crates/acowork-sqlite/
@@ -113,7 +113,7 @@ tests/
 └── store_isolation.rs          # 同库不同 label 隔离（privacy 边界）
 ```
 
-两个旁路都以共享句柄包已打开的 store（`ConversationStore::from_store(Arc<SqliteStore>)`、`SqliteSessionMetaStore::new(Arc<SqliteStore>)`），所以 Runtime 侧的会话索引与 session 元数据仍共享同一个 `{workspace}/memory/private.sqlite`。记忆行不在里面了——它们经 Node 一次性上传后从本文件 DELETE（ADR-100 决策 10）。
+两个旁路都以共享句柄包已打开的 store（`ConversationStore::from_store(Arc<SqliteStore>)`、`SqliteSessionMetaStore::new(Arc<SqliteStore>)`），所以 Runtime 侧的会话索引与 session 元数据仍共享同一个 `{workspace}/memory/private.sqlite`。记忆行不在里面了——它们经 Node 一次性上传后从本文件 DELETE（ADR-101 决策 10）。
 
 ---
 
@@ -242,7 +242,7 @@ v3 存 **sum + count** 而非折叠好的均值：两个指标各自统计自己
 
 ## 5. SqliteStore —— MemoryProvider 实现
 
-> 类型的权威定义在 `acowork-memory::sqlite`（ADR-100）；`acowork_sqlite::SqliteStore` 是同
+> 类型的权威定义在 `acowork-memory::sqlite`（ADR-101）；`acowork_sqlite::SqliteStore` 是同
 > 一个类型的 re-export。本节里的工厂与 trait 实现均指前者。
 
 ### 5.1 工厂函数
@@ -264,7 +264,7 @@ SqliteStore::open_dim_agnostic(path: impl AsRef<Path>) -> Result<Self>
 
 - 单 `Connection`，外层 `Mutex` 保护。
 - ADR-082 工作负载前提：**一 agent 一库，零查询并发**；串行访问充分且简单。
-- ADR-100 保留了这层形状，但把请求方数量抬高了：一个服务进程要带所有实例，所以**不同实例之间真正
+- ADR-101 保留了这层形状，但把请求方数量抬高了：一个服务进程要带所有实例，所以**不同实例之间真正
   并行**（各自一个 `Arc<SqliteStore>`，存在 `service/state.rs` 的 `RwLock<HashMap<…>>` 里），而打在
   **同一**实例上的面板读、MCP 调用与蒸馏循环在该 store 的 mutex 上串行。一库一连接的选择是故意不改的
   ——变忙的是单实例内的争抢，不是全局。
@@ -328,14 +328,14 @@ pub enum Error {
 
 | 边界                    |     | 说明                                                                                  |
 | ---------------------- | --- | ------------------------------------------------------------------------------------- |
-| Runtime ↔ 记忆           | ↔   | **零边界**（ADR-100）：Runtime 不 `use acowork_memory::*`，也不持任何 store 句柄；写记忆只走 MCP `memory_store` / `memory_recall`            |
+| Runtime ↔ 记忆           | ↔   | **零边界**（ADR-101）：Runtime 不 `use acowork_memory::*`，也不持任何 store 句柄；写记忆只走 MCP `memory_store` / `memory_recall`            |
 | Desktop ↔ 面板数据      | ↔   | 只经 Gateway `memory_proxy`（面板路径 `/api/agents/{id}/memory/*` + 短路径 `/api/memory/*`）；Gateway 不打开实例库（ADR-009 §5） |
-| Gateway ↔ 服务进程      | ↔   | supervisor 只管生命周期：spawn / port-file / `/health` 探针 / 重启，并将 MCP 注入全局资源（ADR-100 决策 1、3）                    |
+| Gateway ↔ 服务进程      | ↔   | supervisor 只管生命周期：spawn / port-file / `/health` 探针 / 重启，并将 MCP 注入全局资源（ADR-101 决策 1、3）                    |
 | 服务 ↔ Embedding         | ↔   | 服务自持 OpenAI-compatible embedding 客户端（`service/embedding.rs`），端点从 Gateway 全局资源快照解析；库只存向量字节              |
 | Storage ↔ 服务数据目录  |     | 服务写 `{data_dir}/instances/{instance_id}/memory.db`（含 WAL/SHM）；Runtime 与 Gateway 都不直读该目录                              |
 | Runtime ↔ Workspace 库   |     | `{workspace}/memory/private.sqlite` 仍是 Runtime 的会话索引 + session 元数据所在（`open_dim_agnostic`），但已不含记忆行                  |
-| Cloning                  | ↔   | `acowork-node` 的 clone 仍拷 `private.sqlite` + `*.wal` + `*.shm` 三件套并 `purge_conversation_state()`（ADR-082 D5）；但 ADR-100 之后记忆不再随 workspace 目录走，**clone 不继承服务侧记忆**（见 ADR-100 §5 风险表） |
-| 遗留库交接               | ↔   | 仅 `acowork-node` 发起：读 `{workspace}/memory/private.sqlite` → `POST /api/memory/admin/import?instance_id=` → 导入成功才本地 DELETE（ADR-100 决策 10） |
+| Cloning                  | ↔   | `acowork-node` 的 clone 仍拷 `private.sqlite` + `*.wal` + `*.shm` 三件套并 `purge_conversation_state()`（ADR-082 D5）；但 ADR-101 之后记忆不再随 workspace 目录走，**clone 不继承服务侧记忆**（见 ADR-101 §5 风险表） |
+| 遗留库交接               | ↔   | 仅 `acowork-node` 发起：读 `{workspace}/memory/private.sqlite` → `POST /api/memory/admin/import?instance_id=` → 导入成功才本地 DELETE（ADR-101 决策 10） |
 | InboxAgent 测试         | ↔   | 集成测试用 `SqliteStore::open_in_memory()`，与生产代码同 trait、同路径                  |
 
 ---
@@ -351,7 +351,7 @@ pub enum Error {
 - ❌ `meta/*.json` 边车文件 —— SessionMeta 数据已迁移进 `sessions` 表。
 - ❌ `conversation_index.grafeo` / 独立 `conversation_index.sqlite` —— 全部进 `nodes` 统一表。
 
-ADR-100（记忆服务化）又下线了一批 —— 它们同样不应被重新引入：
+ADR-101（记忆服务化）又下线了一批 —— 它们同样不应被重新引入：
 
 - ❌ Runtime 内的记忆代码路径（`agent/loop_memory.rs`、`memory_store` / `memory_recall` 内置 tool、
   `Arc<dyn MemoryProvider>` 字段、`init_memory_store` / `retrieve_and_inject_memories`）。
@@ -361,6 +361,6 @@ ADR-100（记忆服务化）又下线了一批 —— 它们同样不应被重�
 - ❌ `acowork-runtime::http::global_search` 里的 memory scope（面板全局搜索直连 `/api/memory/search`）。
 - ❌ `PackageOptions` 的 5 个记忆子集开关（`include_episodes` / `include_private_knowledge` /
   `include_procedural` / `include_autobiographical` / `include_public_knowledge`）——打包一直排除
-  整个 `memory/` 目录，开关从未生效（ADR-100 决策 11）。
+  整个 `memory/` 目录，开关从未生效（ADR-101 决策 11）。
 - ❌ `edges` 表与 `SqliteStore` 上的 `edge_*` 方法 —— 目标里没有这张表，别按文档历史写法去 JOIN
   （关系走 `Knowledge(subtype=Relation)` 节点，见 §1）。

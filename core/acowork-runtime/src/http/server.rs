@@ -627,6 +627,11 @@ impl RuntimeHttpServer {
                 put(crate::http::session_control::put_session_workspace),
             )
             .route("/sessions/latest", get(get_latest_session))
+            // Agent-scoped per-model token statistics. Static segment —
+            // matchit gives `/sessions/token-stats` priority over the
+            // `/sessions/{sid}` param route, so it never shadows a real
+            // session id.
+            .route("/sessions/token-stats", get(get_token_stats))
             // NEW: panel-4 endpoint, merges meta.json + live state snapshot.
             .route(
                 "/sessions/{sid}",
@@ -1159,6 +1164,41 @@ async fn get_latest_session(
         "session_id": session_id,
         "title": title,
     })))
+}
+
+/// `GET /sessions/token-stats` — agent-scoped per-(provider, model)
+/// token aggregate, read off the SQLite `token_stats` derived index
+/// (O(#models), no session scan).
+///
+/// Readiness gate follows `get_latest_session` (ADR-085 D4): unfilled
+/// `session_metadata` slot → `503 session_not_ready` + `Retry-After: 2`.
+/// An agent with no statistics yet is a legitimate `200 {items:[]}`.
+///
+/// Note the measurement-scope difference against the legacy `context_usage.agent_total_*`
+/// push fields: this aggregate is decremented on session delete/prune (the
+/// diff transaction nets out removed rows' breakdowns), while the
+/// in-memory AtomicU64 counters never decrement. A lower token-stats
+/// total after deletions is expected, not drift — `consistent` only
+/// validates Σ(aggregate) == Σ(per-session breakdowns).
+///
+/// This is the backend for `GET /api/agents/{id}/token-stats` via Gateway proxy.
+async fn get_token_stats(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, SessionHttpError> {
+    let _scope = crate::http::session_control::scope_from_headers(&headers);
+
+    // ADR-085 D4: readiness gate — see `list_sessions` for the rationale.
+    let svc = state.session_metadata.lock().await;
+    let svc = svc.as_ref().ok_or_else(session_not_ready)?;
+    let resp = svc
+        .token_stats()
+        .await
+        .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(
+        serde_json::to_value(resp)
+            .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?,
+    ))
 }
 
 /// Query parameters for `GET /sessions/{sid}/messages`.
@@ -2393,8 +2433,6 @@ async fn put_agent_config(
         req.approval_timeout_secs,
         req.compression_ratio_threshold,
         req.session_language,
-        req.intent_idle_rotate_hours,
-        req.intent_handoff_max_tokens,
         req.chat_router_enabled,
         req.chat_router_model,
         req.chat_router_provider,
@@ -2529,7 +2567,7 @@ struct UpdateAgentConfigRequest {
     /// leave the on-disk value alone (partial PUT).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compression_ratio_threshold: Option<serde_json::Value>,
-    // ADR-100: `distiller_*` / `memory_forgetting_*` are intentionally not
+    // ADR-101: `distiller_*` / `memory_forgetting_*` are intentionally not
     // accepted here any more. Those knobs belong to the memory service, and the
     // fields no longer exist on `AgentConfig` — an older client that still
     // sends them is dropped by serde as an unknown field.
@@ -2541,15 +2579,6 @@ struct UpdateAgentConfigRequest {
     /// back to `UserProfile.language`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session_language: Option<serde_json::Value>,
-    /// Design 27 §2.1: T1 idle-rotation threshold in hours (1–72;
-    /// `0` disables T1). Absent = leave the on-disk value alone
-    /// (partial PUT); `null` = clear (fall back to default 24h).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    intent_idle_rotate_hours: Option<serde_json::Value>,
-    /// Design 27 §2.1: T2 handoff target token cap (500–4,000).
-    /// Absent = leave alone; `null` = clear (fall back to default 1,500).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    intent_handoff_max_tokens: Option<serde_json::Value>,
     /// ADR-099: Chat Router kill switch (`chat_router.enabled`).
     /// `true`/`false` overwrites the on-disk sub-field; absent = leave
     /// alone. The router re-reads `agent_config.json` every turn, so no
@@ -3922,9 +3951,9 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
+            model_usage: None,
         };
         crate::conversation::write_session_meta(&conversations_dir, &meta).unwrap();
 
@@ -4034,6 +4063,153 @@ mod tests {
         assert_eq!(body["messages"][2]["role"], "system");
 
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// `GET /sessions/token-stats` reads the agent-scoped per-model
+    /// aggregate off the SQLite `token_stats` derived index: an upserted
+    /// session's `model_usage` breakdown must show up in the response with
+    /// the consistency flag set, and an agent with no usage at all is a
+    /// legitimate empty 200 (not 404, not 503).
+    #[tokio::test]
+    async fn test_http_server_token_stats_endpoint() {
+        let temp_dir = std::env::temp_dir().join("acowork-test-runtime-http-token-stats");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let conversations_dir = temp_dir.join("conversations");
+        std::fs::create_dir_all(&conversations_dir).unwrap();
+
+        let snapshots: SharedSessionSnapshots =
+            std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let latest: SharedLatestSession = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let dispatch_tx: SharedDispatchSender = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let degraded_reasons: SharedDegradation =
+            std::sync::Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mqtt_client: SharedMqttClientSlot = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_metadata =
+            new_test_session_metadata(&temp_dir, snapshots.clone(), latest.clone());
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
+        let server = RuntimeHttpServer::start(
+            temp_dir.clone(),
+            temp_dir.clone(),
+            "com.test.agent".to_string(),
+            TEST_INSTANCE_ID.to_string(),
+            snapshots,
+            latest,
+            dispatch_tx,
+            degraded_reasons,
+            mqtt_client,
+            Arc::new(tokio::sync::Mutex::new(Some(session_metadata))),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_workspace_mutation(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_git_query(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_tools(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_agent_config(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(Some(new_test_attachment(
+                temp_dir.clone(),
+            )))),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            std::sync::Arc::new(std::sync::RwLock::new(None)),
+            std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            new_test_workspace_resolver(),
+            session_manager_slot,
+            std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
+        )
+        .await
+        .unwrap();
+
+        // No usage recorded yet → legitimate empty 200.
+        let url = format!("http://127.0.0.1:{}/sessions/token-stats", server.port);
+        let response = reqwest::get(&url).await.unwrap();
+        assert!(response.status().is_success());
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["items"].as_array().unwrap().len(), 0);
+        assert_eq!(body["consistent"], true);
+
+        // Upsert a session carrying a per-model breakdown — the store's
+        // diff transaction folds it into the aggregate in the same txn.
+        let mut usage = std::collections::BTreeMap::new();
+        usage.insert(
+            "openai|gpt-test".to_string(),
+            crate::conversation::ModelUsageEntry {
+                input: 1000,
+                output: 250,
+                cache_read: 40,
+                cache_write: 7,
+                cost: Some(0.05),
+            },
+        );
+        let meta = crate::conversation::SessionMeta {
+            version: 3,
+            session_id: "20260101_120000_tok".to_string(),
+            agent_id: "com.test.agent".to_string(),
+            created_at: "2026-01-01T12:00:00Z".to_string(),
+            last_active_at: "2026-01-01T12:00:01Z".to_string(),
+            message_count: 1,
+            model_usage: Some(usage),
+            ..test_session_meta_minimal()
+        };
+        crate::conversation::write_session_meta(&conversations_dir, &meta).unwrap();
+
+        let response = reqwest::get(&url).await.unwrap();
+        assert!(response.status().is_success());
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["consistent"], true);
+        let items = body["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["provider"], "openai");
+        assert_eq!(items[0]["model"], "gpt-test");
+        assert_eq!(items[0]["total_input"], 1000);
+        assert_eq!(items[0]["total_output"], 250);
+        assert_eq!(items[0]["total_cache_read"], 40);
+        assert_eq!(items[0]["total_cache_write"], 7);
+        assert_eq!(items[0]["total_cost"], 0.05);
+
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// Baseline `SessionMeta` fields tests never vary, so per-test literals
+    /// only spell out what they actually assert on.
+    fn test_session_meta_minimal() -> crate::conversation::SessionMeta {
+        crate::conversation::SessionMeta {
+            version: 3,
+            session_id: String::new(),
+            agent_id: "com.test.agent".to_string(),
+            created_at: "2026-01-01T12:00:00Z".to_string(),
+            user_id: None,
+            visibility: None,
+            title: None,
+            workspace_id: None,
+            model: None,
+            provider: None,
+            account_id: None,
+            reasoning_effort: None,
+            temperature: None,
+            context_window: None,
+            todos: None,
+            message_count: 0,
+            last_active_at: "2026-01-01T12:00:00Z".to_string(),
+            tokens: None,
+            llm_call_counter: None,
+            perf: None,
+            model_ratio: None,
+            last_compaction_offset: None,
+            corrupted: false,
+            chat_session_id: None,
+            model_usage: None,
+        }
     }
 
     /// `builtin_tools` because the request struct only declared that
@@ -6269,9 +6445,9 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
+            model_usage: None,
         };
         crate::conversation::write_session_meta(&temp_dir.join("conversations"), &meta).unwrap();
 
@@ -6999,9 +7175,9 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
+            model_usage: None,
         };
         write_session_meta(&temp_dir.join("conversations"), &meta).unwrap();
 
@@ -7330,3 +7506,5 @@ mod tests {
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 }
+
+

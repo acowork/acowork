@@ -45,7 +45,7 @@ const win = (id: string) => useChatSessionStore.getState().windows[id]!;
 const seqs = (rows: ChatMessageRow[]) => rows.map((r) => r.seq);
 
 beforeEach(() => {
-  useChatSessionStore.setState({ byAgent: {}, windows: {}, live: {}, sending: {}, draft: {} });
+  useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
   fetchMock.mockClear();
   vi.stubGlobal("fetch", fetchMock);
 });

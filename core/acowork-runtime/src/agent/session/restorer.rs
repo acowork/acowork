@@ -326,29 +326,15 @@ pub fn restore_history_from_jsonl(
             }
             "system" => {
                 pending_reasoning = None;
-                // Intent-rotation handoff notes (design 27 §4.1) are stored as
-                // `system` rows but must survive as model context after a
-                // cold restart — `ContextBuilder::build` strips every
-                // `MessageRole::System` history message, so replay the tagged
-                // handoff as a named User message instead. This mirrors the
-                // compaction marker and the live `SystemNotification` path
-                // (both delivered at User role to dodge providers that reject
-                // non-first system messages). Genuine system rows (agent
-                // identity / workspace context) keep their System role.
-                let is_handoff = entry
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("rotation_handoff"))
-                    .and_then(|v| v.as_bool())
-                    == Some(true);
+                // Genuine system rows (agent identity / workspace context) are
+                // replayed at System role. `ContextBuilder::build` strips them
+                // from the model context by design — they exist for the
+                // transcript. Legacy `rotation_handoff`-tagged rows from the
+                // retired intent-rotation mechanism fall into this same
+                // category and are no longer given special treatment.
                 messages.push(ChatMessage {
-                    role: if is_handoff {
-                        MessageRole::User
-                    } else {
-                        MessageRole::System
-                    },
+                    role: MessageRole::System,
                     content: entry.content.clone(),
-                    name: is_handoff.then(|| "intent_handoff".to_string()),
                     ..Default::default()
                 });
                 replayed += 1;
@@ -1329,14 +1315,13 @@ mod tests {
     }
 
     #[test]
-    fn restore_replays_rotation_handoff_as_user_message() {
-        // Design 27 §4.1: an intent-rotation handoff is stored as a `system`
-        // JSONL row, but `ContextBuilder::build` strips System history — so the
-        // restorer must replay the tagged row as a named User message (so it
-        // still reaches the model after a cold restart), while a genuine system
-        // row keeps its System role.
-        let work = temp_workdir("handoff-replay");
-        let session_id = "sess-handoff-replay";
+    fn restore_replays_system_rows_at_system_role() {
+        // System rows are transcript context, not model context: they replay
+        // with `MessageRole::System` (which `ContextBuilder::build` later
+        // strips) and never get promoted to a User turn. This also covers the
+        // retired rotation-handoff shape, whose tagged rows stay System.
+        let work = temp_workdir("system-replay");
+        let session_id = "sess-system-replay";
         let (session, _config_rx, _state_rx) = ConversationSession::new(
             &work,
             session_id,
@@ -1350,9 +1335,9 @@ mod tests {
             Arc::new(AtomicUsize::new(0)),
         )
         .unwrap();
-        // Genuine leading system context (identity) — must stay System.
+        // Genuine leading system context (identity).
         session.append_message("system", "identity context", None);
-        // Rotation handoff row (tagged via metadata, deterministic id).
+        // A historical handoff notice written by the retired mechanism.
         session.append_message_with_id(
             "system",
             "[intent rotation] previous session s-old rotated",
@@ -1370,11 +1355,9 @@ mod tests {
         assert_eq!(outcome.messages.len(), 3);
         assert!(matches!(outcome.messages[0].role, MessageRole::System));
         assert_eq!(outcome.messages[0].content, "identity context");
-        // The handoff replays at User role with the discriminator name.
-        assert!(matches!(outcome.messages[1].role, MessageRole::User));
-        assert_eq!(outcome.messages[1].name.as_deref(), Some("intent_handoff"));
-        assert!(outcome.messages[1].content.contains("[intent rotation]"));
-        // The genuine user message is untouched (no injected name).
+        assert!(matches!(outcome.messages[1].role, MessageRole::System));
+        assert_eq!(outcome.messages[1].name, None);
+        // The genuine user message stays a User turn.
         assert!(matches!(outcome.messages[2].role, MessageRole::User));
         assert_eq!(outcome.messages[2].content, "real question");
         assert_eq!(outcome.messages[2].name, None);

@@ -4,7 +4,7 @@
 //! The storage engine itself ([`SqliteStore`], its schema, the
 //! [`acowork_memory::MemoryProvider`] / [`acowork_memory::MemoryAdminService`]
 //! implementations and the hybrid retrieval engine) moved to
-//! `acowork_memory::sqlite` with ADR-100: the memory service binary is hosted by
+//! `acowork_memory::sqlite` with ADR-101: the memory service binary is hosted by
 //! that crate and has to link a concrete backend, and a backend crate cannot
 //! depend on the crate whose traits it implements. This crate keeps the two
 //! subsystems that are *not* memory and stay in the Runtime:
@@ -27,3 +27,4 @@ pub use acowork_memory::sqlite::{
 };
 pub use conversation::{ConversationHit, ConversationStore};
 pub use session_meta::SqliteSessionMetaStore;
+

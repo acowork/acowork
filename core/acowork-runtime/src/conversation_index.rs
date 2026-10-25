@@ -501,7 +501,7 @@ mod tests {
     use crate::conversation::ENTRY_KIND_COMPACTION;
 
     /// Embedding width used by the tests below (the bge-small-zh output).
-    /// ADR-100: the canonical constant lives in the memory service; the
+    /// ADR-101: the canonical constant lives in the memory service; the
     /// Runtime only needs a fixed width to size its own conversation index.
     const DEFAULT_EMBEDDING_DIM: usize = 384;
 
@@ -862,3 +862,4 @@ mod tests {
         );
     }
 }
+

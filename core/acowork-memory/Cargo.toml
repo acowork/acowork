@@ -5,14 +5,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-description = "MemoryProvider trait, shared memory types, the SQLite workspace store (ADR-082), and the standalone memory service (ADR-100)"
+description = "MemoryProvider trait, shared memory types, the SQLite workspace store (ADR-082), and the standalone memory service (ADR-101)"
 
 [lib]
 name = "acowork_memory"
 path = "src/lib.rs"
 
 # Standalone memory service process (spawned/supervised by the Gateway,
-# ADR-100 — same pattern as acowork-doc / acowork-pm / acowork-user).
+# ADR-101 — same pattern as acowork-doc / acowork-pm / acowork-user).
 [[bin]]
 name = "acowork-memory"
 path = "src/main.rs"
@@ -28,13 +28,13 @@ thiserror.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 
-# Service layer (ADR-100): HTTP server, CLI flags, TOML config file.
+# Service layer (ADR-101): HTTP server, CLI flags, TOML config file.
 axum.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 clap.workspace = true
 toml.workspace = true
-# Global-resources pull (ADR-100 decision 7): the Gateway topics are base64
+# Global-resources pull (ADR-101 decision 7): the Gateway topics are base64
 # `DataEnvelope` protobuf bytes over HTTP, identical to the MQTT wire format.
 base64.workspace = true
 prost.workspace = true
@@ -48,3 +48,4 @@ tokio.workspace = true
 expect-test.workspace = true
 # Drives the MCP router without binding a socket (`ServiceExt::oneshot`).
 tower.workspace = true
+

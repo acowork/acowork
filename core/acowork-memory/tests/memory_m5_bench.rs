@@ -1,7 +1,7 @@
 //! ADR-062 M5 (P2): keyword_index before/after retrieval benchmark.
 //!
 //! M4 (see `memory_m4_bench.rs`) verified D1 (Dormant exclusion) + D2
-//! (the pre-ADR-100 injection-path min_score fix). M5 verifies the
+//! (the pre-ADR-101 injection-path min_score fix). M5 verifies the
 //! keyword-index path (ADR-062 §6.2 — Plan Y): write-time folding of
 //! `metadata["keywords"]` into the BM25-indexed `object` field, gated by
 //! `quality.keyword_index`.
@@ -546,3 +546,4 @@ async fn m5_keyword_index_before_after() {
         before.r5
     );
 }
+

@@ -1,4 +1,4 @@
-//! OpenAI-compatible embedding client for the memory service (ADR-100).
+//! OpenAI-compatible embedding client for the memory service (ADR-101).
 //!
 //! The service needs outbound embedding calls at two moments, and they do not
 //! share a configuration:
@@ -388,3 +388,4 @@ mod tests {
         assert_eq!(c.timeout(), Duration::from_millis(1));
     }
 }
+

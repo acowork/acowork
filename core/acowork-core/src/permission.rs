@@ -23,7 +23,7 @@ enum PermissionTag {
     Network = 0,
     FilesystemRead = 1,
     FilesystemWrite = 2,
-    // Tags 3 and 4 are retired, not renumbered (ADR-100 moved memory behind a hosted
+    // Tags 3 and 4 are retired, not renumbered (ADR-101 moved memory behind a hosted
     // service, so no permission gates it any more). Leaving the gap in place keeps
     // every other tag at its historic byte value.
     IntentSend = 5,
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn memory_permissions_are_retired_not_parsed() {
-        // ADR-100: memory lives behind a hosted service now, so no permission gates it.
+        // ADR-101: memory lives behind a hosted service now, so no permission gates it.
         // A package that still declares `memory:*` has to fail loudly at parse time
         // instead of carrying a permission that nothing reads any more.
         for input in ["memory:read", "memory:write"] {
@@ -764,3 +764,4 @@ mod tests {
         assert_eq!(parsed, T::AutoApprove);
     }
 }
+

@@ -1,4 +1,4 @@
-//! Gateway global-resources client (ADR-100 decision 7).
+//! Gateway global-resources client (ADR-101 decision 7).
 //!
 //! The distiller and the embedding path both need credentials the memory
 //! process does not own: the LLM provider list (base URL + decrypted API key)
@@ -713,3 +713,4 @@ mod tests {
         );
     }
 }
+

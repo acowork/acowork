@@ -48,7 +48,7 @@ roadmap 上有一条：**把第三方开源 agent 运行时接入 Gateway，在 
 | F7 | 能力协商先例**只存在于 Node 层**：`NodeInfo.protocol_version` + `repeated capabilities` | proto:1256-1288（ADR-055 §6.9） |
 | F8 | **Agent 层没有能力字段**：`AgentMeta` 只有 agent_id/name/version/instance_id/node_id | proto:484-502 |
 | F9 | 引擎侧已有一处干净抽象可复用：`Provider` trait + `StreamEvent`（6 种） | [providers/traits.rs:714-748](../../../core/acowork-core/src/providers/traits.rs) |
-| F10 | 记忆已抽成**独立 MCP 服务**，外部进程可通过 MCP 使用 ACowork 记忆 | ADR-100 |
+| F10 | 记忆已抽成**独立 MCP 服务**，外部进程可通过 MCP 使用 ACowork 记忆 | ADR-101 |
 | F11 | 安装/执行同机是既定约束，引擎分发归属 Node | ADR-090 / ADR-091 |
 | F12 | Gateway 红线：不做业务事件转发（零业务）；Node 不得依赖 Gateway | [mqtt.md §7.3](../protocols/zh/mqtt.md)、`tests/dependency_redline` |
 | F13 | Runtime LOC 分布（量级指示）：`agent/` 46.3k、`tools/` 15.6k、`http/` 11.4k、`usecases/` 10.2k、`providers/` 7.7k、`startup/` 6.7k、`mqtt/` 4.8k、`security/` 4.0k、`debug/` 3.4k，总计 ≈13.3 万行 | `wc -l` 实测 |
@@ -299,7 +299,7 @@ ParamDef {
 |---|---|---|
 | `llm.complete/stream` + `llm.models` | loopback OpenAI-compatible 端点（复用 F9 Provider 层 + design 23）；`/v1/models` 即 REQ-03 "model 必选"的可选集来源 | API Key 不外泄；budget / rate-limit / 429 UX / 用量审计不旁路 |
 | `fs.grant` | workspace 路径授权（ADR-009 isolation） | 引擎不继承 Node 进程的全部文件可见性；REQ-03 的 workspace 边界由此保证 |
-| `mcp.endpoints` | 已授权 MCP 列表，**含 ADR-100 记忆 MCP** | 外部引擎"免费"获得 ACowork 记忆，无需实现我们的私有记忆协议 |
+| `mcp.endpoints` | 已授权 MCP 列表，**含 ADR-101 记忆 MCP** | 外部引擎"免费"获得 ACowork 记忆，无需实现我们的私有记忆协议 |
 
 > 记忆是本方案性价比最高的复用：引擎接记忆 = 接一个 MCP server，而不是接 ARP。
 
@@ -367,7 +367,7 @@ sequenceDiagram
 | ADR-085（lifecycle 状态机） | 直接复用；D1/D5/D10 沿用其 F2/Q2/D3 裁定；必选层缺失借 `FAILED + detail` 表达，**不新增状态** |
 | ADR-087（node/agent owner 门控） | 反向调用（`llm.*` / `fs.grant`）放行判定挂在 Host，门控来源不变 |
 | ADR-090 / ADR-091（install/spawn 同机） | D6 沿用；引擎作为 `package kind = engine` |
-| ADR-100（记忆独立 MCP 服务） | §6.5 `mcp.endpoints` 复用，外部引擎获得记忆能力的唯一路径 |
+| ADR-101（记忆独立 MCP 服务） | §6.5 `mcp.endpoints` 复用，外部引擎获得记忆能力的唯一路径 |
 | ADR-043（SessionConfig / SessionState 拆分） | T1C 必选面直接建立在这次拆分上——config 已经是"仅用户可配置项"的 retained 快照，无需新造 |
 | ADR-074（context window 三层解析链） | D14 的既有先例：配置分层与 schema 共存的模式已被验证 |
 | design 03 §9.1 RXT-01~06 | 本方案 = RXT 准则的**对外一层**；建议追加 RXT-07（引擎边界 EIP 与平台边界 ARP 不得混用） |
@@ -470,3 +470,4 @@ Android 仓库对上游的依赖痛点（无 tag、无发布、path 依赖、103
 |---|---|
 | v0.1 | 首版：ARP/EIP 两层拆分、T0–T3 分层、选项 A/B/C/D 对比（D 主干、C 否决）、D1–D9、S0–S5；开放问题 Q1–Q4 |
 | **v0.2** | **纳入四条核心诉求 REQ-01~04**（§1.2）。新增：§6.2 能力模型（权威二分 + 注册表条目结构 + 5 条校验规则 + 3 条裁定）、§6.3 必选配置面（三件套语义 + `ParamDef` schema）、§6.4 统一交互界面规则（U1/U2/U3）。ARP 分层新增 **T1C 必选配置面**；EIP 从 6 动作扩为 **9 动作**；新增事实 **F16/F17/F18**；新增决策 **D10–D14**；**Q3 关闭**（REQ-02 裁定），新增 **Q5/Q6**；§10 的 S1 扩为含 schema 驱动设置面板 + conformance 探针，S5 增加"零 `engine_kind` 分支"终局检验；§12 契约清单补 `AgentConfig` schema 化与 Desktop 去硬编码；§13 增加 REQ 追溯行 |
+

@@ -1,8 +1,8 @@
-﻿# Tool System（工具系统）
+# Tool System（工具系统）
 
 > 版本：v3.5 | 更新日期：2026-10-23
 
-> **v3.5 变更（已实施）**：`memory_recall` / `memory_store` 不再是内置工具——记忆已剥离为 Gateway 托管的独立服务 `acowork-memory`，Agent 侧以 MCP 工具 `mcp_memory__memory_recall` / `mcp_memory__memory_store` 访问（[ADR-100](../../adr/zh/ADR-100-memory-standalone-mcp-service.md)）。随之删除的还有 `memory:read` / `memory:write` 两个权限项，以及本文 §4 / §4.2.1 中描述的“主循环步骤② MemoryManager.retrieve() 自动注入”（auto-inject，ADR-100 决策 5）——记忆获取统一为工具主动调用。这些段落保留作历史设计记录，实际行为以 ADR-100 为准。
+> **v3.5 变更（已实施）**：`memory_recall` / `memory_store` 不再是内置工具——记忆已剥离为 Gateway 托管的独立服务 `acowork-memory`，Agent 侧以 MCP 工具 `mcp_memory__memory_recall` / `mcp_memory__memory_store` 访问（[ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)）。随之删除的还有 `memory:read` / `memory:write` 两个权限项，以及本文 §4 / §4.2.1 中描述的“主循环步骤② MemoryManager.retrieve() 自动注入”（auto-inject，ADR-101 决策 5）——记忆获取统一为工具主动调用。这些段落保留作历史设计记录，实际行为以 ADR-101 为准。
 
 ---
 
@@ -32,7 +32,7 @@ Tool Dispatcher
 **平台基础设施级工具定义：** 内置工具的范围仅限**平台基础设施级**——即调用开放协议（HTTP/DNS/文件系统/操作系统 API）或本地计算（WASM/Embedding），不依赖特定第三方服务的付费 API。SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置。
 | 工具名                 | 功能                             | 所需权限                  | 说明                                                                                                                                                                                                                      |
 | ---------------------- | -------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| ~~`memory_recall`~~        | ~~语义检索私有 SQLite 记忆层~~          | ~~`memory:read`~~          | **已迁移** — ADR-100：记忆已剥离为独立服务，该工具现为 Gateway 托管记忆 MCP 的 `mcp_memory__memory_recall`，无权限域，经 `agent_mcp_tools.json` 做工具级 opt-in（ADR-069） |
+| ~~`memory_recall`~~        | ~~语义检索私有 SQLite 记忆层~~          | ~~`memory:read`~~          | **已迁移** — ADR-101：记忆已剥离为独立服务，该工具现为 Gateway 托管记忆 MCP 的 `mcp_memory__memory_recall`，无权限域，经 `agent_mcp_tools.json` 做工具级 opt-in（ADR-069） |
 | ~~`memory_store`~~         | ~~写入私有 SQLite 记忆层~~              | ~~`memory:write`~~         | **已迁移** — 同上，现为 `mcp_memory__memory_store`；即时提取 / 五种类型 / importance / privacy 参数语义不变，只是调用通道改了 |
 | `http_request`         | HTTP 请求（GET/POST/PUT/DELETE） | `network:<url_pattern>`   | 支持 method 参数选择 HTTP 方法，JSON 响应自动解析，JSON body 和表单                                                                                                                                                       |
 | `web_fetch`            | 获取网页内容                     | `network:<url_pattern>`   | HTML → Markdown 转换，Agent 直接获得可读文本                                                                                                                                                                              |
@@ -117,7 +117,7 @@ name = "http_request"
 type = "builtin"
 permissions = ["network:https://api.weather.com"]
 
-# 记忆工具不再属于 builtin（ADR-100）：它由 Gateway 托管的 memory MCP 提供，
+# 记忆工具不再属于 builtin（ADR-101）：它由 Gateway 托管的 memory MCP 提供，
 # 工具级 opt-in 写在 `agent_mcp_tools.json`（`mcp_memory__memory_recall`，ADR-069），
 # manifest 里没有对应的 `[[tools]]` 条目，也没有 `memory:*` 权限可声明。
 
@@ -525,3 +525,4 @@ LLM 输出 tool_calls: [{name, arguments}, ...]
 | RAG 协议适配                              | ACowork 定义标准协议，企业 RAG 自适配                    | 不为各家 RAG 实现 adapter，企业侧确保其 RAG 服务兼容标准查询接口；遵循 PRD "纯对接，不托管"原则                                                                                                                         |
 | identity_store 专用工具                   | 新增第 14~15 个内置工具（identity_query + identity_observe） | 身份数据有专属语义（字段级 confidence、变更通知、结构化查询），memory_store 通用 Fact 节点无法自然承载；专用工具有扩展点（字段校验、敏感加密、跨设备同步优先级）；内部实现基于 MemoryManager store 接口，不绕过记忆架构 |
 | identity_store 仅系统 Agent 可用          | 权限 `identity:write`                                        | 系统 Agent 是身份数据唯一写入方；其他 Agent 通过 intent_send 汇报，由系统 Agent LLM 判断后写入                                                                                                                          |
+

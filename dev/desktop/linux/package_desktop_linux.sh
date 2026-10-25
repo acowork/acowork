@@ -130,7 +130,7 @@ else
     echo -e "${YELLOW}      Without it, /api/auth/*, /api/users/* and /api/user/* return 503.${NC}"
 fi
 
-# Bundle Memory service binary (sibling of acowork-gateway, ADR-100).
+# Bundle Memory service binary (sibling of acowork-gateway, ADR-101).
 # Mirrors the User service above: the Gateway supervisor locates it via
 # `current_exe().parent().join("acowork-memory")`; without this copy the
 # memory supervisor logs "acowork-memory binary not found" and the memory
@@ -148,3 +148,4 @@ fi
 
 cd "$DESKTOP_DIR"
 npm run tauri build
+

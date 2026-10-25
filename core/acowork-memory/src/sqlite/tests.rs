@@ -2100,3 +2100,4 @@ fn purge_conversation_state_is_a_noop_on_an_empty_store() {
     assert_eq!(purged, 0);
     assert_eq!(store.node_count_by_label(CONVERSATION_LABEL).unwrap(), 0);
 }
+

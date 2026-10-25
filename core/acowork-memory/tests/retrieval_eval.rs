@@ -14,7 +14,7 @@
 //!
 //! This harness seeds and scores **memory rows only**. The conversation scope is
 //! measured by `core/acowork-runtime/tests/retrieval_eval.rs`. The split follows
-//! ADR-100: the two engines are separate binaries with separate code paths, and
+//! ADR-101: the two engines are separate binaries with separate code paths, and
 //! neither test may reach into the other. A query whose ground truth is entirely
 //! in the other scope is skipped, not counted — crediting an engine with rows it
 //! was never given would move its numbers in the flattering direction.
@@ -485,3 +485,4 @@ mod harness_tests {
         ));
     }
 }
+

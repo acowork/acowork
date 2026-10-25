@@ -49,7 +49,7 @@ pub struct BuiltinToolInfo {
 /// and a const-time derivation would require `inventory` / linker
 /// tricks that are not worth their weight for a wizard checkbox list.
 ///
-/// Memory tools are absent by the same rule as `codebase` (ADR-100):
+/// Memory tools are absent by the same rule as `codebase` (ADR-101):
 /// `memory_store` / `memory_recall` are no longer built-ins — they are
 /// tools of the Gateway-hosted memory MCP server, opted in through
 /// `agent_mcp_tools.json` under their prefixed names (ADR-069), so a
@@ -64,7 +64,7 @@ pub const BUILTIN_TOOLS: &[BuiltinToolInfo] = &[
     BuiltinToolInfo { name: "http_request",    description: "Make raw HTTP requests",                                    group: Some("Network") },
     BuiltinToolInfo { name: "web_fetch",       description: "Fetch and extract readable content from web pages",        group: Some("Network") },
     BuiltinToolInfo { name: "intent_send",     description: "Send messages to other agents via the Intent router",      group: Some("Communication") },
-    BuiltinToolInfo { name: "chat_history_read", description: "Read Chat session (group / agent-agent) history you participate in", group: Some("Communication") },
+    BuiltinToolInfo { name: "chat_history_read", description: "Read the bound Chat session's history (user-agent / agent-agent / group chat)", group: Some("Communication") },
     BuiltinToolInfo { name: "ask_user_question", description: "Ask the user a structured multi-option question",        group: Some("Communication") },
     BuiltinToolInfo { name: "todo_write",      description: "Maintain a structured todo list for the task at hand",      group: Some("Workflow") },
     BuiltinToolInfo { name: "mcp_install",     description: "Install an MCP server into the agent's MCP config",        group: Some("MCP") },
@@ -101,15 +101,16 @@ mod tests {
 
     #[test]
     fn builtin_tool_catalog_excludes_service_owned_memory_tools() {
-        // ADR-100 moved memory out of the Runtime: `memory_store` /
+        // ADR-101 moved memory out of the Runtime: `memory_store` /
         // `memory_recall` are MCP tools of the hosted memory service and are
         // opted in per ADR-069 under their prefixed names
         // (`mcp_memory__memory_recall`), not as builtins.
         for name in ["memory_recall", "memory_store"] {
             assert!(
                 !BUILTIN_TOOLS.iter().any(|t| t.name == name),
-                "{name} must not be offered as a builtin tool (ADR-100)"
+                "{name} must not be offered as a builtin tool (ADR-101)"
             );
         }
     }
 }
+

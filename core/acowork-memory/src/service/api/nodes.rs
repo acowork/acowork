@@ -1,4 +1,4 @@
-//! Node CRUD, stats and graph routes (ADR-100 P1d).
+//! Node CRUD, stats and graph routes (ADR-101 P1d).
 //!
 //! Ports of `get_memory_nodes` / `create_memory_node` / `get_memory_node` /
 //! `update_memory_node` / `delete_memory_node` / `get_memory_stats` /
@@ -395,3 +395,4 @@ mod tests {
         assert_eq!(parse_node_id("42").unwrap(), 42);
     }
 }
+

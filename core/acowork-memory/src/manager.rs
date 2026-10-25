@@ -4,7 +4,7 @@
 //! 2. Record  - persist distilled episodes (via `record_distilled`)
 //!
 //! The former "Inject" phase — formatting a retrieved block for the system
-//! prompt, with its three per-category token budgets — died with ADR-100
+//! prompt, with its three per-category token budgets — died with ADR-101
 //! decision 5. Recall is a tool call now: the Agent asks, the tool handler in
 //! `crate::service::mcp::tools` formats the answer, and the result lands in the
 //! conversation as a tool result rather than a prompt section.
@@ -108,7 +108,7 @@ pub struct MemoryManagerConfig {
     /// The same type is used by the background scan (`EpisodicDecayConfig`),
     /// so scan-side and retrieval-side semantics can never drift apart.
     pub forgetting: EpisodicDecayConfig,
-    // ADR-100 decision 5: per-turn auto-injection is gone — recall is driven by
+    // ADR-101 decision 5: per-turn auto-injection is gone — recall is driven by
     // the agent calling the memory tools. That also removed the three injection
     // token budgets (`max_inject_tokens` / `max_autobio_core_tokens` /
     // `max_autobio_history_tokens`) and `record_async` (the knob of the deleted
@@ -199,7 +199,7 @@ pub struct RetrievedMemory {
 ///
 /// ADR-051 C4: RAG channel removed from MemoryManager — RAG retrieval is
 /// issued by the caller against its own provider and merged by score.
-/// ADR-100 decision 5: the injection/formatting phase is removed too; the
+/// ADR-101 decision 5: the injection/formatting phase is removed too; the
 /// recall tool handler owns the output format.
 pub struct MemoryManager {
     config: MemoryManagerConfig,
@@ -603,7 +603,7 @@ impl MemoryManager {
     // the memory service's tool handlers — go through them, never raw provider
     // methods.
     //
-    // ADR-100 decision 5 removed `retrieve_and_inject` together with the
+    // ADR-101 decision 5 removed `retrieve_and_inject` together with the
     // Runtime's per-turn auto-injection path: a recall is now a tool call the
     // agent makes, and its handler composes `retrieve` with its own formatting.
 
@@ -613,7 +613,7 @@ impl MemoryManager {
     /// `activation_count`. This tracks how often a procedure is actually
     /// used, feeding into confidence boosting (ADR-057 P1) and future
     /// activation-based retrieval ranking. Called by the recall tool so the
-    /// signal survives the removal of the auto-injection path (ADR-100).
+    /// signal survives the removal of the auto-injection path (ADR-101).
     pub(crate) fn activate_procedural_nodes(
         &self,
         provider: &dyn MemoryProvider,
@@ -864,3 +864,4 @@ mod tests {
         );
     }
 }
+

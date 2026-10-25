@@ -1,4 +1,4 @@
-//! acowork-memory shared service state (ADR-100).
+//! acowork-memory shared service state (ADR-101).
 //!
 //! The service is **multi-tenant by Agent instance**: every Agent instance owns
 //! one SQLite file, `{data_dir}/instances/{instance_id}/memory.db`, keyed by the
@@ -41,7 +41,7 @@ pub const INSTANCES_DIR_NAME: &str = "instances";
 /// The id comes from a request header / query parameter, so it is untrusted
 /// input on the path-construction route. Only `[A-Za-z0-9._-]` is admitted —
 /// which excludes `/` and `\` outright — and the `.`-leading / `..`-containing
-/// forms are rejected so no id can escape `{data_dir}/instances/` (ADR-100
+/// forms are rejected so no id can escape `{data_dir}/instances/` (ADR-101
 /// decision 3). A UUID v4 (the ADR-073 shape) always passes.
 pub fn validate_instance_id(id: &str) -> Result<()> {
     if id.is_empty() || id.len() > MAX_INSTANCE_ID_LEN {
@@ -529,3 +529,4 @@ mod tests {
         assert!(state.begin_rebuild("../escape").is_err());
     }
 }
+

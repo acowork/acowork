@@ -62,6 +62,100 @@ use crate::intent::gate::{
 };
 use crate::intent::delivery::{self, DeliveryContext};
 
+/// Longest execution-session id accepted in `for_execution_session`
+/// (ADR-100 D12). Session ids are short generated strings (`20261023_131156_a3bb7d`);
+/// the cap only keeps a pathological client value from travelling down the
+/// MQTT bus — a longer one is dropped and the turn routes the ordinary way.
+const MAX_PINNED_SESSION_ID_LEN: usize = 128;
+
+/// ADR-100 D12: ceilings on the two fields only an execution view's composer
+/// sends. A skill is *named*, never described, and an attachment list is ids
+/// plus metadata — and that list rides the MQTT envelope, which the Runtime
+/// size-caps on arrival. Clamped here so an oversized composer send is a
+/// readable 400 rather than a turn silently truncated downstream.
+const MAX_PINNED_COMMAND_LEN: usize = 128;
+const MAX_PINNED_ATTACHMENTS: usize = 32;
+const MAX_PINNED_ATTACHMENTS_JSON_LEN: usize = 32 * 1024;
+
+/// ADR-100 D12: is `id` an Agent participant of this Chat session?
+///
+/// A pinned turn sent from a group names its own executor, and the Gateway
+/// must not deliver on a bare claim: the instance has to be a participant of
+/// the very chat the message is filed in (its reply lands there, so a stranger
+/// would get a conversation it does not belong to). Legacy untyped rows skip
+/// the type check exactly as the write entry's §8.1 rule does — membership is
+/// still required, and a group whose participants were never typed must not
+/// become unsendable.
+fn is_agent_participant(session: &chat_client::SessionInfo, id: &str) -> bool {
+    session.participants.iter().any(|p| match p {
+        chat_client::ParticipantRef::Legacy(s) => s == id,
+        chat_client::ParticipantRef::Typed {
+            id: pid,
+            identity,
+        } => pid == id && identity.as_deref() != Some("human"),
+    })
+}
+
+/// Is `id` acceptable as a client-supplied Chat row id (ADR-100 D12)?
+/// Bounded and restricted to id characters: the value becomes the store's
+/// idempotency key and the mailbox key, so a hostile one must not be able to
+/// smuggle separators into either.
+fn is_valid_row_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Project the ADR-046 `AttachedItem` union of a pinned turn onto the labels
+/// the Chat row may carry (ADR-100 D12): a display name plus which arm of the
+/// union it came from, and nothing else.
+///
+/// This is deliberately not an attachment reference. An uploaded blob lives
+/// under a content hash in one Agent's `files/` dir and a workspace reference
+/// at a node-local path; the Chat store belongs to the user service, the
+/// Gateway never buffers attachment bytes (`/api/intents/chat-attachments/…`
+/// exists precisely so the Runtime streams them instead), and reading a node
+/// path from the Gateway fails the moment Gateway and Node sit on different
+/// hosts. So the chat shows that the human handed something to the task — the
+/// execution view remains the only place it can actually be opened.
+///
+/// An item with no displayable name is dropped rather than rendered as a
+/// blank chip: an unlabelled "attachment" is noise the reader cannot act on.
+fn exec_attachment_labels(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    items
+        .iter()
+        .filter_map(|item| {
+            // `filename` on the upload arms, `name` on the workspace ones —
+            // both are what the execution view already showed the user, so
+            // they are quoted as-is (the wire shape is camelCase per each
+            // variant's `rename_all`).
+            let label = item
+                .get("filename")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("name").and_then(|v| v.as_str()))
+                .filter(|s| !s.is_empty())
+                // Last resort: an item that sent only its path. The directory
+                // part is a node-local layout the chat cannot read, so this
+                // arm alone is trimmed to its last component — and a Windows
+                // path is the case a `/`-only split would silently miss.
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    let raw = item
+                        .get("absPath")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())?;
+                    Some(raw.rsplit(['/', '\\']).next().unwrap_or(raw).to_string())
+                })?;
+            Some(serde_json::json!({
+                "filename": label,
+                "kind": item.get("type").and_then(|v| v.as_str()).unwrap_or(""),
+            }))
+        })
+        .collect()
+}
+
 pub fn intent_routes() -> Router<AppState> {
     Router::new()
         .route("/api/intents", post(deliver_intent))
@@ -359,6 +453,7 @@ async fn dispatch_task(
         // `files/` dir — nothing to pin here (the chat row is written with
         // an empty attachment list too).
         chat_attachment_ids: Vec::new(),
+        for_execution_session: String::new(),
     };
     let outcome =
         delivery::wake_and_deliver(&ctx, &dreq, acowork_core::timeout_config::constants::INTENT_DEFAULT)
@@ -518,9 +613,12 @@ struct ChatAppendRequest {
     /// The agent instance writing the row — a participant of the session.
     pub from: String,
     pub chat_session_id: String,
-    /// `"interaction_request"` | `"system_notice"`. `agent_message` goes
-    /// through the response write-back, `user_message` through the human
-    /// surface — this relay exists for the two Runtime-owned kinds only.
+    /// `"interaction_request"` | `"system_notice"` | `"agent_message"`.
+    /// The first two are cards and turn pointers; `agent_message` is a
+    /// chat-bound execution session echoing a locally-composed turn's output
+    /// back to the chat it was started from (ADR-100 D9). A routed turn's
+    /// answer still goes through the response write-back; `user_message` stays
+    /// on the human surface — this relay exists for Runtime-owned kinds only.
     pub kind: String,
     #[serde(default)]
     pub to: String,
@@ -531,10 +629,41 @@ struct ChatAppendRequest {
     pub meta: serde_json::Value,
 }
 
+/// Kinds the Runtime may write through the chat-append relay (D4 same-source).
+/// Decision cards (§5.5.4), the terminal `agent_message` a chat-bound execution
+/// session echoes for a locally-composed turn (ADR-100 D9) — and `system_notice`
+/// only for legacy rows: since the ADR-100 revision no new dispatch/start/fallback
+/// notice is written, because intermediate milestones are runtime state, not
+/// history. `user_message` is never a Runtime-owned kind (the human surface
+/// writes it).
+fn chat_append_kind_allowed(kind: &str) -> bool {
+    matches!(kind, "interaction_request" | "system_notice" | "agent_message")
+}
+
+/// The mailbox request a Runtime-owned chat row closes, if any (ADR-100 D12).
+///
+/// Only a terminal `agent_message` answers anything, and it answers the request
+/// named in its own `meta.in_reply_to` — for a pinned turn that is the id of the
+/// human `user_message` the Gateway delivered, which is what makes the chat read
+/// as one round (§5.5.5). Two other rows ride this relay with an `in_reply_to`
+/// and must close nothing: a decision card points at the *execution-side*
+/// request id, not a chat row, and a resolution notice points at its own card.
+/// An echo with no `in_reply_to` is a locally-composed turn (D9), which never
+/// opened a request to answer.
+fn answered_request(kind: &str, meta: &serde_json::Value) -> Option<String> {
+    if kind != "agent_message" {
+        return None;
+    }
+    meta.get("in_reply_to")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// `POST /api/intents/chat-append` — the Runtime's chat-row relay
-/// (design 27 §5.5.4 / §5.5.5, plan 3.0). Cards and `turn_started`
-/// pointers are business facts, and §5.5.5 names the Runtime as their
-/// writer; the Chat store itself is loopback-only behind the Gateway's
+/// (design 27 §5.5.4, plan 3.0). Decision cards and the terminal echo of a
+/// locally-composed turn are business facts, and §5.5.5 names the Runtime
+/// as their writer; the Chat store itself is loopback-only behind the Gateway's
 /// system surface. Same-source discipline as the §5.5.1 write-back: the
 /// Runtime never talks to the user service directly. Identity follows
 /// D4 — the node token must attribute `from`; the body is not trusted.
@@ -544,9 +673,9 @@ async fn chat_append(
     Json(req): Json<ChatAppendRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     verify_sender_identity(&state, &headers, &req.from).await?;
-    if !matches!(req.kind.as_str(), "interaction_request" | "system_notice") {
+    if !chat_append_kind_allowed(&req.kind) {
         return Err(ApiError::unprocessable_entity(
-            "chat-append accepts interaction_request and system_notice only",
+            "chat-append accepts interaction_request, system_notice and agent_message only",
         ));
     }
     if req.meta.get("message_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
@@ -568,6 +697,11 @@ async fn chat_append(
             "writer is not a participant of the chat session",
         ));
     }
+    // ADR-100 D12: the terminal echo of a pinned turn is the answer the mailbox
+    // is still waiting for — capture the coordinate before `meta` moves into the
+    // append. It is what closes the request the Gateway opened when it delivered
+    // the human's `user_message`.
+    let answers_request = answered_request(&req.kind, &req.meta);
     chat_client::append_message(
         port,
         &req.chat_session_id,
@@ -582,6 +716,19 @@ async fn chat_append(
     )
     .await
     .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    // §7.1: close the request only now that the answer is on the surface — the
+    // same ordering discipline as the Intent write-back, which learned that
+    // closing before the append inverts the failure mode into a turn that never
+    // ends. A pinned turn has no write-back (the Agent skipped the router, so
+    // there is no request to answer), and without this its mailbox entry would
+    // stay open until the sweeper filed a "no answer will arrive" receipt
+    // beside a chat that already read the real one.
+    if let Some(reply_to) = answers_request {
+        let gw = state.gateway_state.read().await;
+        if let Some(mb) = gw.intent_mailbox.as_deref() {
+            let _ = mb.mark_answered(&reply_to);
+        }
+    }
     Ok(Json(serde_json::json!({ "status": "ok" })))
 }
 
@@ -865,6 +1012,7 @@ async fn deliver_intent(
         status: String::new(),
         has_human,
         chat_attachment_ids: Vec::new(),
+        for_execution_session: String::new(),
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -893,8 +1041,7 @@ async fn deliver_intent(
 /// physical session id (agent-private state, ADR-009) — it forwards the
 /// registry key to the target's Runtime, which closes and unmaps it.
 /// Idempotent; an unreachable Runtime is reported, not retried (the next
-/// dispatch on a dead mapping already self-heals, and T1/T2 rotation
-/// bounds the residue).
+/// dispatch on a dead mapping already self-heals).
 #[derive(Debug, Deserialize)]
 struct TaskCloseRequest {
     project_id: String,
@@ -1116,11 +1263,10 @@ async fn deliver_response(
     // §7.1/§13-12: close the request against the fallback sweeper once the
     // answer is actually on the Chat surface. Closing it *before* the append
     // inverted the failure mode: an append that then failed left a closed
-    // request with no terminal row — an orphaned `turn_started` pointer whose
-    // round never ends for the user, with nobody left to repair it. Leaving
-    // it open costs at most one sweeper tick — and only an append slower
-    // than the sweep interval could interleave with it at all, whereas an
-    // orphan never heals by itself.
+    // request with no terminal row — a turn that never ends for the user, with
+    // nobody left to repair it. Leaving it open costs at most one sweeper tick
+    // — and only an append slower than the sweep interval could interleave with
+    // it at all, whereas an orphan never heals by itself.
     if chat_append_error.is_none()
         && let Some(mb) = mailbox.as_deref()
     {
@@ -1191,6 +1337,7 @@ async fn deliver_response(
         // Same session the request was bound to — reuse its fact.
         has_human: entry.has_human,
         chat_attachment_ids: Vec::new(),
+        for_execution_session: String::new(),
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -1411,6 +1558,10 @@ async fn deliver_mentions(
             // Forward the attachment ids so the Runtime pulls the bytes
             // against the shared row (`in_reply_to` = `row_id`).
             chat_attachment_ids: req.attachment_ids.clone(),
+            // Group fan-out stays with the router: which of the mentioned
+            // agents owns which execution session is not something the
+            // Gateway can attribute to a single id (ADR-100 D12).
+            for_execution_session: String::new(),
         };
         let outcome = delivery::wake_and_deliver(
             &ctx,
@@ -1466,6 +1617,46 @@ pub struct ChatMessageRequest {
     /// chat-attachment path). Empty = a plain text message.
     #[serde(default)]
     pub attachment_ids: Vec<String>,
+    /// Design 27 §5.5.5 / ADR-100 D12: deliver this turn straight to the
+    /// named execution session instead of letting the receiving agent's Chat
+    /// Router pick one. Set by an execution view's composer, where the human
+    /// already knows which task they are talking to. Advisory — a session
+    /// that is not loaded falls back to the ordinary route, so a stale id
+    /// costs a hop, never the message. Ignored on the card-answer path.
+    #[serde(default)]
+    pub for_execution_session: Option<String>,
+    /// Client-supplied row id (ADR-100 D12). An execution view's composer
+    /// already minted an id for the bubble it shows optimistically, and the
+    /// SAME id lands on the execution session's JSONL row once the Intent
+    /// runs — pinning it here is what lets the two surfaces settle on one
+    /// bubble instead of two. Empty = the Gateway generates one, which is
+    /// what the Chat surface's own composer does.
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// ADR-100 D12: the per-turn skill *name* the execution composer selected
+    /// (the Runtime resolves it against the agent's `SkillRegistry` — client
+    /// supplied instructions are never trusted). Honored only with a pin: a
+    /// routed turn is consumed as an Intent, which has no skill arm.
+    #[serde(default)]
+    pub command: String,
+    /// ADR-100 D12: the ADR-046 `AttachedItem` union the execution composer
+    /// carried — uploaded blobs (a content-hash `documentId` into this
+    /// Agent's `files/`) and workspace references (a node-local `absPath`).
+    /// Forwarded verbatim to a pinned turn so it loses no capability the same
+    /// send had against `POST /sessions/{sid}/messages`; the bytes are never
+    /// copied into the Chat store. Honored only with a pin.
+    #[serde(default)]
+    pub attached_items: Vec<serde_json::Value>,
+    /// ADR-100 D12: the Agent instance that owns the pinned execution session.
+    /// Only consulted for a pinned send into a GROUP chat, where there is no
+    /// single agent participant to fall back to and no card to read the answer
+    /// target off. Never trusted: it must name an Agent participant of this
+    /// session (see [`is_agent_participant`]), and the receiving Runtime still
+    /// validates that the named session is bound to this chat. Empty / a 1:1
+    /// chat = the Gateway resolves the target from the session's participants as
+    /// before.
+    #[serde(default)]
+    pub pinned_agent: String,
 }
 
 /// §5.5.4 answer channel: the Runtime resolve endpoint and body a card
@@ -1678,7 +1869,85 @@ async fn deliver_chat_message(
             "chat message sender must match the authenticated user",
         ));
     }
-    if req.text.trim().is_empty() && req.attachment_ids.is_empty() {
+    // ── ADR-100 D12: the execution composer's own turn facts ──────────
+    //
+    // Normalized BEFORE the content gate below, because what the human sent is
+    // not what this turn will deliver: an un-pinned request loses `command` and
+    // `attached_items` outright, and a pinned one keeps only the items that have
+    // a displayable name. Gating on the raw request would accept a send the Chat
+    // store then refuses — a request-shape error surfacing as a 503, with the
+    // turn never delivered and the chat left holding a head row that never
+    // existed.
+    //
+    // The pin itself the Gateway cannot verify — which session is bound to which
+    // chat is the Runtime's private fact — so it stays a hint the receiving
+    // Runtime validates against the session's own binding (see
+    // `deliver_pinned_turn`): an unloaded or misbound pin falls back to the
+    // ordinary route, so a stale id costs a hop, never the message.
+    let for_execution_session = req
+        .for_execution_session
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= MAX_PINNED_SESSION_ID_LEN)
+        .unwrap_or_default()
+        .to_string();
+    // The two execution-composer fields mean nothing without a pin: a routed
+    // turn is consumed as an `Intent`, which has neither a skill arm nor an
+    // attachment one, so accepting them on that path would show the chat a
+    // chip the Agent never received. Dropped to empty instead of rejected —
+    // the text of the turn is still exactly what the human wrote, and an
+    // unpinning client's overshoot is not this turn's business.
+    let pinned = !for_execution_session.is_empty();
+    let command = if pinned {
+        let command = req.command.trim();
+        if command.chars().count() > MAX_PINNED_COMMAND_LEN {
+            return Err(ApiError::bad_request(
+                "command must be at most 128 chars — a skill name, not instructions",
+            ));
+        }
+        command.to_string()
+    } else {
+        String::new()
+    };
+    let attached_items: Vec<serde_json::Value> = if pinned {
+        if req.attached_items.len() > MAX_PINNED_ATTACHMENTS {
+            return Err(ApiError::bad_request(&format!(
+                "attached_items accepts at most {MAX_PINNED_ATTACHMENTS} entries"
+            )));
+        }
+        let attached_json = serde_json::to_string(&req.attached_items).unwrap_or_default();
+        if attached_json.len() > MAX_PINNED_ATTACHMENTS_JSON_LEN {
+            return Err(ApiError::bad_request(
+                "attached_items payload is too large — attach files to the chat session instead",
+            ));
+        }
+        // Validate the ADR-046 union here rather than letting the Runtime drop
+        // what it cannot parse: the Chat row's labels are projected from THIS
+        // list, so an entry the Agent would silently discard must never reach
+        // the transcript as evidence of something that was never delivered.
+        // One check on each side, one agreed set of items.
+        for item in &req.attached_items {
+            serde_json::from_value::<acowork_core::protocol::AttachedItem>(item.clone())
+                .map_err(|e| {
+                    ApiError::bad_request(&format!(
+                        "attached_items contains an entry the Runtime could not read: {e}"
+                    ))
+                })?;
+        }
+        req.attached_items.clone()
+    } else {
+        Vec::new()
+    };
+    // A display-only projection for the Chat row (see
+    // [`exec_attachment_labels`]). The execution session stays the attachment's
+    // only home and the chat records only that something was attached.
+    let exec_attachments = exec_attachment_labels(&attached_items);
+    // Content gate — the same three proofs the Chat store accepts (§4.2:
+    // `body` / `attachments` / `meta.exec_attachments`), computed from what this
+    // turn actually carries. An execution composer may legitimately hand the
+    // task a file and say nothing, so a label-only row is content, not an empty
+    // send.
+    if req.text.trim().is_empty() && req.attachment_ids.is_empty() && exec_attachments.is_empty() {
         return Err(ApiError::bad_request(
             "a chat message needs text or an attachment",
         ));
@@ -1723,23 +1992,44 @@ async fn deliver_chat_message(
         // chat write entry; @-fan-out goes to `/api/intents/mentions`.
         "project_group" | "user_group" => {
             if req.in_reply_to.is_empty() {
-                return Err(ApiError::bad_request(
-                    "chat-message in a group answers a card only; plain group messages post to /api/chat-sessions/{id}/messages and @-fan-out goes to /api/intents/mentions",
-                ));
+                // ADR-100 D12: a PINNED turn names its own executor, so the
+                // question a card exists to settle — which agent answers this —
+                // is already settled by the execution view the human is standing
+                // in. An execution session legitimately binds to a project group
+                // (a PM task dispatched from it, ADR-099), so refusing every
+                // group send would break exactly that follow-up. The claim is
+                // checked, never trusted: the instance must be an Agent
+                // participant of this chat, and the receiving Runtime still has
+                // to find that session bound to this chat before it takes the
+                // turn. A group message with no pin and no card still has no
+                // target, so it keeps failing here.
+                let claimed = req.pinned_agent.trim();
+                if !pinned || claimed.is_empty() {
+                    return Err(ApiError::bad_request(
+                        "chat-message in a group answers a card only; plain group messages post to /api/chat-sessions/{id}/messages and @-fan-out goes to /api/intents/mentions",
+                    ));
+                }
+                if !is_agent_participant(&session, claimed) {
+                    return Err(ApiError::forbidden(
+                        "the pinned turn names an instance that is not an agent participant of this chat",
+                    ));
+                }
+                claimed.to_string()
+            } else {
+                let card = chat_client::message_by_id(port, &req.chat_session_id, &req.from_user, &req.in_reply_to)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|c| c["kind"].as_str() == Some("interaction_request"))
+                    .ok_or_else(|| {
+                        ApiError::bad_request("group answer must reply to an interaction_request card in this session")
+                    })?;
+                card["from"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| ApiError::bad_request("the answered card names no agent"))?
             }
-            let card = chat_client::message_by_id(port, &req.chat_session_id, &req.from_user, &req.in_reply_to)
-                .await
-                .ok()
-                .flatten()
-                .filter(|c| c["kind"].as_str() == Some("interaction_request"))
-                .ok_or_else(|| {
-                    ApiError::bad_request("group answer must reply to an interaction_request card in this session")
-                })?;
-            card["from"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .ok_or_else(|| ApiError::bad_request("the answered card names no agent"))?
         }
         other => {
             return Err(ApiError::bad_request(&format!(
@@ -1758,10 +2048,27 @@ async fn deliver_chat_message(
     // mailbox entry and the write-back share one coordinate. The row is
     // the durable record of a card answer too — resolution is derived
     // from it, never from a second write (§5.5.4).
-    let message_id = uuid::Uuid::new_v4().to_string();
+    //
+    // ADR-100 D12: an execution view supplies its own id so the bubble it
+    // already rendered reconciles with this row (and with the execution
+    // session's copy of the same message) instead of duplicating.
+    let message_id = match req.message_id.as_deref().map(str::trim) {
+        // Absent (or an empty string) = the Chat surface's own path.
+        None | Some("") => uuid::Uuid::new_v4().to_string(),
+        Some(id) if is_valid_row_id(id) => id.to_string(),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "message_id must be 1-64 chars of [A-Za-z0-9_-]",
+            ));
+        }
+    };
+    // ADR-100 D12: `for_execution_session` / `pinned` / `command` /
+    // `attached_items` / `exec_attachments` were normalized above, ahead of the
+    // content gate, so the row and the delivery describe one and the same turn.
     let meta = serde_json::json!({
         "message_id": message_id,
         "in_reply_to": req.in_reply_to,
+        "exec_attachments": exec_attachments,
     });
     if let Err(e) = chat_client::append_message(
         port,
@@ -1818,6 +2125,7 @@ async fn deliver_chat_message(
     // `conversation_id` stays empty: 1:1 continuity lives in the Chat
     // session itself — `routing_key` maps `chat:{session}` onto one
     // execution session (§5.4.4 轮转对单聊生效).
+    //
     let dreq = delivery::DeliveryRequest {
         message_id: message_id.clone(),
         conversation_id: String::new(),
@@ -1829,6 +2137,12 @@ async fn deliver_chat_message(
             "message": req.text,
             "chat_attachment_ids": req.attachment_ids,
             "chat_kind": session.kind,
+            // ADR-100 D12: the execution composer's own turn facts, forwarded
+            // verbatim so a pinned turn is indistinguishable from the same
+            // send made against the execution surface's write endpoint. Empty
+            // / absent unless this turn is pinned (see above).
+            "command": command,
+            "attached_items": attached_items,
         }).to_string(),
         source_chat_session_id: req.chat_session_id.clone(),
         repo: repo.clone(),
@@ -1842,6 +2156,9 @@ async fn deliver_chat_message(
         status: String::new(),
         has_human: Some(true),
         chat_attachment_ids: req.attachment_ids.clone(),
+        // ADR-100 D12: the human typed this while standing in one execution
+        // session's own view, so "who answers it" is already settled.
+        for_execution_session,
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -1881,6 +2198,12 @@ async fn intent_status(
         "created_at": entry.created_at,
         "delivered_at": entry.delivered_at,
         "delivered": entry.delivered(),
+        // ADR-100 D12: `delivered` alone cannot tell a closed round from one
+        // the sweeper still owes a receipt for. A pinned turn has no Intent
+        // write-back, so its answer arrives as a chat row and this is the only
+        // place an operator can see the request was really answered.
+        "answered": entry.answered(),
+        "answered_at": entry.answered_at,
     })))
 }
 
@@ -1932,6 +2255,97 @@ async fn intent_enforce_permissions(state: &AppState) -> bool {
 #[cfg(test)]
 mod card_answer_tests {
     use super::*;
+
+    /// ADR-100 D12: which Runtime-owned chat row closes a pending mailbox
+    /// request. The pinned turn has no Intent write-back, so this is the ONLY
+    /// thing that keeps §7.1's sweeper from filing a "no answer will arrive"
+    /// receipt beside a chat that already read the real answer — and the only
+    /// thing that keeps a card's execution-side request id (which is not a chat
+    /// row at all) from being mistaken for one.
+    #[test]
+    fn only_the_pinned_echo_closes_a_pending_request() {
+        let pinned = serde_json::json!({
+            "message_id": "exec:m-1",
+            "sender_session_id": "s-1",
+            "status": "completed",
+            "in_reply_to": "m-1",
+        });
+        assert_eq!(
+            answered_request("agent_message", &pinned).as_deref(),
+            Some("m-1"),
+            "the echo of a pinned turn answers the human's row"
+        );
+        let card = serde_json::json!({
+            "message_id": "c-1",
+            "in_reply_to": "approval-9",
+            "interaction": { "kind": "approval", "request_id": "approval-9" },
+        });
+        assert_eq!(
+            answered_request("interaction_request", &card),
+            None,
+            "a card coordinate is not a chat request"
+        );
+        let standalone = serde_json::json!({ "message_id": "exec:m-2", "status": "completed" });
+        assert_eq!(
+            answered_request("agent_message", &standalone),
+            None,
+            "a D9 local turn opened no request to close"
+        );
+        let blank = serde_json::json!({ "message_id": "n-1", "in_reply_to": "" });
+        assert_eq!(answered_request("agent_message", &blank), None);
+        assert_eq!(answered_request("agent_message", &serde_json::json!({})), None);
+    }
+
+    /// ADR-100 D12: a pinned send into a group names its own executor, and that
+    /// claim is checked against the chat's participants — a reply would otherwise
+    /// be written into a conversation the named instance is not part of.
+    #[test]
+    fn a_pinned_group_send_may_name_only_an_agent_participant() {
+        let session = chat_client::SessionInfo {
+            session_id: "grp-1".into(),
+            kind: "project_group".into(),
+            participants: vec![
+                chat_client::ParticipantRef::Typed {
+                    id: "u-1".into(),
+                    identity: Some("human".into()),
+                },
+                chat_client::ParticipantRef::Typed {
+                    id: "agent-a".into(),
+                    identity: Some("agent".into()),
+                },
+                chat_client::ParticipantRef::Legacy("agent-legacy".into()),
+            ],
+            repo: None,
+        };
+        assert!(is_agent_participant(&session, "agent-a"));
+        assert!(
+            !is_agent_participant(&session, "u-1"),
+            "a human participant cannot be the executor of a turn"
+        );
+        assert!(
+            is_agent_participant(&session, "agent-legacy"),
+            "rows written before §8.1 carry no type — membership still governs"
+        );
+        assert!(
+            !is_agent_participant(&session, "agent-stranger"),
+            "an instance outside this chat is never a target"
+        );
+    }
+
+    #[test]
+    fn chat_append_kind_whitelist_includes_continuation_echo() {
+        // ADR-100 D9: the Runtime writes a continuation echo as a standalone
+        // `agent_message` through chat-append. If this kind is dropped from
+        // the whitelist the echo silently 422s at the boundary (logged, never
+        // fatal) and the chat stops at the abort — the exact regression this
+        // guards. Cards / pointers stay accepted; a human-speech `user_message`
+        // must never be Runtime-writable.
+        assert!(chat_append_kind_allowed("agent_message"));
+        assert!(chat_append_kind_allowed("system_notice"));
+        assert!(chat_append_kind_allowed("interaction_request"));
+        assert!(!chat_append_kind_allowed("user_message"));
+        assert!(!chat_append_kind_allowed("intent_request"));
+    }
 
     /// ADR-099: a page over the byte budget loses its OLDEST rows, never its
     /// newest. The Chat Router reads the tail window to decide where a message
@@ -2016,5 +2430,74 @@ mod card_answer_tests {
         assert!(is_affirmative("同意"));
         assert!(!is_affirmative("reject"));
         assert!(!is_affirmative(""));
+    }
+
+    // ── ADR-100 D12: a turn pinned to one execution session ──────────
+
+    #[test]
+    fn a_client_row_id_must_be_a_bounded_id_and_nothing_else() {
+        // The id becomes the store's idempotency key and the coordinate the
+        // execution session and the optimistic bubble reconcile on. Anything
+        // outside the id charset is rejected rather than stored.
+        assert!(is_valid_row_id("0f3a-1_b"));
+        assert!(!is_valid_row_id(""), "empty means the Gateway generates one");
+        assert!(!is_valid_row_id("row/../../etc"));
+        assert!(!is_valid_row_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn attachment_labels_carry_a_basename_never_a_path() {
+        // Both union arms are named: an uploaded blob by `filename`, a
+        // workspace reference by its path alone when nothing better was sent.
+        // That path is reduced to its last component — the chat must not
+        // publish a node-local filesystem layout to a surface that cannot read
+        // it, and a Windows path is the case a `/`-only split would silently
+        // miss.
+        let items = vec![
+            serde_json::json!({"type": "file_upload", "filename": "report.pdf", "documentId": "ab12cd34ef56-1"}),
+            serde_json::json!({"type": "attached_file", "absPath": "C:\\work\\src\\main.rs"}),
+        ];
+        let labels = exec_attachment_labels(&items);
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0]["filename"], "report.pdf");
+        assert_eq!(labels[0]["kind"], "file_upload");
+        assert_eq!(labels[1]["filename"], "main.rs");
+        assert_eq!(labels[1]["kind"], "attached_file");
+        // Neither the blob id nor the path survived, which is the whole point.
+        let rendered = serde_json::to_string(&labels).unwrap();
+        assert!(!rendered.contains("ab12cd34ef56-1"));
+        assert!(!rendered.contains("work"));
+    }
+
+    #[test]
+    fn a_workspace_attachment_is_labelled_by_its_display_name() {
+        // The workspace arms carry a `name` the execution view already shows
+        // the user — a workspace-relative path, which is display text, not a
+        // node-local layout, so it is quoted whole instead of trimmed.
+        let items = vec![serde_json::json!({
+            "type": "attached_selection",
+            "name": "src/lib.rs",
+            "absPath": "C:\\work\\project\\src\\lib.rs",
+        })];
+        let labels = exec_attachment_labels(&items);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0]["filename"], "src/lib.rs");
+        assert_eq!(labels[0]["kind"], "attached_selection");
+        let rendered = serde_json::to_string(&labels).unwrap();
+        assert!(!rendered.contains("work"));
+    }
+
+    #[test]
+    fn an_unnamable_attachment_is_dropped_not_rendered_blank() {
+        // A chip with no label is noise the reader cannot act on, and one
+        // empty name would otherwise occupy a slot the human counts on.
+        let items = vec![
+            serde_json::json!({"type": "file_upload", "filename": ""}),
+            serde_json::json!({"type": "attached_folder", "absPath": "/srv/project"}),
+            serde_json::json!({"type": "image_upload"}),
+        ];
+        let labels = exec_attachment_labels(&items);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0]["filename"], "project");
     }
 }

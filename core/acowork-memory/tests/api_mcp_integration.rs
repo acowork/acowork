@@ -1,4 +1,4 @@
-//! End-to-end MCP integration tests for the memory service (ADR-100, P1c).
+//! End-to-end MCP integration tests for the memory service (ADR-101, P1c).
 //!
 //! Boots the real service binary code path (`MemoryService::serve`, full
 //! router: `/mcp` + `/health`) and drives it exactly like the Gateway does:
@@ -181,7 +181,7 @@ async fn store_then_recall_roundtrip() {
 }
 
 /// One process, many Agents: the actor header is the namespace key, so a write
-/// under instance A is invisible to instance B (ADR-100 decision 3).
+/// under instance A is invisible to instance B (ADR-101 decision 3).
 #[tokio::test(flavor = "multi_thread")]
 async fn instance_namespaces_are_isolated() {
     let server = TestServer::spawn().await;
@@ -334,3 +334,4 @@ async fn validation_messages_are_preserved() {
         );
     }
 }
+

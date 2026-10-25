@@ -64,7 +64,7 @@ impl IntentSendTool {
     fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "intent_send".to_string(),
-            description: "Send an Intent message to another Agent via Gateway routing. The Gateway delivers it (waking the target if it is offline) and returns the real delivery outcome. Both agents must declare the matching intent:send / intent:receive permission. Delivery is not a reply: the target's answer arrives later as a new turn in your session, not in this result.".to_string(),
+            description: "Send an Intent message to another Agent via Gateway routing. The Gateway delivers it (waking the target if it is offline) and returns the real delivery outcome. Both agents must declare the matching intent:send / intent:receive permission. Delivery is not a reply: the target's answer arrives later as a new turn in your session, not in this result — and if your session is bound to a Chat, it is echoed there as well.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -116,7 +116,9 @@ impl Tool for IntentSendTool {
 
     async fn execute(&self, _params: Value, _work_dir: Option<&str>) -> acowork_core::error::Result<ToolResult> {
         // Routed through execute_with_context (needs the session id).
-        Ok(Self::fail("intent_send requires session context"))
+        Ok(Self::fail(
+            "intent_send must be dispatched via execute_with_context (no session context reached the tool)",
+        ))
     }
 
     async fn execute_with_context(

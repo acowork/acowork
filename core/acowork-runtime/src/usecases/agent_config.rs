@@ -112,7 +112,7 @@ pub enum ConfigField {
     /// ADR-061 compression ratio bar for levels 1-7 (0.90 default =
     /// "compress until at most 10% remains").
     CompressionRatioThreshold,
-    // ADR-100: the distiller / forgetting knobs (`distiller_enabled`,
+    // ADR-101: the distiller / forgetting knobs (`distiller_enabled`,
     // `distiller_models`, `distiller_interval_minutes`,
     // `distiller_accumulation_threshold`, `distiller_idle_minutes`,
     // `memory_forgetting_*`) moved into the memory service and are gone from
@@ -124,12 +124,6 @@ pub enum ConfigField {
     /// `UserProfile.language`). `None` = follow the user's global
     /// language from `UserProfile`.
     SessionLanguage,
-    /// `AgentConfig::intent_idle_rotate_hours` — `Option<u64>`
-    /// (design 27 §4.1 T1 threshold, 1–72 hours, 0 disables).
-    IntentIdleRotateHours,
-    /// `AgentConfig::intent_handoff_max_tokens` — `Option<u64>`
-    /// (design 27 §4.1 T2 handoff cap, 500–4,000 tokens).
-    IntentHandoffMaxTokens,
     /// `AgentConfig::chat_router.enabled` — `Option<bool>` (ADR-099).
     /// `None` = enabled (the design default).
     ChatRouterEnabled,
@@ -167,8 +161,6 @@ impl ConfigField {
             ConfigField::ApprovalTimeoutSecs => "approval_timeout_secs",
             ConfigField::CompressionRatioThreshold => "compression_ratio_threshold",
             ConfigField::SessionLanguage => "session_language",
-            ConfigField::IntentIdleRotateHours => "intent_idle_rotate_hours",
-            ConfigField::IntentHandoffMaxTokens => "intent_handoff_max_tokens",
             ConfigField::ChatRouterEnabled => "chat_router_enabled",
             ConfigField::ChatRouterModel => "chat_router_model",
             ConfigField::ChatRouterProvider => "chat_router_provider",
@@ -238,8 +230,6 @@ impl PutAgentConfigBody {
         approval_timeout_secs: Option<serde_json::Value>,
         compression_ratio_threshold: Option<serde_json::Value>,
         session_language: Option<serde_json::Value>,
-        intent_idle_rotate_hours: Option<serde_json::Value>,
-        intent_handoff_max_tokens: Option<serde_json::Value>,
         chat_router_enabled: Option<serde_json::Value>,
         chat_router_model: Option<serde_json::Value>,
         chat_router_provider: Option<serde_json::Value>,
@@ -297,18 +287,6 @@ impl PutAgentConfigBody {
         if let Some(v) = session_language {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::SessionLanguage,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = intent_idle_rotate_hours {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::IntentIdleRotateHours,
-                op: value_to_patch(&v),
-            });
-        }
-        if let Some(v) = intent_handoff_max_tokens {
-            patches.push(ConfigFieldPatch {
-                field: ConfigField::IntentHandoffMaxTokens,
                 op: value_to_patch(&v),
             });
         }
@@ -421,3 +399,4 @@ pub trait AgentConfigService: Send + Sync {
         body: PutAgentConfigBody,
     ) -> Result<PutAgentConfigResult, AgentConfigError>;
 }
+

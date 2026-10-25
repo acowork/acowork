@@ -4,7 +4,7 @@
 //! locking the existing usecase slots and running each requested scope
 //! in parallel (`tokio::join!`).
 //!
-//! ADR-100: the `memory` scope is **retired** here — memory nodes moved to the
+//! ADR-101: the `memory` scope is **retired** here — memory nodes moved to the
 //! standalone memory service, and the Desktop's memory tab queries
 //! `/api/memory/search?instance_id=` directly. A request that still asks for
 //! `memory` gets an honest `{"status":"not_available"}` instead of an empty
@@ -437,7 +437,7 @@ pub(crate) async fn global_search(
         scopes_map.insert("conversation".to_string(), conversation_meta);
     }
     if want_memory {
-        // ADR-100: memory nodes live in the memory service. Reporting an
+        // ADR-101: memory nodes live in the memory service. Reporting an
         // empty result would read as "nothing matched", so the scope says
         // plainly that this Runtime no longer answers it.
         scopes_map.insert(
@@ -651,3 +651,4 @@ mod tests {
         assert!(payload.get("fused_score").is_none());
     }
 }
+

@@ -110,7 +110,7 @@ service, document service — talks to the Gateway over the same protocol path.
 |------|-----------|------|
 | **Gateway** (`acowork-gateway`) | One keep-alive Rust process per cluster | HTTP API on `:19876`, embedded MQTT broker on `:19875`, reverse proxy to every Node / Runtime, package manager, intent router, global resources (LLM providers / MCP / budget / cron / rate-limit). |
 | **Node Agent** (`acowork-node`) | One per machine that hosts Runtimes | Process table (spawn / kill / reap Runtimes), local package store, MQTT enrollment with the Gateway, local reverse proxy on `:19900`, LSP sidecar supervisor, node-local fs browse. |
-| **Runtime** (`acowork-runtime`) | One per running `.agent` instance | Universal Rust binary that loads a `.agent` package, hosts the LLM loop, tool execution (memory access is a tool call against the memory service, ADR-100), and per-agent HTTP on loopback. |
+| **Runtime** (`acowork-runtime`) | One per running `.agent` instance | Universal Rust binary that loads a `.agent` package, hosts the LLM loop, tool execution (memory access is a tool call against the memory service, ADR-101), and per-agent HTTP on loopback. |
 
 Alongside these, five co-resident services plug into the same Gateway protocol path and are reachable to Runtimes
 through the same REST + MCP surface that humans use:
@@ -120,7 +120,7 @@ through the same REST + MCP surface that humans use:
 | `acowork-user` | User domain — accounts, credentials, roles, profiles / avatars, user↔user chat. |
 | `acowork-pm`   | Project & task management — first-class service, agents and humans read / write / subscribe to the same project tree. |
 | `acowork-doc`  | Online document library with real-time multi-user editing (Tiptap + Yjs). |
-| `acowork-memory` | Standalone memory service (ADR-100) — the Grafeo storage engine plus distill / consolidation pipeline, one SQLite instance per Agent instance id, exposed as REST + MCP and supervised by the Gateway. |
+| `acowork-memory` | Standalone memory service (ADR-101) — the Grafeo storage engine plus distill / consolidation pipeline, one SQLite instance per Agent instance id, exposed as REST + MCP and supervised by the Gateway. |
 | `acowork-embed` / `acowork-lsp-relay` / `acowork-vault` / `acowork-sqlite` / `acowork-sign` | Embedding model runner, LSP relay, encrypted KV store, storage backend, package signing — supporting tiers. |
 
 ### Standalone vs. cluster
@@ -183,7 +183,7 @@ cd ACowork
 ./dev/common/build_core.sh --debug              # bash
 ```
 
-macOS users on Apple Silicon can also use `./dev/desktop/macos/build_macos.sh` for a one-click build with CoreML enabled.
+macOS users get a one-click build from `./dev/common/build_core.sh` itself: on Apple Silicon it downloads ONNX Runtime via cargo with CoreML acceleration enabled (pass `--cpu` to force CPU inference).
 
 ### Step 3 — Launch the Desktop App
 
@@ -372,3 +372,5 @@ Apache-2.0 — see [`LICENSE`](./LICENSE) for details.
   <b>ACowork — AI Agents Collaboration Platform</b><br>
   <i>An all-in-one platform for humans and AI agents.</i>
 </p>
+
+

@@ -1,4 +1,4 @@
-//! Memory-scope search route (ADR-100 P1d).
+//! Memory-scope search route (ADR-101 P1d).
 //!
 //! `GET /memory/search` is the memory half of the Runtime's aggregate
 //! `GET /search` ([`crate::service::api`] documents why the service keeps the
@@ -153,3 +153,4 @@ mod tests {
         assert_eq!(clamp(Some(500)), 50);
     }
 }
+

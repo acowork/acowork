@@ -1,8 +1,8 @@
-﻿# Tool System
+# Tool System
 
 > Version: v3.5 | Last Updated: 2026-10-23
 
-> **v3.5 change (implemented)**: `memory_recall` / `memory_store` are no longer built-in tools — memory was split out into a Gateway-hosted standalone service, `acowork-memory`, and Agents reach it through the MCP tools `mcp_memory__memory_recall` / `mcp_memory__memory_store` ([ADR-100](../../adr/en/ADR-100-memory-standalone-mcp-service.md)). The `memory:read` / `memory:write` permission entries were removed along with them, as was the "main loop step ② MemoryManager.retrieve() auto-inject" described in §4 / §4.2.1 of this document (auto-inject, ADR-100 decision 5) — memory is now fetched only by an explicit tool call. Those sections are kept as a historical design record; actual behaviour follows ADR-100.
+> **v3.5 change (implemented)**: `memory_recall` / `memory_store` are no longer built-in tools — memory was split out into a Gateway-hosted standalone service, `acowork-memory`, and Agents reach it through the MCP tools `mcp_memory__memory_recall` / `mcp_memory__memory_store` ([ADR-101](../../adr/en/ADR-101-memory-standalone-mcp-service.md)). The `memory:read` / `memory:write` permission entries were removed along with them, as was the "main loop step ② MemoryManager.retrieve() auto-inject" described in §4 / §4.2.1 of this document (auto-inject, ADR-101 decision 5) — memory is now fetched only by an explicit tool call. Those sections are kept as a historical design record; actual behaviour follows ADR-101.
 
 ---
 
@@ -33,7 +33,7 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 
 | Tool Name | Function | Required Permission | Description |
 |-----------|----------|---------------------|-------------|
-| ~~`memory_recall`~~ | ~~Semantic search of private SQLite memory layer~~ | ~~`memory:read`~~ | **Migrated** — ADR-100: memory is a standalone service now, so this tool is `mcp_memory__memory_recall` on the Gateway-hosted memory MCP. No permission domain; per-tool opt-in happens in `agent_mcp_tools.json` (ADR-069). Hybrid search (HNSW + BM25) + associative diffusion semantics unchanged |
+| ~~`memory_recall`~~ | ~~Semantic search of private SQLite memory layer~~ | ~~`memory:read`~~ | **Migrated** — ADR-101: memory is a standalone service now, so this tool is `mcp_memory__memory_recall` on the Gateway-hosted memory MCP. No permission domain; per-tool opt-in happens in `agent_mcp_tools.json` (ADR-069). Hybrid search (HNSW + BM25) + associative diffusion semantics unchanged |
 | ~~`memory_store`~~ | ~~Write to private SQLite memory layer~~ | ~~`memory:write`~~ | **Migrated** — same as above, now `mcp_memory__memory_store`; real-time extraction, the five types and the importance / privacy parameters keep their semantics, only the call channel changed |
 | `http_request` | HTTP requests (GET/POST/PUT/DELETE) | `network:<url_pattern>` | Supports method parameter for HTTP method selection; JSON responses auto-parsed; supports JSON body and form |
 | `web_fetch` | Fetch web page content | `network:<url_pattern>` | HTML → Markdown conversion, Agent directly receives readable text |
@@ -118,7 +118,7 @@ name = "http_request"
 type = "builtin"
 permissions = ["network:https://api.weather.com"]
 
-# Memory tools are no longer built-ins (ADR-100): they come from the Gateway-hosted
+# Memory tools are no longer built-ins (ADR-101): they come from the Gateway-hosted
 # memory MCP, opted in per tool in `agent_mcp_tools.json` as
 # `mcp_memory__memory_recall` (ADR-069). There is no `[[tools]]` entry for them in the
 # manifest and no `memory:*` permission left to declare.

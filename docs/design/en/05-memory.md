@@ -1,4 +1,4 @@
-﻿# Memory Biomimetic Layered Architecture
+# Memory Biomimetic Layered Architecture
 
 > Version: v3.7 | Last Updated: 2026-04-22
 
@@ -10,7 +10,7 @@
 
 > **v4.0 Change**: Memory layer switched to SQLite (single database + WAL + FTS5 + sqlite-vss vectors; consolidated layer graph relations handled by application-level `MemoryNode.edges` table, no longer relying on storage engine native LPG/GQL; see [ADR-082](../../adr/zh/ADR-082-sqlite-memory-cutover.md)). The `acowork-grafeo` crate has been deleted; memory engine code (`EpisodicDistiller` / `RetrievalMetrics`) migrated to `core/acowork-memory/`.
 
-> **v4.1 Change (implemented, 2026-10-23)**: the memory module has been extracted from the Runtime into a Gateway-hosted standalone process `acowork-memory`; Agents call its tools over MCP (registered as `mcp_memory__memory_store` / `mcp_memory__memory_recall`, with per-tool opt-in in `agent_mcp_tools.json`, ADR-069) and the panel reaches it through the Gateway reverse proxy; auto-inject is removed, the `memory:read` / `memory:write` permission entries are deleted, and the Runtime is left with zero memory business code — see [ADR-100](../../adr/en/ADR-100-memory-standalone-mcp-service.md). **The rest of this document is still written against the pre-extraction (built-in) shape**; the layered data model (transient / experiential / consolidated) and the distillation and forgetting pipeline semantics are unchanged — what changed is process ownership and the access channel.
+> **v4.1 Change (implemented, 2026-10-23)**: the memory module has been extracted from the Runtime into a Gateway-hosted standalone process `acowork-memory`; Agents call its tools over MCP (registered as `mcp_memory__memory_store` / `mcp_memory__memory_recall`, with per-tool opt-in in `agent_mcp_tools.json`, ADR-069) and the panel reaches it through the Gateway reverse proxy; auto-inject is removed, the `memory:read` / `memory:write` permission entries are deleted, and the Runtime is left with zero memory business code — see [ADR-101](../../adr/en/ADR-101-memory-standalone-mcp-service.md). **The rest of this document is still written against the pre-extraction (built-in) shape**; the layered data model (transient / experiential / consolidated) and the distillation and forgetting pipeline semantics are unchanged — what changed is process ownership and the access channel.
 
 ---
 

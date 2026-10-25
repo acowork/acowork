@@ -270,7 +270,7 @@ if ($Start -or $Stop) {
         Write-Host "  No User process running." -ForegroundColor Gray
     }
 
-    # The Memory service mirrors the PM/Doc/User pattern (ADR-100): a standalone
+    # The Memory service mirrors the PM/Doc/User pattern (ADR-101): a standalone
     # process (`acowork-memory`) spawned by the Gateway supervisor and listening
     # on port 18084 by default. The ADR-018 watchdog self-exit lags on Windows,
     # and the running exe keeps the file locked, so kill it explicitly to keep
@@ -675,7 +675,7 @@ Write-Host ""
 
 # Step: Build Memory service (standalone binary, sibling of acowork-gateway.exe)
 #
-# ADR-100: memory (storage, distiller pipeline, panel REST and the
+# ADR-101: memory (storage, distiller pipeline, panel REST and the
 # `memory_store` / `memory_recall` MCP tools) is a standalone process
 # (`acowork-memory`), located via
 # `current_exe().parent().join("acowork-memory.exe")` - so the binary MUST sit
@@ -903,4 +903,5 @@ if ($Start) {
 
 # Return to workspace root
 Set-Location $WorkspaceRoot
+
 

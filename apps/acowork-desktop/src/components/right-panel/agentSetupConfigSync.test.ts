@@ -34,8 +34,6 @@ describe("buildProfilePatchFromServerConfig", () => {
         approval_timeout_secs: 500,
         compression_ratio_threshold: 0.9,
         session_language: "zh-CN",
-        intent_idle_rotate_hours: 0,
-        intent_handoff_max_tokens: 2000,
       },
     };
     expect(buildProfilePatchFromServerConfig(data)).toEqual({
@@ -48,10 +46,6 @@ describe("buildProfilePatchFromServerConfig", () => {
       approvalTimeoutSecs: 500,
       compressionRatioThreshold: 0.9,
       sessionLanguage: "zh-CN",
-      // `intent_idle_rotate_hours: 0` must survive — 0 disables T1
-      // rotation, it is not "absent".
-      intentIdleRotateHours: 0,
-      intentHandoffMaxTokens: 2000,
     });
   });
 

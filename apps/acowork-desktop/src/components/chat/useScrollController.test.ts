@@ -1059,6 +1059,90 @@ describe("useScrollController: viewport fill", () => {
     expect(loadNextPage).not.toHaveBeenCalled();
     expect(loadPrevPage).not.toHaveBeenCalled();
   });
+
+  it("keeps pulling past the old 10-page budget while a long explore run is still truncated", async () => {
+    // Regression: pagination is measured in RAW JSONL entries, but the UI
+    // folds a whole thought/tool_call/tool_result run into ONE explore
+    // block whose rendered height is CAPPED (ExploreBlock scrolls its
+    // content internally).  Pulling the rest of that run therefore adds
+    // hundreds of entries and ZERO pixels, so a page-count budget stops
+    // exactly while the rule is still doing useful work.  The old budget
+    // (10 pages = 500 entries) expired mid-run on the 617-entry explore
+    // found in real session logs, and because tripping it `return`ed out of
+    // checkEdges AHEAD of the edge branches, the remaining history became
+    // unreachable in a pane that still had no scroll range — i.e. no user
+    // scroll event could ever re-arm pagination.  The session looked
+    // "loaded but not full screen" with `hasOlder` still true.
+    const PAGE = 50;
+    const TOTAL = 617;
+    let offset = TOTAL - PAGE; // a bare tail page, starting mid-run
+    let fire: (event: { type: string }) => void = () => {};
+    const loadPrevPage = vi.fn(async () => {
+      offset = Math.max(0, offset - PAGE);
+      fire({ type: "pageLoaded", direction: "prev", offset, limit: PAGE, total: TOTAL });
+    });
+    const adapter = {
+      ...makeMockAdapter({ loadPrevPage }),
+      subscribe: (cb: (e: any) => void) => { fire = cb; return () => {}; },
+      get messageOffset() { return offset; },
+      get messageLimit() { return TOTAL - offset; },
+      get hasOlder() { return offset > 0; },
+      hasNewer: false,
+      // The pane never overflows: the single explore block is height-capped
+      // no matter how many entries fold into it.
+    } as unknown as ChatListAdapterV2;
+    const container = {
+      scrollTop: 0,
+      scrollHeight: 180,
+      clientHeight: 600,
+    } as unknown as HTMLDivElement;
+
+    renderHook(() =>
+      useScrollController({
+        containerRef: { current: container },
+        adapter,
+        vmlRef: { current: null },
+        sessionKey: "agent:sess",
+      }),
+    );
+
+    // 12 walks 567 → 0.  Allow headroom so the loop must stop on its own.
+    for (let i = 0; i < 20; i++) await flushRaf();
+
+    expect(offset).toBe(0);
+    expect(loadPrevPage.mock.calls.length).toBeGreaterThan(10);
+    // Terminates on exhausted data, not on a budget: no 13th request.
+    await flushRaf();
+    expect(loadPrevPage.mock.calls.length).toBe(12);
+  });
+
+  it("issues at most one fill load per window state when the adapter makes no progress", async () => {
+    // The runaway guard is a PROGRESS guard, not a page count.  A load that
+    // did not move the cursor (no-op, duplicate response, failure) must not
+    // be retried once per frame forever, and the near-top edge branch must
+    // not sneak a second request in — an under-filled pane pins scrollTop
+    // at 0, so "near an edge" is not a user-driven signal there.
+    const loadPrevPage = vi.fn(async () => {});
+    const adapter = makeMockAdapter({ hasOlder: true, hasNewer: false, loadPrevPage });
+    const container = {
+      scrollTop: 0,
+      scrollHeight: 180,
+      clientHeight: 600,
+    } as unknown as HTMLDivElement;
+
+    const { result } = renderHook(() =>
+      useScrollController({
+        containerRef: { current: container },
+        adapter,
+        vmlRef: { current: null },
+        sessionKey: "agent:sess",
+      }),
+    );
+
+    for (let i = 0; i < 5; i++) await flushRaf();
+    act(() => { result.current.handleScroll(); });
+    expect(loadPrevPage).toHaveBeenCalledTimes(1);
+  });
 });
 
 /**

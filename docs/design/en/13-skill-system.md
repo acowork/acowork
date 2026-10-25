@@ -1,4 +1,4 @@
-﻿# Skill System
+# Skill System
 
 > Version: v3.2 | Last Updated: 2026-04-14
 
@@ -73,7 +73,7 @@ triggers:
 # === Tool dependencies ===
 tool_deps:
   # Memory tools are no longer built-ins — they are MCP tools of the Gateway-hosted
-  # memory service (ADR-100). Registered names carry the `mcp_<server>__` prefix and
+  # memory service (ADR-101). Registered names carry the `mcp_<server>__` prefix and
   # the per-tool switch lives in `agent_mcp_tools.json` (ADR-069).
   - mcp_memory__memory_recall
   - file_write

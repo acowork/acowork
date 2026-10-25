@@ -65,7 +65,7 @@ interface MemoryStore {
    * Drives the "记忆蒸馏" card (enabled switch reflects the service state;
    * the card also shows backlog / last-run summary).
    *
-   * ADR-100: since the panel paths are frozen, the `GET /memory/*` routes
+   * ADR-101: since the panel paths are frozen, the `GET /memory/*` routes
    * below are answered by the standalone memory service through the Gateway's
    * `/api/agents/{id}/memory/*` proxy, not by the agent's Runtime.
    */
@@ -241,7 +241,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       if (filters.timeRange !== "all") params.set("time_range", filters.timeRange);
 
       // Bug B v3 fix: the memory endpoints are proxied to the memory
-      // service (ADR-100) and answer 503 during the boot window between
+      // service (ADR-101) and answer 503 during the boot window between
       // Gateway discovery and the supervisor publishing the service port.
       // `with503Retry` rides out
       // transient 503s transparently so the MemoryPanel does not
@@ -480,3 +480,4 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
     });
   },
 }));
+

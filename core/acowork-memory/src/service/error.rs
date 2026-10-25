@@ -1,4 +1,4 @@
-//! acowork-memory service error type (ADR-100).
+//! acowork-memory service error type (ADR-101).
 //!
 //! Covers both service surfaces: the panel-facing REST API and the MCP
 //! endpoint. MCP handlers do not return these directly — they map them onto
@@ -38,7 +38,7 @@ pub enum ServiceError {
     InstanceNotFound(String),
 
     /// The supplied `instance_id` is not usable as a directory name
-    /// (path-traversal guard, ADR-100 decision 3).
+    /// (path-traversal guard, ADR-101 decision 3).
     #[error("invalid instance id: {0}")]
     InvalidInstanceId(String),
 
@@ -308,3 +308,4 @@ mod tests {
         assert!(e.to_string().contains("not found"));
     }
 }
+

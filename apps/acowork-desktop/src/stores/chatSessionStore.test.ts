@@ -1,13 +1,13 @@
 /**
  * The desktop Chat-session surface (design 27 §6, plan Wave 5).
  *
- * Two things are pinned here, both store rules rather than pixels:
+ * The chat window is a durable EVENT LOG — there is no read-time turn
+ * projection any more (that lived to serve the removed status card). What
+ * the store still owns and these tests pin:
  *
- *   1. `projectInFlight` — the read-time turn projection. Copied VERBATIM
- *      from the mobile twin (`acowork-mobile/src/__tests__/
- *      agent-chat-session.test.ts`): the two clients read one endpoint and
- *      one vocabulary, so these mirrored cases are the drift guard — change
- *      the projection on one side and the other goes red.
+ *   1. the durable card projections — `closedCardIds` / `humanAnsweredCardIds`
+ *      decide when an `interaction_request` can no longer be answered and
+ *      whether it was answered by a human (§5.5.4);
  *   2. the freshness loop — the `chat/changed` doorbell is content-free, so
  *      `wake()` re-reads over HTTP and never patches a row from a signal;
  *      `sendText` re-reads once after the POST because the durable row
@@ -21,10 +21,8 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
-  projectInFlight,
   closedCardIds,
   humanAnsweredCardIds,
-  projectLiveTurn,
   useChatSessionStore,
   wakeAgentChat,
   type ChatMessageRow,
@@ -81,8 +79,6 @@ const row = (kind: string, meta: Partial<NonNullable<ChatMessageRow["meta"]>> = 
 const user = (id: string) => row("user_message", { message_id: id });
 const pointer = (trigger: string, sid: string) =>
   row("system_notice", { notice_type: "turn_started", in_reply_to: trigger, agent_session_id: sid });
-const terminal = (trigger: string) =>
-  row("agent_message", { message_id: `resp-${trigger}`, in_reply_to: trigger });
 const card = (id: string, trigger: string, sid?: string) =>
   row("interaction_request", {
     message_id: id,
@@ -90,82 +86,7 @@ const card = (id: string, trigger: string, sid?: string) =>
     ...(sid ? { agent_session_id: sid } : {}),
   });
 
-describe("projectInFlight (mirrored from mobile — drift guard)", () => {
-  it("sees a trailing user_message with its pointer as in flight", () => {
-    const rows = [user("t1"), pointer("t1", "exec-1")];
-    expect(projectInFlight(rows)).toEqual({ triggerId: "t1", execSid: "exec-1" });
-  });
-
-  it("clears once the terminal row lands", () => {
-    const rows = [user("t1"), pointer("t1", "exec-1"), terminal("t1")];
-    expect(projectInFlight(rows)).toBeNull();
-  });
-
-  it("ignores a trailing user_message without a pointer (group message that @-nobody)", () => {
-    expect(projectInFlight([user("t1")])).toBeNull();
-  });
-
-  it("treats an interaction card as turn-end (the card is pending, not the turn)", () => {
-    const rows = [
-      user("t1"),
-      pointer("t1", "exec-1"),
-      row("interaction_request", {
-        message_id: "c1",
-        in_reply_to: "t1",
-        interaction: { kind: "ask_question", request_id: "r1" },
-      }),
-    ];
-    expect(projectInFlight(rows)).toBeNull();
-  });
-
-  it("follows a card answer back into flight (position rule, not id chain)", () => {
-    const rows = [
-      user("t1"),
-      pointer("t1", "exec-1"),
-      row("interaction_request", { message_id: "c1", in_reply_to: "t1" }),
-      row("user_message", { message_id: "t2", in_reply_to: "c1" }),
-    ];
-    expect(projectInFlight(rows)).toEqual({ triggerId: "t2", execSid: "exec-1" });
-  });
-
-  it("is null for an empty window", () => {
-    expect(projectInFlight([])).toBeNull();
-  });
-
-  it("skips an interaction_resolved closure notice landing after the live trigger", () => {
-    // A `system_notice` (not just turn_started) is bookkeeping: a closure
-    // receipt trailing the live user_message must NOT read as turn-end.
-    const rows = [
-      user("t1"),
-      pointer("t1", "exec-1"),
-      row("system_notice", { notice_type: "interaction_resolved", in_reply_to: "c0", body: "resolved" }),
-    ];
-    expect(projectInFlight(rows)).toEqual({ triggerId: "t1", execSid: "exec-1" });
-  });
-
-  it("ADR-099: awaitPointer=false turns a pointerless trigger into the assigning window", () => {
-    // A 1:1 surface: every message reaches the agent, so the gap before the
-    // router's `turn_started` pointer is "assigning…", not a dead row.
-    expect(projectInFlight([user("t1")], { awaitPointer: false })).toEqual({
-      triggerId: "t1",
-      execSid: null,
-      assigning: true,
-    });
-  });
-
-  it("ADR-099: a card answer is never the assigning window", () => {
-    // Card answers bypass the router (§5.5.4), so even a stale one that fell
-    // through to a fresh turn must not paint "assigning…".
-    const rows = [
-      user("t1"),
-      row("interaction_request", { message_id: "c1", in_reply_to: "t1" }),
-      row("user_message", { message_id: "t2", in_reply_to: "c1" }),
-    ];
-    expect(projectInFlight(rows, { awaitPointer: false })).toBeNull();
-  });
-});
-
-describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + processing dot)", () => {
+describe("closedCardIds / humanAnsweredCardIds (design 27 §5.5.4 — card self-heal)", () => {
   it("closes a card once its turn writes a terminal agent_message", () => {
     const rows = [
       user("t1"),
@@ -174,7 +95,6 @@ describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + pro
       row("agent_message", { message_id: "resp-t1", in_reply_to: "t1", sender_session_id: "exec-9" }),
     ];
     expect(closedCardIds(rows).has("c1")).toBe(true);
-    expect(projectLiveTurn(rows).pendingCard).toBeNull();
   });
 
   it("keeps a card open while its turn ended `waiting` (the pause outcome)", () => {
@@ -185,7 +105,6 @@ describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + pro
       row("agent_message", { message_id: "resp-t1", in_reply_to: "t1", sender_session_id: "exec-9", status: "waiting" }),
     ];
     expect(closedCardIds(rows).has("c1")).toBe(false);
-    expect(projectLiveTurn(rows).pendingCard?.meta?.message_id).toBe("c1");
   });
 
   it("a terminal from a DIFFERENT exec session does not close this agent's card (group fan-out)", () => {
@@ -203,16 +122,11 @@ describe("closedCardIds / projectLiveTurn (design 27 §5.5.4 — self-heal + pro
     expect(closedCardIds(rows).has("c1")).toBe(true);
     expect(humanAnsweredCardIds(rows).has("c1")).toBe(true);
   });
-
-  it("an in-flight turn makes the round live even with no card", () => {
-    const rows = [user("t1"), pointer("t1", "exec-9")];
-    expect(projectLiveTurn(rows).inFlight?.execSid).toBe("exec-9");
-  });
 });
 
 describe("chatSessionStore freshness loop", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, live: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
@@ -267,29 +181,11 @@ describe("chatSessionStore freshness loop", () => {
     await vi.waitFor(() => expect(calls("/messages").length).toBe(1));
     expect(useChatSessionStore.getState().windows["cs-1"]!.tail).toEqual([]);
   });
-
-  it("refresh projects the in-flight turn from the durable rows", async () => {
-    const original = fetchMock.getMockImplementation()!;
-    fetchMock.mockImplementation(async (url: string) => {
-      if (String(url).includes("/messages")) {
-        return {
-          ok: true,
-          json: async () => ({ messages: [user("t1"), pointer("t1", "exec-9")], total: 2 }),
-        };
-      }
-      return (original as (u: string) => unknown)(url) as never;
-    });
-    await useChatSessionStore.getState().openAgent("agent-1");
-    expect(useChatSessionStore.getState().live["cs-1"].inFlight).toEqual({
-      triggerId: "t1",
-      execSid: "exec-9",
-    });
-  });
 });
 
 describe("chatSessionStore seed draft (design 27 §4.5 — backend-persisted, store is a cache)", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, live: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
@@ -369,7 +265,7 @@ describe("chatSessionStore seed draft (design 27 §4.5 — backend-persisted, st
 
 describe("sendGroupText attachment passthrough (design 27 §4.2.1 / §5.3)", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, live: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });

@@ -5,11 +5,11 @@
 //! types, the storage-agnostic logic built on top of them (the episodic
 //! distiller and the retrieval manager), and the SQLite storage engine
 //! ([`sqlite::SqliteStore`]) that backs them. It also hosts the standalone
-//! memory **service** ([`service`], ADR-100) and the panel-facing wire format
+//! memory **service** ([`service`], ADR-101) and the panel-facing wire format
 //! ([`wire`]) that both the service and the Runtime endpoints it replaces speak.
 //!
 //! The store lives here, not in a separate backend crate, because the memory
-//! service binary (ADR-100) is hosted by this crate and must link a concrete
+//! service binary (ADR-101) is hosted by this crate and must link a concrete
 //! backend: a backend crate cannot depend on the crate whose traits it
 //! implements. `acowork-sqlite` keeps only the Runtime-side sidecars that share
 //! the same connection (conversation index, session meta) and re-export the
@@ -18,7 +18,7 @@
 //! [`MemoryProvider`] (ADR-051) is the single storage abstraction: consolidation,
 //! CRUD and lifecycle control all sit on it.
 //!
-//! Design ref: ADR-051, ADR-082, ADR-100, docs/05-memory.md §10
+//! Design ref: ADR-051, ADR-082, ADR-101, docs/05-memory.md §10
 
 pub mod admin;
 pub mod consolidation;
@@ -31,7 +31,7 @@ pub mod sqlite;
 pub mod types;
 pub mod wire;
 
-// Re-exports: the standalone service (ADR-100) — config, process entry parts.
+// Re-exports: the standalone service (ADR-101) — config, process entry parts.
 pub use service::{Cli, MemoryService, MemoryServiceConfig, MemoryState, ServiceError};
 
 // Re-exports: the SQLite workspace store (ADR-082) and its error surface.
@@ -68,7 +68,7 @@ pub use quality::{ConsolidationQuality, DedupQuality, MemoryQualityConfig};
 
 // Re-exports: core memory types
 //
-// Session-metadata types are deliberately not re-exported here (ADR-100): they
+// Session-metadata types are deliberately not re-exported here (ADR-101): they
 // live in `acowork_core::session_meta`, which both the Runtime and the SQLite
 // store can name without pulling in this crate.
 pub use types::{
@@ -82,3 +82,5 @@ pub use types::{
 // Label constants
 pub use types::labels;
 pub use types::{HintType, MemoryFilters, NodeTypeFilter};
+
+

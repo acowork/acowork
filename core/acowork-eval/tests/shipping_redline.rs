@@ -1,4 +1,4 @@
-//! Shipping red line for the evaluation kernel (ADR-100).
+//! Shipping red line for the evaluation kernel (ADR-101).
 //!
 //! `acowork-eval` exists so the memory and runtime harnesses can share one
 //! definition of Precision@K / MRR / nDCG without either reaching into the other.
@@ -137,3 +137,4 @@ fn member_manifests(root: &Path) -> Vec<PathBuf> {
     }
     out
 }
+

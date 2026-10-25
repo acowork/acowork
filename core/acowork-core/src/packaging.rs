@@ -7,7 +7,7 @@
 //!
 //! Memory-subset toggles (`include_episodes`, `include_procedural`, ...) used
 //! to live here. They were never effective — packaging already excluded the
-//! whole `memory/` directory — and ADR-100 removed them with the rest of the
+//! whole `memory/` directory — and ADR-101 removed them with the rest of the
 //! in-package memory: memories now live in the memory service's instance
 //! namespace, so a package directory has no memory to select a subset of.
 
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// These contain runtime data that should never be shipped inside a
 /// distributable `.agent` file.
 pub const PACKAGE_ALWAYS_EXCLUDE_DIRS: &[&str] = &[
-    "memory",    // Legacy in-workspace store dir (ADR-082, pre-ADR-100 layout)
+    "memory",    // Legacy in-workspace store dir (ADR-082, pre-ADR-101 layout)
     "workspace", // User workspace state
     "runtime",   // Runtime temporary files
 ];
@@ -126,7 +126,7 @@ mod tests {
         assert!(opts.include_config);
     }
 
-    /// ADR-100 decision 11: memory data is not a packaging choice any more.
+    /// ADR-101 decision 11: memory data is not a packaging choice any more.
     /// Whatever the toggles say, a `memory/` path never travels — and since the
     /// service took the memories over, there is normally no such directory in a
     /// package dir to begin with.
@@ -206,3 +206,4 @@ mod tests {
         assert!(!glob_match("exact", "other"));
     }
 }
+

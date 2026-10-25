@@ -1,4 +1,4 @@
-﻿# MQTT Protocol
+# MQTT Protocol
 
 > The Gateway embeds an MQTT Broker ([`rumqttd`](https://github.com/bytebeamio/rumqtt)) serving as a **real-time event bus + lightweight state synchronization** component. The topic tree follows the **"publish/subscribe by data source"** principle: each topic represents a data resource, the publisher is the authoritative source of that data, and subscribers consume as needed.
 
@@ -50,7 +50,7 @@ graph LR
    - **Broker host**: manages MQTT connections, ACL, retained storage.
    - **HTTP server**: CRUD, full-list fetch for Desktop (Settings), Runtime startup registration.
    - **Global Resources Publisher**: publishes `acowork/global/{kind}` (single topic, Retained)—the "ready" resource list recomputed by Gateway background health-check (**not agent-distinguished**; all Runtimes share the same list).
-2. **Runtime is an MQTT client + localhost HTTP server**: `rumqttc` connects directly to the Broker, only PUBLISHes data sources it owns (all topics under `agents/{id}/*`), SUBSCRIBES to resources it cares about (`acowork/global/#` + `agents/{id}/sessions/control/#`). Also starts a localhost-only HTTP server for Gateway reverse proxy of large data queries (full session list, message list, file contents; **memory is not in this list** — since ADR-100 memory is served by the separate `acowork-memory` process, which speaks no MQTT and never connects to the Broker).
+2. **Runtime is an MQTT client + localhost HTTP server**: `rumqttc` connects directly to the Broker, only PUBLISHes data sources it owns (all topics under `agents/{id}/*`), SUBSCRIBES to resources it cares about (`acowork/global/#` + `agents/{id}/sessions/control/#`). Also starts a localhost-only HTTP server for Gateway reverse proxy of large data queries (full session list, message list, file contents; **memory is not in this list** — since ADR-101 memory is served by the separate `acowork-memory` process, which speaks no MQTT and never connects to the Broker).
 3. **Desktop is a pure MQTT client**: uses `rumqttc` via Tauri Rust backend to connect directly to the Broker, SUBSCRIBES to data source topics (`agents/{id}/*`). **No Gateway forwarding**.
 4. **Three-tier separation of global resources** (see §3.1):
    - **Full raw list**: HTTP only (`GET/POST/PUT/DELETE /api/global/{kind}`), used by Desktop Settings.
@@ -288,13 +288,13 @@ acowork/agents/{agent_id}/
             ├── compacting_started    # context compaction started
             ├── compacting_ended      # context compaction ended
             ├── context_usage         # context usage
-            ├── memory_updated        # reserved (proto field 16): no publisher — since ADR-100 memory is not in the Runtime
+            ├── memory_updated        # reserved (proto field 16): no publisher — since ADR-101 memory is not in the Runtime
             └── skill_executed        # skill execution completed
 └── memory/                           # [Reserved namespace, never published]
     └── nodes/                        # node-level increment events (unimplemented)
         └── {nid}/update              # [Increment event] envisioned Memory node add/merge/delete
                                       #   payload = latest full node
-                                      #   ADR-100: memory belongs to `acowork-memory`, which does
+                                      #   ADR-101: memory belongs to `acowork-memory`, which does
                                       #   not connect to the Broker — this topic group is never
                                       #   published; the panel re-fetches over HTTP
                                       #   Full graph over HTTP GET /api/agents/{id}/memory/graph
@@ -361,7 +361,7 @@ acowork/users/{user_id}/
 2. **Single owner**: Each data resource has exactly one publisher (Gateway owns `acowork/global/*`—shared available resources for all Runtimes; Runtime owns all topics under `agents/{id}/*`). Subscribers do not modify the data itself.
 3. **Retained is snapshot; push is increment**: Publisher sends each PUBLISH with retain=true, overwriting the previous retained; new subscribers immediately receive the retained (snapshot semantics), subsequent changes are pushes (increment semantics). The entire document uniformly adopts single topic + retained (`acowork/global/{kind}`, `agents/{id}/meta`, `agents/{id}/config`, `agents/{id}/sessions/{sid}/meta`, `agents/{id}/sessions/{sid}/config`—none split into `current/update` dual topics).
 4. **List over HTTP, changes over MQTT**: Resources like session lists that **change frequently and are only queried at operation time** go over HTTP; only "changes to specific items in the list" are notified via MQTT (`created` / `deleted`), avoiding frequent retained list invalidation.
-5. **Snapshot over HTTP, increments over MQTT**: Resources like session messages that are **read heavily and grow continuously** have full data over HTTP, and **increment events** over MQTT (payload is the latest data itself; no need for subscribers to pull back). Memory does not apply: since ADR-100 `acowork-memory` does not connect to the Broker, so the panel reads memory entirely over HTTP and picks up changes by re-fetching.
+5. **Snapshot over HTTP, increments over MQTT**: Resources like session messages that are **read heavily and grow continuously** have full data over HTTP, and **increment events** over MQTT (payload is the latest data itself; no need for subscribers to pull back). Memory does not apply: since ADR-101 `acowork-memory` does not connect to the Broker, so the panel reads memory entirely over HTTP and picks up changes by re-fetching.
 6. **Gateway only passes through, does not forward**: Gateway is the broker host + `acowork/global/*` (availability) data source authority + HTTP server. **Not** a "relay" for session events, **not** maintaining session state views—session authority is Runtime; Desktop connects directly.
 7. **Change payload always contains latest value**: Subscribing to `meta` / `agents/{id}/config` / `acowork/global/{kind}` / `sessions/{sid}/meta` / `sessions/{sid}/config` always receives the complete latest data; subscribers do not need to HTTP-pull snapshots. Among these, `agents/{id}/config` is Runtime's current effective full agent_config.json (merged manifest defaults) — Gateway does not participate in config synchronization at all; Runtime loads from local `<work_dir>/config/agent_config.json` on startup; Desktop config changes go through `PUT /api/agents/{id}/config` → Gateway passthrough → Runtime internal IPC writes local file + PUBLISHes new value.
 8. **Gateway does not forward between Runtime and Desktop**: Runtime-published session events are **directly subscribed** by Desktop to `agents/{id}/sessions/{sid}/messages/...`; Desktop control commands are **directly PUBLISHed** to `agents/{id}/sessions/control/...`. Runtime is session authority; Gateway does not maintain session state views.
@@ -762,8 +762,8 @@ Each data resource chooses its channel based on its properties, **not by busines
 | **Session messages increments** | `messages/chunk` `tool_call` `done` `error` ... | — |
 | **Session messages full** | ❌ No (large data) | ✅ `GET /api/agents/{id}/sessions/{sid}/messages` |
 | **Control commands** | `sessions/control/{cmd}` (Desktop → Runtime direct, sid in payload), `cmd` ∈ {`create_session`, `delete_session`, `message`, `stop`, `cancel_tool`, `model_switch`, `reasoning_effort`, `compact_context`} | `POST /api/agents/{id}/control` (when explicit ack needed) |
-| **Memory single node change** | ❌ **does not exist** (reserved topic group, never implemented; since ADR-100 memory is not in the Runtime and the service does not connect to the Broker) | `GET /api/agents/{id}/memory/nodes/{nid}` (`memory_proxy` to the service) |
-| **Memory graph full** | ❌ No (MB+, and the service speaks no MQTT) | ✅ `GET /api/agents/{id}/memory/graph` (reverse-proxied to the memory service, ADR-100) |
+| **Memory single node change** | ❌ **does not exist** (reserved topic group, never implemented; since ADR-101 memory is not in the Runtime and the service does not connect to the Broker) | `GET /api/agents/{id}/memory/nodes/{nid}` (`memory_proxy` to the service) |
+| **Memory graph full** | ❌ No (MB+, and the service speaks no MQTT) | ✅ `GET /api/agents/{id}/memory/graph` (reverse-proxied to the memory service, ADR-101) |
 | **Sidecar endpoint** | `sidecar/{kind}/status` Retained | `GET /api/sidecar/{kind}` |
 | **File content** | ❌ | ✅ `GET /api/files/{id}` |
 | **Cross-agent aggregate queries** | ❌ (single-point push cannot aggregate) | ✅ `GET /api/agents?status=active` etc. |
@@ -794,7 +794,7 @@ Need to wait for explicit success/failure from the other side?
   1. Maintaining broker process (connection management, ACL, retained storage)
   2. Maintaining `acowork/global/*` topics (this is Gateway's truly owned MQTT data resource—global resource availability shared by all Runtimes, **not agent-distinguished**)
   3. HTTP API for Desktop and Runtime calls (CRUD, Runtime registration, global resource full list CRUD, Desktop config modification passthrough to Runtime); **does not provide** any "initial pull"/"startup pull" interfaces—Runtime config loaded from local `<work_dir>/config/agent_config.json` and synced via `agents/{id}/config` retained; global resources obtained via MQTT retained
-  4. **HTTP reverse proxy** to backend localhost HTTP servers (full session list, message list, file contents, etc.—Gateway does not directly read Runtime local files). Memory no longer belongs here: since ADR-100 the `memory graph` / `nodes` targets are `acowork-memory`
+  4. **HTTP reverse proxy** to backend localhost HTTP servers (full session list, message list, file contents, etc.—Gateway does not directly read Runtime local files). Memory no longer belongs here: since ADR-101 the `memory graph` / `nodes` targets are `acowork-memory`
   5. **Does not** forward any session/agent business events
 
 ### 7.4 Data Ownership and Transport Channel Matrix
@@ -822,8 +822,8 @@ Need to wait for explicit success/failure from the other side?
 | Session config | Runtime | KB | `agents/{id}/sessions/{sid}/config` (R, single topic) | `GET /api/agents/{id}/sessions/{sid}/config` |
 | Control commands | Desktop | B | `agents/{id}/sessions/control/{cmd}` (QoS 1, sid in payload) | `POST /api/agents/{id}/control` (when ack needed) |
 | Sidecar endpoint | Sidecar | B | `sidecar/{kind}/status` (R) | `GET /api/sidecar/{kind}` |
-| Memory node change | `acowork-memory` (ADR-100; that process publishes no MQTT) | KB | ❌ reserved topic group, never implemented | `GET /api/agents/{id}/memory/nodes/{nid}` (Gateway `memory_proxy`) |
-| Memory graph full | `acowork-memory` (ADR-100) | MB+ | ❌ | ✅ `GET /api/agents/{id}/memory/graph` (Gateway `memory_proxy`) |
+| Memory node change | `acowork-memory` (ADR-101; that process publishes no MQTT) | KB | ❌ reserved topic group, never implemented | `GET /api/agents/{id}/memory/nodes/{nid}` (Gateway `memory_proxy`) |
+| Memory graph full | `acowork-memory` (ADR-101) | MB+ | ❌ | ✅ `GET /api/agents/{id}/memory/graph` (Gateway `memory_proxy`) |
 | File content | Runtime | variable | ❌ | ✅ `GET /api/files/{id}` (Gateway reverse proxy) |
 | User↔user chat content | `acowork-user` (SQLite) | KB | ❌ only the empty doorbell `acowork/users/{uid}/chat/changed` (QoS 1, not R) — it carries no thread or peer identity | ✅ `GET /api/users/{uid}/chats`, `GET /api/users/{uid}/chats/{chat}/messages` (ADR-076 § Decision 8) |
 
@@ -846,14 +846,14 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP reverse proxy──▶ R
 
 - Start: Runtime binds random port with `--http-port=0`, binding only to `127.0.0.1`
 - Registration: Runtime reports `http_port` when registering with Gateway (see §5.1 Step 4)
-- Endpoints: Exposes only internal query endpoints (session list, message full, file content), **not** config modification endpoints (config changes go over MQTT control). The memory query endpoints were removed from this list by ADR-100 — they live on the `acowork-memory` service surface now
+- Endpoints: Exposes only internal query endpoints (session list, message full, file content), **not** config modification endpoints (config changes go over MQTT control). The memory query endpoints were removed from this list by ADR-101 — they live on the `acowork-memory` service surface now
 - Lifecycle: Same as Runtime process; destroyed when process exits
 
 **Gateway Reverse Proxy**:
 
 - Gateway HTTP server, for specific paths (`/api/agents/{id}/sessions`, `/api/agents/{id}/sessions/{sid}/messages`, `/api/files/{id}`), does not process them itself but looks up the corresponding Runtime's `http_port` from registry and reverse-proxies the request to `http://127.0.0.1:{http_port}/...`
 - If Runtime not registered or exited, Gateway returns `503 Service Unavailable`
-- **ADR-100 exception**: `/api/agents/{id}/memory/*` and `/api/memory/*` are also reverse-proxied by the Gateway, but the target is `acowork-memory` (port read from the supervisor's port-file, not from the MQTT registry), so a down Runtime does not affect it — see [http.md §5.4](./http.md)
+- **ADR-101 exception**: `/api/agents/{id}/memory/*` and `/api/memory/*` are also reverse-proxied by the Gateway, but the target is `acowork-memory` (port read from the supervisor's port-file, not from the MQTT registry), so a down Runtime does not affect it — see [http.md §5.4](./http.md)
 
 **Endpoint Mapping**:
 
@@ -861,7 +861,7 @@ Desktop ──HTTP──▶ Gateway (:19876) ──HTTP reverse proxy──▶ R
 |-----------------------|-----------------------------------|-------------|
 | `GET /api/agents/{id}/sessions` | `GET /sessions` | Full session list |
 | `GET /api/agents/{id}/sessions/{sid}/messages` | `GET /sessions/{sid}/messages` | Full message list |
-| `GET /api/agents/{id}/memory/graph` | `GET /memory/graph` | Full memory graph (ADR-100: reverse-proxied to `acowork-memory`, not the Runtime) |
+| `GET /api/agents/{id}/memory/graph` | `GET /memory/graph` | Full memory graph (ADR-101: reverse-proxied to `acowork-memory`, not the Runtime) |
 | `GET /api/agents/{id}/memory/consolidation/status` | `GET /memory/consolidation/status` | Consolidation / forgetting pipeline status (same as above) |
 | `GET /api/agents/{id}/rag/status` | `GET /agents/{id}/rag/status` | RAG configuration status |
 | `POST /api/agents/{id}/rag/query` | `POST /agents/{id}/rag/query` | Direct RAG query |
@@ -1146,9 +1146,9 @@ publish_topics = [
     "acowork/agents/+/sessions/+/meta",
     "acowork/agents/+/sessions/+/config",
     "acowork/agents/+/sessions/+/messages/#",
-    # ADR-100: memory left the Runtime and `acowork-memory` does not connect to the
+    # ADR-101: memory left the Runtime and `acowork-memory` does not connect to the
     # Broker, so the grant below has no publisher; it stays only for rollback
-    # compatibility (ADR-100 Decision 12).
+    # compatibility (ADR-101 Decision 12).
     "acowork/agents/+/memory/#",
 ]
 subscribe_topics = [
@@ -1227,7 +1227,7 @@ graph TB
 ## 12. Important Notes
 
 1. **Desktop should not connect to MQTT Broker directly from the frontend**: Browser JS cannot use native TCP; unified use of Tauri Rust backend with `rumqttc` direct connection is more reliable and secure.
-2. **MQTT payload ≤ 100KB threshold**: Single message exceeding this threshold must go over HTTP (via Gateway reverse proxy to the backend HTTP — the Runtime, or the memory service since ADR-100); exceeding `max_packet_size` (10MB) causes Broker to disconnect directly. Retained messages occupy Broker memory; full large data (message lists, memory graphs) should not go over MQTT retained.
+2. **MQTT payload ≤ 100KB threshold**: Single message exceeding this threshold must go over HTTP (via Gateway reverse proxy to the backend HTTP — the Runtime, or the memory service since ADR-101); exceeding `max_packet_size` (10MB) causes Broker to disconnect directly. Retained messages occupy Broker memory; full large data (message lists, memory graphs) should not go over MQTT retained.
 3. **Ordering guarantee**: MQTT guarantees order within the same topic (RFC). Session messages all go under `agents/{id}/sessions/{sid}/messages/*` sub-topics; order is naturally guaranteed within the same sub-topic; no ordering guarantee between different sub-topics (chunk / tool_call don't need strict ordering).
 4. **Multi-user ACL**: Single-user phase uses most permissive ACL (all desktops subscribe to all agents); multi-user phase dynamically generates ACL rules by user → agent authorization.
 5. **Gateway single point**: Current architecture already has Gateway as a single point (agent subprocess management, local filesystem access); MQTT does not change this.

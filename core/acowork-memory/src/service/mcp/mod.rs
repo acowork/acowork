@@ -1,4 +1,4 @@
-//! MCP HTTP endpoint for the memory service (ADR-100) — JSON-RPC over HTTP.
+//! MCP HTTP endpoint for the memory service (ADR-101) — JSON-RPC over HTTP.
 //!
 //! Same stateless protocol subset as acowork-doc / acowork-pm: one `POST /mcp`,
 //! four methods, identity carried per request on `X-MCP-Actor`.
@@ -386,3 +386,4 @@ mod tests {
         );
     }
 }
+

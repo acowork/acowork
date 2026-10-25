@@ -1,4 +1,4 @@
-//! acowork-memory service health endpoint (ADR-100).
+//! acowork-memory service health endpoint (ADR-101).
 //!
 //! Reuses the [`acowork_core::health::HealthResponse`] contract: the Gateway
 //! supervisor probes `GET /health` to decide whether the memory process is
@@ -28,3 +28,4 @@ pub fn health_route(data_dir: PathBuf) -> axum::Router {
         }),
     )
 }
+

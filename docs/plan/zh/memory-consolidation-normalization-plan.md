@@ -316,7 +316,7 @@ episodic rows   : 269      pending backlog : 262      sediment before : knowledg
 
 ### 8.4 验证方式
 
-`core/acowork-runtime/tests/memory_lifecycle_e2e.rs`（验证时路径；该文件已随 ADR-100 迁入 `core/acowork-memory/tests/`）（9 通过 + 1 ignored）。每条断言都做过变异测试确认能失败：
+`core/acowork-runtime/tests/memory_lifecycle_e2e.rs`（验证时路径；该文件已随 ADR-101 迁入 `core/acowork-memory/tests/`）（9 通过 + 1 ignored）。每条断言都做过变异测试确认能失败：
 
 | 注入的错误 | 被捕获的测试 |
 |---|---|
@@ -325,3 +325,4 @@ episodic rows   : 269      pending backlog : 262      sediment before : knowledg
 | 忽略 `archive_days`（见到 Dormant 就清除） | `a_dormant_episode_waits_out_its_grace_period_before_being_forgotten` |
 
 前两项最初**没有**失败，原因是测试只回拨了 episode 的时间、没有回拨沉淀节点的时间，以及断言只看「节点还在」而 Dormant 节点依然可召回。补齐后三项才真正咬人。
+

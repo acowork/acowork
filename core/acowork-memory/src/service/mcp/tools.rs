@@ -1,4 +1,4 @@
-//! MCP tool dispatch for the memory service (ADR-100).
+//! MCP tool dispatch for the memory service (ADR-101).
 //!
 //! Both tools are **instance-scoped**: the `X-MCP-Actor` value (the runtime
 //! instance UUID, injected and validated by the Gateway `memory_proxy`) is the
@@ -331,7 +331,7 @@ async fn memory_recall(state: &MemoryState, instance_id: &str, args: Value) -> R
         .await
         .map_err(|e| ServiceError::Internal(format!("Memory retrieval failed: {e}")))?;
 
-    // Recall is the only read path since ADR-100, so it also carries the
+    // Recall is the only read path since ADR-101, so it also carries the
     // "procedure was actually used" signal that the removed auto-injection
     // step used to feed into activation / confidence boosting.
     manager.activate_procedural_nodes(store_ref(&store), &retrieval.memories);
@@ -675,3 +675,4 @@ mod tests {
         assert!(e.to_string().contains("unknown tool"), "{e}");
     }
 }
+

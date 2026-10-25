@@ -1,4 +1,4 @@
-//! acowork-memory service configuration (ADR-100).
+//! acowork-memory service configuration (ADR-101).
 //!
 //! Config precedence (highest first):
 //!
@@ -299,7 +299,7 @@ impl MemoryServiceConfig {
 
     /// Project this config onto the consolidation scheduler policy.
     ///
-    /// The service owns the pipeline (ADR-100), so the file is the only layer;
+    /// The service owns the pipeline (ADR-101), so the file is the only layer;
     /// the per-agent runtime override layer that the Runtime used to hold is
     /// now served by `PUT /memory/consolidation/status` against a live
     /// instance (P1d/P1e).
@@ -504,3 +504,4 @@ models = [{ provider_id = "volc", model_id = "deepseek-v3" }]
         assert_eq!(cfg.instances_dir(), cfg.data_dir.join("instances"));
     }
 }
+

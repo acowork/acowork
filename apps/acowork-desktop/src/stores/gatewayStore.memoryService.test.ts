@@ -1,12 +1,12 @@
 /**
- * ADR-100 P4: `gatewayStore.refreshMemoryService` — the readiness read that
+ * ADR-101 P4: `gatewayStore.refreshMemoryService` — the readiness read that
  * gates the memory panel and the global-search memory tab.
  *
  * Facts pinned here:
  *   - `memory_service` comes from `GET /api/status` (`/health` is
  *     liveness-only and cannot carry it);
  *   - a read that says nothing (transport failure, non-2xx, a Gateway older
- *     than ADR-100 that has no such key) must NOT rewrite the value we already
+ *     than ADR-101 that has no such key) must NOT rewrite the value we already
  *     have — an unanswered question is not evidence;
  *   - only the FIRST read of a session gets the bounded boot-race re-check
  *     (the supervisor may still be waiting for the service to bind its port
@@ -34,7 +34,7 @@ vi.stubGlobal("fetch", fetchMock);
 
 import { useGatewayStore } from "./gatewayStore";
 
-/** A `GET /api/status` body carrying the ADR-100 projection. */
+/** A `GET /api/status` body carrying the ADR-101 projection. */
 function statusBody(ready: boolean, mcpUrl: string | null = null) {
     return {
         version: "test",
@@ -111,7 +111,7 @@ describe("gatewayStore.refreshMemoryService", () => {
         expect(useGatewayStore.getState().memoryService).toEqual({ ready: true, mcp_url: "x" });
     });
 
-    it("treats a pre-ADR-100 Gateway (no memory_service key) as saying nothing", async () => {
+    it("treats a pre-ADR-101 Gateway (no memory_service key) as saying nothing", async () => {
         useGatewayStore.setState({ memoryService: { ready: true, mcp_url: "x" } });
         stubStatusSequence([
             ok({ version: "0.0.0", agents_installed: 0, agents_running: 0, uptime_secs: 1, mqtt_port: 1 }),
@@ -164,3 +164,4 @@ describe("gatewayStore.refreshMemoryService", () => {
         expect(useGatewayStore.getState().memoryService).toBeNull();
     });
 });
+

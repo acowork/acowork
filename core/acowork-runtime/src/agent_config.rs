@@ -190,7 +190,7 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compression_ratio_threshold: Option<f64>,
 
-    // ADR-100: the distiller schedule and the episodic-decay policy belong to
+    // ADR-101: the distiller schedule and the episodic-decay policy belong to
     // the memory service (its own `consolidation.json` is the write target), so
     // the ten `distiller_*` / `memory_forgetting_*` fields that used to sit here
     // are gone. `agent_config.json` files written before the move still parse —
@@ -211,23 +211,6 @@ pub struct AgentConfig {
     /// `UserProfile.language`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_language: Option<String>,
-
-    // ── Intent session rotation (design 27 §4.1, frontend-configurable
-    //    surface) ──────────────────────────────────────────────────────
-    //
-    // Layer 1 (highest priority) of the two Intent knobs; `None` = system
-    // default. The Desktop "Intent 会话轮转" card reads/writes these.
-    // Out-of-range values are clamped at the consumer
-    // (`intent_routing`), mirroring the deployment-level env override.
-    /// T1 idle-rotation threshold in hours. Design range 1–72; `Some(0)`
-    /// disables T1 rotation. `None` = default 24h.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent_idle_rotate_hours: Option<u64>,
-    /// T2 handoff target token cap. Design range 500–4,000.
-    /// `None` = default 1,500. T1's 500-token cap is design-fixed and
-    /// not configurable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub intent_handoff_max_tokens: Option<u64>,
 
     // ── Global-search retrieval config (ADR-095) ─────────────────────
     //
@@ -275,7 +258,7 @@ pub struct ChatRouterConfig {
     /// Explicit router provider. `None` = whichever provider serves `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Router call timeout in ms. `None` = 8,000.
+    /// Router call timeout in ms. `None` = 60,000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     /// Chat messages projected into the router context. `None` = 32.
@@ -287,7 +270,7 @@ pub struct ChatRouterConfig {
 }
 
 impl ChatRouterConfig {
-    pub const DEFAULT_TIMEOUT_MS: u64 = 8_000;
+    pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
     pub const DEFAULT_HISTORY_WINDOW: usize = 32;
     pub const DEFAULT_MAX_CANDIDATES: usize = 10;
 
@@ -297,11 +280,15 @@ impl ChatRouterConfig {
     }
 
     /// Clamped call timeout; a zero / absurd value must never disable the
-    /// router by making every call time out instantly.
+    /// router by making every call time out instantly. The ceiling stays
+    /// strictly below `provider_request_timeout_ms` (default 600s,
+    /// `timeouts` in runtime.toml) so a slow provider surfaces as a
+    /// provider error — the router's own deadline firing first would erase
+    /// that distinction.
     pub fn timeout_ms(&self) -> u64 {
         self.timeout_ms
             .unwrap_or(Self::DEFAULT_TIMEOUT_MS)
-            .clamp(1_000, 60_000)
+            .clamp(1_000, 300_000)
     }
 
     /// Clamped history window. The lower bound keeps enough turns for a
@@ -406,6 +393,21 @@ pub fn save_agent_config(work_dir: &Path, cfg: &AgentConfig) -> Result<(), Strin
 
 // ── Per-agent builtin-tools config (ADR-029) ───────────────────────────
 
+/// Tools whose operation is required for the Chat ↔ Execution session
+/// architecture to function. Disabling them via the user-facing toggle
+/// would silently break `chat_history_read` (context retrieval) or
+/// `intent_send` (agent-to-agent communication). They are always included
+/// in the dispatch list regardless of the persisted `enabled` flag.
+///
+/// See [`AgentCore::rebuild_all_tools`] which consumes this list.
+pub const PROTECTED_TOOL_NAMES: &[&str] = &["chat_history_read", "intent_send"];
+
+/// Returns `true` when `name` must always be enabled (cannot be turned off
+/// by the user or a manifest omission).
+pub fn is_protected_tool(name: &str) -> bool {
+    PROTECTED_TOOL_NAMES.contains(&name)
+}
+
 /// Per-agent builtin tools enable/disable configuration.
 ///
 /// Persisted to `{work_dir}/config/agent_tools.json`.
@@ -428,11 +430,11 @@ pub struct AgentToolsConfig {
 /// `{ "name": "...", "enabled": bool }`. No extra presentation hint
 /// fields — `AgentToolEntry` is plain persisted state.
 ///
-/// **Platform-protected tools** were historically filtered out here.
-/// The mechanism was retired along with the `context_retrieve` /
-/// `context_abandon` tool surface (`context_abandon` alone survives, as
-/// dead code — `context_retrieve` has been deleted). Every persistence
-/// path now passes all declared entries through verbatim.
+/// **Platform-protected tools** ([`PROTECTED_TOOL_NAMES`]) are always
+/// included in the dispatch list and LLM tool definitions regardless of
+/// their persisted `enabled` flag. The persistence layer still stores
+/// the user's intent, but `rebuild_all_tools` and
+/// `rebuild_context_tool_definitions` override it for these names.
 //
 /// See ADR-029 (per-agent builtin tools) and ADR-052 (tool compression).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1402,7 +1404,7 @@ mod tests {
             max_candidates: Some(usize::MAX),
             ..Default::default()
         };
-        assert_eq!(cfg.timeout_ms(), 60_000);
+        assert_eq!(cfg.timeout_ms(), 300_000);
         assert_eq!(cfg.history_window(), 200);
         assert_eq!(cfg.max_candidates(), 50);
     }
@@ -2740,3 +2742,4 @@ mod tests {
         );
     }
 }
+

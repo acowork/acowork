@@ -273,7 +273,8 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
                 status: String::new(),
                 has_human_participant: None,
                 chat_attachment_ids: vec![],
-params_json: r#"{"target":"A"}"#.into(),
+                for_execution_session: String::new(),
+                params_json: r#"{"target":"A"}"#.into(),
             })),
         };
         gw.publish_control_command(INSTANCE_A, cmd)

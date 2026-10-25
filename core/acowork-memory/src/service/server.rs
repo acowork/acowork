@@ -1,4 +1,4 @@
-//! acowork-memory HTTP server entry (ADR-100).
+//! acowork-memory HTTP server entry (ADR-101).
 //!
 //! The memory service runs as a **standalone process** supervised by the
 //! Gateway (the doc / PM / user pattern). This module provides
@@ -61,7 +61,7 @@ impl MemoryService {
             .merge(crate::service::mcp::mcp_router(state))
     }
 
-    /// Hand the pipeline its Gateway client (ADR-100 decision 7).
+    /// Hand the pipeline its Gateway client (ADR-101 decision 7).
     ///
     /// Plumbing, not tuning: the Gateway base URL and the node token come from
     /// the CLI the supervisor invoked us with, so they never enter `config.toml`.
@@ -120,3 +120,4 @@ impl MemoryService {
         Ok(())
     }
 }
+

@@ -38,8 +38,8 @@ use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::context::{
-    build_block_b, parse_history, prefix_hash, relative_age, CandidateLine, ChatRow, TurnContext,
-    WindowBudget,
+    build_block_b, parse_history, prefix_hash, relative_age, truncate_body, CandidateLine, ChatRow,
+    TurnContext, WindowBudget,
 };
 use super::decision::{append_decision, DecisionRecord};
 use super::prompt::{build_block_a, surface_label, PersonaSource};
@@ -50,7 +50,7 @@ use super::tool::{
 use super::ChatSlot;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::IntentEnvelope;
-use crate::agent::intent_turn::{append_chat_row, post_intent_response, IntentTurnContext};
+use crate::agent::intent_turn::{post_intent_response, IntentTurnContext};
 use crate::agent::session::chat_candidates::{
     self, CandidateSurface, SessionCandidate,
 };
@@ -108,14 +108,21 @@ impl RouterDeps {
 /// What the caller must do next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The router owned the turn — answered, dispatched, or already degraded
-    /// visibly (a `router_fallback` notice was written).
+    /// The router owned the turn and delivered it (answered or dispatched).
     Handled,
     /// Not a Chat turn (or the router is switched off): keep the legacy path.
     PassThrough,
     /// The router failed to decide: write nothing, use the legacy path. The
     /// caller still delivers the user's message, so the turn is never lost.
-    Fallback { reason: String },
+    /// `chat_excerpt` is a bounded tail of the conversation the router had
+    /// already read: a degraded `fresh` route has no LLM-composed brief, so
+    /// the caller attaches the excerpt to the new session's first message
+    /// (mechanical context, no model involved — strictly better than raw
+    /// text alone). `None` when the router never got history this turn.
+    Fallback {
+        reason: String,
+        chat_excerpt: Option<String>,
+    },
 }
 
 /// Entry point: decide whether this envelope is a router turn and run it.
@@ -287,7 +294,7 @@ async fn run_turn(
         // name off the enabled dispatch list. A disabled or missing tool is
         // neither exposed nor executed.
         //
-        // ADR-100: the memory lookup is the official memory service's MCP
+        // ADR-101: the memory lookup is the official memory service's MCP
         // wrapper (when the Gateway put it in this agent's catalog), not a
         // builtin. Resolving by name keeps the router free of memory
         // business logic: no catalog entry, no memory tool on a chat turn.
@@ -430,7 +437,7 @@ async fn run_turn(
         Ok(r) => r,
         Err(reason) => {
             trace.write("fallback", None, "error", Some(reason.clone()), None);
-            return degrade(deps, envelope, &chat_id, reason).await;
+            return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
         }
     };
 
@@ -471,15 +478,22 @@ async fn run_turn(
             info_calls.clone(),
         ));
         for call in &info_calls {
-            let result =
-                execute_info_tool(&prepared.info_tools, call, deps, text, cfg.timeout_ms()).await;
+            let result = execute_info_tool(
+                &prepared.info_tools,
+                call,
+                deps,
+                text,
+                &chat_id,
+                cfg.timeout_ms(),
+            )
+            .await;
             request.messages.push(ChatMessage::tool(call.id.clone(), result));
         }
         response = match call_model(&prepared.provider, request.clone(), cfg.timeout_ms()).await {
             Ok(r) => r,
             Err(reason) => {
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason).await;
+                return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
             }
         };
     }
@@ -514,14 +528,14 @@ async fn run_turn(
                                         again.message()
                                     );
                                     trace.write("fallback", None, "error", Some(reason.clone()), None);
-                                    return degrade(deps, envelope, &chat_id, reason).await;
+                                    return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
                                 }
                             }
                         }
                     }
                     Err(reason) => {
                         trace.write("fallback", None, "error", Some(reason.clone()), None);
-                        return degrade(deps, envelope, &chat_id, reason).await;
+                        return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
                     }
                 }
             }
@@ -534,7 +548,7 @@ async fn run_turn(
             let body = response.content.trim().to_string();
             if body.is_empty() {
                 trace.write("fallback", None, "error", Some("empty reply".into()), None);
-                return degrade(deps, envelope, &chat_id, "empty reply".to_string()).await;
+                return degrade(deps, envelope, &chat_id, "empty reply".to_string(), &rows, true).await;
             }
             let sent = post_intent_response(
                 &deps.instance_id,
@@ -561,27 +575,52 @@ async fn run_turn(
                 }
                 Err(e) => {
                     trace.write("fallback", None, "error", Some(e.clone()), None);
-                    degrade(deps, envelope, &chat_id, format!("reply write-back failed: {e}")).await
+                    degrade(deps, envelope, &chat_id, format!("reply write-back failed: {e}"), &rows, false).await
                 }
             }
         }
         Some((args, label)) => {
             // A `dispatch` without `session_config` still honours the user's
             // draft configuration when it starts a new session — that is the
-            // whole point of not forcing a rotation on a config change.
+            // whole point of not forcing a new session on a config change.
             let seed = args
                 .seed
                 .clone()
                 .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
-            let content = args.message.clone().unwrap_or_else(|| text.to_string());
+            // The router's `message` is a brief, and whether this turn needs
+            // one is NOT decided by the model's `target` argument: an
+            // existing session may have vanished from disk, in which case
+            // `chat_dispatch` opens a fresh one and reports `opened_new`.
+            // So the brief waits until the target is actually resolved.
+            let brief = args.message.clone();
             let target = args.target.clone();
-            // Kept before `content` moves into the intent, to build the bounded
-            // queue preview if the target session turns out to be busy.
-            let preview_text = content.clone();
             let delivered = {
                 let mut guard = session_manager.lock().await;
                 match guard.chat_dispatch(&chat_id, target, seed).await {
-                    Ok((session_id, handoff_note)) => {
+                    Ok((session_id, opened_new)) => {
+                        let content = dispatch_content(opened_new, brief.as_deref(), text);
+                        // §5.5.5 pending queue: record BEFORE delivering. The
+                        // only place that drops this row is the SessionTask
+                        // dequeue, which can run only once the send below has
+                        // happened — so recording first guarantees the row is
+                        // present when removal fires. Recording after the send
+                        // raced: an idle session woke and started the turn at
+                        // once, its empty removal ran first, and the row pushed
+                        // right after (the session now `is_active`) sat in the
+                        // queue forever. A busy session is active now (row
+                        // recorded, cleared at dequeue); an idle one is not
+                        // (record is a no-op — it starts immediately).
+                        guard.record_pending_intent(
+                            &session_id,
+                            crate::agent::session_state::PendingIntent {
+                                message_id: envelope.message_id.clone(),
+                                from: envelope.from.clone(),
+                                preview: crate::agent::session_state::pending_preview(
+                                    &content,
+                                ),
+                                from_chat: true,
+                            },
+                        );
                         let sent = guard.send_to_session(
                             &session_id,
                             SessionMessage::Intent {
@@ -594,27 +633,28 @@ async fn run_turn(
                                 repo: envelope.repo.clone(),
                                 kind: envelope.kind.clone(),
                                 has_human: envelope.has_human,
-                                handoff_note,
                                 chat_attachment_ids: envelope.chat_attachment_ids.clone(),
                                 in_reply_to: envelope.in_reply_to.clone(),
                             },
                         );
-                        (Ok(session_id), sent)
+                        (Ok((session_id, opened_new)), sent)
                     }
                     Err(e) => (Err(e.to_string()), Ok(())),
                 }
             };
             match delivered {
-                (Ok(session_id), Ok(())) => {
-                    // §5.5.5 anchor at routing time: write the `turn_started`
-                    // pointer now, not when the receiving session dequeues
-                    // the intent. A busy session may sit on this turn for a
-                    // long time; without the pointer the chat surface keeps
-                    // projecting "assigning…" long after routing completed.
-                    // Same deterministic `meta.message_id` as the session-
-                    // task write, so the store dedups the later one — this
-                    // is best-effort, a failure only costs the early anchor.
-                    if let Err(e) = append_chat_row(
+                (Ok((session_id, opened_new)), Ok(())) => {
+                    // ADR-100 D11: the routing reaction. The dispatch/start
+                    // *progress* milestones stay runtime-only (D10) — what is
+                    // written here is the one conversational fact the Chat
+                    // turn owes immediately: "your message went to a new task
+                    // / continues task X". It lands the moment the target is
+                    // resolved, minutes or hours before the answer, and it is
+                    // durable because "which task handled this message" is a
+                    // fact of the conversation, not of the progress bar.
+                    // Best-effort: a lost row costs the reaction, never the
+                    // delivery (the turn runs regardless).
+                    if let Err(e) = crate::agent::intent_turn::append_chat_row(
                         &deps.instance_id,
                         &deps.gateway_host,
                         &deps.node_token,
@@ -622,45 +662,33 @@ async fn run_turn(
                         "system_notice",
                         &envelope.from,
                         "",
-                        serde_json::json!({
-                            "message_id": format!("ts:{}", envelope.message_id),
-                            "notice_type": "turn_started",
-                            "in_reply_to": envelope.message_id,
-                            "agent_session_id": session_id,
-                        }),
+                        crate::agent::intent_turn::turn_routed_meta(
+                            &envelope.message_id,
+                            &session_id,
+                            opened_new,
+                        ),
                     )
                     .await
                     {
                         tracing::warn!(
                             chat_id = %chat_id,
+                            message_id = %envelope.message_id,
                             error = %e,
-                            "early turn_started pointer failed — session task retries at turn start"
+                            "routing reaction row failed — non-fatal"
                         );
                     }
-                    // §5.5.5 pending queue: if the target session is mid-turn,
-                    // show this routed message in its execution pending queue
-                    // (a no-op when it is idle and starts right away).
-                    session_manager.lock().await.record_pending_intent(
-                        &session_id,
-                        crate::agent::session_state::PendingIntent {
-                            message_id: envelope.message_id.clone(),
-                            from: envelope.from.clone(),
-                            preview: crate::agent::session_state::pending_preview(&preview_text),
-                            from_chat: true,
-                        },
-                    );
                     trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
                 (Ok(_), Err(e)) => {
                     let reason = format!("dispatch delivery failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason).await
+                    degrade(deps, envelope, &chat_id, reason, &rows, true).await
                 }
                 (Err(e), _) => {
                     let reason = format!("dispatch target resolution failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason).await
+                    degrade(deps, envelope, &chat_id, reason, &rows, true).await
                 }
             }
         }
@@ -744,7 +772,16 @@ async fn call_model(
     timeout_ms: u64,
 ) -> Result<ChatResponse, String> {
     match tokio::time::timeout(Duration::from_millis(timeout_ms), provider.chat(request)).await {
-        Ok(Ok(response)) => Ok(response),
+        Ok(Ok(mut response)) => {
+            // Compat endpoints (MiniMax/DeepSeek style) can inline think blocks
+            // into `content` on the non-streaming path, where ThinkTagParser
+            // never runs. The main loop defends at persistence time
+            // (strip_think_block); the router has no such path — its content is
+            // posted to the chat verbatim. Strip at the single choke point so
+            // the reply body AND the history pushes below stay clean.
+            response.content = crate::agent::loop_session::strip_think_block(&response.content);
+            Ok(response)
+        }
         Ok(Err(e)) => Err(format!("provider error: {e}")),
         Err(_) => Err(format!("router call timed out after {timeout_ms}ms")),
     }
@@ -763,6 +800,7 @@ async fn execute_info_tool(
     call: &ToolCall,
     deps: &RouterDeps,
     user_text: &str,
+    chat_id: &str,
     timeout_ms: u64,
 ) -> String {
     let name = call.function.name.as_str();
@@ -814,9 +852,12 @@ async fn execute_info_tool(
         work_dir: Some(deps.work_dir.clone()),
         // The router turn belongs to the chat, not to any execution
         // session: no session-node exclusion, and the user's message is
-        // the semantic query source for memory recall.
+        // the semantic query source for memory recall. The chat id is
+        // the one coordinate the router DOES own — session-aware tools
+        // (chat_history_read) resolve their binding from it.
         session_id: None,
         current_user_message: Some(user_text.to_string()),
+        chat_session_id: (!chat_id.is_empty()).then(|| chat_id.to_string()),
     };
     let outcome = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
@@ -915,14 +956,23 @@ fn task_label(conversation_id: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
-/// A degraded turn: leave a visible `router_fallback` notice, then hand the
-/// message back to the deterministic route. The user's message is still
-/// delivered — degradation costs latency and a notice, never the message.
+/// A degraded turn: hand the message back to the deterministic route. The
+/// user's message is still delivered — degradation costs latency, never the
+/// message.
+///
+/// `rows` are the chat rows this turn had already read (empty when history
+/// itself failed): they become a bounded excerpt the caller attaches to the
+/// degraded route's first message, so a fresh session is not left with raw
+/// text alone. `notify` posts the one conversational fact the degraded turn
+/// owes the human — the router could not decide and the message was
+/// forwarded automatically — best-effort like the routing reaction row.
 async fn degrade(
     deps: &RouterDeps,
     envelope: &IntentEnvelope,
     chat_id: &str,
     reason: String,
+    rows: &[ChatRow],
+    notify: bool,
 ) -> Outcome {
     tracing::warn!(
         chat_id = %chat_id,
@@ -930,30 +980,72 @@ async fn degrade(
         reason = %reason,
         "chat router degraded to the deterministic route"
     );
-    let meta = serde_json::json!({
-        // Idempotent: a redelivered turn never doubles the notice.
-        "message_id": format!("router-fallback:{}", envelope.message_id),
-        "notice_type": "router_fallback",
-        // Anchor link target: the surface resolves the message this
-        // receipt degraded through to its `ts:` pointer row, so the
-        // notice is clickable once routing lands.
-        "in_reply_to": envelope.message_id,
-    });
-    if let Err(e) = append_chat_row(
-        &deps.instance_id,
-        &deps.gateway_host,
-        &deps.node_token,
-        chat_id,
-        "system_notice",
-        "",
-        "",
-        meta,
-    )
-    .await
+    if notify
+        && let Err(e) = crate::agent::intent_turn::append_chat_row(
+            &deps.instance_id,
+            &deps.gateway_host,
+            &deps.node_token,
+            chat_id,
+            "system_notice",
+            &envelope.from,
+            "",
+            crate::agent::intent_turn::router_fallback_meta(&envelope.message_id),
+        )
+        .await
     {
-        tracing::debug!(error = %e, "chat router: fallback notice not written");
+        tracing::warn!(
+            chat_id = %chat_id,
+            error = %e,
+            "router fallback receipt row failed — non-fatal"
+        );
     }
-    Outcome::Fallback { reason }
+    Outcome::Fallback {
+        reason,
+        chat_excerpt: chat_tail_excerpt(rows, &deps.instance_id),
+    }
+}
+
+/// How many recent chat rows a degraded turn may hand to the fresh session.
+const FALLBACK_EXCERPT_ROWS: usize = 6;
+/// Byte ceiling of the same excerpt (per row and total) — the excerpt must
+/// stay a footnote to the user's message, never a second context window.
+const FALLBACK_EXCERPT_ROW_BYTES: usize = 512;
+const FALLBACK_EXCERPT_TOTAL_BYTES: usize = 2048;
+
+/// Mechanical tail of the conversation for the degraded `fresh` route: the
+/// last few rows, oldest first, each sender-tagged and byte-bounded. No LLM
+/// is involved — this is what the router already saw, not what it concluded.
+/// `None` when nothing but the trigger message itself would remain.
+fn chat_tail_excerpt(rows: &[ChatRow], agent_instance: &str) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    for row in rows.iter().rev() {
+        if lines.len() >= FALLBACK_EXCERPT_ROWS || bytes >= FALLBACK_EXCERPT_TOTAL_BYTES {
+            break;
+        }
+        // The trigger message rides along verbatim on the legacy route;
+        // notices and cards are routing chrome, not conversation.
+        if !matches!(row.kind.as_str(), "user_message" | "agent_message" | "text" | "") {
+            continue;
+        }
+        let body = truncate_body(row.body.trim(), FALLBACK_EXCERPT_ROW_BYTES);
+        if body.is_empty() {
+            continue;
+        }
+        let role = if !agent_instance.is_empty() && row.from == agent_instance {
+            "agent"
+        } else {
+            "user"
+        };
+        let line = format!("[{role}] {body}");
+        bytes += line.len();
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.reverse();
+    Some(lines.join("\n"))
 }
 
 /// Decision-log context for one turn. Holds borrows only, so writing the
@@ -1012,6 +1104,30 @@ impl TurnTrace<'_> {
     }
 }
 
+/// What the execution session actually receives for a dispatched turn.
+///
+/// The router's brief exists for one thing only: a session that starts empty
+/// has no history to resolve "commit the local changes" against, so the
+/// brief has to carry the conversation. A **continued** session already has
+/// its own history — a compaction included, since a compacted session keeps
+/// its summary and its tail and continues in place (ADR-032/ADR-061) — so it
+/// receives the user's own words verbatim. Overwriting them with a router
+/// paraphrase would put the paraphrase in the persisted `user` row and in
+/// the auto-title (ADR-046 keeps those the user's actual message) and
+/// re-inject context the session already holds; anything it genuinely lacks it
+/// pulls with `chat_history_read`.
+///
+/// `opened_new` is the routing-time authority for "this turn landed in a
+/// physically new session", which is why the choice is made here rather than
+/// from `Target`: `Target::Existing` against a session that is gone from disk
+/// also creates one, and that one still needs the brief.
+fn dispatch_content(opened_new: bool, brief: Option<&str>, user_text: &str) -> String {
+    match (opened_new, brief) {
+        (true, Some(brief)) => brief.to_string(),
+        _ => user_text.to_string(),
+    }
+}
+
 // The `SessionStatus` → `CandidateStatus` vocabulary table lives in
 // `chat_candidates` (ADR-099): `SessionManager::resolve_candidates` needs the
 // same mapping, and the session layer must not reach up into the router layer
@@ -1022,6 +1138,30 @@ mod tests {
     use super::super::tool::Target;
     use super::*;
     use crate::agent::session::chat_candidates::{CandidateOrigin, CandidateStatus};
+    use acowork_core::providers::mock::{MockProvider, MockResponse};
+
+    #[tokio::test]
+    async fn call_model_strips_inline_think_tags() {
+        // Chat-surface leak (2026-10-24): a compat endpoint inlined its think
+        // block into `content` on the non-streaming path; the router posted it
+        // verbatim to the chat. call_model must sanitize every response.
+        let open = "<\u{74}hink>";
+        let close = "</\u{74}hink>";
+        let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(vec![MockResponse::Text {
+            content: format!("{open}User asks the time. Simple answer.{close}现在是 19:37。"),
+        }]));
+        let request = ChatRequest {
+            model: "mock-model".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            reasoning_effort: None,
+            thinking_mode: None,
+        };
+        let response = call_model(&provider, request, 5_000).await.unwrap();
+        assert_eq!(response.content, "现在是 19:37。");
+    }
 
     fn envelope(kind: &str, chat_id: &str, params: Value) -> IntentEnvelope {
         IntentEnvelope {
@@ -1038,6 +1178,7 @@ mod tests {
             status: String::new(),
             has_human: Some(true),
             chat_attachment_ids: Vec::new(),
+            for_execution_session: String::new(),
         }
     }
 
@@ -1178,6 +1319,33 @@ mod tests {
         assert!(!rendered.contains("sess-secret"));
     }
 
+    #[test]
+    fn a_continued_session_receives_the_users_own_words() {
+        // Regression (2026-10-24): the router appended a context brief when
+        // dispatching to an existing session, and it replaced the user's
+        // message — the execution session's persisted `user` row and its
+        // auto-title then held the router's paraphrase, and the brief restated
+        // history that session already has.
+        let brief = "把本地修改的代码提交一下。\n\n上下文（同一 session 内刚完成的工作）：1. …";
+        assert_eq!(
+            dispatch_content(false, Some(brief), "把本地修改的代码提交一下。"),
+            "把本地修改的代码提交一下。"
+        );
+    }
+
+    #[test]
+    fn a_fresh_session_keeps_the_routers_brief() {
+        // A session that starts empty has nothing else to work from. This
+        // covers `dispatch(new)` and a `target=S3` whose session has vanished
+        // from disk — `chat_dispatch` reports `opened_new` for both.
+        assert_eq!(
+            dispatch_content(true, Some("Commit the batch described below: …"), "raw"),
+            "Commit the batch described below: …"
+        );
+        // Without a brief (e.g. an attachment-only turn) the text still lands.
+        assert_eq!(dispatch_content(true, None, "raw"), "raw");
+    }
+
     fn info_call(name: &str, arguments: &str) -> ToolCall {
         ToolCall {
             id: "call-1".into(),
@@ -1239,7 +1407,7 @@ mod tests {
             HTTP_REQUEST_TOOL,
             r#"{"url":"https://example.com/time","method":"DELETE","body":{"evil":1},"headers":{"a":"b","c":42},"timeout_secs":9999}"#,
         );
-        let out = execute_info_tool(&tools, &call, &deps(), "now?", 8000).await;
+        let out = execute_info_tool(&tools, &call, &deps(), "now?", "cs-test", 8000).await;
         let echoed: Value = serde_json::from_str(&out)
             .unwrap_or_else(|e| panic!("echoed json params: {e}\nout: {out}"));
         assert_eq!(echoed["method"], "GET");
@@ -1253,7 +1421,7 @@ mod tests {
 
         // Non-http schemes are rejected before any request runs.
         let bad = info_call(HTTP_REQUEST_TOOL, r#"{"url":"file:///etc/passwd"}"#);
-        let out = execute_info_tool(&tools, &bad, &deps(), "x", 1000).await;
+        let out = execute_info_tool(&tools, &bad, &deps(), "x", "cs-test", 1000).await;
         assert!(out.starts_with("Error:"), "got: {out}");
         assert!(out.contains("http(s)"));
     }
@@ -1262,7 +1430,7 @@ mod tests {
     async fn unavailable_or_malformed_info_calls_come_back_as_tool_errors() {
         // A hallucinated or disabled tool name is feedback, not a turn
         // failure - the model gets one more chance to answer or route.
-        let out = execute_info_tool(&[], &info_call("web_fetch", "{}"), &deps(), "x", 1000).await;
+        let out = execute_info_tool(&[], &info_call("web_fetch", "{}"), &deps(), "x", "cs-test", 1000).await;
         assert!(out.starts_with("Error:"));
         assert!(out.contains("not available"));
 
@@ -1271,7 +1439,15 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(EchoTool {
             name: memory.clone(),
         })];
-        let out = execute_info_tool(&tools, &info_call(&memory, "{oops"), &deps(), "x", 1000).await;
+        let out = execute_info_tool(
+            &tools,
+            &info_call(&memory, "{oops"),
+            &deps(),
+            "x",
+            "cs-test",
+            1000,
+        )
+        .await;
         assert!(!out.starts_with("Error:"), "got: {out}");
     }
 
@@ -1286,4 +1462,40 @@ mod tests {
         // Small results pass through untouched.
         assert_eq!(truncate_info_result("fine"), "fine");
     }
+
+    #[test]
+    fn chat_tail_excerpt_keeps_recent_conversation_and_drops_chrome() {
+        let row = |kind: &str, from: &str, body: &str, seq: u64| ChatRow {
+            seq,
+            kind: kind.to_string(),
+            from: from.to_string(),
+            body: body.to_string(),
+            ..Default::default()
+        };
+        let rows = vec![
+            row("user_message", "u-1", "first", 1),
+            row("system_notice", "agent-1", "routing chrome", 2),
+            row("agent_message", "agent-1", "answer one", 3),
+            row("user_message", "u-1", "and the deploy script?", 4),
+        ];
+        let excerpt = chat_tail_excerpt(&rows, "agent-1").expect("conversation rows exist");
+        // Oldest first, sender-tagged, notices excluded.
+        assert_eq!(
+            excerpt,
+            "[user] first\n[agent] answer one\n[user] and the deploy script?"
+        );
+
+        // Nothing but the trigger row itself (or empty bodies) -> no excerpt.
+        assert!(chat_tail_excerpt(&[row("user_message", "u-1", "  ", 1)], "agent-1").is_none());
+        assert!(chat_tail_excerpt(&[], "agent-1").is_none());
+
+        // Byte cap: a huge newest row is clipped, the older rows survive.
+        let big = row("user_message", "u-1", &"x".repeat(4000), 5);
+        let excerpt = chat_tail_excerpt(&[rows[0].clone(), big.clone()], "agent-1").unwrap();
+        assert!(excerpt.starts_with("[user] first\n[user] xxx"));
+        assert!(excerpt.len() < 4000);
+        assert!(!excerpt.ends_with('y')); // clipped, not copied whole
+    }
 }
+
+

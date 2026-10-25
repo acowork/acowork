@@ -1,4 +1,4 @@
-//! Panel-facing REST API (ADR-100 P1d) — the Runtime `/memory/*` endpoints.
+//! Panel-facing REST API (ADR-101 P1d) — the Runtime `/memory/*` endpoints.
 //!
 //! These routes are a **port, not a redesign**. The Desktop memory panel and the
 //! Gateway reverse proxy already speak this contract, so response shapes, field
@@ -12,7 +12,7 @@
 //!
 //! Every route takes `?instance_id=`, injected by the Gateway `memory_proxy`
 //! after it resolves the public `/api/agents/{id}/memory/*` path and validated
-//! here as a directory name (ADR-100 decision 3). A missing or unusable id is a
+//! here as a directory name (ADR-101 decision 3). A missing or unusable id is a
 //! 400 — the request never reaches a store, so it can never read another
 //! Agent's memories. Unlike the MCP surface there is no 403 case: this API is
 //! reachable only through the Gateway, which owns the authorization decision.
@@ -185,3 +185,4 @@ pub(crate) type JsonErrorResult<T> = std::result::Result<T, JsonError>;
 pub(crate) fn err_json(status: axum::http::StatusCode, code: &str) -> JsonError {
     (status, axum::Json(serde_json::json!({ "error": code })))
 }
+

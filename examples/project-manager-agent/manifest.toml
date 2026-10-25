@@ -29,12 +29,12 @@ type = "Network"
 # workflows:
 #   - file_*/doc_reader/glob_search/content_search → project docs, status reports
 #   - http_request/web_fetch                      → research tools/methodologies
-#   - mcp_memory__* (hosted memory MCP, ADR-100)   → project history & decisions
+#   - mcp_memory__* (hosted memory MCP, ADR-101)   → project history & decisions
 #   - intent_send                                  → coordinate team member agents
 #   - ask_user_question, todo_write                → clarify requirements & track tasks
 # No shell tools — PM does not hold a Shell permission.
 
-# --- Memory (ADR-100) ---
+# --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
 # here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
 # `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
@@ -104,3 +104,4 @@ description = "Break down project goals into actionable tasks with estimates and
 
 [capabilities.risk_assessment]
 description = "Identify, evaluate, and create mitigation plans for project risks"
+

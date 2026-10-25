@@ -29,7 +29,7 @@ use std::sync::atomic::AtomicUsize;
 use acowork_core::protocol::{ContextUsageInfo, ModelCapabilitiesInfo};
 use acowork_core::providers::traits::UsageInfo;
 use acowork_runtime::agent::context::{build_context_usage_from_persisted, patch_session_totals};
-use acowork_runtime::conversation::{ConversationSession, SessionConfig, SessionTokens};
+use acowork_runtime::conversation::{ ConversationSession, SessionConfig, SessionTokens, ModelUsageAttribution };
 use tempfile::TempDir;
 
 const AGENT_ID: &str = "com.acowork.test.cache_e2e";
@@ -153,8 +153,8 @@ async fn push_path_carries_total_cache_fields_after_resume() {
 
     // Anthropic-style round: cache_read + cache_write both > 0.
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage_with_cache(10_000, 800, 2_000, 500));
-    session.accumulate_llm_usage(&usage_with_cache(15_000, 1_500, 4_500, 1_000));
+    session.accumulate_llm_usage(&usage_with_cache(10_000, 800, 2_000, 500), &ModelUsageAttribution::default());
+    session.accumulate_llm_usage(&usage_with_cache(15_000, 1_500, 4_500, 1_000), &ModelUsageAttribution::default());
     session.close().await.expect("close");
 
     // Resume reads the persisted SessionTokens.
@@ -223,9 +223,9 @@ async fn cumulative_cache_accumulates_across_calls() {
     let session_id = "cache_accumulate";
 
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage_with_cache(8_000, 600, 1_000, 200));
-    session.accumulate_llm_usage(&usage_with_cache(12_000, 900, 3_000, 0));
-    session.accumulate_llm_usage(&usage_with_cache(20_000, 1_500, 7_500, 1_500));
+    session.accumulate_llm_usage(&usage_with_cache(8_000, 600, 1_000, 200), &ModelUsageAttribution::default());
+    session.accumulate_llm_usage(&usage_with_cache(12_000, 900, 3_000, 0), &ModelUsageAttribution::default());
+    session.accumulate_llm_usage(&usage_with_cache(20_000, 1_500, 7_500, 1_500), &ModelUsageAttribution::default());
     session.close().await.expect("close");
 
     let resumed =
@@ -270,7 +270,7 @@ async fn openai_zero_cache_write_surfaces_as_some_zero() {
     let session_id = "openai_zero_cache_write";
 
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage_with_cache(5_000, 400, 2_500, 0));
+    session.accumulate_llm_usage(&usage_with_cache(5_000, 400, 2_500, 0), &ModelUsageAttribution::default());
     session.close().await.expect("close");
 
     let resumed =
@@ -318,8 +318,8 @@ async fn anthropic_cache_write_round_trips() {
     let session_id = "anthropic_cache_write";
 
     let session = make_session(&dir, session_id);
-    session.accumulate_llm_usage(&usage_with_cache(12_000, 1_000, 6_000, 3_000));
-    session.accumulate_llm_usage(&usage_with_cache(14_000, 1_200, 8_000, 0));
+    session.accumulate_llm_usage(&usage_with_cache(12_000, 1_000, 6_000, 3_000), &ModelUsageAttribution::default());
+    session.accumulate_llm_usage(&usage_with_cache(14_000, 1_200, 8_000, 0), &ModelUsageAttribution::default());
     session.close().await.expect("close");
 
     let resumed =

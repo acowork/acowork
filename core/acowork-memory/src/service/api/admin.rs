@@ -1,4 +1,4 @@
-//! Admin write entrypoints (ADR-100 P1e) — the manifest bootstrap import.
+//! Admin write entrypoints (ADR-101 P1e) — the manifest bootstrap import.
 //!
 //! This is **write entrypoint D** ([`docs/memory-write-entrypoints.md`]): the
 //! only memory writes that are not a tool call, a panel edit or a distiller run.
@@ -15,7 +15,7 @@
 //! that only emerges at runtime and belong to the distiller.
 //!
 //! The sibling entrypoint, `POST /admin/import` (the one-shot upload of a legacy
-//! `{work_dir}/memory/private.sqlite`, ADR-100 decision 10), is in
+//! `{work_dir}/memory/private.sqlite`, ADR-101 decision 10), is in
 //! [`crate::service::api::import_legacy`]: it moves whole stored histories
 //! instead of deriving nodes from declared facts, so it has its own shape and
 //! its own idempotency gate.
@@ -392,3 +392,4 @@ mod tests {
         assert!(state.instances().list().is_empty());
     }
 }
+

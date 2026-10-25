@@ -28,7 +28,7 @@ Scripts are grouped by **scope**, not by file type:
 | Folder | Contains |
 |---|---|
 | [`common/`](common/) | Cross-platform build steps that ship a `.sh` + `.ps1` twin (`build_core`, `setup_ort`, `start_node`, `build-agent`, `gen_icons`). The `.sh` serves both Linux and macOS, so the twins live together rather than under an OS folder. |
-| [`desktop/windows/`](desktop/windows/) · [`desktop/macos/`](desktop/macos/) · [`desktop/linux/`](desktop/linux/) | Per-OS desktop packaging (`package_desktop_*`), plus the macOS one-click build and the Windows stop-latency test. |
+| [`desktop/windows/`](desktop/windows/) · [`desktop/macos/`](desktop/macos/) · [`desktop/linux/`](desktop/linux/) | Per-OS desktop packaging (`package_desktop_*`), plus the Windows stop-latency test. |
 | [`android/`](android/) | Mobile build/sign helpers — `build_mobile.sh` / `build_mobile.ps1` are twins covering the same APK build (bash on macOS/Linux, PowerShell on Windows), and `sign_release.ps1` drives keystore creation, `gradle.properties`, and the signed release build. Authoritative flow: [apps/acowork-mobile/README.md](../apps/acowork-mobile/README.md). |
 | `ci.sh`, `ort_env.js` (repo root of `dev/`) | Kept at the top level because they are referenced by path from `AGENTS.md`, `apps/acowork-desktop/package.json`, and the ADR corpus. |
 | [`deploy/`](deploy/), [`e2e_frontend_smoke/`](e2e_frontend_smoke/) | Server deployment units and the frontend smoke suite (unchanged locations). |
@@ -36,7 +36,8 @@ Scripts are grouped by **scope**, not by file type:
 ## First build
 
 ```bash
-./dev/common/setup_ort.sh           # Linux / macOS
+./dev/common/setup_ort.sh           # Linux only (macOS: skip — build_core.sh
+                                    # downloads ORT itself via cargo download-ort)
 ./dev/common/setup_ort.ps1          # Windows
 ./dev/common/build_core.sh          # or build_core.ps1 on Windows
 ```
@@ -49,8 +50,7 @@ profile. `-Debug` / `--debug` switches to the debug profile and auto-raises
 
 | Script | What it does |
 |---|---|
-| [`build_core.ps1`](common/build_core.ps1) · [`build_core.sh`](common/build_core.sh) | Build Gateway + Runtime + Node Agent. `-Start` stops the old Gateway and starts a new one; `-Start -Remote` binds `0.0.0.0` and advertises the detected LAN IP instead of `127.0.0.1` — this is how you make the Gateway reachable from a phone on the same network. |
-| [`build_macos.sh`](desktop/macos/build_macos.sh) | macOS one-click build: skips the slow `setup_ort.sh` download, pulls the Apple Silicon ONNX Runtime with `download-ort,coreml`, installs Homebrew `pkg-config`/`cmake`. |
+| [`build_core.ps1`](common/build_core.ps1) · [`build_core.sh`](common/build_core.sh) | Build Gateway + Runtime + Node Agent. `-Start` / `--start` stops the old Gateway and starts a new one; `--start --remote` binds `0.0.0.0` and advertises the detected LAN IP instead of `127.0.0.1` — this is how you make the Gateway reachable from a phone on the same network. On macOS the embed build downloads ONNX Runtime via cargo (`download-ort`, CoreML on Apple Silicon; `--cpu` to opt out) and syncs it into `.ort/`, so no `setup_ort.sh` run is needed; `--install-deps` sets up Homebrew `pkg-config`/`cmake` and `--mirror` configures the USTC cargo mirror (both opt-in). |
 | [`start_node.ps1`](common/start_node.ps1) · [`start_node.sh`](common/start_node.sh) | Start a local `acowork-node` daemon joined to a remote Gateway (`<host>:<port>`). |
 | [`ort_env.js`](ort_env.js) | Invoked by `tauri.conf.json`'s `beforeDevCommand`; not run by hand. Probes `.ort/`, then the Cargo cache, and injects `--features download-ort[,coreml\|cuda\|directml]` when nothing is installed. |
 

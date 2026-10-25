@@ -1,6 +1,6 @@
 //! MemoryProvider trait - standardized interface for memory storage backends.
 //!
-//! The single storage abstraction of the memory layer (ADR-100 retired the old
+//! The single storage abstraction of the memory layer (ADR-101 retired the old
 //! `MemoryStore` trait, which had no implementation left). Its methods cover
 //! everything a memory engine has to offer the service:
 //! - Hybrid retrieval (vector + full-text)
@@ -13,7 +13,7 @@
 //! Implementation: [`crate::sqlite::SqliteStore`] (ADR-082), one database per
 //! agent instance.
 //!
-//! Design ref: ADR-051, ADR-082, ADR-100
+//! Design ref: ADR-051, ADR-082, ADR-101
 
 use std::time::Duration;
 
@@ -37,7 +37,7 @@ use crate::types::{
 /// Implementations: [`crate::sqlite::SqliteStore`] (ADR-082) and the test
 /// doubles in this crate.
 ///
-/// Design ref: ADR-051, ADR-082, ADR-100
+/// Design ref: ADR-051, ADR-082, ADR-101
 #[async_trait]
 pub trait MemoryProvider: Send + Sync {
     // ── Episodic layer ───────────────────────────────────────────────────
@@ -344,3 +344,4 @@ pub trait MemoryProvider: Send + Sync {
     fn apply_quality_config(&self, config: &MemoryQualityConfig) -> Result<()>;
 
 }
+

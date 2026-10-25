@@ -1,4 +1,4 @@
-//! acowork-memory service layer (ADR-100).
+//! acowork-memory service layer (ADR-101).
 //!
 //! Turns this crate from a Runtime-embedded capability into a standalone
 //! process supervised by the Gateway, exactly like acowork-doc / acowork-pm /
@@ -11,7 +11,7 @@
 //!
 //! Layout:
 //! - [`cli`] / [`config`] — process arguments + `{data_dir}/config.toml`
-//! - [`state`] — per-instance store registry (ADR-100 decision 3)
+//! - [`state`] — per-instance store registry (ADR-101 decision 3)
 //! - [`mcp`] — `memory_store` / `memory_recall` over the stateless JSON-RPC
 //!   subset
 //! - [`api`] — panel-facing REST endpoints ported from the Runtime
@@ -41,3 +41,4 @@ pub use config::{MemoryServiceConfig, default_data_dir};
 pub use error::{Result as ServiceResult, ServiceError};
 pub use server::MemoryService;
 pub use state::MemoryState;
+

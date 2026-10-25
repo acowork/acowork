@@ -18,7 +18,7 @@ wasm-tools = ["wasmtime", "wasmtime-wasi"]
 interactive-cli = ["dialoguer"]
 [dependencies]
 acowork-core.workspace = true
-# ADR-100: `acowork-memory` is a standalone service now — the Runtime no
+# ADR-101: `acowork-memory` is a standalone service now — the Runtime no
 # longer links it. `acowork-sqlite` stays because the conversation index and
 # the session-metadata rows still live in the Runtime's workspace SQLite file.
 
@@ -105,3 +105,4 @@ futures-util = { workspace = true }
 name = "mqtt_integration"
 harness = false    # We provide our own main()
 required-features = []
+

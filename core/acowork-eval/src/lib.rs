@@ -4,7 +4,7 @@
 //!
 //! ## Why it is its own crate
 //!
-//! The two things that need it are measured from two crates that ADR-100 made
+//! The two things that need it are measured from two crates that ADR-101 made
 //! deliberately binary-isolated — the memory engine is benched from
 //! `acowork-memory`, the conversation engine from `acowork-runtime` — and
 //! integration tests cannot import each other either. Duplicating the metric
@@ -1263,3 +1263,4 @@ mod tests {
         assert_eq!(kept_cell(Some(false)), "LOST");
     }
 }
+

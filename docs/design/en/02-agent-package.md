@@ -1,4 +1,4 @@
-﻿# Agent Packaging Format (.agent)
+# Agent Packaging Format (.agent)
 
 > Version: v3.3 | Last Updated: 2026-04-17
 
@@ -266,7 +266,7 @@ value = "https://api.weather.com"
 [[permissions]]
 type = "FilesystemRead"
 
-# Memory is no longer a permission domain: ADR-100 split it out into a Gateway-hosted
+# Memory is no longer a permission domain: ADR-101 split it out into a Gateway-hosted
 # standalone service, so `memory_store` / `memory_recall` are now tools of that service
 # (MCP server id = `memory`). Per-tool opt-in lives in `agent_mcp_tools.json` under the
 # prefixed names `mcp_memory__*` (ADR-069), and the deleted `MemoryRead` / `MemoryWrite`
@@ -364,7 +364,7 @@ Agent clients rendering Agent avatars MUST follow this priority (aligned with [A
 
 This priority must also be preserved in remote Gateway scenarios (see [04-gateway.md § 9.6](./04-gateway.md#96-security-design)).
 
-- `permissions`: Uses TOML array-of-tables syntax; each entry contains `type` and optional `value`. Supports `Network`, `FilesystemRead`, `FilesystemWrite`, `IntentSend`, etc. (`MemoryRead` / `MemoryWrite` were removed by ADR-100 — memory is served by a hosted service now, so it is no longer a permission domain.)
+- `permissions`: Uses TOML array-of-tables syntax; each entry contains `type` and optional `value`. Supports `Network`, `FilesystemRead`, `FilesystemWrite`, `IntentSend`, etc. (`MemoryRead` / `MemoryWrite` were removed by ADR-101 — memory is served by a hosted service now, so it is no longer a permission domain.)
 - `triggers`: Activation trigger array. Supports `cron`, `event`, `manual` types. `cron` uses standard 5-field expressions (UTC); second-level precision and special macros are not supported.
 - `llm.providers`: Supports multiple LLM Providers, each referencing a Vault key.
 - `llm.routing.strategy`: LLM routing strategy (`cost_priority` / `quality_priority` / `latency_priority`).
@@ -447,7 +447,7 @@ Each permission string in the permissions array follows a unified pattern syntax
 | `filesystem:*:*` | Entire filesystem domain | read/write any path | — |
 | `intent:send:*` | Can send Intent to any Agent | `com.example.calendar`, `com.acowork.system` | — |
 
-> Earlier revisions listed a `memory:read` row here; since ADR-100 memory is no longer a permission domain, so the wildcard rules do not apply to it.
+> Earlier revisions listed a `memory:read` row here; since ADR-101 memory is no longer a permission domain, so the wildcard rules do not apply to it.
 
 **Matching Algorithm**:
 

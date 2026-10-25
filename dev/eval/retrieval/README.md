@@ -15,7 +15,7 @@ the numbers that gate Phase 2 and Phase 4.
 
 ## Three harnesses, split along the binary boundary
 
-ADR-100 made the memory engine and the Runtime separate binaries with separate
+ADR-101 made the memory engine and the Runtime separate binaries with separate
 code paths, and the tests follow that line: each harness seeds and scores **only
 the scope its own binary serves**, and a query whose ground truth lies entirely
 in the other scope is skipped rather than counted — crediting an engine with rows
@@ -176,3 +176,4 @@ memory report averages 9 queries and the conversation report 4 — read the
 synthetic-but-realistic rather than desensitized production transcripts. Before
 §9 items 1 and 3 are decided on numbers, the corpus should be rebuilt from real
 agent transcripts the way `memory_retrieval_bench.rs` does.
+

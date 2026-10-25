@@ -34,7 +34,7 @@ pub const STORE_FILE: &str = "private.sqlite";
 pub const STORE_SIDECAR_SUFFIXES: [&str; 2] = ["-wal", "-shm"];
 
 /// Sentinel written beside a legacy store once the Node migration pass has
-/// handed its memory rows to the memory service (ADR-100 decision 10).
+/// handed its memory rows to the memory service (ADR-101 decision 10).
 ///
 /// The store file itself is NOT renamed: since ADR-082 the same
 /// `private.sqlite` also carries the session meta and the conversation index
@@ -160,3 +160,4 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+

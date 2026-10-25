@@ -1,4 +1,4 @@
-//! Distiller LLM client (ADR-100 decision 7).
+//! Distiller LLM client (ADR-101 decision 7).
 //!
 //! The consolidation pipeline needs one thing from a model: send a list of
 //! messages, get a JSON string back. That is [`crate::consolidation::ConsolidationLlm`],
@@ -728,3 +728,4 @@ mod tests {
         assert!(llm.chat(vec![]).await.unwrap_err().contains("no choices"));
     }
 }
+

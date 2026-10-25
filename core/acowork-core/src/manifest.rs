@@ -428,7 +428,7 @@ pub struct ManifestDistillerConfig {
 /// `From<ManifestMemoryQuality> for MemoryQualityConfig`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ManifestMemoryQuality {
-    // ADR-100 decision 5: `auto_inject_enabled` is gone along with the
+    // ADR-101 decision 5: `auto_inject_enabled` is gone along with the
     // auto-injection path it gated — recall happens through the memory tools
     // the agent calls.
     /// Exclude Dormant nodes from retrieval results (default: true).
@@ -775,7 +775,7 @@ mod tests {
         let manifest = AgentManifest::from_toml(sample_manifest_toml()).unwrap();
         assert!(manifest.has_tool("weather"));
         assert!(manifest.has_tool("file_read"));
-        // ADR-100: memory tools left the builtin registry, so a package no longer
+        // ADR-101: memory tools left the builtin registry, so a package no longer
         // declares them here.
         assert!(!manifest.has_tool("memory_store"));
         assert!(!manifest.has_tool("shell"));
@@ -946,3 +946,4 @@ mod tests {
         assert!(manifest.memory.distiller_enabled());
     }
 }
+

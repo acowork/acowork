@@ -41,7 +41,7 @@ pub struct WasiCapabilities {
 ///
 /// Returns None for permissions that don't need WASI mapping
 /// (e.g., identity, shell, wasm, intent). Memory is not a permission any
-/// more — it is a hosted service now (ADR-100).
+/// more — it is a hosted service now (ADR-101).
 pub fn map_permission_to_wasi(perm: &Permission) -> Option<WasiCapabilities> {
     match perm {
         Permission::FilesystemRead(path) => {
@@ -293,3 +293,4 @@ mod tests {
         assert!(!check_wasi_access(&caps, "/other/file.txt", false));
     }
 }
+

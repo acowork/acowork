@@ -30,12 +30,12 @@ type = "Network"
 # and review, not running test commands:
 #   - file_*/doc_reader/glob_search/content_search → test plans, cases, defect reports
 #   - http_request/web_fetch                      → research test tools & practices
-#   - mcp_memory__* (hosted memory MCP, ADR-100)   → quality history & known issues
+#   - mcp_memory__* (hosted memory MCP, ADR-101)   → quality history & known issues
 #   - intent_send                                  → coordinate with dev/PM agents
 #   - ask_user_question, todo_write                → clarify acceptance & track plans
 # No shell tools — this QA role is management-focused, not test execution.
 
-# --- Memory (ADR-100) ---
+# --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
 # here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
 # `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
@@ -114,3 +114,4 @@ description = "Assess release readiness using quality gates, known issues, risk 
 
 [capabilities.regression_management]
 description = "Plan and maintain regression suites based on risk, change impact, defect history, and automation value"
+

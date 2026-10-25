@@ -1,17 +1,15 @@
 /**
  * The mobile chat-session surface (plan Wave 5.5, design 27 §6.1/§6.5).
  *
- * Two things are pinned here, both store rules rather than pixels:
+ * The chat session is a durable EVENT LOG — the UI renders the point-in-time
+ * rows (`turn_dispatched` / `turn_started` / terminal `agent_message`) and owns
+ * no live status mirror, so there is no read-time turn projection to pin here
+ * any more. What remains is the store rule that matters:
  *
- *   1. `projectInFlight` — the read-time turn projection. Copied verbatim
- *      from Desktop's `chatSessionStore.test.ts`: the two clients read one
- *      endpoint and one vocabulary, so these mirrored cases are the drift
- *      guard — change the projection on one side and the other goes red.
- *      (Mobile drops only the transient-bubble half: v1 has no streaming.)
- *   2. the freshness loop — the `chat/changed` doorbell is content-free, so
- *      `wake()` re-reads over HTTP and never patches a row from a signal;
- *      `sendText` re-reads once after the POST because the durable row
- *      exists before the delivery resolves (§5.1).
+ *   the freshness loop — the `chat/changed` doorbell is content-free, so
+ *   `wake()` re-reads over HTTP and never patches a row from a signal;
+ *   `sendText` re-reads once after the POST because the durable row
+ *   exists before the delivery resolves (§5.1).
  *
  * `lib/api` is the seam, same as `user-chat-push.test.ts`.
  */
@@ -42,89 +40,12 @@ vi.mock('../lib/api', async (importOriginal) => {
   return { ...actual, ...api }
 })
 
-import { projectInFlight, useChatSessionStore, wakeAgentChat } from '../stores/chatSessionStore'
+import { useChatSessionStore, wakeAgentChat } from '../stores/chatSessionStore'
 import { useAuthStore } from '../stores/authStore'
-import type { ChatMessageRow } from '../lib/types'
-
-const row = (kind: string, meta: Partial<ChatMessageRow['meta']> = {}): ChatMessageRow => ({
-  seq: 0,
-  ts: 0,
-  from: 'u1',
-  kind,
-  body: 'x',
-  to: '',
-  meta: { message_id: '', ...meta },
-})
-
-const user = (id: string) => row('user_message', { message_id: id })
-const pointer = (trigger: string, sid: string) =>
-  row('system_notice', { notice_type: 'turn_started', in_reply_to: trigger, agent_session_id: sid })
-const terminal = (trigger: string) =>
-  row('agent_message', { message_id: `resp-${trigger}`, in_reply_to: trigger })
-
-describe('projectInFlight (mirrored from Desktop — drift guard)', () => {
-  it('sees a trailing user_message with its pointer as in flight', () => {
-    const rows = [user('t1'), pointer('t1', 'exec-1')]
-    expect(projectInFlight(rows)).toEqual({ triggerId: 't1', execSid: 'exec-1' })
-  })
-
-  it('clears once the terminal row lands', () => {
-    const rows = [user('t1'), pointer('t1', 'exec-1'), terminal('t1')]
-    expect(projectInFlight(rows)).toBeNull()
-  })
-
-  it('ignores a trailing user_message without a pointer (group message that @-nobody)', () => {
-    expect(projectInFlight([user('t1')])).toBeNull()
-  })
-
-  it('treats an interaction card as turn-end (the card is pending, not the turn)', () => {
-    const rows = [
-      user('t1'),
-      pointer('t1', 'exec-1'),
-      row('interaction_request', { message_id: 'c1', in_reply_to: 't1', interaction: { kind: 'ask_question', request_id: 'r1' } }),
-    ]
-    expect(projectInFlight(rows)).toBeNull()
-  })
-
-  it('follows a card answer back into flight (position rule, not id chain)', () => {
-    const rows = [
-      user('t1'),
-      pointer('t1', 'exec-1'),
-      row('interaction_request', { message_id: 'c1', in_reply_to: 't1' }),
-      row('user_message', { message_id: 't2', in_reply_to: 'c1' }),
-    ]
-    expect(projectInFlight(rows)).toEqual({ triggerId: 't2', execSid: 'exec-1' })
-  })
-
-  it('is null for an empty window', () => {
-    expect(projectInFlight([])).toBeNull()
-  })
-
-  it('ADR-099: awaitPointer=false turns a pointerless trigger into the assigning window', () => {
-    // A 1:1 surface: every message reaches the agent, so the gap before the
-    // router's `turn_started` pointer is "assigning…", not a dead row.
-    expect(projectInFlight([user('t1')], { awaitPointer: false })).toEqual({
-      triggerId: 't1',
-      execSid: null,
-      assigning: true,
-    })
-  })
-
-  it('ADR-099: a card answer is never the assigning window', () => {
-    // Card answers bypass the router (§5.5.4), so even a stale one that fell
-    // through to a fresh turn must not paint "assigning…".
-    const rows = [
-      user('t1'),
-      row('interaction_request', { message_id: 'c1', in_reply_to: 't1' }),
-      row('user_message', { message_id: 't2', in_reply_to: 'c1' }),
-    ]
-    expect(projectInFlight(rows, { awaitPointer: false })).toBeNull()
-  })
-})
 
 describe('chatSessionStore freshness loop', () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, inFlight: {}, sending: {} })
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {} })
     api.fetchDefaultChatSession.mockClear()
     api.fetchChatMessages.mockClear()
     api.sendChatMessage.mockClear()
@@ -160,16 +81,5 @@ describe('chatSessionStore freshness loop', () => {
     await vi.waitFor(() => expect(api.fetchChatMessages).toHaveBeenCalledWith('cs-1', 0, 50))
     // And the window is only ever replaced wholesale: no row was injected.
     expect(useChatSessionStore.getState().windows['cs-1']!.tail).toEqual([])
-  })
-
-  it('refresh projects the in-flight turn from the durable rows', async () => {
-    api.fetchChatMessages.mockResolvedValueOnce({
-      messages: [user('t1'), pointer('t1', 'exec-9')],
-      total: 2,
-      offset: 0,
-      limit: 50,
-    })
-    await useChatSessionStore.getState().openAgent('agent-1')
-    expect(useChatSessionStore.getState().inFlight['cs-1']!).toEqual({ triggerId: 't1', execSid: 'exec-9' })
   })
 })

@@ -1,6 +1,6 @@
-//! One-shot memory migration of this node's installed agents (ADR-100 decision 10).
+//! One-shot memory migration of this node's installed agents (ADR-101 decision 10).
 //!
-//! Until ADR-100 an instance's memories lived inside its own workspace,
+//! Until ADR-101 an instance's memories lived inside its own workspace,
 //! `{install_path}/workspace/memory/private.sqlite`, opened by the Runtime.
 //! They now live in the memory service's instance namespace, and the rows have
 //! to cross that boundary exactly once per instance. The **Node** is the only
@@ -286,7 +286,7 @@ pub async fn migrate_one(
     if size > workspace::STORE_IMPORT_MAX_BYTES {
         return Err(NodeError::MemoryMigration(format!(
             "{} is {size} bytes, above the {} byte migration ceiling; \
-                 the memories have to be moved by hand (ADR-100 decision 10)",
+                 the memories have to be moved by hand (ADR-101 decision 10)",
             store.display(),
             workspace::STORE_IMPORT_MAX_BYTES
         ))
@@ -383,7 +383,7 @@ async fn upload(
     };
     let status = response.status();
     if status == axum::http::StatusCode::SERVICE_UNAVAILABLE {
-        // The Gateway is up but its memory service is not (ADR-100 §not-ready
+        // The Gateway is up but its memory service is not (ADR-101 §not-ready
         // contract: 503 + `Retry-After`), which is the startup race itself.
         return Err(MigrationError::NotReady(format!(
             "POST {url}: HTTP {status}"
@@ -1078,3 +1078,4 @@ mod tests {
         startup_pass(state, config, identity()).await;
     }
 }
+

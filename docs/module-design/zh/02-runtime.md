@@ -1,4 +1,4 @@
-﻿# acowork-runtime — Agent Runtime
+# acowork-runtime — Agent Runtime
 
 **定位**：加载 .agent 包并执行 Agent 逻辑的统一二进制。每个 Agent 是一个独立进程。
 
@@ -11,7 +11,7 @@ crates/acowork-runtime/
     ├── agent/
     │   ├── mod.rs
     │   ├── loop_.rs               # 主循环
-    │   ├── context.rs             # 上下文构建（prompt + history + identity + skills；memory RAG 注入已随 ADR-100 移除，`retrieved_memory` 槽位只剩 DevMode 覆写能填）
+    │   ├── context.rs             # 上下文构建（prompt + history + identity + skills；memory RAG 注入已随 ADR-101 移除，`retrieved_memory` 槽位只剩 DevMode 覆写能填）
     │   ├── history.rs             # 对话历史管理（token 预算、trim）
     │   ├── loop_detector.rs       # 循环检测
     │   └── budget_guard.rs        # 本地预算预检
@@ -51,7 +51,7 @@ crates/acowork-runtime/
     │   │   ├── image_gen.rs       # 文生图（fal.ai）
     │   │   ├── llm_task.rs        # LLM 子调用（无工具，纯文本/JSON）
     │   │   └── identity_query.rs  # 向系统 Agent 查询身份（ACowork 独有）
-    │   ├── memory/                # ← ADR-100 删除：记忆工具已离开 Runtime。
+    │   ├── memory/                # ← ADR-101 删除：记忆工具已离开 Runtime。
     │   │   （`memory_store` / `memory_recall` 现在是 Gateway 托管记忆 MCP 的工具，
     │   │     前缀名 `mcp_memory__*`，经 ADR-069 的 `agent_mcp_tools.json` 做工具级 opt-in）
     │   ├── schedule/              # === 定时任务工具 ===
@@ -133,7 +133,7 @@ crates/acowork-runtime/
     │   ├── tool_search.rs         # 延迟工具搜索
     │   └── node.rs                # Node 设备能力工具
     ├── memory/
-    │   └── （ADR-100 已清空：Memory 门面 / `MemorySessionHandle` / 记忆层读写全部迁入
+    │   └── （ADR-101 已清空：Memory 门面 / `MemorySessionHandle` / 记忆层读写全部迁入
     │       `acowork-memory` 服务。Embedding 也不再由 Runtime 提供给记忆——服务自持客户端）
     ├── skills/
     │   ├── mod.rs
@@ -167,7 +167,7 @@ crates/acowork-runtime/
    ├─ UserMessage / SystemNotification / IntentMessage 三类
    └─ 无新消息时跳过
 ① 预算预检 → budget_guard.check()
-② 构建上下文 → context.build(manifest, history, …)   // 无记忆注入（ADR-100）
+② 构建上下文 → context.build(manifest, history, …)   // 无记忆注入（ADR-101）
 ③ 调用 LLM → provider.chat_stream(request)  // 流式
 ④ 解析响应 → 解析 text / tool_calls
 ④.5 Tool Call 去重 → dedup (tool_name, params)
@@ -224,7 +224,7 @@ ACowork-AI **工具系统设计原则**：
 
 1. **Runtime 提供完整工具池**（~77 个核心工具），但不是每个 Agent 都能用所有工具
 2. **Manifest 声明驱动激活**：`.agent` 包的 `tools` 和 `permissions` 字段决定该 Agent 可用哪些工具
-3. **工具按类别分目录**：builtin / schedule / integration / agent / browser / dev / skill / mcp / wasm / sop（`memory/` 已随 ADR-100 删除——记忆工具改成托管 MCP 提供）
+3. **工具按类别分目录**：builtin / schedule / integration / agent / browser / dev / skill / mcp / wasm / sop（`memory/` 已随 ADR-101 删除——记忆工具改成托管 MCP 提供）
 4. **安全包装器组合**：采用 `RateLimitedTool` + `PathGuardedTool` 装饰器模式，实现限流与路径校验的组合安全策略
 
 ```rust
@@ -254,12 +254,12 @@ fn build_tool_registry(manifest: &AgentManifest, all_tools: Vec<Arc<dyn Tool>>) 
 
 **工具分类参考（完整设计空间，实际激活取决于 manifest 声明）**：
 
-> ⚠️ 以下表格描述的是 ACowork 工具系统的**完整设计空间**。ACowork **Phase 1 仅实现 13 个内置工具**（memory×2, network×2, web×2, shell, file×4, intent×1, search×1）和 WASM 工具。其中 memory×2 已由 ADR-100 从内置面移出（改走记忆 MCP）。其余类别（Notion/Jira 集成、browser、dev tools、MCP、SOP 等）为 Phase 2+ 按需实现。
+> ⚠️ 以下表格描述的是 ACowork 工具系统的**完整设计空间**。ACowork **Phase 1 仅实现 13 个内置工具**（memory×2, network×2, web×2, shell, file×4, intent×1, search×1）和 WASM 工具。其中 memory×2 已由 ADR-101 从内置面移出（改走记忆 MCP）。其余类别（Notion/Jira 集成、browser、dev tools、MCP、SOP 等）为 Phase 2+ 按需实现。
 
 | 分类 | ACowork 目录 | 工具数 | Phase 1 实现 |
 |------|-------------|--------|------------|
 | 核心 Builtin | `builtin/` | 17 | ✅ 13 个（weather/git/pdf/screenshot/image 系移到 WASM 或 Agent 内置） |
-| Memory | ~~`memory/`~~ | 0 | ❌ ADR-100 已移出 Runtime：`memory_store` / `memory_recall` 由 Gateway 托管的记忆 MCP 提供 |
+| Memory | ~~`memory/`~~ | 0 | ❌ ADR-101 已移出 Runtime：`memory_store` / `memory_recall` 由 Gateway 托管的记忆 MCP 提供 |
 | 定时任务 | `schedule/` | 7 | ❌ Phase 2 |
 | 第三方集成 | `integration/` | 8 | ❌ 由独立 Agent 提供 |
 | Agent 协作 | `agent/` | 6 | ✅ intent_send/receive 已实现，其余 Phase 2 |
@@ -321,7 +321,7 @@ impl DevModeController {
 ## 依赖
 
 - `acowork-core` — 共享类型
-- `acowork-sqlite` — 仅会话向量索引 + session 元数据（它仍复用同一 `private.sqlite`）；**记忆引擎已不在此依赖**，`acowork-memory` 是独立服务，Runtime 不再 link 它（ADR-100）
+- `acowork-sqlite` — 仅会话向量索引 + session 元数据（它仍复用同一 `private.sqlite`）；**记忆引擎已不在此依赖**，`acowork-memory` 是独立服务，Runtime 不再 link 它（ADR-101）
 - `acowork-vault` — 不直接依赖，Key 通过 IPC 从 Gateway 获取
 - `tokio`, `reqwest`, `clap`, `serde_json`
 - `wasmtime` (feature-gated: `wasm-tools`)
@@ -345,3 +345,4 @@ mcp = []                                # MCP 协议工具
 sop = []                                # SOP 标准操作流程
 hardware = []                           # 硬件工具（feature 门控）
 ```
+

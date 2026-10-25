@@ -348,7 +348,7 @@ pub(crate) async fn phase_b_init_session(
         crate::usecases::RuntimeAttachmentService::new(work_dir_path.to_path_buf()),
     );
 
-    // ADR-100: the agent's MCP catalog (pushed by the Gateway) decides whether
+    // ADR-101: the agent's MCP catalog (pushed by the Gateway) decides whether
     // the official memory service is wired for this agent. Read once here; the
     // manifest hand-off below keys on it and nothing else.
     let catalog_mcps = crate::agent_config::load_agent_mcp_config(work_dir_path)
@@ -475,12 +475,12 @@ pub(crate) async fn phase_b_init_session(
         // a chat `command` (skill name) into instructions — the runtime is
         // the authoritative source, the frontend only sends names.
         c.skill_registry = Arc::new(std::sync::RwLock::new(ctx.skill_registry.clone()));
-        // ADR-100: open the Runtime-local SQLite store. It backs only session
+        // ADR-101: open the Runtime-local SQLite store. It backs only session
         // metadata + the conversation vector index now — memory nodes belong
         // to the memory service.
         c.init_runtime_sqlite(work_dir_path);
 
-        // ADR-100 decision 12: manifest hand-off to the memory service.
+        // ADR-101 decision 12: manifest hand-off to the memory service.
         // Keyed on the MCP catalog only — no official `memory` server means
         // no coupling at all. Fire-and-forget: agent startup must not block
         // on (or fail with) the service, which may still be booting.
@@ -704,7 +704,7 @@ pub(crate) async fn phase_b_init_session(
             }
             c.approval_timeout_secs = updated.approval_timeout_secs;
 
-            // ── ADR-100: distiller / forgetting knobs are service-owned ──
+            // ── ADR-101: distiller / forgetting knobs are service-owned ──
             // The old first-boot seed wrote manifest `[memory.distiller]`
             // defaults into `agent_config.json` so the Runtime's scheduler
             // could read them. Both the scheduler and the seed moved to the
@@ -817,7 +817,7 @@ pub(crate) async fn phase_b_init_session(
 
         // Publish the RAG provider to the HTTP server's late-bind slot. It was
         // set on the core above; the memory consolidation timer that used to
-        // share this block is gone with ADR-100 (the service owns it).
+        // share this block is gone with ADR-101 (the service owns it).
         {
             // core_clone was moved into RuntimeAgentTokenService above; use
             // agent_core_shared (which holds a clone) to access the fields.
@@ -1011,3 +1011,4 @@ pub(crate) async fn phase_b_init_session(
         committed_lines,
     })
 }
+

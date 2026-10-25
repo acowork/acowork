@@ -12,12 +12,15 @@ let openSessionMock: ReturnType<typeof vi.fn>;
 
 // ── chat-session store ────────────────────────────────────────────────
 // `windows` / `sending` / `draft` are read through the hook; the composer
-// actions through `getState`. The pure read projections (`projectLiveTurn`,
-// `closedCardIds`, …) are kept REAL via importOriginal so the view's card +
-// processing-dot wiring is exercised against the actual projection rules.
+// actions through `getState`. The pure read projections (`closedCardIds`,
+// `humanAnsweredCardIds`, …) are kept REAL via importOriginal so the view's
+// event-row + inline-card wiring is exercised against the actual rules.
 let windows: Record<string, unknown>;
+// `sending` is the in-flight HTTP window; the view reads one flag per session.
+let sendingMap: Record<string, unknown> = {};
 let drafts: Record<string, unknown> = {};
 let availableModels: unknown[] = [];
+let sendTextMock: ReturnType<typeof vi.fn> = vi.fn();
 
 vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../stores/chatSessionStore")>();
@@ -25,10 +28,10 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
     ...actual,
     useChatSessionStore: Object.assign(
       (selector: (state: unknown) => unknown) =>
-        selector({ windows, sending: {}, draft: drafts }),
+        selector({ windows, sending: sendingMap, draft: drafts }),
       {
         getState: () => ({
-          sendText: vi.fn().mockResolvedValue(undefined),
+          sendText: (...a: unknown[]) => sendTextMock(...(a as [])),
           loadOlder: vi.fn().mockResolvedValue(undefined),
           loadNewer: vi.fn().mockResolvedValue(undefined),
           clearLocate: vi.fn(),
@@ -45,7 +48,16 @@ vi.mock("../../stores/chatStore", () => ({
   useChatStore: Object.assign(
     (selector: (state: unknown) => unknown) =>
       selector({ availableModels, providerAccounts: [] }),
-    { getState: () => ({ openSession: (...a: unknown[]) => openSessionMock(...(a as [])) }) },
+    {
+      getState: () => ({
+        openSession: (...a: unknown[]) => openSessionMock(...(a as [])),
+        // Optimistic-title seed (ADR-099): the event-row effect calls this once
+        // per resolved exec session; stubbed here — the store's own suite
+        // (chatStore.sessionTitle.test.ts) covers its real behaviour.
+        seedOptimisticTitle: vi.fn(),
+        resolveQuestion: vi.fn(),
+      }),
+    },
   ),
 }));
 
@@ -71,20 +83,12 @@ vi.mock("../../stores/userProfileStore", () => ({
 vi.mock("../../lib/config", () => ({ getGatewayUrl: () => "http://127.0.0.1:1" }));
 
 vi.mock("../../i18n/useTranslation", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
-}));
-
-// The unified status card is the collaborator under test: stub it so its
-// presence/absence and the props the view wires into it are observable,
-// without pulling the whole live-mirror store graph.
-vi.mock("./ExecSessionStatusCard", () => ({
-  ExecSessionStatusCard: ({ card }: { card?: { kind: string; messageId: string } }) => (
-    <div
-      data-testid="status-card"
-      data-kind={card?.kind ?? ""}
-      data-msgid={card?.messageId ?? ""}
-    />
-  ),
+  // Echo keys (with interpolated values appended) so assertions read against
+  // the i18n vocabulary directly.
+  useTranslation: () => ({
+    t: (key: string, vars?: Record<string, unknown>) =>
+      vars && Object.keys(vars).length ? `${key}|${Object.values(vars).join("|")}` : key,
+  }),
 }));
 
 // Toolbar / editor deps that pull unrelated stores — neutral stubs.
@@ -139,18 +143,20 @@ function askCardRow(seq: number): ChatMessageRow {
   };
 }
 
-describe("AgentChatView unified-card wiring", () => {
+describe("AgentChatView event-log wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sendingMap = {};
     setModeMock = vi.fn();
     openSessionMock = vi.fn().mockResolvedValue(undefined);
+    sendTextMock = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal(
       "fetch",
       vi.fn().mockRejectedValue(new Error("no network in test")),
     );
   });
 
-  it("renders an unanswered ask_question ONLY through the unified card, not a standalone row", () => {
+  it("renders an unanswered ask_question as an inline card that answers in place", () => {
     windows = {
       [SESSION]: {
         older: [],
@@ -165,18 +171,18 @@ describe("AgentChatView unified-card wiring", () => {
     // The durable user_message paints as a normal bubble.
     expect(screen.getByText("hello there")).toBeTruthy();
 
-    // The interaction_request row is suppressed: its question never renders
-    // as a standalone line anywhere in the stream.
-    expect(screen.queryByText("Pick one")).toBeNull();
+    // The interaction_request row is a durable, actionable card: its question
+    // and option list render in the stream.
+    expect(screen.getByText("Pick one")).toBeTruthy();
 
-    // …and is instead carried by the unified status card, bound to the card's
-    // kind + message id (the answer channel's in_reply_to target).
-    const card = screen.getByTestId("status-card");
-    expect(card.getAttribute("data-kind")).toBe("ask_question");
-    expect(card.getAttribute("data-msgid")).toBe("card2");
+    // Select an option radio then submit to answer through the chat channel,
+    // bound to the card id (the answer channel's in_reply_to target).
+    fireEvent.click(screen.getByText("A"));
+    fireEvent.click(screen.getByText("askQuestionCard.submit"));
+    expect(sendTextMock).toHaveBeenCalledWith(SESSION, "A", "card2");
   });
 
-  it("drops the card and leaves no orphan row once the card is answered", () => {
+  it("collapses an answered card to a receipt and keeps the answer bubble", () => {
     windows = {
       [SESSION]: {
         older: [],
@@ -192,12 +198,229 @@ describe("AgentChatView unified-card wiring", () => {
     };
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
 
-    // No live card once every projection is answered (inFlight absent too).
-    expect(screen.queryByTestId("status-card")).toBeNull();
-    // No "已回答" / question orphan — the answered card row paints nothing.
-    expect(screen.queryByText("Pick one")).toBeNull();
+    // No live card once the human answered — the request folded to a receipt.
+    expect(screen.queryByText("chatView.freeAnswer")).toBeNull();
+    // The card row now reads as an answered receipt (the §5.5.4 closure text).
+    expect(screen.getByText(/chatView.cardAnswered/)).toBeTruthy();
     // The answer itself is just a normal user bubble.
     expect(screen.getByText("B")).toBeTruthy();
+  });
+
+  it("drops a retired milestone from an old transcript and derives the wait line", () => {
+    windows = {
+      [SESSION]: {
+        older: [],
+        tail: [
+          userRow(1, "hello there"),
+          {
+            seq: 2,
+            ts: 2,
+            from: "agent",
+            kind: "system_notice",
+            body: "",
+            to: "user",
+            meta: {
+              message_id: "td:u1",
+              notice_type: "turn_dispatched",
+              in_reply_to: "u1",
+              agent_session_id: "exec-9",
+            },
+          },
+        ],
+        tailLoaded: 2,
+        total: 2,
+        loadingOlder: false,
+      },
+    };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    // The milestone is runtime state now (ADR-100 revision): a transcript that
+    // still carries the old row must not paint it back.
+    expect(screen.queryByText("chatView.notice.turnDispatched")).toBeNull();
+    // The reader gets one derived line instead: the newest human message has
+    // no answer yet, so the agent is still working on it.
+    expect(screen.getByText("chatView.notice.pendingTurn|Agent A")).toBeTruthy();
+  });
+
+  it("renders the routing reaction as an attributed bubble and keeps the wait", () => {
+    // ADR-100 D11: "启动新任务：xxx" is the agent's own conversational answer
+    // to the user message — avatar + name + bubble, never a centered line —
+    // while the live line below it keeps covering the run in flight.
+    windows = {
+      [SESSION]: {
+        older: [],
+        tail: [
+          userRow(1, "review the repo"),
+          {
+            seq: 2,
+            ts: 2,
+            from: "agent",
+            kind: "system_notice",
+            body: "",
+            to: "user",
+            meta: {
+              message_id: "tr:u1",
+              notice_type: "turn_routed",
+              in_reply_to: "u1",
+              agent_session_id: "exec-9",
+              turn_mode: "new",
+            },
+          },
+        ],
+        tailLoaded: 2,
+        total: 2,
+        loadingOlder: false,
+      },
+    };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    // The bubble names the task off the trigger body (no title exists yet).
+    expect(screen.getByText("chatView.notice.turnRoutedNew|review the repo")).toBeTruthy();
+    // Attributed: the agent's name header rides with it.
+    expect(screen.getByText("Agent A")).toBeTruthy();
+    // The run is still in flight — the derived wait line stays.
+    expect(screen.getByText("chatView.notice.pendingTurn|Agent A")).toBeTruthy();
+  });
+
+  it("keeps the avatar header on the reply after an empty terminal row", () => {
+    // The header predicate folded the avatar off any `agent_message` whose
+    // predecessor was ALSO an `agent_message` — but an empty terminal row
+    // paints as a centered status line, not a bubble, so the attributed reply
+    // under it lost its avatar and stood "孤零零" in the stream.
+    windows = {
+      [SESSION]: {
+        older: [],
+        tail: [
+          userRow(1, "do the thing"),
+          {
+            seq: 2,
+            ts: 2,
+            from: "agent",
+            kind: "agent_message",
+            body: "",
+            to: "user",
+            meta: { message_id: "a2", in_reply_to: "u1", status: "aborted", sender_session_id: "exec-8" },
+          },
+          {
+            seq: 3,
+            ts: 3,
+            from: "agent",
+            kind: "agent_message",
+            body: "late answer",
+            to: "user",
+            meta: { message_id: "a3", in_reply_to: "u1", status: "completed", sender_session_id: "exec-9" },
+          },
+        ],
+        tailLoaded: 3,
+        total: 3,
+        loadingOlder: false,
+      },
+    };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    expect(screen.getByText("late answer")).toBeTruthy();
+    // The centered line owns no header, so the reply re-attributes.
+    expect(screen.getByText("Agent A")).toBeTruthy();
+  });
+
+  it("ends the wait line at the terminal reply — one bubble, one drill", () => {
+    windows = {
+      [SESSION]: {
+        older: [],
+        tail: [
+          userRow(1, "fix this bug"),
+          {
+            seq: 2,
+            ts: 2,
+            from: "agent",
+            kind: "system_notice",
+            body: "",
+            to: "user",
+            meta: {
+              message_id: "ts:u1",
+              notice_type: "turn_started",
+              in_reply_to: "u1",
+              agent_session_id: "exec-9",
+            },
+          },
+          {
+            seq: 3,
+            ts: 3,
+            from: "agent",
+            kind: "agent_message",
+            body: "on it, done",
+            to: "user",
+            meta: {
+              message_id: "a3",
+              in_reply_to: "u1",
+              status: "completed",
+              agent_session_id: "exec-9",
+            },
+          },
+        ],
+        tailLoaded: 3,
+        total: 3,
+        loadingOlder: false,
+      },
+    };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    expect(screen.getByText("on it, done")).toBeTruthy();
+    // Neither milestone reached the stream, and the wait line is gone now that
+    // a terminal row answers the turn.
+    expect(screen.queryByText("chatView.notice.turnStarted")).toBeNull();
+    expect(screen.queryByText(/chatView\.notice\.pendingTurn/)).toBeNull();
+    // One run to drill into, so the 查看执行 affordance appears exactly once.
+    expect(screen.getAllByText("chatView.viewRun")).toHaveLength(1);
+  });
+
+  it("paints an empty terminal row as a centered outcome, not an agent bubble", () => {
+    windows = {
+      [SESSION]: {
+        older: [],
+        tail: [
+          userRow(1, "fix this bug"),
+          {
+            seq: 2,
+            ts: 2,
+            from: "agent",
+            kind: "agent_message",
+            body: "",
+            to: "user",
+            meta: {
+              message_id: "a2",
+              in_reply_to: "u1",
+              status: "aborted",
+              sender_session_id: "exec-9",
+            },
+          },
+        ],
+        tailLoaded: 2,
+        total: 2,
+        loadingOlder: false,
+      },
+    };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    // The outcome IS the message: centered, with the drill into the run.
+    expect(screen.getByText("chatView.notice.interrupted")).toBeTruthy();
+    expect(screen.getByText("chatView.viewRun")).toBeTruthy();
+    // The empty-bubble placeholder must not stand in for a real reply.
+    expect(screen.queryByText("chatView.emptyAnswer")).toBeNull();
+    // A terminal row answers the turn, so the wait line is gone.
+    expect(screen.queryByText(/chatView\.notice\.pendingTurn/)).toBeNull();
+  });
+
+  it("shows the generic wait line while the send round trip is in flight", () => {
+    windows = {
+      [SESSION]: { older: [], tail: [], tailLoaded: 0, total: 0, loadingOlder: false },
+    };
+    sendingMap = { [SESSION]: true };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    // The transcript has no human row yet — the line is still owed to the user.
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(screen.getByText("chatView.notice.pendingTurn|Agent A")).toBeTruthy();
   });
 
   describe("查看执行 drill", () => {
@@ -271,6 +494,7 @@ describe("AgentChatView reasoning-effort toggle", () => {
     availableModels = [];
     setModeMock = vi.fn();
     openSessionMock = vi.fn().mockResolvedValue(undefined);
+    sendTextMock = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
   });
 

@@ -27,7 +27,7 @@ use crate::{Result, SqliteStore};
 ///
 /// An alias of [`acowork_memory::sqlite::CONVERSATION_LABEL`]: the store's FTS
 /// routing and `purge_conversation_state` have to recognise the same string,
-/// and they live in that crate (ADR-100).
+/// and they live in that crate (ADR-101).
 pub const LABEL: &str = acowork_memory::sqlite::CONVERSATION_LABEL;
 
 /// File name of the conversation index database.
@@ -644,3 +644,4 @@ mod tests {
         assert_eq!(stored.chars().count(), MAX_INDEX_CONTENT);
     }
 }
+

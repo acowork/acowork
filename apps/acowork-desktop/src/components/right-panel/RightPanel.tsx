@@ -38,6 +38,9 @@ import { ListBox, ExpandableRow } from "../common/list";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { Switch } from "../common/Switch";
 import { getGatewayUrl } from "../../lib/config";
+import { ModelTokenDonut } from "./ModelTokenDonut";
+import { fetchAgentTokenStats, computeAgentTotals } from "../../lib/tokenStats";
+import type { TokenStatsResponse } from "../../lib/types";
 
 interface RightPanelProps {
   onCollapse: () => void;
@@ -420,6 +423,33 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
       setSnapshotPage(Math.max(0, snapshotTotalPages - 1));
     }
   }, [snapshotPage, snapshotTotalPages]);
+
+  // Per-model token statistics (agent-scoped donut in the Agent Status
+  // card). "HTTP 拉完整数据, MQTT 推变化数据": the numbers come from a
+  // direct gateway read of the runtime's `token_stats` aggregate; the
+  // `contextUsage.agent_total_*` push values are ONLY an invalidation
+  // signal — their changes debounce (≥1s) a re-fetch, never a projection.
+  // No client-side cache of the stats: every agent switch / card expand /
+  // invalidation re-reads the server.
+  const [tokenStats, setTokenStats] = useState<TokenStatsResponse | null>(null);
+  const agentTotals = tokenStats ? computeAgentTotals(tokenStats.items) : null;
+  const agentTotalSignal = contextUsage
+    ? `${contextUsage.agent_total_input_tokens ?? ""}|${contextUsage.agent_total_output_tokens ?? ""}|${contextUsage.agent_total_cache_read_tokens ?? ""}|${contextUsage.agent_total_cache_write_tokens ?? ""}`
+    : "";
+  const refetchTokenStats = useCallback((agentId: string) => {
+    void fetchAgentTokenStats(agentId).then((r) => {
+      // Agent switched while in flight — drop the stale response.
+      if (useAgentStore.getState().selectedAgentId === agentId) setTokenStats(r);
+    });
+  }, []);
+  useEffect(() => {
+    if (!selectedAgentId || !selectedAgent?.alive || !agentStatusOpen) {
+      setTokenStats(null);
+      return;
+    }
+    const timer = setTimeout(() => refetchTokenStats(selectedAgentId), agentTotalSignal ? 1000 : 0);
+    return () => clearTimeout(timer);
+  }, [selectedAgentId, selectedAgent?.alive, agentStatusOpen, agentTotalSignal, refetchTokenStats]);
 
   return (
     <div className="relative flex flex-col shrink-0 ml-1" style={{ width }}>
@@ -1031,34 +1061,32 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       use `py-1`, so an asymmetric `mb-2` would make the
                       line look glued to the row above). */}
                   <div className="my-2 border-t border-border-divider" />
-                  {/* ADR-028 / ADR-066: agent-scoped cumulative totals across every
-                      LLM call made by this Runtime process for this
-                      agent. These are agent-level (not session-level)
-                      figures, so they live in the Agent Status panel
-                      rather than the session context panel above.
-
-                      Regression t-83afab47: single data source — the
-                      live `contextUsage.agent_total_*` from the
-                      Runtime's `patch_agent_totals` helper. The
-                      previous `agentStore.agents[id].agentTokenTotals`
-                      fallback was removed because HTTP session-list
-                      responses no longer carry `agent_total_*` fields
-                      ("HTTP 拉完整数据, MQTT 推变化数据" rule), and
-                      keeping a stale client-side fallback caused the
-                      Agent Status panel to drift-flicker against the
-                      live push on every `session_state` re-emit. When
-                      `contextUsage` has not yet reported, the rows
-                      render as "—" — distinct from "0". */}
+                  {/* Per-model token share — direct read of the runtime's
+                      agent-scoped `token_stats` derived index (gateway
+                      transparent proxy). Empty for agents that never made
+                      an LLM call — the component hides itself. */}
+                  {tokenStats && tokenStats.items.length > 0 && (
+                    <ModelTokenDonut items={tokenStats.items} consistent={tokenStats.consistent} />
+                  )}
+                  {/* Per-agent cumulative totals — sourced from the
+                      runtime's `token_stats` aggregate (agent-scoped,
+                      no visibility filter), NOT from the MQTT push
+                      `agent_total_*` fields. The push values are
+                      affected by `scan_sessions_async`'s visibility
+                      filtering and atomic-MAX merge, so they can
+                      drift far below the true agent total. The
+                      pie above and these rows share the same
+                      data source. */}
                   <div className="flex justify-between py-1">
                     <span className="text-text-tertiary">{t("rightPanel.agentTotalInputTokens")}</span>
                     <span className="font-mono text-text-secondary ">
-                      {contextUsage?.agent_total_input_tokens?.toLocaleString() ?? "—"}
+                      {agentTotals ? agentTotals.totalInput.toLocaleString() : "—"}
                     </span>
                   </div>
                   <div className="flex justify-between py-1">
                     <span className="text-text-tertiary">{t("rightPanel.agentTotalOutputTokens")}</span>
                     <span className="font-mono text-text-secondary ">
-                      {contextUsage?.agent_total_output_tokens?.toLocaleString() ?? "—"}
+                      {agentTotals ? agentTotals.totalOutput.toLocaleString() : "—"}
                     </span>
                   </div>
                   {/* ADR-066: agent-level cumulative cache totals. These are
@@ -1070,7 +1098,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   <div className="flex justify-between py-1">
                     <span className="text-text-tertiary">{t("rightPanel.agentTotalCacheReadTokens")}</span>
                     <span className="font-mono text-text-secondary ">
-                      {contextUsage?.agent_total_cache_read_tokens?.toLocaleString() ?? "—"}
+                      {agentTotals ? agentTotals.totalCacheRead.toLocaleString() : "—"}
                     </span>
                   </div>
                   {/* ADR-066 §6: cache-write is an Anthropic-only concept.
@@ -1085,7 +1113,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                     <div className="flex justify-between py-1">
                       <span className="text-text-tertiary">{t("rightPanel.agentTotalCacheWriteTokens")}</span>
                       <span className="font-mono text-text-secondary ">
-                        {contextUsage?.agent_total_cache_write_tokens?.toLocaleString() ?? "—"}
+                        {agentTotals ? agentTotals.totalCacheWrite.toLocaleString() : "—"}
                       </span>
                     </div>
                   )}

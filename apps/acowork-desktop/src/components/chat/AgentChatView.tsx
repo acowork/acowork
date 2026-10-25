@@ -1,8 +1,8 @@
 // Design 27 Wave 5: the Chat session surface — the Agent page's primary
-// view. One Chat session: durable rows (messages / decision cards /
-// system notices) from the user service, the in-flight turn projected at
-// read time (§6.2), and a composer that is the SAME visual language as the
-// execution view (same container, same textarea, same toolbar components —
+// view. One Chat session: a pure durable EVENT LOG of point-in-time rows
+// (messages / decision cards / system notices) from the user service, and a
+// composer that is the SAME visual language as the execution view (same
+// container, same textarea, same toolbar components —
 // plan 5.4: "输入框能力与执行视图一致").
 //
 // Deliberate deltas from the execution composer, all of them semantic:
@@ -10,9 +10,9 @@
 //   pick is a `session_config` DRAFT held on the Chat session ROW (design 27
 //   §4.5) — the store only caches what the server returned: `setCurrentModel`
 //   needs an active execution session, and a Chat turn's session is created
-//   server-side when the intent lands. The draft rides `sendText` and seeds
-//   that session at creation (or rotates it via T3 if one is already running
-//   under a different config) — so the choice is fixed BEFORE the turn, not
+//   server-side when the intent lands. The draft rides `sendText`: it seeds
+//   a newly created execution session and is re-applied when a mapped
+//   session is reused — so the choice is fixed BEFORE the turn, not
 //   after, which is the whole point (pick model/workspace/reasoning first).
 //   Persisting it on the session (not in component state) is what keeps the
 //   last pick across tab switches, reloads and devices.
@@ -28,8 +28,12 @@
 // - No @-mention UI: a 1:1 user_agent session has exactly one other
 //   participant (design 27 §5.5.4 "单聊无需 @").
 //
-// The status card is the drill-down INTO the execution view (plan 5.3):
-// click → `chatStore.openSession(agentId, execSid)` + mode flip.
+// The chat stream persists conversation, not progress (ADR-100 revision): the
+// turn's dispatch / round-open milestones are no longer rows, and the live
+// waiting line is DERIVED from "the newest human message has no answer yet"
+// (`chatTurnState.pendingTurn`). Each row that resolved an execution session
+// carries a discrete drill-down into the execution view:
+// `chatStore.openSession(agentId, execSid)` + mode flip (plan 5.3).
 
 import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -44,18 +48,23 @@ import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { UserAvatar } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
-import { OutlineBrainIcon } from "../common/BrainIcon";
+import { ViewRunButton } from "./ViewRunButton";
+import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { detectPaste } from "./pasteDetect";
 import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
-import { ExecSessionStatusCard } from "./ExecSessionStatusCard";
+import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
+import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { isFailureStatus, isEmptyTerminalReply, isTurnRoutedNotice, pendingTurn, terminalNoticeKey } from "./chatTurnState";
+import { InlineInteractionCard } from "./InlineInteractionCard";
 import { useLocateMessage } from "../../lib/useLocateMessage";
-import { useChatSessionStore, projectInFlight, projectLiveTurn, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
+import { useChatSessionStore, closedCardIds, humanAnsweredCardIds, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { sessionExists } from "../../lib/session-control";
@@ -63,20 +72,6 @@ import { showToast } from "../common/ToastProvider";
 import { useAuthStore } from "../../stores/authStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { getGatewayUrl } from "../../lib/config";
-
-/** i18n key for an empty agent bubble, read off the turn's §7.1 outcome.
- *
- *  A stopped run (`aborted`, `timeout`) genuinely produced no output; a run
- *  that answered `completed` with an empty body said nothing, which is a
- *  different fact and used to be labelled the same way. `failed` keeps the
- *  interrupted wording — its body is the error summary, so this path is only
- *  a fallback. Rows predating the outcome field carry no status and keep the
- *  historical guess. */
-export function emptyBubbleKey(status?: string): string {
-  return status === "completed" || status === "waiting"
-    ? "chatView.emptyAnswer"
-    : "chatView.emptyReply";
-}
 
 /** Strip common leading whitespace from multi-line strings (same helper
  *  the execution bubbles use for indented code blocks). */
@@ -120,6 +115,15 @@ const chatMarkdownComponents = {
       </a>
     );
   },
+  /** Same scroll-wrapper every other desktop markdown surface uses
+   *  (`MessageBubble` / `CompactionCard` / `MarkdownPreviewView`). A GFM table
+   *  cannot shrink-to-fit below its widest cell, so left unwrapped it widened
+   *  the bubble instead of scrolling inside it. */
+  table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
+    <div className="prose-table-scroll">
+      <table {...rest}>{children}</table>
+    </div>
+  ),
 };
 
 function ChatMarkdown({ content }: { content: string }) {
@@ -143,73 +147,106 @@ interface RowProps {
   showHeader: boolean;
   /** Drill into the execution session that produced this agent message.
    *  Every `agent_message` with a resolved exec session id is clickable —
-   *  finished, failed or empty-bodied alike (§5.5.5: the pointer survives
-   *  rotation, the JSONL stays in Agent home). */
+   *  finished, failed or empty-bodied alike (§5.5.5: the exec JSONL stays
+   *  in Agent home). */
   onJumpToExec: (execSid: string) => void;
-  /** For a `router_fallback` receipt: the exec session its trigger message was
-   *  routed into (resolved through the window's `turn_started` pointer). When
-   *  present the receipt is a clickable anchor, not just a line of text. */
-  routerExecSid?: string;
+  /** Cards that can no longer be answered — the inline card paints an
+   *  answered/closed receipt for these instead of an answer affordance. */
+  closed: Set<string>;
+  /** The subset of closed cards the human actually replied to. */
+  answered: Set<string>;
+  /** Answer an `interaction_request` card through the chat answer channel. */
+  onAnswer: (row: ChatMessageRow, text: string, immediate: boolean) => void;
+  /** Body of the message that triggered this row's turn (`meta.in_reply_to`).
+   *  Names the run in the drill-down tooltip while the exec session still has
+   *  no title. Resolved by the parent through its message_id → body index. */
+  triggerBody?: string;
 }
 
-function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, routerExecSid }: RowProps) {
+function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed, answered, onAnswer, triggerBody }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
   const agentName = agent?.display_name ?? agent?.name ?? "";
 
+  // The exec session this row can drill into. Its name feeds the "view run"
+  // tooltip so the hover says which run it opens, not just "view run". Read
+  // before the kind branches so the store hook stays unconditional. The
+  // routing reaction row (ADR-100 D11) names the task in its bubble, so it
+  // resolves its title through the same hook.
+  const routed = isTurnRoutedNotice(row);
+  const drillSid =
+    row.kind === "agent_message" || routed
+      ? row.meta?.agent_session_id || row.meta?.sender_session_id || ""
+      : undefined;
+  const execRunName = useSessionTitle(agentId, drillSid);
+
   if (row.kind === "system_notice") {
-    // `turn_started` is rendered as the status card, never as a row; other
-    // notices (receipts) are a quiet centered line.
-    if (row.meta?.notice_type === "turn_started") return null;
-    // ADR-099: the router degraded to the deterministic route. The message
-    // itself still went through — a receipt, not an error. Once routing
-    // landed the receipt is an anchor: clicking drills into the execution
-    // session the message was assigned to.
-    if (row.meta?.notice_type === "router_fallback") {
-      const text = t("chatView.routerFallback");
-      if (!routerExecSid) {
-        return <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>;
-      }
-      return (
-        <div className="py-1 text-center">
-          <button
-            type="button"
-            onClick={() => onJumpToExec(routerExecSid)}
-            className="text-10 text-text-tertiary underline-offset-2 transition-colors hover:text-text-secondary hover:underline"
-          >
-            {text}
-          </button>
-        </div>
-      );
+    if (routed) {
+      // ADR-100 D11: the routing reaction — the agent's immediate in-chat
+      // answer to "where did my message go". It is a runtime-written row, but
+      // it speaks as the agent: synthesized into the ordinary agent-bubble
+      // path below so it carries the avatar + name header and the drill, and
+      // never paints as a centered system line. The conversational rule it
+      // exists for: a user message is always followed by an agent message.
+      const taskName = execRunName?.trim() || truncateTaskName(triggerBody) || "";
+      row = {
+        ...row,
+        kind: "agent_message",
+        body: t(
+          row.meta?.turn_mode === "new"
+            ? "chatView.notice.turnRoutedNew"
+            : "chatView.notice.turnRoutedContinue",
+          { task: taskName },
+        ),
+      };
+    } else {
+      // Legacy receipts only — the milestones and the router-fallback receipt
+      // are gone from the stream (ADR-100 revision). Whatever survived paints
+      // as a quiet centered line, never as an agent bubble.
+      return <ChatNoticeEventRow row={row} className="px-6" />;
     }
-    const text = row.body || row.meta?.status || "";
-    return (
-      <div className="py-1 text-center text-10 text-text-tertiary">{text}</div>
-    );
   }
 
   if (row.kind === "interaction_request") {
-    // Every execute-session projection (ask_question / approval / pause) is
-    // rendered through the unified ExecSessionStatusCard, not as a standalone
-    // row — so the durable card row never paints here. An unanswered card is
-    // surfaced live by the status card (bound to its exec session); an
-    // answered one is intentionally left with no orphan "已回答" line (§ 5.5.4,
-    // answer-then-done).
-    return null;
+    // A decision the agent asked a human to make (ask_question / approval).
+    // It is a durable, actionable row in the stream — answered in place
+    // through the chat answer channel (§5.5.4).
+    return (
+      <InlineInteractionCard
+        row={row}
+        closed={closed}
+        answered={answered}
+        askerName={agentName}
+        onAnswer={onAnswer}
+      />
+    );
   }
 
   if (row.kind === "agent_message") {
-    // §7.1 outcomes: `failed` / `timeout` are errors and wear the error
-    // badge; `aborted` is the user stopping a run — a fact of the transcript,
-    // not an error, so it must not paint red (it used to arrive as an empty
-    // `completed`, which is why stopping looked like a blank reply).
-    const failed = row.meta?.status === "failed" || row.meta?.status === "timeout";
+    // §7.1 outcomes: `failed` / `timeout` are errors and paint as an error
+    // line; `aborted` is the user stopping a run — a fact of the transcript,
+    // not a fault, so it never paints red.
+    const failed = isFailureStatus(row.meta?.status);
     // The execution session that produced this reply: a 1:1 agent message
     // carries it as `sender_session_id` (the responder's own session); a
     // group / routed reply carries `agent_session_id` (routing-resolved).
     // Either way every agent message is drillable, finished or empty alike.
     const execSid = row.meta?.agent_session_id || row.meta?.sender_session_id || "";
+    // A terminal row with nothing in it IS its outcome ("interrupted",
+    // "failed"): paint the centered status line with the drill into the run,
+    // never an agent bubble announcing it in the agent's voice.
+    if (isEmptyTerminalReply(row)) {
+      return (
+        <ChatTurnStatusLine
+          className="px-6"
+          text={t(terminalNoticeKey(row.meta?.status))}
+          danger={failed}
+          onJump={execSid ? () => onJumpToExec(execSid) : undefined}
+          runName={execRunName?.trim() || truncateTaskName(triggerBody) || undefined}
+        />
+      );
+    }
     return (
       <div className="px-6 py-1">
         {showHeader && (
@@ -239,8 +276,6 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, router
               the group hugs the text, then 70%-of-that cuts the bubble
               narrower than its own content and the text overflows right. */}
           <div className="group min-w-0 max-w-[var(--content-max-width)]">
-            {/* `inline-block`: the bubble hugs its text (symmetric padding,
-                no width jump when the hover timestamp widens the group). */}
             {/* Attachment chips above the bubble, left-aligned — the mirror
                 of the user row; the bubble never wraps them. An attachments-
                 only reply paints chips alone, no empty bubble. */}
@@ -251,23 +286,32 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, router
                 ))}
               </div>
             )}
+            {/* `inline-block`: the bubble hugs its text (symmetric padding,
+                no width jump when the hover timestamp widens the group).
+                `max-w-full` is what keeps that hug honest: shrink-to-fit falls
+                back to the content's *minimum* width whenever the content
+                cannot be squeezed — a mermaid SVG's natural width, an
+                unwrapped table, one long unbreakable token — and an uncapped
+                hug then grew the bubble past the row clamp and spilled the
+                reply under the next panel. Bounding the used width lets the
+                inner scroll containers (`CodeBlock`, `MermaidBlock`,
+                `.prose-table-scroll`) do their job inside it, which is also
+                the contract Mobile's `.bubble` has always had. */}
             {(row.body || failed || !row.attachments?.length) && (
-              <div className="inline-block rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
+              <div className="inline-block max-w-full rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
                 {failed && (
                   <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
                     {row.meta?.status}
                   </div>
                 )}
                 {row.body && <ChatMarkdown content={row.body} />}
-                {/* The write-back records which outcome ended the turn (§7.1),
-                    so the placeholder no longer has to guess from an empty
-                    body: a stopped run says "interrupted", an answered one that
-                    had nothing to say says "empty reply". Rows written before
-                    the outcome existed carry no status and keep the old
-                    wording. */}
+                {/* Legacy rows without a §7.1 status: there is no outcome to
+                    name, so the placeholder stays deliberately neutral. Modern
+                    empty terminals never reach here — they paint as the status
+                    line above. */}
                 {!row.body && !row.attachments?.length && (
                   <span className="italic text-text-tertiary whitespace-nowrap">
-                    {t(emptyBubbleKey(row.meta?.status))}
+                    {t("chatView.emptyAnswer")}
                   </span>
                 )}
               </div>
@@ -289,15 +333,10 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, router
                   its destination read as the same thing; outline variant
                   because at 11px the two filled lobes smear into a blob. */}
               {execSid && (
-                <button
-                  type="button"
-                  onClick={() => onJumpToExec(execSid)}
-                  title={t("chatView.viewRun")}
-                  className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
-                >
-                  <OutlineBrainIcon className="h-[11px] w-[11px] shrink-0" />
-                  {t("chatView.viewRun")}
-                </button>
+                <ViewRunButton
+                  runName={execRunName?.trim() || truncateTaskName(triggerBody) || undefined}
+                  onJump={() => onJumpToExec(execSid)}
+                />
               )}
               <span className="w-0 shrink overflow-hidden whitespace-nowrap text-10 text-text-tertiary opacity-0 transition-opacity group-hover:w-auto group-hover:opacity-100">
                 {formatBubbleTime(row.ts * 1000)}
@@ -328,8 +367,15 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, router
                 ))}
               </div>
             )}
+            {/* ADR-100 D12: this turn was sent from an execution view's
+                composer, so its attached items belong to that run, not to
+                this chat session — labels only, and not clickable. They paint
+                above the text like the chat's own chips, which is also what
+                keeps a file-with-no-words turn from collapsing to a blank
+                row. */}
+            <ExecAttachmentLabels labels={row.meta?.exec_attachments ?? []} />
             {row.body && (
-              <div className="rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
+              <div className="max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
                 <div className="px-4 py-2.5 whitespace-pre-wrap break-words">{row.body}</div>
               </div>
             )}
@@ -366,6 +412,20 @@ const EMPTY_DRAFT: ChatSessionConfig = {};
 /** How close to the top (px) trips auto-pagination. The "load earlier" status
  *  band sits here; scrolling into it fires the next older page. */
 const AUTO_LOAD_TOP_PX = 48;
+
+/** Optimistically dismiss the corresponding question/approval card in the
+ *  execute session view when the user answers from the chat surface. The
+ *  MQTT `event_cleared` path (zero-byte retained publish) is unreliable with
+ *  rumqttd for already-connected subscribers, so we clear local state
+ *  immediately rather than waiting for the signal. */
+function dismissExecCard(card: ChatMessageRow) {
+  const execSid = card.meta?.agent_session_id;
+  const reqId = card.meta?.interaction?.request_id;
+  const agentId = card.from;
+  if (execSid && reqId && agentId) {
+    useChatStore.getState().resolveQuestion(agentId, reqId, execSid);
+  }
+}
 
 export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const { t } = useTranslation();
@@ -423,67 +483,59 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => (win ? [...win.older, ...win.tail] : []),
     [win],
   );
-  // `in_reply_to → agent_session_id` over the window's `turn_started`
-  // pointer rows — the anchor map receipts and other rows drill through
-  // (§5.5.5: the pointer is written at routing time, so it exists while the
-  // turn is still queued on a busy session).
-  const pointerSid = useMemo(() => {
+  // message_id → body index, so a reply (whose trigger is only an
+  // `in_reply_to` id) can name the task in its drill-down tooltip when the
+  // execution session has no title yet.
+  const bodyById = useMemo(() => {
     const m = new Map<string, string>();
     for (const r of rows) {
-      if (
-        r.kind === "system_notice" &&
-        r.meta?.notice_type === "turn_started" &&
-        r.meta?.in_reply_to &&
-        r.meta?.agent_session_id
-      ) {
-        m.set(r.meta.in_reply_to, r.meta.agent_session_id);
-      }
+      if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
     }
     return m;
   }, [rows]);
-  // The live round — one projection for the status card, drilled from the
-  // rows themselves so the card reacts to the window the user is looking at
-  // rather than to the last refresh tick (§5.5.5).
-  const live = useMemo(() => projectLiveTurn(rows), [rows]);
-  // ADR-099: this is a 1:1 surface — every message reaches the agent, so a
-  // trailing `user_message` whose pointer has not landed yet is the router's
-  // assigning window, not a dead row. The card paints "assigning…" for it and
-  // switches to the live mirror the moment `turn_started` arrives.
-  const inFlight = useMemo(
-    () => projectInFlight(rows, { awaitPointer: false }) ?? live.inFlight,
-    [rows, live.inFlight],
-  );
-  // The latest `interaction_request` card, if it is still answerable — this
-  // is the execute-session projection the unified status card mirrors live
-  // (ask_question / approval / pause). A closed card (or none) yields `null`,
-  // so nothing lingers in the stream (§ 5.5.4: answer-then-done).
-  const pendingCard = live.pendingCard;
-
-  // ADR-099: optimistic title for a Chat-Router exec session. That session has
-  // no list row and usually no open tab, so its title would otherwise read
-  // "Untitled" until the backend's generated title arrives over MQTT. Seed a
-  // provisional title from the triggering user message the moment
-  // `turn_started` resolves the exec session; `seedOptimisticTitle` no-ops
-  // once any title exists, so the backend's authoritative (possibly
-  // LLM-refined) push always wins afterwards. Guarded per execSid so it
-  // fires at most once per session.
+  // Optimistic exec-session title seed (ADR-099). A Router-created execute
+  // session has no list row and often no open tab, so it would read "Untitled"
+  // until the backend's generated title arrives over MQTT. The reply row is now
+  // the first durable place the exec session id appears (the routing pointer
+  // that used to expose it earlier is gone with the ADR-100 revision), so seed
+  // a provisional title off the message that triggered it. `seedOptimisticTitle`
+  // no-ops once any title exists, so the authoritative (possibly LLM-refined)
+  // push always wins afterwards. Guarded per execSid so it fires at most once.
   const seededTitleRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const execSid = inFlight?.execSid;
-    if (!execSid || seededTitleRef.current.has(execSid)) return;
-    const triggerId = inFlight?.triggerId;
-    const body = triggerId
-      ? rows.find((r) => r.meta?.message_id === triggerId)?.body
-      : undefined;
-    // Only pin the execSid once a body is available — the pointer can land
-    // a window before the trigger row is readable, and marking it early would
-    // permanently skip the seed. `seedOptimisticTitle` itself is idempotent
-    // (no-ops once a title exists), so a re-run on a later `rows` tick is safe.
-    if (!body) return;
-    seededTitleRef.current.add(execSid);
-    useChatStore.getState().seedOptimisticTitle(agentId, execSid, body);
+    for (const r of rows) {
+      if (r.kind !== "agent_message" || !r.meta?.sender_session_id || !r.meta?.in_reply_to) {
+        continue;
+      }
+      const execSid = r.meta.sender_session_id;
+      if (seededTitleRef.current.has(execSid)) continue;
+      // Only pin the execSid once a body is available — the reply row can land a
+      // window before its trigger row is readable, and marking it early would
+      // permanently skip the seed. `seedOptimisticTitle` is itself idempotent,
+      // so re-running on a later `rows` tick is safe.
+      const body = rows.find((x) => x.meta?.message_id === r.meta?.in_reply_to)?.body;
+      if (!body) continue;
+      seededTitleRef.current.add(execSid);
+      useChatStore.getState().seedOptimisticTitle(agentId, execSid, body);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inFlight?.execSid, inFlight?.triggerId, agentId, rows]);
+  }, [rows, agentId]);
+  // Cards that can no longer be answered, and the subset the human replied to
+  // — driving the inline card's answered/closed receipt (§5.5.4). The chat
+  // stream is a pure durable event log now; there is no live projection.
+  const closed = useMemo(() => closedCardIds(rows), [rows]);
+  const answered = useMemo(() => humanAnsweredCardIds(rows), [rows]);
+  // Is the newest human message still waiting for an answer? Derived, never
+  // stored — see `chatTurnState`. Suppressed only when a locate is KNOWN to
+  // have parked the window mid-history (a window with newer pages has no
+  // newest message to wait on); a window without position info is treated as
+  // at the tail.
+  const waiting = pendingTurn(rows, sending, closed) && !(win && win.lastPos < win.total - 1);
+  // Name for the waiting line. The turn may have been routed to another agent,
+  // but this surface talks to exactly one — naming it is what makes the line
+  // read as "someone is working on it" instead of a generic spinner.
+  const agentMeta = useAgentStore((s) => s.agents[agentId]?.meta);
+  const pendingName = agentMeta?.display_name ?? agentMeta?.name ?? "";
 
   // Follow rule shared by every chat surface (AgentChatView / GroupChatPanel /
   // InboxPanel): stick to the newest row only while pinned, and never let a
@@ -528,6 +580,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     if (immediate && text) {
       stickNow();
       void sendText(sessionId, text, card.meta?.message_id);
+      dismissExecCard(card);
       return;
     }
     setAnswerTarget(card);
@@ -547,10 +600,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     // applied to a newly created one).
     const sessionConfig = replyTo ? undefined : (Object.keys(draft).length > 0 ? draft : undefined);
     setInput("");
+    const target = answerTarget;
     setAnswerTarget(null);
     setPendingAttachments([]);
     stickNow();
     void sendText(sessionId, text, replyTo, sessionConfig, attachmentIds);
+    if (target && replyTo) dismissExecCard(target);
   };
 
   // Upload each chosen file into the session's `files/` dir and stack a
@@ -651,16 +706,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const removeAttachment = (id: string) =>
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
 
-  const drillIntoExec = async () => {
-    if (!inFlight?.execSid) return;
-    await useChatStore.getState().openSession(agentId, inFlight.execSid);
-    setMode(agentId, "exec");
-  };
-
-  // Jump to the execution session behind a specific agent message — the same
-  // drill the in-flight status card does, but for a resolved turn (finished,
-  // failed or empty). openSession cold-loads the exec tab; the pointer stays
-  // valid after rotation because the old JSONL remains in Agent home (§5.5.5).
+  // Jump to the execution session behind a specific agent message — for a
+  // resolved turn (finished, failed or empty). openSession cold-loads the exec
+  // tab; the pointer stays valid because the exec JSONL remains
+  // in Agent home (§5.5.5).
   // A DELETED session would otherwise cold-open as an empty exec tab whose
   // every load fails into the retry banner, so probe existence first: a
   // definitive 404 is answered with a toast and no navigation.
@@ -754,52 +803,43 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               agentId={agentId}
               chatSessionId={sessionId}
               showHeader={
-                r.kind === "agent_message" && rows[i - 1]?.kind !== "agent_message"
+                // Header rule (ADR-100 D11 + the interaction-feel invariant):
+                // an agent bubble — the routing reaction included — wears the
+                // avatar+name header unless the row directly above already
+                // painted one. An empty terminal row is a CENTERED status
+                // line, not a bubble: it must not fold the header off the
+                // reply that follows it (that left the answer "孤零零" with no
+                // avatar). And the reaction row never folds the turn's real
+                // reply — they are minutes or hours apart, each is its own
+                // utterance.
+                (r.kind === "agent_message" || isTurnRoutedNotice(r)) &&
+                !(rows[i - 1]?.kind === "agent_message" && !isEmptyTerminalReply(rows[i - 1]!))
               }
               onJumpToExec={(sid) => void jumpToExec(sid)}
-              routerExecSid={
-                r.meta?.in_reply_to ? pointerSid.get(r.meta.in_reply_to) : undefined
+              triggerBody={
+                r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined
               }
+              closed={closed}
+              answered={answered}
+              onAnswer={handleAnswer}
             />
           </div>
         ))}
-        {/* Status card — the one live row the Chat surface owns (§5.5.5:
-            pointer durable, state projected). It renders both the in-flight
-            turn AND an unanswered execute-session projection card (ask_question
-            / approval) bound to that card's exec session, so every projection
-            shares one unified card grammar. */}
-        {(inFlight || pendingCard) &&
-          (() => {
-            const cardExecSid =
-              inFlight?.execSid ?? pendingCard?.meta?.agent_session_id ?? null;
-            const interaction = pendingCard?.meta?.interaction;
-            return (
-              <ExecSessionStatusCard
-                agentId={agentId}
-                execSid={cardExecSid}
-                assigning={inFlight?.assigning}
-                onDrill={
-                  cardExecSid
-                    ? () =>
-                        void (inFlight ? drillIntoExec() : jumpToExec(cardExecSid))
-                    : undefined
-                }
-                card={
-                  pendingCard && interaction
-                    ? {
-                        kind: interaction.kind,
-                        messageId: pendingCard.meta?.message_id ?? "",
-                      }
-                    : undefined
-                }
-                onAnswerCard={(messageId, text, immediate) => {
-                  const cardRow =
-                    rows.find((r) => r.meta?.message_id === messageId) ?? pendingCard;
-                  if (cardRow) handleAnswer(cardRow, text, immediate);
-                }}
-              />
-            );
-          })()}
+        {/* The waiting line sits where the answer will land: one aggregated
+            "the agent has your message" indicator, derived from the newest
+            unanswered human row. It replaces the removed dispatch / round-open
+            milestones, and disappears the moment a terminal row arrives. */}
+        {waiting && (
+          <ChatTurnStatusLine
+            className="px-6"
+            live
+            text={
+              pendingName
+                ? t("chatView.notice.pendingTurn", { name: pendingName })
+                : t("chatView.notice.pendingTurnGeneric")
+            }
+          />
+        )}
         {hasMoreNewer && (
           <div className="py-2 text-center text-10 text-text-tertiary">
             {win?.loadingNewer ? (

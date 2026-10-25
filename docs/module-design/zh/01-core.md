@@ -1,4 +1,4 @@
-﻿# acowork-core — 共享类型与协议
+# acowork-core — 共享类型与协议
 
 > 属于 [模块设计总览](00-overview.md) 的一部分
 
@@ -106,7 +106,7 @@ pub enum Permission {
     Network(String),               // "network:https://api.weather.com"
     FilesystemRead(String),        // "filesystem:read:~/Documents"
     FilesystemWrite(String),       // "filesystem:write:~/Documents"
-    // MemoryRead / MemoryWrite 已随 ADR-100 删除（其二进制 tag 3/4 一并废弃、不重编号）：
+    // MemoryRead / MemoryWrite 已随 ADR-101 删除（其二进制 tag 3/4 一并废弃、不重编号）：
     // 记忆改由 Gateway 托管的 acowork-memory 服务承载，不再是权限域。
     IntentSend(String),            // "intent:send:com.example.calendar"
     IntentReceive(String),         // "intent:receive:com.example.weather"
@@ -125,3 +125,4 @@ pub enum Permission {
 - Provider trait 放在 core 而非 runtime：Gateway 的 Budget Tracker 需要知道 Provider 名称做统计，不依赖具体实现
 - Tool trait 放在 core：Gateway 需要解析 manifest 中的 tool 声明做权限校验
 - 零重型依赖：不依赖 tokio（trait 中的 async 方法通过 `async-trait` 实现，返回 `Pin<Box<dyn Future>>`）
+

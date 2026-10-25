@@ -7,7 +7,7 @@
 //! Each `AgentLoop` owns one `SessionCore`, constructed from the shared
 //! `AgentCore` template at session creation time.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::Utc;
@@ -205,6 +205,17 @@ pub(crate) struct SessionCore {
     /// Written by the spawned title task in `AgentLoop::run_inner`, read by
     /// `notify_new_data_available()` to push the title to the frontend.
     pub(crate) title: Arc<RwLock<Option<String>>>,
+
+    /// Claim flag for the async title-generation task.
+    ///
+    /// `title` alone cannot gate spawning: it is only written when the LLM
+    /// call returns. A Stop followed by a new user message races that window
+    /// — the next `run_inner` still sees `title == None` and spawns a second
+    /// task whose result (derived from the *follow-up* message) can overwrite
+    /// the first-message title. Claiming this flag before spawning makes the
+    /// duplicate structurally impossible; it is released by a Drop guard at
+    /// the end of the task (including panic) so a failed call can retry.
+    pub(crate) title_task_in_flight: Arc<AtomicBool>,
 }
 
 impl SessionCore {
@@ -249,6 +260,7 @@ impl SessionCore {
             current_work_dir,
             approval_handle: None,
             title: Arc::new(RwLock::new(None)),
+            title_task_in_flight: Arc::new(AtomicBool::new(false)),
         }
     }
 

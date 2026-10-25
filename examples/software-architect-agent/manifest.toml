@@ -34,13 +34,13 @@ type = "Shell"
 #   - bash/powershell/shell                       → investigate infra, run analysis tools
 #   - http_request/web_fetch                     → research patterns & best practices
 #   - codebase                                    → LSP-based code intelligence for review
-#   - mcp_memory__* (hosted memory MCP, ADR-100)   → architecture decisions and trade-offs
+#   - mcp_memory__* (hosted memory MCP, ADR-101)   → architecture decisions and trade-offs
 #   - intent_send                                 → coordinate with dev and review agents
 #   - ask_user_question, todo_write               → clarify requirements & track planning
 # Shell tools are declared for all three names (platform-detected) so an
 # architect always has shell access on every platform.
 
-# --- Memory (ADR-100) ---
+# --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
 # here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
 # `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
@@ -120,3 +120,4 @@ description = "Convert approved designs into implementation plans with clear mod
 
 [capabilities.architecture_risk_assessment]
 description = "Assess architectural risks, blast radius, reversibility, rollback paths, and operational failure modes"
+

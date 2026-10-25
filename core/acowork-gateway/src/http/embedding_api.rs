@@ -802,7 +802,7 @@ async fn write_migration_terminal(
     }
 }
 
-/// `POST /memory/rebuild-embeddings` request to the memory service (ADR-100 —
+/// `POST /memory/rebuild-embeddings` request to the memory service (ADR-101 —
 /// the rebuild used to be a Runtime reverse proxy; `memory_proxy` now injects
 /// the `?instance_id=` namespace). Each agent's progress is recorded in
 /// `RunningAgentInfo.migration` and surfaced through
@@ -1058,7 +1058,7 @@ pub async fn start_migration(
             // timeout on very large stores and made the UI look hung for the
             // entire duration.
             //
-            // ADR-100: this call used to be a Runtime reverse proxy. The rebuild
+            // ADR-101: this call used to be a Runtime reverse proxy. The rebuild
             // now belongs to the memory service, so it goes through
             // `memory_proxy` with the instance namespace injected — the agent key
             // (`running_agents`, install table, memory instance namespace) is the
@@ -1325,7 +1325,7 @@ mod tests {
     ///   415 Unsupported Media Type. The fix is to set
     ///   `Content-Type: application/json` explicitly on the proxied request.
     ///
-    /// ADR-100 moved the endpoint from the Runtime to the memory service, so
+    /// ADR-101 moved the endpoint from the Runtime to the memory service, so
     /// the request now travels `memory_proxy` and carries `?instance_id=`.
     ///
     /// This test pins BOTH contracts. Without it, regression is silent and
@@ -1389,7 +1389,7 @@ mod tests {
         // ── 2. Build AppState with:
         //    - embed_process ready (port 18080, bge-small-zh-v1.5, dim 512)
         //    - running_agents[com.test.architect] present
-        //    - memory_process pointing at the mock service (ADR-100: the
+        //    - memory_process pointing at the mock service (ADR-101: the
         //      rebuild is the service's endpoint now, so `memory_proxy` must
         //      have a port to route to)
         let dir = std::env::temp_dir().join(format!(
@@ -1408,7 +1408,7 @@ mod tests {
             active_dimension: Some(512),
             ready: true,
         });
-        // ADR-100: the rebuild endpoints live in the memory service, so
+        // ADR-101: the rebuild endpoints live in the memory service, so
         // `memory_proxy` needs a port to forward to — point it at the mock.
         gw_state.memory_process =
             Some(crate::lifecycle::memory_supervisor::MemoryProcessState {
@@ -1529,7 +1529,7 @@ mod tests {
 
         assert_eq!(method, "POST", "must be POST, got {}", method);
 
-        // ADR-100 regression: the request must land on the memory service's
+        // ADR-101 regression: the request must land on the memory service's
         // own path (`/memory/*`, no `/agents/{id}` prefix) with the instance
         // namespace injected by the proxy — the service refuses to open a
         // store without it.
@@ -1820,4 +1820,5 @@ mod tests {
         serde_json::to_string(v).unwrap_or_else(|_| "<unprintable>".to_string())
     }
 }
+
 

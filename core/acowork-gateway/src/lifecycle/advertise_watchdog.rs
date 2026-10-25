@@ -61,7 +61,7 @@ pub struct AdvertiseWatchdogConfig {
     pub doc_mcp_path: Option<String>,
     /// `memory.mcp_http_path` (e.g. `/api/memory/mcp`); `None` ⇒
     /// `memory_mcp_url` is not auto-injected and we leave it alone
-    /// (ADR-100: the memory MCP endpoint is advertised exactly like doc's).
+    /// (ADR-101: the memory MCP endpoint is advertised exactly like doc's).
     pub memory_mcp_path: Option<String>,
 }
 
@@ -246,3 +246,4 @@ mod tests {
         let _ = state.read().await.advertise_host.clone(); // baseline readable
     }
 }
+

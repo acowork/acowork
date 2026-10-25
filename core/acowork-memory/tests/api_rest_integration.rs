@@ -1,4 +1,4 @@
-//! End-to-end panel REST integration tests (ADR-100, P1d).
+//! End-to-end panel REST integration tests (ADR-101, P1d).
 //!
 //! Boots the real service (`MemoryService::serve`, full router) and drives the
 //! `/memory/*` endpoints over HTTP the way the Gateway reverse proxy will: the
@@ -678,3 +678,4 @@ async fn rebuild_starts_conflicts_and_reaches_a_terminal_progress() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+

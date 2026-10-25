@@ -12,12 +12,23 @@
 #   --remote                 With --start: bind Gateway to 0.0.0.0 and advertise
 #                            the detected LAN IP. Implies --start.
 #   --skip-embed             Skip building the embedding runtime
+#   --cpu                    macOS only: build Embed with CPU-only ONNX Runtime
+#                            (default on Apple Silicon is download-ort,coreml)
+#   --install-deps           macOS only: check build tools and install missing
+#                            pkg-config / cmake via Homebrew (opt-in: installs
+#                            system packages)
+#   --mirror                 Configure the USTC cargo mirror (opt-in: writes
+#                            ~/.cargo/config.toml, and only when it does not
+#                            exist yet). Useful on slow GitHub/crates.io networks.
 #   -h, --help               Show this help
 #
 # Profile selection: --debug/--release flag > $ACOWORK_BUILD_PROFILE > release
 # In debug profile, $ACOWORK_GATEWAY_LOG_LEVEL is auto-exported to "debug" so
 # any gateway process spawned from this script inherits verbose logging.
 # Supports: Linux, macOS, Windows (Git Bash, WSL, MSYS2)
+# On macOS the embedding runtime is built with `--features download-ort[,coreml]`
+# so cargo fetches ONNX Runtime itself (no setup_ort.sh GitHub download needed);
+# the downloaded dylib is synced into .ort/ for downstream scripts.
 
 set -e
 
@@ -51,12 +62,18 @@ START_GATEWAY=true
 STOP_GATEWAY=false
 SKIP_EMBED=false
 NETWORK_MODE="default"   # default|local|remote
+USE_GPU=true             # macOS/Apple Silicon: auto-enable CoreML (--cpu to opt out)
+INSTALL_DEPS=false       # --install-deps: macOS Homebrew dependency setup
+CARGO_MIRROR=false       # --mirror: configure USTC cargo mirror
 for arg in "$@"; do
     case "$arg" in
         --debug)      PROFILE="debug" ;;
         --release)    PROFILE="release" ;;
         --start)      START_GATEWAY=true ;;
         --stop)       STOP_GATEWAY=true ;;
+        --cpu)        USE_GPU=false ;;
+        --install-deps) INSTALL_DEPS=true ;;
+        --mirror)     CARGO_MIRROR=true ;;
         --local)
             [ "$NETWORK_MODE" = "remote" ] && { echo -e "${RED}ERROR: --local and --remote are mutually exclusive.${NC}"; exit 1; }
             NETWORK_MODE="local" ;;
@@ -79,6 +96,12 @@ Options:
   --remote          With --start: bind Gateway to 0.0.0.0 (LAN-reachable) and
                     advertise the detected LAN IP. Implies --start.
   --skip-embed      Skip the embedding runtime build
+  --cpu             macOS only: CPU-only ONNX Runtime (no CoreML acceleration;
+                    default on Apple Silicon is download-ort,coreml)
+  --install-deps    macOS only: verify Homebrew and install missing
+                    pkg-config / cmake. Opt-in because it installs packages.
+  --mirror          Configure the USTC cargo mirror in ~/.cargo/config.toml
+                    (only when that file does not exist yet). Cross-platform.
   -h, --help        Show this help
 
 Environment:
@@ -221,9 +244,52 @@ stop_process() {
     fi
 }
 
+# Opt-in environment setup (moved from build_macos.sh's "Step 0"). These steps
+# install system packages or write to ~/.cargo/config.toml, so they NEVER run
+# implicitly -- pass --install-deps / --mirror to opt in.
+if [ "$INSTALL_DEPS" = "true" ]; then
+    if [ "$OS" != "macos" ]; then
+        echo -e "${YELLOW}--install-deps is macOS-only (Homebrew); skipping.${NC}"
+    elif ! command -v brew &>/dev/null; then
+        echo -e "${RED}  ✗ Homebrew is not installed${NC}"
+        echo -e "${YELLOW}  Install: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"${NC}"
+        exit 1
+    else
+        echo -e "${GREEN}  ✓ Homebrew $(brew --version | head -1)${NC}"
+        if ! command -v pkg-config &>/dev/null; then
+            echo -e "${YELLOW}  pkg-config missing, installing...${NC}"
+            brew install pkg-config
+        fi
+        if ! command -v cmake &>/dev/null; then
+            echo -e "${YELLOW}  cmake missing, installing...${NC}"
+            brew install cmake
+        fi
+    fi
+fi
+
+if [ "$CARGO_MIRROR" = "true" ]; then
+    if [ -f "$HOME/.cargo/config.toml" ]; then
+        echo -e "${GRAY}  ~/.cargo/config.toml already exists; leaving it untouched.${NC}"
+    else
+        echo -e "${YELLOW}  Configuring Cargo mirror (USTC)...${NC}"
+        mkdir -p "$HOME/.cargo"
+        cat > "$HOME/.cargo/config.toml" << 'EOF'
+[source.crates-io]
+replace-with = "ustc"
+
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
+[net]
+git-fetch-with-cli = true
+EOF
+        echo -e "${GREEN}  ✓ Cargo mirror configured (USTC)${NC}"
+    fi
+fi
+
 # Step 1: Stop running processes (only when we are about to start a new one)
 if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
-    echo -e "${YELLOW}[1/8] Stopping running Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, and User processes...${NC}"
+    echo -e "${YELLOW}[1/8] Stopping running Gateway, Runtime, Embed, LSP Relay, Node Agent, PM, Doc, User, and Memory processes...${NC}"
     stop_process "acowork-gateway" "Gateway"
     stop_process "acowork-runtime" "Runtime"
     stop_process "acowork-embed"  "Embed"
@@ -253,7 +319,7 @@ if [ "$START_GATEWAY" = "true" ] || [ "$STOP_GATEWAY" = "true" ]; then
     # port 18083 by default. The ADR-018 watchdog self-exit can lag, so kill it
     # explicitly to keep the stop step idempotent and to release 18083.
     stop_process "acowork-user" "User"
-    # The Memory service mirrors the PM/Doc/User pattern (ADR-100). It is a
+    # The Memory service mirrors the PM/Doc/User pattern (ADR-101). It is a
     # standalone process (`acowork-memory`) spawned by the Gateway supervisor
     # and listens on port 18084 by default. The ADR-018 watchdog self-exit can
     # lag, and on Windows the old exe keeps the file locked, so kill it
@@ -424,35 +490,59 @@ if [ "$SKIP_EMBED" = "true" ]; then
 else
     echo -e "${YELLOW}[3.5/8] Building Embedding Runtime ($PROFILE mode)...${NC}"
 
+    # macOS fast path (formerly build_macos.sh): when no ORT is pre-installed,
+    # let cargo download it via the download-ort feature (no slow setup_ort.sh
+    # GitHub fetch), with CoreML acceleration on Apple Silicon unless --cpu.
+    # An explicit ORT_LIB_LOCATION always wins and falls through to the
+    # generic .ort/ path below.
+    MACOS_EMBED_DONE=false
+    if [ "$OS" = "macos" ] && [ -z "$ORT_LIB_LOCATION" ]; then
+        EMBED_FEATURES="download-ort"
+        if [ "$USE_GPU" = "true" ] && [ "$(uname -m)" = "arm64" ]; then
+            EMBED_FEATURES="download-ort,coreml"
+            echo -e "${GRAY}  Apple Silicon: CoreML acceleration enabled${NC}"
+        else
+            echo -e "${GRAY}  CPU-only ONNX Runtime${NC}"
+        fi
+        if [ "$PROFILE" = "release" ]; then
+            cargo_args=(cargo build --release -p acowork-embed --features "$EMBED_FEATURES")
+        else
+            cargo_args=(cargo build -p acowork-embed --features "$EMBED_FEATURES")
+        fi
+        if "${cargo_args[@]}" 2>&1 | tee /tmp/embed_build.log; then
+            if grep -q "error\[" /tmp/embed_build.log 2>/dev/null; then
+                echo -e "${RED}  Embedding Runtime build failed with errors.${NC}"
+                exit 1
+            fi
+            echo -e "${GREEN}  Embedding Runtime build completed.${NC}"
+        else
+            echo -e "${RED}  Embedding Runtime build failed.${NC}"
+            exit 1
+        fi
+        # Sync the downloaded ORT into .ort/ so downstream scripts (ort_env.js,
+        # package_desktop_macos.sh, later build_core.sh runs) find it. The
+        # directory name follows the actual arch -- the old build_macos.sh
+        # hardcoded aarch64 even on Intel Macs.
+        if [ "$(uname -m)" = "arm64" ]; then ORT_ARCH="aarch64"; else ORT_ARCH="x64"; fi
+        ORT_TARGET_DIR="$WORKSPACE_ROOT/.ort/onnxruntime-osx-$ORT_ARCH-latest/lib"
+        FOUND_LIB=$(find "$HOME/.cargo/registry/cache" -maxdepth 6 -name "libonnxruntime.dylib" -type f 2>/dev/null | head -1)
+        if [ -n "$FOUND_LIB" ]; then
+            mkdir -p "$ORT_TARGET_DIR"
+            cp "$FOUND_LIB" "$ORT_TARGET_DIR/"
+            echo -e "${GREEN}  ✓ Synced ONNX Runtime to $ORT_TARGET_DIR${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ libonnxruntime.dylib not found in Cargo cache (statically linked into the binary) -- .ort/ not populated.${NC}"
+        fi
+        MACOS_EMBED_DONE=true
+    fi
+
+    if [ "$MACOS_EMBED_DONE" = "false" ]; then
+
     # Auto-detect local ONNX Runtime install under .ort/
     if [ -z "$ORT_LIB_LOCATION" ]; then
         detect_ort_local || true
     fi
     
-    # Fallback: Auto-detect from Cargo cache if download-ort feature was used
-    if [ -z "$ORT_LIB_LOCATION" ]; then
-        echo -e "${YELLOW}  .ort/ not found, searching Cargo registry cache...${NC}"
-        for cached_ort in $(find ~/.cargo/registry/cache -maxdepth 5 -type d \( -name "onnxruntime-osx-aarch64-*" -o -name "onnxruntime-osx-x64-*" \) 2>/dev/null); do
-            [ -d "$cached_ort" ] || continue
-            if [ "$OS" = "macos" ]; then
-                lib_path="$cached_ort/lib/libonnxruntime.dylib"
-            else
-                lib_path="$cached_ort/lib/libonnxruntime.so"
-            fi
-            if [ -f "$lib_path" ]; then
-                echo -e "${GREEN}  Found ONNX Runtime in Cargo cache: $lib_path${NC}"
-                # Create a symlink in .ort/ so build_core.sh can use it
-                WORKSPACE_ROOT_ORT="$WORKSPACE_ROOT/.ort/onnxruntime-osx-aarch64-latest"
-                mkdir -p "$WORKSPACE_ROOT_ORT/lib"
-                cp "$lib_path" "$WORKSPACE_ROOT_ORT/lib/"
-                echo -e "${GREEN}  Copied to $WORKSPACE_ROOT_ORT${NC}"
-                export ORT_LIB_LOCATION="$WORKSPACE_ROOT_ORT/lib"
-                export ORT_DYLIB_PATH="$lib_path"
-                export ORT_PREFER_DYNAMIC_LINK=1
-                break
-            fi
-        done
-    fi
     if [ -z "$ORT_LIB_LOCATION" ]; then
         # Offer to run setup_ort.sh in-place. Guards:
         #   - `[ -t 0 ]`: only prompt with a real terminal. CI / piped stdin
@@ -506,6 +596,7 @@ else
         exit 1
     fi
 
+    fi # end MACOS_EMBED_DONE check (generic .ort/ path: Linux + explicit ORT_LIB_LOCATION)
 fi # end SKIP_EMBED check
 rm -f /tmp/embed_build.log
 echo ""
@@ -648,7 +739,7 @@ echo ""
 # Step 3.11: Build Memory service (standalone binary, sibling of acowork-gateway)
 #
 # Mirrors the services above: the Memory service is a standalone process
-# (`acowork-memory`, ADR-100), located via `current_exe().parent().join("acowork-memory")` —
+# (`acowork-memory`, ADR-101), located via `current_exe().parent().join("acowork-memory")` —
 # so the binary MUST sit next to acowork-gateway. Without it the Gateway
 # supervisor logs "acowork-memory binary not found" and the memory panel plus
 # the agent's `memory_store` / `memory_recall` tools are gone.
@@ -927,3 +1018,5 @@ cd "$WORKSPACE_ROOT"
 
 # Cleanup temp files
 rm -f /tmp/gateway_build.log /tmp/runtime_build.log
+
+

@@ -13,7 +13,7 @@
 //!
 //! This harness seeds and scores **conversation rows only**. The memory scope is
 //! measured by `core/acowork-memory/tests/retrieval_eval.rs`. The split follows
-//! ADR-100: the two engines are separate binaries, and neither test may reach
+//! ADR-101: the two engines are separate binaries, and neither test may reach
 //! into the other — a fused-scope harness would have to link both, which is how
 //! this file used to end up naming memory types. A query whose ground truth is
 //! entirely in the other scope is skipped, not counted.
@@ -436,3 +436,4 @@ mod harness_tests {
         assert!(!exact_terms_present(&texts, &[]));
     }
 }
+

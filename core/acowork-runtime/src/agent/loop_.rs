@@ -8,6 +8,7 @@
 //! S1.7: Parallel tool execution with per-tool timeout
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{ChatMessage, Provider};
@@ -66,6 +67,26 @@ pub struct SessionChunkEvent {
     pub session_id: String,
     /// The actual chunk event.
     pub event: ChunkEvent,
+}
+
+/// Releases the session's title-generation claim when the spawned task ends.
+///
+/// Held for the whole lifetime of the async title task (and by the
+/// synchronous resume path that propagates a persisted title), so the claim
+/// is released on every exit — success, error, or panic — letting a later
+/// turn retry generation.
+struct TitleTaskClaim(Arc<AtomicBool>);
+
+impl TitleTaskClaim {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+}
+
+impl Drop for TitleTaskClaim {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// Streaming chunk event emitted during LLM response generation.
@@ -457,6 +478,14 @@ pub struct AgentLoop {
     /// [`Self::chat_writeback`] has already been taken. Each entry carries
     /// its own row coordinates for that reason.
     pub(crate) open_chat_cards: Vec<crate::agent::loop_interaction::OpenChatCard>,
+
+    /// ADR-100 revision: whether the current turn ended because the user
+    /// stopped it. Set by [`Self::mark_turn_aborted`], which historically only
+    /// stamped the pending `chat_writeback` context. A turn composed directly
+    /// in the execution session has no such context, so its abort outcome had
+    /// nowhere to live — and the chat it is bound to could never learn why its
+    /// previous message went unanswered. Reset at the top of every request.
+    pub(crate) turn_aborted: bool,
 }
 
 impl AgentLoop {
@@ -528,6 +557,7 @@ impl AgentLoop {
             chat_writeback: None,
             chat_has_human: None,
             open_chat_cards: Vec::new(),
+            turn_aborted: false,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         loop_.session_core.approval_handle = Some(approval_handle.clone());
@@ -600,6 +630,7 @@ impl AgentLoop {
             chat_writeback: None,
             chat_has_human: None,
             open_chat_cards: Vec::new(),
+            turn_aborted: false,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
         session_loop.session_core.approval_handle = Some(approval_handle);
@@ -608,7 +639,7 @@ impl AgentLoop {
 
     // ── ADR-014 Phase 6 moved the memory methods (init_memory_store,
     // retrieve_and_inject_memories, write_attached_items) into loop_memory.rs;
-    // ADR-100 deleted that module together with the Runtime's memory code.
+    // ADR-101 deleted that module together with the Runtime's memory code.
     // Attachment persistence survived as session history, now in loop_persist.rs. ──
 
     /// Execute a built-in tool by name, simulating an LLM tool call.
@@ -638,6 +669,11 @@ impl AgentLoop {
             work_dir,
             session_id: self.session_core.session_id.clone(),
             current_user_message: self.current_turn_user_message.clone(),
+            chat_session_id: self
+                .session
+                .conversation
+                .as_ref()
+                .and_then(|c| c.chat_session_id()),
         };
         match tool.execute_with_context(params, &ctx).await {
             Ok(result) if result.ok => Ok(result.content),
@@ -816,6 +852,10 @@ impl AgentLoop {
         // request begins.
         let _cancel_handle = self.session_core.begin_new_request();
 
+        // ADR-100 revision: a new request starts with a clean outcome — an
+        // abort from the previous turn must not leak into this one.
+        self.turn_aborted = false;
+
         // Replay is a debug path over existing history; the staged turn
         // message from the live run is not re-embedded (memory tools fall
         // back to keyword-only recall).
@@ -889,9 +929,26 @@ impl AgentLoop {
             // Only when a conversation exists (not in tests without sessions).
             // Title generation runs only once per session — subsequent user
             // messages skip the LLM call entirely.
+            //
+            // Gate on the in-flight claim, not just `title.is_none()`: a Stop
+            // interrupts this turn while the spawned LLM call is still in
+            // flight, and a follow-up message sent right after would spawn a
+            // second task whose result (derived from that follow-up) would
+            // overwrite the first-message title. See `title_task_in_flight`.
             if self.session.conversation.is_some()
                 && self.session_core.title.read().unwrap().is_none()
+                && !self
+                    .session_core
+                    .title_task_in_flight
+                    .swap(true, Ordering::AcqRel)
             {
+                // Claim released on every exit path below — the spawned task
+                // holds it for its whole lifetime, the synchronous resume
+                // path drops it at the end of this block.
+                let _title_claim = TitleTaskClaim::new(Arc::clone(
+                    &self.session_core.title_task_in_flight,
+                ));
+
                 // Check if the conversation already has a title from a
                 // previous session run (session resume case). If so,
                 // propagate it to session_core.title and skip the LLM call.
@@ -914,15 +971,34 @@ impl AgentLoop {
                         })
                         .unwrap_or_else(|| "en".to_string());
 
-                    // Use the raw user message (before any prompt enrichment)
-                    // for title generation. This is the user's original input
-                    // without [Attached context:] prefix, document content,
-                    // or file hints — exactly what the user typed.
+                    // The title must always describe the session's FIRST user
+                    // turn — never the message currently being handled. A
+                    // follow-up sent after a Stop, or a session rebuilt from
+                    // disk (which has no in-memory title cache), would
+                    // otherwise title the conversation after a later message.
+                    // The JSONL log is the durable source of the first turn;
+                    // the current message is only a fallback for logs that
+                    // have not flushed a user row yet.
                     //
-                    // When `raw_user_message` is None or empty (e.g. user only
+                    // These are the user's original input (no
+                    // [Attached context:] prefix, document content, or file
+                    // hints) — exactly what the user typed.
+                    //
+                    // When the first turn has no text (e.g. user only
                     // uploaded files without typing text), the fallback below
-                    // extracts filenames from <attached_document> tags.
-                    let title_input = raw_user_message.unwrap_or("");
+                    // extracts filenames from <attached_document> tags in the
+                    // current message.
+                    let first_user_message = self
+                        .session
+                        .conversation
+                        .as_ref()
+                        .and_then(|conv| {
+                            crate::conversation::read_first_user_message(conv.session_path())
+                        })
+                        .filter(|s| !s.trim().is_empty());
+                    let title_input_owned = first_user_message
+                        .unwrap_or_else(|| raw_user_message.unwrap_or("").to_string());
+                    let title_input = title_input_owned.as_str();
 
                     let prompt = crate::prompt::TITLE_PROMPT
                         .replace("{language}", &lang)
@@ -934,6 +1010,11 @@ impl AgentLoop {
                     // (session provider, other-provider model) pair.
                     let resolved_distill = self.resolve_distill_model(title_input);
                     let (provider, compact_model, _tier) = self.distill_provider(&resolved_distill);
+                    // Per-model attribution for the title call: empty
+                    // `provider_id` means "session provider" (same convention
+                    // as `distill_provider`) — resolved against the
+                    // conversation clone inside the spawned task.
+                    let title_provider_id = resolved_distill.provider_id.clone();
                     let session_core_title = self.session_core.title.clone();
                     let conversation_clone = self.session.conversation.clone();
                     // ADR-028: clone the AgentCore so the spawned task can
@@ -959,6 +1040,10 @@ impl AgentLoop {
                     };
 
                     tokio::spawn(async move {
+                        // Hold the claim for the task's whole lifetime: it is
+                        // released only when this future completes (or panics),
+                        // so a follow-up turn cannot spawn a competing task.
+                        let _title_claim = _title_claim;
                         // max_tokens=120 leaves room for a 60-char Chinese title
                         // (CJK char ≈ 1.5–2 BPE tokens). 64 was tight for a 30-char
                         // budget and would silently cap LLM output for Chinese
@@ -976,7 +1061,25 @@ impl AgentLoop {
                                 // ADR-027: record raw Provider usage from
                                 // title-generation call.
                                 if let Some(ref conv) = conversation_clone {
-                                    conv.accumulate_llm_usage(&usage);
+                                    let provider_id = if title_provider_id.is_empty() {
+                                        conv.provider()
+                                    } else {
+                                        Some(title_provider_id.clone())
+                                    };
+                                    let caps = core_clone.get_model_capabilities(&compact_model);
+                                    conv.accumulate_llm_usage(
+                                        &usage,
+                                        &crate::conversation::ModelUsageAttribution {
+                                            provider_id: provider_id.as_deref(),
+                                            model_id: Some(&compact_model),
+                                            cost_delta: caps.as_ref().and_then(|c| {
+                                                crate::conversation::estimate_call_cost(
+                                                    c.cost.as_ref(),
+                                                    &usage,
+                                                )
+                                            }),
+                                        },
+                                    );
                                 }
                                 // ADR-028: also feed the agent-scoped
                                 // counters so the agent-total line in the
@@ -1002,7 +1105,7 @@ impl AgentLoop {
             }
         }
 
-        // ADR-100: memory retrieval/injection is gone from the Runtime — the
+        // ADR-101: memory retrieval/injection is gone from the Runtime — the
         // agent reaches the memory service through the MCP catalog like any
         // other tool. Nothing to inject before the first LLM call.
 
@@ -2645,6 +2748,7 @@ mod tests {
                     status: String::new(),
                     has_human: None,
                     chat_attachment_ids: Vec::new(),
+                    for_execution_session: String::new(),
                 },
             )))
             .unwrap();
@@ -3999,139 +4103,6 @@ mod tests {
         );
     }
 
-    /// Design 27 §2.1 / §4.1 regression: an intent-rotation handoff note must
-    /// NOT become the user message. The SessionTask records the note as a
-    /// standalone `system` entry (via `record_intent_handoff`) *before* the
-    /// turn runs, then calls `run()` with the user's clean message. The JSONL
-    /// `user` entry — which also feeds the auto-title — must therefore hold
-    /// only what the user typed, while the note lives on its own `system` row.
-    #[tokio::test]
-    async fn test_record_intent_handoff_keeps_user_message_clean() {
-        use std::io::Read;
-        use std::sync::atomic::AtomicUsize;
-        use tempfile::tempdir;
-
-        let dir = tempdir().unwrap();
-        let work_dir = dir.path();
-        let session_id = "test-rotation-handoff";
-        let committed = Arc::new(AtomicUsize::new(0));
-        let config = crate::conversation::SessionConfig {
-            agent_id: "com.test.loop".to_string(),
-            workspace_id: None,
-            model: None,
-            provider: None,
-        };
-        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
-            work_dir, session_id, config, 0, // max_sessions
-            committed,
-        )
-        .unwrap();
-        let conversation = Arc::new(conversation);
-
-        let manifest = test_manifest();
-        let provider = Arc::new(MockProvider::single_text("ok"));
-        let tools = entries(vec![]);
-        let budget = test_budget();
-        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
-            RuntimeConfig::default(),
-            manifest,
-            provider,
-            tools,
-            budget,
-            None,
-            Some(conversation.clone()),
-        );
-
-        let note = "[intent rotation] The previous execution session for this context (session id \"s-old\") was rotated because this inbound intent carried an explicit session-config choice.";
-        let user_msg = "帮我总结这份报告";
-        let llm_message = format!("{note}\n\n{user_msg}");
-
-        // Mirror the Intent arm: persist the note as a standalone `system`
-        // row for the transcript, then run the turn with the note folded into
-        // the model-facing `user_message` while `raw_user_message` stays the
-        // clean user text.
-        agent_loop.record_intent_handoff(note, "msg-rot-1");
-        let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
-        let result = agent_loop
-            .run(
-                &llm_message,
-                &mut context_builder,
-                None,
-                Some("msg-rot-1".to_string()),
-                Some(user_msg),
-                None,
-            )
-            .await;
-        assert!(result.is_ok(), "run() should succeed: {result:?}");
-        conversation
-            .flush_pending()
-            .await
-            .expect("flush should succeed");
-
-        let jsonl_path = work_dir
-            .join("conversations")
-            .join(format!("{session_id}.jsonl"));
-        let mut content = String::new();
-        std::fs::File::open(&jsonl_path)
-            .unwrap()
-            .read_to_string(&mut content)
-            .unwrap();
-
-        // (a) exactly one user entry, holding the clean message and NOT the
-        //     rotation note (so the auto-title derives from user text).
-        let user_lines: Vec<&str> = content
-            .lines()
-            .filter(|l| l.contains(r#""role":"user""#))
-            .collect();
-        assert_eq!(
-            user_lines.len(),
-            1,
-            "Expected exactly one user entry in JSONL, got {}: {user_lines:?}",
-            user_lines.len(),
-        );
-        assert!(
-            user_lines[0].contains(user_msg) && !user_lines[0].contains("[intent rotation]"),
-            "user entry must be the clean message, got: {}",
-            user_lines[0]
-        );
-
-        // (b) the note is persisted as its own `system` entry tagged
-        //     `rotation_handoff`.
-        let system_lines: Vec<&str> = content
-            .lines()
-            .filter(|l| l.contains(r#""role":"system""#))
-            .collect();
-        assert!(
-            system_lines
-                .iter()
-                .any(|l| l.contains("[intent rotation]") && l.contains("\"rotation_handoff\":true")),
-            "a standalone system rotation_handoff entry must exist, got: {system_lines:?}"
-        );
-
-        // (c) the note must reach the model. `ContextBuilder::build` drops
-        //     every System-role history message, so the note has to ride on
-        //     the User turn — assert it is present there and NOT injected as a
-        //     (silently-filtered) System history copy.
-        assert!(
-            agent_loop
-                .history()
-                .messages()
-                .iter()
-                .any(|m| m.role == acowork_core::providers::traits::MessageRole::User
-                    && m.content.contains("[intent rotation]")),
-            "handoff note must ride on the user turn so it survives the System-role filter"
-        );
-        assert!(
-            !agent_loop
-                .history()
-                .messages()
-                .iter()
-                .any(|m| m.role == acowork_core::providers::traits::MessageRole::System
-                    && m.content.contains("[intent rotation]")),
-            "record_intent_handoff must not append a filtered System history copy"
-        );
-    }
-
     /// When `raw_user_message` is None (legacy callers), `run()` falls back
     /// to `user_message` for JSONL persistence — backward-compatible.
     #[tokio::test]
@@ -4400,3 +4371,5 @@ mod tests {
         ));
     }
 }
+
+

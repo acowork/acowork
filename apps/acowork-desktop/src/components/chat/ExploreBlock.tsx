@@ -87,7 +87,7 @@ function formatDuration(ms: number): string {
  *  - mcp_uninstall      : name
  *  - codebase           : action [language] [file:Lline]
  *  - other (MCP/external): no special handling — falls through to first field
- *    (exception: the hosted memory MCP, ADR-100 — its two tools keep their
+ *    (exception: the hosted memory MCP, ADR-101 — its two tools keep their
  *    cards via the explicit `mcp_memory__*` cases below)
  */
 function summarizeToolCall(

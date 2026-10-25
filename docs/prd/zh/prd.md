@@ -1,11 +1,11 @@
-﻿# ACowork 平台需求定义
+# ACowork 平台需求定义
 
 > 版本：v1.7 | 更新日期：2026-10-23
 >
 > 本文档从设计文档（01~19）和设计对话中反向提取需求，作为平台功能的权威需求来源。设计文档描述"怎么做"，本文档描述"做什么"和"为什么"。
 >
 > **v1.7 变更说明**：
-> 1. 记忆需求与实现对齐（[ADR-100](../../adr/zh/ADR-100-memory-standalone-mcp-service.md)）：记忆不再是 Runtime 内置能力，而由 Gateway 托管的独立服务 `acowork-memory` 承载；`memory_recall` / `memory_store` 从内置工具清单改为该服务的 MCP 工具（注册名 `mcp_memory__*`），`memory:read` / `memory:write` 两个权限项随之删除。§1.4 与 §1.5.1 已按此更正；能力语义（三层五类、遗忘、巩固、隐私分级、检索质量）不变。
+> 1. 记忆需求与实现对齐（[ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)）：记忆不再是 Runtime 内置能力，而由 Gateway 托管的独立服务 `acowork-memory` 承载；`memory_recall` / `memory_store` 从内置工具清单改为该服务的 MCP 工具（注册名 `mcp_memory__*`），`memory:read` / `memory:write` 两个权限项随之删除。§1.4 与 §1.5.1 已按此更正；能力语义（三层五类、遗忘、巩固、隐私分级、检索质量）不变。
 >
 > **v1.6 变更说明**：
 > 1. 与当前代码实现对齐（工具清单、Crate 数量、GUI 实际结构、通信协议实际形式）
@@ -97,19 +97,19 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 ### 1.4 Memory 系统
 
-> 归属变更（ADR-100）：下列能力的实现与进程归属已整体移到 `acowork-memory` 服务（每实例一库 `{data_dir}/instances/{instance_id}/memory.db`），Runtime 零记忆业务代码；表中需求语义本身不变，旧路径 / 旧模块名仅作历史坐标保留。
+> 归属变更（ADR-101）：下列能力的实现与进程归属已整体移到 `acowork-memory` 服务（每实例一库 `{data_dir}/instances/{instance_id}/memory.db`），Runtime 零记忆业务代码；表中需求语义本身不变，旧路径 / 旧模块名仅作历史坐标保留。
 
 | 编号 | 需求 | 优先级 | 说明 |
 |------|------|--------|------|
 | MEM-01 | 每个 Agent 拥有完全独立的私有 SQLite 记忆层（`memory/private.sqlite`），不存在公共数据库 | P0 | 数据隔离底线 |
 | MEM-02 | 三层五类仿生分层：瞬态层（工作记忆）→ 经历层（情景记忆）→ 沉淀层（语义+程序+自传体） | P0 | 仿生记忆架构 |
-| MEM-03 | 即时提取：LLM 通过记忆存储工具自主判断是否存储，零额外 API 成本（内置时代为 `memory_store`；ADR-100 后为记忆服务的 MCP 工具 `mcp_memory__memory_store`） | P0 | 记忆积累的核心机制 |
+| MEM-03 | 即时提取：LLM 通过记忆存储工具自主判断是否存储，零额外 API 成本（内置时代为 `memory_store`；ADR-101 后为记忆服务的 MCP 工具 `mcp_memory__memory_store`） | P0 | 记忆积累的核心机制 |
 | MEM-04 | 遗忘机制：分级衰减模型 — ①后台定期扫描（`run_decay_scan`）计算 decay_score = importance × activity_signal，低于阈值的节点 Active→Dormant；②Dormant 节点超期后自动 Purge；③容量压力触发 eviction（按 decay_score 最低优先）。后台扫描非阻塞，由 Gateway Cron 调度，扫描粒度按 label 分批 | P1 | 防止记忆膨胀 |
 | MEM-05 | 关联扩散检索：1-2 跳图扩展，支持跨层（经历层↔沉淀层） | P1 | 检索质量 |
 | MEM-06 | 自传体记忆：六维度自我认知，从 manifest 自动派生，注入 System Prompt | P1 | Agent 自我认知 |
 | MEM-07 | 程序记忆：跨 Skill 的通用行为模式 | P2 | 自学习能力 |
 | MEM-08 | 隐私分级：PrivacyLevel（Public/Personal/Sensitive），LLM 自动判断。控制的是"数据打包分享时是否包含该节点"——Personal/Sensitive 节点在 Agent 分享导出时剥离，Public 节点保留。LLM 上下文中的数据无法从技术上访问控制，只能通过 prompt 约定约束 | P1 | 打包边界隐私保护 |
-| MEM-09 | 离线巩固：空闲时触发专用 LLM 调用，将经历层提炼到沉淀层 | P3 | 记忆质量提升——巩固与调度已随 ADR-100 迁入 `acowork-memory` 服务（原 Runtime `memory/consolidation_bg.rs` 与 `acowork-sqlite/src/consolidation/` 的调度面），按实例调度。完整 LLM 驱动的离线巩固仍待 Phase 6 激活 |
+| MEM-09 | 离线巩固：空闲时触发专用 LLM 调用，将经历层提炼到沉淀层 | P3 | 记忆质量提升——巩固与调度已随 ADR-101 迁入 `acowork-memory` 服务（原 Runtime `memory/consolidation_bg.rs` 与 `acowork-sqlite/src/consolidation/` 的调度面），按实例调度。完整 LLM 驱动的离线巩固仍待 Phase 6 激活 |
 | MEM-10 | SQLite 记忆层 全 Zone 跨设备完整同步（平台明文托管，多设备体验一致）。enterprise Zone 改名为 work Zone（个人工作记忆，与企业 RAG 无关）。隐私分级与同步策略完全解耦——PrivacyLevel 控制打包边界（分享时 Personal/Sensitive 数据是否剥离），Zone 仅作为打包边界的语义标记，不影响同步范围 | P1 | 多设备同步——MemoryStore 当前仅本地（`memory/private.sqlite`），**云端同步尚未实现**。Cloud Sync 与企业级 MemStore 计划 Phase 6 一并实现 |
 | MEM-11 | 内容分类压缩：工件性内容（代码/文件/命令输出）仅存摘要 + ArtifactRef 引用 | P1 | 防 SQLite 记忆层 膨胀 |
 | MEM-12 | Embedding 生成：Ollama local（`/api/embed`）→ Remote API（`/embeddings`）降级链，`MemoryManager.retrieve()` 内部 200ms 超时自动生成 | P1 | 向量检索前提 |
@@ -133,8 +133,8 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 | # | 工具 | 类型 | 权限 | 说明 |
 |---|------|------|------|------|
-| 1 | ~~`memory_recall`~~ | ~~core~~ | ~~`memory:read`~~ | **已迁出**（ADR-100）——现为 Gateway 托管记忆服务的 MCP 工具 `mcp_memory__memory_recall`，工具级 opt-in 写在 `agent_mcp_tools.json`（ADR-069），无权限域 |
-| 2 | ~~`memory_store`~~ | ~~core~~ | ~~`memory:write`~~ | **已迁出**（ADR-100）——同上，现为 `mcp_memory__memory_store`；manifest 里声明 `MemoryRead` / `MemoryWrite` 会被当作未知权限类型拒绝 |
+| 1 | ~~`memory_recall`~~ | ~~core~~ | ~~`memory:read`~~ | **已迁出**（ADR-101）——现为 Gateway 托管记忆服务的 MCP 工具 `mcp_memory__memory_recall`，工具级 opt-in 写在 `agent_mcp_tools.json`（ADR-069），无权限域 |
+| 2 | ~~`memory_store`~~ | ~~core~~ | ~~`memory:write`~~ | **已迁出**（ADR-101）——同上，现为 `mcp_memory__memory_store`；manifest 里声明 `MemoryRead` / `MemoryWrite` 会被当作未知权限类型拒绝 |
 | 3 | `http_request` | core | `network:<url>` | HTTP 请求 |
 | 4 | `web_fetch` | core | `network:<url>` | URL → 文本（带超时） |
 | 6 | `shell` | core × N | `filesystem:exec` | 按平台检测的 shell 工具集（Windows: bash + PowerShell，Unix: system shell） |
@@ -154,7 +154,7 @@ ACowork 是一个"**Agent as APP**"平台。核心隐喻借鉴 Android：Agent �
 
 **要点**：
 
-- 身份管理不暴露为独立工具 API：身份查询由 Gateway 的 `UserProfile`（`/api/users`）承载，`acowork-system` 通过记忆服务工具（ADR-100 前是 `memory_recall` / `memory_store`，现为 `mcp_memory__*`）暴露。
+- 身份管理不暴露为独立工具 API：身份查询由 Gateway 的 `UserProfile`（`/api/users`）承载，`acowork-system` 通过记忆服务工具（ADR-101 前是 `memory_recall` / `memory_store`，现为 `mcp_memory__*`）暴露。
 - 实际工具数随配置变化：核心 16 + `rag_query` + `codebase` = 16 ~ 18。（`context_retrieve` / `context_abandon` 均已退役、不注册：前者实现已删除，后者源码作为死代码保留，见 ADR-061 §10.1。）
 - WASM 工具不在此清单：模块代码已实现（`core/acowork-runtime/src/tools/wasm/`），但 `wasm-tools` feature 默认未开启，**没有任何 Agent 使用 WASM 工具**——TOL-02~04 / TOL-08~09 在 Phase 6 之前实际不可用。
 
@@ -688,3 +688,4 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 | Phase 7 | PLT-03/05 移动端、SEC-06 OS 沙箱、ADR-007 全平台进程级沙箱 |
 
 > **维护约定**：当某需求从本附录中删除（已实现并交付）时，须同步更新主文档中对应条目的当前状态描述，并在 commit message 中引用对应 ADR 或 PR。
+

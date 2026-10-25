@@ -346,7 +346,7 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
         servers.push(gateway_hosted_mcp_ref("doc", doc_url.clone()));
     }
 
-    // ADR-100: auto-inject the memory MCP. `memory_mcp_url` is set in
+    // ADR-101: auto-inject the memory MCP. `memory_mcp_url` is set in
     // `Gateway::run` (`Some` ⇔ the memory supervisor is enabled and
     // `memory.auto_inject_mcp = true`) and re-derived by the advertise-host
     // watchdog on IP change, exactly like doc's. The URL points at the
@@ -677,7 +677,7 @@ mod tests {
         );
     }
 
-    /// ADR-100: `memory_mcp_url` set ⇒ the memory MCP is injected like doc's,
+    /// ADR-101: `memory_mcp_url` set ⇒ the memory MCP is injected like doc's,
     /// on HTTP transport with the instance-identity template.
     #[test]
     fn test_build_available_mcps_injects_memory_mcp_when_url_set() {
@@ -704,12 +704,12 @@ mod tests {
                 .get("X-MCP-Actor")
                 .map(|s| s.as_str()),
             Some("{instance_id}"),
-            "memory MCP must carry X-MCP-Actor identity template (ADR-100 instance namespace)"
+            "memory MCP must carry X-MCP-Actor identity template (ADR-101 instance namespace)"
         );
         assert_eq!(memory.tool_timeout_secs, 60);
     }
 
-    /// ADR-100 reverse: the memory MCP stays out of the catalog when
+    /// ADR-101 reverse: the memory MCP stays out of the catalog when
     /// `memory_mcp_url` is `None` (supervisor disabled, or the restart cap was
     /// hit) — a reachable-looking endpoint with no process behind it would
     /// turn every `memory_*` call into a tool timeout.
@@ -725,3 +725,4 @@ mod tests {
         );
     }
 }
+

@@ -1,4 +1,4 @@
-# ADR-100: Extracting the Memory Module from the Runtime into a Replaceable Standalone Service acowork-memory (MCP Integration)
+# ADR-101: Extracting the Memory Module from the Runtime into a Replaceable Standalone Service acowork-memory (MCP Integration)
 
 **Status**: Accepted (2026-10-23; the two key forks — service scope = full migration, auto-inject = removed — are settled by the user, P1–P5 are implemented, and this ADR is settled by the P5 documentation closeout)
 **Date**: 2026-10-23
@@ -178,3 +178,4 @@ The service consuming available providers mirrors exactly how the Runtime does, 
 | P5 | Node migration channel (`memory_migration` pass + `acowork-node migrate-memory` + the service's `/admin/import`) + doc closeout (this ADR settled; module-design/protocols/AGENTS.md updated) | Pass unit tests cover import / skip-existing / oversize refusal / bounded retry / sentinel; `dev/ci.sh` green including `run_gateway_fs_redline`; migration drill over existing instances passes |
 
 P1/P2 may run in parallel; P3+P4 ship in one batch (avoiding a half-builtin/half-service intermediate); P5 last.
+

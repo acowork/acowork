@@ -29,12 +29,12 @@ type = "Network"
 #   - doc_reader              → PRIMARY tool: read PDF/Word/Excel/PowerPoint
 #   - file_*/glob_search/content_search → organize, write, search knowledge base
 #   - http_request/web_fetch             → gather external references
-#   - mcp_memory__* (hosted memory MCP, ADR-100)   → knowledge-base persistence across sessions
+#   - mcp_memory__* (hosted memory MCP, ADR-101)   → knowledge-base persistence across sessions
 #   - intent_send             → coordinate with content-owner agents
 #   - ask_user_question, todo_write → clarify scope & track doc tasks
 # No shell tools — Doc Manager does not hold a Shell permission.
 
-# --- Memory (ADR-100) ---
+# --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
 # here: they are tools of the Gateway-hosted memory MCP, opted in per agent in
 # `agent_mcp_tools.json` as `mcp_memory__memory_recall` / `mcp_memory__memory_store`
@@ -123,3 +123,4 @@ description = "Maintain knowledge bases by deduplicating, linking, updating, dep
 
 [capabilities.document_quality_review]
 description = "Review documents for accuracy, completeness, clarity, structure, consistency, links, and freshness"
+

@@ -258,7 +258,7 @@ describe("formatTokenCount", () => {
     });
 });
 
-/* ─── ADR-100: the memory scope talks to the standalone service ─────── */
+/* ─── ADR-101: the memory scope talks to the standalone service ─────── */
 
 describe("visibleTabOrder", () => {
     it("keeps all six tabs while the memory service is ready", () => {
@@ -307,3 +307,4 @@ describe("memorySearchUrl", () => {
         expect(url.searchParams.get("limit")).toBe("5");
     });
 });
+

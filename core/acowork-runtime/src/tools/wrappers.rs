@@ -5,7 +5,7 @@
 //! instead of ZeroClaw's config-driven security policy.
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
-use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use acowork_core::tools::traits::{Tool, ToolContext, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
@@ -115,7 +115,26 @@ impl Tool for OutputBoundedTool {
         params: Value,
         work_dir: Option<&str>,
     ) -> acowork_core::error::Result<ToolResult> {
-        let mut result = self.inner.execute(params, work_dir).await?;
+        self.execute_with_context(
+            params,
+            &ToolContext {
+                work_dir: work_dir.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// Forward the [`ToolContext`] to the inner tool — the wrapper must
+    /// not be the layer that drops it (session-aware tools like
+    /// `chat_history_read` / `intent_send` resolve their state from it).
+    /// The cap then applies to whatever the inner tool returned.
+    async fn execute_with_context(
+        &self,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> acowork_core::error::Result<ToolResult> {
+        let mut result = self.inner.execute_with_context(params, ctx).await?;
         // Last-line-of-defence cap. Only kicks in when the inner tool
         // forgot to truncate (or was structurally unable to — e.g. an
         // LSP response with thousands of Locations). Per-tool semantic
@@ -179,6 +198,24 @@ impl Tool for RateLimitedTool {
         params: Value,
         work_dir: Option<&str>,
     ) -> acowork_core::error::Result<ToolResult> {
+        self.execute_with_context(
+            params,
+            &ToolContext {
+                work_dir: work_dir.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// Rate-limit check, then forward the [`ToolContext`] untouched —
+    /// dropping it here would silently disable every session-aware tool
+    /// behind the decorator stack.
+    async fn execute_with_context(
+        &self,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> acowork_core::error::Result<ToolResult> {
         if let Err(e) = self.check_rate_limit() {
             return Ok(ToolResult {
                 ok: false,
@@ -187,7 +224,7 @@ impl Tool for RateLimitedTool {
                 token_usage: None,
             });
         }
-        self.inner.execute(params, work_dir).await
+        self.inner.execute_with_context(params, ctx).await
     }
 }
 
@@ -364,6 +401,25 @@ impl Tool for PathGuardedTool {
         params: Value,
         work_dir: Option<&str>,
     ) -> acowork_core::error::Result<ToolResult> {
+        self.execute_with_context(
+            params,
+            &ToolContext {
+                work_dir: work_dir.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// Path guard, then forward the [`ToolContext`] untouched. The guard
+    /// itself only reads `ctx.work_dir` (same as the old `work_dir`
+    /// argument), so session-aware inner tools keep every other field.
+    async fn execute_with_context(
+        &self,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> acowork_core::error::Result<ToolResult> {
+        let work_dir = ctx.work_dir.as_deref();
         let mut params = params;
         if self.is_filesystem_tool() {
             // Check path parameter
@@ -429,7 +485,7 @@ impl Tool for PathGuardedTool {
                 }
             }
         }
-        self.inner.execute(params, work_dir).await
+        self.inner.execute_with_context(params, ctx).await
     }
 }
 
@@ -1189,6 +1245,89 @@ mod tests {
     /// the integration tests as the "innermost" layer of the stack.
     fn mock_inner(content: &str) -> Arc<dyn Tool> {
         mock(content)
+    }
+
+    /// A mock inner tool that overrides `execute_with_context` and
+    /// echoes the session-scoped fields back — the exact shape of
+    /// `chat_history_read` / `intent_send` / `memory_*`. Used to prove
+    /// the decorator stack forwards the [`ToolContext`] instead of
+    /// dropping it at the outermost layer (the bug that made those
+    /// tools hit their context-less `execute()` fallback in production).
+    struct CtxEchoTool;
+    #[async_trait]
+    impl Tool for CtxEchoTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "ctx_echo".to_string(),
+                description: "Echo the ToolContext back".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+        async fn execute(
+            &self,
+            _params: Value,
+            _work_dir: Option<&str>,
+        ) -> acowork_core::error::Result<ToolResult> {
+            // Same contract as the session-aware builtins: reachable only
+            // without context — the test below must NOT land here.
+            Ok(ToolResult {
+                ok: false,
+                content: String::new(),
+                error: Some("ctx_echo requires session context".to_string()),
+                token_usage: None,
+            })
+        }
+        async fn execute_with_context(
+            &self,
+            _params: Value,
+            ctx: &ToolContext,
+        ) -> acowork_core::error::Result<ToolResult> {
+            Ok(ToolResult {
+                ok: true,
+                content: format!(
+                    "{}|{}",
+                    ctx.session_id.clone().unwrap_or_default(),
+                    ctx.chat_session_id.clone().unwrap_or_default()
+                ),
+                error: None,
+                token_usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn full_stack_forwards_tool_context_to_inner_tool() {
+        // Regression: the decorator stack must dispatch through
+        // `execute_with_context` end to end. Before the fix, none of the
+        // three wrappers overrode it, so the trait default dropped the
+        // context at the outermost layer and session-aware tools only
+        // ever saw their bare `execute()` fallback.
+        let tool = full_stack(Arc::new(CtxEchoTool), &["/allowed"], 60);
+        let ctx = ToolContext {
+            work_dir: None,
+            session_id: Some("sess-1".to_string()),
+            current_user_message: None,
+            chat_session_id: Some("cs-1".to_string()),
+        };
+        let result = tool
+            .execute_with_context(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.ok, "inner tool never saw the context: {:?}", result.error);
+        assert_eq!(result.content, "sess-1|cs-1");
+    }
+
+    #[tokio::test]
+    async fn bare_execute_through_stack_still_reaches_inner() {
+        // The delegation direction must not invert: a wrapper's `execute`
+        // funnels into its own `execute_with_context` with a default ctx,
+        // so the inner tool is still reached — just with empty session
+        // fields. (Session-aware tools must therefore tolerate a default
+        // ctx, exactly as `memory_recall` already does.)
+        let tool = full_stack(Arc::new(CtxEchoTool), &["/allowed"], 60);
+        let result = tool.execute(serde_json::json!({}), None).await.unwrap();
+        assert!(result.ok);
+        assert_eq!(result.content, "|");
     }
 
     /// A mock inner tool that returns a 1 MB payload — the headline

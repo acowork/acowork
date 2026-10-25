@@ -1,4 +1,4 @@
-# ADR-100: 记忆模块从 Runtime 剥离为可替换的独立服务 acowork-memory（MCP 接入）
+# ADR-101: 记忆模块从 Runtime 剥离为可替换的独立服务 acowork-memory（MCP 接入）
 
 **状态**：已接受（2026-10-23；两个关键分叉——服务化范围=完整迁移、auto-inject=移除——已由用户定案，P1–P5 实施完成，本 ADR 随 P5 文档收口定案）
 **日期**：2026-10-23
@@ -178,3 +178,4 @@ auto-inject 是 Runtime 与"特定记忆实现"之间唯一无法用 MCP 表达�
 | P5 | Node 迁移通道（`memory_migration` pass + `acowork-node migrate-memory` + 服务 `/admin/import`）+ 文档收口（本 ADR 状态定案、module-design/protocols/AGENTS.md 更新） | pass 单测覆盖导入/跳过/超限/退避重试/哨兵；`dev/ci.sh` 全绿含 `run_gateway_fs_redline`；存量实例迁移演练通过 |
 
 P1/P2 可并行；P3+P4 同批切换（避免"半内置半服务"中间态）；P5 最后。
+

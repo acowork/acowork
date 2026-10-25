@@ -89,13 +89,6 @@ const EDGE_THRESHOLD_PX = 50;
 const FILL_MIN_RANGE_VIEWPORTS = 1;
 
 /**
- * Hard cap on consecutive fill loads (pages that add no height would
- * otherwise re-trigger forever).  Mirrors the pre-refactor
- * MAX_ENSURE_RENDERABLE_PAGES guard from useChatListAdapter.
- */
-const MAX_FILL_PAGES = 10;
-
-/**
  * Deadline for the init-scroll positioning retry loop (see the init-scroll
  * effect).  The virtualizer attaches its scroll element during the child's
  * layout phase, so one or two frames is normally enough; the cap exists only
@@ -278,6 +271,12 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   // cascading loadPrevPage until all messages are loaded.
   const initializedRef = useRef(false);
   /**
+   * Cursor signature (`offset:limit`) of the window for which the fill rule
+   * in `checkEdges` last issued a load.  Declared here because the
+   * session-switch reset below consumes it, and `const` does not hoist.
+   */
+  const fillWindowRef = useRef("");
+  /**
    * True once the viewport holds a position worth recording for this
    * session: either the init-scroll landed, or the user directly interacted
    * with the viewport (see `noteViewportInteraction`).  Kept apart from
@@ -325,6 +324,10 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
   useLayoutEffect(() => {
     initializedRef.current = false;
     positionedRef.current = false;
+    // The fill rule's cursor signature is per-session: a session that left
+    // the window at some cursor must not hand that signature to the next
+    // session, or the first fill load for an identical cursor is skipped.
+    fillWindowRef.current = "";
     setIsNearBottom(true); // fresh session starts at bottom
     setIsNearTop(false);   // ...not at top
     setFollowModeSync(true); // new session → auto-follow by default
@@ -527,10 +530,6 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     prevScrollHeightRef.current = container.scrollHeight;
   }, [blocksLen, firstBlockId, sessionKey, cacheGeneration]);
 
-  // Counts consecutive viewport-fill loads; reset once the pane is
-  // comfortably scrollable (see the fill branch in checkEdges).
-  const fillPagesRef = useRef(0);
-
   // ── Edge-detection (shared by scroll handler + adapter events) ──
   // Reads DOM scrollTop/scrollHeight and triggers pagination when the
   // user is within EDGE_THRESHOLD_PX of either edge.  Called from:
@@ -561,24 +560,47 @@ export function useScrollController(config: ScrollControllerConfig): ScrollContr
     // ── Viewport fill (restores ADR-050 C5 `ensureRenderable`) ──
     // Runs BEFORE the edge branches: when the window is too short there is
     // no scroll range to speak of, so "near an edge" is meaningless.  Keep
-    // pulling pages until the content is comfortably scrollable or the
-    // direction is exhausted.
+    // pulling pages until the pane overflows or the data runs out.
+    //
+    // The loop is bounded by DATA, not by a page budget.  A page budget
+    // cannot work here: pagination is measured in raw JSONL entries while
+    // the UI folds a whole thought/tool_call/tool_result run into ONE
+    // block, and ExploreBlock caps that block's content height — so
+    // crossing a long run adds hundreds of entries and ZERO pixels.  The
+    // ADR-050 C5 budget (10 pages = 500 entries) expired in the middle of
+    // the 617-entry run found in real session logs, and because exhausting
+    // it `return`ed out of checkEdges AHEAD of the edge branches, it
+    // switched off pagination for the whole pane — in a state with no
+    // scroll range there is no user scroll event that could ever re-arm
+    // it.  The user was left with an under-filled pane and unreachable
+    // history.
+    //
+    // This also subsumes turn-boundary alignment for free: while the
+    // leading block is a truncated explore run, more of that run adds no
+    // height, so the pane cannot fill and the loop keeps going until the
+    // window starts on a real turn boundary (a new block appears, which is
+    // the only thing that adds height at the head).
     const range = container.scrollHeight - container.clientHeight;
     if (range < container.clientHeight * FILL_MIN_RANGE_VIEWPORTS) {
-      if (fillPagesRef.current >= MAX_FILL_PAGES) return;
-      if (a.hasNewer) {
-        fillPagesRef.current += 1;
-        void a.loadNextPage();
-        return;
+      // Under-filled: the fill rule owns this state ENTIRELY.  Do not fall
+      // through to the edge branches — with no scroll range there is no
+      // "near an edge" to speak of (scrollTop is pinned at 0, so the
+      // near-top branch would fire on every single check and re-introduce
+      // exactly the unbounded auto-load this guard exists to bound).
+      const direction = a.hasNewer ? "next" : a.hasOlder ? "prev" : null;
+      // One load per distinct window state: a load that MOVED the cursor
+      // re-arms the rule, a load that changed nothing (no-op, duplicate
+      // response, failure) does not — so the loop stops on a stuck adapter
+      // instead of spinning, and a long explore run is never cut off
+      // mid-way for being "too many pages".
+      const cursor = `${a.messageOffset}:${a.messageLimit}`;
+      if (direction && cursor !== fillWindowRef.current) {
+        fillWindowRef.current = cursor;
+        void (direction === "next" ? a.loadNextPage() : a.loadPrevPage());
       }
-      if (a.hasOlder) {
-        fillPagesRef.current += 1;
-        void a.loadPrevPage();
-        return;
-      }
-    } else {
-      fillPagesRef.current = 0;
+      return;
     }
+    fillWindowRef.current = "";
 
     // near-top → load older
     if (scrollTop <= EDGE_THRESHOLD_PX && a.hasOlder) {

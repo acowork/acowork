@@ -19,7 +19,7 @@ cargo test                     # unit + integration tests
 ### Desktop App (Tauri v2)
 
 Required core binaries (built by `core:build:debug|release`):
-`acowork-gateway`, `acowork-runtime`, `acowork-embed`, `acowork-doc`, `acowork-lsp-relay`, `acowork-node`, `acowork-pm`, `acowork-user`, `acowork-memory` (ADR-100 — Gateway-spawned memory service).
+`acowork-gateway`, `acowork-runtime`, `acowork-embed`, `acowork-doc`, `acowork-lsp-relay`, `acowork-node`, `acowork-pm`, `acowork-user`, `acowork-memory` (ADR-101 — Gateway-spawned memory service).
 
 ```bash
 # Release — beforeBuildCommand auto-runs core:build:release + npm build + tauri bundle
@@ -61,7 +61,7 @@ Full details: [apps/acowork-mobile/README.md](apps/acowork-mobile/README.md)
 - Desktop: `{HOME_DIR}\.acowork\desktop-app\logs`
 - Runtime: `{HOME_DIR}\.acowork\acowork-gateway\config\packages\com.acowork.senior-engineer\workspace\logs`
 - User service: `{HOME_DIR}\.acowork\acowork-gateway\data\logs\user.log`
-- Memory service: `{HOME_DIR}\.acowork\acowork-gateway\data\logs\memory.log` (ADR-100; instance stores under `{HOME_DIR}\.acowork\acowork-memory\instances\{instance_id}\`)
+- Memory service: `{HOME_DIR}\.acowork\acowork-gateway\data\logs\memory.log` (ADR-101; instance stores under `{HOME_DIR}\.acowork\acowork-memory\instances\{instance_id}\`)
 
 ## Project Structure
 
@@ -73,7 +73,7 @@ core/                  # Rust workspace (18 crates; source of truth: core/Cargo.
   acowork-gateway/     # HTTP API, embedded MQTT broker, reverse proxy, lifecycle, package mgr
   acowork-lsp-relay/   # LSP protocol relay (Node-spawned loopback sidecar; stateless since ADR-091 — it only reads the registry and probes)
   acowork-mcp/         # MCP (Model Context Protocol) wrapper
-  acowork-memory/      # Memory service (ADR-100) — lib + bin: MCP `/mcp` + panel REST `/memory/*`, Gateway-supervised
+  acowork-memory/      # Memory service (ADR-101) — lib + bin: MCP `/mcp` + panel REST `/memory/*`, Gateway-supervised
   acowork-mqtt-session/# MQTT session / event multiplexing (Gateway <-> Runtime)
   acowork-pm/          # Project & task management service (REST API + MCP tools)
   acowork-node/        # Node Agent (ADR-055) — per-machine daemon hosting Runtime processes; owns the LSP server registry (ADR-091)
@@ -82,7 +82,7 @@ core/                  # Rust workspace (18 crates; source of truth: core/Cargo.
   acowork-relay/       # Cloud thin relay: SNI-routed byte pipe + yamux tunnel (design 24; BYO self-hosted tier, protocol frozen per ADR-088). Not bundled into Desktop builds.
   acowork-runtime/     # Agent runtime (main loop, tools, providers, sessions)
   acowork-sign/        # Package signing & verification
-  acowork-sqlite/      # Runtime-side SQLite sidecars — session meta + conversation index (ADR-082); the memory storage engine moved to acowork-memory::sqlite (ADR-100)
+  acowork-sqlite/      # Runtime-side SQLite sidecars — session meta + conversation index (ADR-082); the memory storage engine moved to acowork-memory::sqlite (ADR-101)
   acowork-tool-sdk/    # WASM custom tool SDK (Wasmtime host)
   acowork-vault/       # Encrypted key/value store
 
@@ -94,7 +94,7 @@ apps/
 docs/                  # Public architecture docs
   design/{zh,en}/      # 23 zh / 17 en design docs
   module-design/{zh,en}/ # 8 zh / 7 en Rust crate specs
-  adr/{zh,en}/         # 84 ADRs (zh: 84, en: 84 — en is the maintained translation set)
+  adr/{zh,en}/         # 94 ADRs (zh: 94, en: 94 — en is the maintained translation set)
   prd/{zh,en}/         # Platform + Desktop UI/UX PRD
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   mcp-server-research/{zh,en}/
@@ -115,7 +115,7 @@ Desktop App (Tauri v2) — separate process
 Gateway (keep-alive process, Rust)
   HTTP API :19876 (Axum, localhost) · embedded MQTT broker :19875 (rumqttd)
   Reverse proxy -> Runtime localhost HTTP · package mgr · lifecycle mgr
-  Memory service (acowork-memory, ADR-100): supervised process :18084 — MCP /api/memory/mcp
+  Memory service (acowork-memory, ADR-101): supervised process :18084 — MCP /api/memory/mcp
     (injected through the catalog) + panel REST /api/memory/* and /api/agents/{id}/memory/*
   LSP reverse proxies: /lsp (relay passthrough) + /lsp-admin (Node registry, ADR-091)
   Intent router · global resources · budget tracker · rate limiter
@@ -126,13 +126,13 @@ Node Agent (acowork-node, ADR-055) — per-machine daemon
   MQTT control plane (acowork/nodes/#) · process table (spawn/kill/reap Runtime)
   Local package mgr · identity/enrollment · reverse proxy :19900
   LSP sidecar supervisor · LSP server registry + install executor (ADR-091) · node-local fs browse
-  One-shot memory hand-over (ADR-100 decision 10): memory_migration pass at start + `acowork-node migrate-memory`
+  One-shot memory hand-over (ADR-101 decision 10): memory_migration pass at start + `acowork-node migrate-memory`
         |
         | MQTT pub/sub :19875
         v
 Agent Runtime (universal binary, Rust)
   MQTT client + localhost HTTP · system agent · user agents
-  Zero memory business code (ADR-100): memory tools come from the injected memory MCP
+  Zero memory business code (ADR-101): memory tools come from the injected memory MCP
   DevMode debug protocol (ADR-048)
 ```
 
@@ -143,7 +143,7 @@ Agent Runtime (universal binary, Rust)
 - Workspace members source of truth: `core/Cargo.toml [workspace] members`
 - Desktop App = presentation/interaction only — no business logic, no state persistence
 - **Gateway boundary = communication + resource management + reverse proxy.** Agent-private data (skills, prompts, conversations, per-agent embedding, `{install_path}/assets`) is read and written **only through Runtime HTTP** (`core/acowork-gateway/src/http/proxy.rs`), never by direct filesystem access. Since ADR-055 `install_path` is a node-local path, so a Gateway-side `fs` read works in a single-machine setup and returns 5xx the moment Gateway and Node are on different hosts. Enforced by `run_gateway_fs_redline` in `dev/ci.sh`; rationale and the frozen ceilings in [ADR-009 §5](docs/adr/zh/ADR-009-gateway-workspace-isolation.md).
-- **Memory is the service's, not the Runtime's** (ADR-100): panel data reaches the memory service only through `memory_proxy` (`core/acowork-gateway/src/http/memory_proxy.rs`); the Gateway MUST NOT open `instances/*/memory.db`. The one legacy exception is the Node-side migration pass — the pre-ADR-100 `{workspace}/memory/private.sqlite` is read by `acowork-node` (node-local fs owner) and uploaded to the service's `/admin/import`.
+- **Memory is the service's, not the Runtime's** (ADR-101): panel data reaches the memory service only through `memory_proxy` (`core/acowork-gateway/src/http/memory_proxy.rs`); the Gateway MUST NOT open `instances/*/memory.db`. The one legacy exception is the Node-side migration pass — the pre-ADR-101 `{workspace}/memory/private.sqlite` is read by `acowork-node` (node-local fs owner) and uploaded to the service's `/admin/import`.
 
 ## File Reference
 Point to files with Markdown links only: e.g. `[src/lib/foo.ts](src/lib/foo.ts)` or `[src/lib/foo.ts:42](src/lib/foo.ts#L42)`. 

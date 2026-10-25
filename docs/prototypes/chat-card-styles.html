@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>聊天卡片视觉统一设计稿</title>
+<style>
+  /* ── Design Tokens ── */
+  :root {
+    --accent:        #3B82F6;
+    --accent-strong: #2563EB;
+    --accent-soft:   rgba(59,130,246,0.10);
+    --accent-border: rgba(59,130,246,0.32);
+    --ok:            #059669;
+    --ok-soft:       rgba(5,150,105,0.10);
+    --ok-border:     rgba(5,150,105,0.30);
+    --warning:       #d97706;
+    --warning-soft:  rgba(217,119,6,0.10);
+    --warning-border:rgba(217,119,6,0.30);
+    --danger:        #DC2626;
+    --danger-soft:   rgba(220,38,38,0.08);
+    --danger-border: rgba(220,38,38,0.28);
+
+    --text-primary:   hsl(240 10% 10%);
+    --text-secondary: hsl(0 0% 25%);
+    --text-tertiary:  hsl(0 0% 40%);
+    --text-muted:     hsl(0 0% 54%);
+
+    --bg-surface:     hsl(240 5.9% 96%);
+    --bg-card:        hsl(240 5.9% 92% / 0.5);
+    --bg-header:      hsl(240 5.9% 90.6%);
+    --bg-panel-block: #FFFFFF;
+
+    --border-outer:    hsl(240 5.9% 90.6%);
+    --border-divider:  hsl(240 5.9% 88%);
+
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+  }
+
+  body.dark {
+    --accent-soft:   rgba(59,130,246,0.14);
+    --accent-border: rgba(59,130,246,0.38);
+
+    --text-primary:   hsl(210 40% 98%);
+    --text-secondary: hsl(215 20% 78%);
+    --text-tertiary:  hsl(215 15% 60%);
+    --text-muted:     hsl(215 10% 44%);
+
+    --bg-surface:     hsl(222 47% 11%);
+    --bg-card:        hsl(217 33% 17% / 0.6);
+    --bg-header:      hsl(217 33% 20%);
+    --bg-panel-block: hsl(217 33% 17%);
+
+    --border-outer:   hsl(215 28% 22%);
+    --border-divider: hsl(215 28% 25%);
+  }
+
+  /* ── Base ── */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Inter", "Segoe UI", sans-serif;
+    font-size: 13px;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    padding: 24px 20px 80px;
+    line-height: 1.5;
+  }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  h2 { font-size: 15px; font-weight: 600; color: var(--text-secondary); margin: 28px 0 12px; }
+  h3 { font-size: 13px; font-weight: 600; color: var(--text-tertiary); margin: 20px 0 8px; text-transform: uppercase; letter-spacing: .6px; }
+  p  { color: var(--text-secondary); margin-bottom: 8px; }
+  .page-desc { font-size: 13px; color: var(--text-tertiary); margin-bottom: 28px; max-width: 700px; }
+  .section { background: var(--bg-panel-block); border: 1px solid var(--border-outer); border-radius: var(--radius-lg); padding: 20px; margin-bottom: 20px; max-width: 700px; }
+
+  /* ── Theme toggle ── */
+  #theme-toggle {
+    position: fixed; top: 16px; right: 20px;
+    background: var(--accent-strong); color: #fff;
+    border: none; border-radius: var(--radius-sm);
+    padding: 5px 14px; font-size: 12px; cursor: pointer;
+    font-weight: 500; z-index: 99;
+  }
+
+  /* ── Annotation strip ── */
+  .annot { font-size: 11px; color: var(--text-tertiary); padding: 0 0 8px; font-style: italic; }
+  .state-label { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 6px; }
+
+  /* ── Card Base ── */
+  /*
+   * 布局策略与 agent 气泡一致：
+   *   - 左侧缩进 ml-12（40px avatar + 8px gap = 48px）
+   *   - 宽度上限 max-w = var(--content-max-width)（用户在设置中控制，默认 90%）
+   *   - 实际宽度由内容决定，shrink-to-fit，不撑满聊天框
+   * 这里用 .card-wrapper 模拟 agent row 的 flex 容器结构。
+   */
+  .card-wrapper {
+    margin-left: 48px;              /* ml-12: avatar(40)+gap(8) */
+    max-width: var(--content-max-width, 90%); /* 同 agent bubble */
+  }
+  .chat-card {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin-bottom: 12px;
+    border: 1px solid var(--border-outer);
+    background: var(--bg-card);
+    width: fit-content;             /* shrink-to-fit 内容宽 */
+  }
+
+  /* Open state — accent border */
+  .chat-card.open-ask      { border-color: var(--accent-border); }
+  .chat-card.open-approval { border-color: var(--ok-border); }
+  .chat-card.open-pause    { border-color: var(--warning-border); }
+  .chat-card.open-retry    { border-color: var(--danger-border); }
+
+  /* Closed / answered receipt state — no accent, slightly muted */
+  .chat-card.receipt { opacity: 0.72; }
+
+  /* ── Card Header ── */
+  .card-header {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border-divider);
+    font-size: 12px; font-weight: 500; color: var(--text-secondary);
+  }
+  .card-header .hd-icon { font-size: 14px; flex-shrink: 0; line-height: 1; }
+  .card-header .hd-title { flex: 1; }
+
+  /* Header color variants */
+  .chat-card.open-ask      .card-header { background: var(--accent-soft); color: var(--accent-strong); border-color: var(--accent-border); }
+  .chat-card.open-approval .card-header { background: var(--ok-soft); color: var(--ok); border-color: var(--ok-border); }
+  .chat-card.open-pause    .card-header { background: var(--warning-soft); color: var(--warning); border-color: var(--warning-border); }
+  .chat-card.open-retry    .card-header { background: var(--danger-soft); color: var(--danger); border-color: var(--danger-border); }
+  .chat-card.receipt       .card-header { background: var(--bg-header); color: var(--text-muted); }
+
+  /* ── Countdown badge ── */
+  .countdown {
+    font-size: 11px; font-family: monospace;
+    color: var(--warning);
+    padding: 1px 6px; border-radius: 2px;
+    background: var(--warning-soft);
+    flex-shrink: 0;
+  }
+  .countdown.expired { color: var(--text-muted); background: var(--bg-header); }
+
+  /* ── Card Body ── */
+  .card-body { padding: 10px 12px 12px; }
+  .question-text {
+    font-size: 13px; font-weight: 500; color: var(--text-primary);
+    margin-bottom: 10px; line-height: 1.45;
+  }
+  .question-sub {
+    font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;
+  }
+
+  /* ── Form A: List/Selection mode ── */
+  .option-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .option-row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 6px 8px; border-radius: var(--radius-sm);
+    cursor: pointer; transition: background 0.12s;
+  }
+  .option-row:hover { background: var(--accent-soft); }
+  .option-row.selected { background: var(--accent-soft); }
+  .option-radio {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid var(--border-divider);
+    flex-shrink: 0; margin-top: 1px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .option-row.selected .option-radio { border-color: var(--accent); }
+  .option-row.selected .option-radio::after {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent);
+  }
+  .option-label { font-size: 13px; font-weight: 500; color: var(--text-primary); line-height: 1.35; }
+  .option-desc  { font-size: 12px; color: var(--text-tertiary); margin-top: 1px; }
+  .other-textarea {
+    width: 100%; margin-top: 4px; margin-left: 22px;
+    border: 1px solid var(--border-outer); border-radius: var(--radius-sm);
+    padding: 5px 8px; font-size: 12px; color: var(--text-primary);
+    background: var(--bg-panel-block); resize: none; height: 52px;
+  }
+
+  /* ── Form B: Button/action mode ── */
+  .btn-group { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .card-btn {
+    padding: 6px 14px; border-radius: var(--radius-sm);
+    font-size: 12px; font-weight: 500; cursor: pointer;
+    border: none; transition: opacity 0.12s;
+  }
+  .card-btn:active { transform: scale(0.98); }
+  /* Accent (primary action) */
+  .card-btn.accent { background: var(--accent-strong); color: #fff; }
+  .card-btn.accent:hover { opacity: 0.9; }
+  /* OK (approve) */
+  .card-btn.ok { background: var(--ok); color: #fff; }
+  .card-btn.ok:hover { opacity: 0.9; }
+  /* Warning (pause/continue) */
+  .card-btn.warning { background: var(--warning); color: #fff; }
+  .card-btn.warning:hover { opacity: 0.9; }
+  /* Danger (deny/stop) */
+  .card-btn.danger { background: var(--danger); color: #fff; }
+  .card-btn.danger:hover { opacity: 0.9; }
+  /* Secondary (free-text trigger / skip) */
+  .card-btn.secondary { background: var(--bg-header); color: var(--text-secondary); border: 1px solid var(--border-outer); }
+  .card-btn.secondary:hover { background: var(--border-outer); }
+  /* Outline (cancel) */
+  .card-btn.outline { background: transparent; color: var(--text-secondary); border: 1px solid var(--border-divider); }
+  .card-btn.outline:hover { background: var(--bg-header); }
+
+  /* ── Submit row (list mode) ── */
+  .submit-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+
+  /* ── Receipt line (answered/closed) ── */
+  .receipt-line {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-muted);
+    padding: 2px 0;
+  }
+  .receipt-icon { font-size: 13px; }
+  .receipt-answer { font-weight: 500; color: var(--text-secondary); }
+
+  /* ── Legend ── */
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    margin-bottom: 20px; font-size: 12px; color: var(--text-tertiary);
+  }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+
+  /* ── Divider between cards ── */
+  .divider { height: 1px; background: var(--border-divider); margin: 16px 0; }
+
+  /* ── Spec table ── */
+  .spec-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; font-size: 12px; }
+  .spec-grid > div { padding: 6px; border: 1px solid var(--border-divider); border-radius: var(--radius-sm); }
+  .spec-grid .hd { background: var(--bg-header); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<button id="theme-toggle" onclick="document.body.classList.toggle('dark')">切换 Dark/Light</button>
+
+<h1>聊天卡片视觉统一设计稿</h1>
+<p class="page-desc">
+  设计目标：统一 chat session 与 execute session 的交互卡片，全项目 <strong>标题栏 + 内容区</strong> 结构。
+  交互形态只有两种：<strong>列表选择型</strong>（单选列表，用于 ask_question）和<strong>按钮操作型</strong>（即时动作按钮，用于 approval / pause / retry）。
+  每种卡片覆盖三个状态：<strong>待操作</strong> / <strong>已回答</strong> / <strong>已关闭</strong>。
+</p>
+<p class="page-desc" style="margin-top:-12px">
+  <strong>布局策略</strong>（与 agent 气泡一致）：左侧缩进 ml-12 (48px = avatar 40 + gap 8)；宽度上限 max-w-[var(--content-max-width)]；实际宽度由内容自适应（shrink-to-fit），不撑满聊天框。
+</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div> 询问 (ask_question)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--ok)"></div> 审批 (approval)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--warning)"></div> 暂停确认 (pause)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--danger)"></div> 失败重试 (retry)</div>
+</div>
+
+<!-- ─────────────────────────────────────────────────── -->
+<h2>一、ask_question — 列表选择型</h2>
+<p class="annot">适用场景：Agent 询问用户从若干选项中选择，附带"其他"自由文本。</p>
+
+<div class="section">
+  <div class="state-label">▸ 待操作（Open）</div>
+  <div class="chat-card open-ask">
+    <div class="card-header">
+      <span class="hd-icon">💬</span>
+      <span class="hd-title">需要你的确认</span>
+      <span class="countdown">4:32</span>
+    </div>
+    <div class="card-body">
+      <div class="question-text">您希望使用哪种数据库方案？</div>
+      <ul class="option-list">
+        <li class="option-row selected">
+          <div class="option-radio"></div>
+          <div>
+            <div class="option-label">SQLite</div>
+            <div class="option-desc">轻量内嵌，无需独立进程，适合单机部署</div>
+          </div>
+        </li>
+        <li class="option-row">
+          <div class="option-radio"></div>
+          <div>
+            <div class="option-label">PostgreSQL</div>
+            <div class="option-desc">生产级关系数据库，支持高并发</div>
+          </div>
+        </li>
+        <li class="option-row">
+          <div class="option-radio"></div>
+          <div>
+            <div class="option-label">其他</div>
+          </div>
+        </li>
+      </ul>
+      <div class="submit-row">
+        <button class="card-btn accent">提交答案</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已回答（Answered）</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">💬</span>
+      <span class="hd-title">已回答</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon">✓</span>
+        <span>您选择了：</span>
+        <span class="receipt-answer">SQLite — 轻量内嵌，无需独立进程</span>
+      </div>
+      <div style="margin-top:4px"><div class="question-sub" style="margin:0;font-size:12px;color:var(--text-tertiary)">您希望使用哪种数据库方案？</div></div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已关闭（超时/取消）</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">💬</span>
+      <span class="hd-title">已关闭</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon">—</span>
+        <span>问题超时关闭</span>
+      </div>
+      <div style="margin-top:4px"><div class="question-sub" style="margin:0;font-size:12px;color:var(--text-tertiary)">您希望使用哪种数据库方案？</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────────── -->
+<h2>二、ask_question — 按钮快速选择型</h2>
+<p class="annot">适用场景：选项简短（≤4个），直接点击即提交，无需 Submit 步骤。</p>
+
+<div class="section">
+  <div class="state-label">▸ 待操作（Open）</div>
+  <div class="chat-card open-ask">
+    <div class="card-header">
+      <span class="hd-icon">💬</span>
+      <span class="hd-title">Agent 询问</span>
+      <span class="countdown">3:15</span>
+    </div>
+    <div class="card-body">
+      <div class="question-text">是否继续在当前分支上开发？</div>
+      <div class="btn-group">
+        <button class="card-btn accent">是，继续当前分支</button>
+        <button class="card-btn secondary">切换到新分支</button>
+        <button class="card-btn outline">自由回答…</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已回答</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">💬</span>
+      <span class="hd-title">已回答</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon">✓</span>
+        <span>您选择了：</span>
+        <span class="receipt-answer">是，继续当前分支</span>
+      </div>
+      <div style="margin-top:4px"><div class="question-sub" style="margin:0;font-size:12px;color:var(--text-tertiary)">是否继续在当前分支上开发？</div></div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已关闭</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">💬</span>
+      <span class="hd-title">已关闭</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon">—</span>
+        <span>会话已结束，问题自动关闭</span>
+      </div>
+      <div style="margin-top:4px"><div class="question-sub" style="margin:0;font-size:12px;color:var(--text-tertiary)">是否继续在当前分支上开发？</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────────── -->
+<h2>三、审批卡片（approval）</h2>
+<p class="annot">适用场景：Agent 请求用户批准某个操作（命令执行、文件修改等）。</p>
+
+<div class="section">
+  <div class="state-label">▸ 待审批（Open）</div>
+  <div class="chat-card open-approval">
+    <div class="card-header">
+      <span class="hd-icon">🔐</span>
+      <span class="hd-title">需要审批</span>
+      <span class="countdown">5:00</span>
+    </div>
+    <div class="card-body">
+      <div class="question-text">Agent 请求运行以下命令</div>
+      <div style="background:var(--bg-header);border-radius:var(--radius-sm);padding:7px 10px;margin-bottom:10px;font-family:monospace;font-size:11px;color:var(--text-primary);word-break:break-all;">
+        cargo build --release --all-targets
+      </div>
+      <div class="btn-group">
+        <button class="card-btn ok">批准</button>
+        <button class="card-btn danger">拒绝</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已批准</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">🔐</span>
+      <span class="hd-title">已批准</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon">✓</span>
+        <span class="receipt-answer">已批准执行</span>
+      </div>
+      <div style="margin-top:4px"><div class="question-sub" style="margin:0;font-size:12px;color:var(--text-tertiary)">Agent 请求运行命令: cargo build --release --all-targets</div></div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已拒绝</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">🔐</span>
+      <span class="hd-title">已拒绝</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon" style="color:var(--danger)">✗</span>
+        <span class="receipt-answer" style="color:var(--danger)">已拒绝</span>
+      </div>
+      <div style="margin-top:4px"><div class="question-sub" style="margin:0;font-size:12px;color:var(--text-tertiary)">Agent 请求运行命令: cargo build --release --all-targets</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────────── -->
+<h2>四、暂停确认卡片（pause）</h2>
+<p class="annot">适用场景：执行步骤需要用户确认后继续，或停止当前任务。</p>
+
+<div class="section">
+  <div class="state-label">▸ 等待确认（Open）</div>
+  <div class="chat-card open-pause">
+    <div class="card-header">
+      <span class="hd-icon">⏸</span>
+      <span class="hd-title">步骤确认</span>
+      <span class="countdown">3:42</span>
+    </div>
+    <div class="card-body">
+      <div class="question-text">即将覆盖已有文件 <code style="font-size:11px;background:var(--bg-header);padding:1px 4px;border-radius:2px;">src/main.rs</code></div>
+      <div class="question-sub">是否继续写入？</div>
+      <div class="btn-group">
+        <button class="card-btn warning">继续执行</button>
+        <button class="card-btn outline">停止任务</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已继续</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">⏸</span>
+      <span class="hd-title">已继续</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon">▶</span>
+        <span class="receipt-answer">用户选择继续</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已停止</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">⏸</span>
+      <span class="hd-title">已停止</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon" style="color:var(--danger)">■</span>
+        <span class="receipt-answer" style="color:var(--danger)">用户停止任务</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────────── -->
+<h2>五、失败重试卡片（retry）</h2>
+<p class="annot">适用场景：步骤失败后 Agent 询问用户是否重试。</p>
+
+<div class="section">
+  <div class="state-label">▸ 等待选择（Open）</div>
+  <div class="chat-card open-retry">
+    <div class="card-header">
+      <span class="hd-icon">⟳</span>
+      <span class="hd-title">步骤失败</span>
+    </div>
+    <div class="card-body">
+      <div class="question-text">命令执行失败（exit code 1）</div>
+      <div style="background:var(--danger-soft);border:1px solid var(--danger-border);border-radius:var(--radius-sm);padding:7px 10px;margin-bottom:10px;font-size:11px;color:var(--danger);font-family:monospace;max-height:60px;overflow:hidden;word-break:break-all;">
+        error[E0308]: mismatched types — expected `String`, found `&str`
+      </div>
+      <div class="btn-group">
+        <button class="card-btn accent">重试</button>
+        <button class="card-btn secondary">跳过此步骤</button>
+        <button class="card-btn outline">终止任务</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已重试</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">⟳</span>
+      <span class="hd-title">已重试</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon">⟳</span>
+        <span class="receipt-answer">用户选择重试</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="state-label">▸ 已跳过 / 终止</div>
+  <div class="chat-card receipt">
+    <div class="card-header">
+      <span class="hd-icon">⟳</span>
+      <span class="hd-title">已跳过</span>
+    </div>
+    <div class="card-body">
+      <div class="receipt-line">
+        <span class="receipt-icon">→</span>
+        <span class="receipt-answer">用户跳过此步骤</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────────── -->
+<h2>六、结构规格说明</h2>
+
+<div class="section">
+  <div class="spec-grid">
+    <div class="hd">元素</div>
+    <div class="hd">规格</div>
+    <div class="hd">备注</div>
+
+    <div>卡片容器</div>
+    <div>border-radius: 6px (md)<br>border: 1px solid <em>{semantic}</em> / var(--border-outer)</div>
+    <div>open 态使用语义色 border，receipt 态降为 outer</div>
+
+    <div>标题栏</div>
+    <div>height: ~30px<br>padding: 7px 12px<br>font-size: 12px; font-weight: 500</div>
+    <div>左侧 icon + 标题文字，右侧倒计时 badge</div>
+
+    <div>标题栏背景</div>
+    <div>open: {semantic-soft}<br>receipt: var(--bg-header)</div>
+    <div>ask=accent-soft, approval=ok-soft, pause=warning-soft, retry=danger-soft</div>
+
+    <div>内容区</div>
+    <div>padding: 10px 12px 12px<br>background: var(--bg-card)</div>
+    <div>无额外 border，靠 header divider 分隔</div>
+
+    <div>问题文字</div>
+    <div>font-size: 13px; font-weight: 500<br>color: var(--text-primary)</div>
+    <div>唯一必选元素</div>
+
+    <div>列表选项</div>
+    <div>padding: 6px 8px<br>border-radius: 4px (sm)<br>hover: accent-soft</div>
+    <div>radio 14px，accent 填充时选中</div>
+
+    <div>按钮组</div>
+    <div>gap: 8px; flex-wrap: wrap<br>btn: padding 6px 14px<br>border-radius: 4px</div>
+    <div>主操作用 accent/ok/warning/danger 实心，辅操作用 secondary/outline</div>
+
+    <div>倒计时 badge</div>
+    <div>font-size: 11px; font-family: monospace<br>color: var(--warning)<br>bg: warning-soft</div>
+    <div>过期后变 text-muted + bg-header</div>
+
+    <div>Receipt 行</div>
+    <div>font-size: 12px<br>icon + "您选择了：" + 答案文字</div>
+    <div>opacity: 0.72 作用于整张卡片</div>
+  </div>
+</div>
+
+<!-- ─────────────────────────────────────────────────── -->
+<h2>七、两种形态对比</h2>
+
+<div class="section" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+  <div>
+    <div class="state-label" style="margin-bottom:8px">列表选择型（多选项 + Submit）</div>
+    <div class="chat-card open-ask" style="max-width:100%">
+      <div class="card-header">
+        <span class="hd-icon">💬</span>
+        <span class="hd-title">需要你的确认</span>
+      </div>
+      <div class="card-body">
+        <div class="question-text">您希望如何处理这个问题？</div>
+        <ul class="option-list">
+          <li class="option-row"><div class="option-radio"></div><div><div class="option-label">方案 A</div><div class="option-desc">描述文字</div></div></li>
+          <li class="option-row"><div class="option-radio"></div><div><div class="option-label">方案 B</div><div class="option-desc">描述文字</div></div></li>
+          <li class="option-row"><div class="option-radio"></div><div><div class="option-label">其他（自由输入）</div></div></li>
+        </ul>
+        <div class="submit-row"><button class="card-btn accent">提交</button></div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:6px">适用：选项 ≥3，有描述文字，需要确认步骤</div>
+  </div>
+  <div>
+    <div class="state-label" style="margin-bottom:8px">按钮操作型（点击即提交）</div>
+    <div class="chat-card open-ask" style="max-width:100%">
+      <div class="card-header">
+        <span class="hd-icon">💬</span>
+        <span class="hd-title">Agent 询问</span>
+      </div>
+      <div class="card-body">
+        <div class="question-text">您希望如何处理这个问题？</div>
+        <div class="btn-group">
+          <button class="card-btn accent">方案 A</button>
+          <button class="card-btn secondary">方案 B</button>
+          <button class="card-btn outline">自由回答…</button>
+        </div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:6px">适用：选项 ≤4，点击即提交，无描述</div>
+  </div>
+</div>
+
+<p style="margin-top:24px;font-size:12px;color:var(--text-tertiary)">— 设计稿结束。确认后将统一实现到 InlineInteractionCard 和 AskQuestionCard 组件中。</p>
+
+</body>
+</html>

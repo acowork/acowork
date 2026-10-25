@@ -1,4 +1,4 @@
-//! Consolidation / distill REST integration tests (ADR-100, P1e).
+//! Consolidation / distill REST integration tests (ADR-101, P1e).
 //!
 //! Boots the real service and drives the two panel routes the Runtime used to
 //! answer itself (`GET /memory/consolidation/status`, `POST /memory/distill`)
@@ -471,3 +471,4 @@ async fn scheduling_state_is_per_instance() {
     let (_, body_a) = server.get(&a).await;
     assert_eq!(body_a["distiller"]["interval_secs"], json!(600));
 }
+

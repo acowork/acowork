@@ -26,9 +26,10 @@ use crate::agent::session_state::TodoItem;
 // `crate::agent::session_state` (kept as a thin re-export) and the two
 // surfaces use the same type via `pub use` aliasing.
 pub use acowork_core::session_meta::{
-    SessionMeta, SessionMetaStore, SessionPerf, SessionScope, SessionTokens, SessionVisibility,
+    ModelUsageEntry, SessionMeta, SessionMetaStore, SessionPerf, SessionScope, SessionTokens,
+    SessionVisibility, TokenStatsRow, model_usage_key,
 };
-use acowork_core::protocol::ContextUsageSection;
+use acowork_core::protocol::{ContextUsageSection, ModelCostInfo};
 use acowork_core::providers::traits::UsageInfo;
 
 /// Format version for the JSONL conversation file.
@@ -853,6 +854,14 @@ pub struct ConversationSession {
     /// ADR-027: snapshot + cumulative token counts (raw Provider values).
     /// `None` means no LLM call has been recorded yet.
     tokens: std::sync::Mutex<Option<SessionTokens>>,
+    /// Per-model usage breakdown, attributed per LLM call by provider/model.
+    /// Mirrors `SessionMeta.model_usage`; folded by
+    /// [`Self::apply_model_usage`] alongside [`Self::apply_llm_usage`]
+    /// (same zero-skip gate, so Σ detail entries == the `tokens` totals).
+    /// The store diffs the persisted map against the previous row inside the
+    /// upsert transaction to maintain the agent-level `token_stats` table.
+    /// `None` = no attributed call yet.
+    model_usage: std::sync::Mutex<Option<std::collections::BTreeMap<String, ModelUsageEntry>>>,
     /// Per-session lifetime LLM-call counter, mirrored from
     /// `SessionMeta.llm_call_counter`. The single mutation owner is
     /// [`Self::bump_llm_call_counter`] (mirroring `accumulate_llm_usage`
@@ -929,12 +938,6 @@ pub struct ConversationSession {
     /// `meta.last_compaction_offset` so the next restore can use O(1)
     /// offset skip instead of falling back to the O(N) rposition scan.
     last_compaction_offset: Arc<std::sync::Mutex<Option<u64>>>,
-    /// §8 (write-time derived state): text of the most recent compaction
-    /// summary, mirrored into `SessionMeta.last_compaction_summary`.
-    /// Set by [`Self::append_compaction_event`] before its `write_meta()`,
-    /// so the T2-handoff reader is O(1) instead of a full JSONL scan.
-    /// Initialized from meta on `resume()`.
-    last_compaction_summary: std::sync::Mutex<Option<String>>,
 }
 
 impl std::fmt::Debug for ConversationSession {
@@ -970,6 +973,47 @@ pub struct StateChange {
     pub snapshot: acowork_core::mqtt_proto::SessionState,
 }
 
+/// Per-call attribution for the per-model usage detail (`SessionMeta.model_usage`).
+///
+/// Folded into the in-memory detail map by [`ConversationSession::apply_model_usage`]
+/// on every persisting usage call; `SqliteSessionMetaStore` then diffs the
+/// persisted map against the row's previous value inside the upsert
+/// transaction to maintain the agent-level `token_stats` aggregate.
+/// Missing segments fold to `"unknown"` via [`model_usage_key`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelUsageAttribution<'a> {
+    /// Provider id this call went to (`None` → `"unknown"`).
+    pub provider_id: Option<&'a str>,
+    /// Model id that served this call (`None` → `"unknown"`).
+    pub model_id: Option<&'a str>,
+    /// Estimated cost of this call in USD (`None` = price unknown —
+    /// folds as "no cost known", never as free).
+    pub cost_delta: Option<f64>,
+}
+
+/// Estimate one LLM call's cost from the model's price table and raw usage.
+///
+/// Cache tokens are deliberately NOT billed: `ModelCostInfo` only carries
+/// input/output per-million prices (no cache unit prices exist), so cache
+/// read/write contribute nothing to the estimate. Returns `None` when any
+/// price is missing — "宁可 miss 也不估计".
+pub fn estimate_call_cost(cost: Option<&ModelCostInfo>, usage: &UsageInfo) -> Option<f64> {
+    let cost = cost?;
+    let input = cost.input_per_million?;
+    let output = cost.output_per_million?;
+    // Mirror the ADR-027 zero-skip gate from `apply_llm_usage`: a provider
+    // fallback reporting `prompt_tokens == 0` did not bill input either.
+    let billed_input = if usage.prompt_tokens > 0 {
+        usage.prompt_tokens
+    } else {
+        0
+    };
+    Some(
+        billed_input as f64 / 1_000_000.0 * input
+            + usage.completion_tokens as f64 / 1_000_000.0 * output,
+    )
+}
+
 /// Minimum interval between meta file writes triggered by `append_message`.
 ///
 /// Metadata-only mutations (title, model, provider, workspace) always write
@@ -989,11 +1033,6 @@ impl ConversationSession {
         // value is fresh as long as compaction writes are awaited
         // (see `append_compaction_event`).
         let last_compaction_offset = self.last_compaction_offset.lock().ok().and_then(|g| *g);
-        let last_compaction_summary = self
-            .last_compaction_summary
-            .lock()
-            .ok()
-            .and_then(|s| s.clone());
         SessionMeta {
             version: CONVERSATION_FORMAT_VERSION,
             session_id: self.session_id.clone(),
@@ -1014,11 +1053,16 @@ impl ConversationSession {
             message_count: self.message_count.load(Ordering::Relaxed),
             last_active_at: now,
             tokens,
+            model_usage: self
+                .model_usage
+                .lock()
+                .ok()
+                .and_then(|m| m.clone())
+                .filter(|m| !m.is_empty()),
             llm_call_counter,
             perf: self.perf.lock().ok().and_then(|p| p.clone()),
             model_ratio: self.model_ratio.lock().ok().and_then(|r| *r),
             last_compaction_offset,
-            last_compaction_summary,
             corrupted: false,
         }
     }
@@ -1331,6 +1375,7 @@ impl ConversationSession {
             visibility: std::sync::Mutex::new(None),
             chat_session_id: std::sync::Mutex::new(None),
             tokens: std::sync::Mutex::new(None),
+            model_usage: std::sync::Mutex::new(None),
             llm_call_counter: std::sync::Mutex::new(None),
             perf: std::sync::Mutex::new(None),
             model_ratio: std::sync::Mutex::new(None),
@@ -1348,7 +1393,6 @@ impl ConversationSession {
             pending_intents: std::sync::Mutex::new(Vec::new()),
             last_context_usage_sections: std::sync::Mutex::new(None),
             last_compaction_offset,
-            last_compaction_summary: std::sync::Mutex::new(None),
         };
 
         // ADR-082 §4 step 3: write the initial meta row through the
@@ -1453,6 +1497,7 @@ impl ConversationSession {
                 visibility: std::sync::Mutex::new(meta.visibility),
                 chat_session_id: std::sync::Mutex::new(meta.chat_session_id.clone()),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
+                model_usage: std::sync::Mutex::new(meta.model_usage.clone()),
                 llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
                 perf: std::sync::Mutex::new(meta.perf.clone()),
                 model_ratio: std::sync::Mutex::new(meta.model_ratio),
@@ -1470,7 +1515,6 @@ impl ConversationSession {
                 pending_intents: std::sync::Mutex::new(Vec::new()),
                 last_context_usage_sections: std::sync::Mutex::new(None),
                 last_compaction_offset,
-                last_compaction_summary: std::sync::Mutex::new(meta.last_compaction_summary.clone()),
             },
             config_rx,
             state_rx,
@@ -1600,15 +1644,6 @@ impl ConversationSession {
                 "Compaction writer dropped its done channel before reply: {}",
                 e
             ),
-        }
-
-        // §8: persist the summary text itself into the derived meta state
-        // (mirrored by `build_meta` into the row below). Matches the legacy
-        // scan semantics: empty summaries never become the handoff source.
-        if !summary.trim().is_empty()
-            && let Ok(mut guard) = self.last_compaction_summary.lock()
-        {
-            *guard = Some(summary.to_string());
         }
 
         // ADR-024 / ADR-060 v2 §5.4: persist the freshly-recorded
@@ -2032,6 +2067,18 @@ impl ConversationSession {
         self.write_meta();
     }
 
+    /// Design 27 §8.2 / ADR-100 D9: the Chat session this execution session
+    /// was started from (stamped by `set_chat_binding`), if any. A turn the
+    /// user composes directly in this session owes that Chat a result even
+    /// when no routed request carried the debt, so the turn-end echo reads
+    /// this binding. `None` for a session that never came from a Chat.
+    pub fn chat_session_id(&self) -> Option<String> {
+        self.chat_session_id
+            .lock()
+            .ok()
+            .and_then(|c| c.clone())
+    }
+
     /// Design 27 §8.2: bind this execution session to a Chat session and
     /// mark it `Members`-visible in one persisted step. Called once at
     /// creation from the `chat:` routing path; the pair is what makes the
@@ -2237,13 +2284,18 @@ impl ConversationSession {
     /// `tps` / `ttft_ms` are this call's measurements; `None` (no output
     /// produced, no usage reported, the stream cancelled before its first
     /// token) folds as "no measurement", never as 0.
+    ///
+    /// `attribution` folds the same usage into the per-model detail map
+    /// (`SessionMeta.model_usage`) — see [`Self::apply_model_usage`].
     pub fn record_llm_round(
         &self,
         usage: &UsageInfo,
         tps: Option<f64>,
         ttft_ms: Option<f64>,
+        attribution: &ModelUsageAttribution<'_>,
     ) -> u32 {
         self.apply_llm_usage(usage);
+        self.apply_model_usage(usage, attribution);
         self.apply_llm_perf(tps, ttft_ms);
         let iteration = self.apply_llm_call_counter();
         self.write_meta();
@@ -2301,8 +2353,13 @@ impl ConversationSession {
     /// `last_active_at` is bumped and the meta file is rewritten on every
     /// call. Callers should invoke this once per LLM round-trip, not on
     /// every streaming event.
-    pub fn accumulate_llm_usage(&self, usage: &UsageInfo) {
+    pub fn accumulate_llm_usage(
+        &self,
+        usage: &UsageInfo,
+        attribution: &ModelUsageAttribution<'_>,
+    ) {
         self.apply_llm_usage(usage);
+        self.apply_model_usage(usage, attribution);
         self.write_meta();
         // Hot field — the relay task coalesces these behind a 3 s cooldown.
         self.notify_state_change();
@@ -2369,6 +2426,61 @@ impl ConversationSession {
         }
     }
 
+    /// In-memory fold of one call's usage into the per-model detail map
+    /// (`SessionMeta.model_usage`) without touching storage.
+    ///
+    /// Mirrors the ADR-027 / ADR-066 zero-skip gate from
+    /// [`Self::apply_llm_usage`] exactly (input + cache_read share the
+    /// `prompt_tokens > 0` gate; output + cache_write always accumulate),
+    /// so Σ detail entries == the `tokens` cumulative totals at every
+    /// persist point — the store's upsert diff then maintains the
+    /// agent-level `token_stats` aggregate against that invariant.
+    ///
+    /// Cost folding is poison-on-unknown: a fresh bucket takes the call's
+    /// `cost_delta` (which may be `None`), an existing bucket only keeps a
+    /// running cost while both sides are known; the first `None` contribution
+    /// flips the bucket's cost to `None` permanently (until
+    /// `rebuild_token_stats` / a corrected attribution — "宁可 miss 也不估计").
+    fn apply_model_usage(&self, usage: &UsageInfo, attribution: &ModelUsageAttribution<'_>) {
+        // Fold the same gated deltas as apply_llm_usage.
+        let (d_in, d_cr) = if usage.prompt_tokens > 0 {
+            (usage.prompt_tokens, usage.cache_read_tokens)
+        } else {
+            (0, 0)
+        };
+        let d_out = usage.completion_tokens;
+        let d_cw = usage.cache_write_tokens;
+        if d_in == 0 && d_out == 0 && d_cr == 0 && d_cw == 0 && attribution.cost_delta.is_none() {
+            return;
+        }
+        let key = model_usage_key(attribution.provider_id, attribution.model_id);
+        if let Ok(mut guard) = self.model_usage.lock() {
+            let map = guard.get_or_insert_with(Default::default);
+            match map.entry(key) {
+                std::collections::btree_map::Entry::Vacant(v) => {
+                    v.insert(ModelUsageEntry {
+                        input: d_in,
+                        output: d_out,
+                        cache_read: d_cr,
+                        cache_write: d_cw,
+                        cost: attribution.cost_delta,
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut o) => {
+                    let e = o.get_mut();
+                    e.input = e.input.saturating_add(d_in);
+                    e.output = e.output.saturating_add(d_out);
+                    e.cache_read = e.cache_read.saturating_add(d_cr);
+                    e.cache_write = e.cache_write.saturating_add(d_cw);
+                    e.cost = match (e.cost, attribution.cost_delta) {
+                        (Some(prev), Some(delta)) => Some(prev + delta),
+                        _ => None,
+                    };
+                }
+            }
+        }
+    }
+
     /// Persist a compaction LLM call's raw `usage` into the session token
     /// accumulator.
     ///
@@ -2394,7 +2506,12 @@ impl ConversationSession {
     /// after the summary LLM call returns and before
     /// [`Self::set_history_anchor`] (which anchors `last_input` to the
     /// post-compaction `history.token_count()`).
-    pub fn accumulate_compaction_usage(&self, usage: &UsageInfo) {
+    pub fn accumulate_compaction_usage(
+        &self,
+        usage: &UsageInfo,
+        attribution: &ModelUsageAttribution<'_>,
+    ) {
+        self.apply_model_usage(usage, attribution);
         if let Ok(mut guard) = self.tokens.lock() {
             let prev_last_input = guard.as_ref().map(|t| t.last_input).unwrap_or(0);
             let prev_last_output = guard.as_ref().map(|t| t.last_output).unwrap_or(0);
@@ -2556,6 +2673,9 @@ impl Clone for ConversationSession {
             visibility: std::sync::Mutex::new(self.visibility.lock().ok().and_then(|v| *v)),
             chat_session_id: std::sync::Mutex::new(self.chat_session_id.lock().ok().and_then(|c| c.clone())),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
+            model_usage: std::sync::Mutex::new(
+                self.model_usage.lock().ok().and_then(|m| m.clone()),
+            ),
             llm_call_counter: std::sync::Mutex::new(
                 self.llm_call_counter.lock().ok().and_then(|c| *c),
             ),
@@ -2610,9 +2730,6 @@ impl Clone for ConversationSession {
             // the parent does. This matches the comment above that the
             // sender is shared for the same reason.
             last_compaction_offset: self.last_compaction_offset.clone(),
-            last_compaction_summary: std::sync::Mutex::new(
-                self.last_compaction_summary.lock().ok().and_then(|s| s.clone()),
-            ),
         }
     }
 }
@@ -2751,7 +2868,7 @@ pub fn install_session_meta_backend(
 /// dimension, see `SqliteStore::open_dim_agnostic`. `find_latest_session` runs
 /// before the memory backend is up, so the open has to live here rather than
 /// only in [`install_session_meta_backend`].
-fn session_meta_store(conversations_dir: &Path) -> std::io::Result<Arc<dyn SessionMetaStore>> {
+pub(crate) fn session_meta_store(conversations_dir: &Path) -> std::io::Result<Arc<dyn SessionMetaStore>> {
     let db_path = session_meta_db_path(conversations_dir);
     if let Some(store) = session_meta_registry().lock().unwrap().get(&db_path) {
         return Ok(store.clone());
@@ -3348,47 +3465,42 @@ pub fn read_messages_paginated(
 
 // ── ADR-021: Incremental read with line-number coordinates ─────────────────
 
-/// Design 27 §2.1 T2 handoff source: the LAST persisted compaction summary
-/// of a session. Read from the write-time derived state in the session meta
-/// row (§8) — O(1), no JSONL scan. Sessions persisted before the field
-/// existed fall back to a one-time legacy line scan whose result is written
-/// back, healing the row for every later read. `None` when the session has
-/// no meta row or no compaction was ever recorded.
-pub fn last_compaction_summary(work_dir: &Path, session_id: &str) -> Option<String> {
-    let conversations_dir = work_dir.join("conversations");
-    let mut meta = read_session_meta(&conversations_dir, session_id).ok()?;
-    if meta.last_compaction_summary.is_some() {
-        return meta.last_compaction_summary;
-    }
-    // One-time self-heal for pre-field rows. Low frequency by construction:
-    // exactly one scan per legacy session, then the row carries the value.
-    let path = conversations_dir.join(format!("{session_id}.jsonl"));
-    let found = scan_last_compaction_summary_legacy(&path);
-    if found.is_some() {
-        meta.last_compaction_summary = found.clone();
-        let _ = write_session_meta(&conversations_dir, &meta);
-    }
-    found
-}
-
-/// The pre-§8 O(N) full-file scan. Only reachable as the one-time legacy
-/// self-heal above — do NOT call it from request-path code.
-fn scan_last_compaction_summary_legacy(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut last: Option<String> = None;
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
-        if !line.contains(ENTRY_KIND_COMPACTION) {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<ConversationEntry>(&line)
-            && entry.kind.as_deref() == Some(ENTRY_KIND_COMPACTION)
-            && !entry.content.trim().is_empty()
+/// Read the first persisted `user` entry of a session's JSONL log.
+///
+/// Session-title generation uses this instead of the current turn's message:
+/// the title must always describe the conversation's FIRST user turn. After a
+/// Stop the async title task may still be running, and a follow-up message
+/// typed into the same session must never become the title — neither through
+/// a second generation task nor through a session restored from disk (a
+/// rebuilt session has no in-memory title cache).
+///
+/// Internal runtime artifacts (output-budget nudges and the like) are
+/// skipped — they are not user input. `None` when the log has no user row yet.
+pub fn read_first_user_message(path: &Path) -> Option<String> {
+    // The first user row sits at the head of the log; a couple of pages cover
+    // the session-init / system rows that may precede it. Pages are only
+    // walked when a log is unusually header-heavy.
+    const PAGE: u32 = 16;
+    const MAX_PAGES: u8 = 32;
+    let mut offset = 0u64;
+    for _ in 0..MAX_PAGES {
+        let page = read_messages_paginated(path, offset, PAGE, false).ok()?;
+        if let Some(entry) = page
+            .messages
+            .into_iter()
+            .find(|e| e.role == "user" && !e.is_internal())
         {
-            last = Some(entry.content);
+            return Some(entry.content);
+        }
+        if page.limit == 0 {
+            return None;
+        }
+        offset += u64::from(page.limit);
+        if offset >= page.total {
+            return None;
         }
     }
-    last
+    None
 }
 
 /// Read messages from a JSONL file since a given line-number coordinate.
@@ -3657,129 +3769,6 @@ mod tests {
     }
 
     #[test]
-    fn last_compaction_summary_reads_meta_and_self_heals_legacy_rows() {
-        let dir = TempDir::new().unwrap();
-        let conv = dir.path().join("conversations");
-        std::fs::create_dir_all(&conv).unwrap();
-        let entry = |role: &str, content: &str, kind: Option<&str>| ConversationEntry {
-            id: "x".into(),
-            ts: "2026-01-01T00:00:00.000Z".into(),
-            role: role.into(),
-            content: content.into(),
-            metadata: None,
-            kind: kind.map(str::to_string),
-        };
-        let seed_meta = |sid: &str, summary: Option<&str>| {
-            let meta = SessionMeta {
-                version: 1,
-                session_id: sid.to_string(),
-                agent_id: "com.test.agent".to_string(),
-                created_at: "2026-01-01T00:00:00Z".to_string(),
-                user_id: None,
-                visibility: None,
-                title: None,
-                workspace_id: None,
-                model: None,
-                provider: None,
-                account_id: None,
-                reasoning_effort: None,
-                temperature: None,
-                context_window: None,
-                todos: None,
-                message_count: 0,
-                last_active_at: "2026-01-01T00:00:00Z".to_string(),
-                tokens: None,
-                llm_call_counter: None,
-                perf: None,
-                model_ratio: None,
-                last_compaction_offset: None,
-                last_compaction_summary: summary.map(str::to_string),
-                corrupted: false,
-                chat_session_id: None,
-            };
-            write_session_meta(&conv, &meta).unwrap();
-        };
-
-        // §8 O(1) read: a meta row that already carries the summary wins and
-        // the JSONL is never opened. The stored value differs from the only
-        // compaction line on disk, so a hit here proves the meta path.
-        seed_meta("s-0", Some("FROM META"));
-        std::fs::write(
-            conv.join("s-0.jsonl"),
-            format!(
-                "{}\n",
-                serde_json::to_string(&entry(
-                    "system",
-                    "SCANNED",
-                    Some(ENTRY_KIND_COMPACTION)
-                ))
-                .unwrap(),
-            ),
-        )
-        .unwrap();
-        assert_eq!(
-            last_compaction_summary(dir.path(), "s-0").as_deref(),
-            Some("FROM META")
-        );
-
-        // Legacy self-heal: a pre-field meta row (`summary = None`) with
-        // compaction lines on disk. The first read scans once, keeps the latest
-        // summary, and writes it back; the JSONL is then no longer consulted.
-        std::fs::write(
-            conv.join("s-1.jsonl"),
-            format!(
-                "{}\n{}\n{}\n",
-                serde_json::to_string(&entry("user", "hi", None)).unwrap(),
-                serde_json::to_string(&entry(
-                    "system",
-                    "FIRST SUMMARY",
-                    Some(ENTRY_KIND_COMPACTION)
-                ))
-                .unwrap(),
-                serde_json::to_string(&entry(
-                    "system",
-                    "SECOND SUMMARY",
-                    Some(ENTRY_KIND_COMPACTION)
-                ))
-                .unwrap(),
-            ),
-        )
-        .unwrap();
-        seed_meta("s-1", None);
-        assert_eq!(
-            last_compaction_summary(dir.path(), "s-1").as_deref(),
-            Some("SECOND SUMMARY")
-        );
-        // The write-back healed the row...
-        assert_eq!(
-            read_session_meta(&conv, "s-1")
-                .unwrap()
-                .last_compaction_summary
-                .as_deref(),
-            Some("SECOND SUMMARY")
-        );
-        // ...so emptying the JSONL afterwards still yields the healed value —
-        // proof the request path reads meta, not the log.
-        std::fs::write(conv.join("s-1.jsonl"), "").unwrap();
-        assert_eq!(
-            last_compaction_summary(dir.path(), "s-1").as_deref(),
-            Some("SECOND SUMMARY")
-        );
-
-        // No compaction line -> None (and nothing written back).
-        std::fs::write(
-            conv.join("s-2.jsonl"),
-            serde_json::to_string(&entry("user", "hi", None)).unwrap(),
-        )
-        .unwrap();
-        seed_meta("s-2", None);
-        assert_eq!(last_compaction_summary(dir.path(), "s-2"), None);
-
-        // No meta row -> None, never a panic.
-        assert_eq!(last_compaction_summary(dir.path(), "nope"), None);
-    }
-
-    #[test]
     fn test_generate_session_id() {
         let id = generate_session_id();
         // Format: YYYYMMDD_HHMMSS_xxxxxx (6-char short UUID)
@@ -4036,9 +4025,9 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
+            model_usage: None,
         };
         std::fs::write(conv.join(format!("{}.jsonl", sid)), "").unwrap();
         write_session_meta(conv, &meta).unwrap();
@@ -4253,9 +4242,9 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-            last_compaction_summary: None,
                 corrupted: false,
             chat_session_id: None,
+                model_usage: None,
             };
             write_session_meta(&conv_dir, &meta).unwrap();
         }
@@ -4544,9 +4533,9 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
+            model_usage: None,
         };
         write_session_meta(&conv_dir, &valid_meta).unwrap();
 
@@ -4617,12 +4606,12 @@ mod tests {
                 prompt_tokens: 1_000,
                 completion_tokens: 200,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 3_500,
                 completion_tokens: 450,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let tokens = session.tokens().expect("tokens should be set");
             assert_eq!(
@@ -4704,6 +4693,7 @@ mod tests {
                     },
                     Some(100.0),
                     Some(300.0),
+                    &ModelUsageAttribution::default(),
                 ),
                 1
             );
@@ -4718,6 +4708,7 @@ mod tests {
                     },
                     None,
                     Some(140.0),
+                    &ModelUsageAttribution::default(),
                 ),
                 2
             );
@@ -4741,6 +4732,7 @@ mod tests {
                     },
                     None,
                     None,
+                    &ModelUsageAttribution::default(),
                 ),
                 3
             );
@@ -4783,17 +4775,17 @@ mod tests {
                 prompt_tokens: 1_000,
                 completion_tokens: 100,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 0, // Provider fallback
                 completion_tokens: 50,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 2_000,
                 completion_tokens: 80,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let tokens = session.tokens().expect("tokens should be set");
             assert_eq!(
@@ -4832,12 +4824,12 @@ mod tests {
                 prompt_tokens: u64::MAX,
                 completion_tokens: u64::MAX,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let tokens = session.tokens().expect("tokens should be set");
             assert_eq!(
@@ -4938,7 +4930,7 @@ mod tests {
                 prompt_tokens: 10_000,
                 completion_tokens: 500,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             let before = session.tokens().expect("tokens should be set");
             assert_eq!(before.last_input, 10_000);
             assert_eq!(before.last_output, 500);
@@ -4955,7 +4947,7 @@ mod tests {
                 prompt_tokens: summary_prompt_tokens,
                 completion_tokens: summary_completion_tokens,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let after = session.tokens().expect("tokens should be set");
             // last_input / last_output MUST be preserved — the compaction
@@ -5013,12 +5005,12 @@ mod tests {
                 prompt_tokens: 10_000,
                 completion_tokens: 500,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             session.accumulate_compaction_usage(&UsageInfo {
                 prompt_tokens: 80_000,
                 completion_tokens: 1_200,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             // Anchor to the post-compaction history size. Typical numbers:
             // pre-compaction history ~80K tokens, summary trims it to ~20K.
@@ -5067,14 +5059,14 @@ mod tests {
                 prompt_tokens: 144_000,
                 completion_tokens: 600,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             // 2. Compaction summary LLM call (preserves last_input=144_000).
             session.accumulate_compaction_usage(&UsageInfo {
                 prompt_tokens: 144_000,
                 completion_tokens: 1_500,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             // 3. History replace_middle_with_summary — token_count() drops
             //    to ~20K. Anchor to that.
@@ -5086,7 +5078,7 @@ mod tests {
                 prompt_tokens: 23_500,
                 completion_tokens: 800,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let final_tokens = session.tokens().expect("tokens should be set");
             assert_eq!(
@@ -5098,6 +5090,162 @@ mod tests {
             assert_eq!(final_tokens.total_input, 144_000 + 144_000 + 23_500);
             assert_eq!(final_tokens.total_output, 600 + 1_500 + 800);
         });
+    }
+
+    #[test]
+    fn test_model_usage_folds_attribution_and_poisons_cost() {
+        // Per-model detail folding mirrors the ADR-027/066 zero-skip gate,
+        // attributes by provider|model (missing → "unknown|unknown"), and
+        // poisons a bucket's cost on the first priceless contribution.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        rt.block_on(async {
+            let dir = temp_dir.path().to_path_buf();
+            let cfg = SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            };
+            let committed = Arc::new(AtomicUsize::new(0));
+            let (session, _config_rx, _state_rx) =
+                ConversationSession::new(&dir, "mu_fold", cfg, 0, committed.clone()).unwrap();
+
+            // Round 1: attributed, priced call.
+            session.record_llm_round(
+                &UsageInfo {
+                    prompt_tokens: 1_000,
+                    completion_tokens: 200,
+                    cache_read_tokens: 400,
+                    cache_write_tokens: 60,
+                    ..Default::default()
+                },
+                None,
+                None,
+                &ModelUsageAttribution {
+                    provider_id: Some("p1"),
+                    model_id: Some("m1"),
+                    cost_delta: Some(0.01),
+                },
+            );
+            // Round 2: same bucket, price still known → cost accumulates.
+            session.accumulate_llm_usage(
+                &UsageInfo {
+                    prompt_tokens: 500,
+                    completion_tokens: 100,
+                    ..Default::default()
+                },
+                &ModelUsageAttribution {
+                    provider_id: Some("p1"),
+                    model_id: Some("m1"),
+                    cost_delta: Some(0.02),
+                },
+            );
+            // Round 3: provider fallback (prompt = 0) without a price — the
+            // zero-skip gate drops input/cache_read, and the missing price
+            // poisons the bucket cost (Some(0.03) → None).
+            session.accumulate_llm_usage(
+                &UsageInfo {
+                    prompt_tokens: 0,
+                    completion_tokens: 50,
+                    cache_read_tokens: 999,
+                    ..Default::default()
+                },
+                &ModelUsageAttribution {
+                    provider_id: Some("p1"),
+                    model_id: Some("m1"),
+                    cost_delta: None,
+                },
+            );
+            // Round 4: unattributed compaction call → "unknown|unknown".
+            session.accumulate_compaction_usage(
+                &UsageInfo {
+                    prompt_tokens: 8_000,
+                    completion_tokens: 900,
+                    ..Default::default()
+                },
+                &ModelUsageAttribution::default(),
+            );
+
+            let meta = read_session_meta(&dir.join("conversations"), "mu_fold").unwrap();
+            let usage = meta.model_usage.expect("detail map persisted");
+            let p1m1 = &usage["p1|m1"];
+            assert_eq!(p1m1.input, 1_500);
+            assert_eq!(p1m1.output, 350);
+            assert_eq!(p1m1.cache_read, 400, "round-3 cache_read skipped (prompt=0)");
+            assert_eq!(p1m1.cache_write, 60);
+            assert_eq!(p1m1.cost, None, "a priceless contribution poisons the bucket cost");
+            let unk = &usage["unknown|unknown"];
+            assert_eq!(unk.input, 8_000);
+            assert_eq!(unk.output, 900);
+            assert_eq!(unk.cost, None);
+
+            // Σ detail == tokens totals — the store's diff invariant.
+            let t = meta.tokens.expect("totals set");
+            assert_eq!(p1m1.input + unk.input, t.total_input);
+            assert_eq!(p1m1.output + unk.output, t.total_output);
+            assert_eq!(p1m1.cache_read + unk.cache_read, t.total_cache_read);
+            assert_eq!(p1m1.cache_write + unk.cache_write, t.total_cache_write);
+
+            // Resume hydrates the map; the next attributed round keeps
+            // folding into the existing buckets.
+            session.close().await.unwrap();
+            let (resumed, _config_rx, _state_rx) =
+                ConversationSession::resume(&dir, "mu_fold", committed).unwrap();
+            resumed.accumulate_llm_usage(
+                &UsageInfo {
+                    prompt_tokens: 100,
+                    completion_tokens: 10,
+                    ..Default::default()
+                },
+                &ModelUsageAttribution {
+                    provider_id: Some("p1"),
+                    model_id: Some("m1"),
+                    cost_delta: None,
+                },
+            );
+            let after = resumed.build_meta();
+            let usage = after.model_usage.expect("map survives resume");
+            assert_eq!(usage["p1|m1"].input, 1_600);
+            assert_eq!(usage["p1|m1"].cost, None, "poison stays poisoned");
+        });
+    }
+
+    #[test]
+    fn test_estimate_call_cost_requires_prices_and_gates_zero_prompt() {
+        let priced = acowork_core::protocol::ModelCostInfo {
+            input_per_million: Some(3.0),
+            output_per_million: Some(15.0),
+        };
+        // ADR-027 zero-skip mirror: prompt_tokens == 0 bills no input.
+        let cost = estimate_call_cost(
+            Some(&priced),
+            &UsageInfo { prompt_tokens: 0, completion_tokens: 1_000, ..Default::default() },
+        )
+        .unwrap();
+        assert!((cost - 0.015).abs() < 1e-12);
+        let cost = estimate_call_cost(
+            Some(&priced),
+            &UsageInfo { prompt_tokens: 1_000_000, completion_tokens: 1_000_000, ..Default::default() },
+        )
+        .unwrap();
+        assert!((cost - 18.0).abs() < 1e-12);
+        // Half-priced or missing tables fold as "unknown", never 0.
+        let half = acowork_core::protocol::ModelCostInfo {
+            input_per_million: Some(3.0),
+            output_per_million: None,
+        };
+        assert!(estimate_call_cost(Some(&half), &UsageInfo::default()).is_none());
+        assert!(estimate_call_cost(None, &UsageInfo::default()).is_none());
+    }
+
+    #[test]
+    fn test_session_meta_parses_without_model_usage() {
+        // Meta written before the per-model breakdown existed must still
+        // deserialize (serde default → None), the same contract as `tokens`.
+        let old_json = r#"{"version":3,"session_id":"pre_mu","agent_id":"com.test","created_at":"2026-01-01T00:00:00Z","last_active_at":"2026-01-01T00:00:00Z","message_count":0,"corrupted":false}"#;
+        let meta: SessionMeta = serde_json::from_str(old_json).unwrap();
+        assert_eq!(meta.model_usage, None);
     }
 
     #[test]
@@ -5149,9 +5297,9 @@ mod tests {
             }),
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
             corrupted: false,
         chat_session_id: None,
+            model_usage: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: SessionMeta = serde_json::from_str(&json).unwrap();
@@ -5208,14 +5356,14 @@ mod tests {
                 cache_read_tokens: 400,  // Anthropic-style cache hit
                 cache_write_tokens: 200, // Anthropic-style cache write
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 3_500,
                 completion_tokens: 450,
                 cache_read_tokens: 1_200,
                 cache_write_tokens: 0,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let tokens = session
                 .tokens()
@@ -5259,7 +5407,7 @@ mod tests {
                 cache_read_tokens: 300,
                 cache_write_tokens: 50,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             // Provider fallback: prompt=0, but a (bogus) cache_write
             // is still recorded as-is.
             session.accumulate_llm_usage(&UsageInfo {
@@ -5268,14 +5416,14 @@ mod tests {
                 cache_read_tokens: 999, // should be skipped
                 cache_write_tokens: 30, // should be added
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 2_000,
                 completion_tokens: 80,
                 cache_read_tokens: 800,
                 cache_write_tokens: 0,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let tokens = session.tokens().expect("tokens should be set");
             // cache_read: 300 + 800 = 1_100 (999 skipped due to zero-input gate)
@@ -5317,14 +5465,14 @@ mod tests {
                 cache_read_tokens: u64::MAX,
                 cache_write_tokens: u64::MAX,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
             session.accumulate_llm_usage(&UsageInfo {
                 prompt_tokens: 1,
                 completion_tokens: 0,
                 cache_read_tokens: 5,
                 cache_write_tokens: 7,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let tokens = session.tokens().expect("tokens should be set");
             assert_eq!(
@@ -5371,7 +5519,7 @@ mod tests {
                 cache_read_tokens: 4_000,
                 cache_write_tokens: 800,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             // Compaction LLM call: huge prompt, big cache hit — must NOT
             // overwrite `last_cache_*` (otherwise the next push would
@@ -5382,7 +5530,7 @@ mod tests {
                 cache_read_tokens: 100_000,
                 cache_write_tokens: 0,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             let tokens = session.tokens().expect("tokens should be set");
             // last_cache_* preserved from the pre-compaction call.
@@ -5421,7 +5569,7 @@ mod tests {
                 cache_read_tokens: 4_000,
                 cache_write_tokens: 800,
                 ..Default::default()
-            });
+            }, &ModelUsageAttribution::default());
 
             // Anchor to post-compaction history size.
             session.set_history_anchor(3_500);
@@ -5475,9 +5623,9 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-            last_compaction_summary: None,
                 corrupted: false,
             chat_session_id: None,
+                model_usage: None,
             };
 
             // Session A: full cache breakdown.
@@ -5644,6 +5792,42 @@ mod tests {
             metadata: None,
             kind: None,
         }
+    }
+
+    #[test]
+    fn read_first_user_message_skips_non_user_and_internal_rows() {
+        // Title generation must describe the FIRST real user turn: session-init
+        // system rows and internal runtime nudges are not user input.
+        let dir = TempDir::new().unwrap();
+        let mut nudge = make_entry("nudge", "user", "budget nudge");
+        nudge.metadata = Some(serde_json::json!({ "internal": true }));
+        let entries = vec![
+            make_entry("sys", "system", "session init"),
+            nudge,
+            make_entry("u1", "user", "第一条用户消息"),
+            make_entry("a1", "assistant", "reply"),
+            make_entry("u2", "user", "第二条用户消息"),
+        ];
+        let path = write_test_jsonl(&dir, "first-user", &entries);
+
+        assert_eq!(
+            read_first_user_message(&path).as_deref(),
+            Some("第一条用户消息"),
+            "must return the first real user row, not the internal nudge"
+        );
+    }
+
+    #[test]
+    fn read_first_user_message_returns_none_without_a_user_row() {
+        let dir = TempDir::new().unwrap();
+        let path = write_test_jsonl(&dir, "no-user", &[make_entry("a1", "assistant", "reply")]);
+        assert_eq!(read_first_user_message(&path), None);
+
+        // A missing file (brand-new session) is a clean `None`, not an error.
+        assert_eq!(
+            read_first_user_message(&dir.path().join("conversations").join("missing.jsonl")),
+            None
+        );
     }
 
     #[test]
@@ -7275,8 +7459,8 @@ mod tests {
             perf: None,
             model_ratio: None,
             last_compaction_offset: None,
-            last_compaction_summary: None,
         chat_session_id: None,
+            model_usage: None,
         };
 
         // (owner, visibility) -> (alice reads, bob reads, alice writes, bob writes)
@@ -7352,8 +7536,8 @@ mod tests {
                 perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-            last_compaction_summary: None,
                 corrupted: false,
+                model_usage: None,
             }
         }
         let owner = SessionScope::user("u-alice");
@@ -7450,8 +7634,8 @@ mod tests {
             perf: None,
                 model_ratio: None,
                 last_compaction_offset: None,
-            last_compaction_summary: None,
             chat_session_id: None,
+                model_usage: None,
             }
         };
 
@@ -7565,3 +7749,4 @@ mod tests {
     }
 
 }
+

@@ -57,7 +57,7 @@ pub enum NodeError {
     #[error("Sign error: {0}")]
     Sign(String),
 
-    /// One-shot memory migration failure (ADR-100 decision 10): the legacy
+    /// One-shot memory migration failure (ADR-101 decision 10): the legacy
     /// workspace store could not be read, was too large to hand over, or the
     /// memory service refused it. Never retried silently — see
     /// [`crate::memory_migration`].
@@ -66,3 +66,4 @@ pub enum NodeError {
 }
 
 pub type Result<T> = std::result::Result<T, NodeError>;
+

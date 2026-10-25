@@ -171,7 +171,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub user: UserConfig,
 
-    /// Memory service config (acowork-memory, standalone process, ADR-100).
+    /// Memory service config (acowork-memory, standalone process, ADR-101).
     ///
     /// Mirrors `DocConfig`: the Gateway spawns and supervises the binary and
     /// reverse-proxies `/api/memory/*` plus the agent-scoped panel routes to it.
@@ -473,7 +473,7 @@ fn default_user_port() -> u16 {
     18083
 }
 
-/// Memory service config (Gateway side, ADR-100).
+/// Memory service config (Gateway side, ADR-101).
 ///
 /// Only what the Gateway needs to manage the `acowork-memory` process and to
 /// advertise its MCP endpoint. The service owns its own defaults
@@ -1837,3 +1837,4 @@ allowed_node_ips = ["192.168.1.20", "10.0.0.0/24", "fd00::1"]
         assert_eq!(sec.allowed_node_ips.len(), 1);
     }
 }
+

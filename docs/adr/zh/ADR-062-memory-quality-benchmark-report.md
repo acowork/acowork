@@ -6,7 +6,7 @@
 **harness**：`core/acowork-memory/tests/memory_m4_bench.rs`
 **探针**：`core/acowork-runtime/tests/memory_m4_probe.rs`、`memory_m4_tiediag.rs`（临时，验证分数域与 MRR 波动；已删除，见下方路径说明）
 
-> 路径说明：本报告的数字在 Runtime 内置记忆时代测得，当时这些文件位于 `core/acowork-runtime/tests/`。ADR-100 把记忆引擎拆成独立服务后，仍存在的 benchmark（m4/m5/retrieval_eval/lifecycle/chains）随逻辑迁入 `core/acowork-memory/tests/`，两个临时探针已删除——它们是一次性诊断，结论已在下文记录。指标数学（Precision@K / MRR / nDCG）与本报告各数字同源，统一定义在 dev-only 的 `core/acowork-eval`，因此本报告与迁入后的 harness 仍可逐列对比。
+> 路径说明：本报告的数字在 Runtime 内置记忆时代测得，当时这些文件位于 `core/acowork-runtime/tests/`。ADR-101 把记忆引擎拆成独立服务后，仍存在的 benchmark（m4/m5/retrieval_eval/lifecycle/chains）随逻辑迁入 `core/acowork-memory/tests/`，两个临时探针已删除——它们是一次性诊断，结论已在下文记录。指标数学（Precision@K / MRR / nDCG）与本报告各数字同源，统一定义在 dev-only 的 `core/acowork-eval`，因此本报告与迁入后的 harness 仍可逐列对比。
 
 ---
 
@@ -315,3 +315,4 @@ cd core
 cargo test -p acowork-memory --test memory_m5_bench -- --nocapture   # M5 keyword before/after
 cargo test -p acowork-memory --lib keyword                             # 质量门规则单测
 ```
+

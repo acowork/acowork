@@ -1195,7 +1195,7 @@ impl NodeControlPlane {
             tokio::spawn(async move { gate.run_worker(executor, sink).await });
         }
 
-        // ADR-100 decision 10: hand the memories that still live in each
+        // ADR-101 decision 10: hand the memories that still live in each
         // instance's workspace store over to the memory service, once. A
         // background task — the Gateway spawns that service as one of its own
         // startup steps, so the pass waits for it (bounded retry) instead of
@@ -2923,3 +2923,4 @@ mod tests {
         );
     }
 }
+

@@ -77,7 +77,7 @@ export interface AgentModelResponse {
   available_models: string[];
 }
 
-/** ADR-100: memory service availability, as projected by `GET /api/status`.
+/** ADR-101: memory service availability, as projected by `GET /api/status`.
  *
  *  `ready` is false both when the operator turned the service off
  *  (`[memory].enabled = false`) and while it is still starting — the backend
@@ -102,8 +102,8 @@ export interface SystemStatusResponse {
   /** ADR-076 §决策 12: resolved deployment auth mode. `undefined` when the
    *  Gateway is older than ADR-076 (treated as `local` — no login gate). */
   auth_mode?: AuthMode;
-  /** ADR-100: memory service gating signal. `undefined` on a Gateway older
-   *  than ADR-100 — which has no standalone memory service to talk to, so
+  /** ADR-101: memory service gating signal. `undefined` on a Gateway older
+   *  than ADR-101 — which has no standalone memory service to talk to, so
    *  the memory panel and the search tab stay hidden. */
   memory_service?: MemoryServiceStatus;
 }
@@ -972,6 +972,29 @@ export interface ContextUsageInfo {
   avg_ttft_ms?: number;
 }
 
+/**
+ * agent 级 per-model token 统计的一行（GET /api/agents/{id}/token-stats）。
+ * 事实源是 runtime 侧每个 session 的 `model_usage` 明细，`token_stats`
+ * 聚合表只是同事务 diff 维护的派生索引（O(#models) 直读）。
+ */
+export interface TokenStatItem {
+  provider: string;
+  model: string;
+  total_input: number;
+  total_output: number;
+  total_cache_read: number;
+  total_cache_write: number;
+  /** 估算成本（USD）。`null` = 有贡献调用无已知价格——绝不伪造 0。 */
+  total_cost: number | null;
+}
+
+export interface TokenStatsResponse {
+  items: TokenStatItem[];
+  /** 派生索引与 per-session 明细的一致性校验位；`false` = 聚合漂移，
+   *  数字仍可展示（带警示），修复走 runtime 侧 rebuild（不 fail 读取）。 */
+  consistent: boolean;
+}
+
 /** Navigation view type */
 export type NavView = "chat" | "extensions" | "harness" | "docs" | "projects" | "settings";
 
@@ -1423,6 +1446,21 @@ export interface SessionInfo {
   can_write?: boolean;
   /** ADR-076 §决策 4: `null`/absent = public (readable by everyone). */
   visibility?: "public" | "private" | null;
+  /**
+   * ADR-100 D12: the Chat session this execution session is bound to, when it
+   * came from one (the router's `dispatch(new)`, a Chat-surface `+`, or a PM
+   * task dispatched from a project group — design 27 §8.2).
+   *
+   * The execution composer reads it as a routing flag: with a binding, the
+   * human's words are sent through the Chat entry point so they land as a
+   * durable `user_message` row under the user's own identity and the chat
+   * reads as one round (question + execution result). Without one there is no
+   * chat to answer, so the send keeps the session-scoped write.
+   *
+   * Absent on responses from a Runtime predating the binding — `undefined`
+   * means "no chat", which is the correct fallback, not a bug.
+   */
+  chat_session_id?: string | null;
 }
 
 /**
@@ -2705,4 +2743,6 @@ export interface OperationAck {
    *  package id. */
   instance_id?: string;
 }
+
+
 

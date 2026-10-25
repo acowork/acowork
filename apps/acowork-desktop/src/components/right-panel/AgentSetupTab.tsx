@@ -86,8 +86,6 @@ type WiredField =
   // Agent Setup panel. Skill mode (Progressive vs Manual) is now
   // driven entirely by the `load_skill` tool switch in the Tools
   // panel — see ADR-094 §4 (single source of truth, no drift).
-  | "intentIdleRotateHours"
-  | "intentHandoffMaxTokens"
   // ADR-099: Chat Router knobs. `chatRouterModel` / `chatRouterProvider`
   // are written together from the model dropdown; empty string clears
   // (fall back to the agent's compact-model chain).
@@ -106,8 +104,6 @@ const WIRE_FIELD: Record<WiredField, string> = {
   approvalTimeoutSecs: "approval_timeout_secs",
   compressionRatioThreshold: "compression_ratio_threshold",
   sessionLanguage: "session_language",
-  intentIdleRotateHours: "intent_idle_rotate_hours",
-  intentHandoffMaxTokens: "intent_handoff_max_tokens",
   chatRouterEnabled: "chat_router_enabled",
   chatRouterModel: "chat_router_model",
   chatRouterProvider: "chat_router_provider",
@@ -131,8 +127,6 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   maxSessions: FIELD_DEBOUNCE_MS,
   compressionRatioThreshold: FIELD_DEBOUNCE_MS,
   sessionLanguage: FIELD_DEBOUNCE_MS,
-  intentIdleRotateHours: FIELD_DEBOUNCE_MS,
-  intentHandoffMaxTokens: FIELD_DEBOUNCE_MS,
   chatRouterEnabled: FIELD_DEBOUNCE_MS,
   chatRouterModel: FIELD_DEBOUNCE_MS,
   chatRouterProvider: FIELD_DEBOUNCE_MS,
@@ -1179,59 +1173,6 @@ export function AgentSetupTab() {
             </p>
           </div>
 
-    {/* Intent session rotation (design 27 §4.1) — only the two knobs the
-        design exposes: T1 idle threshold and the T2 handoff token cap.
-        Compaction thresholds / T2 criteria / JSONL hard cap stay closed. */}
-          <div className="space-y-1">
-            <label className="block text-10 font-medium text-text-tertiary ">
-              {t("agentSetup.intentIdleRotateHours")}
-            </label>
-            <StyledInput
-              type="number"
-              min={0}
-              max={72}
-              step={1}
-              value={profile.intentIdleRotateHours !== undefined ? profile.intentIdleRotateHours : ""}
-              onChange={(e) => {
-                const v = e.target.value;
-                saveField(
-                  "intentIdleRotateHours",
-                  v === "" ? undefined : Math.min(72, Math.max(0, parseInt(v, 10) || 0)),
-                );
-              }}
-              placeholder="24 (default; 0 disables)"
-              className="rounded-md"
-            />
-            <p className="text-9 text-text-tertiary ">
-              {t("agentSetup.intentIdleRotateHoursDesc")}
-            </p>
-          </div>
-
-          <div className="space-y-1">
-            <label className="block text-10 font-medium text-text-tertiary ">
-              {t("agentSetup.intentHandoffMaxTokens")}
-            </label>
-            <StyledInput
-              type="number"
-              min={500}
-              max={4000}
-              step={100}
-              value={profile.intentHandoffMaxTokens && profile.intentHandoffMaxTokens > 0 ? profile.intentHandoffMaxTokens : ""}
-              onChange={(e) => {
-                const v = e.target.value;
-                saveField(
-                  "intentHandoffMaxTokens",
-                  v === "" ? undefined : Math.min(4000, Math.max(500, parseInt(v, 10) || 0)),
-                );
-              }}
-              placeholder="1500 (default)"
-              className="rounded-md"
-            />
-            <p className="text-9 text-text-tertiary ">
-              {t("agentSetup.intentHandoffMaxTokensDesc")}
-            </p>
-          </div>
-
     {/* ADR-094 note: the `skillsAutoLoad` Switch + label block was
         removed from the Session Parameters card. Skill mode now
         toggles via the `load_skill` Switch in the Tools panel —
@@ -1408,17 +1349,17 @@ export function AgentSetupTab() {
               <StyledInput
                 type="number"
                 min={1000}
-                max={60000}
+                max={300000}
                 step={500}
                 value={profile.chatRouterTimeoutMs && profile.chatRouterTimeoutMs > 0 ? profile.chatRouterTimeoutMs : ""}
                 onChange={(e) => {
                   const v = e.target.value;
                   saveField(
                     "chatRouterTimeoutMs",
-                    v === "" ? undefined : Math.min(60000, Math.max(1000, parseInt(v, 10) || 0)),
+                    v === "" ? undefined : Math.min(300000, Math.max(1000, parseInt(v, 10) || 0)),
                   );
                 }}
-                placeholder="8000 (default)"
+                placeholder="60000 (default)"
                 className="rounded-md"
               />
               <p className="text-9 text-text-tertiary ">

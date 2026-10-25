@@ -1,12 +1,12 @@
 //! Memory management HTTP API handlers
 //!
-//! ADR-100: the memory endpoints are reverse-proxied to the standalone
+//! ADR-101: the memory endpoints are reverse-proxied to the standalone
 //! `acowork-memory` service by [`crate::http::memory_proxy`]. This module
 //! therefore exposes no HTTP routes of its own — registering a path here would
 //! collide with that proxy and make `Router::merge()` panic at gateway startup
 //! (e.g. "Overlapping method route" on `/api/agents/{id}/memory/nodes`).
 //!
-//! Before ADR-100 the same paths were proxied to the Runtime by
+//! Before ADR-101 the same paths were proxied to the Runtime by
 //! `crate::http::proxy::proxy_routes()`; the public contract did not change
 //! with that move.
 //!
@@ -21,7 +21,7 @@ use crate::http::routes::AppState;
 
 /// Build the memory management router.
 ///
-/// Per ADR-100 this router is intentionally empty: every memory path is owned
+/// Per ADR-101 this router is intentionally empty: every memory path is owned
 /// by [`crate::http::memory_proxy`] and forwarded to the memory service. Keeping
 /// the function (rather than deleting it) preserves the `merge(...)` call in
 /// `routes::build_router` and this module's contract types in one place.
@@ -224,3 +224,4 @@ mod tests {
         assert!(json.contains("\"schema_version\":7"));
     }
 }
+

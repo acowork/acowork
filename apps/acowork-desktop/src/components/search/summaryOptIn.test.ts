@@ -36,7 +36,7 @@ function runSearchBody(): string {
     // The callback ends at its dependency array — the first bare `[…],`
     // line followed by the closing `);`. Located structurally rather than
     // by the exact member list, because that list is edited by unrelated
-    // work (ADR-100 appended `memoryServiceReady`) and a literal match
+    // work (ADR-101 appended `memoryServiceReady`) and a literal match
     // here would break on those edits without protecting anything.
     const rel = SRC.slice(start);
     const end = rel.match(/\n\s*\[[^\]]*\],\n\s*\);/);
@@ -88,3 +88,4 @@ describe("the opt-in trigger lives in the summary area only", () => {
         expect(SRC).not.toContain("summaryEnabled");
     });
 });
+

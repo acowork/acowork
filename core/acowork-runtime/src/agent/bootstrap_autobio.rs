@@ -1,4 +1,4 @@
-//! Manifest hand-off to the memory service (ADR-100 P3).
+//! Manifest hand-off to the memory service (ADR-101 P3).
 //!
 //! The Runtime no longer owns a memory store, so it cannot write Identity /
 //! Capability nodes itself. What it still owns is the **manifest**, the
@@ -29,7 +29,7 @@ use serde_json::{json, Map, Value};
 
 /// Catalog id of the Gateway-hosted memory MCP server.
 ///
-/// The coupling is keyed on this string alone (ADR-100 decision 12): a
+/// The coupling is keyed on this string alone (ADR-101 decision 12): a
 /// third-party memory MCP is a different server and is deliberately not
 /// inspected.
 const MEMORY_MCP_NAME: &str = "memory";
@@ -297,3 +297,4 @@ mod tests {
         assert!(body.get("memory").is_none());
     }
 }
+

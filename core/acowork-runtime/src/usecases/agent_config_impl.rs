@@ -152,16 +152,10 @@ fn apply_field_patch(
         ConfigField::CompressionRatioThreshold => {
             cfg.compression_ratio_threshold = patch_typed::<f64>(field, op);
         }
-        // ADR-100: no distiller / forgetting arms — those knobs belong to the
+        // ADR-101: no distiller / forgetting arms — those knobs belong to the
         // memory service and `AgentConfig` no longer writes them.
         ConfigField::SessionLanguage => {
             cfg.session_language = patch_typed::<String>(field, op);
-        }
-        ConfigField::IntentIdleRotateHours => {
-            cfg.intent_idle_rotate_hours = patch_typed::<u64>(field, op);
-        }
-        ConfigField::IntentHandoffMaxTokens => {
-            cfg.intent_handoff_max_tokens = patch_typed::<u64>(field, op);
         }
         // ADR-099: sub-field patches against the nested `chat_router`
         // block. The block is created on first write; an all-`None`
@@ -223,8 +217,9 @@ where
         },
     }
 }
+
 // ============================================================================
-// Tests — ADR-071 D4 distiller field patches
+// Tests — ADR-099 chat_router field patches and wire translation
 // ============================================================================
 
 #[cfg(test)]
@@ -262,7 +257,7 @@ mod tests {
     fn test_chat_router_wire_to_patch_translation() {
         let body = PutAgentConfigBody::from_request_fields(
             None, None, None, None, None, None, None, None, // 8 core knobs
-            None, None, None, // session_language / intent_idle / intent_handoff
+            None, // session_language
             Some(serde_json::json!(true)),   // chat_router_enabled -> Set
             Some(serde_json::json!("fast")), // chat_router_model -> Set
             Some(serde_json::json!(null)),   // chat_router_provider -> Clear
@@ -364,3 +359,5 @@ mod tests {
         assert_eq!(router.enabled, Some(false), "sibling preserved");
     }
 }
+
+
