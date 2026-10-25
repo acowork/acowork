@@ -251,6 +251,14 @@ pub struct IntentMeta {
     /// normalised remote URL, never a filesystem path.
     #[serde(default)]
     pub repo: String,
+    /// PM dispatch rows only (design 27 §4.2): the task id the chat
+    /// surface renders as a chip. Absent on every other row. Declared
+    /// here because undeclared meta keys are silently dropped at this
+    /// storage boundary — the Gateway writes it, the Desktop reads it,
+    /// and this struct is the only shape they share (design 27 decision
+    /// 29's trap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     /// Response outcome (§7.1): completed / failed / aborted / timeout.
     #[serde(default)]
     pub status: String,
@@ -2341,6 +2349,58 @@ mod tests {
         let human = Participant::new("human-1", ParticipantIdentity::Human);
         let agent = Participant::new("agent-1", ParticipantIdentity::Agent);
         ensure_pair(dir, human, agent, SessionKind::UserAgent, 100).expect("pair")
+    }
+
+    #[test]
+    fn gateway_dispatch_meta_survives_the_store_round_trip() {
+        // The full JSON boundary, not a typed construction: the Gateway
+        // writes the PM dispatch row through
+        // `POST /internal/chat-sessions/messages` with this exact shape
+        // (acowork-gateway/src/intent/chat_client.rs::append_message +
+        // http/intent_api.rs::dispatch_task). Undeclared meta keys are
+        // silently dropped here (design 27 decision 29) — this test is
+        // what makes that drop loud: the Desktop TaskChip reads
+        // `meta.task_id` back off this round trip.
+        let wire = serde_json::json!({
+            "session_id": "cs-boundary-test",
+            "message": {
+                "seq": 0,
+                "ts": 0,
+                "from": "human-1",
+                "kind": "user_message",
+                "body": "修复分页不满屏",
+                "to": "agent-1",
+                "meta": {
+                    "message_id": "m-1",
+                    "conversation_id": "task:p-1:t-1",
+                    "task_id": "t-1",
+                    "repo": "",
+                },
+                "attachment_ids": [],
+            }
+        });
+        let req: crate::http::chat_sessions_api::SystemAppendRequest =
+            serde_json::from_value(wire).expect("gateway wire shape must deserialize");
+        assert_eq!(
+            req.message.meta.task_id.as_deref(),
+            Some("t-1"),
+            "task_id must be a declared IntentMeta field"
+        );
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let (stored, _) = append_message(&dir, &s.session_id, &req.message, 1).unwrap();
+        assert_eq!(stored.meta.task_id.as_deref(), Some("t-1"));
+        let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].meta.task_id.as_deref(),
+            Some("t-1"),
+            "task_id must survive JSONL persistence and reload"
+        );
+        // The read path serializes the row to the clients — the key must
+        // be on the wire, not just in the typed struct.
+        let out = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(out["meta"]["task_id"], "t-1");
     }
 
     #[test]

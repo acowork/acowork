@@ -288,6 +288,29 @@ struct TaskDispatchRequest {
     chat_session_id: Option<String>,
 }
 
+/// The meta object on a PM dispatch chat row. The key set is a storage
+/// contract: every key here must be a declared field on the user
+/// service's `IntentMeta` (undeclared keys are silently dropped at that
+/// boundary — design 27 decision 29), and `task_id` is what the Desktop
+/// renders as the task chip. `project_id` is deliberately absent: the row
+/// already lives in that project's own group chat.
+///
+/// Pinned by `dispatch_row_meta_keys_are_the_storage_contract` below; the
+/// matching round-trip test lives with `IntentMeta` in acowork-user.
+fn dispatch_row_meta(
+    message_id: &str,
+    conversation_id: &str,
+    task_id: &str,
+    repo: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "task_id": task_id,
+        "repo": repo,
+    })
+}
+
 async fn dispatch_task(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -404,15 +427,8 @@ async fn dispatch_task(
     // The dispatch chat row (§4: the chat log is the message record).
     // §5.4.5 role table: a PM dispatch is human input — the owner speaks,
     // the agent answers. The row carries the human-readable task body
-    // only; the assignment playbook stays on the envelope. `task_id` in
-    // meta feeds the chat surface's task chip — `project_id` is
-    // deliberately absent (the row lives in the project's own group).
-    let meta = serde_json::json!({
-        "message_id": message_id,
-        "conversation_id": conversation_id,
-        "task_id": req.task_id,
-        "repo": repo,
-    });
+    // only; the assignment playbook stays on the envelope.
+    let meta = dispatch_row_meta(&message_id, &conversation_id, &req.task_id, &repo);
     if let Err(e) = chat_client::append_message(
         port,
         &chat_session_id,
@@ -2509,5 +2525,27 @@ mod card_answer_tests {
         let labels = exec_attachment_labels(&items);
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0]["filename"], "project");
+    }
+
+    #[test]
+    fn dispatch_row_meta_keys_are_the_storage_contract() {
+        // The user service's `IntentMeta` deserializes this object at its
+        // storage boundary and silently drops undeclared keys (design 27
+        // decision 29). Pin the exact key set here so a rename or an
+        // accidental re-add of `project_id` fails loudly; the matching
+        // round-trip test lives with `IntentMeta` (acowork-user:
+        // gateway_dispatch_meta_survives_the_store_round_trip).
+        let meta = dispatch_row_meta("m-1", "task:p-1:t-1", "t-1", "");
+        let mut keys: Vec<&str> = meta.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["conversation_id", "message_id", "repo", "task_id"]
+        );
+        assert_eq!(meta["task_id"], "t-1", "the chip's only coordinate");
+        assert!(
+            meta.get("project_id").is_none(),
+            "project_id must not return: the row lives in the project's own group"
+        );
     }
 }
