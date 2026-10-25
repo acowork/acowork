@@ -35,7 +35,7 @@
 // carries a discrete drill-down into the execution view:
 // `chatStore.openSession(agentId, execSid)` + mode flip (plan 5.3).
 
-import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, memo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown } from "lucide-react";
@@ -107,7 +107,15 @@ interface RowProps {
   replyQuote?: string;
 }
 
-function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed, answered, onAnswer, triggerBody, replyQuote }: RowProps) {
+/**
+ * One transcript row. Memoized: the composer's per-keystroke re-render of the
+ * host must not cascade into `rows.map` re-parsing every markdown body
+ * (chat-transcript render-perf plan L1). All props are value-stable while the
+ * window is unchanged — `row` references come from the store window, Sets are
+ * memoized per window, callbacks are host-level `useCallback`s. The
+ * render-count regression test (`AgentChatView.memo.test.tsx`) locks this.
+ */
+const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed, answered, onAnswer, triggerBody, replyQuote }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
@@ -341,7 +349,7 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed
       </div>
     </div>
   );
-}
+});
 
 // ── View ───────────────────────────────────────────────────────────────
 
@@ -536,16 +544,22 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => clearLocate(sessionId),
   );
 
-  const handleAnswer = (card: ChatMessageRow, text: string, immediate: boolean) => {
-    if (immediate && text) {
-      stickNow();
-      void sendText(sessionId, text, card.meta?.message_id);
-      dismissExecCard(card);
-      return;
-    }
-    setAnswerTarget(card);
-    textareaRef.current?.focus();
-  };
+  // Stable identities: RowView is memoized, so every prop handed to it must
+  // keep its reference across host re-renders (a keystroke in the composer
+  // re-renders this host; it must not re-render N rows).
+  const handleAnswer = useCallback(
+    (card: ChatMessageRow, text: string, immediate: boolean) => {
+      if (immediate && text) {
+        stickNow();
+        void sendText(sessionId, text, card.meta?.message_id);
+        dismissExecCard(card);
+        return;
+      }
+      setAnswerTarget(card);
+      textareaRef.current?.focus();
+    },
+    [sessionId, stickNow, sendText],
+  );
 
   const handleSend = () => {
     const text = input.trim();
@@ -673,15 +687,25 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // A DELETED session would otherwise cold-open as an empty exec tab whose
   // every load fails into the retry banner, so probe existence first: a
   // definitive 404 is answered with a toast and no navigation.
-  const jumpToExec = async (execSid: string) => {
-    if (!execSid) return;
-    if (!(await sessionExists(agentId, execSid))) {
-      showToast({ type: "info", message: t("chatView.execSessionGone") });
-      return;
-    }
-    await useChatStore.getState().openSession(agentId, execSid);
-    setMode(agentId, "exec");
-  };
+  const jumpToExec = useCallback(
+    async (execSid: string) => {
+      if (!execSid) return;
+      if (!(await sessionExists(agentId, execSid))) {
+        showToast({ type: "info", message: t("chatView.execSessionGone") });
+        return;
+      }
+      await useChatStore.getState().openSession(agentId, execSid);
+      setMode(agentId, "exec");
+    },
+    [agentId, t, setMode],
+  );
+  // The void-returning stable handler handed to memoized rows. An inline
+  // `(sid) => void jumpToExec(sid)` at the call site is a fresh identity every
+  // render and would defeat `RowView`'s memo on every keystroke.
+  const handleJumpToExec = useCallback(
+    (execSid: string) => void jumpToExec(execSid),
+    [jumpToExec],
+  );
 
   const hasMoreOlder = win ? win.firstPos > 0 : false;
   // A locate can park the window mid-history; `!atTail` then opens the
@@ -775,7 +799,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 (r.kind === "agent_message" || isTurnRoutedNotice(r)) &&
                 !(rows[i - 1]?.kind === "agent_message" && !isEmptyTerminalReply(rows[i - 1]!))
               }
-              onJumpToExec={(sid) => void jumpToExec(sid)}
+              onJumpToExec={handleJumpToExec}
               triggerBody={
                 r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined
               }

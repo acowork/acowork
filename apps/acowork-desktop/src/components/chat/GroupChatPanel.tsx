@@ -23,7 +23,7 @@
  * mentions channel carries `session_config`.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, memo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown, ClipboardList } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -205,7 +205,15 @@ function TaskChip({ taskId }: { taskId: string }) {
   );
 }
 
-function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody, replyQuote }: RowProps) {
+/**
+ * One transcript row. Memoized for the same reason as AgentChatView's RowView:
+ * the composer re-renders this host on every keystroke, and the host re-runs
+ * `rows.map` — without memo that re-parses every markdown body in the window
+ * (chat-transcript render-perf plan L1). Every prop is reference-stable while
+ * the window is unchanged: `nameOf` is a `useCallback`, `closed`/`answered`
+ * are per-window memos, `onAnswer`/`onJumpToExec` are host-level callbacks.
+ */
+const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody, replyQuote }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
@@ -444,7 +452,7 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
       {own && avatar}
     </div>
   );
-}
+});
 
 // ── Mention resolution ────────────────────────────────────────────────
 
@@ -870,6 +878,13 @@ export function GroupChatPanel() {
     await useChatStore.getState().openSession(agentId, execSid);
     useChatSessionStore.getState().setMode(agentId, "exec");
   }, [t]);
+  // Void-returning stable handler for memoized rows — an inline
+  // `(aid, sid) => void jumpToExec(aid, sid)` is a fresh identity per render
+  // and would defeat `GroupRowView`'s memo on every keystroke.
+  const handleJumpToExec = useCallback(
+    (agentId: string, execSid: string) => void jumpToExec(agentId, execSid),
+    [jumpToExec],
+  );
 
   if (!activeGroupId) return null;
 
@@ -960,7 +975,7 @@ export function GroupChatPanel() {
               closed={closed}
               answered={answered}
               onAnswer={onAnswer}
-              onJumpToExec={(aid, sid) => void jumpToExec(aid, sid)}
+              onJumpToExec={handleJumpToExec}
               triggerBody={
                 row.meta?.in_reply_to ? bodyById.get(row.meta.in_reply_to) : undefined
               }

@@ -18,7 +18,7 @@
  * means going through this component so the scope cannot be forgotten again.
  */
 
-import { Children, isValidElement, type CSSProperties } from "react";
+import { Children, isValidElement, memo, type CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -98,6 +98,11 @@ export const chatMarkdownComponents: Components = {
 export const CHAT_MARKDOWN_SHELL_CLASS =
   "prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent";
 
+/** Module-level constant so react-markdown never sees a fresh array identity
+ *  per render (an inline `[remarkGfm]` defeats memoization inside the library's
+ *  own plugin-equality checks on every re-render). */
+const REMARK_PLUGINS = [remarkGfm];
+
 interface ChatMarkdownProps {
   content: string;
   /** Surface-specific element overrides, merged over the shared behavioural set.
@@ -112,7 +117,7 @@ interface ChatMarkdownProps {
   className?: string;
 }
 
-export function ChatMarkdown({
+export const ChatMarkdown = memo(function ChatMarkdown({
   content,
   components,
   style,
@@ -121,7 +126,7 @@ export function ChatMarkdown({
   return (
     <div className={className ? `${CHAT_MARKDOWN_SHELL_CLASS} ${className}` : CHAT_MARKDOWN_SHELL_CLASS} style={style}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={REMARK_PLUGINS}
         urlTransform={markdownUrlTransform}
         components={components ? { ...chatMarkdownComponents, ...components } : chatMarkdownComponents}
       >
@@ -129,4 +134,4 @@ export function ChatMarkdown({
       </ReactMarkdown>
     </div>
   );
-}
+});
