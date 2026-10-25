@@ -158,8 +158,46 @@ pub fn restore_installed_agents(state: &mut NodeState, packages_dir: &Path) {
             let Ok(content) = std::fs::read_to_string(&manifest_path) else {
                 continue;
             };
-            let Ok(manifest) = acowork_core::AgentManifest::from_toml(&content) else {
-                continue;
+            let manifest = match acowork_core::AgentManifest::from_toml(&content) {
+                Ok(manifest) => manifest,
+                Err(e) => {
+                    // ADR-101 one-time migration: manifests installed before
+                    // memory became a hosted service declare the retired
+                    // `MemoryRead` / `MemoryWrite` permissions, which the
+                    // current `Permission` deserializer rejects. Without this
+                    // pass every legacy install is silently skipped here and
+                    // the agent list comes back empty after a restart. Strip
+                    // the retired entries and rewrite the file once; anything
+                    // that still fails has a different cause and is logged.
+                    match migrate_retired_memory_permissions(&content).and_then(|migrated| {
+                        acowork_core::AgentManifest::from_toml(&migrated)
+                            .ok()
+                            .map(|manifest| (migrated, manifest))
+                    }) {
+                        Some((migrated, manifest)) => {
+                            if let Err(we) = std::fs::write(&manifest_path, &migrated) {
+                                tracing::warn!(
+                                    path = %manifest_path.display(),
+                                    error = %we,
+                                    "Migrated manifest in memory but could not rewrite it — migration re-runs next restart"
+                                );
+                            }
+                            tracing::info!(
+                                path = %manifest_path.display(),
+                                "Migrated legacy manifest: stripped retired memory permissions"
+                            );
+                            manifest
+                        }
+                        None => {
+                            tracing::warn!(
+                                path = %manifest_path.display(),
+                                error = %e,
+                                "Skipping instance directory: manifest.toml failed to parse"
+                            );
+                            continue;
+                        }
+                    }
+                }
             };
             // ADR-073: the directory name MUST be a valid UUIDv4. An
             // instance directory named anything else (e.g. "manifest"
@@ -195,9 +233,80 @@ pub fn restore_installed_agents(state: &mut NodeState, packages_dir: &Path) {
     }
 }
 
+/// Strip the retired `MemoryRead` / `MemoryWrite` permission entries from a
+/// legacy manifest TOML (ADR-101). Returns `None` when the document does not
+/// parse at all or holds nothing to strip — a failure with another cause must
+/// not be papered over.
+fn migrate_retired_memory_permissions(content: &str) -> Option<String> {
+    const RETIRED: [&str; 2] = ["MemoryRead", "MemoryWrite"];
+    let mut doc: toml::Table = content.parse().ok()?;
+    let permissions = doc.get("permissions")?.as_array()?.clone();
+    let kept: Vec<toml::Value> = permissions
+        .iter()
+        .filter(|entry| match entry.get("type").and_then(|t| t.as_str()) {
+            Some(perm_type) => !RETIRED.contains(&perm_type),
+            None => true,
+        })
+        .cloned()
+        .collect();
+    if kept.len() == permissions.len() {
+        return None;
+    }
+    if kept.is_empty() {
+        doc.remove("permissions");
+    } else {
+        doc.insert("permissions".to_string(), toml::Value::Array(kept));
+    }
+    toml::to_string(&doc).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pre-ADR-101 manifest (retired memory permissions declared) fails the
+    /// current parser; the migration strips exactly those entries, keeps the
+    /// rest of the document intact, and is idempotent.
+    #[test]
+    fn legacy_manifest_with_retired_memory_permissions_is_migrated() {
+        let legacy = r#"
+agent_id = "com.acowork.test"
+name = "Test"
+version = "0.1.0"
+description = "fixture"
+author = "acowork-test"
+runtime_version = "0.1.0"
+
+[[permissions]]
+type = "FilesystemRead"
+
+[[permissions]]
+type = "MemoryRead"
+
+[[permissions]]
+type = "MemoryWrite"
+
+[[tools]]
+name = "weather"
+
+[memory]
+enabled = true
+"#;
+        assert!(
+            acowork_core::AgentManifest::from_toml(legacy).is_err(),
+            "the retired permissions must fail the current parser — that is the bug being migrated"
+        );
+        let migrated =
+            migrate_retired_memory_permissions(legacy).expect("migration strips the retired entries");
+        let manifest = acowork_core::AgentManifest::from_toml(&migrated).expect("migrated manifest parses");
+        assert_eq!(manifest.permissions.len(), 1);
+        assert!(manifest.has_tool("weather"));
+        assert_eq!(manifest.agent_id, "com.acowork.test");
+        assert!(
+            migrate_retired_memory_permissions(&migrated).is_none(),
+            "a manifest without retired entries must not be rewritten again"
+        );
+    }
 
     /// The install table holds the install-time manifest snapshot; a
     /// publish-flow rewrite changes the file only. The retained
