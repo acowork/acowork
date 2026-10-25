@@ -53,9 +53,9 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
 
   return (
     <div className="ml-12 my-1.5 max-w-[var(--content-max-width)] w-fit">
-      <div className="overflow-hidden rounded-md border border-[var(--color-accent)]/30 dark:border-[var(--color-accent)]/40">
+      <div className="overflow-hidden rounded-md border border-border-outer">
         {/* Header bar */}
-        <div className="flex items-center gap-[7px] border-b border-border-divider bg-[var(--color-accent)]/10 px-3 py-[7px] text-xs font-medium text-[var(--color-accent-strong)]">
+        <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text">
           <MessageCircleQuestion className="h-3.5 w-3.5 shrink-0" />
           <span className="flex-1">{t("chatView.cardAsk")}</span>
           {countdownLabel && countdownLabel !== "expired" && (

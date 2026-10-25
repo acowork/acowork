@@ -9,7 +9,7 @@
  *   - **Action buttons** (approval / pause / others): click = immediate
  *
  * Three states per card:
- *   - Open: interactive, accent border + semantic header bg
+ *   - Open: interactive, neutral hairline + neutral header
  *   - Answered: receipt header (neutral) + answer text
  *   - Closed:  receipt header (neutral) + "Closed" + question text
  *
@@ -52,6 +52,18 @@ interface InlineInteractionCardProps {
 
 // ── Kind → header config mapping ──────────────────────────────────
 
+/**
+ * Per-kind chrome. Two rules govern the colors here:
+ *
+ *   - A card outline is NEVER the brand highlight. `--color-accent` is
+ *     reserved for button backgrounds (globals.css `.btn-accent` /
+ *     `.bg-accent-strong`), so an ask card wears the neutral hairline and
+ *     its title the regular text tier — same recipe as the receipt state
+ *     below and as CodeBlock's title bar.
+ *   - emerald / amber below are SEMANTIC STATUS colors (ok / warning), not
+ *     the highlight. They carry "this needs approval" / "this needs a
+ *     resume", so they stay. Do not "unify" them to `border-border-outer`.
+ */
 interface KindConfig {
   icon: React.ReactNode;
   titleKey: string;
@@ -79,8 +91,8 @@ function kindConfig(kind: string): KindConfig {
       return {
         icon: <MessageCircleQuestion className="h-3.5 w-3.5 shrink-0" />,
         titleKey: "chatView.cardAsk",
-        borderCls: "border-[var(--color-accent)]/30 dark:border-[var(--color-accent)]/40",
-        headerBgCls: "bg-[var(--color-accent)]/10 text-[var(--color-accent-strong)]",
+        borderCls: "border-border-outer",
+        headerBgCls: "bg-chat-title text-text",
       };
   }
 }
