@@ -476,7 +476,7 @@ fn session_path(dir: &Path) -> PathBuf {
     dir.join("session.json")
 }
 
-fn messages_path(dir: &Path) -> PathBuf {
+pub(crate) fn messages_path(dir: &Path) -> PathBuf {
     dir.join("messages.jsonl")
 }
 

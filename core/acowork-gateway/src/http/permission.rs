@@ -285,6 +285,14 @@ pub fn classify(method: &Method, rest: &str) -> (Op, Tier) {
             (Op::Manage, Tier::Agent)
         };
     }
+    // Per-model token statistics (proxied to Runtime's session metadata).
+    // Confirmed default-deny per ADR-087 §8: aggregate usage can surface
+    // provider/model configuration, so it stays in the manage bucket until
+    // an owner decision widens it. Kept explicit so the red-line sync in
+    // `dev/ci.sh` documents the decision rather than the fall-through.
+    if head == "token-stats" {
+        return (Op::Manage, Tier::Agent);
+    }
     // Default -- fail-closed: an UNREGISTERED route (any method) lands in
     // `manage`, so a new endpoint that forgets to declare itself cannot
     // silently widen to `view`/`use`. Every real read route is matched by

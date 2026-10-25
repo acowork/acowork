@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat::Attachment;
 use crate::chat_sessions::SessionMessage;
+use crate::chat_sessions::messages_path;
 use crate::chat_sessions::{KIND_AGENT_MESSAGE, KIND_USER_MESSAGE, normalize_kind};
 
 /// Minimum pattern length the FTS5 `trigram` tokenizer can match. Kept
@@ -110,10 +111,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn db_path(dir: &Path) -> PathBuf {
     dir.join("search.sqlite")
-}
-
-fn messages_path(dir: &Path) -> PathBuf {
-    dir.join("messages.jsonl")
 }
 
 /// The speech kinds whose non-empty body counts as searchable text. Legacy
