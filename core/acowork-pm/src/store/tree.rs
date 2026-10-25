@@ -1580,29 +1580,60 @@ impl TreePmStore {
     /// 纯内存过滤出"到期可派发"的任务 ID：pending + agent 责任人 +
     /// 创建审批已过 + 未派发过 + `start_at` 为空或已到。
     /// 不读任何 task.json，每 tick O(pending)。
-    pub fn dispatch_due_ids(&self, now: DateTime<Utc>) -> Vec<TaskId> {
+    /// Dependency gate over an already-loaded task: blocker statuses come
+    /// from the index, so no extra disk read (the per-candidate
+    /// `compute_blocked_by` re-read the same task.json). A dangling
+    /// reference blocks, matching `compute_blocked_by`.
+    pub fn is_dispatch_blocked(&self, task: &Task) -> bool {
+        let index = self.index.read();
+        task.depends_on.iter().any(|d| {
+            d.kind == DependencyKind::Blocks
+                && !matches!(
+                    index.by_id.get(&d.task_id).map(|e| e.status),
+                    Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+                )
+        })
+    }
+
+    /// The scanner's candidate set, computed entirely from the index (no
+    /// `task.json` reads, no entry clones): pending + past the approval
+    /// gate + `start_at` due + undispatched + agent-assigned + not
+    /// abandoned (attempt bound) + every Blocks prerequisite already
+    /// Done/Cancelled. Sorted by priority then due time; truncated to
+    /// `limit` so a large backlog costs one bounded probe per tick.
+    pub fn dispatch_due_ids(&self, now: DateTime<Utc>, limit: usize) -> Vec<TaskId> {
         let index = self.index.read();
         let Some(pending) = index.by_status.get(&TaskStatus::Pending) else {
             return Vec::new();
         };
-        let mut due: Vec<(TaskId, TaskEntry)> = pending
+        let mut due: Vec<&TaskId> = pending
             .iter()
-            .filter_map(|id| index.by_id.get(id).map(|e| (id.clone(), e.clone())))
-            .filter(|(_, e)| {
-                e.dispatched_at.is_none()
-                    && e.review_status != ReviewStatus::Pending
-                    && matches!(&e.assignee, Some(a) if a != "human")
-                    && e.start_at.is_none_or(|s| s <= now)
+            .filter(|id| {
+                index.by_id.get(*id).is_some_and(|e| {
+                    e.dispatched_at.is_none()
+                        && e.review_status != ReviewStatus::Pending
+                        && matches!(&e.assignee, Some(a) if a != "human")
+                        && e.start_at.is_none_or(|s| s <= now)
+                        && e.dispatch_attempts < crate::dispatch::MAX_DISPATCH_ATTEMPTS
+                        && e.blocks.iter().all(|b| {
+                            matches!(
+                                index.by_id.get(b).map(|x| x.status),
+                                Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+                            )
+                        })
+                })
             })
             .collect();
-        // 高优先级先派发（per-tick 上限截断时的排序依据）
-        due.sort_by_key(|(_, e)| {
+        // Highest priority first (the ordering the per-tick cap truncates by).
+        due.sort_by_key(|id| {
+            let e = &index.by_id[*id];
             (
                 priority_rank(e.priority),
                 e.start_at.unwrap_or(DateTime::<Utc>::MIN_UTC),
             )
         });
-        due.into_iter().map(|(id, _)| id).collect()
+        due.truncate(limit);
+        due.into_iter().cloned().collect()
     }
 
     /// The dispatch generation's identity for a scanner push: returns the
@@ -2813,7 +2844,7 @@ mod tests {
         let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
         add_member(&store, &p.id, inst).await;
 
-        // 无 start_at = 立即可派
+        // No start_at = dispatchable immediately.
         let now_task = store
             .create_task(
                 &p.id,
@@ -2822,9 +2853,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(store.dispatch_due_ids(Utc::now()), vec![now_task.id.clone()]);
+        assert_eq!(store.dispatch_due_ids(Utc::now(), 100), vec![now_task.id.clone()]);
 
-        // 未来 start_at → 未到期
+        // Future start_at → not due.
         let future = store
             .create_task(
                 &p.id,
@@ -2837,9 +2868,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(store.dispatch_due_ids(Utc::now()), vec![now_task.id.clone()]);
+        assert_eq!(store.dispatch_due_ids(Utc::now(), 100), vec![now_task.id.clone()]);
 
-        // Agent 创建未批准 → 不派发；批准后进入候选
+        // Agent-created and unapproved → not dispatched; approval joins candidates.
         let unapproved = store
             .create_task_as(
                 &p.id,
@@ -2849,20 +2880,21 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(store.dispatch_due_ids(Utc::now()), vec![now_task.id.clone()]);
+        assert_eq!(store.dispatch_due_ids(Utc::now(), 100), vec![now_task.id.clone()]);
         approve_creation(&store, &unapproved.id).await;
-        let mut due = store.dispatch_due_ids(Utc::now());
+        let mut due = store.dispatch_due_ids(Utc::now(), 100);
         due.sort_by_key(|t| t.to_string());
         assert_eq!(due.len(), 2, "approved task joins the candidate set");
 
-        // mark_dispatched → 幂等，退出候选集
+        // mark_dispatched → idempotent, leaves the candidate set.
         store.mark_dispatched(&now_task.id).await.unwrap();
-        let after = store.dispatch_due_ids(Utc::now());
+        let after = store.dispatch_due_ids(Utc::now(), 100);
         assert_eq!(after, vec![unapproved.id.clone()]);
         let stamped = store.get_task(&now_task.id).await.unwrap().unwrap();
         assert!(stamped.dispatched_at.is_some());
 
-        // claim（离开 pending）清派发标记；回退 pending 后可再派发
+        // claim (leaving pending) clears the dispatch stamp; rollback to
+        // pending allows re-dispatch.
         store.claim_task(&now_task.id, inst).await.unwrap();
         store
             .update_task(
@@ -2871,14 +2903,99 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(store.dispatch_due_ids(Utc::now()).contains(&now_task.id));
+        assert!(store.dispatch_due_ids(Utc::now(), 100).contains(&now_task.id));
 
-        // 未来任务永远不该出现在候选里
-        assert!(!store.dispatch_due_ids(Utc::now()).contains(&future.id));
+        // A future task must never appear in the candidate set.
+        assert!(!store.dispatch_due_ids(Utc::now(), 100).contains(&future.id));
+
+        // Abandon gate: at the persisted attempt bound the task leaves the
+        // candidates without ever being dispatched; the bound is index-side
+        // now, so the scanner never touches its disk again until a
+        // generation transition resets it.
+        let stuck = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("stuck") },
+                "human",
+            )
+            .await
+            .unwrap();
+        for _ in 0..crate::dispatch::MAX_DISPATCH_ATTEMPTS {
+            store.record_dispatch_failure(&stuck.id, "gateway down").await.unwrap();
+        }
+        assert!(
+            !store.dispatch_due_ids(Utc::now(), 100).contains(&stuck.id),
+            "an abandoned generation drops out of the due set"
+        );
+        store
+            .update_task(
+                &stuck.id,
+                UpdateTask { status: Some(TaskStatus::InProgress), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        store
+            .update_task(
+                &stuck.id,
+                UpdateTask { status: Some(TaskStatus::Pending), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.dispatch_due_ids(Utc::now(), 100).contains(&stuck.id),
+            "a new generation re-arms the attempt bound"
+        );
+
+        // Dependency gate, index-side: a Blocks prerequisite that is not
+        // Done/Cancelled keeps the dependent out of the due set.
+        let blocker = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("blocker") },
+                "human",
+            )
+            .await
+            .unwrap();
+        let dependent = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    assignee: Some(inst.into()),
+                    depends_on: vec![crate::types::Dependency {
+                        task_id: blocker.id.clone(),
+                        kind: crate::types::DependencyKind::Blocks,
+                    }],
+                    ..create_task_input("dependent")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store.dispatch_due_ids(Utc::now(), 100).contains(&dependent.id),
+            "blocked tasks wait for their blocker's own dispatch cycle"
+        );
+        store
+            .update_task(
+                &blocker.id,
+                UpdateTask { status: Some(TaskStatus::Cancelled), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.dispatch_due_ids(Utc::now(), 100).contains(&dependent.id),
+            "a Cancelled blocker releases the dependent (Done answers too)"
+        );
+
+        // Limit: the due set is truncated, so a 10k-task backlog costs one
+        // bounded probe per tick instead of unbounded per-candidate reads.
+        assert!(store.dispatch_due_ids(Utc::now(), 1).len() <= 1);
     }
 
-    /// 派发代次身份生命周期：首派生成并落盘（crash-safe）、重试复用、
-    /// PM 重启（重开 store）后仍复用、状态跃迁清代次后换新身份。
+    /// Dispatch generation identity lifecycle: minted and persisted before
+    /// the first attempt (crash-safe), reused on retry, reused after a PM
+    /// restart (reopen + rebuild), and replaced after a generation
+    /// transition clears it.
     #[tokio::test]
     async fn dispatch_identity_is_persisted_and_reset_per_generation() {
         let dir = tempfile::tempdir().unwrap();

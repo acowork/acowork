@@ -54,6 +54,13 @@ pub struct TaskEntry {
     pub dispatched_at: Option<DateTime<Utc>>,
     pub review_status: ReviewStatus,
     pub priority: Priority,
+    /// Blocks prerequisites this task waits for (forward edges, derived
+    /// from `task.depends_on`). Lets the scanner's dependency gate run
+    /// purely against index statuses, with no disk reads.
+    pub blocks: Vec<TaskId>,
+    /// Consecutive dispatch failures of the current generation (abandon
+    /// gate: at or above MAX the task no longer enters the due set).
+    pub dispatch_attempts: u32,
 }
 
 impl TaskEntry {
@@ -74,6 +81,13 @@ impl TaskEntry {
             dispatched_at: task.dispatched_at,
             review_status: task.review_status,
             priority: task.priority,
+            blocks: task
+                .depends_on
+                .iter()
+                .filter(|d| d.kind == crate::types::DependencyKind::Blocks)
+                .map(|d| d.task_id.clone())
+                .collect(),
+            dispatch_attempts: task.dispatch_attempts,
         }
     }
 }
@@ -199,6 +213,8 @@ mod tests {
                 dispatched_at: None,
                 review_status: ReviewStatus::NotRequired,
                 priority: Priority::Normal,
+                blocks: vec![],
+                dispatch_attempts: 0,
             },
         );
         assert_eq!(idx.len(), 1);

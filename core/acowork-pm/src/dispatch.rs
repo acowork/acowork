@@ -162,7 +162,7 @@ pub fn spawn_scanner(
                 tracing::info!("PM dispatch scanner stopped (graceful shutdown)");
                 return;
             }
-            let due = store.dispatch_due_ids(Utc::now());
+            let due = store.dispatch_due_ids(Utc::now(), per_tick.saturating_mul(2));
             // Prune backoff bookkeeping for tasks that left the candidate
             // set (claimed, cancelled, unassigned…) so the map cannot grow
             // without bound.
@@ -191,9 +191,10 @@ pub fn spawn_scanner(
                 let Some(assignee) = task.assignee.as_deref() else {
                     continue;
                 };
-                // Dependency gate: blocked tasks wait for their blocker's own
-                // dispatch cycle; waking the agent now would only 409.
-                if !store.compute_blocked_by(&tid).await.unwrap_or_default().is_empty() {
+                // Dependency gate (race guard against the index snapshot
+                // the due filter used; answered from the loaded task +
+                // index statuses, no extra disk read).
+                if store.is_dispatch_blocked(&task) {
                     continue;
                 }
                 // The generation identity, persisted *before* the first
