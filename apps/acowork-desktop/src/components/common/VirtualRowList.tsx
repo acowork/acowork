@@ -43,10 +43,11 @@ import React, {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useReducer,
   useRef,
   useState,
 } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useVirtualizer, type Virtualizer } from "@tanstack/react-virtual";
 import { decideBottomPin } from "./bottomAnchor";
 
 /** Fallback row height when neither the measured cache nor the adapter's
@@ -197,6 +198,30 @@ export function VirtualRowList<T>({
     overscan,
     gap,
     initialOffset: 0,
+    // Viewport measurement fallback (render-perf L2). The library's default
+    // observer reads offsetWidth/offsetHeight, which are 0 in environments
+    // without layout (jsdom) — scrollRect then pins viewportSize to 0 and the
+    // range stays empty (white pane). Fall back to clientWidth/clientHeight,
+    // which layout-less test setups mock directly. In real browsers the
+    // primary path always yields a positive size, so behavior is unchanged.
+    observeElementRect: (
+      instance: Virtualizer<HTMLElement, HTMLElement>,
+      cb: (rect: { width: number; height: number }) => void,
+    ) => {
+      const el = instance.scrollElement;
+      if (!el) return () => {};
+      const read = () => {
+        cb({
+          width: el.offsetWidth || el.clientWidth,
+          height: el.offsetHeight || el.clientHeight,
+        });
+      };
+      read();
+      if (typeof ResizeObserver === "undefined") return () => {};
+      const ro = new ResizeObserver(read);
+      ro.observe(el, { box: "border-box" });
+      return () => ro.disconnect();
+    },
     // Content-stable keys so the internal measurement cache survives
     // prepend/append (index keys shift every measurement on a prepend).
     getItemKey: (index: number) => {
@@ -227,6 +252,25 @@ export function VirtualRowList<T>({
         }
       }
     },
+  });
+
+  // ── Late-ref self-heal ───────────────────────────────────────────
+  // React attaches the parent's scroll-container ref AFTER this child's
+  // layout effects run (verified on React 19 + testing-library: refs are
+  // attached in the parent's layout phase, passive effects run after it).
+  // The virtualizer discovers its scroll element during render/effect
+  // passes only, so the first commit can miss it and nothing re-checks —
+  // leaving an empty range (white pane). The passive effect below bumps
+  // exactly one re-render per element identity so _willUpdate re-runs with
+  // the ref populated; the guard prevents any loop.
+  const [, remeasure] = useReducer((n: number) => n + 1, 0);
+  const attachedForEl = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (el && !virtualizer.scrollElement && attachedForEl.current !== el) {
+      attachedForEl.current = el;
+      remeasure();
+    }
   });
 
   // ── measureElement + ResizeObserver discipline ───────────────────
@@ -379,37 +423,77 @@ export function VirtualRowList<T>({
   );
 
   // ── Render ───────────────────────────────────────────────────────
+  // Three states:
+  //   1. scroll container not yet attached (first commit — the parent's
+  //      ref lags this child's effects, see Late-ref self-heal): render
+  //      the sizing pane only. One frame of no rows, then the bump
+  //      re-renders virtualized. Cheaper than mounting the whole
+  //      transcript on the first paint of a huge session.
+  //   2. container attached but viewport measures 0 (jsdom without
+  //      layout mocks, or a hidden container): fall back to every row in
+  //      normal flow — pre-virtualization behavior, so degraded
+  //      environments can never produce a white pane.
+  //   3. normal: the virtualized window.
+  const container = scrollContainerRef.current;
+  const viewportPx = container ? container.offsetHeight || container.clientHeight : 0;
+  const virtualized = container !== null && viewportPx > 0;
+
+  const rowDiv = (
+    key: string | number,
+    item: T,
+    index: number,
+    posStyle: React.CSSProperties,
+    measured: boolean,
+  ) => (
+    <div
+      key={key}
+      {...(measured ? { ref: measureRef, "data-index": index } : {})}
+      {...(rowAttrs?.(item, index) ?? {})}
+      className={rowClassName?.(item, index)}
+      style={posStyle}
+    >
+      {renderItem(item, index)}
+    </div>
+  );
+
   return (
     <div
       style={{
-        height: virtualizer.getTotalSize(),
+        height: virtualized ? virtualizer.getTotalSize() : undefined,
         width: "100%",
         position: "relative",
       }}
     >
-      {virtualizer.getVirtualItems().map((virtualRow) => {
-        const item = items[virtualRow.index];
-        if (item === undefined) return null;
-        return (
-          <div
-            key={virtualRow.key}
-            ref={measureRef}
-            data-index={virtualRow.index}
-            {...(rowAttrs?.(item, virtualRow.index) ?? {})}
-            className={rowClassName?.(item, virtualRow.index)}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              width: "100%",
-              transform: `translateY(${virtualRow.start}px)`,
-              ...(rowStyle?.(item, virtualRow.index) ?? {}),
-            }}
-          >
-            {renderItem(item, virtualRow.index)}
-          </div>
-        );
-      })}
+      {virtualized
+        ? virtualizer.getVirtualItems().map((virtualRow) => {
+            const item = items[virtualRow.index];
+            if (item === undefined) return null;
+            return rowDiv(
+              virtualRow.key as string | number,
+              item,
+              virtualRow.index,
+              {
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                transform: `translateY(${virtualRow.start}px)`,
+                ...(rowStyle?.(item, virtualRow.index) ?? {}),
+              },
+              true,
+            );
+          })
+        : container
+          ? items.map((item, index) =>
+              rowDiv(
+                keyOf(item, index),
+                item,
+                index,
+                { ...(rowStyle?.(item, index) ?? {}) },
+                false,
+              ),
+            )
+          : null}
     </div>
   );
 }

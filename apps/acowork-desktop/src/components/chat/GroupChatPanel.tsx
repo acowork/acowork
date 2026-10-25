@@ -56,6 +56,7 @@ import {
 import { InlineInteractionCard } from "./InlineInteractionCard";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { VirtualRowList, type VirtualRowListHandle } from "../common/VirtualRowList";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -593,6 +594,12 @@ export function GroupChatPanel() {
     () => containerRef.current,
     pendingLocateSeq,
     () => activeGroupId && useChatSessionStore.getState().clearLocate(activeGroupId),
+    // Virtualization fallback: the row is in the window but not in the DOM.
+    (seq) => {
+      const idx = rowsRef.current.findIndex((r) => r.seq === seq);
+      if (idx < 0) return false;
+      return listRef.current?.scrollToKey(`${activeGroupId}:${seq}`, "center") ?? false;
+    },
   );
 
   // Directory for human sender names — best-effort, once per mount.
@@ -608,6 +615,21 @@ export function GroupChatPanel() {
   // as nothing (the shared renderer returns null) and the only state line the
   // surface adds is derived below. No projection layer is needed.
   const rows = useMemo(() => [...(win?.older ?? []), ...(win?.tail ?? [])], [win]);
+  // Virtualization adapters (render-perf L2) — see AgentChatView for the
+  // full rationale. Session-qualified keys, rows ref for the locate
+  // fallback, coarse body-length estimate corrected by measurement.
+  const rowKeyOf = useCallback(
+    (r: ChatMessageRow) => `${activeGroupId}:${r.seq}`,
+    [activeGroupId],
+  );
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const listRef = useRef<VirtualRowListHandle | null>(null);
+  const estimateRow = useCallback((r: ChatMessageRow) => {
+    const body = r.body ?? "";
+    const lines = Math.max(1, Math.ceil(body.length / 70));
+    return Math.min(480, 32 + lines * 22);
+  }, []);
   // message_id → body index over the raw window, so a reply (whose trigger is
   // only an `in_reply_to` id) can name the task in its drill-down tooltip when
   // the run has no title yet.
@@ -958,15 +980,23 @@ export function GroupChatPanel() {
             {t("groupChat.empty")}
           </div>
         )}
-        {rows.map((row) => (
-          <div
-            key={`${row.seq}-${row.meta?.message_id ?? ""}`}
-            data-seq={row.seq}
-            className={cn(
+        {/* Virtualized transcript window (render-perf L2) — see AgentChatView.
+            `key` remounts the shell on group switch (stale-offset contract). */}
+        <VirtualRowList
+          key={activeGroupId}
+          ref={listRef}
+          items={rows}
+          keyOf={rowKeyOf}
+          scrollContainerRef={containerRef}
+          estimateSize={estimateRow}
+          rowAttrs={(row) => ({ "data-seq": row.seq })}
+          rowClassName={(row) =>
+            cn(
               "scroll-mt-2 transition-colors",
               highlightSeq === row.seq && "bg-[var(--color-accent)]/10",
-            )}
-          >
+            )
+          }
+          renderItem={(row) => (
             <GroupRowView
               row={row}
               me={me}
@@ -984,8 +1014,8 @@ export function GroupChatPanel() {
               }
               readOnly={!canPost}
             />
-          </div>
-        ))}
+          )}
+        />
         {/* One aggregated "an agent has your message" line, derived from the
             newest unanswered row — the group twin of the 1:1 waiting line. No
             agent is named: a fan-out can wake more than one, and the reply

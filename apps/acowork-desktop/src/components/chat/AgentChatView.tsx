@@ -54,6 +54,7 @@ import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote } from "./ReplyQuote";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { VirtualRowList, type VirtualRowListHandle } from "../common/VirtualRowList";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
@@ -410,6 +411,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // The scroll viewport, captured alongside `useStickToBottom`'s callback ref
   // so the locate effect can query `[data-seq]` rows within it.
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Virtualized row window (render-perf L2): imperative handle for locate
+  // fallbacks (an off-viewport row is NOT in the DOM) and visibility queries.
+  const listRef = useRef<VirtualRowListHandle | null>(null);
 
   // The agent's current model, read-only here (see header comment).
   const [agentModel, setAgentModel] = useState<{ model: string; provider: string } | null>(null);
@@ -438,6 +442,23 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => (win ? [...win.older, ...win.tail] : []),
     [win],
   );
+  // Virtualization adapters (render-perf L2). Keys are session-qualified:
+  // the shell's measured-height cache is module-level, and `seq` is unique
+  // only WITHIN a chat session. `rowsRef` lets the locate fallback resolve a
+  // seq to an index without re-creating the (stamp-keyed) locate effect.
+  const rowKeyOf = useCallback(
+    (r: ChatMessageRow) => `${sessionId}:${r.seq}`,
+    [sessionId],
+  );
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  // Coarse pre-measure estimate from body length; `measureElement` corrects
+  // it on first mount and the shell's cache keeps the real height after.
+  const estimateRow = useCallback((r: ChatMessageRow) => {
+    const body = r.body ?? "";
+    const lines = Math.max(1, Math.ceil(body.length / 70));
+    return Math.min(480, 32 + lines * 22);
+  }, []);
   // message_id → body index, so a reply (whose trigger is only an
   // `in_reply_to` id) can name the task in its drill-down tooltip when the
   // execution session has no title yet.
@@ -542,6 +563,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => containerRef.current,
     pendingLocateSeq,
     () => clearLocate(sessionId),
+    // Virtualization fallback: the row is in the window but not in the DOM.
+    (seq) => {
+      const idx = rowsRef.current.findIndex((r) => r.seq === seq);
+      if (idx < 0) return false;
+      return listRef.current?.scrollToKey(`${sessionId}:${seq}`, "center") ?? false;
+    },
   );
 
   // Stable identities: RowView is memoized, so every prop handed to it must
@@ -773,15 +800,28 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         {rows.length === 0 && (
           <div className="py-10 text-center text-sm text-text-tertiary">{t("chatView.empty")}</div>
         )}
-        {rows.map((r, i) => (
-          <div
-            key={`${r.seq}`}
-            data-seq={r.seq}
-            className={cn(
+        {/* Virtualized transcript window (render-perf L2): only viewport rows
+            + overscan are in the DOM, so a keystroke — or a doorbell refresh —
+            costs a bounded number of row renders regardless of loaded pages.
+            Prepend anchoring stays with `useStickToBottom` (scroll-container
+            level; virtualization does not move it). The shell remounts on
+            session change via `key` — the documented contract against a
+            stale scroll offset (white pane). */}
+        <VirtualRowList
+          key={sessionId}
+          ref={listRef}
+          items={rows}
+          keyOf={rowKeyOf}
+          scrollContainerRef={containerRef}
+          estimateSize={estimateRow}
+          rowAttrs={(r) => ({ "data-seq": r.seq })}
+          rowClassName={(r) =>
+            cn(
               "scroll-mt-2 transition-colors",
               highlightSeq === r.seq && "bg-[var(--color-accent)]/10",
-            )}
-          >
+            )
+          }
+          renderItem={(r, i) => (
             <RowView
               row={r}
               agentId={agentId}
@@ -810,8 +850,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               answered={answered}
               onAnswer={handleAnswer}
             />
-          </div>
-        ))}
+          )}
+        />
         {/* The waiting line sits where the answer will land: one aggregated
             "the agent has your message" indicator, derived from the newest
             unanswered human row. It replaces the removed dispatch / round-open
