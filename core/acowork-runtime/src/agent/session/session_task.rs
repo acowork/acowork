@@ -1369,7 +1369,7 @@ impl SessionTask {
                     repo: _,
                     kind,
                     has_human,
-                        chat_attachment_ids,
+                    chat_attachment_ids,
                     in_reply_to,
                     assignment_brief,
                 }) => {
@@ -1379,8 +1379,15 @@ impl SessionTask {
                     // JSONL and every chat surface stay clean. After a
                     // runtime restart the claim/submit contract is
                     // recoverable from the session's own tool-call history.
-                    if !assignment_brief.is_empty() {
-                        context_builder.set_task_brief(assignment_brief);
+                    // Origin-gated a second time (see `brief_for_system_block`):
+                    // a stored Intent whose kind is not a PM dispatch can
+                    // never feed the system block, whatever filled the field.
+                    let brief = crate::agent::intent_turn::brief_for_system_block(
+                        &kind,
+                        &assignment_brief,
+                    );
+                    if !brief.is_empty() {
+                        context_builder.set_task_brief(brief.to_string());
                     }
                     // §5.5.5: this intent has left the pending queue and is
                     // starting its turn — drop its queue row so the execution

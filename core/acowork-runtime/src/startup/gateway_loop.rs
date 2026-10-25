@@ -1456,11 +1456,9 @@ async fn route_intent_legacy(
     // A PM dispatch's wake-up playbook is model-facing and ephemeral: it
     // bypasses the rendered message and history entirely, injected into
     // the turn's system block (see `ContextBuilder::set_task_brief`).
-    let assignment_brief = params
-        .get("assignment_brief")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    // Origin-gated: a peer's params are never trusted with the system
+    // block (`extract_assignment_brief`).
+    let assignment_brief = crate::agent::intent_turn::extract_assignment_brief(&kind, &params);
     let content = render_intent_message(
         &from,
         &action,

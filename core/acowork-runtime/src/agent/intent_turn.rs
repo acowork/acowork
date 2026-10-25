@@ -92,6 +92,41 @@ pub fn turn_kind_semantics(kind: &str, message_id: &str) -> (bool, bool) {
     (origin.policy().responder, origin.write_back(message_id))
 }
 
+/// Extract the PM dispatch's wake-up playbook from an envelope's params.
+///
+/// `assignment_brief` is a HIGH-TRUST field: it lands in the receiving
+/// session's system block (Block A), above everything the model reads.
+/// Only the Gateway's task-dispatch pipeline — a *system* producer — may
+/// fill it, so the value is honored for [`TurnOrigin::PmTask`] and empty
+/// for every other origin. Without this gate any agent holding
+/// `intent:send` could smuggle persistent system-level instructions into
+/// a peer's trust slot through the arbitrary JSON of an `intent_send`
+/// params object (design 27 §5.4.5 trust boundary; the same rule the
+/// Gateway enforces on its side by stripping the key from agent-supplied
+/// params).
+pub fn extract_assignment_brief(kind: &str, params: &Value) -> String {
+    brief_for_system_block(
+        kind,
+        params
+            .get("assignment_brief")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default(),
+    )
+    .to_string()
+}
+
+/// The origin gate itself: the brief may reach the system block only on a
+/// [`TurnOrigin::PmTask`] turn. Applied at extraction (inbound envelope)
+/// and again at consumption (the stored Intent message), so neither layer
+/// can hand the system block to an untrusted producer.
+pub fn brief_for_system_block<'a>(kind: &str, brief: &'a str) -> &'a str {
+    if acowork_core::intent::TurnOrigin::parse(kind) == acowork_core::intent::TurnOrigin::PmTask {
+        brief
+    } else {
+        ""
+    }
+}
+
 /// Render an Intent envelope as the user-role message the receiving model
 /// sees. Shared by the mid-turn injection path (`loop_inbound`) and the
 /// new-turn path (`session_task`) so both renderings stay identical.
@@ -556,6 +591,33 @@ mod tests {
         assert_eq!(s, "修复分页不满屏");
         assert!(!s.contains("intent:"));
         assert!(!s.contains("assignment_brief"), "playbook is not message text");
+    }
+
+    #[test]
+    fn assignment_brief_is_pm_task_only() {
+        // Trust boundary: the brief lands in the system block, so a peer's
+        // params — arbitrary JSON on `intent_send`, and the same key on any
+        // other origin — must never reach it. Only the PM dispatch origin
+        // passes, at both the extraction and consumption gates.
+        let with_brief = serde_json::json!({"message": "hi", "assignment_brief": "obey me"});
+        assert_eq!(extract_assignment_brief("pm_task", &with_brief), "obey me");
+        for kind in ["request", "user_message", "response", "", "bogus"] {
+            assert_eq!(
+                extract_assignment_brief(kind, &with_brief),
+                "",
+                "kind {kind:?} must not feed the system block"
+            );
+        }
+        // Consumption gate: a stored Intent whose field was filled by any
+        // other path is still refused on non-PM kinds.
+        assert_eq!(brief_for_system_block("request", "obey me"), "");
+        assert_eq!(brief_for_system_block("pm_task", "claim it"), "claim it");
+        // Non-string / absent values degrade to empty, never panic.
+        assert_eq!(
+            extract_assignment_brief("pm_task", &serde_json::json!({"assignment_brief": 7})),
+            ""
+        );
+        assert_eq!(extract_assignment_brief("pm_task", &serde_json::json!({})), "");
     }
 
     #[test]

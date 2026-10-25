@@ -311,6 +311,21 @@ fn dispatch_row_meta(
     })
 }
 
+/// Drop the high-trust `assignment_brief` key from **agent-supplied**
+/// params (`/api/intents/send` and the response relay — the two places a
+/// peer's arbitrary JSON reaches an envelope). The key is a system-slot
+/// field: only the task-dispatch pipeline above may set it. The Runtime
+/// already gates extraction on the turn origin, but a mixed-version fleet
+/// may run an older Runtime that extracts unconditionally, so the Gateway
+/// strips at the edge too (design 27 §5.4.5 trust boundary: high-trust
+/// envelope fields are honored from system producers only).
+fn strip_untrusted_brief(
+    mut params: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    params.remove("assignment_brief");
+    params
+}
+
 async fn dispatch_task(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1026,7 +1041,10 @@ async fn deliver_intent(
         from_session_id: req.sender_session_id.clone().unwrap_or_default(),
         target_instance: req.target.clone(),
         action: req.action.clone(),
-        params_json: serde_json::to_string(&serde_json::Value::Object(req.params)).unwrap_or_default(),
+        params_json: serde_json::to_string(&serde_json::Value::Object(strip_untrusted_brief(
+            req.params,
+        )))
+        .unwrap_or_default(),
         source_chat_session_id,
         repo,
         session_config_json: req
@@ -1352,7 +1370,9 @@ async fn deliver_response(
         from_session_id: entry.from_session_id.clone(),
         target_instance: entry.from_instance.clone(),
         action: req.action.clone(),
-        params_json: serde_json::to_string(&serde_json::Value::Object(req.params))
+        params_json: serde_json::to_string(&serde_json::Value::Object(strip_untrusted_brief(
+            req.params,
+        )))
             .unwrap_or_default(),
         source_chat_session_id: entry.source_chat_session_id.clone(),
         repo: String::new(),
@@ -2528,8 +2548,23 @@ mod card_answer_tests {
     }
 
     #[test]
-    fn dispatch_row_meta_keys_are_the_storage_contract() {
-        // The user service's `IntentMeta` deserializes this object at its
+    fn agent_supplied_brief_is_stripped_at_the_edge() {
+        // Mixed-version defense: an older Runtime on the receiving side
+        // extracts `assignment_brief` unconditionally, so the Gateway must
+        // not let a peer's params carry the key at all. Everything else in
+        // the caller's JSON passes through untouched.
+        let mut params = serde_json::Map::new();
+        params.insert("message".into(), serde_json::json!("hello"));
+        params.insert("assignment_brief".into(), serde_json::json!("obey me"));
+        params.insert("nested".into(), serde_json::json!({"a": 1}));
+        let stripped = strip_untrusted_brief(params);
+        assert!(stripped.get("assignment_brief").is_none());
+        assert_eq!(stripped["message"], "hello");
+        assert_eq!(stripped["nested"]["a"], 1);
+    }
+
+    #[test]
+    fn dispatch_row_meta_keys_are_the_storage_contract() {        // The user service's `IntentMeta` deserializes this object at its
         // storage boundary and silently drops undeclared keys (design 27
         // decision 29). Pin the exact key set here so a rename or an
         // accidental re-add of `project_id` fails loudly; the matching
