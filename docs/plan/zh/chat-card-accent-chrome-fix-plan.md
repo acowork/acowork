@@ -199,7 +199,7 @@ B1/B2 是**单一改动点覆盖多视觉变体**：`cfg.borderCls` / `cfg.heade
 
 ## 8. 执行结果
 
-三个 commit 依次落地：`f901294a`（桌面端交互卡片）、`1cc9d467`（桌面端内联 chip/badge）、`84a53586`（移动端 task chip）。
+四个 commit 依次落地：`f901294a`（桌面端交互卡片）、`1cc9d467`（桌面端内联 chip/badge）、`84a53586`（移动端 task chip）、`7337feab`（修正 1cc9d467 顺带改深的徽章文字层级）。
 
 ### 8.1 红→绿双向验证留痕
 
@@ -211,6 +211,7 @@ B1/B2 是**单一改动点覆盖多视觉变体**：`cfg.borderCls` / `cfg.heade
 | `headerBgCls` → `bg-accent/10 text-accent-strong` | 1 红（头部），边框用例仍绿 |
 | TaskChip 边框 → `border-accent/30` | 2 红（TaskChip + 全量 accent 边框扫描） |
 | 移动端 `border` → `--color-tint-strong` | 1 红（边框轴），文字色与 pill 形状用例仍绿 |
+| 徽章文字 `text-text-tertiary` → `text-text-secondary` | 1 红（仅该条徽章用例），证明层级断言独立生效 |
 
 每条断言都只对自己那一根轴敏感，说明测试定位的是具体违规，不是整块 className 的模糊匹配。回退项全部已还原。
 
@@ -224,6 +225,13 @@ B1/B2 是**单一改动点覆盖多视觉变体**：`cfg.borderCls` / `cfg.heade
 | 移动端 `npx tsc --noEmit` | exit 0 |
 | `9b071b66` 完好性 | `GroupChatPanel.markdownTable.test.tsx` 未被触碰，随桌面端全量套件通过 |
 
-### 8.3 结论
+### 8.3 自检发现的一处越界
+
+最终 diff 自检时发现 `1cc9d467` 里的一处非预期改动：技能/回复徽章原本带
+`style={{ color: "var(--color-text-tertiary)" }}` 内联覆盖，实际渲染是 tertiary；
+删除内联样式时我把类名写成了 `text-text-secondary`，等于在修高亮色的过程中顺带把标签改深了一档。
+`7337feab` 已改回 `text-text-tertiary`，并在徽章用例里钉住文字层级。
+
+### 8.4 结论
 
 验收标准 §6 全部满足，除两项按 §4.2 / §2.1 的说明主动收窄：移动端颜色断言未落地（测试环境读不到样式表，代价大于收益）；`--color-accent` 在聊天目录仍保留 focus 态、按钮填充、选中圆点、spinner、命中高亮、emerald/amber 状态语义这些合法用途，未做全目录清零。
