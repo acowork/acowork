@@ -134,3 +134,19 @@
 - 记忆面板搜索每键发 HTTP 无 debounce（MemoryPanel.tsx:129-130）——行轻未爆，L3 纪律推广时的候选。
 - ChatPanel.tsx:348 断连横幅 1s interval、ExploreBlock.tsx:621 interval——影响面小，暂不动。
 - chat surface 流式（design 27 ceiling 的另一半）——独立需求，另立计划。
+
+## 7. 实施记录（L1/L2/L3 已落地）
+
+| 层 | commit | 结果 |
+|---|---|---|
+| L1 | `b0fa2876` | ChatMarkdown / RowView / GroupRowView 包 React.memo；handleAnswer/jumpToExec 收敛为 useCallback，调用点内联 lambda 经稳定引用（onJumpToExecStable）传入。新增 render-count 回归测试 3 个（keystroke 后行渲染次数为 0）。 |
+| L2 | `fdef0a3b` + `cca57368` | 抽通用壳 components/common/VirtualRowList.tsx（virtualizer + measureElement/ResizeObserver 纪律 + 模块级 measured-height cache + bottom-pin convergence + imperative handle）；AgentChatView/GroupChatPanel 接入（session-qualified key、key 重挂载、useLocateMessage 加 scrollToKey 兜底）。 |
+| L3 | `ab7f2118` | refresh 等价门控（append-only + 行不可变 → total+末条 seq 即内容指纹，非 force 等价则不 set）+ 行级结构共享 shareRowIdentities（按 seq 复用旧 row 对象）；wake 250ms 去抖合并 + 并行重拉。新增 chatSessionStore.refDiscipline.test.ts（引用不变断言）。 |
+
+**spike 结论（L2）**：VML 不包含 prepend 锚定——scrollHeight-delta 锚定在 scroll-container 层，由 useStickToBottom 的 prependSignal（chat）与 useScrollController 的 prepend detection（exec）各自实现；虚拟化下 scrollHeight = virtualizer.totalSize，两者继续有效。故壳不含 prepend 锚定，exec 面迁移另立计划。
+
+**实施中新发现的壳加固（cca57368）**：React 19 下父组件的 scroll-container ref 在子组件 layout effect 之后才挂载，virtualizer 首帧发现不到 scroll element 且不再复查，导致白屏。三处修复：late-ref 自愈（每元素身份一次被动重渲染）、viewport 测量 offsetHeight 为 0 时回退 clientHeight、已挂载但零高容器全量渲染（回退到非虚拟化行为，杜绝白屏）。
+
+**约定入文**：AGENTS.md 补两条——「chat transcript 渲染已 windowed+memoized（L1-L3）」与「identity-preserving store 更新」。
+
+**度量验收（§5 S1/S2/S3）待真机执行**：本环境为 jsdom，longtask/上屏延迟需桌面真机用 mainThreadProbe（lib/mainThreadProbe.ts）复测。
