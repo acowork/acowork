@@ -60,8 +60,10 @@ pub async fn create(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
     // ADR-076 §决策 11: REST 面 = 人类操作面 → creator 恒为 User。
-    // 派发不再由此处事件钩子触发（旧 Design 27 §5.4 行为）：统一由
-    // `dispatch::spawn_scanner` 按 `start_at` 到期扫描派发，见该模块注释。
+    // Dispatch is no longer triggered from here by an event hook (the old
+    // Design 27 §5.4 behavior): the single trigger source is
+    // `dispatch::spawn_scanner`, scanning for `start_at` due — see that
+    // module's docs.
     let task = state
         .store
         .create_task_as(&pid, input, created_by, MemberKind::User)
@@ -248,9 +250,11 @@ pub async fn review(
     // review 可由 human 完成（REST 路径默认 X-Actor=human）或 instance 完成（MCP 路径）
     let before = state.store.get_task(&tid).await?;
     let task = state.store.review_task(&tid, input.approved, reviewer).await?;
-    // Design 27 §5.4（修订）：创建审批**不再**在此即时派发——派发统一由
-    // `dispatch::spawn_scanner` 按 `start_at` 到期触发（审批通过后任务保持
-    // pending，扫描器在下一 tick 自然发现它）。终态跃迁仍需关闭执行上下文。
+    // Design 27 §5.4 (revised): creation approval does **not** dispatch
+    // immediately here — dispatch is triggered solely by
+    // `dispatch::spawn_scanner` on `start_at` due (the task stays `pending`
+    // after approval and the scanner picks it up on the next tick). A
+    // terminal transition still closes the execution context.
     if let Some(before) = before {
         close_task_context_if_terminal(&state, &before, &task).await;
     }

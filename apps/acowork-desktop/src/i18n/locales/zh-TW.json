@@ -1625,6 +1625,8 @@
       "edit": "編輯任務",
       "delete": "刪除任務",
       "dueDate": "截止日期",
+      "dispatchFailed": "派發失敗（第 {{attempts}} 次）：{{error}}",
+      "dispatchAbandoned": "派發已放棄（連續 5 次失敗）：{{error}}。重新指派或變更狀態後可重試。",
       "startDate": "開始日期",
       "assignee": "負責人",
       "priority": "優先級",

@@ -184,13 +184,21 @@ async fn main() {
     // group chats existed) get their group chat backfilled, idempotently.
     service.spawn_group_chat_backfill();
 
-    // start_at 到期派发扫描器（派发唯一触发源，见 `dispatch` 模块）
+    // Graceful shutdown: created before the scanner so it can hand the
+    // same flag to the dispatch loop; signals set the flag, main waits,
+    // then flushes the store.
+    let shutdown = acowork_core::shutdown::Shutdown::new();
+    acowork_core::shutdown::install_signal_handlers(shutdown.clone());
+
+    // The dispatch scanner — the single dispatch trigger source (see the
+    // `dispatch` module); stops between ticks on the shutdown flag.
     service.spawn_dispatch_scanner(
         std::time::Duration::from_millis(cli.dispatch_interval_ms),
         cli.dispatch_per_tick,
+        shutdown.clone(),
     );
 
-    // 把实际绑定端口写入 port_file（Gateway supervisor 读取）
+    // Write the actually-bound port to port_file (read by the Gateway supervisor).
     if let Some(path) = &cli.port_file {
         if let Err(e) = std::fs::write(path, addr.port().to_string()) {
             tracing::error!(path = %path.display(), error = %e, "Failed to write port file");
@@ -199,9 +207,6 @@ async fn main() {
         tracing::info!(path = %path.display(), port = addr.port(), "Port file written");
     }
 
-    // 优雅停机：等待信号 → flush store
-    let shutdown = acowork_core::shutdown::Shutdown::new();
-    acowork_core::shutdown::install_signal_handlers(shutdown.clone());
     while !shutdown.is_shutting_down() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

@@ -361,9 +361,10 @@ pub struct Task {
     /// agent 推送 intent；`None` = 立即（下一个 tick 派发）。
     #[serde(default)]
     pub start_at: Option<DateTime<Utc>>,
-    /// 派发幂等标记：扫描器投递成功后写入（design 27 §5.4 修订：
-    /// 派发时机由「指派事件」改为「开始时间到期」，单一触发源）。
-    /// 任务离开 `pending` 时清除，回退后允许重新派发。
+    /// Idempotence marker for dispatch: written by the scanner after a
+    /// successful delivery (design 27 §5.4 revision: the trigger moved from
+    /// "assignment event" to "start_at reached", single trigger source).
+    /// Cleared when the task leaves `pending`, so a rollback re-dispatches.
     #[serde(default)]
     pub dispatched_at: Option<DateTime<Utc>>,
     /// The dispatch generation's identity — the `message_id` the Gateway
@@ -376,6 +377,18 @@ pub struct Task {
     /// reassignment — a new generation gets a fresh identity.
     #[serde(default)]
     pub dispatch_message_id: Option<String>,
+    /// Consecutive dispatch failures within the current generation.
+    /// Persisted so a PM restart cannot re-arm the bounded backoff (the
+    /// in-process-only counter was the known ceiling in the scanner's
+    /// `ponytail:` note); cleared with the generation.
+    #[serde(default)]
+    pub dispatch_attempts: u32,
+    /// Last dispatch failure reason. Kept on the task record so "task
+    /// never dispatched" is a visible condition on the task surface
+    /// (REST / MCP / UI) instead of a scanner-only log line; cleared on a
+    /// successful dispatch and with the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_error: Option<String>,
     /// 前置依赖（跨树/跨项目皆可）。
     ///
     /// **派生字段** `is_blocked` / `blocked_by` 在 API 响应层计算，**不**写入此结构。
@@ -405,6 +418,8 @@ impl Task {
     pub fn clear_dispatch_generation(&mut self) {
         self.dispatched_at = None;
         self.dispatch_message_id = None;
+        self.dispatch_attempts = 0;
+        self.dispatch_error = None;
     }
 }
 
@@ -712,6 +727,8 @@ mod tests {
             start_at: None,
             dispatched_at: None,
             dispatch_message_id: None,
+            dispatch_attempts: 0,
+            dispatch_error: None,
             depends_on: vec![],
             attachments: vec![],
             result: None,

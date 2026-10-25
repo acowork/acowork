@@ -1725,6 +1725,8 @@
       "edit": "Edit task",
       "delete": "Delete task",
       "dueDate": "Due date",
+      "dispatchFailed": "Dispatch failed (attempt {{attempts}}): {{error}}",
+      "dispatchAbandoned": "Dispatch abandoned after 5 failed attempts: {{error}}. Reassign or change status to retry.",
       "startDate": "Start date",
       "assignee": "Assignee",
       "priority": "Priority",

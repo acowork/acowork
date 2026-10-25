@@ -73,6 +73,7 @@ function task(over: Partial<PmTaskResponse> = {}): PmTaskResponse {
     due_at: null,
     start_at: null,
     dispatched_at: null,
+    dispatch_attempts: 0,
     depends_on: [],
     attachments: [],
     result: null,
@@ -142,5 +143,45 @@ describe("TaskDetailDrawer header", () => {
 
     fireEvent.keyDown(tabs[tabs.length - 1], { key: "ArrowRight" });
     await waitFor(() => expect(selected(tabs[0])).toBe("true"));
+  });
+});
+
+describe("TaskDetailDrawer dispatch failure surface", () => {
+  beforeEach(() => {
+    mocks.detail = task();
+  });
+
+  it("shows the persisted failure while the task is still undispatched", () => {
+    mocks.detail = task({
+      status: "pending",
+      dispatched_at: null,
+      dispatch_attempts: 3,
+      dispatch_error: "gateway unreachable",
+    });
+    render(<TaskDetailDrawer taskId="t-1" onClose={vi.fn()} />);
+    // The mocked `t` echoes the key; the banner must be on the overview tab.
+    expect(screen.getByText("pm.task.dispatchFailed")).toBeTruthy();
+  });
+
+  it("shows the abandoned variant once attempts reach the bound", () => {
+    mocks.detail = task({
+      status: "pending",
+      dispatched_at: null,
+      dispatch_attempts: 5,
+      dispatch_error: "gateway unreachable",
+    });
+    render(<TaskDetailDrawer taskId="t-1" onClose={vi.fn()} />);
+    expect(screen.getByText("pm.task.dispatchAbandoned")).toBeTruthy();
+  });
+
+  it("stays silent after a successful dispatch", () => {
+    mocks.detail = task({
+      status: "pending",
+      dispatched_at: "2026-10-25T01:00:00Z",
+      dispatch_attempts: 0,
+      dispatch_error: null,
+    });
+    render(<TaskDetailDrawer taskId="t-1" onClose={vi.fn()} />);
+    expect(screen.queryByText("pm.task.dispatchFailed")).toBeNull();
   });
 });

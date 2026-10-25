@@ -908,6 +908,8 @@ impl PmStore for TreePmStore {
             start_at: input.start_at,
             dispatched_at: None,
             dispatch_message_id: None,
+            dispatch_attempts: 0,
+            dispatch_error: None,
             depends_on: input.depends_on,
             attachments: vec![],
             result: None,
@@ -1632,7 +1634,9 @@ impl TreePmStore {
         Ok(Some(minted))
     }
 
-    /// 派发成功后回写 `dispatched_at`（幂等：仅 pending 且未派发时写入）。
+    /// Stamp `dispatched_at` after a successful delivery (idempotent: only
+    /// a still-pending, undispatched task is written). Also clears the
+    /// failure bookkeeping — the generation succeeded.
     pub async fn mark_dispatched(&self, id: &TaskId) -> Result<()> {
         let entry = match self.index.read().by_id.get(id).cloned() {
             Some(e) => e,
@@ -1646,9 +1650,34 @@ impl TreePmStore {
         let now = Utc::now();
         task.dispatched_at = Some(now);
         task.updated_at = now;
+        task.dispatch_attempts = 0;
+        task.dispatch_error = None;
         atomic_write_json(&path, &task).await?;
         self.refresh_entry(&entry, id, &task);
         Ok(())
+    }
+
+    /// Persist one failed dispatch attempt for the current generation:
+    /// bumps `dispatch_attempts` and records the reason on the task record,
+    /// so the bounded-backoff state survives a PM restart and the task
+    /// surface can show *why* nothing was dispatched. Returns the new
+    /// attempt count. A task that left the dispatchable state in the
+    /// meantime is left untouched (returns its current count).
+    pub async fn record_dispatch_failure(&self, id: &TaskId, reason: &str) -> Result<u32> {
+        let entry = match self.index.read().by_id.get(id).cloned() {
+            Some(e) => e,
+            None => return Ok(0),
+        };
+        let path = entry.dir_path.join("task.json");
+        let mut task: Task = read_json(&path).await?;
+        if task.status != TaskStatus::Pending || task.dispatched_at.is_some() {
+            return Ok(task.dispatch_attempts);
+        }
+        task.dispatch_attempts += 1;
+        task.dispatch_error = Some(reason.to_string());
+        atomic_write_json(&path, &task).await?;
+        self.refresh_entry(&entry, id, &task);
+        Ok(task.dispatch_attempts)
     }
 
     fn refresh_entry(&self, entry: &TaskEntry, id: &TaskId, task: &Task) {
@@ -2877,7 +2906,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 首派：mint 并先于投递落盘。
+        // First dispatch: minted and persisted BEFORE the delivery attempt.
         let id1 = store
             .dispatch_identity(&t.id)
             .await
@@ -2891,16 +2920,28 @@ mod tests {
             "the identity is durable BEFORE the first delivery attempt"
         );
 
-        // 重试复用同一代次身份（Gateway 据此去重 chat 行与预算）。
+        // Retries reuse the same generation identity (the Gateway dedupes
+        // the chat row and the budget on it).
         assert_eq!(store.dispatch_identity(&t.id).await.unwrap(), Some(id1.clone()));
 
-        // PM 重启：重开 store + 索引重建后仍复用（磁盘事实，不是进程状态）。
+        // A failure is durable bookkeeping: the count and the reason live
+        // on the task record, not in the scanner process.
+        assert_eq!(store.record_dispatch_failure(&t.id, "gateway unreachable").await.unwrap(), 1);
+        assert_eq!(store.record_dispatch_failure(&t.id, "gateway unreachable").await.unwrap(), 2);
+
+        // PM restart: still reused after reopening the store and rebuilding
+        // the index (a disk fact, not process state).
         drop(store);
         let store = TreePmStore::new(cfg).await.unwrap();
         store.rebuild_index().await.unwrap();
         assert_eq!(store.dispatch_identity(&t.id).await.unwrap(), Some(id1.clone()));
+        let kept = store.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(kept.dispatch_attempts, 2, "the backoff count survives a restart");
+        assert_eq!(kept.dispatch_error.as_deref(), Some("gateway unreachable"));
 
-        // 状态跃迁（离开 pending 再回退）= 新一代：清旧身份，mint 新的。
+        // A status transition (leaving pending and rolling back) = new
+        // generation: the old identity, the count and the reason are all
+        // cleared, and a fresh identity is minted.
         store
             .update_task(
                 &t.id,
@@ -2920,7 +2961,41 @@ mod tests {
             after.dispatch_message_id.is_none() && after.dispatched_at.is_none(),
             "a generation transition clears the identity together with dispatched_at"
         );
+        assert_eq!(
+            (after.dispatch_attempts, after.dispatch_error.clone()),
+            (0, None),
+            "abandonment is per generation: the count resets with it"
+        );
         let id2 = store.dispatch_identity(&t.id).await.unwrap().expect("new generation mints");
         assert_ne!(id1, id2, "the new generation is a new identity");
+    }
+
+    #[tokio::test]
+    async fn successful_dispatch_clears_failure_bookkeeping() {
+        let cfg = test_config();
+        let store = TreePmStore::new(cfg).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+        let t = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("recover") },
+                "human",
+            )
+            .await
+            .unwrap();
+        store.record_dispatch_failure(&t.id, "transient").await.unwrap();
+        store.mark_dispatched(&t.id).await.unwrap();
+        let done = store.get_task(&t.id).await.unwrap().unwrap();
+        assert!(done.dispatched_at.is_some());
+        assert_eq!((done.dispatch_attempts, done.dispatch_error), (0, None),
+            "a delivered generation carries no stale failure onto the task surface");
     }
 }

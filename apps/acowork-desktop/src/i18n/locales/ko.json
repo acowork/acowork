@@ -1635,6 +1635,8 @@
       "edit": "작업 편집",
       "delete": "작업 삭제",
       "dueDate": "마감일",
+      "dispatchFailed": "디스패치 실패 ({{attempts}}회차): {{error}}",
+      "dispatchAbandoned": "5회 연속 실패로 디스패치를 중단했습니다: {{error}}. 재할당 또는 상태 변경 후 재시도할 수 있습니다.",
       "startDate": "시작일",
       "assignee": "담당자",
       "priority": "우선순위",

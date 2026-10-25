@@ -1634,6 +1634,8 @@
       "edit": "タスクを編集",
       "delete": "タスクを削除",
       "dueDate": "期限",
+      "dispatchFailed": "ディスパッチ失敗（{{attempts}} 回目）：{{error}}",
+      "dispatchAbandoned": "5 回连续失败后已放弃派发：{{error}}。重新指派或变更状态后可重试。",
       "startDate": "開始日",
       "assignee": "担当者",
       "priority": "優先度",

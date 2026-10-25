@@ -77,21 +77,57 @@ pub fn build_assignment_brief(task: &Task) -> String {
 /// every minute forever. The retry *identity* (`dispatch_message_id`) is
 /// persisted, so those five attempts land as ONE chat row and ONE budget
 /// slot, not five of each.
+/// How many consecutive failures abandon a dispatch generation. One fact,
+/// two consumers: `next_retry_delay` (timing) and the scanner loop (the
+/// persisted-attempt gate that replaces the old in-process abandon map).
+pub const MAX_DISPATCH_ATTEMPTS: u32 = 5;
+
 fn next_retry_delay(attempts: u32) -> Option<Duration> {
     match attempts {
         1 => Some(Duration::from_secs(60)),
         2 => Some(Duration::from_secs(5 * 60)),
         3 => Some(Duration::from_secs(15 * 60)),
         4 => Some(Duration::from_secs(30 * 60)),
+        n if n >= MAX_DISPATCH_ATTEMPTS => None,
         _ => None,
     }
 }
 
-/// Backoff state for one task, scoped to its current dispatch generation.
+/// Backoff timing for one task, scoped to its current dispatch generation.
+/// The attempt *count* lives on the task record (survives a PM restart);
+/// only the next-wake instant is in-process — losing it on restart just
+/// means one immediate (idempotent) retry.
 struct RetryState {
     identity: String,
-    attempts: u32,
     next_at: std::time::Instant,
+}
+
+/// Scanner counters since process start, surfaced in the PM `/health`
+/// details so "the scanner is alive but pushing nothing" is diagnosable
+/// without reading logs.
+#[derive(Debug, Default)]
+pub struct DispatchMetrics {
+    pub ticks: std::sync::atomic::AtomicU64,
+    pub pushed: std::sync::atomic::AtomicU64,
+    pub failed: std::sync::atomic::AtomicU64,
+    pub abandoned: std::sync::atomic::AtomicU64,
+}
+
+static METRICS: std::sync::LazyLock<DispatchMetrics> = std::sync::LazyLock::new(DispatchMetrics::default);
+
+fn bump(m: &std::sync::atomic::AtomicU64) {
+    m.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Snapshot of the scanner counters for the health route.
+pub fn metrics_snapshot() -> serde_json::Value {
+    use std::sync::atomic::Ordering::Relaxed;
+    serde_json::json!({
+        "ticks": METRICS.ticks.load(Relaxed),
+        "pushed": METRICS.pushed.load(Relaxed),
+        "failed": METRICS.failed.load(Relaxed),
+        "abandoned": METRICS.abandoned.load(Relaxed),
+    })
 }
 
 /// Spawn the dispatch scanner loop. No-op in standalone mode (no Gateway).
@@ -99,40 +135,40 @@ struct RetryState {
 /// `interval` is the tick period (second-level is plenty — dispatch latency
 /// tolerance is human-scale); `per_tick` caps intents pushed per tick so a
 /// large due-backlog drains gradually instead of flooding the Gateway's
-/// per-conversation request budget.
+/// per-conversation request budget; `shutdown` stops the loop between
+/// ticks on the service's graceful-shutdown signal.
 pub fn spawn_scanner(
     store: Arc<TreePmStore>,
     gateway: (String, Option<String>),
     interval: Duration,
     per_tick: usize,
+    shutdown: Arc<acowork_core::shutdown::Shutdown>,
 ) {
     let client = GatewayClient::new(gateway.0, gateway.1);
     tokio::spawn(async move {
-        // Per-task bounded backoff (see `next_retry_delay`). Both maps are
-        // keyed by task but carry the generation identity: a transition
-        // that clears the generation resets the bookkeeping, so "give up"
-        // is per generation, never per task forever.
-        //
-        // ponytail: the counters are in-process — a PM restart re-arms up
-        // to 5 attempts for a still-stuck task. Acceptable ceiling: each
-        // attempt is idempotent (one row, one budget slot), and the
-        // give-up `error!` is the operator signal. Upgrade path: persist
-        // attempt counts beside `dispatch_message_id` if ever needed.
+        // Per-task backoff *timing* is in-process; the attempt *count* and
+        // the last error live on the task record (`dispatch_attempts` /
+        // `dispatch_error`), so a PM restart neither re-arms the bounded
+        // backoff nor loses why the task sits undispatched. Each attempt
+        // is idempotent anyway (one chat row, one budget slot per
+        // generation).
         let mut retries: std::collections::HashMap<crate::types::TaskId, RetryState> =
-            std::collections::HashMap::new();
-        let mut abandoned: std::collections::HashMap<crate::types::TaskId, String> =
             std::collections::HashMap::new();
         let mut tick = tokio::time::interval(interval);
         loop {
             tick.tick().await;
+            bump(&METRICS.ticks);
+            if shutdown.is_shutting_down() {
+                tracing::info!("PM dispatch scanner stopped (graceful shutdown)");
+                return;
+            }
             let due = store.dispatch_due_ids(Utc::now());
-            // Prune bookkeeping for tasks that left the candidate set
-            // (claimed, cancelled, unassigned…) so the maps cannot grow
-            // without bound. Abandoned tasks are still due, so they stay.
+            // Prune backoff bookkeeping for tasks that left the candidate
+            // set (claimed, cancelled, unassigned…) so the map cannot grow
+            // without bound.
             let due_set: std::collections::HashSet<_> =
                 due.iter().cloned().collect();
             retries.retain(|tid, _| due_set.contains(tid));
-            abandoned.retain(|tid, _| due_set.contains(tid));
             if due.is_empty() {
                 continue;
             }
@@ -171,14 +207,16 @@ pub fn spawn_scanner(
                         continue;
                     }
                 };
-                // A new generation resets backoff and abandonment.
-                if retries.get(&tid).is_some_and(|s| s.identity != identity)
-                    || abandoned.get(&tid).is_some_and(|i| *i != identity)
-                {
+                // A new generation resets the in-process backoff timing;
+                // the persisted attempt count was already zeroed with the
+                // generation (`clear_dispatch_generation`).
+                if retries.get(&tid).is_some_and(|s| s.identity != identity) {
                     retries.remove(&tid);
-                    abandoned.remove(&tid);
                 }
-                if abandoned.contains_key(&tid) {
+                // Abandonment gate: derived from the persisted count, so
+                // it survives restarts. The `error!` was logged when the
+                // final attempt was recorded; stay quiet here.
+                if task.dispatch_attempts >= MAX_DISPATCH_ATTEMPTS {
                     continue;
                 }
                 if retries.get(&tid).is_some_and(|s| s.next_at > now) {
@@ -204,10 +242,21 @@ pub fn spawn_scanner(
                         if let Err(e) = store.mark_dispatched(&tid).await {
                             tracing::warn!(task = %tid, error = %e, "failed to stamp dispatched_at; may re-dispatch");
                         }
+                        bump(&METRICS.pushed);
                         dispatched += 1;
                     }
                     Err(reason) => {
-                        let attempts = retries.get(&tid).map_or(1, |s| s.attempts + 1);
+                        // Persist the failure first: the count survives a
+                        // restart and the reason lands on the task record,
+                        // visible on every task surface.
+                        let attempts = store
+                            .record_dispatch_failure(&tid, &reason)
+                            .await
+                            .unwrap_or_else(|e| {
+                                tracing::warn!(task = %tid, error = %e, "cannot persist dispatch failure");
+                                task.dispatch_attempts + 1
+                            });
+                        bump(&METRICS.failed);
                         match next_retry_delay(attempts) {
                             Some(delay) => {
                                 tracing::warn!(
@@ -221,7 +270,6 @@ pub fn spawn_scanner(
                                     tid.clone(),
                                     RetryState {
                                         identity,
-                                        attempts,
                                         next_at: now + delay,
                                     },
                                 );
@@ -236,7 +284,7 @@ pub fn spawn_scanner(
                                      the task stays undispatched until its generation \
                                      changes (reassign / status transition)"
                                 );
-                                abandoned.insert(tid.clone(), identity);
+                                bump(&METRICS.abandoned);
                                 retries.remove(&tid);
                             }
                         }

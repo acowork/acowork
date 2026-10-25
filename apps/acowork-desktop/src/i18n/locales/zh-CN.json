@@ -1742,6 +1742,8 @@
       "edit": "编辑任务",
       "delete": "删除任务",
       "dueDate": "截止日期",
+      "dispatchFailed": "派发失败（第 {{attempts}} 次）：{{error}}",
+      "dispatchAbandoned": "派发已放弃（连续 5 次失败）：{{error}}。重新指派或变更状态后可重试。",
       "startDate": "开始日期",
       "assignee": "负责人",
       "priority": "优先级",

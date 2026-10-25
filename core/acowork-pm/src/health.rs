@@ -22,6 +22,7 @@ pub fn health_route(data_dir: PathBuf) -> axum::Router {
                 process: "acowork-pm".to_string(),
                 details: Some(json!({
                     "data_dir": data_dir.display().to_string(),
+                    "dispatch": crate::dispatch::metrics_snapshot(),
                 })),
             })
         }),
