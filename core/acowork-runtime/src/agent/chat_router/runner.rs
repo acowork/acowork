@@ -567,13 +567,10 @@ async fn run_turn(
                 // an empty id is what tells the surface there is nothing to
                 // open (design 29 §7.2).
                 "",
-                &IntentTurnContext::new(
-                    &envelope.message_id,
-                    &envelope.conversation_id,
-                    &envelope.source_chat_session_id,
-                    &envelope.from,
-                    &envelope.action,
-                ),
+                &IntentTurnContext::new(&envelope.message_id, &envelope.from, &envelope.action),
+                // The router's fallback is a finished answer, not a turn that
+                // paused or was stopped.
+                crate::agent::intent_turn::TurnOutcome::Completed,
                 &body,
             )
             .await;
@@ -635,13 +632,16 @@ async fn run_turn(
                             SessionMessage::Intent {
                                 content,
                                 message_id: envelope.message_id.clone(),
-                                conversation_id: envelope.conversation_id.clone(),
-                                source_chat_session_id: chat_id.clone(),
+                                surface: crate::agent::intent_turn::TurnSurface::new(
+                                    chat_id.clone(),
+                                    envelope.message_id.clone(),
+                                    &envelope.from,
+                                    envelope.has_human,
+                                ),
                                 from: envelope.from.clone(),
                                 action: envelope.action.clone(),
                                 repo: envelope.repo.clone(),
                                 kind: envelope.kind.clone(),
-                                has_human: envelope.has_human,
                                 chat_attachment_ids: envelope.chat_attachment_ids.clone(),
                                 in_reply_to: envelope.in_reply_to.clone(),
                                 // The router only takes Chat-originated

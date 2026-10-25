@@ -987,9 +987,9 @@ async fn dispatch_inbound(
                         attached_items,
                         content_parts,
                         // Written straight against the execution surface: no
-                        // Chat row precedes it, so the echo stays standalone
-                        // (ADR-100 D12).
-                        chat_trigger_message_id: None,
+                        // Chat row precedes it, so there is nothing to answer
+                        // and no card to write (ADR-100 D12).
+                        surface: Default::default(),
                     },
                 )
                 .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))
@@ -1264,8 +1264,13 @@ async fn deliver_pinned_turn(
                 active_skill,
                 attached_items,
                 content_parts,
-                // The Chat row this turn answers — the echo owes it a reply.
-                chat_trigger_message_id: Some(env.message_id.clone()),
+                // ADR-100 follow-up: the pinned turn's Chat obligations come
+                // from the envelope exactly like the Intent transport's — one
+                // producer, so the row this turn answers, the human who can
+                // answer a card, and the chat's human-presence fact can no
+                // longer be dropped by the conversion that switches it to the
+                // ChatMessage transport.
+                surface: crate::agent::intent_turn::TurnSurface::from_envelope(env),
             },
         )
         .is_ok()
@@ -1553,18 +1558,26 @@ async fn route_intent_legacy(
         );
     }
     let opened_new = target.1;
+    // ADR-100 follow-up: this turn's Chat obligations, produced from the same
+    // envelope fields the route already read. One producer for every
+    // transport: the loop's card writer, the human-awaiting gate and the
+    // terminal echo all read this value instead of re-deriving it.
+    let surface = crate::agent::intent_turn::TurnSurface::new(
+        source_chat_session_id,
+        message_id.clone(),
+        &from,
+        has_human,
+    );
     let sent = session_manager.lock().await.send_to_session(
         &target.0,
         SessionMessage::Intent {
             content,
             message_id,
-            conversation_id,
-            source_chat_session_id,
+            surface,
             from,
             action,
             repo,
             kind,
-            has_human,
             chat_attachment_ids,
             in_reply_to,
             assignment_brief,

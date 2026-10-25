@@ -24,6 +24,38 @@ use crate::debug::DebugHandles;
 use crate::debug::DebugObserverImpl;
 use crate::usecases::attachment::on_disk_name;
 
+/// ADR-100 follow-up: the turn-end obligations BOTH transports share, in one
+/// place. A turn that ends without this leaks its Chat facts into the next one
+/// (the surface would still point at the previous trigger row, so a card
+/// written later answers the wrong question) and leaves an unanswered card
+/// rendering as a live button forever.
+///
+/// Returns the §7.1 response context the turn owed (if any) and how the turn
+/// ended, for the arm's own terminal writer. Cards are closed BEFORE the
+/// surface is cleared, since the closure needs to know which Chat they live in.
+async fn end_turn_obligations(
+    agent_loop: &mut crate::agent::loop_::AgentLoop,
+) -> (
+    Option<crate::agent::intent_turn::IntentTurnContext>,
+    crate::agent::intent_turn::TurnOutcome,
+) {
+    agent_loop.pending_intent = None;
+    let ctx = agent_loop.chat_writeback.take();
+    let outcome = agent_loop.turn_outcome;
+    // §5.5.4 safety net: an approval / ask_question card still open now
+    // belongs to a finished turn and can never be answered — close it so the
+    // Chat surface drops the card instead of offering a dead button forever.
+    // (`pause` cards are intentionally kept: they outlive the turn by design
+    // and are closed by the answering turn.)
+    if let Some(chat) = agent_loop.turn_surface.echo_chat().map(str::to_string) {
+        agent_loop
+            .close_chat_cards_of_kind(&["approval", "ask_question"], Some(&chat), "turn_ended")
+            .await;
+    }
+    agent_loop.turn_surface = Default::default();
+    (ctx, outcome)
+}
+
 /// A Chat attachment the Runtime pulled over node-auth HTTP from the
 /// Gateway (design 27 §4.2.1). Bytes never ride the MQTT envelope — the
 /// Intent carries ids only; this is what a successful pull yields.
@@ -58,16 +90,17 @@ pub enum SessionMessage {
         /// When present, the agent loop constructs a ChatMessage::user_multimodal()
         /// instead of ChatMessage::user(), enabling image inputs to flow to the LLM.
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
-        /// ADR-100 D12: `Some(id)` when this turn's human message already has
-        /// its own row in the session's Chat transcript — a pinned turn, sent
-        /// from the execution view but written through the Chat entry point,
-        /// carries that row's id. The continuation echo then threads under it
-        /// (`in_reply_to`), so the chat reads as one round: the question asked
-        /// here and the answer that came back from it. `None` = composed
-        /// straight against the execution surface, which owes the chat no
-        /// answer to a visible row — the echo stays the standalone `exec:`
-        /// keyed line it has always been.
-        chat_trigger_message_id: Option<String>,
+        /// ADR-100 D12 / follow-up: the Chat surface this turn owes its
+        /// visible behaviour to. A pinned turn (sent from the execution view
+        /// but written through the Chat entry point) brings the Chat session,
+        /// its own row id — so the terminal echo threads under it and the
+        /// turn's interactive cards have somewhere to land — the sender who
+        /// can answer them, and the Gateway's human-presence fact. A turn
+        /// composed straight against the execution surface brings none of it:
+        /// no row to answer, so no card, and the echo stays the standalone
+        /// `exec:` keyed line (D9) in the chat the session is bound to.
+        /// Produced by `TurnSurface::from_envelope`; see ADR-100 follow-up.
+        surface: crate::agent::intent_turn::TurnSurface,
     },
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
@@ -195,14 +228,16 @@ pub enum SessionMessage {
         /// Stable envelope id — also the write-back path coordinate for
         /// requests (`POST /api/intents/{request_id}/response`).
         message_id: String,
-        conversation_id: String,
-        source_chat_session_id: String,
+        /// ADR-100 follow-up: the Chat surface this turn owes its cards, its
+        /// human-awaiting gate and its Chat rows to, produced from the
+        /// envelope by `TurnSurface::from_envelope`. Carries what used to be
+        /// the loose `source_chat_session_id` + `has_human` pair.
+        surface: crate::agent::intent_turn::TurnSurface,
         /// Sender instance (write-back `target`).
         from: String,
         action: String,
         repo: String,
         kind: String,
-        has_human: Option<bool>,
         /// Chat attachment ids from a human Chat message. Runtime pulls from Gateway HTTP.
         chat_attachment_ids: Vec<String>,
         /// Design 27 §5.3.1: the durable `user_message` row the attachments
@@ -233,7 +268,7 @@ impl std::fmt::Debug for SessionMessage {
                 active_skill,
                 attached_items,
                 content_parts,
-                chat_trigger_message_id,
+                surface,
             } => f
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
@@ -244,7 +279,8 @@ impl std::fmt::Debug for SessionMessage {
                     &attached_items.as_ref().map(|c| c.len()).unwrap_or(0),
                 )
                 .field("has_content_parts", &content_parts.is_some())
-                .field("has_chat_trigger", &chat_trigger_message_id.is_some())
+                .field("chat", &surface.chat_session_id)
+                .field("has_chat_trigger", &!surface.trigger_message_id.is_empty())
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::UpdateRuntimeConfig(overrides) => f
@@ -967,7 +1003,7 @@ impl SessionTask {
                     active_skill,
                     attached_items,
                     content_parts,
-                    chat_trigger_message_id,
+                    surface,
                 }) => {
                     let has_attached = attached_items.as_ref().is_some_and(|a| !a.is_empty());
                     let has_content_parts = content_parts.as_ref().is_some_and(|p| !p.is_empty());
@@ -1131,12 +1167,31 @@ impl SessionTask {
                     // success, empty answer, abort, attachment failure, loop
                     // error — can close the human's `user_message`. Own value, not
                     // a borrow: the agent loop takes `&mut` below.
-                    let echo_chat_id = agent_loop
-                        .session
-                        .conversation
-                        .as_ref()
-                        .and_then(|c| c.chat_session_id())
-                        .filter(|c| !c.is_empty());
+                    // ADR-100 follow-up: the Chat this turn is accountable to.
+                    // A pinned turn says so itself; a turn composed straight
+                    // against the execution surface has no row of its own but
+                    // may still sit in a chat-bound session, whose terminal
+                    // echo lands there (D9). With no trigger row and no answer
+                    // coordinate its `card_target()` stays `None`, so it writes
+                    // no card — the D12 distinction, now expressed by the
+                    // surface instead of a re-read of the binding.
+                    let mut surface = surface;
+                    if surface.chat_session_id.is_empty()
+                        && let Some(bound) = agent_loop
+                            .session
+                            .conversation
+                            .as_ref()
+                            .and_then(|c| c.chat_session_id())
+                            .filter(|c| !c.is_empty())
+                    {
+                        surface.chat_session_id = bound;
+                    }
+                    let echo_chat_id = surface.echo_chat().map(str::to_string);
+                    let echo_trigger = if surface.trigger_message_id.is_empty() {
+                        None
+                    } else {
+                        Some(surface.trigger_message_id.clone())
+                    };
 
                     let final_content_parts: Option<
                         Vec<acowork_core::providers::traits::ContentPart>,
@@ -1170,7 +1225,7 @@ impl SessionTask {
                                     // error_type never enter a transcript.
                                     if let (Some(chat_id), Some(trigger)) = (
                                         echo_chat_id.as_deref(),
-                                        chat_trigger_message_id.as_deref(),
+                                        echo_trigger.as_deref(),
                                     ) {
                                         echo_terminal_row(
                                             &agent_loop.core.config.agent_instance_id,
@@ -1209,6 +1264,10 @@ impl SessionTask {
                         _ => content_parts,
                     };
 
+                    // ADR-100 follow-up: the loop reads this turn's Chat
+                    // obligations from one place — set here, released by
+                    // `end_turn_obligations` when the turn is over.
+                    agent_loop.turn_surface = surface;
                     match agent_loop
                         .run(
                             &enriched_content,
@@ -1278,7 +1337,7 @@ impl SessionTask {
                             // and without it every stop/continue cycle after
                             // the first is invisible in the transcript. An
                             // ordinary empty answer leaves no row.
-                            let aborted = agent_loop.turn_aborted;
+                            let outcome = agent_loop.turn_outcome;
                             let echo_text = crate::agent::intent_turn::truncate_response_body(
                                 &echo_body,
                                 64 * 1024,
@@ -1290,9 +1349,9 @@ impl SessionTask {
                             // even when the model had nothing to say — otherwise
                             // the conversation stays "in progress" over a run that
                             // finished.
-                            let owes_a_row = aborted
+                            let owes_a_row = outcome != crate::agent::intent_turn::TurnOutcome::Completed
                                 || !echo_text.trim().is_empty()
-                                || chat_trigger_message_id.is_some();
+                                || echo_trigger.is_some();
                             if let Some(chat_id) = echo_chat_id.as_deref()
                                 && owes_a_row
                             {
@@ -1303,9 +1362,9 @@ impl SessionTask {
                                     chat_id,
                                     &echo_message_id,
                                     &session_id,
-                                    if aborted { "aborted" } else { "completed" },
+                                    outcome.as_str(),
                                     &echo_text,
-                                    chat_trigger_message_id.as_deref(),
+                                    echo_trigger.as_deref(),
                                 )
                                 .await;
                             }
@@ -1324,7 +1383,7 @@ impl SessionTask {
                             // means an in-progress round that never resolves.
                             if let (Some(chat_id), Some(trigger)) = (
                                 echo_chat_id.as_deref(),
-                                chat_trigger_message_id.as_deref(),
+                                echo_trigger.as_deref(),
                             ) {
                                 echo_terminal_row(
                                     &agent_loop.core.config.agent_instance_id,
@@ -1358,17 +1417,21 @@ impl SessionTask {
                             }
                         }
                     }
+
+                    // ADR-100 follow-up: release this turn's Chat obligations
+                    // (close its still-open cards, clear the surface) through
+                    // the same function the Intent arm uses — a pinned turn
+                    // writes cards now, so it needs their safety net too.
+                    end_turn_obligations(&mut agent_loop).await;
                 }
                 Some(SessionMessage::Intent {
                     content,
                     message_id,
-                    conversation_id,
-                    source_chat_session_id,
+                    surface,
                     from,
                     action,
                     repo: _,
                     kind,
-                    has_human,
                     chat_attachment_ids,
                     in_reply_to,
                     assignment_brief,
@@ -1382,6 +1445,12 @@ impl SessionTask {
                     // Origin-gated a second time (see `brief_for_system_block`):
                     // a stored Intent whose kind is not a PM dispatch can
                     // never feed the system block, whatever filled the field.
+                    // The Chat this turn is accountable to, kept as a local so
+                    // the pre-turn bookkeeping (queue row, pause-card
+                    // supersession, attachment pull) can read it while the loop
+                    // borrows are still free. Same value the loop sees through
+                    // `turn_surface`.
+                    let chat_id = surface.chat_session_id.clone();
                     let brief = crate::agent::intent_turn::brief_for_system_block(
                         &kind,
                         &assignment_brief,
@@ -1393,7 +1462,7 @@ impl SessionTask {
                     // starting its turn — drop its queue row so the execution
                     // UI stops showing it as waiting. A no-op when it reached
                     // an idle session and was never recorded as pending.
-                    if !source_chat_session_id.is_empty()
+                    if !chat_id.is_empty()
                         && let Some(conv) = agent_loop.session.conversation.as_ref()
                     {
                         conv.remove_pending_intent(&message_id);
@@ -1410,13 +1479,7 @@ impl SessionTask {
                     let (responder, write_back) =
                         crate::agent::intent_turn::turn_kind_semantics(&kind, &message_id);
                     let turn_ctx = || {
-                        crate::agent::intent_turn::IntentTurnContext::new(
-                            &message_id,
-                            &conversation_id,
-                            &source_chat_session_id,
-                            &from,
-                            &action,
-                        )
+                        crate::agent::intent_turn::IntentTurnContext::new(&message_id, &from, &action)
                     };
                     agent_loop.pending_intent = if responder { Some(turn_ctx()) } else { None };
                     agent_loop.chat_writeback = if write_back { Some(turn_ctx()) } else { None };
@@ -1428,17 +1491,18 @@ impl SessionTask {
                     // now derives its waiting indicator from the unanswered
                     // trigger (frontend `pendingTurn`), and this turn's own
                     // terminal write-back closes it.
-                    // §5.5.4 answerability for this turn (plan 2b.3); reset
-                    // with the turn like the two fields above.
-                    agent_loop.chat_has_human = has_human;
+                    // ADR-100 follow-up: the Chat obligations this turn carries
+                    // (card coordinates, answerability, terminal echo). The
+                    // Intent transport used to hand over only the
+                    // answerability half of this and keep the rest in fields
+                    // the card writer could not see.
+                    agent_loop.turn_surface = surface;
                     // §5.5.4: this turn is the answer to any pause card still
                     // showing in the same Chat session — close it before the
                     // new turn's own rows land, so the read-side projection
                     // never sees "continue?" alongside a running round.
-                    if !source_chat_session_id.is_empty() {
-                        agent_loop
-                            .supersede_pause_cards(&source_chat_session_id)
-                            .await;
+                    if !chat_id.is_empty() {
+                        agent_loop.supersede_pause_cards(&chat_id).await;
                     }
                     // The model-facing message starts as the user's verbatim
                     // text; the auto-title and the JSONL `user` entry stay
@@ -1459,7 +1523,7 @@ impl SessionTask {
                     let intent_attached_items: Option<Vec<acowork_core::protocol::AttachedItem>> =
                         if chat_attachment_ids.is_empty() {
                             None
-                        } else if source_chat_session_id.is_empty() {
+                        } else if chat_id.is_empty() {
                             tracing::warn!(
                                 session_id = %session_id,
                                 message_id = %message_id,
@@ -1496,7 +1560,7 @@ impl SessionTask {
                                     &gateway_host,
                                     &node_token,
                                     &instance,
-                                    &source_chat_session_id,
+                                    &chat_id,
                                     aid,
                                     attach_coord,
                                 )
@@ -1565,26 +1629,9 @@ impl SessionTask {
                             intent_attached_items.as_deref(),
                         )
                         .await;
-                    // Take both fields back regardless of outcome — the
-                    // turn is over and the next one must not inherit them.
-                    // The write-back context (D-C/C1) is what the turn-end
-                    // posting reads.
-                    agent_loop.pending_intent = None;
-                    agent_loop.chat_has_human = None;
-                    let ctx = agent_loop.chat_writeback.take();
-                    // §5.5.4 safety net: an approval / ask_question card that
-                    // is still open now belongs to a finished turn and can
-                    // never be answered — close it so the Chat surface drops
-                    // the card instead of offering a dead button forever.
-                    // (`pause` cards are intentionally kept: they outlive the
-                    // turn by design and are closed by the answering turn.)
-                    agent_loop
-                        .close_chat_cards_of_kind(
-                            &["approval", "ask_question"],
-                            Some(&source_chat_session_id),
-                            "turn_ended",
-                        )
-                        .await;
+                    // Release this turn's Chat obligations and take back the
+                    // §7.1 response context (D-C/C1) the write-back posts.
+                    let (ctx, outcome) = end_turn_obligations(&mut agent_loop).await;
                     match result {
                         Ok(response) => {
                             if let Some(ref tx) = chunk_tx {
@@ -1624,6 +1671,7 @@ impl SessionTask {
                                         .unwrap_or_default(),
                                     &session_id,
                                     &ctx,
+                                    outcome,
                                     &body,
                                 )
                                 .await
@@ -1661,10 +1709,9 @@ impl SessionTask {
                                     );
                                 }
                             }
-                            if let Some(mut ctx) = ctx {
+                            if let Some(ctx) = ctx {
                                 // §7.1 failed row: user-facing summary only,
                                 // no internal detail / stack on the wire.
-                                ctx.outcome = "failed".to_string();
                                 let _ = crate::agent::intent_turn::post_intent_response(
                                     &agent_loop.core.config.agent_instance_id,
                                     &agent_loop
@@ -1681,6 +1728,7 @@ impl SessionTask {
                                         .unwrap_or_default(),
                                     &session_id,
                                     &ctx,
+                                    crate::agent::intent_turn::TurnOutcome::Failed,
                                     &user_message,
                                 )
                                 .await;

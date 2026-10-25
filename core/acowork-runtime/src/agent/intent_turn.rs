@@ -13,6 +13,8 @@
 use std::time::Duration;
 
 use acowork_core::defaults::GATEWAY_HTTP_PORT;
+
+use super::inbound::IntentEnvelope;
 use serde_json::Value;
 
 /// Bound on the best-effort Gateway writes. All three calls below are
@@ -27,37 +29,148 @@ const GATEWAY_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 /// relay rather than a JSON row.
 const GATEWAY_PULL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The Chat surface a turn owes its visible behaviour to (ADR-099 §2.2
+/// generalised; ADR-100 D12).
+///
+/// Every obligation a turn has toward a Chat session — where an interactive
+/// card is written, who may answer it, whether the turn may block on a human
+/// at all, which Chat row the terminal echo belongs to — reads these facts
+/// and nothing else. A turn carries exactly one, produced at the transport
+/// boundary from the envelope fields the Gateway already stamped.
+///
+/// This struct exists because its absence was a root cause, not a symptom:
+/// the same facts used to be re-derived ad hoc per consumer (`chat_writeback`
+/// standing in for "is there a chat", `echo_chat_id` re-reading the session
+/// binding, `has_human` copied into a separate field), so any transport that
+/// dropped one of them silently turned a consumer's "no chat here" branch
+/// into real behaviour — a card that never appears, a pause that aborts
+/// instead of waiting. A consumer may not derive these facts from anything
+/// else; a new transport or dispatch scenario produces a `TurnSurface` (or
+/// states explicitly why it has no chat obligations).
+#[derive(Debug, Clone, Default)]
+pub struct TurnSurface {
+    /// The Chat session this turn is accountable to. Empty = none.
+    pub chat_session_id: String,
+    /// The Chat row that triggered the turn — an interactive card's
+    /// `in_reply_to` and the coordinate an answer resolves against (§5.5.4).
+    /// Empty = the turn has no row to hang a card on.
+    pub trigger_message_id: String,
+    /// Who may answer this turn's cards: the sender of the triggering row.
+    /// `None` = the transport carried no sender, so a card would be
+    /// unanswerable — it is not written rather than left as a dead button.
+    pub answerable_by: Option<String>,
+    /// Whether the accountable chat has a human participant, as derived by
+    /// the Gateway from the session it bound to (never from the sender).
+    /// `None` = unknown → fail open (interactive tools stay available, no
+    /// card is written). `Some(false)` = agent-to-agent: a turn must not
+    /// block on a human (the §2.2 availability gate, now transport-agnostic).
+    pub has_human: Option<bool>,
+}
+
+impl TurnSurface {
+    /// The single producer: turn-to-chat accountability is decided here,
+    /// from the envelope, for every transport (Chat write endpoint, pinned
+    /// turn, Intent delivery). A turn bound to a Chat with a known sender
+    /// owes its cards and its terminal echo to that Chat; the kind of the
+    /// turn does not change that — it changes only whether the turn must
+    /// *reply* to another agent, which is [`IntentTurnContext`]'s business.
+    pub fn from_envelope(env: &IntentEnvelope) -> Self {
+        Self::new(
+            env.source_chat_session_id.clone(),
+            env.message_id.clone(),
+            &env.from,
+            env.has_human,
+        )
+    }
+
+    /// The field-level form of [`Self::from_envelope`], for a caller that has
+    /// already destructured the envelope (the deterministic Intent route).
+    /// Same rule, one place: a Chat-bound turn with a known sender owes that
+    /// Chat its cards and its terminal echo.
+    pub fn new(
+        chat_session_id: String,
+        trigger_message_id: String,
+        from: &str,
+        has_human: Option<bool>,
+    ) -> Self {
+        Self {
+            chat_session_id,
+            trigger_message_id,
+            answerable_by: (!from.is_empty()).then(|| from.to_string()),
+            has_human,
+        }
+    }
+
+    /// Whether this turn may write an interactive card, and where: the
+    /// `(chat_session_id, trigger_message_id, answerable_by)` triple §5.5.4
+    /// requires. `None` when any coordinate is missing.
+    pub fn card_target(&self) -> Option<(&str, &str, &str)> {
+        if self.chat_session_id.is_empty() || self.trigger_message_id.is_empty() {
+            return None;
+        }
+        self.answerable_by
+            .as_deref()
+            .map(|a| (self.chat_session_id.as_str(), self.trigger_message_id.as_str(), a))
+    }
+
+    /// The Chat this turn's terminal row is echoed to, if any.
+    pub fn echo_chat(&self) -> Option<&str> {
+        (!self.chat_session_id.is_empty()).then_some(self.chat_session_id.as_str())
+    }
+}
+
+/// How a turn ended, in the Chat-facing vocabulary: the status of the
+/// terminal row (ADR-100 D9) and of the §7.1 write-back.
+///
+/// One field on the loop carries it and both terminal writers read it. Before
+/// it existed the loop held a `turn_aborted` bool for the echo while the
+/// write-back context held a parallel `outcome` string mutated from inside
+/// the loop — two mirrors of one fact, and the transport that only had the
+/// bool echoed a turn paused *waiting for a human* as `aborted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    Completed,
+    Aborted,
+    /// Ended waiting on a human answer (§5.5.4): the open card is the answer
+    /// entry and the answer opens the next turn.
+    Waiting,
+    /// The loop returned `Err` — the terminal row is `failed`.
+    Failed,
+}
+
+impl TurnOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TurnOutcome::Completed => "completed",
+            TurnOutcome::Aborted => "aborted",
+            TurnOutcome::Waiting => "waiting",
+            TurnOutcome::Failed => "failed",
+        }
+    }
+}
+
 /// The request a responder turn must answer. Built when a `request`
 /// IntentMessage starts a turn; consumed at turn end for the write-back.
+///
+/// This is the §7.1 **response channel** to the initiator agent — after
+/// ADR-099 it means exactly that and nothing more. It used to double as the
+/// "is there a Chat" signal for card writing and the human-awaiting gate;
+/// those obligations moved to [`TurnSurface`], which every transport carries.
 #[derive(Debug, Clone)]
 pub struct IntentTurnContext {
     /// The request's stable message id — the write-back coordinate.
     pub request_id: String,
-    pub conversation_id: String,
-    pub source_chat_session_id: String,
     /// Sender instance (the response is addressed back to it).
     pub from: String,
     pub action: String,
-    /// §7.1 outcome, mutated by the loop when a human-awaiting pause is
-    /// refused. Default "completed".
-    pub outcome: String,
 }
 
 impl IntentTurnContext {
-    pub fn new(
-        request_id: &str,
-        conversation_id: &str,
-        source_chat_session_id: &str,
-        from: &str,
-        action: &str,
-    ) -> Self {
+    pub fn new(request_id: &str, from: &str, action: &str) -> Self {
         Self {
             request_id: request_id.to_string(),
-            conversation_id: conversation_id.to_string(),
-            source_chat_session_id: source_chat_session_id.to_string(),
             from: from.to_string(),
             action: action.to_string(),
-            outcome: "completed".to_string(),
         }
     }
 }
@@ -341,6 +454,7 @@ pub async fn post_intent_response(
     node_token: &str,
     session_id: &str,
     ctx: &IntentTurnContext,
+    outcome: TurnOutcome,
     body: &str,
 ) -> Result<(), String> {
     let url = format!(
@@ -355,7 +469,7 @@ pub async fn post_intent_response(
         "params": { "message": body },
         "kind": "response",
         "in_reply_to": ctx.request_id,
-        "status": ctx.outcome,
+        "status": outcome.as_str(),
     });
     let mut req = reqwest::Client::new()
         .post(&url)
@@ -482,6 +596,85 @@ pub fn truncate_response_body(body: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An envelope of the real wire shape (every field but from/action/params
+    /// is `#[serde(default)]`), so a producer-side field rename cannot quietly
+    /// become a test-side one.
+    fn env(from: &str, chat: &str, has_human: Option<bool>) -> IntentEnvelope {
+        serde_json::from_value(serde_json::json!({
+            "from": from,
+            "action": "chat",
+            "params": { "message": "hi" },
+            "message_id": "m-1",
+            "source_chat_session_id": chat,
+            "has_human": has_human,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn pinned_turn_surface_keeps_its_card_target() {
+        // The root cause this pins: a turn pinned to an execution session was
+        // converted onto the ChatMessage transport carrying content + row id
+        // only, and the card writer's guard read `chat_writeback` — a field
+        // that path never set. `ask_user_question` then wrote no Chat card
+        // while the execution dialog worked fine. The surface is produced
+        // from the envelope by BOTH transports, so the coordinates survive
+        // the conversion.
+        let s = TurnSurface::from_envelope(&env("user-1", "chat-9", Some(true)));
+        assert_eq!(s.card_target(), Some(("chat-9", "m-1", "user-1")));
+        assert_eq!(s.echo_chat(), Some("chat-9"));
+        assert_eq!(s.has_human, Some(true));
+    }
+
+    #[test]
+    fn request_turn_owes_its_card_to_the_pair_session_it_was_bound_to() {
+        // Same producer for the Intent transport: the pair session the
+        // Gateway bound (and stamped) is where the card lands.
+        let s = TurnSurface::from_envelope(&env("inst-a", "chat-pair", Some(false)));
+        assert_eq!(s.card_target(), Some(("chat-pair", "m-1", "inst-a")));
+        // A human-free chat is the one fact that must block *blocking*
+        // behaviour (§6.5 R3) while the card itself stays writable — the gate
+        // reads `has_human`, not the presence of a write-back.
+        assert_eq!(s.has_human, Some(false));
+    }
+
+    #[test]
+    fn unbound_or_senderless_turn_writes_no_card() {
+        // Mailbox-only degradation: no chat bound → nothing to answer.
+        let mut e = env("inst-a", "", Some(true));
+        e.source_chat_session_id = String::new();
+        assert_eq!(TurnSurface::from_envelope(&e).card_target(), None);
+        // A chat with no known sender would be a dead button → not written.
+        let mut e = env("", "chat-9", Some(true));
+        e.from = String::new();
+        assert_eq!(TurnSurface::from_envelope(&e).card_target(), None);
+    }
+
+    #[test]
+    fn a_bound_chat_alone_does_not_make_a_card() {
+        // A turn composed straight against the execution surface (ADR-100 D9):
+        // the session's own chat binding gets the terminal echo, but there is
+        // no triggering row and no answer coordinate, so no card — the
+        // D12 distinction, expressed by the surface rather than by re-reading
+        // the binding at every consumer.
+        let mut s = TurnSurface::default();
+        assert_eq!(s.card_target(), None);
+        s.chat_session_id = "chat-9".into();
+        assert_eq!(s.card_target(), None);
+        assert_eq!(s.echo_chat(), Some("chat-9"));
+    }
+
+    #[test]
+    fn waiting_is_not_aborted() {
+        // Symptom 3 of the same root cause: the pinned arm had only a
+        // `turn_aborted` bool, so a turn that ended *waiting for a human* was
+        // echoed to the Chat as `aborted`. One outcome field, read by both
+        // terminal writers, and the two states are distinct strings.
+        assert_eq!(TurnOutcome::Waiting.as_str(), "waiting");
+        assert_eq!(TurnOutcome::Aborted.as_str(), "aborted");
+        assert_ne!(TurnOutcome::Waiting.as_str(), TurnOutcome::Aborted.as_str());
+    }
 
     #[test]
     fn render_carries_envelope_coordinates() {

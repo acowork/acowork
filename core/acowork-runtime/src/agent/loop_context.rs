@@ -1585,7 +1585,10 @@ impl AgentLoop {
         // still has humans to answer a card, so the tool stays (§5.5.4).
         // Unknown (`None`) fails open: keep the tool.
         {
-            let hidden = hidden_tools_for_turn(self.pending_intent.is_some(), self.chat_has_human);
+            let hidden = hidden_tools_for_turn(
+                self.pending_intent.is_some(),
+                self.turn_surface.has_human,
+            );
             if !hidden.is_empty()
                 && let Some(tools) = chat_request.tools.as_mut()
             {

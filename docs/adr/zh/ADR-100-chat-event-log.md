@@ -145,6 +145,17 @@ D9 让绑定 chat 的执行会话把**本地回合的输出**回写进 chat，�
 
 **与 D10 / D11 的关系。**D10 取消 durable 进度行、D11 恢复一条对话反应行；D12 不新增任何行类型，只是把已存在的 `user_message` 从执行面搬进 chat 面。pinned 回合也不写 `turn_routed`——它没经过路由，没有"去了哪个任务"可宣布，人就在看着它跑。
 
+### D13 — 修订（Rev. 5）：回合对 chat 的义务收敛为单一 `TurnSurface`；两条传输仍不合一
+
+D12 把 pinned 回合投成 `SessionMessage::ChatMessage`，转换时只从信封取走 `content` 与 `message_id`——`source_chat_session_id`、`from`、`has_human` 三个字段在换传输的那一刻被丢弃。它们不是投递细节，而是**这一轮对 chat 负有哪些义务**的事实：交互卡片落在哪个 chat、挂在哪个行 id 上、谁能答、这一轮能不能停下来等人、终态行回显到哪里。于是同一句话在两个入口得到两种行为：执行视图里 `ask_user_question` 弹框正常，群聊里**根本没有卡片**（卡片写入的判据是 `chat_writeback.is_some()`，而 pinned 分支从不设置它）；工具审批卡片同样消失；撞到迭代上限 / 循环检测的 pinned 回合既不写 pause 卡片也不落 `waiting`，直接以 `aborted` 收场；可答性判断退化成猜。五个症状一个根因：**信封上的一等事实在换传输时被降级成"这里没有 chat"**，而消费端把"没有 write-back"当成了"没有 chat"的替身判据。
+
+1. **`TurnSurface{chat_session_id, trigger_message_id, answerable_by, has_human}` 是回合对 chat 义务的唯一载体。**两条传输都在投递点由同一个产出函数生成（信封原样在场时用 `TurnSurface::from_envelope`，已解构处用 `TurnSurface::new`，规则只写一遍），消费端——卡片落点与 `to` / `in_reply_to`、审批与提问的可见性和阻塞闸门、pause + `waiting`、终态回显、pending 指针——只读这一个值，不得再从 session 绑定或 write-back 上下文里推断。强制点是编译期的：新的传输或派发场景必须显式产出一个 `TurnSurface`（或写明它为何不欠 chat 任何义务），否则拿不到这些字段。
+2. **`chat_writeback` 回归本义。**它只表示 §7.1 那条回给发起 agent 的 response 通道。它曾兼职当"这一轮有没有 chat"的替身，正是这个替身让 pinned 分支静默失效。`IntentTurnContext` 随之瘦身：收拢后 `conversation_id`、`source_chat_session_id`、`outcome` 三个字段已无任何读取方，连同 Intent 传输上同样无人再读的 `conversation_id` 一并删除。
+3. **`TurnOutcome` 取代两面镜子。**"这一轮怎么结束的"此前同时存在于 `AgentLoop.turn_aborted: bool`（回显读）与 `IntentTurnContext.outcome: String`（write-back 读），而 pinned 分支只有前者，因此**为等待人类而暂停的回合被回显成 `aborted`**。现在循环上只有一个 `turn_outcome` 字段，两个终态写入方读同一个值，`completed / aborted / waiting / failed` 在两处一致。
+4. **回合收尾合并成一个函数。**`end_turn_obligations` 由两条传输共用：交还 §7.1 上下文、关闭本轮仍未被回答的 `approval` / `ask_question` 卡片（§5.5.4 安全网；`pause` 卡片按设计活到下一轮，由回答它的那一轮关闭）、再把 Chat 事实清零以免下一轮继承。pinned 分支过去不经过这段收尾（它当时写不出卡片，也就无需关闭）；修好卡片之后它**必须**经过，否则卡片会永远停在可点状态。
+5. **已评估并否决：把两条传输合一（pinned 也投 `SessionMessage::Intent`）。**D12.2 的分歧是真的：附件模型一边是 ADR-046 判别联合（写进本会话 `files/`、node-local 路径），一边是 `chat_attachment_ids`（跨进程 HTTP 拉取）；per-turn skill 注入只存在于 ChatMessage 臂；渲染上人话对信封串；角色上 initiator 对可能的 responder；收尾上 `exec:` 独立行对 §7.1 write-back。合一要么给 Intent 补三个可空字段并在臂内到处 `if is_pinned`（约 700 行带模式标志的单臂，总行数不降反升），要么在运行时和解两套附件语义——后者本身是另一场尚未开始的讨论。它还牵动 mailbox / sweeper / response target 的跨进程语义，需要 Gateway + Runtime + PM 三边同改并重新论证混部兼容。本决策已把"必须显式产出 surface"变成编译期强制点，合一剩下的收益只有"enum 少一个变体"。**重新考虑的触发条件**：出现第 3 条传输；或两套附件模型统一（`AttachedItem` 与 `chat_attachment_ids` 合一）时。
+6. **影响面仅 Runtime 内部，并有一处有意的行为扩张。**Gateway 未改：这些事实本就在信封上（D12 起 pinned 发送即 `has_human: Some(true)`），丢失发生在 Runtime 的转换处。agent↔agent 请求的消费语义不变（pair session 的卡片仍写、`has_human = Some(false)` 仍禁止阻塞）。扩张在 `notify`：fire-and-forget 回合过去因 `chat_writeback` 为空而不写卡片，现按同一判据（绑定了 chat、且有可答的发送人）会写。这是修正而非新策略——问题既然落在群里就该看得见，回合结束时未答的卡片由第 4 条关闭，不留死按钮。
+
 ## 验收标准
 
 > 1–8 为 Rev. 1 的验收、9–13 为 Rev. 2 的验收（均保留作历史记录）；当前验收以下方 9–17 为准（14–16 为 Rev. 3 新增，17 为 Rev. 4 新增，与 9–13 并存——Rev. 3 只恢复 `turn_routed` 一条反应行，Rev. 4 不新增任何行类型，都不撤销 Rev. 2 的进度不落盘）。
@@ -254,3 +265,9 @@ D9 让绑定 chat 的执行会话把**本地回合的输出**回写进 chat，�
 - Mobile：`__tests__/pinned-send.test.ts` 七例分层覆盖——store 层五例（绑定读自会话行时传 pin、未绑定不传、无账号即使绑定也不传、所选 skill 在 pinned 发送上不丢、乐观气泡沿用 transport 生成的 id）；`api.ts` 层两例（经 `setAuthBridge` 注入，带 pin 命中 chat 入口、不带 pin 命中会话入口），两者返回同一个客户端 mint 的 `message_id`。移动端的标签渲染（`AgentChatScreen` 的 `chat-attachment-label` chip）没有独立单测——该端不发送附件，只是读侧兜现桌面写出的行，且移动端测试基建不做行级渲染断言。
 - D12 修复轮（①–⑥）补的锁定：Gateway 单测 `only_the_pinned_echo_closes_a_pending_request` 锁定只有 `agent_message` 且 `meta.in_reply_to` 非空才关闭 mailbox（卡片与决议通知的坐标不算），`a_pinned_group_send_may_name_only_an_agent_participant` 锁定 `pinned_agent` 只认本 chat 的 agent 参与者（human 拒绝、Legacy 无类型行仍按成员资格、陌生 instance 拒绝）；二者均由 `chat_append` 落库后 `mark_answered` 接入，`GET /api/intents/{message_id}` 因此同时报 `delivered` 与 `answered`。mailbox 层的 `stale_unanswered_selects_only_open_delivered_requests` 早已锁定一个被 `mark_answered` 关掉的 `user_message` 不会再进 sweeper 候选集，即不会多出一条 `fallback-` 回执。Gateway e2e：`a_pinned_send_into_a_group_files_the_head_row_and_checks_its_target` 覆盖群绑定的 200 / 403 / 未带 pin 的 400，`a_send_with_nothing_to_deliver_is_a_readable_400` 覆盖内容门与 `attached_items` 的 ADR-046 union 校验都在投递之前判完（请求形状错不能伪装成 503）。Runtime：`a_pin_naming_another_chats_session_does_not_take_that_turn` 锁定跨 chat 的 pin 被丢弃、回合落回发送者自己的 chat。两端 `pinned-send` / `chatStore.pinnedSend` 各断言 body 带上 `pinned_agent`。
 - 回归：两端 `tsc --noEmit` + 全量 `vitest`；`cd core && cargo check --all-targets` + `cargo test` + `cargo clippy --all-targets -- -D warnings`。
+
+**Rev. 5（D13）补充：**
+
+- 后端（`intent_turn.rs` 单测，钉住根因而非症状）：`pinned_turn_surface_keeps_its_card_target` 断言换传输后卡片三坐标（chat / 触发行 / 可答人）与 `has_human` 仍在；`request_turn_owes_its_card_to_the_pair_session_it_was_bound_to` 锁定 Intent 传输走同一产出函数；`unbound_or_senderless_turn_writes_no_card` 覆盖 mailbox-only 与无发送人两种"写不出可答卡片"的情形；`a_bound_chat_alone_does_not_make_a_card` 保证 D9 的本地回合仍不写卡片、只拿绑定做回显；`waiting_is_not_aborted` 锁定 `TurnOutcome` 四态字符串。
+- 回归：`cargo test -p acowork-runtime --lib`（1783 通过）+ `cargo clippy -p acowork-runtime --all-targets -- -D warnings`。
+- 手工验收（真实项目群）：群内 @ 一个 agent 让它提问 → `ask_user_question` 卡片出现在群聊且可就地作答；触发工具审批 → 审批卡片同样落在群里；迭代上限触发的 pause → 群内出现"回复以继续"卡片且终态行状态为 `waiting` 而非 `aborted`；同一问题在执行视图与群聊两处都可答，先答者生效（§5.5.4 一个问题两个回答面）。

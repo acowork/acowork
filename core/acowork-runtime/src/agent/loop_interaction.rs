@@ -67,10 +67,16 @@ pub(crate) fn chat_card_id(kind: &str, request_id: &str) -> String {
 impl AgentLoop {
     /// Design 27 §5.5.4 (plan 3.1): drop an `interaction_request` card
     /// into the Chat session that triggered this turn. No-op unless the
-    /// turn owes a chat write-back AND the session is known to have a
-    /// human who can answer (`chat_has_human != Some(false)` — unknown
-    /// fails open, the card is harmless if nobody picks it up, the row
-    /// is the durable record of the question).
+    /// turn's [`crate::agent::intent_turn::TurnSurface`] has a full card
+    /// coordinate (chat + trigger row + a sender who could answer) AND the
+    /// chat is not known to be human-free (`has_human != Some(false)` —
+    /// unknown fails open, the card is harmless if nobody picks it up, the
+    /// row is the durable record of the question).
+    ///
+    /// Read from the surface, never from `chat_writeback`: the card is a
+    /// Chat obligation, the write-back is an agent-to-agent one, and
+    /// conflating them is what made a pinned turn's cards vanish (ADR-100
+    /// follow-up).
     ///
     /// The card is recorded in `open_chat_cards` so its resolution can
     /// close it (see [`AgentLoop::close_chat_card`]): a card that stays
@@ -84,10 +90,12 @@ impl AgentLoop {
         interaction: serde_json::Value,
         summary: &str,
     ) {
-        let Some(wb) = self.chat_writeback.as_ref() else {
+        let Some((chat_session_id, trigger_row, answerable_by)) =
+            self.turn_surface.card_target().map(|(c, t, a)| (c.to_string(), t.to_string(), a.to_string()))
+        else {
             return;
         };
-        if self.chat_has_human == Some(false) {
+        if self.turn_surface.has_human == Some(false) {
             return;
         }
         let kind = interaction
@@ -107,11 +115,11 @@ impl AgentLoop {
         let card_id = chat_card_id(&kind, &request_id);
         let meta = serde_json::json!({
             "message_id": card_id,
-            "in_reply_to": wb.request_id,
+            "in_reply_to": trigger_row,
             "agent_session_id": self.session_core.session_id.clone().unwrap_or_default(),
             "interaction": interaction,
         });
-        let (chat_session_id, to) = (wb.source_chat_session_id.clone(), wb.from.clone());
+        let to = answerable_by;
         if let Err(e) = crate::agent::intent_turn::append_chat_row(
             &self.core.config.agent_instance_id,
             &self
@@ -251,15 +259,13 @@ impl AgentLoop {
     /// surface could only guess at what happened ("no output") and the
     /// transcript could not tell an interrupted run from an empty answer.
     ///
-    /// Sets [`Self::turn_aborted`] as well as the pending write-back: a turn
+    /// Sets the loop's [`Self::turn_outcome`] — the one field both terminal
+    /// writers read (the Chat echo row and the §7.1 write-back). A turn
     /// composed directly in the execution session carries no write-back
     /// context, yet the chat bound to that session still has to learn that the
     /// turn was stopped (ADR-100 revision).
     pub(crate) fn mark_turn_aborted(&mut self) {
-        self.turn_aborted = true;
-        if let Some(ctx) = self.chat_writeback.as_mut() {
-            ctx.outcome = "aborted".to_string();
-        }
+        self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Aborted;
     }
 
     /// Handle an `ask_user_question` tool call.
