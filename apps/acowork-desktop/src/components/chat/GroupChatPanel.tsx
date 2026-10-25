@@ -137,13 +137,24 @@ const chatMarkdownComponents = {
 
 function ChatMarkdown({ content }: { content: string }) {
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={chatMarkdownComponents}
-      urlTransform={markdownUrlTransform}
-    >
-      {content}
-    </ReactMarkdown>
+    // The prose shell is load-bearing, not cosmetic: every table rule in
+    // globals.css (`.prose table` borders / rounded frame, `.prose th`
+    // header shade, `.prose td` padding, the zebra-striping override) is
+    // scoped under `.prose`. Without it remark-gfm still emits a real
+    // <table>, but unstyled — the group-chat defect where an agent's
+    // markdown table read as plain text while the same reply rendered
+    // correctly in the execution session (`MessageBubble` / `AgentChatView`,
+    // both wrapped in this exact class list). Keep in sync with
+    // `AgentChatView`'s ChatMarkdown shell.
+    <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={chatMarkdownComponents}
+        urlTransform={markdownUrlTransform}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
   );
 }
 
