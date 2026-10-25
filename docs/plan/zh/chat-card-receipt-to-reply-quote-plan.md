@@ -75,6 +75,37 @@ i18n：`cardAnswered` / `cardClosed` 失去渲染方，五语删除；新增 `ca
 ## 5. 未做
 
 1. **引用行不可点击跳转**。卡片就在同一窗口内，滚动即见；加跳转要引入锚点与滚动定位，收益不抵复杂度。
-2. **执行面（`AskQuestionCard`）未动**。它本来就没有回执，是本次对齐的参照物，不是待修对象。
+2. **执行面（`AskQuestionCard`）的回执结构未动**。它本来就没有回执，是本次对齐的参照物；正文 markdown 渲染见 §6。
 3. **移动端**未动：移动端不渲染 `interaction_request` 卡片回执，无对应物。
-4. **正文 markdown 渲染**：随回执卡删除，问题原文不再进 chat 流，原先暴露的「卡片正文不渲染 markdown」在已答/未答两条路径上同时消失。但**开放态与只读态仍用裸 `{question}`**（[InlineInteractionCard.tsx:172](../../../apps/acowork-desktop/src/components/chat/InlineInteractionCard.tsx#L172)、[:192](../../../apps/acowork-desktop/src/components/chat/InlineInteractionCard.tsx#L192)），模型若把 markdown 写进问题，开放卡仍会显示原始语法。这条仍然遗留，需要先把 `ChatMarkdown` 从 `AgentChatView` 局部组件提取为共享件，属结构改动。
+4. **卡片正文 markdown 渲染**：原列为遗留，已在同一批次内完成，见 §6。
+
+## 6. 追加：卡片正文走 markdown + `ChatMarkdown` 提取为共享件
+
+回执删除后，用户在同一处截图指出：开放卡正文把 markdown 语法原样画出来（`` `bash` `` 带反引号、`[标题](路径)` 带方括号）。问题文本是模型输出，带 markdown 是常态，而紧邻的聊天气泡会渲染它——卡片是唯一不渲染的 chat 面。
+
+### 6.1 结构前提
+
+`ChatMarkdown` 在 `AgentChatView`、`GroupChatPanel`、`MessageBubble` 各有一份局部实现。三份的**外壳 class 字符串完全相同**，元素覆盖表也同为 `pre`/`a`/`table` 三个键；差异只在群聊版多了 `p`/`code`/`ul`/`ol`/`li` 的间距覆盖、1:1 与执行面版 `pre` 带 `dedent`、群聊版 `a` 写死 accent 类名。已漂移的三份副本正是 `9b071b66` 表格缺陷的成因，因此先提取再复用：
+
+| 文件 | 改动 |
+|---|---|
+| `chat/ChatMarkdown.tsx`（新增） | 合并三份副本：外壳取共同字面量，覆盖表取并集（`dedent` + 走 `.prose a` 的链接 + 表格滚动壳），导出 `CHAT_MARKDOWN_SHELL_CLASS` |
+| `AgentChatView.tsx` / `GroupChatPanel.tsx` | 删本地副本，改 import 共享件（−67 / −82 行） |
+| `MessageBubble.tsx` | 覆盖表改用共享件；外壳 div 保留（它经 `StreamMarkdown` 流式渲染），但引用同一常量 |
+
+行为保持：外壳字面量逐字取自原三份（含执行面的 heading 字号与 `[&_th]`/`[&_td]` 单元格底色——三份原本一致，所以是共享默认值而非按面传参），覆盖表键集合与原来相同，无独有 handler 丢失。
+
+### 6.2 卡片接入
+
+`InlineInteractionCard` 开放态 [:199](../../../apps/acowork-desktop/src/components/chat/InlineInteractionCard.tsx#L199)、只读态 [:178](../../../apps/acowork-desktop/src/components/chat/InlineInteractionCard.tsx#L178)、`AskQuestionCard` [:85](../../../apps/acowork-desktop/src/components/chat/AskQuestionCard.tsx#L85) 三处裸 `{question}` 改为 `<ChatMarkdown content={question} />`。**未答关闭态的单行标记保持纯文本**——它是状态行不是正文，且 `title` 属性承载不了 markup。
+
+### 6.3 测试与验证
+
+`ChatMarkdown.test.tsx`（5 条）+ `cardMarkdown.test.tsx`（4 条）。卡片用例同时断言**渲染结果出现**（`<code>`、`<a>`）与**原始语法消失**（文本中不再含 `` `bash` ``、`[the plan](`），否则「退回裸文本节点」这种回归仍可能靠树里别处的 `code` 蒙过。
+
+红→绿双向：临时回退开放态为裸文本、删掉 `prose` 作用域、去掉 `dedent` —— 三条各自转红；还原后桌面全量 1783 通过、`tsc` exit 0。
+
+### 6.4 自检发现的两处自伤
+
+1. **假绿断言**：首版 `ChatMarkdown.test.tsx` 写的是 `toContain("prose")`（被 `prose-sm` 满足）与 `toBe(CHAT_MARKDOWN_SHELL_CLASS)`（拿组件自己读的常量和该常量比，恒真）。红→绿验证时删掉 `prose` 却没有转红才暴露，改为与字面量比较 + 断言 `prose` 独立成词。
+2. **误改共享外壳**：提取时一度把默认外壳写成 `prose … dark:prose-invert … [&>*:first-child]:mt-0`，并给执行面留了第二个常量。`git diff` 核对原副本后发现三个面原本用的是**同一条**（含 `[&_th]:bg-chat-title`），照我误写的默认值会把两个 chat 面的表格单元格底色改掉、并凭空引入 `dark:prose-invert`。已回退为单一共享默认值。教训：合并副本时「更合理的写法」不是依据，逐字比对才是。

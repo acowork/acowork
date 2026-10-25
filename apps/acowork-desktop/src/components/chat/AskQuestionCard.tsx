@@ -5,6 +5,7 @@ import { StyledTextarea } from "../common/StyledInput";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useChatStore } from "../../stores/chatStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
+import { ChatMarkdown } from "./ChatMarkdown";
 
 interface AskQuestionCardProps {
   event: AskQuestionEvent;
@@ -78,7 +79,11 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
           {event.title && (
             <div className="mb-1 text-xs font-medium text-text-secondary">{event.title}</div>
           )}
-          <div className="mb-2 text-xs font-medium text-text">{event.question}</div>
+          {/* Same renderer as the durable chat card, so one question reads
+              identically on the execution surface and in chat. */}
+          <div className="mb-2">
+            <ChatMarkdown content={event.question} />
+          </div>
 
           {/* Options list */}
           <ul className="mb-2 space-y-0.5">

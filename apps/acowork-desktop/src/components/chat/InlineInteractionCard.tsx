@@ -31,6 +31,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { truncateQuote } from "./ReplyQuote";
+import { ChatMarkdown } from "./ChatMarkdown";
 
 interface InlineInteractionCardProps {
   row: ChatMessageRow;
@@ -169,7 +170,12 @@ export function InlineInteractionCard({
             {askerName && <span className="ml-auto text-10 font-normal opacity-70">{askerName}</span>}
           </div>
           <div className="bg-chat-bubble px-3 py-2.5">
-            <div className="text-xs font-medium text-text">{question}</div>
+            {/* Markdown, not a bare text node: the question is model output and
+                carries inline code and links. Routed through the shared chat
+                renderer so the `prose` scope -- and every table and link rule
+                globals.css hangs under it -- cannot be forgotten the way the
+                per-surface bubble copies drifted. */}
+            <ChatMarkdown content={question} />
           </div>
         </div>
       </div>
@@ -189,7 +195,9 @@ export function InlineInteractionCard({
 
         {/* Body */}
         <div className="bg-chat-bubble px-3 py-2.5">
-          <div className="mb-2 text-xs font-medium text-text">{question}</div>
+          <div className="mb-2">
+            <ChatMarkdown content={question} />
+          </div>
 
           {/* Form A: list selection (ask_question with options) */}
           {isListMode && (
