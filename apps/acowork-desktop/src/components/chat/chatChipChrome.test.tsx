@@ -94,7 +94,11 @@ describe("composer badges and inline tags", () => {
     it(`${file}: the badge outline and label stay neutral`, () => {
       const line = lineOf(file, "bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium");
       expect(line).toContain("border-border-outer");
-      expect(line).toContain("text-text-secondary");
+      // Tertiary, not secondary: the inline style this replaced resolved to
+      // --color-text-tertiary, so the label tier must survive the accent fix
+      // unchanged. Pinning the tier here stops a future pass from "helpfully"
+      // darkening the badge while touching its border.
+      expect(line).toContain("text-text-tertiary");
       expect(line).not.toContain("border-[var(--color-accent)]");
       // The label color used to ride an inline style, which no class-based
       // assertion would have caught.
