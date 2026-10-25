@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef, Children, isValidElement, useMemo } from "react";
+import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { Copy, ChevronDown, ChevronRight, Wrench, AlertTriangle, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -8,13 +8,13 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { ThinkBlock } from "./ThinkBlock";
-import { CodeBlock } from "./CodeBlock";
 import { MermaidBlock } from "./MermaidBlock";
 import { CompactionCard } from "./CompactionCard";
 import { UserAvatar } from "../common/UserAvatar";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
-import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
+import { markdownUrlTransform } from "../editor/markdownLinkResolver";
+import { chatMarkdownComponents, CHAT_MARKDOWN_SHELL_CLASS } from "./ChatMarkdown";
 import type { AttachedItem } from "../../lib/types";
 import {
   ContextMenu,
@@ -57,7 +57,7 @@ const StreamMarkdown = React.memo(function StreamMarkdown({ content }: { content
   if (segments.length <= 1) {
     // Fast path: no mermaid blocks at all
     return (
-      <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={markdownComponents}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={chatMarkdownComponents}>
         {content}
       </ReactMarkdown>
     );
@@ -72,7 +72,7 @@ const StreamMarkdown = React.memo(function StreamMarkdown({ content }: { content
           return <MermaidBlock key={i} chart={code} />;
         }
         return (
-          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={markdownComponents}>
+          <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={chatMarkdownComponents}>
             {seg}
           </ReactMarkdown>
         );
@@ -81,81 +81,6 @@ const StreamMarkdown = React.memo(function StreamMarkdown({ content }: { content
   );
 }, (prev, next) => prev.content === next.content);
 
-/** ReactMarkdown component overrides — code blocks with title bar */
-const markdownComponents = {
-  pre: ({ children }: { children?: React.ReactNode }) => {
-    const childArray = Children.toArray(children);
-    const codeEl = childArray.find(
-      (child): child is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
-        isValidElement(child) && child.type === "code"
-    );
-    if (codeEl) {
-      const { className, children: codeContent } = codeEl.props;
-      const language = className?.replace(/^language-/, "") || "";
-      const code = dedent(Children.toArray(codeContent).join(""));
-      return <CodeBlock language={language} code={code} />;
-    }
-    return <pre>{children}</pre>;
-  },
-  /** Intercept link clicks: open in a file/URL tab instead of letting the
-   *  webview navigate (which reloads or crashes the renderer). Local
-   *  paths — including the Windows drive paths agents emit (`D:/…`) —
-   *  are resolved across the agent's workspaces by
-   *  `handleChatMarkdownLinkClick`; http(s) links open in the URL
-   *  preview tab; image extensions open in preview mode, every other
-   *  supported format opens in Monaco (same rule as the workspace tree
-   *  and the attachment chips).
-   *
-   *  Two layers keep a malformed link from ever reaching the webview:
-   *    1. `urlTransform={markdownUrlTransform}` (on both ReactMarkdown
-   *       render paths) keeps drive paths and `file://` URLs alive
-   *       through react-markdown's stock URL sanitisation, which
-   *       rewrites them to `""` — and an empty href default-navigates
-   *       to the current URL, reloading the whole app.
-   *    2. Any link that still ends up without a usable href degrades to
-   *       a plain `<span>` here, so it cannot be clicked into a
-   *       navigation at all.
-   *
-   *  `node` is destructured out on purpose: react-markdown passes the raw
-   *  HAST node as a prop and spreading it onto the DOM element renders
-   *  `node="[object Object]"`. Non-left-button presses (middle-click asks
-   *  the webview to open a new window, which it cannot) and link drags
-   *  are cancelled as well. */
-  a: ({ href, children, node: _node, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
-    // Degrade to plain text when no usable href survived sanitisation.
-    if (!href) return <span>{children}</span>;
-    const handleClick = (e: React.MouseEvent) => {
-      // preventDefault FIRST — every branch downstream must never fall
-      // through to webview navigation.
-      e.preventDefault();
-      handleChatMarkdownLinkClick(href);
-    };
-    return (
-      <a
-        href={href}
-        {...rest}
-        onClick={handleClick}
-        onAuxClick={(e) => {
-          if (e.button !== 0) e.preventDefault();
-        }}
-        draggable={false}
-      >
-        {children}
-      </a>
-    );
-  },
-  /** Wrap <table> in a horizontally-scrollable container so an
-   *  oversized column (URL / hash / path) doesn't squeeze the
-   *  title column mid-word. The wrapper is a pure scroll viewport —
-   *  visual chrome (border / rounded corners) lives on the <table>
-   *  itself in globals.css; the <th> cells stay nowrap so headers
-   *  never break. */
-  table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
-    <div className="prose-table-scroll">
-      <table {...rest}>{children}</table>
-    </div>
-  ),
-};
 
 // ── Message Bubble ─────���──────────────────────────────────────────────
 
@@ -414,7 +339,7 @@ const MessageBubble = React.memo(function MessageBubble({
                 {formatBubbleTime(message.timestamp)}
               </span>
             )}
-            <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent" style={fontSizeStyle}>
+            <div className={CHAT_MARKDOWN_SHELL_CLASS} style={fontSizeStyle}>
               <StreamMarkdown content={displayContent} />
             </div>
           </div>

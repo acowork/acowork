@@ -23,12 +23,11 @@
  * mentions channel carries `session_config`.
  */
 
-import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown, ClipboardList } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import type { Components } from "react-markdown";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
 import { toolbarIconButton } from "../../lib/ui-styles";
@@ -42,7 +41,6 @@ import { UserAvatar } from "../common/UserAvatar";
 import { ViewRunButton } from "./ViewRunButton";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
-import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote } from "./ReplyQuote";
@@ -57,7 +55,7 @@ import {
 } from "./chatTurnState";
 import { InlineInteractionCard } from "./InlineInteractionCard";
 import { detectPaste } from "./pasteDetect";
-import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
+import { ChatMarkdown } from "./ChatMarkdown";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -79,43 +77,25 @@ import { useLocateMessage } from "../../lib/useLocateMessage";
 // Same markdown shell as AgentChatView's bubbles (kept local on purpose:
 // extracting a shared component would touch two surfaces for one class
 // list — do that when a third chat surface appears).
-const chatMarkdownComponents = {
+/**
+ * Group-surface block typography only. The behavioural overrides (fenced code,
+ * links, table scroll) and the `prose` shell now live in `ChatMarkdown`, shared
+ * with the 1:1 chat and the execution bubbles — see the drift note there.
+ *
+ * Two group behaviours were intentionally dropped when the copies merged, both
+ * toward the house style rather than away from it: fenced code is dedented like
+ * every other surface, and links take `.prose a` (globals.css) instead of a
+ * hard-coded `text-[var(--color-accent)] underline`.
+ */
+const chatBlockComponents: Components = {
   p: ({ children }: { children?: React.ReactNode }) => (
     <p className="mb-2 text-sm leading-relaxed last:mb-0">{children}</p>
   ),
-  pre: ({ children }: { children?: React.ReactNode }) => {
-    const codeEl = Children.toArray(children).find(
-      (child): child is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
-        isValidElement(child) && child.type === "code",
-    );
-    if (codeEl) {
-      const { className, children: codeContent } = codeEl.props;
-      const language = className?.replace(/^language-/, "") || "";
-      const code = Children.toArray(codeContent).join("");
-      return <CodeBlock language={language} code={code} />;
-    }
-    return <pre>{children}</pre>;
-  },
   code: ({ children }: { children?: React.ReactNode }) => (
     <code className="rounded bg-black/10 px-1 py-0.5 text-xs dark:bg-white/10">
       {children}
     </code>
   ),
-  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
-    if (!href) return <span>{children}</span>;
-    return (
-      <a
-        href={href}
-        onClick={(e) => {
-          e.preventDefault();
-          handleChatMarkdownLinkClick(href);
-        }}
-        className="text-[var(--color-accent)] underline"
-      >
-        {children}
-      </a>
-    );
-  },
   ul: ({ children }: { children?: React.ReactNode }) => (
     <ul className="mb-2 list-disc pl-5">{children}</ul>
   ),
@@ -125,39 +105,9 @@ const chatMarkdownComponents = {
   li: ({ children }: { children?: React.ReactNode }) => (
     <li className="text-sm leading-relaxed">{children}</li>
   ),
-  /** Same scroll wrapper as every other desktop markdown surface
-   *  (`MessageBubble` / `CompactionCard` / `MarkdownPreviewView`): a GFM table
-   *  cannot shrink below its widest cell, so unwrapped it widened the bubble
-   *  instead of scrolling inside it. */
-  table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
-    <div className="prose-table-scroll">
-      <table {...rest}>{children}</table>
-    </div>
-  ),
 };
 
-function ChatMarkdown({ content }: { content: string }) {
-  return (
-    // The prose shell is load-bearing, not cosmetic: every table rule in
-    // globals.css (`.prose table` borders / rounded frame, `.prose th`
-    // header shade, `.prose td` padding, the zebra-striping override) is
-    // scoped under `.prose`. Without it remark-gfm still emits a real
-    // <table>, but unstyled — the group-chat defect where an agent's
-    // markdown table read as plain text while the same reply rendered
-    // correctly in the execution session (`MessageBubble` / `AgentChatView`,
-    // both wrapped in this exact class list). Keep in sync with
-    // `AgentChatView`'s ChatMarkdown shell.
-    <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={chatMarkdownComponents}
-        urlTransform={markdownUrlTransform}
-      >
-        {content}
-      </ReactMarkdown>
-    </div>
-  );
-}
+
 
 // ── Participant naming ────────────────────────────────────────────────
 
@@ -466,7 +416,7 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
                 {row.meta?.status}
               </div>
             )}
-            {row.body ? <ChatMarkdown content={row.body} /> : (
+            {row.body ? <ChatMarkdown content={row.body} components={chatBlockComponents} /> : (
               <span className="text-xs text-text-tertiary italic">{t("groupChat.emptyTurn")}</span>
             )}
           </div>

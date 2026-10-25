@@ -35,11 +35,9 @@
 // carries a discrete drill-down into the execution view:
 // `chatStore.openSession(agentId, execSid)` + mode flip (plan 5.3).
 
-import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
@@ -51,12 +49,11 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { ViewRunButton } from "./ViewRunButton";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
-import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote } from "./ReplyQuote";
 import { detectPaste } from "./pasteDetect";
-import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
+import { ChatMarkdown } from "./ChatMarkdown";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
@@ -74,68 +71,8 @@ import { useAuthStore } from "../../stores/authStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { getGatewayUrl } from "../../lib/config";
 
-/** Strip common leading whitespace from multi-line strings (same helper
- *  the execution bubbles use for indented code blocks). */
-function dedent(code: string): string {
-  const lines = code.split("\n");
-  const nonEmpty = lines.filter((l) => l.trim().length > 0);
-  if (nonEmpty.length === 0) return code.trim();
-  const minIndent = Math.min(...nonEmpty.map((l) => l.match(/^ */)?.[0].length ?? 0));
-  return lines.map((l) => l.slice(minIndent)).join("\n").trim();
-}
 
-// ── Markdown in chat bubbles — same overrides as the execution view,
-//    minimal set (code + safe links). ──────────────────────────────────
-const chatMarkdownComponents = {
-  pre: ({ children }: { children?: React.ReactNode }) => {
-    const childArray = Children.toArray(children);
-    const codeEl = childArray.find(
-      (child): child is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
-        isValidElement(child) && child.type === "code",
-    );
-    if (codeEl) {
-      const { className, children: codeContent } = codeEl.props;
-      const language = className?.replace(/^language-/, "") || "";
-      const code = dedent(Children.toArray(codeContent).join(""));
-      return <CodeBlock language={language} code={code} />;
-    }
-    return <pre>{children}</pre>;
-  },
-  a: ({ href, children, node: _node, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
-    if (!href) return <span>{children}</span>;
-    return (
-      <a
-        {...rest}
-        href={href}
-        onClick={(e) => {
-          e.preventDefault();
-          handleChatMarkdownLinkClick(href);
-        }}
-      >
-        {children}
-      </a>
-    );
-  },
-  /** Same scroll-wrapper every other desktop markdown surface uses
-   *  (`MessageBubble` / `CompactionCard` / `MarkdownPreviewView`). A GFM table
-   *  cannot shrink-to-fit below its widest cell, so left unwrapped it widened
-   *  the bubble instead of scrolling inside it. */
-  table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
-    <div className="prose-table-scroll">
-      <table {...rest}>{children}</table>
-    </div>
-  ),
-};
 
-function ChatMarkdown({ content }: { content: string }) {
-  return (
-    <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={chatMarkdownComponents}>
-        {content}
-      </ReactMarkdown>
-    </div>
-  );
-}
 
 // ── Rows ───────────────────────────────────────────────────────────────
 
