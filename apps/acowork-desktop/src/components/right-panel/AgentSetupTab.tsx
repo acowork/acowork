@@ -227,9 +227,9 @@ export function AgentSetupTab() {
   const [agentInfoOpen, setAgentInfoOpen] = useState(true);
   const [sessionParamsOpen, setSessionParamsOpen] = useState(true);
   const [modelParamsOpen, setModelParamsOpen] = useState(true);
-  // ADR-099: Chat Router card. Default collapsed — it is an advanced
-  // knob most users leave on the compact-model chain.
-  const [chatRouterOpen, setChatRouterOpen] = useState(false);
+  // ADR-099: Chat Router card. Default expanded — users should see which
+  // model the router picks per conversation.
+  const [chatRouterOpen, setChatRouterOpen] = useState(true);
 
   // ADR-099: (provider, model) options for the router-model dropdown.
   // Same source as the Harness compact-model card and the distiller
