@@ -147,3 +147,37 @@ describe("assignee dropdown options", () => {
     expect(opts[0].label).toBe("Ponytail Display");
   });
 });
+/**
+ * Date-field round-trip (plan §8 debt: TaskEditDialog timezone drift).
+ * The date input carries a *local* calendar day; the stored instant is
+ * local midnight. The old code (`new Date("YYYY-MM-DD")`) parsed as UTC
+ * midnight, so users west of UTC saw the previous day after a re-edit.
+ * These run in the test runner's timezone (Asia/Shanghai, UTC+8):
+ * UTC-midnight storage would render 08:00 local, local-midnight storage
+ * renders 00:00 — the assertions below pin the local-midnight semantics.
+ */
+describe("TaskEditDialog date fields", () => {
+  it("stores a date field as local midnight", async () => {
+    const { localDateFieldToIso } = await import("./TaskEditDialog");
+    const iso = localDateFieldToIso("2026-10-30");
+    const d = new Date(iso);
+    expect(d.getFullYear()).toBe(2026);
+    expect(d.getMonth()).toBe(9);
+    expect(d.getDate()).toBe(30);
+    expect(d.getHours()).toBe(0);
+    expect(d.getMinutes()).toBe(0);
+  });
+
+  it("round-trips iso back to the same local calendar day", async () => {
+    const { localDateFieldToIso, isoToLocalDate } = await import("./TaskEditDialog");
+    expect(isoToLocalDate(localDateFieldToIso("2026-10-30"))).toBe("2026-10-30");
+    expect(isoToLocalDate(localDateFieldToIso("2026-02-01"))).toBe("2026-02-01");
+  });
+
+  it("tolerates empty and malformed input", async () => {
+    const { isoToLocalDate } = await import("./TaskEditDialog");
+    expect(isoToLocalDate(null)).toBe("");
+    expect(isoToLocalDate(undefined)).toBe("");
+    expect(isoToLocalDate("not-a-date")).toBe("not-a-date");
+  });
+});

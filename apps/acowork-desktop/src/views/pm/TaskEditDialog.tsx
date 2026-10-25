@@ -27,6 +27,26 @@ import { showToast } from "../../components/common/ToastProvider";
 import type { PmTaskResponse, Priority, TaskType } from "../../lib/pm-types";
 import { memberOptions, usePmDirectoryUsers, useSelfAccount } from "./pmMembers";
 
+/**
+ * A `<input type="date">` value means *local* calendar day, so the stored
+ * instant is local midnight: parse with a time component (`T00:00:00`, no
+ * suffix → local per spec). `new Date("YYYY-MM-DD")` would parse as UTC
+ * midnight and shift the rendered date a day behind for users west of UTC.
+ * Paired with `isoToLocalDate` so an edit round-trip never drifts.
+ */
+export function localDateFieldToIso(dateField: string): string {
+  return new Date(`${dateField}T00:00:00`).toISOString();
+}
+
+/** The local calendar day of a stored instant, for the date input. */
+export function isoToLocalDate(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export interface TaskEditDialogProps {
   mode: "create" | "edit";
   projectId: string;
@@ -86,8 +106,8 @@ export function TaskEditDialog({
   const [priority, setPriority] = useState<Priority>(initial?.priority ?? "normal");
   const [description, setDescription] = useState(initial?.description ?? "");
   const [assignee, setAssignee] = useState<string>(initial?.assignee ?? "");
-  const [dueAt, setDueAt] = useState<string>(initial?.due_at?.slice(0, 10) ?? "");
-  const [startAt, setStartAt] = useState<string>(initial?.start_at?.slice(0, 10) ?? "");
+  const [dueAt, setDueAt] = useState<string>(isoToLocalDate(initial?.due_at));
+  const [startAt, setStartAt] = useState<string>(isoToLocalDate(initial?.start_at));
   const [parentId, setParentId] = useState<string>(initial?.parent_id ?? defaultParentId ?? "");
   const [dependsOn, setDependsOn] = useState<string[]>(
     initial?.depends_on?.map((d) => d.task_id) ?? [],
@@ -172,8 +192,8 @@ export function TaskEditDialog({
         if (assignee || dueAt || startAt) {
           await updateTask(created.id, {
             assignee: assignee || null,
-            due_at: dueAt ? new Date(dueAt).toISOString() : null,
-            start_at: startAt ? new Date(startAt).toISOString() : null,
+            due_at: dueAt ? localDateFieldToIso(dueAt) : null,
+            start_at: startAt ? localDateFieldToIso(startAt) : null,
           });
         }
       } else if (initial) {
@@ -183,8 +203,8 @@ export function TaskEditDialog({
           type,
           priority,
           assignee: assignee || null,
-          due_at: dueAt ? new Date(dueAt).toISOString() : null,
-          start_at: startAt ? new Date(startAt).toISOString() : null,
+          due_at: dueAt ? localDateFieldToIso(dueAt) : null,
+          start_at: startAt ? localDateFieldToIso(startAt) : null,
           depends_on: dependsOn.map((id) => ({ task_id: id, kind: "relates" })),
         });
         // 父任务变化 → reparent
