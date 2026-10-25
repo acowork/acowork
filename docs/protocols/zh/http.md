@@ -137,7 +137,7 @@ Runtime 本地文件 / SQLite 记忆层；Gateway 通过 HTTP 反向代理拉取
 
 | 大类 | Gateway 实现模块 |
 |---|---|
-| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs) |
+| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs), [`intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs) |
 | B | [`proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)（ADR-033 Phase 2 + ADR-034 Phase 3） |
 | C | [`workspaces.rs`](../../../core/acowork-gateway/src/http/workspaces.rs)（仅静态资源部分） |
 
@@ -555,6 +555,46 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 - **两个写方法成功后都会敲 MQTT 空门铃** `acowork/users/{uid}/chat/changed`：`POST …/messages` 敲给发件
   人与收件人两个账号，`POST …/read` 只敲给读取者（见 [mqtt.md §3.4](./mqtt.md)）。业务写绝不因 broker 不
   可用而失败（fire-and-forget），所以客户端同时保留 5s 兜底轮询。
+
+---
+
+### 4.16 服务间内部端点（acowork-pm → Gateway，Intent 派发面）
+
+> **实现**：[`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs)。
+> 本节只收录 acowork-pm 作为调用方的两个端点；其余 `/api/intents/*` 是 Gateway↔Runtime / 前端会话面，
+> 契约以设计 27 §4.5 字段表为真源，不在此重复。鉴权为内部服务边界（同 `/api/intents/project-group`）：
+> PM 以项目 owner 身份行事，Gateway 不反向校验 `owner`。
+
+#### 4.16.1 `POST /api/intents/task-dispatch`
+
+把一条 PM 任务派发到项目群聊并唤醒目标 agent 的执行会话（设计 27 §5.4.2）。请求体：
+
+| 字段 | 必需 | 说明 |
+|---|---|---|
+| `project_id` / `task_id` | 是 | 任务坐标；`conversation_id` 由 Gateway 用 `task:{project}:{task}` 常量函数铸造 |
+| `target_agent` | 是 | 目标 agent instance id（ADR-073 UUID） |
+| `owner` | 是 | 派发人（项目 owner），chat 行的 `from` |
+| `title` | 否 | 任务标题（群聊 ensure 用） |
+| `message` | 是 | **人读文本**（标题+描述）：进群聊 chat 行正文与信封 `params.message` |
+| `assignment_brief` | 否 | **高信任信封字段**（claim→work→submit playbook）：只进 Runtime 执行会话系统块，不落任何聊天表面；agent 来源的 params 携带该键会被 Gateway 出口剥离（ADR-101） |
+| `chat_session_id` | 否 | 项目群聊会话；缺省时幂等 ensure |
+| `message_id` | 否 | **调用方提供的派发代次身份**。PM 扫描器首试前落盘、重试重放同一 id → chat 行按 `meta.message_id` 去重、信箱预算按同 id 去重（每代次各占一份）。缺省 → Gateway 现铸（每次调用一行，无重试幂等） |
+
+信封 `kind` 固定盖 `pm_task`（人类输入、keyed 路由、不经 Chat Router）。响应恒为 200 + JSON（投递失败不是 HTTP 错误，PM 据此退避重试）：
+
+```json
+{ "message_id": "…", "status": "delivered | failed",
+  "conversation_id": "task:…", "chat_session_id": "…",
+  "error_code": "target_not_installed | not_authorized | conversation_limit_exceeded | chat_log_unavailable | …", "error": "…" }
+```
+
+#### 4.16.2 `POST /api/intents/task-close`
+
+任务进入终态（Done / Rejected / Cancelled）时结束目标 agent 对该任务的逻辑执行上下文。请求体 `{project_id, task_id, target_agent}`（任一为空 → 400；需内部服务 token）；Gateway 把 `conv:task:{project}:{task}` 路由键转发给目标 Runtime 的 `/intent-context/close`。幂等，Runtime 不可达时如实报告不重试（下次派发自愈死映射）。响应 `{ "status": "closed | skipped | failed", "key": "conv:task:…", "reason" | "error": … }`（`skipped` = agent 未在运行，无需关闭）。
+
+#### 4.16.3 PM 任务资源新增字段（acowork-pm REST，字段真源在设计 27 §5.4.2）
+
+`Task.dispatch_message_id: string | null`——派发代次身份，首试前落盘、重试复用、状态跃迁（重开/重派）时清除；随任务 JSON 透传，客户端只读。
 
 ---
 

@@ -112,7 +112,7 @@ Source mapping:
 
 | Category | Gateway implementation modules |
 |---|---|
-| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs) |
+| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs), [`intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs) |
 | B | [`proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs) (ADR-033 Phase 2 + ADR-034 Phase 3) |
 | C | [`workspaces.rs`](../../../core/acowork-gateway/src/http/workspaces.rs) (static resource part only) |
 
@@ -392,6 +392,47 @@ Encoding protobuf bytes as base64 keeps the two channels **wire‑format identic
 `503` body is uniformly `NotReadyView`: `{instance_id, phase, phase_detail, retry_after_seconds, error}` (`retry_after_seconds` same value as header, dual‑channel redundancy; client may use either).
 
 Runtime consumption rule: `503` **does not update local cache**, backs off per `Retry-After`; `200` is always authoritative snapshot (empty `instance_id` / empty `topics` are treated as normal snapshots — empty resources are valid, not unready).
+
+---
+
+### 4.16 Internal service-to-service endpoints (acowork-pm → Gateway, Intent dispatch surface)
+
+> **Implementation**: [`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs).
+> This section covers only the two endpoints acowork-pm calls; the rest of `/api/intents/*` is the
+> Gateway↔Runtime / frontend chat surface whose contract is owned by Design 27 §4.5's field table and is
+> not duplicated here. Auth is the internal-service boundary (same as `/api/intents/project-group`): PM
+> acts as the project owner from its own domain data; the Gateway does not re-validate `owner`.
+
+#### 4.16.1 `POST /api/intents/task-dispatch`
+
+Dispatches a PM task into its project group chat and wakes the target agent's execution session (Design 27 §5.4.2). Request body:
+
+| Field | Required | Description |
+|---|---|---|
+| `project_id` / `task_id` | yes | Task coordinates; `conversation_id` is minted by the Gateway via the `task:{project}:{task}` constant helper |
+| `target_agent` | yes | Target agent instance id (ADR-073 UUID) |
+| `owner` | yes | Dispatching human (project owner) — the chat row's `from` |
+| `title` | no | Task title (used when ensuring the group chat) |
+| `message` | yes | **Human text** (title + description): goes to the group-chat row body and the envelope's `params.message` |
+| `assignment_brief` | no | **High-trust envelope field** (the claim→work→submit playbook): enters only the Runtime execution session's system block, never any chat surface; agent-sourced params carrying this key are stripped by the Gateway at the edge (ADR-101) |
+| `chat_session_id` | no | Project group chat; ensured idempotently when absent |
+| `message_id` | no | **Caller-supplied dispatch generation identity.** The PM scanner persists one before the first attempt and replays it on every retry → the chat row dedupes on `meta.message_id` and the mailbox budget dedupes on the same id (one charge per generation). Absent → the Gateway mints one (one row per call, no retry idempotency) |
+
+The envelope `kind` is always stamped `pm_task` (human input, keyed routing, Chat Router bypassed). The response is always 200 + JSON (a failed delivery is not an HTTP error — PM backs off and retries on it):
+
+```json
+{ "message_id": "…", "status": "delivered | failed",
+  "conversation_id": "task:…", "chat_session_id": "…",
+  "error_code": "target_not_installed | not_authorized | conversation_limit_exceeded | chat_log_unavailable | …", "error": "…" }
+```
+
+#### 4.16.2 `POST /api/intents/task-close`
+
+Ends the target agent's logical execution context for a task when it reaches a terminal state (Done / Rejected / Cancelled). Request body `{project_id, task_id, target_agent}` (any empty → 400; internal-service token required); the Gateway forwards the `conv:task:{project}:{task}` routing key to the target Runtime's `/intent-context/close`. Idempotent; an unreachable Runtime is reported, not retried (the next dispatch self-heals a dead mapping). Response `{ "status": "closed | skipped | failed", "key": "conv:task:…", "reason" | "error": … }` (`skipped` = the agent is not running, nothing to close).
+
+#### 4.16.3 New PM task resource field (acowork-pm REST; source of truth: Design 27 §5.4.2)
+
+`Task.dispatch_message_id: string | null` — the dispatch generation identity: persisted before the first attempt, reused across retries, cleared on state transitions (reopen / reassignment); passed through in the task JSON, read-only for clients.
 
 ---
 

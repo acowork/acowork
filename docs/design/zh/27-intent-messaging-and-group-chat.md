@@ -1,7 +1,9 @@
 # Intent 通信与聊天 Session 设计
 
 > 状态：设计定稿（框架、需求、数据模型、协议、前端、模块边界已确认；API 与 schema 细节待实现设计）
-> 版本：v2.7 | 更新日期：2026-10-24
+> 版本：v2.8 | 更新日期：2026-10-25
+>
+> v2.8 为**轮次来源词汇表与 PM 派发链路修订**（ADR-101）：① Intent 信封 `kind` 定型为四值词汇表（`user_message` / `pm_task` / `request` / `response`，未知与空值按 `request` 保守兜底），接收侧的路由、渲染、角色、写回四个决策点一律由 `TurnOrigin` 策略表决定，废除以 `conversation_id` 前缀字符串匹配猜场景的潜规则；② PM 派发的唤醒 playbook 从用户消息正文拆为信封字段 `assignment_brief`，由 Runtime 注入执行会话的系统块，不进任何聊天表面、不随会话历史持久化；派发 chat 行只带人读文本与 `meta.task_id`（渲染为任务胶囊；`project_id` 移除——行本就活在该项目的群里）；③ 派发触发源收敛为 PM 侧扫描器（`start_at` 到期 + 审批闸门 + 依赖闸门），撤销事件钩子；投递重试以持久化的 `dispatch_message_id` 为代次身份幂等（chat 行与信箱预算每代次各只占一份），退避 60s→5m→15m→30m、五次失败放弃。逐项见 §4.5 字段表、§5.4.2、§5.4.5、§13。
 >
 > v2.7 为**执行会话轮转机制删除**（ADR-099 2026-10-24 修订）：T1（空闲间隔）/ T2（任务终态或发生过 compaction）与已取消的 T3（配置冲突）一并从设计中删除，连 successor / predecessor / handoff 与两个配置项。理由：execute session 本就是可一直追加的会话，压缩过的历史会话同样能继续接 dispatch与迭代；T1/T2 是「没有 LLM 做路由判断」时代用物理信号近似「任务该结束了」的产物，语义决策上提到 Chat 层后它们不再承担任何路由含义，而 T2 的 handoff 摘要正是本设计要消灭的污染。收敛后的规则：执行会话**长命**，上下文卫生只有 compaction 阈值，文件规模只有 JSONL 硬上限，开新会话只有三个显式来源（router `dispatch(new)` / PM task 终态 close / 用户手动新建）。逐项见 §2.4 术语表、§3.3 非功能需求、§3.4 决策 3 / 4 / 23、§4.1、§4.5.2、§6.2。
 >
@@ -407,6 +409,7 @@ Chat session 里只有一类指向 execution session 内事件的 durable 行：
 | `body` / `attachments` | 至少一个非空 | 给接收 Agent 的消息内容与附件（§4.2.1） |
 | `mentions` | 群聊 @ 时 | 被 @ 的目标 instance id 列表。一条 `user_message` 只落一行，多个目标写在同一行的 `mentions` 里（§5.3.1） |
 | `repo` | 可选 | 本次工作涉及的代码仓库地址（规范化 remote URL）。项目有仓库时由系统在派发时自动注入；发送方不指定目标 Agent 的具体工作目录 |
+| `assignment_brief` | 仅 `pm_task` | PM 派发的唤醒 playbook（claim → 工作 → submit 契约）。**高信任信封字段**：只有系统生产者（task-dispatch 管线）可以填，Runtime 仅当轮次来源为 `pm_task` 时采纳并注入执行会话的系统块（Block A），不进渲染后的用户消息、不落 Chat 表面、不随会话历史持久化；对等 `intent_send` / 卡片应答等 agent 来源的 params 携带该键时，Gateway 在出口剥离、Runtime 在提取与消费两处各设一道来源门控（ADR-101 信任边界：高信任信封字段只认系统生产者） |
 | `session_config` | 可选 | model / provider / reasoning-effort / 工作目录的**初值建议**；新建 execution session 时作为 seed 应用（复用已映射会话时按 §4.5.2 从它的下一轮生效），未提供的字段用目标 Agent 默认值。**不含 skills**——技能由模型自动加载，非 session 级初值，chat-message 通道也没有逐条指定技能的入口 |
 | `conversation_id` | Agent 发起时必需 | 一次对话的标识，由发起方在首次 request 时生成，本次对话的后续 request / response 复用。系统据此统计 request 次数（§5.4.5）。**人类发起的轮次留空**，因此人类消息天然不计入对话预算 |
 | `in_reply_to` | 应答时必需 | 被应答消息的 `message_id`；**由系统生成，不是模型可填参数**——它的存在即表示本条是应答（§5.4.5 R2）。人类回答卡片时同样使用此字段（§5.5.4） |
@@ -636,6 +639,8 @@ PM 创建任务并向 Agent 派发时，以任务作为执行 session 边界：
 
 任务逻辑执行上下文对应 Agent execution session 链，不是 Chat session。群聊负责可见的项目交流历史，PM task ID 负责选择目标 Agent 的执行上下文。
 
+**派发触发与幂等（v2.8，ADR-101）。**派发的唯一触发源是 PM 侧扫描器：每 tick 从索引取「pending + 已过审批闸门 + `start_at` 到期（缺省=立即）+ 未派发 + 有 agent 责任人 + 依赖已满足」的候选集，按优先级推送 `POST /api/intents/task-dispatch`（信封 `kind=pm_task`）。事件钩子（创建即派发 / 审批即派发）撤销——触发时机只有一个事实来源（`start_at` 与 `dispatched_at`），不依赖进程内事件链。投递是**代次幂等**的：扫描器在首次尝试**之前**把 `dispatch_message_id` 落盘（`Task` 字段，crash-safe、重启复用），重试以同一身份重放——chat 行按 `meta.message_id` 去重（存储层唯一写入口的既有合同）、信箱预算按 `message_id` 去重（每代次占 1 个名额，投递失败不再能烧穿 §6.5 R4 上限把任务永久饿死）。失败退避 60s→5m→15m→30m，第 5 次失败后放弃并 `error` 日志（放弃按代次计：状态跃迁/换人清除 `dispatch_message_id` 与 `dispatched_at`，新代次重新计数）。派发到项目群的 chat 行只带人读文本（标题+描述）与 `meta.task_id`（前端渲染为任务胶囊，点击复制裸 id）；`project_id` 不进 meta——行本就活在该项目的群里；唤醒 playbook 走信封 `assignment_brief`（§4.5 字段表），不进消息正文、不落历史。
+
 #### 5.4.3 Agent-Agent：三个 session
 
 Agent A 与 Agent B 建立一对一聊天时存在三个互相独立但可关联的 session：
@@ -690,6 +695,8 @@ Intent 采用 C/S 式的所有权模型：一次对话由发起方拥有并负�
 | 人类消息（用户单聊 / 群聊 @ / PM 派单 / cron） | 发起方 | 可用 | 新建 |
 | `agent_message`（别的 Agent 问我） | 应对方 | **不在本轮 tool set 中** | 复用入站值 |
 | 应答（别的 Agent 答我） | 发起方，延续自己的对话 | 可用 | 复用 |
+
+**入站类型是信封 `kind` 字段上的四值词汇表（v2.8，ADR-101），不是靠字符串线索推断的潜规则。**`user_message`（人类聊天轮：单聊 / 群聊 @ / pinned 转投）、`pm_task`（PM 任务派发——人类输入，但路由键是任务身份、不经 router）、`request`（agent 发起的对话请求；空值与未知值保守兜底为本项，覆盖 cron 与混版的旧生产者）、`response`（应答回传）。每个值在 `acowork-core::intent::TurnOrigin` 的策略表上对应一行 `{router_eligible, render_envelope, responder, write_back}`：路由资格、渲染形态（人读文本还是完整信封）、本轮角色（R1 的工具裁剪依据）、写回义务四个决策点**查同一张表**，生产端（Gateway 各构造点）显式盖章，消费端不再各自从 `conversation_id` 前缀或 kind 字面量反推场景。`pm_task` 与 `user_message` 的差别只在路由资格一项——它是人类输入，角色与渲染与聊天轮相同（v2.8 修复的正是它此前骑 `request` 值、被按应对方裁剪 `ask_user_question` 并被渲染成信封 JSON 的错位）。task 坐标（`task:{project}:{task}` 与 `conv:task:{project}:{task}`）的格式常量与判定/构造函数同样收在 `acowork-core::intent`，feature 代码不得裸写 `starts_with`。
 
 R1 的强制点在工具可见性：应对方 turn 的工具集合里没有 `intent_send`，同时移除 `ask_user_question`（靠工具可见性强制，不是运行时报错）。模型看不到这两个工具，因此既不会尝试，也不会消耗 token 想别的路子绕过去——比运行时报错更省，也更硬。
 
@@ -933,6 +940,7 @@ chat 侧不读 execution session 的 `live_state`：既不读时投影为持续�
 - **@ 选择器**：只有 @ 到 Agent 才触发执行；@ 到人仅产生提及，不触发（§5.3.1）。
 - **多 Agent 并发**：同一消息 @ 多个 Agent 时，各自独立地跑一轮（chat 侧只有一条群级等待行，不逐个点名）。
 - **成员变更**：被移出群的成员，其视图中的历史群消息保留，但群 execution session 立即不可达（§8.3）。
+- **任务胶囊（v2.8）**：PM 派发的 `user_message` 行在气泡上方渲染一枚胶囊（`meta.task_id` 存在即渲染，文案「任务 {id}」，点击复制裸 id）；行正文只有人读文本，唤醒 playbook 不上任何聊天表面（§5.4.2）。胶囊是派发行唯一的机器坐标展示——`project_id` 不进 meta，也不渲染。
 
 ### 6.5 移动端
 
@@ -1164,6 +1172,8 @@ v2.0 重排了章节。代码注释中对本设计的 `§` 引用需按此表更
 ## 13. 变更记录
 
 保留历史修订要点（原文照录；其中 § 引用为当时的旧编号，新旧对照见 §12。v2.2 / v2.0 等条目中描述的 T1/T2/T3 轮转与 handoff 机制**已在 v2.7 整体删除**，仅作历史记录保留）
+
+> v2.8 修订（轮次来源词汇表与 PM 派发链路，ADR-101）：① Intent 信封 `kind` 收为四值词汇表 `user_message` / `pm_task` / `request` / `response`（空值与未知值兜底 `request`，cron 与混版旧生产者落保守侧），生产端在 Gateway 各构造点显式盖章，消费端（路由资格 / 渲染形态 / responder 角色 / 写回义务四个决策点）统一查 `acowork-core::intent::TurnOrigin` 策略表；task 坐标格式常量与判定/构造函数收进同一模块，feature 代码禁止裸 `starts_with("task:")`。修复的错位：PM 派发此前骑 `kind="request"`，被按应对方裁剪 `ask_user_question` / `intent_send`（人类任务轮失去向人提问的能力），并在执行 transcript 里渲染成整个信封 JSON、经会话标题派生二次泄漏到群聊回执。② PM 派发消息拆分：人读文本（标题+描述）进群聊 chat 行，唤醒 playbook 拆为信封字段 `assignment_brief`，Runtime 注入执行会话系统块（ADR-060 字节稳定：每代次常量），不进渲染文本、不落会话历史、不进任何聊天表面；群聊按 `meta.task_id` 渲染任务胶囊（该键必须在 chat 存储 `IntentMeta` 上声明——决策 29 的静默丢弃陷阱在本键上真实发生过一次，两端各有测试钉住），`project_id` 从派发行 meta 移除。信任边界：`assignment_brief` 是高信任字段，Runtime 按来源门控（提取与消费两道），Gateway 对 agent 来源 params 在出口剥离（保护混部旧 Runtime）。③ 派发触发源收敛为 PM 扫描器（`start_at` 到期 + 审批 + 依赖三闸门），撤销事件钩子；重试幂等：`Task.dispatch_message_id` 首试前落盘、按代次复用，chat 行与信箱预算每代次各占一份，退避 60s→5m→15m→30m、五次失败放弃并 error 日志（放弃按代次计，跃迁即重计）。逐项见 §4.5 字段表（`assignment_brief` 行）、§5.4.2（触发与幂等段）、§5.4.5（词汇表段）、§6（任务胶囊）。协议面：task-dispatch 是 Gateway 内部服务间端点，契约（`assignment_brief` / 可选 `message_id` / kind=`pm_task`）以本文 §4.5 字段表为准，不重复收录进 protocols/http；版本偏差注记（新 Gateway→旧 Runtime 会把 `pm_task` 兜底成 responder 语义，多节点部署 Runtime 先行或同批）见 runbooks。
 
 > v2.7 修订（执行会话轮转机制删除，取代 v2.2 的三态轮转模型）：T1（空闲间隔）/ T2（PM task 终态或本次执行发生过 compaction）与已在 v2.2 取消的 T3（配置冲突）一并删除，连 successor / predecessor 会话对、`handoff_note` 通道、`rotation_handoff` transcript 标记、`last_compaction_summary` 派生列、以及 `intent_idle_rotate_hours` / `intent_handoff_max_tokens` 两个配置项（含 Agent 设置卡片与五份 locale）。理由：execute session 本就是可一直追加、持续交互的会话，每一轮都重新读全量 JSONL（ADR-032），压缩过的会话同样能继续接 dispatch——「压缩过就该换窗口」没有依据；T1/T2 是「没有 LLM 做路由判断」时代用物理信号近似「任务该结束了」的产物，语义决策上提到 Chat Router 后不再承担任何路由含义；T2 的 handoff 摘要与「新任务不被旧摘要污染」的目标直接冲突。收敛后的唯一规则：执行会话**长命**，上下文卫生只有 compaction 阈值，文件规模只有既有 JSONL 硬上限，开新执行会话只有三个显式来源（router `dispatch(new)` / PM task 终态 close / 用户经 `+` 手动新建）。不变面：`turn_mode` 仍只有 new / continue 两态（ADR-100 D11），`chat_dispatch` 返回值随之从三元收回二元，transcript 不新增 tag，映射可指向已压缩的会话且不做健康检查，压缩自身的恢复跳过仍用 `last_compaction_offset`；历史 JSONL 里的 `rotation_handoff` 行不迁移、不清理，仍从聊天渲染中过滤。详见 ADR-099「修订（2026-10-24）」，逐项见 §2.4 / §3.3 / §3.4 决策 3、4、23 / §4.1 / §4.5.2 / §5.4.1 / §5.4.2 / §6.2。
 

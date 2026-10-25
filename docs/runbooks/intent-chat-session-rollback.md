@@ -176,3 +176,17 @@ cp "{data}/chat-sessions/$SID/files/"* "$OUT/files/" 2>/dev/null || true
 - **不许**把 6.2 的导出配方当同步工具长期双跑——它是回滚桥，双写会造出两个真相源。
 - **不许**在回滚窗口内启用注册自建号后直接前滚而不重跑 `migrate_legacy`（新 pair 无旧目录可迁，
   重跑是 no-op，但跳过它意味着没人核对 `.migrating` 残留——启动时它自动续跑，别绕开启动路径）。
+
+---
+
+## 7. 版本偏差：Gateway 与 Runtime 混部（v2.8 / ADR-101 起必读）
+
+Intent 信封 `kind` 自 v2.8 起是四值词汇表（`user_message` / `pm_task` / `request` / `response`），消费端由 `TurnOrigin` 策略表解释。**新 Gateway → 旧 Runtime** 的混部窗口里，旧 Runtime 不认识 `pm_task`，按旧词汇表兜底成 responder 语义（agent-to-agent 应对方）：PM 派发轮会被裁掉 `ask_user_question` / `intent_send`，且信封按旧规则渲染成 JSON 进 transcript——正是 v2.8 修掉的行为。
+
+| 混部方向 | 后果 | 处置 |
+|---|---|---|
+| 新 Gateway + 旧 Runtime | `pm_task` 轮退回 responder 裁剪 + JSON 渲染（功能性回退，不丢数据） | **多节点部署先升 Runtime（或同批），再升 Gateway**；单桌面 bundle 内同二进制版本，无此窗口 |
+| 旧 Gateway + 新 Runtime | 旧 Gateway 发 `kind="request"` 的 PM 派发 → 新 Runtime 兜底 `AgentRequest`，行为等同旧 Runtime（不劣化） | 可接受；升级完成后新派发即恢复正确语义 |
+| 新 PM + 旧 Gateway | PM 传 `assignment_brief` / `message_id` 字段，旧 Gateway 忽略未知字段 → 派发仍成功，但 playbook 仍在正文里（旧显示行为），重试不幂等（旧 Gateway 每次铸新 message_id） | 尽快补齐 Gateway；窗口内重复派发靠 chat 行 `meta.message_id` 幂等去重兜底 |
+
+回滚同理：`git revert` Gateway 侧 v2.8 提交后，Runtime 若留在新版，PM 派发按 `request` 兜底运行（旧行为），无需同步回滚 Runtime。
