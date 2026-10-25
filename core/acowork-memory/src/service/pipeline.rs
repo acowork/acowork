@@ -1055,16 +1055,39 @@ async fn resource_loop(this: Arc<Pipeline>) {
         if !this.is_running() {
             return;
         }
+        let mut embedding_known = true;
         match client.pull_with_retry(PULL_MAX_DURATION).await {
-            Some(snapshot) => this.apply_snapshot(snapshot),
+            Some(snapshot) => {
+                embedding_known = snapshot
+                    .embedding
+                    .as_ref()
+                    .and_then(|e| e.base_url.as_ref())
+                    .is_some();
+                this.apply_snapshot(snapshot);
+            }
             None => tracing::warn!(
                 url = %client.url(),
                 "global-resources pull did not complete — keeping the previous credentials"
             ),
         }
-        tokio::time::sleep(REFRESH_INTERVAL).await;
+        // A snapshot without an embedding endpoint is a startup race — the
+        // embed sidecar is still loading its model while the Gateway already
+        // serves — not a steady state. Until the real endpoint (and width)
+        // arrives, the pipeline runs on the config fallback whose declared
+        // dimension may not match the model the sidecar loads; re-pull fast so
+        // that window is seconds, not one full refresh interval.
+        let wait = if embedding_known || !this.config.embedding.enabled {
+            REFRESH_INTERVAL
+        } else {
+            EMBEDDING_PENDING_INTERVAL
+        };
+        tokio::time::sleep(wait).await;
     }
 }
+
+/// Retry interval while the Gateway snapshot carries no embedding endpoint
+/// (see [`resource_loop`]).
+const EMBEDDING_PENDING_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Consolidation loop: one tick every `poll_interval`, walking every known
 /// instance. The Runtime loop's body, lifted to per-namespace.

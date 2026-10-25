@@ -15,6 +15,7 @@
 //! Keeping both on one client type is what stops the rebuild path and the
 //! steady-state path from drifting apart on response parsing or error wording.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,7 +34,10 @@ pub struct HttpEmbeddingClient {
     base_url: String,
     api_key: Option<String>,
     model: String,
-    dimension: usize,
+    /// Vector width this provider reports. Seeds from the declaration but is
+    /// corrected by [`Self::record_observed_dim`] on every successful embed —
+    /// see the trait impl note on why measurement beats declaration.
+    dimension: AtomicUsize,
     http: Client,
     /// Request timeout this client was built with, kept because reqwest offers
     /// no getter and a zero/typo timeout is otherwise invisible in a log.
@@ -45,9 +49,12 @@ impl HttpEmbeddingClient {
     ///
     /// `api_key` is optional — the local acowork-embed sidecar runs
     /// unauthenticated and rejects nothing, while a cloud provider needs the
-    /// bearer token. `dimension` is declarative: it is what the store writes
-    /// into its vector index and what the panel compares against `stored_dim`;
-    /// the client does not verify the model actually produces that width.
+    /// bearer token. `dimension` is the client's opening declaration (what the
+    /// store seeds its vector index from, what the panel compares against
+    /// `stored_dim`), not a hard claim: once vectors arrive, the observed
+    /// width wins, because a declaration read from a stale config default is
+    /// exactly what kept the rebuild banner up after every node had already
+    /// been re-embedded at the real width.
     pub fn new(
         base_url: &str,
         api_key: Option<&str>,
@@ -63,10 +70,29 @@ impl HttpEmbeddingClient {
             base_url: normalize_base_url(base_url),
             api_key: api_key.map(str::to_string).filter(|k| !k.is_empty()),
             model: model.to_string(),
-            dimension,
+            dimension: AtomicUsize::new(dimension),
             http,
             timeout,
         })
+    }
+
+    /// Follow the provider's real output width. Called after every successful
+    /// batch with the first vector's length; logs only when the width actually
+    /// changes, so a converged client stays quiet.
+    fn record_observed_dim(&self, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let prev = self.dimension.swap(len, Ordering::Relaxed);
+        if prev != len {
+            tracing::warn!(
+                declared = prev,
+                observed = len,
+                base_url = %self.base_url,
+                model = %self.model,
+                "embedding provider reports a different dimension than declared — following the provider"
+            );
+        }
     }
 
     /// The per-request timeout this client enforces — reqwest keeps no getter,
@@ -124,7 +150,11 @@ impl HttpEmbeddingClient {
             .json()
             .await
             .map_err(|e| EmbeddingError::Remote(format!("failed to parse response: {e}")))?;
-        Ok(resp.data.into_iter().map(|d| d.embedding).collect())
+        let vectors: Vec<Vec<f32>> = resp.data.into_iter().map(|d| d.embedding).collect();
+        if let Some(first) = vectors.first() {
+            self.record_observed_dim(first.len());
+        }
+        Ok(vectors)
     }
 }
 
@@ -158,7 +188,7 @@ impl EmbeddingProvider for HttpEmbeddingClient {
     }
 
     fn dimension(&self) -> usize {
-        self.dimension
+        self.dimension.load(Ordering::Relaxed)
     }
 
     /// Reachability probe: `GET {base_url}/models`, which both the embed
@@ -365,10 +395,29 @@ mod tests {
     }
 
     #[test]
-    fn dimension_is_declared_not_measured() {
+    fn dimension_starts_at_the_declaration() {
         let c = client("http://h/v1");
         assert_eq!(c.dimension(), 4);
         assert_eq!(c.name(), PROVIDER_NAME);
+    }
+
+    /// The declaration is only the opening value: a provider whose real output
+    /// is wider (config default 384 vs a loaded bge-m3, the rebuild-banner
+    /// loop) must be followed, or `model_dim` never converges with `stored_dim`
+    /// and the panel asks for a rebuild forever.
+    #[tokio::test]
+    async fn observed_dimension_follows_the_provider() {
+        let stub = stub_server(serde_json::json!({
+            "data": [{"embedding": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]}]
+        }))
+        .await;
+        let c = client(&stub.base_url);
+        assert_eq!(c.dimension(), 4, "before any traffic the declaration stands");
+        c.embed("hello").await.unwrap();
+        assert_eq!(c.dimension(), 6, "the observed width wins after an embed");
+        // Converged: a repeat call at the same width changes nothing.
+        c.embed("again").await.unwrap();
+        assert_eq!(c.dimension(), 6);
     }
 
     #[test]

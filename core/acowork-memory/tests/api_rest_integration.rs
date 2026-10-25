@@ -146,6 +146,12 @@ async fn body_json(resp: reqwest::Response) -> Value {
 /// an unrealistic stub quietly turns "nothing was re-embedded" into a passing
 /// test.
 async fn stub_embed_server(slow: bool) -> String {
+    stub_embed_server_w(slow, DEFAULT_EMBEDDING_DIM).await
+}
+
+/// Same stub with a configurable reply width — a model switch is exactly a
+/// width change, and a fixed-width stub cannot observe it.
+async fn stub_embed_server_w(slow: bool, width: usize) -> String {
     let handler = axum::routing::post(move |Json(body): Json<Value>| async move {
         if slow {
             tokio::time::sleep(Duration::from_millis(800)).await;
@@ -156,8 +162,8 @@ async fn stub_embed_server(slow: bool) -> String {
                 json!({
                     "object": "embedding",
                     "index": i,
-                    "embedding": (0..DEFAULT_EMBEDDING_DIM)
-                        .map(|d| d as f64 / DEFAULT_EMBEDDING_DIM as f64)
+                    "embedding": (0..width)
+                        .map(|d| d as f64 / width as f64)
                         .collect::<Vec<f64>>(),
                 })
             })
@@ -677,5 +683,54 @@ async fn rebuild_starts_conflicts_and_reaches_a_terminal_progress() {
         ))
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The reported bug: the panel banner compares `stored_dim` against the
+/// service's `model_dim`. A clean rebuild re-embeds every node at the target
+/// width but must ALSO retarget the live provider — otherwise `model_dim`
+/// keeps the stale startup declaration, the banner survives every rebuild
+/// click, and the user loops. Reproduces the bge-small → bge-m3 switch: the
+/// harness provider is 384, the migration target is 1024.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_rebuild_retargers_the_live_provider() {
+    let server = TestServer::spawn().await;
+    server.mcp_store(INSTANCE_A, "switching models").await;
+    let q = format!("instance_id={INSTANCE_A}");
+
+    let (_, before) = server.get(&format!("/memory/nodes?{q}")).await;
+    assert_eq!(
+        before["model_dim"],
+        json!(DEFAULT_EMBEDDING_DIM as u64),
+        "the harness installs the 384 stub at startup: {before}"
+    );
+
+    let wide = stub_embed_server_w(false, 1024).await;
+    let (status, _) = server
+        .post(
+            &format!("/memory/rebuild-embeddings?{q}"),
+            json!({"endpoint": wide, "model_id": "bge-m3", "dimension": 1024, "scope": "all"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let mut done = false;
+    for _ in 0..50 {
+        let (_, p) = server.get(&format!("/memory/rebuild-progress?{q}")).await;
+        if p["done"] == json!(true) {
+            assert_eq!(p["error"], Value::Null, "rebuild failed: {p}");
+            assert_eq!(p["rebuilt"], p["total"], "rebuild skipped rows: {p}");
+            done = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(done, "rebuild never completed");
+
+    let (_, after) = server.get(&format!("/memory/nodes?{q}")).await;
+    assert_eq!(
+        after["model_dim"],
+        json!(1024),
+        "a clean rebuild must leave model_dim at the width it just migrated to"
+    );
 }
 

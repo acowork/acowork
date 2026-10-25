@@ -11,6 +11,7 @@
 //! provider the service loaded at startup — see [`crate::service::embedding`].
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -101,6 +102,27 @@ pub async fn rebuild_embeddings(
             Some(progress),
         )
         .await;
+        // The migration just proved this endpoint/model/width works against the
+        // live store, so make it the service's provider: `model_dim` (what the
+        // panel compares against `stored_dim`) then follows the model the
+        // operator switched to immediately instead of waiting for the next
+        // global-resources pull — otherwise a clean rebuild leaves the banner
+        // up and the user clicks rebuild forever. Only on a fully clean run: a
+        // rebuild with per-node errors used an endpoint that half-fails and
+        // must not replace a working provider.
+        if let Ok(stats) = &outcome
+            && stats.errors == 0
+            && let Ok(client) = HttpEmbeddingClient::new(
+                &endpoint,
+                None,
+                &model_id,
+                dimension,
+                Duration::from_millis(task_state.config.embedding.timeout_ms.max(1)),
+            )
+        {
+            task_state.set_embedding(Some(Arc::new(client)));
+            task_state.instances().set_embedding_dim(dimension);
+        }
         let (rebuilt, total, error) = match outcome {
             Ok(stats) => {
                 tracing::info!(
