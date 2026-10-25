@@ -907,6 +907,7 @@ impl PmStore for TreePmStore {
             due_at: input.due_at,
             start_at: input.start_at,
             dispatched_at: None,
+            dispatch_message_id: None,
             depends_on: input.depends_on,
             attachments: vec![],
             result: None,
@@ -1028,7 +1029,7 @@ impl PmStore for TreePmStore {
             if s != task.status {
                 // 状态跃迁即视为一次新的生命周期：清派发标记，
                 // 回退到 pending 时允许扫描器按 start_at 重新派发。
-                task.dispatched_at = None;
+                task.clear_dispatch_generation();
             }
             task.status = s;
         }
@@ -1045,7 +1046,7 @@ impl PmStore for TreePmStore {
                 && task.status == TaskStatus::Pending
             {
                 // 换人 = 需要重新唤醒新执行者
-                task.dispatched_at = None;
+                task.clear_dispatch_generation();
             }
             task.assignee = input.assignee.clone().flatten();
         }
@@ -1249,10 +1250,8 @@ impl PmStore for TreePmStore {
 
         task.status = TaskStatus::InProgress;
         task.claimed_at = Some(Utc::now());
-        // 离开 pending：清派发标记，回退 pending 后扫描器可再派发
-        task.dispatched_at = None;
         // 离开 pending 生命周期起点：清派发标记，回退后可被重新派发
-        task.dispatched_at = None;
+        task.clear_dispatch_generation();
         // P3: Agent 自领后即成为责任人（修复 P1 遗留——claim 不更新 assignee）。
         // MCP 层已校验调用者 instance_id == assignee instance_id（设计 §9.2 / ADR-073）。
         // 联动指派：claim 会把 actor 写为 assignee，actor 必须是项目成员。
@@ -1339,7 +1338,7 @@ impl PmStore for TreePmStore {
         if let Some(to) = to {
             validate_transition(task.status, to, id)?;
             if to != task.status {
-                task.dispatched_at = None;
+                task.clear_dispatch_generation();
             }
             task.status = to;
         }
@@ -1602,6 +1601,35 @@ impl TreePmStore {
             )
         });
         due.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// The dispatch generation's identity for a scanner push: returns the
+    /// task's persisted `dispatch_message_id`, minting and writing it to
+    /// disk on the first attempt of a generation (crash-safe: a retry —
+    /// or a retry after a PM restart — replays the same id, and the
+    /// Gateway dedupes the chat row and the mailbox budget on it).
+    /// `Ok(None)` = the task left the dispatchable state concurrently
+    /// (claimed / reassigned between the candidate filter and this read);
+    /// the scanner skips it this tick.
+    pub async fn dispatch_identity(&self, id: &TaskId) -> Result<Option<String>> {
+        let entry = match self.index.read().by_id.get(id).cloned() {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let path = entry.dir_path.join("task.json");
+        let mut task: Task = read_json(&path).await?;
+        if let Some(existing) = task.dispatch_message_id.clone() {
+            return Ok(Some(existing));
+        }
+        if task.status != TaskStatus::Pending || task.dispatched_at.is_some() {
+            return Ok(None);
+        }
+        let minted = format!("pm-{}", uuid::Uuid::new_v4());
+        task.dispatch_message_id = Some(minted.clone());
+        task.updated_at = Utc::now();
+        atomic_write_json(&path, &task).await?;
+        self.refresh_entry(&entry, id, &task);
+        Ok(Some(minted))
     }
 
     /// 派发成功后回写 `dispatched_at`（幂等：仅 pending 且未派发时写入）。
@@ -2818,5 +2846,81 @@ mod tests {
 
         // 未来任务永远不该出现在候选里
         assert!(!store.dispatch_due_ids(Utc::now()).contains(&future.id));
+    }
+
+    /// 派发代次身份生命周期：首派生成并落盘（crash-safe）、重试复用、
+    /// PM 重启（重开 store）后仍复用、状态跃迁清代次后换新身份。
+    #[tokio::test]
+    async fn dispatch_identity_is_persisted_and_reset_per_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PmConfig {
+            data_dir: dir.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
+        let store = TreePmStore::new(cfg.clone()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+        let t = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("idem") },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        // 首派：mint 并先于投递落盘。
+        let id1 = store
+            .dispatch_identity(&t.id)
+            .await
+            .unwrap()
+            .expect("first call mints");
+        assert!(id1.starts_with("pm-"));
+        let persisted = store.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(
+            persisted.dispatch_message_id.as_deref(),
+            Some(id1.as_str()),
+            "the identity is durable BEFORE the first delivery attempt"
+        );
+
+        // 重试复用同一代次身份（Gateway 据此去重 chat 行与预算）。
+        assert_eq!(store.dispatch_identity(&t.id).await.unwrap(), Some(id1.clone()));
+
+        // PM 重启：重开 store + 索引重建后仍复用（磁盘事实，不是进程状态）。
+        drop(store);
+        let store = TreePmStore::new(cfg).await.unwrap();
+        store.rebuild_index().await.unwrap();
+        assert_eq!(store.dispatch_identity(&t.id).await.unwrap(), Some(id1.clone()));
+
+        // 状态跃迁（离开 pending 再回退）= 新一代：清旧身份，mint 新的。
+        store
+            .update_task(
+                &t.id,
+                UpdateTask { status: Some(TaskStatus::InProgress), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        store
+            .update_task(
+                &t.id,
+                UpdateTask { status: Some(TaskStatus::Pending), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        let after = store.get_task(&t.id).await.unwrap().unwrap();
+        assert!(
+            after.dispatch_message_id.is_none() && after.dispatched_at.is_none(),
+            "a generation transition clears the identity together with dispatched_at"
+        );
+        let id2 = store.dispatch_identity(&t.id).await.unwrap().expect("new generation mints");
+        assert_ne!(id1, id2, "the new generation is a new identity");
     }
 }

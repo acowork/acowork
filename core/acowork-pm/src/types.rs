@@ -366,6 +366,16 @@ pub struct Task {
     /// 任务离开 `pending` 时清除，回退后允许重新派发。
     #[serde(default)]
     pub dispatched_at: Option<DateTime<Utc>>,
+    /// The dispatch generation's identity — the `message_id` the Gateway
+    /// stamps on the dispatch chat row and the mailbox entry. The scanner
+    /// persists it *before* the first delivery attempt (crash-safe) and
+    /// replays it on every retry: both the chat store and the mailbox
+    /// dedupe on it, so a failing retry loop can neither pile up
+    /// duplicate rows nor re-burn the conversation's request budget.
+    /// Cleared together with `dispatched_at` on a status transition or a
+    /// reassignment — a new generation gets a fresh identity.
+    #[serde(default)]
+    pub dispatch_message_id: Option<String>,
     /// 前置依赖（跨树/跨项目皆可）。
     ///
     /// **派生字段** `is_blocked` / `blocked_by` 在 API 响应层计算，**不**写入此结构。
@@ -384,6 +394,18 @@ pub struct Task {
     pub claimed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub submitted_at: Option<DateTime<Utc>>,
+}
+
+impl Task {
+    /// End the current dispatch generation. Every path that clears
+    /// `dispatched_at` (status transition, reassignment, claim, review)
+    /// must go through here so the generation identity can never
+    /// outlive the generation it belongs to — a stale id would make the
+    /// next dispatch dedupe against the previous generation's chat row.
+    pub fn clear_dispatch_generation(&mut self) {
+        self.dispatched_at = None;
+        self.dispatch_message_id = None;
+    }
 }
 
 fn default_review() -> ReviewStatus {
@@ -689,6 +711,7 @@ mod tests {
             due_at: None,
             start_at: None,
             dispatched_at: None,
+            dispatch_message_id: None,
             depends_on: vec![],
             attachments: vec![],
             result: None,

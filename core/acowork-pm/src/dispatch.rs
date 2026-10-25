@@ -70,6 +70,30 @@ pub fn build_assignment_brief(task: &Task) -> String {
     )
 }
 
+/// The backoff after `attempts` consecutive failed dispatches of one
+/// generation, or `None` = give up. 60s → 5min → 15min → 30min, abandon
+/// after the 5th failure (~50min of trying): an unreachable agent is an
+/// operator-visible condition, not something to hammer the Gateway with
+/// every minute forever. The retry *identity* (`dispatch_message_id`) is
+/// persisted, so those five attempts land as ONE chat row and ONE budget
+/// slot, not five of each.
+fn next_retry_delay(attempts: u32) -> Option<Duration> {
+    match attempts {
+        1 => Some(Duration::from_secs(60)),
+        2 => Some(Duration::from_secs(5 * 60)),
+        3 => Some(Duration::from_secs(15 * 60)),
+        4 => Some(Duration::from_secs(30 * 60)),
+        _ => None,
+    }
+}
+
+/// Backoff state for one task, scoped to its current dispatch generation.
+struct RetryState {
+    identity: String,
+    attempts: u32,
+    next_at: std::time::Instant,
+}
+
 /// Spawn the dispatch scanner loop. No-op in standalone mode (no Gateway).
 ///
 /// `interval` is the tick period (second-level is plenty — dispatch latency
@@ -84,17 +108,32 @@ pub fn spawn_scanner(
 ) {
     let client = GatewayClient::new(gateway.0, gateway.1);
     tokio::spawn(async move {
-        // Per-task retry backoff: a dispatch that the Gateway rejects (agent
-        // uninstalled, budget exhausted, …) would otherwise be retried every
-        // tick forever. Failed tasks are retried after 60s.
-        let mut retry_after: std::collections::HashMap<crate::types::TaskId, std::time::Instant> =
+        // Per-task bounded backoff (see `next_retry_delay`). Both maps are
+        // keyed by task but carry the generation identity: a transition
+        // that clears the generation resets the bookkeeping, so "give up"
+        // is per generation, never per task forever.
+        //
+        // ponytail: the counters are in-process — a PM restart re-arms up
+        // to 5 attempts for a still-stuck task. Acceptable ceiling: each
+        // attempt is idempotent (one row, one budget slot), and the
+        // give-up `error!` is the operator signal. Upgrade path: persist
+        // attempt counts beside `dispatch_message_id` if ever needed.
+        let mut retries: std::collections::HashMap<crate::types::TaskId, RetryState> =
+            std::collections::HashMap::new();
+        let mut abandoned: std::collections::HashMap<crate::types::TaskId, String> =
             std::collections::HashMap::new();
         let mut tick = tokio::time::interval(interval);
         loop {
             tick.tick().await;
             let due = store.dispatch_due_ids(Utc::now());
+            // Prune bookkeeping for tasks that left the candidate set
+            // (claimed, cancelled, unassigned…) so the maps cannot grow
+            // without bound. Abandoned tasks are still due, so they stay.
+            let due_set: std::collections::HashSet<_> =
+                due.iter().cloned().collect();
+            retries.retain(|tid, _| due_set.contains(tid));
+            abandoned.retain(|tid, _| due_set.contains(tid));
             if due.is_empty() {
-                retry_after.clear();
                 continue;
             }
             let now = std::time::Instant::now();
@@ -102,9 +141,6 @@ pub fn spawn_scanner(
             for tid in due {
                 if dispatched >= per_tick {
                     break;
-                }
-                if retry_after.get(&tid).is_some_and(|t| *t > now) {
-                    continue;
                 }
                 // Re-read the full task for the message body; cheap because
                 // the candidate set is only "due and undispatched".
@@ -124,9 +160,33 @@ pub fn spawn_scanner(
                 if !store.compute_blocked_by(&tid).await.unwrap_or_default().is_empty() {
                     continue;
                 }
+                // The generation identity, persisted *before* the first
+                // attempt: retries — including retries after a PM restart —
+                // replay the same id and dedupe at the Gateway.
+                let identity = match store.dispatch_identity(&tid).await {
+                    Ok(Some(id)) => id,
+                    Ok(None) => continue, // raced out of the dispatchable state
+                    Err(e) => {
+                        tracing::warn!(task = %tid, error = %e, "cannot mint dispatch identity");
+                        continue;
+                    }
+                };
+                // A new generation resets backoff and abandonment.
+                if retries.get(&tid).is_some_and(|s| s.identity != identity)
+                    || abandoned.get(&tid).is_some_and(|i| *i != identity)
+                {
+                    retries.remove(&tid);
+                    abandoned.remove(&tid);
+                }
+                if abandoned.contains_key(&tid) {
+                    continue;
+                }
+                if retries.get(&tid).is_some_and(|s| s.next_at > now) {
+                    continue;
+                }
                 let message = build_dispatch_message(&task);
                 let brief = build_assignment_brief(&task);
-                let delivered = client
+                match client
                     .dispatch_task(
                         task.project_id.as_str(),
                         task.id.as_str(),
@@ -135,16 +195,52 @@ pub fn spawn_scanner(
                         &task.title,
                         &message,
                         &brief,
+                        &identity,
                     )
-                    .await;
-                if delivered.is_some() {
-                    retry_after.remove(&tid);
-                    if let Err(e) = store.mark_dispatched(&tid).await {
-                        tracing::warn!(task = %tid, error = %e, "failed to stamp dispatched_at; may re-dispatch");
+                    .await
+                {
+                    Ok(_delivered) => {
+                        retries.remove(&tid);
+                        if let Err(e) = store.mark_dispatched(&tid).await {
+                            tracing::warn!(task = %tid, error = %e, "failed to stamp dispatched_at; may re-dispatch");
+                        }
+                        dispatched += 1;
                     }
-                    dispatched += 1;
-                } else {
-                    retry_after.insert(tid.clone(), now + Duration::from_secs(60));
+                    Err(reason) => {
+                        let attempts = retries.get(&tid).map_or(1, |s| s.attempts + 1);
+                        match next_retry_delay(attempts) {
+                            Some(delay) => {
+                                tracing::warn!(
+                                    task = %tid,
+                                    attempt = attempts,
+                                    ?delay,
+                                    error = %reason,
+                                    "task dispatch failed; backing off"
+                                );
+                                retries.insert(
+                                    tid.clone(),
+                                    RetryState {
+                                        identity,
+                                        attempts,
+                                        next_at: now + delay,
+                                    },
+                                );
+                            }
+                            None => {
+                                tracing::error!(
+                                    task = %tid,
+                                    assignee,
+                                    attempts,
+                                    last_error = %reason,
+                                    "task dispatch abandoned after {attempts} attempts; \
+                                     the task stays undispatched until its generation \
+                                     changes (reassign / status transition)"
+                                );
+                                abandoned.insert(tid.clone(), identity);
+                                retries.remove(&tid);
+                            }
+                        }
+                    }
                 }
             }
             if dispatched > 0 {
@@ -194,5 +290,22 @@ mod tests {
         assert!(brief.contains("pm_submit_task"), "submit step must appear");
         assert!(brief.contains("review_not_approved"), "409 branch must appear");
         assert!(!brief.contains("p-test1"), "project_id is not needed to claim");
+    }
+
+    #[test]
+    fn retry_backoff_is_bounded_then_gives_up() {
+        // The regression this pins: the old loop retried every 60s forever,
+        // each attempt burning a conversation budget slot and a chat row
+        // until the task was permanently starved. Five attempts, growing
+        // gaps, then silence with an error log.
+        assert_eq!(next_retry_delay(1), Some(Duration::from_secs(60)));
+        assert_eq!(next_retry_delay(2), Some(Duration::from_secs(300)));
+        assert_eq!(next_retry_delay(3), Some(Duration::from_secs(900)));
+        assert_eq!(next_retry_delay(4), Some(Duration::from_secs(1800)));
+        assert_eq!(next_retry_delay(5), None, "the 5th failure abandons the generation");
+        assert_eq!(next_retry_delay(u32::MAX), None);
+        // Monotonic gaps: each retry waits longer than the last.
+        let gaps: Vec<Duration> = (1..=4).filter_map(next_retry_delay).collect();
+        assert!(gaps.windows(2).all(|w| w[0] < w[1]));
     }
 }

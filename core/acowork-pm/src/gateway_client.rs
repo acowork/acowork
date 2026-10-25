@@ -143,7 +143,16 @@ impl GatewayClient {
     /// logged, never surfaced (the agent can still claim/poll the task the
     /// traditional way; the push is an accelerator).
     ///
-    /// Returns the Gateway `message_id` on delivery.
+    /// Returns `Ok(message_id)` on delivery, `Err(reason)` otherwise —
+    /// the reason feeds the scanner's give-up log; each failed attempt is
+    /// already `warn`-logged here with the Gateway's full body.
+    ///
+    /// `message_id` is the caller's dispatch-generation identity (see
+    /// `Task::dispatch_message_id`): replaying the same id on every retry
+    /// makes the Gateway dedupe the chat row and the mailbox budget on it,
+    /// so a failing delivery can neither pile up rows nor burn the
+    /// conversation's request budget. An empty string lets the Gateway
+    /// mint one (pre-idempotency behavior).
     #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_task(
         &self,
@@ -154,7 +163,8 @@ impl GatewayClient {
         title: &str,
         message: &str,
         assignment_brief: &str,
-    ) -> Option<String> {
+        message_id: &str,
+    ) -> Result<String, String> {
         let mut req = self.client.post(format!(
             "{}/api/intents/task-dispatch",
             self.gateway_url
@@ -171,6 +181,7 @@ impl GatewayClient {
                 "title": title,
                 "message": message,
                 "assignment_brief": assignment_brief,
+                "message_id": message_id,
             }))
             .send()
             .await
@@ -178,7 +189,7 @@ impl GatewayClient {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, task_id, "task dispatch unreachable");
-                return None;
+                return Err(format!("unreachable: {e}"));
             }
         };
         let status = resp.status();
@@ -186,7 +197,7 @@ impl GatewayClient {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, task_id, %status, "task dispatch response not JSON");
-                return None;
+                return Err(format!("bad response ({status}): {e}"));
             }
         };
         if !status.is_success() || body.get("status").and_then(|v| v.as_str()) != Some("delivered") {
@@ -196,14 +207,19 @@ impl GatewayClient {
                 body = %body,
                 "task dispatch rejected or undelivered by Gateway"
             );
-            return None;
+            let code = body
+                .get("error_code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            return Err(format!("gateway rejected ({status}): {code}"));
         }
         let mid = body
             .get("message_id")
             .and_then(|v| v.as_str())
-            .map(str::to_string);
-        tracing::info!(task_id, target = target_agent, message_id = ?mid, "task dispatched to project group chat");
-        mid
+            .unwrap_or(message_id)
+            .to_string();
+        tracing::info!(task_id, target = target_agent, message_id = %mid, "task dispatched to project group chat");
+        Ok(mid)
     }
 
     /// Design 27 §2.1 T2-a: a task reached a terminal state, so the target

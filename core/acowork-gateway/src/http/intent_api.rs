@@ -286,6 +286,16 @@ struct TaskDispatchRequest {
     /// Project group chat session; ensured idempotently when absent.
     #[serde(default)]
     chat_session_id: Option<String>,
+    /// Caller-provided dispatch identity. The PM scanner persists one per
+    /// dispatch generation and replays it on every retry, which makes the
+    /// whole chain idempotent: the chat row dedupes on `meta.message_id`
+    /// (the store's write entry returns `already_written` without
+    /// appending) and the mailbox dedupes on the same id (3a), so a
+    /// delivery-failure retry can neither pile up rows nor re-burn the
+    /// §6.5 R4 budget. Absent → the Gateway mints one (old PM senders get
+    /// the pre-idempotency behavior, one row per call, unchanged).
+    #[serde(default)]
+    message_id: Option<String>,
 }
 
 /// The meta object on a PM dispatch chat row. The key set is a storage
@@ -324,6 +334,18 @@ fn strip_untrusted_brief(
 ) -> serde_json::Map<String, serde_json::Value> {
     params.remove("assignment_brief");
     params
+}
+
+/// The dispatch row's identity: a usable caller-supplied id is reused so
+/// retries dedupe at the chat store and the mailbox (see
+/// `TaskDispatchRequest::message_id`); an unusable one (absent, blank,
+/// oversized) degrades to minting — never an error, the worst case is the
+/// old one-row-per-call behavior.
+fn dispatch_message_id(supplied: Option<&str>) -> String {
+    match supplied.map(str::trim) {
+        Some(s) if !s.is_empty() && s.len() <= 128 => s.to_string(),
+        _ => uuid::Uuid::new_v4().to_string(),
+    }
 }
 
 async fn dispatch_task(
@@ -426,7 +448,10 @@ async fn dispatch_task(
     // §6.2: the task IS the conversation. Follow-up dispatches on the same
     // task share the conversation (and its §6.5 R4 request budget).
     let conversation_id = acowork_core::intent::task_conversation_id(&req.project_id, &req.task_id);
-    let message_id = uuid::Uuid::new_v4().to_string();
+    // A caller-supplied identity makes retries idempotent end to end (see
+    // `TaskDispatchRequest::message_id`); anything unusable falls back to
+    // minting.
+    let message_id = dispatch_message_id(req.message_id.as_deref());
     let max_requests = intent_max_conversation_requests(&state).await;
     if let Some(mb) = mailbox.as_deref()
         && mb.conversation_request_count(&conversation_id) >= max_requests
@@ -2548,8 +2573,26 @@ mod card_answer_tests {
     }
 
     #[test]
-    fn agent_supplied_brief_is_stripped_at_the_edge() {
-        // Mixed-version defense: an older Runtime on the receiving side
+    fn dispatch_message_id_reuses_usable_ids_and_mints_otherwise() {
+        // The retry-identity contract: a supplied usable id passes through
+        // verbatim (it is the dedup key on both the chat store and the
+        // mailbox); anything else mints a fresh one, never an error.
+        assert_eq!(dispatch_message_id(Some("pm-t-1-gen1")), "pm-t-1-gen1");
+        assert_eq!(dispatch_message_id(Some("  spaced  ")), "spaced");
+        for bad in [None, Some(""), Some("   ")] {
+            let id = dispatch_message_id(bad);
+            assert!(!id.is_empty() && id.len() == 36, "minted uuid: {id}");
+        }
+        // Oversized ids cannot be a dedup key the store will never echo
+        // back identically — degrade to minting rather than trust them.
+        let huge = "x".repeat(200);
+        assert_ne!(dispatch_message_id(Some(&huge)), huge);
+        // Two mints differ (a retried mint would defeat idempotency).
+        assert_ne!(dispatch_message_id(None), dispatch_message_id(None));
+    }
+
+    #[test]
+    fn agent_supplied_brief_is_stripped_at_the_edge() {        // Mixed-version defense: an older Runtime on the receiving side
         // extracts `assignment_brief` unconditionally, so the Gateway must
         // not let a peer's params carry the key at all. Everything else in
         // the caller's JSON passes through untouched.
