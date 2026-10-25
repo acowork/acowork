@@ -885,7 +885,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         />
         {answerTarget && (
           <div className="flex items-center gap-1 px-3 pt-2">
-            <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-[var(--color-accent)]/20" style={{ color: "var(--color-accent)" }}>
+            <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-border-outer text-text-secondary">
               {t("chatView.replyingTo")} {answerTarget.meta?.interaction?.question?.slice(0, 30) || ""}
               <button
                 type="button"

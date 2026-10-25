@@ -56,7 +56,7 @@ export function DocumentChip({
 }: DocumentChipProps) {
   const { t } = useTranslation();
   const borderClass = status === "uploading"
-    ? "border-[var(--color-accent)] animate-pulse"
+    ? "border-border-divider animate-pulse"
     : status === "error"
       ? "border-red-400 dark:border-red-500 bg-red-50 dark:bg-red-900/20"
       : "border-border-outer  bg-zinc-50 dark:bg-zinc-800";

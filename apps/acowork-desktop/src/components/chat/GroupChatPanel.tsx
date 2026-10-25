@@ -239,8 +239,8 @@ function TaskChip({ taskId }: { taskId: string }) {
       title={copied ? undefined : t("groupChat.taskChipCopy")}
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-10 font-medium transition-colors",
-        "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-accent)]",
-        "hover:border-[var(--color-accent)]/50",
+        "border-border-outer bg-[var(--color-accent)]/10 text-text-secondary",
+        "hover:bg-[var(--color-accent)]/20",
       )}
     >
       <ClipboardList className="h-3 w-3 shrink-0" aria-hidden />
