@@ -136,8 +136,7 @@
   "chatView": {
     "empty": "No messages yet",
     "routerFallback": "Assigned automatically",
-    "cardAnswered": "Answered",
-    "cardClosed": "Closed",
+    "cardUnanswered": "Unanswered: {{question}}",
     "cardAsk": "Agent Question",
     "cardApproval": "Approval Required",
     "cardPause": "Step Confirmation",

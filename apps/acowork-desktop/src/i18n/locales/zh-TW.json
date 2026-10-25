@@ -229,8 +229,7 @@
   "chatView": {
     "empty": "該聊天暫無訊息",
     "routerFallback": "已自動分配任務",
-    "cardAnswered": "已回答",
-    "cardClosed": "已結束",
+    "cardUnanswered": "未獲應答：{{question}}",
     "cardAsk": "Agent 詢問",
     "cardApproval": "需要審批",
     "cardPause": "步驟確認",

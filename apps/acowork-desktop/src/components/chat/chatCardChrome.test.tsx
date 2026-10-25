@@ -10,15 +10,16 @@
  *   `bg-accent-strong`, globals.css:1649-1670). A card wears the neutral
  *   hairline (`border-border-outer`) and its title wears the regular text
  *   tier (`text-text`). The drift also broke the cards against their own
- *   family: the receipt state in the very same component already used the
- *   neutral recipe.
+ *   family: the receipt state in the same component had already used the
+ *   neutral recipe (that receipt is since gone — an answered card paints
+ *   nothing and the answer bubble quotes the question; see ReplyQuote).
  *
  * What this pins:
  *   1. Every OPEN / READ-ONLY interaction card shell is `border-border-outer`
  *      and carries no `--color-accent` anywhere in its border or header class.
  *   2. The header bar uses the shared neutral card-header recipe
- *      (`bg-chat-title` + `text-text`) — the same one CodeBlock and the
- *      receipt state use, so the fix is an alignment, not a new style.
+ *      (`bg-chat-title` + `text-text`) — the same one CodeBlock uses, so the
+ *      fix is an alignment, not a new style.
  *   3. The approval / pause kinds KEEP their emerald / amber chrome. Those
  *      are semantic status colors, not the brand highlight; pinning them here
  *      stops a future "unify all borders" sweep from erasing the semantics.
@@ -136,7 +137,7 @@ describe("chat interaction card chrome", () => {
     expect(headerOf(shell).className).not.toContain("--color-accent");
   });
 
-  it("receipt (closed) state keeps its neutral border", () => {
+  it("paints no shell at all once the card is answered", () => {
     const { container } = render(
       <InlineInteractionCard
         row={cardRow("card1", ASK)}
@@ -145,7 +146,10 @@ describe("chat interaction card chrome", () => {
         onAnswer={vi.fn()}
       />,
     );
-    expect(shellOf(container).className).toContain("border-border-outer");
+    // The answered receipt no longer exists, so it cannot drift back to an
+    // accent border: there is nothing to paint. The question it used to repeat
+    // now rides on the answer bubble as a quote line (ReplyQuote).
+    expect(container.firstChild).toBeNull();
   });
 
   it("approval / pause keep their semantic emerald / amber chrome", () => {

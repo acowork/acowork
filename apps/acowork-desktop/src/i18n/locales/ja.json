@@ -229,8 +229,7 @@
   "chatView": {
     "empty": "このチャットにメッセージはありません",
     "routerFallback": "自動で割り当てました",
-    "cardAnswered": "回答済み",
-    "cardClosed": "終了",
+    "cardUnanswered": "回答なし：{{question}}",
     "cardAsk": "Agent の質問",
     "cardApproval": "承認が必要",
     "cardPause": "ステップ確認",

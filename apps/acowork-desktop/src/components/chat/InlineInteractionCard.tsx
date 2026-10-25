@@ -10,8 +10,10 @@
  *
  * Three states per card:
  *   - Open: interactive, neutral hairline + neutral header
- *   - Answered: receipt header (neutral) + answer text
- *   - Closed:  receipt header (neutral) + "Closed" + question text
+ *   - Answered: paints nothing — the answer bubble above quotes the question
+ *     (see ReplyQuote), so a receipt here only repeated what is on screen
+ *   - Closed without an answer: one quiet line in the card's slot, because
+ *     "a decision was requested and nobody made it" exists nowhere else
  *
  * Layout strategy (aligned with agent bubbles):
  *   - ml-12 → same horizontal offset as agent bubble content (avatar + gap)
@@ -28,14 +30,15 @@ import { MessageCircleQuestion, ShieldCheck, Pause } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
+import { truncateQuote } from "./ReplyQuote";
 
 interface InlineInteractionCardProps {
   row: ChatMessageRow;
   /** Cards that can no longer be answered (§5.5.4). */
   closed: Set<string>;
-  /** The subset the human actually replied to — the receipt line says
-   *  "Answered", anything else that closed (turn ended, timeout, stop)
-   *  says "Closed". */
+  /** The subset the human actually replied to. An answered card paints
+   *  nothing (the answer bubble quotes the question); anything else that
+   *  closed — turn ended, timeout, stop — leaves the quiet one-line note. */
   answered: Set<string>;
   /** Resolved display name of the asking agent (the group resolves the
    *  participant; a 1:1 passes its single agent's name). */
@@ -58,8 +61,7 @@ interface InlineInteractionCardProps {
  *   - A card outline is NEVER the brand highlight. `--color-accent` is
  *     reserved for button backgrounds (globals.css `.btn-accent` /
  *     `.bg-accent-strong`), so an ask card wears the neutral hairline and
- *     its title the regular text tier — same recipe as the receipt state
- *     below and as CodeBlock's title bar.
+ *     its title the regular text tier — same recipe as CodeBlock's title bar.
  *   - emerald / amber below are SEMANTIC STATUS colors (ok / warning), not
  *     the highlight. They carry "this needs approval" / "this needs a
  *     resume", so they stay. Do not "unify" them to `border-border-outer`.
@@ -129,22 +131,29 @@ export function InlineInteractionCard({
   const isListMode = kind === "ask_question" && (it?.options?.length ?? 0) > 0;
   const actions = kind === "approval" ? APPROVAL_ACTIONS : kind === "pause" ? PAUSE_ACTIONS : null;
 
-  // ── Receipt states (closed) ──
+  // ── Closed cards ──
   if (closed.has(mid)) {
-    const wasAnswered = answered.has(mid);
+    // Answered: paint nothing. The receipt repeated the question in a full card
+    // shell (header band, hairline, padding) directly above the answer, and
+    // carried nothing else — not the answer text, not who gave it. Both halves
+    // of that fact are on screen without it: the question was just read in the
+    // open card, the answer is the bubble below, and that bubble now quotes the
+    // question (§5.5.4 puts the record on the `in_reply_to` row, not on a card).
+    if (answered.has(mid)) return null;
+    // Closed with nobody answering — the turn ended, timed out, or was stopped.
+    // This is the one fact the transcript would otherwise lose: a decision was
+    // requested and never got one, and the agent moved on. It stays visible, but
+    // as a quiet line in the card's own slot rather than a card shell, because
+    // it is a status note, not an utterance.
     return (
-      <div className="ml-12 my-1 max-w-[var(--content-max-width)] w-fit">
-        <div className="overflow-hidden rounded-md border border-border-outer opacity-70">
-          {/* Header — neutral */}
-          <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text-tertiary">
-            {cfg.icon}
-            <span>{wasAnswered ? t("chatView.cardAnswered") : t("chatView.cardClosed")}</span>
-          </div>
-          {/* Body — receipt line */}
-          <div className="px-3 py-2 text-xs text-text-tertiary">
-            {question}
-          </div>
-        </div>
+      <div
+        className="ml-12 my-1 flex max-w-[var(--content-max-width)] items-center gap-1.5 text-10 text-text-tertiary"
+        title={question}
+      >
+        {cfg.icon}
+        <span className="min-w-0 truncate">
+          {t("chatView.cardUnanswered", { question: truncateQuote(question) })}
+        </span>
       </div>
     );
   }
