@@ -425,7 +425,7 @@ export function AgentChatScreen() {
 /* Row rendering — the four durable kinds (design 27 §4.2)              */
 /* ------------------------------------------------------------------ */
 
-interface RowProps {
+export interface RowProps {
   row: ChatMessageRow
   isSelf: boolean
   selfAvatar: ReactNode
@@ -445,7 +445,32 @@ interface RowProps {
   triggerBody?: string
 }
 
-function RowView(props: RowProps) {
+/** Mobile twin of the desktop task chip (design 27 §6.4, v2.8): a PM
+ *  dispatch row shows its task id as a pill; tap copies the bare id. The
+ *  claim/submit playbook never reaches this surface — the row body is the
+ *  human text alone. */
+export function TaskChip({ taskId }: { taskId: string }) {
+  const [copied, setCopied] = useState(false)
+  const onCopy = () => {
+    navigator.clipboard
+      ?.writeText(taskId)
+      .then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      })
+      .catch(() => {
+        /* clipboard unavailable — the id is still visible as the label */
+      })
+  }
+  return (
+    <button type="button" className="chat-task-chip" onClick={onCopy} title="复制任务 ID">
+      任务 {taskId}
+      {copied ? ' ✓' : ''}
+    </button>
+  )
+}
+
+export function RowView(props: RowProps) {
   const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, onOpenExec, onAnswerCard, triggerBody } = props
   const routed = isTurnRoutedNotice(row)
   const execSid =
@@ -510,6 +535,11 @@ function RowView(props: RowProps) {
           </div>
         </div>
         <div className="msg-stack">
+          {/* Design 27 §6.4 (v2.8): a PM dispatch row's task id as a pill,
+              above the bubble — the row body is human text only. */}
+          {row.kind === 'user_message' && row.meta?.task_id ? (
+            <TaskChip taskId={row.meta.task_id} />
+          ) : null}
           <div className={`bubble${isSelf ? ' bubble-self' : ' bubble-peer'}`}>
             <div className="bubble-text">{renderMarkdown(row.body)}</div>
             {row.attachments && row.attachments.length > 0 ? (
