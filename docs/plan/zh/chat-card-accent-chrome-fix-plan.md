@@ -111,7 +111,7 @@ B1/B2 是**单一改动点覆盖多视觉变体**：`cfg.borderCls` / `cfg.heade
 | # | 改为 |
 |---|------|
 | C1 TaskChip | `border-border-outer bg-[var(--color-accent)]/10 text-text-secondary` + `hover:bg-[var(--color-accent)]/20`（hover 从「边框变高亮」改为「背景加深」，与 `listRowHover` 家族一致） |
-| C2/C3 徽章 | 去掉 `border-[var(--color-accent)]/20` 与内联 `style={{color}}` → `border-border-outer text-text-secondary`，保留 `bg-[var(--color-accent)]/10` |
+| C2/C3 徽章 | 去掉 `border-[var(--color-accent)]/20` 与内联 `style={{color}}` → `border-border-outer text-text-tertiary`（tertiary 沿用原内联色层，不改深浅），保留 `bg-[var(--color-accent)]/10` |
 | C4 上传中 | `border-[var(--color-accent)] animate-pulse` → `border-border-divider animate-pulse`（进度感由 pulse 承担；`border-border-outer` 与静置态同色会完全不可辨，故取更重一档的中性分隔色） |
 | C5 pending pill | `bg-[var(--color-accent)]/10 text-[var(--color-accent)]` → `bg-chat-badge text-text-secondary`（它不是按钮也不是行，用专门的标签 pill token） |
 
@@ -142,14 +142,16 @@ B1/B2 是**单一改动点覆盖多视觉变体**：`cfg.borderCls` / `cfg.heade
 | InlineInteractionCard 回执态 | 保持 `border-border-outer`（防回归基线） |
 | InlineInteractionCard approval / pause | **仍**含 `emerald-500/30` / `amber-500/30` —— 把 §1.1 裁决钉成代码契约，防止后来者「顺手统一」掉语义色 |
 | AskQuestionCard | 外壳 `border-border-outer`、头部 `bg-chat-title text-text`，均不含 accent |
-| GroupChatPanel TaskChip | 复用既有 `GroupChatPanel.taskChip.test.tsx` 的渲染 harness，追加 className 断言 |
-| DocumentChip 上传中 | `border-border-divider`，不含 accent |
-| ChatPanel / AgentChatView 徽章、pending pill | 源码扫描（整面板渲染需 mock 大量 store，成本与脆弱度不划算） |
+| GroupChatPanel TaskChip | **实际改为源码扫描**（`chatChipChrome.test.tsx`）。既有 harness 断言的是 `onCopy(taskId)` 交互，className 从未被检查，复用它的成本不低于直接扫源码；且该文件 1224 行、依赖 i18n/tooltip/markdown 全链，加断言会让一个交互测试同时承担样式契约 |
+| DocumentChip 上传中 | 真实渲染（`fireEvent` 注入文件后读 `<li>` 的 `className`），断言含 `border-border-divider`、不含 accent，并钉住静置态的 `border-border-outer` |
+| ChatPanel / AgentChatView 徽章、pending pill | 源码扫描（整面板渲染需 mock 大量 store，成本与脆弱度不划算）。扫描用 `[^-]border-\\[var\\(--color-accent\\)\\]` 排除 `hover:`/`focus:` 前缀，避免误伤合规的 focus 态 |
 | 反向守卫 | 三个卡片文件里 `btn-accent` 仍存在 —— 证明修复没有把合法按钮高亮一起删掉 |
 
 ### 4.2 新增移动端测试
 
 `apps/acowork-mobile/src/__tests__/task-chip-style.test.ts` — 读 `src/styles/app.css`，断言 `.chat-task-chip` 块内 `border`/`color` 不含 `--color-tint-strong` / `--color-accent`，且含 `--color-border`。
+
+> **执行时修订：该测试未落地。** 移动端测试环境读不到样式表：mobile 包没有 `@types/node`（`node:fs` 直接 TS2307，`tsc --noEmit` 由 0 错变 3 错），而 Vitest 默认 `css: false` 会把 CSS 导入（`import.meta.glob(..., {query:'?raw'})` 与静态 `?raw` 两种写法都实测过）stub 成空串（`raw.length === 0`）。要跑通只能新增 devDependency 或全局打开 `css: true`，两者都比一处颜色修复重。移动端因此保留既有 `task-chip.test.tsx` 的类名钉（`chat-task-chip`），颜色断言由桌面端套件承担。
 
 ### 4.3 红→绿双向验证
 
@@ -192,3 +194,36 @@ B1/B2 是**单一改动点覆盖多视觉变体**：`cfg.borderCls` / `cfg.heade
 
 1. `docs/prototypes/chat-card-styles.html` 的 `--accent-border` / `--accent-soft` 与本规则冲突，是这次漂移的视觉源头；原型是讨论稿，是否改写待产品决定。
 2. 桌面端 11 处 `text-text-primary` 引用的 `--color-text-primary` **在 globals.css 里并不存在**（`@theme` 只定义了 `--color-text` / `-secondary` / `-tertiary` / `-disabled`，见 [globals.css:11-18](../../../apps/acowork-desktop/src/styles/globals.css#L11-L18)），这些类名当前不产生任何颜色。属独立的 token 缺失缺陷，与本次「高亮色越界」根因不同，建议单独立项。
+
+---
+
+## 8. 执行结果
+
+三个 commit 依次落地：`f901294a`（桌面端交互卡片）、`1cc9d467`（桌面端内联 chip/badge）、`84a53586`（移动端 task chip）。
+
+### 8.1 红→绿双向验证留痕
+
+先写测试、后落地修复，修复前 6 条用例全红（`chatCardChrome` 4 红 / `chatChipChrome` 2 红）。修复后再逐条把改动临时回退，确认对应用例重新变红：
+
+| 回退项 | 结果 |
+|--------|------|
+| `borderCls` → `border-[var(--color-accent)]/30` | 2 红（开放态 + 只读态），头部用例仍绿 |
+| `headerBgCls` → `bg-accent/10 text-accent-strong` | 1 红（头部），边框用例仍绿 |
+| TaskChip 边框 → `border-accent/30` | 2 红（TaskChip + 全量 accent 边框扫描） |
+| 移动端 `border` → `--color-tint-strong` | 1 红（边框轴），文字色与 pill 形状用例仍绿 |
+
+每条断言都只对自己那一根轴敏感，说明测试定位的是具体违规，不是整块 className 的模糊匹配。回退项全部已还原。
+
+### 8.2 回归结果
+
+| 套件 | 结果 |
+|------|------|
+| 桌面端全量 `npx vitest run` | 194 files / **1764 passed**（含新增 14 条） |
+| 桌面端 `npx tsc --noEmit` | exit 0 |
+| 移动端全量 `npx vitest run` | 20 files / **223 passed**，2 skipped |
+| 移动端 `npx tsc --noEmit` | exit 0 |
+| `9b071b66` 完好性 | `GroupChatPanel.markdownTable.test.tsx` 未被触碰，随桌面端全量套件通过 |
+
+### 8.3 结论
+
+验收标准 §6 全部满足，除两项按 §4.2 / §2.1 的说明主动收窄：移动端颜色断言未落地（测试环境读不到样式表，代价大于收益）；`--color-accent` 在聊天目录仍保留 focus 态、按钮填充、选中圆点、spinner、命中高亮、emerald/amber 状态语义这些合法用途，未做全目录清零。
