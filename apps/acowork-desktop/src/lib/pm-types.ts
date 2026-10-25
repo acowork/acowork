@@ -116,6 +116,10 @@ export interface PmTask {
   priority: Priority;
   assignee: string | null;
   due_at: string | null;
+  /** 开始时间：PM 派发扫描器到期后向 assignee 推送 intent；null = 立即 */
+  start_at: string | null;
+  /** 派发幂等标记（服务端扫描器写入，只读） */
+  dispatched_at: string | null;
   depends_on: PmDependency[];
   attachments: PmAttachmentMeta[];
   result: PmTaskResult | null;
@@ -198,6 +202,8 @@ export interface CreateTaskInput {
   parent_task_id?: string | null;
   depends_on?: PmDependency[];
   attachment_ids?: string[];
+  /** 开始时间（RFC3339）；缺省 = 任务可执行后下一个扫描 tick 派发 */
+  start_at?: string | null;
 }
 
 export interface UpdateTaskInput {
@@ -208,6 +214,7 @@ export interface UpdateTaskInput {
   priority?: Priority;
   assignee?: string | null;
   due_at?: string | null;
+  start_at?: string | null;
   depends_on?: PmDependency[];
 }
 

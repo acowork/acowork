@@ -1635,6 +1635,7 @@
       "edit": "작업 편집",
       "delete": "작업 삭제",
       "dueDate": "마감일",
+      "startDate": "시작일",
       "assignee": "담당자",
       "priority": "우선순위",
       "type": "유형",
@@ -1861,6 +1862,8 @@
     "placeholderWithMentions": "보내기 — @Agent로 처리 요청",
     "send": "보내기",
     "emptyTurn": "(출력 없음)",
+    "taskChip": "작업 {{id}}",
+    "taskChipCopy": "작업 ID 복사",
     "readOnly": "읽기 전용 — 이 프로젝트의 멤버가 아닙니다."
   }
 }

@@ -65,7 +65,9 @@ impl IntentTurnContext {
 /// Design 27 §5.4.5 / plan D-C/C1: an inbound Intent kind decides **two
 /// orthogonal things**, and conflating them is what made 1:1 user-agent
 /// chat unusable (a human message judged as a `request` stripped
-/// `ask_user_question` from the turn).
+/// `ask_user_question` from the turn). The decision is a pure lookup in
+/// the [`acowork_core::intent::TurnOrigin`] policy table — no inference
+/// here, the producer stamped it.
 ///
 /// Returns `(responder_role, needs_write_back)`:
 ///
@@ -79,17 +81,15 @@ impl IntentTurnContext {
 ///   transport (§5.4.4) — an ordinary initiator turn with the full tool
 ///   set, but the turn owes its Chat session a terminal row. Needs a
 ///   `message_id` to answer against; without one there is no coordinate.
+/// - `"pm_task"`: a PM task dispatch — also human input (same role and
+///   write-back as `user_message`), but routed on the task key, not by
+///   the Chat Router.
 /// - `"response"`: the answer arriving back at the initiator — an
 ///   ordinary turn with **no** write-back (the response row is already
 ///   durable; the Gateway appended it when the answer was posted).
 pub fn turn_kind_semantics(kind: &str, message_id: &str) -> (bool, bool) {
-    match kind {
-        "response" => (false, false),
-        "user_message" => (false, !message_id.is_empty()),
-        // "request" and any unknown kind keep request semantics —
-        // same conservative default the pre-split code used.
-        _ => (true, true),
-    }
+    let origin = acowork_core::intent::TurnOrigin::parse(kind);
+    (origin.policy().responder, origin.write_back(message_id))
 }
 
 /// Render an Intent envelope as the user-role message the receiving model
@@ -109,14 +109,19 @@ pub fn render_intent_message(
     status: &str,
 ) -> String {
     // Design 27 §3.2: the receiver sees the full envelope — reply
-    // coordinates (conversation / source sessions) and the authorized repo
-    // are part of the message, not ambient.
+    // coordinates (conversation / source sessions) and the authorized
+    // repo are part of the message, not ambient.
     //
-    // §5.4.4: a `user_message` is human input routed through the Intent
-    // transport — the model must see the person speaking, not an envelope.
-    // No reply coordinates either: the write-back is system-driven from
-    // the envelope, not from anything the model reads here.
-    if kind == "user_message" {
+    // §5.4.4: a human turn (`user_message`, or a `pm_task` dispatch —
+    // both are people speaking) must reach the model as the person, not
+    // an envelope. No reply coordinates either: the write-back is
+    // system-driven from the envelope, not from anything the model reads
+    // here. A `pm_task`'s assignment playbook is NOT part of this
+    // message — the turn handler injects it into the system block.
+    if !acowork_core::intent::TurnOrigin::parse(kind)
+        .policy()
+        .render_envelope
+    {
         return match params.get("message").and_then(|v| v.as_str()) {
             Some(text) => text.to_string(),
             None => params.to_string(),
@@ -524,6 +529,33 @@ mod tests {
         assert_eq!(turn_kind_semantics("user_message", ""), (false, false));
         // A response arriving at the initiator: ordinary turn, no debt.
         assert_eq!(turn_kind_semantics("response", "m2"), (false, false));
+        // A PM task dispatch is human input on a keyed route: full tool
+        // set (the woken agent must be able to ask the owner), owes the
+        // project group a terminal row.
+        assert_eq!(turn_kind_semantics("pm_task", "m1"), (false, true));
+        assert_eq!(turn_kind_semantics("pm_task", ""), (false, true));
+    }
+
+    #[test]
+    fn pm_task_renders_human_text_not_envelope() {
+        // The regression this kills: a dispatch rendered as
+        // `[intent:owner:task] {"message":…}` in the execution
+        // transcript, and the JSON leaked into the auto-title.
+        let s = render_intent_message(
+            "owner-1",
+            "task",
+            &serde_json::json!({"message": "修复分页不满屏", "task_id": "t-083", "assignment_brief": "Claim it first…"}),
+            "m1",
+            "task:p1:t-083",
+            "cs-group",
+            "",
+            "pm_task",
+            "",
+            "",
+        );
+        assert_eq!(s, "修复分页不满屏");
+        assert!(!s.contains("intent:"));
+        assert!(!s.contains("assignment_brief"), "playbook is not message text");
     }
 
     #[test]

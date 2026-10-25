@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use tokio::fs;
 
@@ -300,13 +300,7 @@ impl TreePmStore {
 
                 index.insert(
                     task_id.clone(),
-                    TaskEntry {
-                        project_id: project_id.clone(),
-                        status: task.status,
-                        assignee: task.assignee.clone(),
-                        depth,
-                        dir_path: task_path.clone(),
-                    },
+                    TaskEntry::new(project_id.clone(), depth, task_path.clone(), &task),
                 );
                 for att in &task.attachments {
                     index.register_attachment(att.id.clone(), task_id.clone());
@@ -911,6 +905,8 @@ impl PmStore for TreePmStore {
             priority: input.priority,
             assignee: input.assignee,
             due_at: input.due_at,
+            start_at: input.start_at,
+            dispatched_at: None,
             depends_on: input.depends_on,
             attachments: vec![],
             result: None,
@@ -926,13 +922,7 @@ impl PmStore for TreePmStore {
         let mut index = self.index.write();
         index.insert(
             task_id.clone(),
-            TaskEntry {
-                project_id: project_id.clone(),
-                status: task.status,
-                assignee: task.assignee.clone(),
-                depth,
-                dir_path: dir,
-            },
+            TaskEntry::new(project_id.clone(), depth, dir, &task),
         );
         for dep in &task.depends_on {
             if dep.kind == DependencyKind::Blocks {
@@ -1035,6 +1025,11 @@ impl PmStore for TreePmStore {
             if s == TaskStatus::InProgress {
                 ensure_creation_approved(&task)?;
             }
+            if s != task.status {
+                // 状态跃迁即视为一次新的生命周期：清派发标记，
+                // 回退到 pending 时允许扫描器按 start_at 重新派发。
+                task.dispatched_at = None;
+            }
             task.status = s;
         }
         if let Some(p) = input.priority {
@@ -1046,10 +1041,19 @@ impl PmStore for TreePmStore {
                 let project = self.read_project(&entry.project_id).await?;
                 self.ensure_assignee_is_member(&project, &new_assignee)?;
             }
+            if input.assignee.clone().flatten().as_deref() != task.assignee.as_deref()
+                && task.status == TaskStatus::Pending
+            {
+                // 换人 = 需要重新唤醒新执行者
+                task.dispatched_at = None;
+            }
             task.assignee = input.assignee.clone().flatten();
         }
         if input.due_at.is_some() {
             task.due_at = input.due_at.flatten();
+        }
+        if input.start_at.is_some() {
+            task.start_at = input.start_at.flatten();
         }
         if let Some(deps) = input.depends_on {
             for dep in &deps {
@@ -1069,13 +1073,7 @@ impl PmStore for TreePmStore {
         index.remove_dependent_refs(id);
         index.insert(
             id.clone(),
-            TaskEntry {
-                project_id: entry.project_id,
-                status: task.status,
-                assignee: task.assignee.clone(),
-                depth: entry.depth,
-                dir_path: entry.dir_path,
-            },
+            TaskEntry::new(entry.project_id, entry.depth, entry.dir_path, &task),
         );
         for dep in &task.depends_on {
             if dep.kind == DependencyKind::Blocks {
@@ -1251,6 +1249,10 @@ impl PmStore for TreePmStore {
 
         task.status = TaskStatus::InProgress;
         task.claimed_at = Some(Utc::now());
+        // 离开 pending：清派发标记，回退 pending 后扫描器可再派发
+        task.dispatched_at = None;
+        // 离开 pending 生命周期起点：清派发标记，回退后可被重新派发
+        task.dispatched_at = None;
         // P3: Agent 自领后即成为责任人（修复 P1 遗留——claim 不更新 assignee）。
         // MCP 层已校验调用者 instance_id == assignee instance_id（设计 §9.2 / ADR-073）。
         // 联动指派：claim 会把 actor 写为 assignee，actor 必须是项目成员。
@@ -1259,7 +1261,7 @@ impl PmStore for TreePmStore {
         task.assignee = Some(actor.to_string());
         task.updated_at = Utc::now();
         atomic_write_json(&path, &task).await?;
-        self.refresh_entry(&entry, id, task.status, task.assignee.clone());
+        self.refresh_entry(&entry, id, &task);
         Ok(task)
     }
 
@@ -1294,7 +1296,7 @@ impl PmStore for TreePmStore {
         });
         task.updated_at = now;
         atomic_write_json(&path, &task).await?;
-        self.refresh_entry(&entry, id, task.status, task.assignee.clone());
+        self.refresh_entry(&entry, id, &task);
         Ok(task)
     }
 
@@ -1336,6 +1338,9 @@ impl PmStore for TreePmStore {
         };
         if let Some(to) = to {
             validate_transition(task.status, to, id)?;
+            if to != task.status {
+                task.dispatched_at = None;
+            }
             task.status = to;
         }
         task.review_status = if approved {
@@ -1345,7 +1350,7 @@ impl PmStore for TreePmStore {
         };
         task.updated_at = Utc::now();
         atomic_write_json(&path, &task).await?;
-        self.refresh_entry(&entry, id, task.status, task.assignee.clone());
+        self.refresh_entry(&entry, id, &task);
         Ok(task)
     }
 
@@ -1569,24 +1574,66 @@ impl PmStore for TreePmStore {
 // ────────────────────────────────────────────────────────────────────────────
 
 impl TreePmStore {
-    fn refresh_entry(
-        &self,
-        entry: &TaskEntry,
-        id: &TaskId,
-        status: TaskStatus,
-        assignee: Option<String>,
-    ) {
+    // ── 派发扫描器支撑（dispatch.rs 唯一消费者）──────────────────────
+
+    /// 纯内存过滤出"到期可派发"的任务 ID：pending + agent 责任人 +
+    /// 创建审批已过 + 未派发过 + `start_at` 为空或已到。
+    /// 不读任何 task.json，每 tick O(pending)。
+    pub fn dispatch_due_ids(&self, now: DateTime<Utc>) -> Vec<TaskId> {
+        let index = self.index.read();
+        let Some(pending) = index.by_status.get(&TaskStatus::Pending) else {
+            return Vec::new();
+        };
+        let mut due: Vec<(TaskId, TaskEntry)> = pending
+            .iter()
+            .filter_map(|id| index.by_id.get(id).map(|e| (id.clone(), e.clone())))
+            .filter(|(_, e)| {
+                e.dispatched_at.is_none()
+                    && e.review_status != ReviewStatus::Pending
+                    && matches!(&e.assignee, Some(a) if a != "human")
+                    && e.start_at.is_none_or(|s| s <= now)
+            })
+            .collect();
+        // 高优先级先派发（per-tick 上限截断时的排序依据）
+        due.sort_by_key(|(_, e)| {
+            (
+                priority_rank(e.priority),
+                e.start_at.unwrap_or(DateTime::<Utc>::MIN_UTC),
+            )
+        });
+        due.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// 派发成功后回写 `dispatched_at`（幂等：仅 pending 且未派发时写入）。
+    pub async fn mark_dispatched(&self, id: &TaskId) -> Result<()> {
+        let entry = match self.index.read().by_id.get(id).cloned() {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        let path = entry.dir_path.join("task.json");
+        let mut task: Task = read_json(&path).await?;
+        if task.status != TaskStatus::Pending || task.dispatched_at.is_some() {
+            return Ok(());
+        }
+        let now = Utc::now();
+        task.dispatched_at = Some(now);
+        task.updated_at = now;
+        atomic_write_json(&path, &task).await?;
+        self.refresh_entry(&entry, id, &task);
+        Ok(())
+    }
+
+    fn refresh_entry(&self, entry: &TaskEntry, id: &TaskId, task: &Task) {
         let mut index = self.index.write();
         index.remove(id);
         index.insert(
             id.clone(),
-            TaskEntry {
-                project_id: entry.project_id.clone(),
-                status,
-                assignee,
-                depth: entry.depth,
-                dir_path: entry.dir_path.clone(),
-            },
+            TaskEntry::new(
+                entry.project_id.clone(),
+                entry.depth,
+                entry.dir_path.clone(),
+                task,
+            ),
         );
     }
 }
@@ -1621,6 +1668,7 @@ mod tests {
             attachment_ids: vec![],
             assignee: None,
             due_at: None,
+            start_at: None,
         }
     }
 
@@ -2692,5 +2740,83 @@ mod tests {
 
         let reloaded = store.get_project(&p.id).await.unwrap().unwrap();
         assert!(reloaded.members.is_empty(), "legacy project.json must deserialize with empty members");
+    }
+
+    /// 派发扫描器过滤链路：start_at 到期 / 审批闸门 / 幂等标记 / 回退重派。
+    #[tokio::test]
+    async fn dispatch_due_ids_filter_and_idempotence() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+
+        // 无 start_at = 立即可派
+        let now_task = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("now") },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.dispatch_due_ids(Utc::now()), vec![now_task.id.clone()]);
+
+        // 未来 start_at → 未到期
+        let future = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    assignee: Some(inst.into()),
+                    start_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                    ..create_task_input("future")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.dispatch_due_ids(Utc::now()), vec![now_task.id.clone()]);
+
+        // Agent 创建未批准 → 不派发；批准后进入候选
+        let unapproved = store
+            .create_task_as(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("unapproved") },
+                inst,
+                MemberKind::Agent,
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.dispatch_due_ids(Utc::now()), vec![now_task.id.clone()]);
+        approve_creation(&store, &unapproved.id).await;
+        let mut due = store.dispatch_due_ids(Utc::now());
+        due.sort_by_key(|t| t.to_string());
+        assert_eq!(due.len(), 2, "approved task joins the candidate set");
+
+        // mark_dispatched → 幂等，退出候选集
+        store.mark_dispatched(&now_task.id).await.unwrap();
+        let after = store.dispatch_due_ids(Utc::now());
+        assert_eq!(after, vec![unapproved.id.clone()]);
+        let stamped = store.get_task(&now_task.id).await.unwrap().unwrap();
+        assert!(stamped.dispatched_at.is_some());
+
+        // claim（离开 pending）清派发标记；回退 pending 后可再派发
+        store.claim_task(&now_task.id, inst).await.unwrap();
+        store
+            .update_task(
+                &now_task.id,
+                UpdateTask { status: Some(TaskStatus::Pending), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(store.dispatch_due_ids(Utc::now()).contains(&now_task.id));
+
+        // 未来任务永远不该出现在候选里
+        assert!(!store.dispatch_due_ids(Utc::now()).contains(&future.id));
     }
 }

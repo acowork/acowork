@@ -189,14 +189,20 @@ fn router_config(work_dir: &str) -> ChatRouterConfig {
         .unwrap_or_default()
 }
 
-/// A Chat Router turn is a human `user_message` delivered from a Chat session
-/// (design 27 §5.4.4). Everything else — cross-agent requests, responses,
-/// cron triggers — keeps the legacy route.
+/// A Chat Router turn is a human `user_message` delivered from a Chat
+/// session (design 27 §5.4.4). Everything else — PM task dispatches
+/// (keyed on the task conversation), cross-agent requests, responses,
+/// cron triggers — keeps the deterministic route. The eligibility comes
+/// from the origin policy table, not a kind-string comparison.
 ///
 /// Returns the message text to route. `Some("")` is legitimate: an
 /// attachment-only message still has to be routed.
 fn chat_turn_text(envelope: &IntentEnvelope) -> Option<String> {
-    if envelope.kind != "user_message" || envelope.source_chat_session_id.is_empty() {
+    if !acowork_core::intent::TurnOrigin::parse(&envelope.kind)
+        .policy()
+        .router_eligible
+        || envelope.source_chat_session_id.is_empty()
+    {
         return None;
     }
     let text = envelope
@@ -638,6 +644,10 @@ async fn run_turn(
                                 has_human: envelope.has_human,
                                 chat_attachment_ids: envelope.chat_attachment_ids.clone(),
                                 in_reply_to: envelope.in_reply_to.clone(),
+                                // The router only takes Chat-originated
+                                // turns (policy.router_eligible); a PM
+                                // dispatch's brief never arrives here.
+                                assignment_brief: String::new(),
                             },
                         );
                         (Ok((session_id, opened_new)), sent)
@@ -937,7 +947,7 @@ fn draft_label(raw: &str) -> String {
 /// every other conversation shape — a `task:` id is the only one the router
 /// can describe without guessing.
 fn task_label(conversation_id: &str) -> Option<String> {
-    let rest = conversation_id.strip_prefix("task:")?;
+    let rest = conversation_id.strip_prefix(acowork_core::intent::TASK_CONVERSATION_PREFIX)?;
     let mut parts = rest.splitn(2, ':');
     let project = parts.next().unwrap_or("").trim();
     let task = parts.next().unwrap_or("").trim();

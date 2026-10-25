@@ -190,7 +190,7 @@ async fn emit_fallback_receipt(
         let gw = state.gateway_state.read().await;
         gw.resolve_installed_key(&req.from_instance).is_some()
     };
-    if !req.conversation_id.starts_with("task:") && initiator_is_agent {
+    if !acowork_core::intent::is_task_conversation(&req.conversation_id) && initiator_is_agent {
         let ctx = delivery::DeliveryContext {
             state: &state.gateway_state,
             registry: state.agent_registry.as_ref().expect("checked in sweep_once"),

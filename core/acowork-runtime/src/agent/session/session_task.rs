@@ -181,10 +181,13 @@ pub enum SessionMessage {
     SystemNotification { content: String },
     /// Design 27 §6/§7: an Intent envelope delivered to this execution
     /// session as a *turn trigger* (the session was idle, or the turn must
-    /// run with responder-role semantics). `kind == "request"` puts the
-    /// turn in responder role: tool trimming (R1), no human-awaiting
-    /// pauses (R3), and a system `response` write-back at turn end (§7.1).
-    /// `kind == "response"` renders the initiator-side answer turn.
+    /// run with responder-role semantics). The turn's role and write-back
+    /// come from `acowork_core::intent::TurnOrigin::parse(kind).policy()`:
+    /// an agent `request` puts the turn in responder role (tool trimming
+    /// R1, no human-awaiting pauses R3, system `response` write-back at
+    /// turn end §7.1); a `user_message` / `pm_task` is an initiator turn
+    /// that owes its Chat session a terminal row; a `response` renders the
+    /// initiator-side answer turn.
     Intent {
         /// Rendered user-visible message text (shared renderer,
         /// `intent_turn::render_intent_message`).
@@ -210,6 +213,12 @@ pub enum SessionMessage {
         /// id is carried here, so attachment pulls fall back to this
         /// coordinate. Never rendered; purely the pull address.
         in_reply_to: String,
+        /// A `pm_task` dispatch's model-facing wake-up playbook (claim →
+        /// work → submit). Injected into the turn's system block via
+        /// `ContextBuilder::set_task_brief` — never part of `content`,
+        /// never written to a Chat surface, never persisted with the
+        /// conversation. Empty for every other origin.
+        assignment_brief: String,
     },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, the front/back suppression mechanism is gone.
@@ -1362,7 +1371,17 @@ impl SessionTask {
                     has_human,
                         chat_attachment_ids,
                     in_reply_to,
+                    assignment_brief,
                 }) => {
+                    // A PM dispatch's playbook joins Block A for this
+                    // session's remaining requests: constant per task, so
+                    // the ADR-060 byte-stability holds; ephemeral, so the
+                    // JSONL and every chat surface stay clean. After a
+                    // runtime restart the claim/submit contract is
+                    // recoverable from the session's own tool-call history.
+                    if !assignment_brief.is_empty() {
+                        context_builder.set_task_brief(assignment_brief);
+                    }
                     // §5.5.5: this intent has left the pending queue and is
                     // starting its turn — drop its queue row so the execution
                     // UI stops showing it as waiting. A no-op when it reached

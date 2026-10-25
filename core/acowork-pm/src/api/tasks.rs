@@ -60,17 +60,12 @@ pub async fn create(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
     // ADR-076 §决策 11: REST 面 = 人类操作面 → creator 恒为 User。
-    // Design 27 §5.4: a human creating a task *for an agent* is an act of
-    // assignment — the assignee gets a push dispatch into the project group
-    // chat. (Approval of agent-created tasks dispatches from `review`; the
-    // MCP face creates with `review_status=pending` and no dispatch.)
+    // 派发不再由此处事件钩子触发（旧 Design 27 §5.4 行为）：统一由
+    // `dispatch::spawn_scanner` 按 `start_at` 到期扫描派发，见该模块注释。
     let task = state
         .store
         .create_task_as(&pid, input, created_by, MemberKind::User)
         .await?;
-    if task.review_status == ReviewStatus::NotRequired {
-        dispatch_task_via_gateway(&state, &task).await;
-    }
     Ok(Json(task))
 }
 
@@ -253,20 +248,10 @@ pub async fn review(
     // review 可由 human 完成（REST 路径默认 X-Actor=human）或 instance 完成（MCP 路径）
     let before = state.store.get_task(&tid).await?;
     let task = state.store.review_task(&tid, input.approved, reviewer).await?;
-    // Design 27 §5.4 / §2.1 T2-a: approving an agent-created task (still
-    // `pending`, awaiting creation approval) is the human's act of handing
-    // the work over — dispatch it. Anything that lands the task on a
-    // terminal status (result approval → done, any reject → rejected,
-    // creation rejects included) ends the assignee's logical execution
-    // context.
-    if task.status == TaskStatus::Pending {
-        let was_awaiting_approval = before
-            .as_ref()
-            .is_some_and(|b| b.review_status == ReviewStatus::Pending);
-        if input.approved && was_awaiting_approval {
-            dispatch_task_via_gateway(&state, &task).await;
-        }
-    } else if let Some(before) = before {
+    // Design 27 §5.4（修订）：创建审批**不再**在此即时派发——派发统一由
+    // `dispatch::spawn_scanner` 按 `start_at` 到期触发（审批通过后任务保持
+    // pending，扫描器在下一 tick 自然发现它）。终态跃迁仍需关闭执行上下文。
+    if let Some(before) = before {
         close_task_context_if_terminal(&state, &before, &task).await;
     }
     Ok(Json(task))
@@ -310,33 +295,6 @@ fn provisioner(state: &ApiState) -> Option<crate::gateway_client::GatewayClient>
         .gateway
         .as_ref()
         .map(|(url, token)| crate::gateway_client::GatewayClient::new(url.clone(), token.clone()))
-}
-
-/// Push-dispatch a task as a task-keyed `intent_request` into the project
-/// group chat (§5.4: assignment is dispatch). No-op without a Gateway
-/// config or without an agent assignee; failures are logged inside the
-/// provisioner and never fail the PM mutation.
-pub(crate) async fn dispatch_task_via_gateway(state: &ApiState, task: &Task) {
-    let Some(gateway) = provisioner(state) else { return };
-    let Some(assignee) = task.assignee.as_deref() else { return };
-    if assignee == "human" {
-        return;
-    }
-    let message = if task.description.trim().is_empty() {
-        task.title.clone()
-    } else {
-        format!("{}\n{}", task.title, task.description.trim())
-    };
-    gateway
-        .dispatch_task(
-            task.project_id.as_str(),
-            task.id.as_str(),
-            assignee,
-            &task.created_by,
-            &task.title,
-            &message,
-        )
-        .await;
 }
 
 /// End the assignee agents' logical execution contexts for `tasks`

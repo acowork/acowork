@@ -1742,6 +1742,7 @@
       "edit": "编辑任务",
       "delete": "删除任务",
       "dueDate": "截止日期",
+      "startDate": "开始日期",
       "assignee": "负责人",
       "priority": "优先级",
       "type": "类型",
@@ -1969,6 +1970,8 @@
     "send": "发送",
     "mentionLabel": "提及成员",
     "emptyTurn": "（无输出）",
+    "taskChip": "任务 {{id}}",
+    "taskChipCopy": "复制任务 ID",
     "readOnly": "只读 — 你不是该项目的成员。"
   },
   "groupMembers": {

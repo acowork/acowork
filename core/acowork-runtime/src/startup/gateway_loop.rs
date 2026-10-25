@@ -1451,7 +1451,16 @@ async fn route_intent_legacy(
         for_execution_session: _,
     } = *env;
 
-    let is_response = kind == "response";
+    let origin = acowork_core::intent::TurnOrigin::parse(&kind);
+    let is_response = origin == acowork_core::intent::TurnOrigin::AgentResponse;
+    // A PM dispatch's wake-up playbook is model-facing and ephemeral: it
+    // bypasses the rendered message and history entirely, injected into
+    // the turn's system block (see `ContextBuilder::set_task_brief`).
+    let assignment_brief = params
+        .get("assignment_brief")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let content = render_intent_message(
         &from,
         &action,
@@ -1481,7 +1490,7 @@ async fn route_intent_legacy(
             // to the session the message was routed into (ADR-099).
             let seed =
                 crate::agent::session::intent_routing::SessionSeed::from_json(&session_config_json);
-            let is_chat_human = kind == "user_message" && !source_chat_session_id.is_empty();
+            let is_chat_human = origin.policy().router_eligible && !source_chat_session_id.is_empty();
             if fresh && is_chat_human {
                 // Degraded router turn: fresh session, bound to the same
                 // chat, mapping re-pointed — the same creation path the
@@ -1495,7 +1504,7 @@ async fn route_intent_legacy(
                     )
                     .await?
             } else {
-                let key = routing_key(&source_chat_session_id, &conversation_id, &message_id);
+                let key = routing_key(&kind, &source_chat_session_id, &conversation_id, &message_id);
                 session_manager
                     .lock()
                     .await
@@ -1560,6 +1569,7 @@ async fn route_intent_legacy(
             has_human,
             chat_attachment_ids,
             in_reply_to,
+            assignment_brief,
         },
     );
     // ADR-100 D11: the routing reaction row — the same conversational fact the

@@ -153,6 +153,7 @@ impl GatewayClient {
         owner: &str,
         title: &str,
         message: &str,
+        assignment_brief: &str,
     ) -> Option<String> {
         let mut req = self.client.post(format!(
             "{}/api/intents/task-dispatch",
@@ -169,6 +170,7 @@ impl GatewayClient {
                 "owner": owner,
                 "title": title,
                 "message": message,
+                "assignment_brief": assignment_brief,
             }))
             .send()
             .await

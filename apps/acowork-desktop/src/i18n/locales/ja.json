@@ -1634,6 +1634,7 @@
       "edit": "タスクを編集",
       "delete": "タスクを削除",
       "dueDate": "期限",
+      "startDate": "開始日",
       "assignee": "担当者",
       "priority": "優先度",
       "type": "種別",
@@ -1860,6 +1861,8 @@
     "placeholderWithMentions": "送信。@Agent で処理を依頼",
     "send": "送信",
     "emptyTurn": "（出力なし）",
+    "taskChip": "タスク {{id}}",
+    "taskChipCopy": "タスクIDをコピー",
     "readOnly": "読み取り専用 — このプロジェクトのメンバーではありません。"
   }
 }

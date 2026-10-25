@@ -266,6 +266,10 @@ export function TaskDetailDrawer({ taskId, onClose, onEdit, onAddSubtask }: Task
             <dl className="space-y-2 text-xs">
               <Field label={t("pm.task.assignee")} value={assigneeName ?? "—"} />
               <Field
+                label={t("pm.task.startDate")}
+                value={detail.start_at ? formatDateTime(detail.start_at) : "—"}
+              />
+              <Field
                 label={t("pm.task.dueDate")}
                 value={detail.due_at ? formatDateTime(detail.due_at) : "—"}
               />

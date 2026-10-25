@@ -275,8 +275,14 @@ struct TaskDispatchRequest {
     owner: String,
     #[serde(default)]
     title: String,
-    /// Human-readable dispatch text (task title + description today).
+    /// Human-readable dispatch text (task title + description).
     message: String,
+    /// Model-facing wake-up playbook (claim → work → submit). Delivered
+    /// to the Runtime as an envelope field, injected into the system
+    /// block — never written to a chat surface or persisted with the
+    /// conversation (see `acowork_core::intent::TurnOrigin::PmTask`).
+    #[serde(default)]
+    assignment_brief: String,
     /// Project group chat session; ensured idempotently when absent.
     #[serde(default)]
     chat_session_id: Option<String>,
@@ -381,7 +387,7 @@ async fn dispatch_task(
 
     // §6.2: the task IS the conversation. Follow-up dispatches on the same
     // task share the conversation (and its §6.5 R4 request budget).
-    let conversation_id = format!("task:{}:{}", req.project_id, req.task_id);
+    let conversation_id = acowork_core::intent::task_conversation_id(&req.project_id, &req.task_id);
     let message_id = uuid::Uuid::new_v4().to_string();
     let max_requests = intent_max_conversation_requests(&state).await;
     if let Some(mb) = mailbox.as_deref()
@@ -397,13 +403,14 @@ async fn dispatch_task(
 
     // The dispatch chat row (§4: the chat log is the message record).
     // §5.4.5 role table: a PM dispatch is human input — the owner speaks,
-    // the agent answers. Wave 2B vocabulary: `user_message` carrying the
-    // task conversation, not a separate intent kind.
+    // the agent answers. The row carries the human-readable task body
+    // only; the assignment playbook stays on the envelope. `task_id` in
+    // meta feeds the chat surface's task chip — `project_id` is
+    // deliberately absent (the row lives in the project's own group).
     let meta = serde_json::json!({
         "message_id": message_id,
         "conversation_id": conversation_id,
         "task_id": req.task_id,
-        "project_id": req.project_id,
         "repo": repo,
     });
     if let Err(e) = chat_client::append_message(
@@ -438,13 +445,16 @@ async fn dispatch_task(
         params_json: serde_json::json!({
             "message": req.message,
             "task_id": req.task_id,
-            "project_id": req.project_id,
+            "assignment_brief": req.assignment_brief,
         })
         .to_string(),
         source_chat_session_id: chat_session_id.clone(),
         repo,
         session_config_json: String::new(),
-        kind: "request".to_string(),
+        // A human dispatch, not a peer request: `pm_task` keeps the
+        // Runtime on initiator semantics (full tool set, human text
+        // rendered) while the task key stays the routing contract.
+        kind: acowork_core::intent::TurnOrigin::PmTask.as_str().to_string(),
         in_reply_to: String::new(),
         status: String::new(),
         // PM dispatch lands in a project group the human owner belongs to.
@@ -1066,8 +1076,8 @@ async fn close_task_context(
     }
     // The key format is the Runtime's routing contract: `routing_key`
     // yields `conv:task:{project}:{task}` for task-scoped conversations
-    // (the same `task:` prefix `dispatch_task` stamps).
-    let key = format!("conv:task:{}:{}", req.project_id, req.task_id);
+    // (the same coordinate `dispatch_task` stamps).
+    let key = acowork_core::intent::task_routing_key(&req.project_id, &req.task_id);
     let endpoint = {
         let registry = state
             .runtime_http_registry
@@ -1287,7 +1297,7 @@ async fn deliver_response(
         let gw = state.gateway_state.read().await;
         gw.resolve_installed_key(&entry.from_instance).is_some()
     };
-    if entry.conversation_id.starts_with("task:") || !initiator_is_agent {
+    if acowork_core::intent::is_task_conversation(&entry.conversation_id) || !initiator_is_agent {
         let (out_status, error_code, error) = match chat_append_error {
             None => ("delivered".to_string(), None, None),
             Some(e) => ("failed".to_string(), Some("chat_log_unavailable".to_string()), Some(e)),

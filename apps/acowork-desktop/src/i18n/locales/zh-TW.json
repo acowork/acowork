@@ -1625,6 +1625,7 @@
       "edit": "編輯任務",
       "delete": "刪除任務",
       "dueDate": "截止日期",
+      "startDate": "開始日期",
       "assignee": "負責人",
       "priority": "優先級",
       "type": "類型",
@@ -1851,6 +1852,8 @@
     "placeholderWithMentions": "傳送訊息，@Agent 讓其處理",
     "send": "傳送",
     "emptyTurn": "（無輸出）",
+    "taskChip": "任務 {{id}}",
+    "taskChipCopy": "複製任務 ID",
     "readOnly": "唯讀 — 您不是該專案的成員。"
   }
 }

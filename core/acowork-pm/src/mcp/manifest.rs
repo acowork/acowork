@@ -122,6 +122,11 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "format": "date-time",
             "description": "RFC3339 due timestamp, e.g. 2026-09-05T00:00:00Z"
           },
+          "start_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 start timestamp. The PM dispatch scanner sends the wake-up intent to the assignee agent when start_at is reached (after human approval). Omit or null = dispatch as soon as the task is actionable."
+          },
           "depends_on": {
             "type": "array",
             "items": {

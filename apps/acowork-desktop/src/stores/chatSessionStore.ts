@@ -62,6 +62,10 @@ export interface ChatMessageRow {
     mentions?: string[];
     status?: string;
     repo?: string;
+    /** A PM task dispatch (`pm_task` origin): the task id, rendered as a
+     *  chip on the group-chat bubble so the human text stays clean (the
+     *  claim/submit playbook is model-facing only, never on this row). */
+    task_id?: string;
     notice_type?: string;
     /** ADR-099: reserved producer label (`chat_router`). No writer emits it
      *  yet — the router's plain-text answer says "nothing to open" by

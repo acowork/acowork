@@ -1725,6 +1725,7 @@
       "edit": "Edit task",
       "delete": "Delete task",
       "dueDate": "Due date",
+      "startDate": "Start date",
       "assignee": "Assignee",
       "priority": "Priority",
       "type": "Type",
@@ -1952,6 +1953,8 @@
     "send": "Send",
     "mentionLabel": "Mention a member",
     "emptyTurn": "(no output)",
+    "taskChip": "Task {{id}}",
+    "taskChipCopy": "Copy task id",
     "readOnly": "Read-only — you are not a member of this project."
   },
   "groupMembers": {

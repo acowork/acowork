@@ -354,8 +354,18 @@ pub struct Task {
     /// 解析为显示名时，由调用方按 `instance_id` 查 agent directory（`meta.display_name ?? meta.name`）。
     #[serde(default)]
     pub assignee: Option<String>,
+    /// 截止时间（可选）。
     #[serde(default)]
     pub due_at: Option<DateTime<Utc>>,
+    /// 开始时间（可选）：派发扫描器在 `start_at <= now` 时才向 assignee
+    /// agent 推送 intent；`None` = 立即（下一个 tick 派发）。
+    #[serde(default)]
+    pub start_at: Option<DateTime<Utc>>,
+    /// 派发幂等标记：扫描器投递成功后写入（design 27 §5.4 修订：
+    /// 派发时机由「指派事件」改为「开始时间到期」，单一触发源）。
+    /// 任务离开 `pending` 时清除，回退后允许重新派发。
+    #[serde(default)]
+    pub dispatched_at: Option<DateTime<Utc>>,
     /// 前置依赖（跨树/跨项目皆可）。
     ///
     /// **派生字段** `is_blocked` / `blocked_by` 在 API 响应层计算，**不**写入此结构。
@@ -442,6 +452,9 @@ pub struct CreateTask {
     /// 截止时间（可选；`pm_create_task` 的 `due` 参数）。
     #[serde(default)]
     pub due_at: Option<DateTime<Utc>>,
+    /// 开始时间（可选）：到期才派发 intent 给 assignee agent；缺省 = 立即。
+    #[serde(default)]
+    pub start_at: Option<DateTime<Utc>>,
 }
 
 fn default_task_type() -> TaskType {
@@ -511,6 +524,9 @@ pub struct UpdateTask {
     pub assignee: Option<Option<String>>, // `null` 表示清空
     #[serde(default, deserialize_with = "deserialize_clearable")]
     pub due_at: Option<Option<DateTime<Utc>>>,
+    /// `null` 表示清空（清空 = 立即派发）。
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    pub start_at: Option<Option<DateTime<Utc>>>,
     pub depends_on: Option<Vec<Dependency>>,
 }
 
@@ -671,6 +687,8 @@ mod tests {
             priority: Priority::Normal,
             assignee: None,
             due_at: None,
+            start_at: None,
+            dispatched_at: None,
             depends_on: vec![],
             attachments: vec![],
             result: None,

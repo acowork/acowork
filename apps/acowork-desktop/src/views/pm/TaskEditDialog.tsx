@@ -87,6 +87,7 @@ export function TaskEditDialog({
   const [description, setDescription] = useState(initial?.description ?? "");
   const [assignee, setAssignee] = useState<string>(initial?.assignee ?? "");
   const [dueAt, setDueAt] = useState<string>(initial?.due_at?.slice(0, 10) ?? "");
+  const [startAt, setStartAt] = useState<string>(initial?.start_at?.slice(0, 10) ?? "");
   const [parentId, setParentId] = useState<string>(initial?.parent_id ?? defaultParentId ?? "");
   const [dependsOn, setDependsOn] = useState<string[]>(
     initial?.depends_on?.map((d) => d.task_id) ?? [],
@@ -168,10 +169,11 @@ export function TaskEditDialog({
           depends_on: dependsOn.map((id) => ({ task_id: id, kind: "relates" })),
         });
         // CreateTask 不含 assignee/due_at → PATCH 补充
-        if (assignee || dueAt) {
+        if (assignee || dueAt || startAt) {
           await updateTask(created.id, {
             assignee: assignee || null,
             due_at: dueAt ? new Date(dueAt).toISOString() : null,
+            start_at: startAt ? new Date(startAt).toISOString() : null,
           });
         }
       } else if (initial) {
@@ -182,6 +184,7 @@ export function TaskEditDialog({
           priority,
           assignee: assignee || null,
           due_at: dueAt ? new Date(dueAt).toISOString() : null,
+          start_at: startAt ? new Date(startAt).toISOString() : null,
           depends_on: dependsOn.map((id) => ({ task_id: id, kind: "relates" })),
         });
         // 父任务变化 → reparent
@@ -199,7 +202,7 @@ export function TaskEditDialog({
     } finally {
       setSaving(false);
     }
-  }, [title, description, type, priority, assignee, dueAt, parentId, dependsOn, mode, initial, projectId, reload, onClose, onSaved, t]);
+  }, [title, description, type, priority, assignee, dueAt, startAt, parentId, dependsOn, mode, initial, projectId, reload, onClose, onSaved, t]);
 
   const toggleDep = (id: string) => {
     setDependsOn((prev) =>
@@ -288,6 +291,13 @@ export function TaskEditDialog({
                   placeholder={{ value: "", label: t("pm.task.unassigned") }}
                 />
               )}
+            </Field>
+            <Field label={t("pm.task.startDate")}>
+              <StyledInput
+                type="date"
+                value={startAt}
+                onChange={(e) => setStartAt(e.target.value)}
+              />
             </Field>
             <Field label={t("pm.task.dueDate")}>
               <StyledInput

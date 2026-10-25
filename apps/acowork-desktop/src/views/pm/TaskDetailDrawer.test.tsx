@@ -71,6 +71,8 @@ function task(over: Partial<PmTaskResponse> = {}): PmTaskResponse {
     priority: "normal",
     assignee: "agent-1",
     due_at: null,
+    start_at: null,
+    dispatched_at: null,
     depends_on: [],
     attachments: [],
     result: null,

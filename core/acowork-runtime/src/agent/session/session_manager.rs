@@ -843,7 +843,7 @@ impl SessionManager {
                 current = Some(entry.session_id.clone());
             }
             for (key, entry) in map.iter() {
-                if key.starts_with("conv:task:") {
+                if acowork_core::intent::is_task_routing_key(key) {
                     task_ids.insert(entry.session_id.clone());
                 }
             }
@@ -971,7 +971,7 @@ impl SessionManager {
             .map(|e| e.session_id.clone());
         if let Some(sid) = mapped {
             // The mirror is advisory: a failed write must not block the close.
-            if key.starts_with("conv:task:")
+            if acowork_core::intent::is_task_routing_key(key)
                 && let Err(e) = self.terminal_sessions.record(&sid)
             {
                 tracing::warn!(key, session_id = %sid, error = %e, "terminal-session mirror rewrite failed");

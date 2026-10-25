@@ -25,7 +25,7 @@
 
 import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown } from "lucide-react";
+import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown, ClipboardList } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -199,6 +199,44 @@ interface RowProps {
    *  Names the run in the drill-down tooltip while the exec session still has
    *  no title. Resolved by the parent through its message_id → body index. */
   triggerBody?: string;
+}
+
+/**
+ * A PM task dispatch chip: the task id as a compact, copyable pill shown
+ * above the human-readable dispatch text. The claim/submit playbook that
+ * wakes the agent is model-facing only (injected into the execution
+ * session's system block, never on this row) — the chip is the sole
+ * machine coordinate the human surface needs. `project_id` is deliberately
+ * absent: the row already lives in that project's own group chat.
+ */
+function TaskChip({ taskId }: { taskId: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(taskId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable — the id is still visible as the label */
+    }
+  }, [taskId]);
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={copied ? undefined : t("groupChat.taskChipCopy")}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-10 font-medium transition-colors",
+        "border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-accent)]",
+        "hover:border-[var(--color-accent)]/50",
+      )}
+    >
+      <ClipboardList className="h-3 w-3 shrink-0" aria-hidden />
+      <span className="max-w-[14rem] truncate">{t("groupChat.taskChip", { id: taskId })}</span>
+      {copied && <span aria-hidden>✓</span>}
+    </button>
+  );
 }
 
 function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody }: RowProps) {
@@ -377,6 +415,14 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
             labels={row.meta?.exec_attachments ?? []}
             align={own ? "end" : "start"}
           />
+          {/* A PM task dispatch: the task id rides a chip, not the body —
+              the human text stays clean and the claim/submit playbook never
+              reaches this surface at all. */}
+          {row.kind === "user_message" && row.meta?.task_id && (
+            <div className={cn("mb-1 flex flex-wrap gap-1.5", own ? "justify-end" : "justify-start")}>
+              <TaskChip taskId={row.meta.task_id} />
+            </div>
+          )}
           {/* The group column is an `items-start` flex column, so the bubble is
              shrink-to-fit too: without the clamp, content that cannot be
              squeezed (a mermaid SVG's natural width, an unwrapped table, one

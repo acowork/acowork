@@ -62,6 +62,16 @@ struct Cli {
     #[arg(long, default_value = "60")]
     agent_sync_interval_secs: u64,
 
+    /// 派发扫描器 tick 间隔（毫秒，默认 1000）。任务 `start_at` 到期后
+    /// 最迟一个 tick 内派发 intent（见 `dispatch` 模块）。
+    #[arg(long, default_value = "1000")]
+    dispatch_interval_ms: u64,
+
+    /// 每个 tick 最多派发的任务数（防止到期积压一次性打爆 Gateway
+    /// 每会话请求预算）。
+    #[arg(long, default_value = "10")]
+    dispatch_per_tick: usize,
+
     /// 日志级别
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -173,6 +183,12 @@ async fn main() {
     // Design 27 Phase 2 follow-up: old projects (created before per-project
     // group chats existed) get their group chat backfilled, idempotently.
     service.spawn_group_chat_backfill();
+
+    // start_at 到期派发扫描器（派发唯一触发源，见 `dispatch` 模块）
+    service.spawn_dispatch_scanner(
+        std::time::Duration::from_millis(cli.dispatch_interval_ms),
+        cli.dispatch_per_tick,
+    );
 
     // 把实际绑定端口写入 port_file（Gateway supervisor 读取）
     if let Some(path) = &cli.port_file {
