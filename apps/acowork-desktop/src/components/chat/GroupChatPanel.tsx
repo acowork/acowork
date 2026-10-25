@@ -45,6 +45,7 @@ import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
+import { ReplyQuote } from "./ReplyQuote";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import {
@@ -210,6 +211,10 @@ interface RowProps {
    *  Names the run in the drill-down tooltip while the exec session still has
    *  no title. Resolved by the parent through its message_id → body index. */
   triggerBody?: string;
+  /** Question text of the `interaction_request` card this row answers, when it
+   *  answers one — the one-line quote above the answer bubble. Card-only by
+   *  construction: the parent resolves it through a card-only index. */
+  replyQuote?: string;
 }
 
 /**
@@ -250,7 +255,7 @@ function TaskChip({ taskId }: { taskId: string }) {
   );
 }
 
-function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody }: RowProps) {
+function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody, replyQuote }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
@@ -433,6 +438,13 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
             <div className={cn("mb-1 flex flex-wrap gap-1.5", own ? "justify-end" : "justify-start")}>
               <TaskChip taskId={row.meta.task_id} />
             </div>
+          )}
+          {/* What this answer answers. The answered card no longer paints a
+              receipt, so the §5.5.4 `in_reply_to` link surfaces here instead —
+              above the bubble, where the highlight-filled bubble cannot swallow
+              a gray quote line. */}
+          {row.kind === "user_message" && (
+            <ReplyQuote quote={replyQuote} align={own ? "end" : "start"} />
           )}
           {/* The group column is an `items-start` flex column, so the bubble is
              shrink-to-fit too: without the clamp, content that cannot be
@@ -645,6 +657,19 @@ export function GroupChatPanel() {
     const m = new Map<string, string>();
     for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
       if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
+    }
+    return m;
+  }, [win]);
+  // Card rows only, so an answer can quote the question it answers. Separate
+  // from `bodyById` on purpose: `in_reply_to` also points at plain messages,
+  // and quoting one of those would paint a decision quote where none exists.
+  // Question-first, the same way the card renders its own text — the row body
+  // is only a summary (an approval's reads "Tool approval: bash").
+  const cardQuoteById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
+      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
+      m.set(r.meta.message_id, r.meta.interaction?.question || r.body);
     }
     return m;
   }, [win]);
@@ -988,6 +1013,9 @@ export function GroupChatPanel() {
               onJumpToExec={(aid, sid) => void jumpToExec(aid, sid)}
               triggerBody={
                 row.meta?.in_reply_to ? bodyById.get(row.meta.in_reply_to) : undefined
+              }
+              replyQuote={
+                row.meta?.in_reply_to ? cardQuoteById.get(row.meta.in_reply_to) : undefined
               }
               readOnly={!canPost}
             />

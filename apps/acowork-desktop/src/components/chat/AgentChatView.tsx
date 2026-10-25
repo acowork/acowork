@@ -54,6 +54,7 @@ import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
+import { ReplyQuote } from "./ReplyQuote";
 import { detectPaste } from "./pasteDetect";
 import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
@@ -161,9 +162,15 @@ interface RowProps {
    *  Names the run in the drill-down tooltip while the exec session still has
    *  no title. Resolved by the parent through its message_id → body index. */
   triggerBody?: string;
+  /** Question text of the `interaction_request` card this row answers, when it
+   *  answers one. Paints the one-line quote above the answer bubble — the
+   *  visible half of the §5.5.4 `in_reply_to` link the answered card used to
+   *  carry. Only cards are quoted: the parent resolves this through a
+   *  card-only index so a reply to any other row kind paints nothing. */
+  replyQuote?: string;
 }
 
-function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed, answered, onAnswer, triggerBody }: RowProps) {
+function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed, answered, onAnswer, triggerBody, replyQuote }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
@@ -374,6 +381,9 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed
                 keeps a file-with-no-words turn from collapsing to a blank
                 row. */}
             <ExecAttachmentLabels labels={row.meta?.exec_attachments ?? []} />
+            {/* What this answer answers. The card itself is gone once answered
+                (§5.5.4 records the answer here, not on a receipt). */}
+            <ReplyQuote quote={replyQuote} />
             {row.body && (
               <div className="max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
                 <div className="px-4 py-2.5 whitespace-pre-wrap break-words">{row.body}</div>
@@ -490,6 +500,19 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     const m = new Map<string, string>();
     for (const r of rows) {
       if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
+    }
+    return m;
+  }, [rows]);
+  // Card rows only, so an answer can quote the question it answers. Deliberately
+  // separate from `bodyById`: `in_reply_to` also points at plain messages, and
+  // quoting one of those would paint a quote where there is no decision. The
+  // text resolves question-first, exactly as the card itself renders it, so the
+  // quote says what the reader saw on the card (the row body is only a summary).
+  const cardQuoteById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of rows) {
+      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
+      m.set(r.meta.message_id, r.meta.interaction?.question || r.body);
     }
     return m;
   }, [rows]);
@@ -818,6 +841,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               onJumpToExec={(sid) => void jumpToExec(sid)}
               triggerBody={
                 r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined
+              }
+              replyQuote={
+                r.meta?.in_reply_to ? cardQuoteById.get(r.meta.in_reply_to) : undefined
               }
               closed={closed}
               answered={answered}
