@@ -57,21 +57,17 @@ interface InlineInteractionCardProps {
 // ── Kind → header config mapping ──────────────────────────────────
 
 /**
- * Per-kind chrome. Two rules govern the colors here:
- *
- *   - A card outline is NEVER the brand highlight. `--color-accent` is
- *     reserved for button backgrounds (globals.css `.btn-accent` /
- *     `.bg-accent-strong`), so an ask card wears the neutral hairline and
- *     its title the regular text tier — same recipe as CodeBlock's title bar.
- *   - emerald / amber below are SEMANTIC STATUS colors (ok / warning), not
- *     the highlight. They carry "this needs approval" / "this needs a
- *     resume", so they stay. Do not "unify" them to `border-border-outer`.
+ * Per-kind chrome. Every card outline is the neutral hairline and every
+ * header title the regular text tier — same recipe as CodeBlock's title bar.
+ * `--color-accent` is reserved for button backgrounds (globals.css
+ * `.btn-accent` / `.bg-accent-strong`) and nothing else paints the highlight;
+ * the former emerald / amber semantic borders on approval / pause were
+ * unified away per user decision (2025, chat-card style). Kinds are told
+ * apart by icon + title, not by color.
  */
 interface KindConfig {
   icon: React.ReactNode;
   titleKey: string;
-  borderCls: string;
-  headerBgCls: string;
 }
 
 function kindConfig(kind: string): KindConfig {
@@ -80,22 +76,16 @@ function kindConfig(kind: string): KindConfig {
       return {
         icon: <ShieldCheck className="h-3.5 w-3.5 shrink-0" />,
         titleKey: "chatView.cardApproval",
-        borderCls: "border-emerald-500/30 dark:border-emerald-500/40",
-        headerBgCls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
       };
     case "pause":
       return {
         icon: <Pause className="h-3.5 w-3.5 shrink-0" />,
         titleKey: "chatView.cardPause",
-        borderCls: "border-amber-500/30 dark:border-amber-500/40",
-        headerBgCls: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
       };
     default: // ask_question and unknown kinds
       return {
         icon: <MessageCircleQuestion className="h-3.5 w-3.5 shrink-0" />,
         titleKey: "chatView.cardAsk",
-        borderCls: "border-border-outer",
-        headerBgCls: "bg-chat-title text-text",
       };
   }
 }
@@ -131,6 +121,11 @@ export function InlineInteractionCard({
   const cfg = kindConfig(kind);
   const isListMode = kind === "ask_question" && (it?.options?.length ?? 0) > 0;
   const actions = kind === "approval" ? APPROVAL_ACTIONS : kind === "pause" ? PAUSE_ACTIONS : null;
+  // Two-button action cards (approval / pause) ride a narrow clamp: the tool
+  // text wraps to a couple of lines instead of stretching the card to the
+  // full content width while the buttons stay tiny — the balance the user
+  // asked for. List/option cards keep the shared content-max-width ceiling.
+  const widthCls = actions ? "max-w-sm" : "max-w-[var(--content-max-width)]";
 
   // ── Closed cards ──
   if (closed.has(mid)) {
@@ -162,9 +157,9 @@ export function InlineInteractionCard({
   // ── Read-only (admin viewing) ──
   if (readOnly) {
     return (
-      <div className="ml-12 my-2 max-w-[var(--content-max-width)] w-fit">
-        <div className={`overflow-hidden rounded-md border ${cfg.borderCls}`}>
-          <div className={`flex items-center gap-[7px] border-b border-border-divider px-3 py-[7px] text-xs font-medium ${cfg.headerBgCls}`}>
+      <div className={`ml-12 my-2 ${widthCls} w-fit`}>
+        <div className="overflow-hidden rounded-md border border-border-outer">
+          <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text">
             {cfg.icon}
             <span>{t(cfg.titleKey)}</span>
             {askerName && <span className="ml-auto text-10 font-normal opacity-70">{askerName}</span>}
@@ -184,10 +179,10 @@ export function InlineInteractionCard({
 
   // ── Open / interactive state ──
   return (
-    <div className="ml-12 my-2 max-w-[var(--content-max-width)] w-fit">
-      <div className={`overflow-hidden rounded-md border ${cfg.borderCls}`}>
+    <div className={`ml-12 my-2 ${widthCls} w-fit`}>
+      <div className="overflow-hidden rounded-md border border-border-outer">
         {/* Header bar */}
-        <div className={`flex items-center gap-[7px] border-b border-border-divider px-3 py-[7px] text-xs font-medium ${cfg.headerBgCls}`}>
+        <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text">
           {cfg.icon}
           <span>{t(cfg.titleKey)}</span>
           {askerName && <span className="ml-auto text-10 font-normal opacity-70">{askerName}</span>}

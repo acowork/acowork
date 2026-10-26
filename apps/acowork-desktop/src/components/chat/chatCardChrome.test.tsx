@@ -20,11 +20,14 @@
  *   2. The header bar uses the shared neutral card-header recipe
  *      (`bg-chat-title` + `text-text`) — the same one CodeBlock uses, so the
  *      fix is an alignment, not a new style.
- *   3. The approval / pause kinds KEEP their emerald / amber chrome. Those
- *      are semantic status colors, not the brand highlight; pinning them here
- *      stops a future "unify all borders" sweep from erasing the semantics.
+ *   3. The approval / pause kinds share the same neutral chrome as
+ *      ask_question — kinds are told apart by icon + title, not color.
+ *      (The former emerald / amber semantic borders were unified away by
+ *      explicit user decision.)
  *   4. The accent BUTTONS inside the cards survive the fix — a card that
  *      loses its accent border must not also lose its primary action.
+ *   5. Two-button action cards (approval / pause) wear a narrow `max-w-sm`
+ *      clamp so long tool text wraps instead of stretching the card.
  *
  * Why rendered DOM for the cards and source scanning for the button guard:
  *   The shell/header class strings are what the browser paints, so reading
@@ -152,7 +155,7 @@ describe("chat interaction card chrome", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("approval / pause keep their semantic emerald / amber chrome", () => {
+  it("approval / pause wear the same neutral chrome as ask (icon+title tell them apart)", () => {
     const { container: approveBox } = render(
       <InlineInteractionCard
         row={cardRow("c2", { kind: "approval", request_id: "a1", question: "Approve?" })}
@@ -161,7 +164,10 @@ describe("chat interaction card chrome", () => {
         onAnswer={vi.fn()}
       />,
     );
-    expect(shellOf(approveBox).className).toContain("border-emerald-500/30");
+    expect(shellOf(approveBox).className).toContain("border-border-outer");
+    expect(shellOf(approveBox).className).not.toMatch(/emerald|amber|--color-accent/);
+    // Narrow clamp: long tool text wraps instead of stretching the card.
+    expect((approveBox.firstChild as HTMLElement).className).toContain("max-w-sm");
 
     const { container: pauseBox } = render(
       <InlineInteractionCard
@@ -171,7 +177,9 @@ describe("chat interaction card chrome", () => {
         onAnswer={vi.fn()}
       />,
     );
-    expect(shellOf(pauseBox).className).toContain("border-amber-500/30");
+    expect(shellOf(pauseBox).className).toContain("border-border-outer");
+    expect(shellOf(pauseBox).className).not.toMatch(/emerald|amber|--color-accent/);
+    expect((pauseBox.firstChild as HTMLElement).className).toContain("max-w-sm");
   });
 
   it("AskQuestionCard (execute-session surface): neutral border and header", () => {
