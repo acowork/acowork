@@ -77,6 +77,11 @@ export interface ChatMessageRow {
      *  claim/submit playbook is model-facing only, never on this row). */
     task_id?: string;
     notice_type?: string;
+    /** On an `interaction_resolved` notice: how the card's request ended —
+     *  "answered"/"approved"/"rejected" (a human decided, on either surface)
+     *  vs "timeout"/"cancelled"/"stopped"/"turn_ended"/"unanswerable"/
+     *  "superseded" (nobody answered). */
+    resolution?: string;
     /** ADR-099: reserved producer label (`chat_router`). No writer emits it
      *  yet — the router's plain-text answer says "nothing to open" by
      *  carrying an empty `agent_session_id` (design 29 §7.2), which is what
@@ -469,10 +474,11 @@ export function closedCardIds(rows: ChatMessageRow[]): Set<string> {
   return closed;
 }
 
-/** Cards a human actually answered — a `user_message` addressed to the card.
- *  Narrower than [`closedCardIds`]: it exists so a surface can tell "you
- *  answered this" from "this request is just no longer open". */
-export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
+/** Cards answered on THIS surface — a `user_message` row addressed to the
+ *  card. The chat-side subset of [`humanAnsweredCardIds`]: the surface uses
+ *  it to suppress the Runtime's duplicate `interaction_resolved` notice, so
+ *  a chat-side answer is recorded exactly once (by its own event line). */
+export function chatAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
   return new Set(
     rows
       .filter((r) => r.kind === "user_message")
@@ -480,6 +486,32 @@ export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
       .filter((s): s is string => !!s),
   );
 }
+
+/** Cards a human actually answered. Two shapes carry that fact:
+ *  - a `user_message` addressed to the card (answered on THIS surface);
+ *  - the Runtime's `interaction_resolved` notice with a decision resolution
+ *    ("answered"/"approved"/"rejected") — answered on the execution surface,
+ *    where the reply never rides the chat answer channel. A non-decision
+ *    resolution (timeout / stopped / turn_ended / cancelled / unanswerable /
+ *    superseded) means nobody answered, so it stays out.
+ *  Narrower than [`closedCardIds`]: it exists so a surface can tell "you
+ *  answered this" from "this request is just no longer open". */
+export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
+  const answered = chatAnsweredCardIds(rows);
+  for (const r of rows) {
+    const mid = r.meta?.in_reply_to;
+    if (
+      mid &&
+      r.kind === "system_notice" &&
+      r.meta?.notice_type === "interaction_resolved" &&
+      DECISION_RESOLUTIONS.has(r.meta?.resolution ?? "")
+    )
+      answered.add(mid);
+  }
+  return answered;
+}
+
+const DECISION_RESOLUTIONS = new Set(["answered", "approved", "rejected"]);
 
 // ── Store ──────────────────────────────────────────────────────────────
 

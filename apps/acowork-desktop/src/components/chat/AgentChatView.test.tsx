@@ -182,7 +182,7 @@ describe("AgentChatView event-log wiring", () => {
     expect(sendTextMock).toHaveBeenCalledWith(SESSION, "A", "card2");
   });
 
-  it("drops an answered card and quotes the question on the answer bubble", () => {
+  it("renders a chat-surface answer as an event line, not a bubble", () => {
     windows = {
       [SESSION]: {
         older: [],
@@ -201,15 +201,75 @@ describe("AgentChatView event-log wiring", () => {
     // No live card once the human answered.
     expect(screen.queryByText("chatView.freeAnswer")).toBeNull();
     // No receipt either — it repeated the question without saying who answered
-    // or what they said. The slot is empty now.
-    expect(screen.queryByText(/chatView.cardAnswered/)).toBeNull();
+    // or what they said. The slot is empty now. (The negative lookahead keeps
+    // this about the removed `cardAnswered` receipt key, not the new
+    // `cardAnsweredNote` / `cardAnsweredInExec` event lines.)
+    expect(screen.queryByText(/chatView\.cardAnswered(?!Note|InExec)/)).toBeNull();
     // And the slot must not fall through to the unanswered note either: an
     // answered card that reads "Unanswered: …" is worse than the receipt was.
     expect(screen.queryByText(/chatView.cardUnanswered/)).toBeNull();
-    // The answer is a normal user bubble, and the link to the question rides
-    // above it as the quote line (§5.5.4: the answer row IS the record).
-    expect(screen.getByText("B")).toBeTruthy();
-    expect(screen.getByText("Pick one")).toBeTruthy();
+    // The answer is a step of the run, not an utterance: a row-tier event
+    // line naming the choice — no bubble, no avatar, no quote of the question
+    // (the question was just read in the open card above).
+    expect(screen.getByText("chatView.cardAnsweredNote|B")).toBeTruthy();
+    expect(screen.queryByText("Pick one")).toBeNull();
+    expect(document.querySelector('[data-event-text="turn"]')).toBeTruthy();
+  });
+
+  it("renders an exec-surface answer as one event line and dedups the notice", () => {
+    const resolvedNotice = (extra: Record<string, unknown>): ChatMessageRow => ({
+      seq: 9,
+      ts: 9,
+      from: "agent",
+      kind: "system_notice",
+      body: "",
+      to: "user",
+      meta: {
+        message_id: "ir:card2",
+        notice_type: "interaction_resolved",
+        in_reply_to: "card2",
+        ...extra,
+      },
+    });
+    windows = {
+      [SESSION]: {
+        older: [],
+        tail: [
+          userRow(1, "hello there"),
+          askCardRow(2),
+          resolvedNotice({ resolution: "answered" }),
+        ],
+        tailLoaded: 3,
+        total: 3,
+        loadingOlder: false,
+      },
+    };
+    const { unmount } = render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    // The decision happened on the execution surface — the chat says so, once,
+    // as an event line; the card paints nothing and never claims "unanswered".
+    expect(screen.getAllByText("chatView.cardAnsweredInExec")).toHaveLength(1);
+    expect(screen.queryByText(/chatView.cardUnanswered/)).toBeNull();
+    unmount();
+
+    // Answered on the chat surface instead: the answer row states the fact,
+    // and the Runtime's duplicate notice stays silent.
+    windows = {
+      [SESSION]: {
+        older: [],
+        tail: [
+          userRow(1, "hello there"),
+          askCardRow(2),
+          userRow(3, "B", { in_reply_to: "card2" }),
+          resolvedNotice({ resolution: "answered" }),
+        ],
+        tailLoaded: 4,
+        total: 4,
+        loadingOlder: false,
+      },
+    };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.getByText("chatView.cardAnsweredNote|B")).toBeTruthy();
+    expect(screen.queryByText("chatView.cardAnsweredInExec")).toBeNull();
   });
 
   it("drops a retired milestone from an old transcript and derives the wait line", () => {
@@ -481,7 +541,7 @@ describe("AgentChatView event-log wiring", () => {
       vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
       render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
       fireEvent.click(screen.getByText("chatView.viewRun"));
-      await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7"));
+      await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7", { prepend: true }));
       await waitFor(() => expect(setModeMock).toHaveBeenCalledWith(AGENT, "exec"));
     });
   });

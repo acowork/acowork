@@ -71,7 +71,8 @@ import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
-import { ReplyQuote } from "./ReplyQuote";
+import { ReplyQuote, truncateQuote } from "./ReplyQuote";
+import { ChatEventText } from "./ChatEventText";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
@@ -98,6 +99,7 @@ import {
   useChatSessionStore,
   closedCardIds,
   humanAnsweredCardIds,
+  chatAnsweredCardIds,
   type ChatMessageRow,
   type ChatSessionConfig,
   type ChatAttachmentMeta,
@@ -141,6 +143,14 @@ interface RowProps {
    *  carry. Only cards are quoted: the parent resolves this through a
    *  card-only index so a reply to any other row kind paints nothing. */
   replyQuote?: string;
+  /** Kind of the `interaction_request` card this row answers, when it answers
+   *  one. An ask_question/approval answer is a step of the run, not an
+   *  utterance, so it renders as an event line instead of a bubble; a PAUSE
+   *  answer stays a bubble because that text IS the new turn's prompt. */
+  answeredCardKind?: string;
+  /** Cards answered on THIS surface — lets the notice row suppress its
+   *  duplicate resolution receipt. */
+  chatAnswered: Set<string>;
 }
 
 /**
@@ -162,6 +172,8 @@ const RowView = memo(function RowView({
   onAnswer,
   triggerBody,
   replyQuote,
+  answeredCardKind,
+  chatAnswered,
 }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
@@ -204,7 +216,14 @@ const RowView = memo(function RowView({
       // Legacy receipts only — the milestones and the router-fallback receipt
       // are gone from the stream (ADR-100 revision). Whatever survived paints
       // as a quiet centered line, never as an agent bubble.
-      return <ChatNoticeEventRow row={row} className="px-4" />;
+      return (
+        <ChatNoticeEventRow
+          row={row}
+          className="px-4"
+          answered={answered}
+          chatAnswered={chatAnswered}
+        />
+      );
     }
   }
 
@@ -366,6 +385,28 @@ const RowView = memo(function RowView({
           </div>
         </div>
       </div>
+    );
+  }
+
+  // A decision answered on THIS surface. The card interaction is a step of
+  // the run, not an utterance — so it states itself as a centered event line
+  // ("Answered: <choice>"), the sibling of the unanswered note the card
+  // leaves behind. PAUSE answers are excluded: that text IS the new turn's
+  // prompt and must read as a message.
+  if (
+    row.kind === "user_message" &&
+    answeredCardKind &&
+    answeredCardKind !== "pause" &&
+    !row.attachments?.length
+  ) {
+    const answer = truncateQuote(row.body);
+    return (
+      <ChatEventText
+        anchor="turn"
+        text={t("chatView.cardAnsweredNote", { answer })}
+        title={row.body}
+        className="px-4"
+      />
     );
   }
 
@@ -584,6 +625,16 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     }
     return m;
   }, [rows]);
+  // Same index, kind instead of question: an answer row needs the card's kind
+  // to decide between event line (ask_question / approval) and bubble (pause).
+  const cardKindById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of rows) {
+      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
+      m.set(r.meta.message_id, r.meta.interaction?.kind ?? "ask_question");
+    }
+    return m;
+  }, [rows]);
   // Optimistic exec-session title seed (ADR-099). A Router-created execute
   // session has no list row and often no open tab, so it would read "Untitled"
   // until the backend's generated title arrives over MQTT. The reply row is now
@@ -622,6 +673,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // stream is a pure durable event log now; there is no live projection.
   const closed = useMemo(() => closedCardIds(rows), [rows]);
   const answered = useMemo(() => humanAnsweredCardIds(rows), [rows]);
+  const chatAnswered = useMemo(() => chatAnsweredCardIds(rows), [rows]);
   // Is the newest human message still waiting for an answer? Derived, never
   // stored — see `chatTurnState`. Suppressed only when a locate is KNOWN to
   // have parked the window mid-history (a window with newer pages has no
@@ -861,7 +913,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         showToast({ type: "info", message: t("chatView.execSessionGone") });
         return;
       }
-      await useChatStore.getState().openSession(agentId, execSid);
+      await useChatStore
+        .getState()
+        .openSession(agentId, execSid, { prepend: true });
       setMode(agentId, "exec");
     },
     [agentId, t, setMode],
@@ -1005,6 +1059,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                     ? cardQuoteById.get(r.meta.in_reply_to)
                     : undefined
                 }
+                answeredCardKind={
+                  r.meta?.in_reply_to
+                    ? cardKindById.get(r.meta.in_reply_to)
+                    : undefined
+                }
+                chatAnswered={chatAnswered}
                 closed={closed}
                 answered={answered}
                 onAnswer={handleAnswer}

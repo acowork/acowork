@@ -23,9 +23,24 @@
  * mentions channel carries `session_config`.
  */
 
-import { useCallback, useEffect, useMemo, memo, useRef, useState, type UIEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  memo,
+  useRef,
+  useState,
+  type UIEvent,
+} from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown, ClipboardList } from "lucide-react";
+import {
+  Send,
+  Paperclip,
+  Loader2,
+  ChevronDown,
+  ChevronsDown,
+  ClipboardList,
+} from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { Components } from "react-markdown";
 import { formatBubbleTime } from "../../lib/formatTime";
@@ -43,7 +58,7 @@ import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
-import { ReplyQuote } from "./ReplyQuote";
+import { ReplyQuote, truncateQuote } from "./ReplyQuote";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
@@ -55,9 +70,13 @@ import {
   terminalNoticeKey,
 } from "./chatTurnState";
 import { InlineInteractionCard } from "./InlineInteractionCard";
+import { ChatEventText } from "./ChatEventText";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { VirtualRowList, type VirtualRowListHandle } from "../common/VirtualRowList";
+import {
+  VirtualRowList,
+  type VirtualRowListHandle,
+} from "../common/VirtualRowList";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -66,6 +85,7 @@ import {
   useChatSessionStore,
   closedCardIds,
   humanAnsweredCardIds,
+  chatAnsweredCardIds,
   type ChatMessageRow,
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
@@ -109,8 +129,6 @@ const chatBlockComponents: Components = {
   ),
 };
 
-
-
 // ── Participant naming ────────────────────────────────────────────────
 
 /** Resolve a participant id to a display name + kind. Agents come from
@@ -131,7 +149,8 @@ function useParticipantNamer(directory: DirectoryUser[]) {
         return { name: agent.display_name ?? agent.name ?? id, isAgent: true };
       }
       const user = dirById.get(id);
-      if (user) return { name: user.display_name || user.username, isAgent: false };
+      if (user)
+        return { name: user.display_name || user.username, isAgent: false };
       return { name: id.slice(0, 8), isAgent: false };
     },
     [agentsMap, dirById],
@@ -167,6 +186,14 @@ interface RowProps {
    *  answers one — the one-line quote above the answer bubble. Card-only by
    *  construction: the parent resolves it through a card-only index. */
   replyQuote?: string;
+  /** Kind of the `interaction_request` card this row answers, when it answers
+   *  one. ask_question/approval answers render as an event line (a step of
+   *  the run, not an utterance); a PAUSE answer stays a bubble — that text
+   *  IS the new turn's prompt. */
+  answeredCardKind?: string;
+  /** Cards answered on THIS surface — lets the notice row suppress its
+   *  duplicate resolution receipt. */
+  chatAnswered: Set<string>;
 }
 
 /**
@@ -201,7 +228,9 @@ function TaskChip({ taskId }: { taskId: string }) {
       )}
     >
       <ClipboardList className="h-3 w-3 shrink-0" aria-hidden />
-      <span className="max-w-[14rem] truncate">{t("groupChat.taskChip", { id: taskId })}</span>
+      <span className="max-w-[14rem] truncate">
+        {t("groupChat.taskChip", { id: taskId })}
+      </span>
       {copied && <span aria-hidden>✓</span>}
     </button>
   );
@@ -215,7 +244,21 @@ function TaskChip({ taskId }: { taskId: string }) {
  * the window is unchanged: `nameOf` is a `useCallback`, `closed`/`answered`
  * are per-window memos, `onAnswer`/`onJumpToExec` are host-level callbacks.
  */
-const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody, replyQuote }: RowProps) {
+const GroupRowView = memo(function GroupRowView({
+  row,
+  me,
+  chatSessionId,
+  nameOf,
+  closed,
+  answered,
+  onAnswer,
+  onJumpToExec,
+  readOnly,
+  triggerBody,
+  replyQuote,
+  answeredCardKind,
+  chatAnswered,
+}: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
@@ -238,7 +281,8 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
       // (avatar + name + bubble), never a centered system line. A user
       // message must always be followed by an agent message: that exchange IS
       // the chat.
-      const taskName = execRunName?.trim() || truncateTaskName(triggerBody) || "";
+      const taskName =
+        execRunName?.trim() || truncateTaskName(triggerBody) || "";
       row = {
         ...row,
         kind: "agent_message",
@@ -253,7 +297,14 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
       // Legacy receipts only — the milestones and the router-fallback receipt
       // are gone from the stream (ADR-100 revision). Whatever survived paints
       // as a quiet centered line, never on an agent's side.
-      return <ChatNoticeEventRow row={row} className="px-4" />;
+      return (
+        <ChatNoticeEventRow
+          row={row}
+          className="px-4"
+          answered={answered}
+          chatAnswered={chatAnswered}
+        />
+      );
     }
   }
 
@@ -282,7 +333,8 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
   // `sender_session_id` (the answering agent's own session). Same formula as
   // AgentChatView, so finished / failed / empty-bodied replies are all
   // drillable.
-  const execSid = row.meta?.agent_session_id || row.meta?.sender_session_id || "";
+  const execSid =
+    row.meta?.agent_session_id || row.meta?.sender_session_id || "";
 
   // A terminal reply with nothing in it IS its outcome ("interrupted",
   // "failed"): paint the centered status line with the drill into the run,
@@ -294,7 +346,31 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
         text={t(terminalNoticeKey(row.meta?.status))}
         danger={failed}
         onJump={execSid ? () => onJumpToExec(row.from, execSid) : undefined}
-        runName={execRunName?.trim() || truncateTaskName(triggerBody) || undefined}
+        runName={
+          execRunName?.trim() || truncateTaskName(triggerBody) || undefined
+        }
+      />
+    );
+  }
+
+  // A decision answered on THIS surface (any human's). The card interaction
+  // is a step of the run, not an utterance — so it states itself as a
+  // centered event line ("Answered: <choice>"), the sibling of the
+  // unanswered note the card leaves behind. PAUSE answers are excluded:
+  // that text IS the new turn's prompt and must read as a message.
+  if (
+    row.kind === "user_message" &&
+    answeredCardKind &&
+    answeredCardKind !== "pause" &&
+    !row.attachments?.length
+  ) {
+    const answer = truncateQuote(row.body);
+    return (
+      <ChatEventText
+        anchor="turn"
+        text={t("chatView.cardAnsweredNote", { answer })}
+        title={row.body}
+        className="px-4"
       />
     );
   }
@@ -381,7 +457,11 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
               )}
             >
               {row.attachments.map((a) => (
-                <ChatAttachmentChip key={a.id} chatSessionId={chatSessionId} attachment={a} />
+                <ChatAttachmentChip
+                  key={a.id}
+                  chatSessionId={chatSessionId}
+                  attachment={a}
+                />
               ))}
             </div>
           )}
@@ -399,7 +479,12 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
               the human text stays clean and the claim/submit playbook never
               reaches this surface at all. */}
           {row.kind === "user_message" && row.meta?.task_id && (
-            <div className={cn("mb-1 flex flex-wrap gap-1.5", own ? "justify-end" : "justify-start")}>
+            <div
+              className={cn(
+                "mb-1 flex flex-wrap gap-1.5",
+                own ? "justify-end" : "justify-start",
+              )}
+            >
               <TaskChip taskId={row.meta.task_id} />
             </div>
           )}
@@ -416,21 +501,24 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
              long token) widened the bubble past the row's `max-w-[var(
              --content-max-width)]` and spilled under the next panel. The clamp
              hands that overflow to the inner scroll containers. */}
-          {(row.body || !(row.attachments?.length || row.meta?.exec_attachments?.length)) && (
-          <div
-            className={cn(
-              "max-w-full rounded-md px-4 py-2.5 leading-relaxed break-words select-text",
-              own
-                ? "rounded-br-sm bg-chat-user text-chat-user-text"
-                : "rounded-bl-sm bg-chat-bubble text-text-primary",
-            )}
-          >
-            {failed && (
-              <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
-                {row.meta?.status}
-              </div>
-            )}
-            {/* Human input is literal text, markdown is agent speech — the
+          {(row.body ||
+            !(
+              row.attachments?.length || row.meta?.exec_attachments?.length
+            )) && (
+            <div
+              className={cn(
+                "max-w-full rounded-md px-4 py-2.5 leading-relaxed break-words select-text",
+                own
+                  ? "rounded-br-sm bg-chat-user text-chat-user-text"
+                  : "rounded-bl-sm bg-chat-bubble text-text-primary",
+              )}
+            >
+              {failed && (
+                <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
+                  {row.meta?.status}
+                </div>
+              )}
+              {/* Human input is literal text, markdown is agent speech — the
                 same renderer split the user↔agent thread (`AgentChatView`)
                 and the execution surface (`UserWithAttachmentsBubble`) apply
                 to their user rows. Routing `user_message` through
@@ -440,16 +528,23 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
                 the accent-filled own-bubble inherits — the "user bubble text
                 turned black" defect. It also made `**bold**` render bold in
                 a group chat while reading as literal text in the 1:1 chat. */}
-            {row.body ? (
-              row.kind === "user_message" ? (
-                <div className="whitespace-pre-wrap break-words">{row.body}</div>
+              {row.body ? (
+                row.kind === "user_message" ? (
+                  <div className="whitespace-pre-wrap break-words">
+                    {row.body}
+                  </div>
+                ) : (
+                  <ChatMarkdown
+                    content={row.body}
+                    components={chatBlockComponents}
+                  />
+                )
               ) : (
-                <ChatMarkdown content={row.body} components={chatBlockComponents} />
-              )
-            ) : (
-              <span className="text-xs text-text-tertiary italic">{t("groupChat.emptyTurn")}</span>
-            )}
-          </div>
+                <span className="text-xs text-text-tertiary italic">
+                  {t("groupChat.emptyTurn")}
+                </span>
+              )}
+            </div>
           )}
           <div className="mt-1 flex items-center gap-2">
             {/* Drill-into-exec affordance — the group twin of the 1:1 chat
@@ -461,7 +556,11 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
                 the same thing. */}
             {!own && who.isAgent && row.kind === "agent_message" && execSid && (
               <ViewRunButton
-                runName={execRunName?.trim() || truncateTaskName(triggerBody) || undefined}
+                runName={
+                  execRunName?.trim() ||
+                  truncateTaskName(triggerBody) ||
+                  undefined
+                }
                 onJump={() => onJumpToExec(row.from, execSid)}
               />
             )}
@@ -555,10 +654,12 @@ export function GroupChatPanel() {
       null,
   );
   const me = useAuthStore((s) => s.account?.user_id ?? "");
-  const win = useChatSessionStore(
-    (s) => (activeGroupId ? s.windows[activeGroupId] : undefined),
+  const win = useChatSessionStore((s) =>
+    activeGroupId ? s.windows[activeGroupId] : undefined,
   );
-  const sending = useChatSessionStore((s) => (activeGroupId ? s.sending[activeGroupId] : false));
+  const sending = useChatSessionStore((s) =>
+    activeGroupId ? s.sending[activeGroupId] : false,
+  );
   const pendingLocateSeq = useChatSessionStore((s) =>
     activeGroupId ? (s.windows[activeGroupId]?.pendingLocateSeq ?? null) : null,
   );
@@ -576,13 +677,18 @@ export function GroupChatPanel() {
   // Composer attachments — uploaded into the group's `files/` dir (§4.2.1)
   // before send; the send carries their ids so the durable row and each
   // mentioned agent's execution turn both see them (mirrors AgentChatView).
-  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentMeta[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<
+    ChatAttachmentMeta[]
+  >([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // @-mention autocomplete: the active token under the caret + which popup
   // row is highlighted (keyboard nav). `null` = caret is not inside a mention.
-  const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
+  const [mention, setMention] = useState<{
+    query: string;
+    start: number;
+  } | null>(null);
   const [mentionActive, setMentionActive] = useState(0);
   const pickerRef = useRef<HTMLDivElement>(null);
 
@@ -599,7 +705,12 @@ export function GroupChatPanel() {
     [],
   );
 
-  const { ref: scrollRef, stickNow, unpin, atBottom } = useStickToBottom(
+  const {
+    ref: scrollRef,
+    stickNow,
+    unpin,
+    atBottom,
+  } = useStickToBottom(
     [win?.tail.length ?? 0, activeGroupId],
     activeGroupId,
     () => {},
@@ -628,12 +739,17 @@ export function GroupChatPanel() {
   const highlightSeq = useLocateMessage(
     () => containerRef.current,
     pendingLocateSeq,
-    () => activeGroupId && useChatSessionStore.getState().clearLocate(activeGroupId),
+    () =>
+      activeGroupId &&
+      useChatSessionStore.getState().clearLocate(activeGroupId),
     // Virtualization fallback: the row is in the window but not in the DOM.
     (seq) => {
       const idx = rowsRef.current.findIndex((r) => r.seq === seq);
       if (idx < 0) return false;
-      return listRef.current?.scrollToKey(`${activeGroupId}:${seq}`, "center") ?? false;
+      return (
+        listRef.current?.scrollToKey(`${activeGroupId}:${seq}`, "center") ??
+        false
+      );
     },
     // A locate parks the reader mid-history on purpose: take them out of
     // the follow, or the persistent anchor rides the next commit back to
@@ -653,7 +769,10 @@ export function GroupChatPanel() {
   // The stream is now a straight durable log: every retired milestone renders
   // as nothing (the shared renderer returns null) and the only state line the
   // surface adds is derived below. No projection layer is needed.
-  const rows = useMemo(() => [...(win?.older ?? []), ...(win?.tail ?? [])], [win]);
+  const rows = useMemo(
+    () => [...(win?.older ?? []), ...(win?.tail ?? [])],
+    [win],
+  );
   // Virtualization adapters (render-perf L2) — see AgentChatView for the
   // full rationale. Session-qualified keys, rows ref for the locate
   // fallback, coarse body-length estimate corrected by measurement.
@@ -691,6 +810,16 @@ export function GroupChatPanel() {
     }
     return m;
   }, [win]);
+  // Same index, kind instead of question: an answer row needs the card's kind
+  // to decide between event line (ask_question / approval) and bubble (pause).
+  const cardKindById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
+      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
+      m.set(r.meta.message_id, r.meta.interaction?.kind ?? "ask_question");
+    }
+    return m;
+  }, [win]);
   const hasMoreOlder = win ? win.firstPos > 0 : false;
   const hasMoreNewer = win ? win.lastPos < win.total - 1 : false;
   // Auto-pagination: scrolling into the top band fires the next older page;
@@ -703,13 +832,24 @@ export function GroupChatPanel() {
     if (hasMoreOlder && !win.loadingOlder && el.scrollTop <= 48) {
       void useChatSessionStore.getState().loadOlder(activeGroupId);
     }
-    if (hasMoreNewer && !win.loadingNewer && el.scrollHeight - el.scrollTop - el.clientHeight <= 48) {
+    if (
+      hasMoreNewer &&
+      !win.loadingNewer &&
+      el.scrollHeight - el.scrollTop - el.clientHeight <= 48
+    ) {
       void useChatSessionStore.getState().loadNewer(activeGroupId);
     }
   };
-  const closed = useMemo(() => (win?.tail ? closedCardIds(win.tail) : new Set<string>()), [win]);
+  const closed = useMemo(
+    () => (win?.tail ? closedCardIds(win.tail) : new Set<string>()),
+    [win],
+  );
   const answered = useMemo(
     () => (win?.tail ? humanAnsweredCardIds(win.tail) : new Set<string>()),
+    [win],
+  );
+  const chatAnswered = useMemo(
+    () => (win?.tail ? chatAnsweredCardIds(win.tail) : new Set<string>()),
     [win],
   );
   const agentParticipants = useMemo(() => {
@@ -731,7 +871,8 @@ export function GroupChatPanel() {
   // opens no wait either (it woke nobody), while a turn an agent is still
   // chewing on keeps its line even if a plain remark landed after it.
   const waiting =
-    !hasMoreNewer && pendingTurn(rows, sending, closed, agentParticipants.length > 0);
+    !hasMoreNewer &&
+    pendingTurn(rows, sending, closed, agentParticipants.length > 0);
 
   // Everything the @ picker lists. Design 27 §5.3.1: @-ing an Agent wakes it,
   // @-ing a person is a mention that triggers nothing — but both are pickable,
@@ -757,7 +898,10 @@ export function GroupChatPanel() {
   // Candidates for the open popup: mentionable participants narrowed by the
   // typed query.
   const mentionCandidates = useMemo(
-    () => (mention ? filterMentionCandidates(mentionParticipants, mention.query) : []),
+    () =>
+      mention
+        ? filterMentionCandidates(mentionParticipants, mention.query)
+        : [],
     [mention, mentionParticipants],
   );
 
@@ -782,7 +926,12 @@ export function GroupChatPanel() {
       const ta = textareaRef.current;
       if (!ta || !mention) return;
       const caret = ta.selectionStart ?? draft.length;
-      const { value, caret: nextCaret } = applyMention(draft, caret, mention.start, name);
+      const { value, caret: nextCaret } = applyMention(
+        draft,
+        caret,
+        mention.start,
+        name,
+      );
       setDraft(value);
       setMention(null);
       requestAnimationFrame(() => {
@@ -796,7 +945,8 @@ export function GroupChatPanel() {
   const submit = useCallback(async () => {
     const body = draft.trim();
     const attachmentIds = pendingAttachments.map((a) => a.id);
-    if ((!body && attachmentIds.length === 0) || !activeGroupId || uploading) return;
+    if ((!body && attachmentIds.length === 0) || !activeGroupId || uploading)
+      return;
     setDraft("");
     const sentAttachments = pendingAttachments;
     setPendingAttachments([]);
@@ -810,24 +960,36 @@ export function GroupChatPanel() {
       setDraft(body);
       setPendingAttachments(sentAttachments);
     }
-  }, [draft, activeGroupId, agentParticipants, stickNow, pendingAttachments, uploading]);
+  }, [
+    draft,
+    activeGroupId,
+    agentParticipants,
+    stickNow,
+    pendingAttachments,
+    uploading,
+  ]);
 
   // Upload each chosen file into the group's `files/` dir and stack a chip.
   // Shared by the paperclip picker and the paste handler (§4.2.1).
-  const uploadFiles = useCallback(async (files: File[]) => {
-    if (files.length === 0 || !activeGroupId) return;
-    setUploading(true);
-    try {
-      for (const f of files) {
-        const meta = await useChatSessionStore.getState().upload(activeGroupId, f);
-        setPendingAttachments((prev) => [...prev, meta]);
+  const uploadFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0 || !activeGroupId) return;
+      setUploading(true);
+      try {
+        for (const f of files) {
+          const meta = await useChatSessionStore
+            .getState()
+            .upload(activeGroupId, f);
+          setPendingAttachments((prev) => [...prev, meta]);
+        }
+      } catch (err) {
+        console.warn("[GroupChatPanel] attachment upload failed:", err);
+      } finally {
+        setUploading(false);
       }
-    } catch (err) {
-      console.warn("[GroupChatPanel] attachment upload failed:", err);
-    } finally {
-      setUploading(false);
-    }
-  }, [activeGroupId]);
+    },
+    [activeGroupId],
+  );
 
   const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -877,7 +1039,11 @@ export function GroupChatPanel() {
             if (!resp.ok) throw new Error(`asset fetch → ${resp.status}`);
             const blob = await resp.blob();
             const name = p.replace(/^.*[\\/]/, "") || "attachment";
-            files.push(new File([blob], name, { type: blob.type || "application/octet-stream" }));
+            files.push(
+              new File([blob], name, {
+                type: blob.type || "application/octet-stream",
+              }),
+            );
           } catch (err) {
             console.warn("[GroupChatPanel] clipboard file unreadable:", p, err);
           }
@@ -928,16 +1094,21 @@ export function GroupChatPanel() {
   // A deleted exec session is answered with a toast and no navigation — the
   // same probe AgentChatView.jumpToExec runs (the message's exec pointer
   // outlives the session it names, §5.5.5).
-  const jumpToExec = useCallback(async (agentId: string, execSid: string) => {
-    if (!agentId || !execSid) return;
-    if (!(await sessionExists(agentId, execSid))) {
-      showToast({ type: "info", message: t("chatView.execSessionGone") });
-      return;
-    }
-    useAgentStore.getState().selectAgent(agentId);
-    await useChatStore.getState().openSession(agentId, execSid);
-    useChatSessionStore.getState().setMode(agentId, "exec");
-  }, [t]);
+  const jumpToExec = useCallback(
+    async (agentId: string, execSid: string) => {
+      if (!agentId || !execSid) return;
+      if (!(await sessionExists(agentId, execSid))) {
+        showToast({ type: "info", message: t("chatView.execSessionGone") });
+        return;
+      }
+      useAgentStore.getState().selectAgent(agentId);
+      await useChatStore
+        .getState()
+        .openSession(agentId, execSid, { prepend: true });
+      useChatSessionStore.getState().setMode(agentId, "exec");
+    },
+    [t],
+  );
   // Void-returning stable handler for memoized rows — an inline
   // `(aid, sid) => void jumpToExec(aid, sid)` is a fresh identity per render
   // and would defeat `GroupRowView`'s memo on every keystroke.
@@ -955,7 +1126,9 @@ export function GroupChatPanel() {
   const isDm = group?.kind === "user_user";
   const peerId = isDm ? participants.find((p) => p.id !== me)?.id : undefined;
   const title = isDm
-    ? (peerId ? nameOf(peerId).name : activeGroupId.slice(0, 8))
+    ? peerId
+      ? nameOf(peerId).name
+      : activeGroupId.slice(0, 8)
     : group?.title || activeGroupId.slice(0, 8);
   // Admin cross-account view: the panel lists groups the admin never joined.
   // Reading is allowed (server-side admin bypass), posting is not — hide the
@@ -996,92 +1169,109 @@ export function GroupChatPanel() {
           affordance. No "to top" arrow: a Chat session grows without bound, so
           jumping to the head would page through the whole history. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
-      <OverlayScrollbar
-        ref={setViewport}
-        className="py-2 [overflow-anchor:none]"
-        onViewportScroll={handleStreamScroll}
-      >
-        {hasMoreOlder && (
-          <div className="py-2 text-center text-10 text-text-tertiary">
-            {win?.loadingOlder ? (
-              <span className="inline-flex items-center justify-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                {t("chatHistory.loadingEarlier")}
-              </span>
-            ) : (
-              <span>{t("chatHistory.scrollForEarlier")}</span>
-            )}
-          </div>
-        )}
-        {rows.length === 0 && (
-          <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
-            {t("groupChat.empty")}
-          </div>
-        )}
-        {/* Virtualized transcript window (render-perf L2) — see AgentChatView.
-            `key` remounts the shell on group switch (stale-offset contract). */}
-        <VirtualRowList
-          key={activeGroupId}
-          ref={listRef}
-          items={rows}
-          keyOf={rowKeyOf}
-          scrollContainerRef={containerRef}
-          followBottom={atBottom}
-          estimateSize={estimateRow}
-          rowAttrs={(row) => ({ "data-seq": row.seq })}
-          rowClassName={(row) =>
-            cn(
-              "scroll-mt-2 transition-colors",
-              highlightSeq === row.seq && "bg-[var(--color-accent)]/10",
-            )
-          }
-          renderItem={(row) => (
-            <GroupRowView
-              row={row}
-              me={me}
-              chatSessionId={activeGroupId}
-              nameOf={nameOf}
-              closed={closed}
-              answered={answered}
-              onAnswer={onAnswer}
-              onJumpToExec={handleJumpToExec}
-              triggerBody={
-                row.meta?.in_reply_to ? bodyById.get(row.meta.in_reply_to) : undefined
-              }
-              replyQuote={
-                row.meta?.in_reply_to ? cardQuoteById.get(row.meta.in_reply_to) : undefined
-              }
-              readOnly={!canPost}
-            />
+        <OverlayScrollbar
+          ref={setViewport}
+          className="py-2 [overflow-anchor:none]"
+          onViewportScroll={handleStreamScroll}
+        >
+          {hasMoreOlder && (
+            <div className="py-2 text-center text-10 text-text-tertiary">
+              {win?.loadingOlder ? (
+                <span className="inline-flex items-center justify-center gap-1.5">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {t("chatHistory.loadingEarlier")}
+                </span>
+              ) : (
+                <span>{t("chatHistory.scrollForEarlier")}</span>
+              )}
+            </div>
           )}
-        />
-        {/* One aggregated "an agent has your message" line, derived from the
+          {rows.length === 0 && (
+            <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
+              {t("groupChat.empty")}
+            </div>
+          )}
+          {/* Virtualized transcript window (render-perf L2) — see AgentChatView.
+            `key` remounts the shell on group switch (stale-offset contract). */}
+          <VirtualRowList
+            key={activeGroupId}
+            ref={listRef}
+            items={rows}
+            keyOf={rowKeyOf}
+            scrollContainerRef={containerRef}
+            followBottom={atBottom}
+            estimateSize={estimateRow}
+            rowAttrs={(row) => ({ "data-seq": row.seq })}
+            rowClassName={(row) =>
+              cn(
+                "scroll-mt-2 transition-colors",
+                highlightSeq === row.seq && "bg-[var(--color-accent)]/10",
+              )
+            }
+            renderItem={(row) => (
+              <GroupRowView
+                row={row}
+                me={me}
+                chatSessionId={activeGroupId}
+                nameOf={nameOf}
+                closed={closed}
+                answered={answered}
+                onAnswer={onAnswer}
+                onJumpToExec={handleJumpToExec}
+                triggerBody={
+                  row.meta?.in_reply_to
+                    ? bodyById.get(row.meta.in_reply_to)
+                    : undefined
+                }
+                replyQuote={
+                  row.meta?.in_reply_to
+                    ? cardQuoteById.get(row.meta.in_reply_to)
+                    : undefined
+                }
+                answeredCardKind={
+                  row.meta?.in_reply_to
+                    ? cardKindById.get(row.meta.in_reply_to)
+                    : undefined
+                }
+                chatAnswered={chatAnswered}
+                readOnly={!canPost}
+              />
+            )}
+          />
+          {/* One aggregated "an agent has your message" line, derived from the
             newest unanswered row — the group twin of the 1:1 waiting line. No
             agent is named: a fan-out can wake more than one, and the reply
             bubbles say who answered. */}
-        {waiting && (
-          <ChatTurnStatusLine className="px-4" live text={t("chatView.notice.pendingTurnGeneric")} />
-        )}
-        {hasMoreNewer && (
-          <div className="py-2 text-center text-10 text-text-tertiary">
-            {win?.loadingNewer ? (
-              <span className="inline-flex items-center justify-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                {t("chatHistory.loadingNewer")}
-              </span>
-            ) : (
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 hover:text-text-secondary"
-                onClick={() => activeGroupId && void useChatSessionStore.getState().loadNewer(activeGroupId)}
-              >
-                <ChevronDown size={12} />
-                {t("chatHistory.jumpToLatest")}
-              </button>
-            )}
-          </div>
-        )}
-      </OverlayScrollbar>
+          {waiting && (
+            <ChatTurnStatusLine
+              className="px-4"
+              live
+              text={t("chatView.notice.pendingTurnGeneric")}
+            />
+          )}
+          {hasMoreNewer && (
+            <div className="py-2 text-center text-10 text-text-tertiary">
+              {win?.loadingNewer ? (
+                <span className="inline-flex items-center justify-center gap-1.5">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {t("chatHistory.loadingNewer")}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 hover:text-text-secondary"
+                  onClick={() =>
+                    activeGroupId &&
+                    void useChatSessionStore.getState().loadNewer(activeGroupId)
+                  }
+                >
+                  <ChevronDown size={12} />
+                  {t("chatHistory.jumpToLatest")}
+                </button>
+              )}
+            </div>
+          )}
+        </OverlayScrollbar>
         {/* Back-to-bottom arrow — visible only while the reader has scrolled
             up off the tail (and there is content). Same treatment as the
             execute-session button: default-reduced opacity, full on hover. */}
@@ -1146,47 +1336,49 @@ export function GroupChatPanel() {
                   className="py-1"
                   maxHeight={224}
                 >
-                {mentionCandidates.map((c, i) => {
-                  const meta = c.isAgent ? agentsMap[c.id]?.meta : undefined;
-                  const avatar = c.isAgent ? (
-                    <AgentAvatar
-                      agentId={c.id}
-                      displayName={c.name}
-                      avatarUrl={meta?.avatar ?? null}
-                      builtinAvatarId={meta?.builtin_avatar ?? null}
-                      size={20}
-                      className="shrink-0"
-                    />
-                  ) : (
-                    <UserAvatar
-                      displayName={c.name}
-                      avatarUrl={null}
-                      builtinAvatarId={null}
-                      size={20}
-                      className="shrink-0"
-                    />
-                  );
-                  return (
-                    <button
-                      key={c.id}
-                      type="button"
-                      role="option"
-                      data-mention-index={i}
-                      aria-selected={i === mentionActive}
-                      onClick={() => pickMention(c.name)}
-                      onMouseEnter={() => setMentionActive(i)}
-                      className={cn(
-                        "flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs",
-                        i === mentionActive
-                          ? "bg-nav-item-hover text-text"
-                          : "text-text-secondary",
-                      )}
-                    >
-                      {avatar}
-                      <span className="min-w-0 flex-1 truncate">{c.name}</span>
-                    </button>
-                  );
-                })}
+                  {mentionCandidates.map((c, i) => {
+                    const meta = c.isAgent ? agentsMap[c.id]?.meta : undefined;
+                    const avatar = c.isAgent ? (
+                      <AgentAvatar
+                        agentId={c.id}
+                        displayName={c.name}
+                        avatarUrl={meta?.avatar ?? null}
+                        builtinAvatarId={meta?.builtin_avatar ?? null}
+                        size={20}
+                        className="shrink-0"
+                      />
+                    ) : (
+                      <UserAvatar
+                        displayName={c.name}
+                        avatarUrl={null}
+                        builtinAvatarId={null}
+                        size={20}
+                        className="shrink-0"
+                      />
+                    );
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        role="option"
+                        data-mention-index={i}
+                        aria-selected={i === mentionActive}
+                        onClick={() => pickMention(c.name)}
+                        onMouseEnter={() => setMentionActive(i)}
+                        className={cn(
+                          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs",
+                          i === mentionActive
+                            ? "bg-nav-item-hover text-text"
+                            : "text-text-secondary",
+                        )}
+                      >
+                        {avatar}
+                        <span className="min-w-0 flex-1 truncate">
+                          {c.name}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </OverlayScrollbar>
               </div>
             )}
@@ -1209,19 +1401,25 @@ export function GroupChatPanel() {
                   if (mention && mentionCandidates.length > 0) {
                     if (e.key === "ArrowDown") {
                       e.preventDefault();
-                      setMentionActive((i) => (i + 1) % mentionCandidates.length);
+                      setMentionActive(
+                        (i) => (i + 1) % mentionCandidates.length,
+                      );
                       return;
                     }
                     if (e.key === "ArrowUp") {
                       e.preventDefault();
                       setMentionActive(
-                        (i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length,
+                        (i) =>
+                          (i - 1 + mentionCandidates.length) %
+                          mentionCandidates.length,
                       );
                       return;
                     }
                     if (e.key === "Enter" || e.key === "Tab") {
                       e.preventDefault();
-                      const pick = mentionCandidates[mentionActive] ?? mentionCandidates[0];
+                      const pick =
+                        mentionCandidates[mentionActive] ??
+                        mentionCandidates[0];
                       if (pick) pickMention(pick.name);
                       return;
                     }
@@ -1254,7 +1452,10 @@ export function GroupChatPanel() {
                 the far side). */}
             <div className="flex items-center justify-between gap-2 px-3 pb-2">
               <div />
-              <div data-toolbar-cluster="right" className="flex shrink-0 items-center gap-1">
+              <div
+                data-toolbar-cluster="right"
+                className="flex shrink-0 items-center gap-1"
+              >
                 <Tooltip content={t("chatPanel.attach")} variant="plain">
                   <button
                     className={cn(toolbarIconButton, uploading && "opacity-50")}
@@ -1268,7 +1469,11 @@ export function GroupChatPanel() {
                 <button
                   type="button"
                   onClick={() => void submit()}
-                  disabled={(!draft.trim() && pendingAttachments.length === 0) || sending || uploading}
+                  disabled={
+                    (!draft.trim() && pendingAttachments.length === 0) ||
+                    sending ||
+                    uploading
+                  }
                   aria-label={t("groupChat.send")}
                   title={t("groupChat.send")}
                   className="rounded-md p-1.5 text-text-tertiary hover:bg-zinc-200 disabled:opacity-50 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"

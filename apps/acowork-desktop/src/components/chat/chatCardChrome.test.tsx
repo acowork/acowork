@@ -167,7 +167,8 @@ describe("chat interaction card chrome", () => {
     expect(shellOf(approveBox).className).toContain("border-border-outer");
     expect(shellOf(approveBox).className).not.toMatch(/emerald|amber|--color-accent/);
     // Narrow clamp: long tool text wraps instead of stretching the card.
-    expect((approveBox.firstChild as HTMLElement).className).toContain("max-w-sm");
+    // The clamp rides the content column (row → avatar gutter → column).
+    expect((approveBox.firstChild!.children[1] as HTMLElement).className).toContain("max-w-sm");
 
     const { container: pauseBox } = render(
       <InlineInteractionCard
@@ -179,7 +180,7 @@ describe("chat interaction card chrome", () => {
     );
     expect(shellOf(pauseBox).className).toContain("border-border-outer");
     expect(shellOf(pauseBox).className).not.toMatch(/emerald|amber|--color-accent/);
-    expect((pauseBox.firstChild as HTMLElement).className).toContain("max-w-sm");
+    expect((pauseBox.firstChild!.children[1] as HTMLElement).className).toContain("max-w-sm");
   });
 
   it("AskQuestionCard (execute-session surface): neutral border and header", () => {

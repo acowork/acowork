@@ -156,7 +156,7 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     // The jump now runs behind the existence probe (a rejected fetch is
     // inconclusive → proceed), so the whole chain lands a tick later.
     await waitFor(() => expect(selectAgentMock).toHaveBeenCalledWith(AGENT));
-    expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7");
+    expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7", { prepend: true });
     // setMode runs after the awaited openSession (a microtask later).
     await waitFor(() => expect(setModeMock).toHaveBeenCalledWith(AGENT, "exec"));
   });
@@ -166,7 +166,7 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     render(<GroupChatPanel />);
 
     fireEvent.click(screen.getByText("chatView.viewRun"));
-    await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-router"));
+    await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-router", { prepend: true }));
   });
 
   it("renders on an empty-body reply that still carries a session pointer", () => {

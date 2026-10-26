@@ -10,8 +10,9 @@
  * own waiting state from the transcript itself (see `chatTurnState`).
  *
  * What remains renderable: a receipt whose body is a genuine channel fact
- * (`delivery_failed`, `budget_exhausted`, …). `interaction_resolved` folds into
- * its card as the answered/closed receipt and paints nothing here.
+ * (`delivery_failed`, `budget_exhausted`, …), and the `interaction_resolved`
+ * notice of a decision made on the execution surface — the only chat-visible
+ * record of that answer (see the branch below).
  */
 
 import { ChatEventText } from "./ChatEventText";
@@ -28,14 +29,44 @@ interface ChatNoticeEventRowProps {
   row: ChatMessageRow;
   /** Surface column gutter so the line lines up with the stream. */
   className?: string;
+  /** Cards a human answered on either surface (the `humanAnsweredCardIds`
+   *  projection). Paired with `chatAnswered` below, this is what tells an
+   *  exec-surface decision from a nobody-answered closure. */
+  answered?: Set<string>;
+  /** Cards answered on THIS surface (the `chatAnsweredCardIds` projection):
+   *  their answer row already states the outcome, so the Runtime's duplicate
+   *  resolution notice must stay silent. */
+  chatAnswered?: Set<string>;
 }
 
-export function ChatNoticeEventRow({ row, className }: ChatNoticeEventRowProps) {
+export function ChatNoticeEventRow({
+  row,
+  className,
+  answered,
+  chatAnswered,
+}: ChatNoticeEventRowProps) {
   const { t } = useTranslation();
   const noticeType = row.meta?.notice_type ?? "";
 
-  // The closure is shown on its card as an answered/closed receipt.
-  if (noticeType === "interaction_resolved") return null;
+  // The card's closure. A nobody-answered close leaves its note in the CARD's
+  // slot (see `InlineInteractionCard`), so this row stays silent for it. A
+  // human decision made on the EXECUTION surface never arrives here as a
+  // message row — this notice is the transcript's only record of it, and it
+  // says so as a row-tier event line, not a bubble (a card interaction is a
+  // step of the run, not an utterance).
+  if (noticeType === "interaction_resolved") {
+    const cardId = row.meta?.in_reply_to ?? "";
+    if (cardId && answered?.has(cardId) && !chatAnswered?.has(cardId)) {
+      return (
+        <ChatEventText
+          anchor="turn"
+          text={t("chatView.cardAnsweredInExec")}
+          className={className}
+        />
+      );
+    }
+    return null;
+  }
   // Retired milestones: history only.
   if (RETIRED_NOTICES.has(noticeType)) return null;
   // The router-fallback receipt is keyed by notice_type, not body: the
