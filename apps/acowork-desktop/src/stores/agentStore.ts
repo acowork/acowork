@@ -1073,6 +1073,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         chatStore.batchUpdateSessionStatuses(agentId, mismatches);
       }
 
+      // Tab strip = Runtime Active session set (ADR-038 lifecycle).
+      // Only sync when the response actually carried a sessions array —
+      // a missing field means the fetch hit a non-session-list endpoint
+      // (e.g. test mock, or a proxy error page); syncing on that would
+      // clear tabs the user just opened.
+      if (data.sessions !== undefined) {
+        const activeIds = sessions.filter((s) => s.is_active).map((s) => s.session_id);
+        chatStore.syncActiveTabs(agentId, activeIds);
+      }
+
       // Sync session workspaces
       useWorkspaceStore.getState().syncSessionWorkspaces(sessions);
     } catch (e) {

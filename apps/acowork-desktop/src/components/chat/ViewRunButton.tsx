@@ -32,7 +32,7 @@ export function ViewRunButton({ runName, onJump, className }: ViewRunButtonProps
       title={runName?.trim() || label}
       className={
         className ??
-        "inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
+        "inline-flex shrink-0 items-center gap-1 rounded-full bg-zinc-100 px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-[var(--color-accent)] dark:bg-zinc-800"
       }
     >
       <OutlineBrainIcon className="h-[11px] w-[11px] shrink-0" />

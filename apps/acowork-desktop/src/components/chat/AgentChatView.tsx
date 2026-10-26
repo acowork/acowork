@@ -41,10 +41,24 @@
 // carries a discrete drill-down into the execution view:
 // `chatStore.openSession(agentId, execSid)` + mode flip (plan 5.3).
 
-import { useCallback, useEffect, useMemo, memo, useRef, useState, type UIEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  memo,
+  useRef,
+  useState,
+  type UIEvent,
+} from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
-import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown } from "lucide-react";
+import {
+  Send,
+  Paperclip,
+  Loader2,
+  ChevronDown,
+  ChevronsDown,
+} from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
 import { toolbarIconButton } from "../../lib/ui-styles";
@@ -60,17 +74,33 @@ import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote } from "./ReplyQuote";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { VirtualRowList, type VirtualRowListHandle } from "../common/VirtualRowList";
+import {
+  VirtualRowList,
+  type VirtualRowListHandle,
+} from "../common/VirtualRowList";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { AttachedContextChips } from "./AttachedContextChips";
-import { isFailureStatus, isEmptyTerminalReply, isTurnRoutedNotice, pendingTurn, terminalNoticeKey } from "./chatTurnState";
+import {
+  isFailureStatus,
+  isEmptyTerminalReply,
+  isTurnRoutedNotice,
+  pendingTurn,
+  terminalNoticeKey,
+} from "./chatTurnState";
 import { InlineInteractionCard } from "./InlineInteractionCard";
 import { useLocateMessage } from "../../lib/useLocateMessage";
-import { useChatSessionStore, closedCardIds, humanAnsweredCardIds, type ChatMessageRow, type ChatSessionConfig, type ChatAttachmentMeta } from "../../stores/chatSessionStore";
+import {
+  useChatSessionStore,
+  closedCardIds,
+  humanAnsweredCardIds,
+  type ChatMessageRow,
+  type ChatSessionConfig,
+  type ChatAttachmentMeta,
+} from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { sessionExists } from "../../lib/session-control";
@@ -78,9 +108,6 @@ import { showToast } from "../common/ToastProvider";
 import { useAuthStore } from "../../stores/authStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { getGatewayUrl } from "../../lib/config";
-
-
-
 
 // ── Rows ───────────────────────────────────────────────────────────────
 
@@ -123,7 +150,18 @@ interface RowProps {
  * memoized per window, callbacks are host-level `useCallback`s. The
  * render-count regression test (`AgentChatView.memo.test.tsx`) locks this.
  */
-const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed, answered, onAnswer, triggerBody, replyQuote }: RowProps) {
+const RowView = memo(function RowView({
+  row,
+  agentId,
+  chatSessionId,
+  showHeader,
+  onJumpToExec,
+  closed,
+  answered,
+  onAnswer,
+  triggerBody,
+  replyQuote,
+}: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
@@ -149,7 +187,8 @@ const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader,
       // path below so it carries the avatar + name header and the drill, and
       // never paints as a centered system line. The conversational rule it
       // exists for: a user message is always followed by an agent message.
-      const taskName = execRunName?.trim() || truncateTaskName(triggerBody) || "";
+      const taskName =
+        execRunName?.trim() || truncateTaskName(triggerBody) || "";
       row = {
         ...row,
         kind: "agent_message",
@@ -164,7 +203,7 @@ const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader,
       // Legacy receipts only — the milestones and the router-fallback receipt
       // are gone from the stream (ADR-100 revision). Whatever survived paints
       // as a quiet centered line, never as an agent bubble.
-      return <ChatNoticeEventRow row={row} className="px-6" />;
+      return <ChatNoticeEventRow row={row} className="px-4" />;
     }
   }
 
@@ -192,23 +231,26 @@ const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader,
     // carries it as `sender_session_id` (the responder's own session); a
     // group / routed reply carries `agent_session_id` (routing-resolved).
     // Either way every agent message is drillable, finished or empty alike.
-    const execSid = row.meta?.agent_session_id || row.meta?.sender_session_id || "";
+    const execSid =
+      row.meta?.agent_session_id || row.meta?.sender_session_id || "";
     // A terminal row with nothing in it IS its outcome ("interrupted",
     // "failed"): paint the centered status line with the drill into the run,
     // never an agent bubble announcing it in the agent's voice.
     if (isEmptyTerminalReply(row)) {
       return (
         <ChatTurnStatusLine
-          className="px-6"
+          className="px-4"
           text={t(terminalNoticeKey(row.meta?.status))}
           danger={failed}
           onJump={execSid ? () => onJumpToExec(execSid) : undefined}
-          runName={execRunName?.trim() || truncateTaskName(triggerBody) || undefined}
+          runName={
+            execRunName?.trim() || truncateTaskName(triggerBody) || undefined
+          }
         />
       );
     }
     return (
-      <div className="px-6 py-1">
+      <div className="px-4 py-1">
         {showHeader && (
           <div className="flex items-center gap-2 mb-2 mt-1">
             <AgentAvatar
@@ -221,32 +263,45 @@ const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader,
               className="shrink-0"
             />
             <div className="flex flex-col">
-              <span className="text-xs font-medium text-text-tertiary ">{agentName}</span>
+              <span className="text-xs font-medium text-text-tertiary ">
+                {agentName}
+              </span>
               {agent?.role && (
-                <span className="text-10 leading-tight text-text-tertiary ">{agent.role}</span>
+                <span className="text-10 leading-tight text-text-tertiary ">
+                  {agent.role}
+                </span>
               )}
             </div>
           </div>
         )}
         <div className="flex items-start gap-2">
           <div className="w-10 shrink-0" />
-          {/* The percentage line-length clamp belongs on this shrink-wrap
-              group (resolved against the wide row), exactly like the user
-              row's `max-w-[85%]`. On the bubble itself it double-clamps:
-              the group hugs the text, then 70%-of-that cuts the bubble
-              narrower than its own content and the text overflows right. */}
-          <div className="group min-w-0 max-w-[var(--content-max-width)]">
-            {/* Attachment chips above the bubble, left-aligned — the mirror
+          {/* Content column mirroring GroupChatPanel's grammar: the percentage
+            line-length clamp resolves against the column (row minus the avatar
+            gutter), so the bubble hugs the gutter and stops at the same line
+            length as on the group-chat / execute-session surfaces. Clamping
+            against the full row instead let the bubble reach 90% of the row
+            while starting 48px in — it read as a fixed-width centered column.
+            The clamp stays on this shrink-wrap group, not on the bubble: on
+            the inline-block bubble itself it double-clamps and the text
+            overflows right. */}
+          <div className="flex min-w-0 flex-1 flex-col items-start">
+            <div className="group min-w-0 max-w-[var(--content-max-width)]">
+              {/* Attachment chips above the bubble, left-aligned — the mirror
                 of the user row; the bubble never wraps them. An attachments-
                 only reply paints chips alone, no empty bubble. */}
-            {row.attachments && row.attachments.length > 0 && (
-              <div className="mb-1 flex flex-wrap gap-1.5">
-                {row.attachments.map((a) => (
-                  <ChatAttachmentChip key={a.id} chatSessionId={chatSessionId} attachment={a} />
-                ))}
-              </div>
-            )}
-            {/* `inline-block`: the bubble hugs its text (symmetric padding,
+              {row.attachments && row.attachments.length > 0 && (
+                <div className="mb-1 flex flex-wrap gap-1.5">
+                  {row.attachments.map((a) => (
+                    <ChatAttachmentChip
+                      key={a.id}
+                      chatSessionId={chatSessionId}
+                      attachment={a}
+                    />
+                  ))}
+                </div>
+              )}
+              {/* `inline-block`: the bubble hugs its text (symmetric padding,
                 no width jump when the hover timestamp widens the group).
                 `max-w-full` is what keeps that hug honest: shrink-to-fit falls
                 back to the content's *minimum* width whenever the content
@@ -257,26 +312,26 @@ const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader,
                 inner scroll containers (`CodeBlock`, `MermaidBlock`,
                 `.prose-table-scroll`) do their job inside it, which is also
                 the contract Mobile's `.bubble` has always had. */}
-            {(row.body || failed || !row.attachments?.length) && (
-              <div className="inline-block max-w-full rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
-                {failed && (
-                  <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
-                    {row.meta?.status}
-                  </div>
-                )}
-                {row.body && <ChatMarkdown content={row.body} />}
-                {/* Legacy rows without a §7.1 status: there is no outcome to
+              {(row.body || failed || !row.attachments?.length) && (
+                <div className="inline-block max-w-full rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
+                  {failed && (
+                    <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
+                      {row.meta?.status}
+                    </div>
+                  )}
+                  {row.body && <ChatMarkdown content={row.body} />}
+                  {/* Legacy rows without a §7.1 status: there is no outcome to
                     name, so the placeholder stays deliberately neutral. Modern
                     empty terminals never reach here — they paint as the status
                     line above. */}
-                {!row.body && !row.attachments?.length && (
-                  <span className="italic text-text-tertiary whitespace-nowrap">
-                    {t("chatView.emptyAnswer")}
-                  </span>
-                )}
-              </div>
-            )}
-            {/* Meta row under the bubble. The timestamp collapses to zero width
+                  {!row.body && !row.attachments?.length && (
+                    <span className="italic text-text-tertiary whitespace-nowrap">
+                      {t("chatView.emptyAnswer")}
+                    </span>
+                  )}
+                </div>
+              )}
+              {/* Meta row under the bubble. The timestamp collapses to zero width
                 instead of just going transparent: an invisible span still
                 reserves its width, which is what stranded the button
                 mid-bubble. Collapsed, the button sits on the bubble's left
@@ -284,23 +339,28 @@ const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader,
                 `justify-between` would fling them to opposite ends of a
                 wide bubble, leaving a gap far larger than the meta row
                 warrants. */}
-            <div className="mt-1 flex items-center gap-2">
-              {/* Drill-into-exec affordance — a discrete control, not a
+              <div className="mt-1 flex items-center gap-2">
+                {/* Drill-into-exec affordance — a discrete control, not a
                   whole-bubble click, so selecting the reply text never fires a
                   jump. Present on every agent message with a resolved exec
                   session, empty body included. The brain glyph (design 27
                   §6.1) is the same one the exec tabs wear, so the button and
                   its destination read as the same thing; outline variant
                   because at 11px the two filled lobes smear into a blob. */}
-              {execSid && (
-                <ViewRunButton
-                  runName={execRunName?.trim() || truncateTaskName(triggerBody) || undefined}
-                  onJump={() => onJumpToExec(execSid)}
-                />
-              )}
-              <span className="w-0 shrink overflow-hidden whitespace-nowrap text-10 text-text-tertiary opacity-0 transition-opacity group-hover:w-auto group-hover:opacity-100">
-                {formatBubbleTime(row.ts * 1000)}
-              </span>
+                {execSid && (
+                  <ViewRunButton
+                    runName={
+                      execRunName?.trim() ||
+                      truncateTaskName(triggerBody) ||
+                      undefined
+                    }
+                    onJump={() => onJumpToExec(execSid)}
+                  />
+                )}
+                <span className="w-0 shrink overflow-hidden whitespace-nowrap text-10 text-text-tertiary opacity-0 transition-opacity group-hover:w-auto group-hover:opacity-100">
+                  {formatBubbleTime(row.ts * 1000)}
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -310,20 +370,29 @@ const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader,
 
   // user_message (and anything else) — the human side, right-aligned.
   return (
-    <div className="px-6 py-1">
+    <div className="px-4 py-1">
       <div className="flex items-start justify-end gap-2">
         <div className="min-w-0 flex-1 flex flex-col items-end">
           {profile.displayName && (
-            <span className="mt-[2px] text-xs text-text-tertiary ">{profile.displayName}</span>
+            <span className="mt-[2px] text-xs text-text-tertiary ">
+              {profile.displayName}
+            </span>
           )}
-          <div className="group mt-[6px] max-w-[85%] flex flex-col items-start">
+          {/* Clamp on the global content-width variable, not a hardcoded
+              percentage: same as GroupChatPanel's own row — a long message
+              reaches the agent bubble's line length and follows the setting. */}
+          <div className="group mt-[6px] max-w-[var(--content-max-width)] flex flex-col items-start">
             {/* Attachment chips — independent units above the text bubble,
                 right-aligned: same grammar as the execution session's
                 `UserWithAttachmentsBubble`. The bubble never wraps them. */}
             {row.attachments && row.attachments.length > 0 && (
               <div className="mb-1 flex flex-wrap justify-end gap-1.5 self-end">
                 {row.attachments.map((a) => (
-                  <ChatAttachmentChip key={a.id} chatSessionId={chatSessionId} attachment={a} />
+                  <ChatAttachmentChip
+                    key={a.id}
+                    chatSessionId={chatSessionId}
+                    attachment={a}
+                  />
                 ))}
               </div>
             )}
@@ -339,7 +408,9 @@ const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader,
             <ReplyQuote quote={replyQuote} />
             {row.body && (
               <div className="max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
-                <div className="px-4 py-2.5 whitespace-pre-wrap break-words">{row.body}</div>
+                <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
+                  {row.body}
+                </div>
               </div>
             )}
             <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
@@ -402,15 +473,24 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // by `saveDraft`'s PATCH response. Stable ref so the selector never
   // re-renders on an absent draft.
   const draft = useChatSessionStore((s) => s.draft[sessionId] ?? EMPTY_DRAFT);
-  const { sendText, loadOlder, loadNewer, clearLocate, setMode, saveDraft, upload } =
-    useChatSessionStore.getState();
+  const {
+    sendText,
+    loadOlder,
+    loadNewer,
+    clearLocate,
+    setMode,
+    saveDraft,
+    upload,
+  } = useChatSessionStore.getState();
 
   const [input, setInput] = useState("");
   const [answerTarget, setAnswerTarget] = useState<ChatMessageRow | null>(null);
   // Composer attachments — uploaded into the Chat session's `files/` dir
   // (§4.2.1) before send; the send carries their ids so the durable row and
   // the execution turn both see them.
-  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentMeta[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<
+    ChatAttachmentMeta[]
+  >([]);
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -423,17 +503,26 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const listRef = useRef<VirtualRowListHandle | null>(null);
 
   // The agent's current model, read-only here (see header comment).
-  const [agentModel, setAgentModel] = useState<{ model: string; provider: string } | null>(null);
+  const [agentModel, setAgentModel] = useState<{
+    model: string;
+    provider: string;
+  } | null>(null);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const token = useAuthStore.getState().accessToken;
-        const resp = await fetch(`${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/model`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
+        const resp = await fetch(
+          `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/model`,
+          {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          },
+        );
         if (resp.ok && !cancelled) {
-          const data = (await resp.json()) as { model: string; provider: string };
+          const data = (await resp.json()) as {
+            model: string;
+            provider: string;
+          };
           setAgentModel(data);
         }
       } catch {
@@ -445,10 +534,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     };
   }, [agentId]);
 
-  const rows = useMemo(
-    () => (win ? [...win.older, ...win.tail] : []),
-    [win],
-  );
+  const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win]);
   // Virtualization adapters (render-perf L2). Keys are session-qualified:
   // the shell's measured-height cache is module-level, and `seq` is unique
   // only WITHIN a chat session. `rowsRef` lets the locate fallback resolve a
@@ -500,7 +586,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const seededTitleRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const r of rows) {
-      if (r.kind !== "agent_message" || !r.meta?.sender_session_id || !r.meta?.in_reply_to) {
+      if (
+        r.kind !== "agent_message" ||
+        !r.meta?.sender_session_id ||
+        !r.meta?.in_reply_to
+      ) {
         continue;
       }
       const execSid = r.meta.sender_session_id;
@@ -509,7 +599,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       // window before its trigger row is readable, and marking it early would
       // permanently skip the seed. `seedOptimisticTitle` is itself idempotent,
       // so re-running on a later `rows` tick is safe.
-      const body = rows.find((x) => x.meta?.message_id === r.meta?.in_reply_to)?.body;
+      const body = rows.find(
+        (x) => x.meta?.message_id === r.meta?.in_reply_to,
+      )?.body;
       if (!body) continue;
       seededTitleRef.current.add(execSid);
       useChatStore.getState().seedOptimisticTitle(agentId, execSid, body);
@@ -526,7 +618,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // have parked the window mid-history (a window with newer pages has no
   // newest message to wait on); a window without position info is treated as
   // at the tail.
-  const waiting = pendingTurn(rows, sending, closed) && !(win && win.lastPos < win.total - 1);
+  const waiting =
+    pendingTurn(rows, sending, closed) && !(win && win.lastPos < win.total - 1);
   // Name for the waiting line. The turn may have been routed to another agent,
   // but this surface talks to exactly one — naming it is what makes the line
   // read as "someone is working on it" instead of a generic spinner.
@@ -552,7 +645,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => listRef.current?.scrollToBottom() ?? false,
     [],
   );
-  const { ref: scrollRef, stickNow, unpin, atBottom } = useStickToBottom(
+  const {
+    ref: scrollRef,
+    stickNow,
+    unpin,
+    atBottom,
+  } = useStickToBottom(
     [win?.tail.length ?? 0, sessionId],
     sessionId,
     undefined,
@@ -586,7 +684,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     (seq) => {
       const idx = rowsRef.current.findIndex((r) => r.seq === seq);
       if (idx < 0) return false;
-      return listRef.current?.scrollToKey(`${sessionId}:${seq}`, "center") ?? false;
+      return (
+        listRef.current?.scrollToKey(`${sessionId}:${seq}`, "center") ?? false
+      );
     },
     // A locate parks the reader mid-history on purpose: take them out of
     // the follow, or the persistent anchor rides the next commit back to
@@ -622,7 +722,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     // per ADR-099's 2026-10-28 revision the router-side seed is an initial
     // value for the session a routing CREATES and is never applied to one
     // that already exists.
-    const sessionConfig = replyTo ? undefined : (Object.keys(draft).length > 0 ? draft : undefined);
+    const sessionConfig = replyTo
+      ? undefined
+      : Object.keys(draft).length > 0
+        ? draft
+        : undefined;
     setInput("");
     const target = answerTarget;
     setAnswerTarget(null);
@@ -697,7 +801,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             if (!resp.ok) throw new Error(`asset fetch → ${resp.status}`);
             const blob = await resp.blob();
             const name = p.replace(/^.*[\\/]/, "") || "attachment";
-            files.push(new File([blob], name, { type: blob.type || "application/octet-stream" }));
+            files.push(
+              new File([blob], name, {
+                type: blob.type || "application/octet-stream",
+              }),
+            );
           } catch (err) {
             console.warn("[AgentChatView] clipboard file unreadable:", p, err);
           }
@@ -779,7 +887,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     ) ??
     availableModels.find((m) => m.name === currentModelId) ??
     null;
-  const reasoningEffort = draft.reasoning_effort ?? defaultEffortOf(currentModelEntry);
+  const reasoningEffort =
+    draft.reasoning_effort ?? defaultEffortOf(currentModelEntry);
 
   // Auto-pagination: reaching the top band triggers the next older page — no
   // click. Guarded by `hasMore` and the in-flight `loadingOlder` flag so it
@@ -788,10 +897,18 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // as the new page lands above.
   const handleStreamScroll = (event: UIEvent<HTMLDivElement>) => {
     const el = event.currentTarget;
-    if (hasMoreOlder && !win?.loadingOlder && el.scrollTop <= AUTO_LOAD_TOP_PX) {
+    if (
+      hasMoreOlder &&
+      !win?.loadingOlder &&
+      el.scrollTop <= AUTO_LOAD_TOP_PX
+    ) {
       void loadOlder(sessionId);
     }
-    if (hasMoreNewer && !win?.loadingNewer && el.scrollHeight - el.scrollTop - el.clientHeight <= AUTO_LOAD_TOP_PX) {
+    if (
+      hasMoreNewer &&
+      !win?.loadingNewer &&
+      el.scrollHeight - el.scrollTop - el.clientHeight <= AUTO_LOAD_TOP_PX
+    ) {
       void loadNewer(sessionId);
     }
   };
@@ -803,114 +920,123 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           affordance. No "to top" arrow: a Chat session grows without bound, so
           jumping to the head would page through the whole history. */}
       <div className="relative flex min-h-0 flex-1 flex-col">
-      <OverlayScrollbar
-        ref={setViewport}
-        className="py-2 [overflow-anchor:none]"
-        onViewportScroll={handleStreamScroll}
-      >
-        {hasMoreOlder && (
-          <div className="py-2 text-center text-10 text-text-tertiary">
-            {win?.loadingOlder ? (
-              <span className="inline-flex items-center justify-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                {t("chatHistory.loadingEarlier")}
-              </span>
-            ) : (
-              <span>{t("chatHistory.scrollForEarlier")}</span>
-            )}
-          </div>
-        )}
-        {rows.length === 0 && (
-          <div className="py-10 text-center text-sm text-text-tertiary">{t("chatView.empty")}</div>
-        )}
-        {/* Virtualized transcript window (render-perf L2): only viewport rows
+        <OverlayScrollbar
+          ref={setViewport}
+          className="py-2 [overflow-anchor:none]"
+          onViewportScroll={handleStreamScroll}
+        >
+          {hasMoreOlder && (
+            <div className="py-2 text-center text-10 text-text-tertiary">
+              {win?.loadingOlder ? (
+                <span className="inline-flex items-center justify-center gap-1.5">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {t("chatHistory.loadingEarlier")}
+                </span>
+              ) : (
+                <span>{t("chatHistory.scrollForEarlier")}</span>
+              )}
+            </div>
+          )}
+          {rows.length === 0 && (
+            <div className="py-10 text-center text-sm text-text-tertiary">
+              {t("chatView.empty")}
+            </div>
+          )}
+          {/* Virtualized transcript window (render-perf L2): only viewport rows
             + overscan are in the DOM, so a keystroke — or a doorbell refresh —
             costs a bounded number of row renders regardless of loaded pages.
             Prepend anchoring stays with `useStickToBottom` (scroll-container
             level; virtualization does not move it). The shell remounts on
             session change via `key` — the documented contract against a
             stale scroll offset (white pane). */}
-        <VirtualRowList
-          key={sessionId}
-          ref={listRef}
-          items={rows}
-          keyOf={rowKeyOf}
-          scrollContainerRef={containerRef}
-          followBottom={atBottom}
-          estimateSize={estimateRow}
-          rowAttrs={(r) => ({ "data-seq": r.seq })}
-          rowClassName={(r) =>
-            cn(
-              "scroll-mt-2 transition-colors",
-              highlightSeq === r.seq && "bg-[var(--color-accent)]/10",
-            )
-          }
-          renderItem={(r, i) => (
-            <RowView
-              row={r}
-              agentId={agentId}
-              chatSessionId={sessionId}
-              showHeader={
-                // Header rule (ADR-100 D11 + the interaction-feel invariant):
-                // an agent bubble — the routing reaction included — wears the
-                // avatar+name header unless the row directly above already
-                // painted one. An empty terminal row is a CENTERED status
-                // line, not a bubble: it must not fold the header off the
-                // reply that follows it (that left the answer "孤零零" with no
-                // avatar). And the reaction row never folds the turn's real
-                // reply — they are minutes or hours apart, each is its own
-                // utterance.
-                (r.kind === "agent_message" || isTurnRoutedNotice(r)) &&
-                !(rows[i - 1]?.kind === "agent_message" && !isEmptyTerminalReply(rows[i - 1]!))
-              }
-              onJumpToExec={handleJumpToExec}
-              triggerBody={
-                r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined
-              }
-              replyQuote={
-                r.meta?.in_reply_to ? cardQuoteById.get(r.meta.in_reply_to) : undefined
-              }
-              closed={closed}
-              answered={answered}
-              onAnswer={handleAnswer}
-            />
-          )}
-        />
-        {/* The waiting line sits where the answer will land: one aggregated
+          <VirtualRowList
+            key={sessionId}
+            ref={listRef}
+            items={rows}
+            keyOf={rowKeyOf}
+            scrollContainerRef={containerRef}
+            followBottom={atBottom}
+            estimateSize={estimateRow}
+            rowAttrs={(r) => ({ "data-seq": r.seq })}
+            rowClassName={(r) =>
+              cn(
+                "scroll-mt-2 transition-colors",
+                highlightSeq === r.seq && "bg-[var(--color-accent)]/10",
+              )
+            }
+            renderItem={(r, i) => (
+              <RowView
+                row={r}
+                agentId={agentId}
+                chatSessionId={sessionId}
+                showHeader={
+                  // Header rule (ADR-100 D11 + the interaction-feel invariant):
+                  // an agent bubble — the routing reaction included — wears the
+                  // avatar+name header unless the row directly above already
+                  // painted one. An empty terminal row is a CENTERED status
+                  // line, not a bubble: it must not fold the header off the
+                  // reply that follows it (that left the answer "孤零零" with no
+                  // avatar). And the reaction row never folds the turn's real
+                  // reply — they are minutes or hours apart, each is its own
+                  // utterance.
+                  (r.kind === "agent_message" || isTurnRoutedNotice(r)) &&
+                  !(
+                    rows[i - 1]?.kind === "agent_message" &&
+                    !isEmptyTerminalReply(rows[i - 1]!)
+                  )
+                }
+                onJumpToExec={handleJumpToExec}
+                triggerBody={
+                  r.meta?.in_reply_to
+                    ? bodyById.get(r.meta.in_reply_to)
+                    : undefined
+                }
+                replyQuote={
+                  r.meta?.in_reply_to
+                    ? cardQuoteById.get(r.meta.in_reply_to)
+                    : undefined
+                }
+                closed={closed}
+                answered={answered}
+                onAnswer={handleAnswer}
+              />
+            )}
+          />
+          {/* The waiting line sits where the answer will land: one aggregated
             "the agent has your message" indicator, derived from the newest
             unanswered human row. It replaces the removed dispatch / round-open
             milestones, and disappears the moment a terminal row arrives. */}
-        {waiting && (
-          <ChatTurnStatusLine
-            className="px-6"
-            live
-            text={
-              pendingName
-                ? t("chatView.notice.pendingTurn", { name: pendingName })
-                : t("chatView.notice.pendingTurnGeneric")
-            }
-          />
-        )}
-        {hasMoreNewer && (
-          <div className="py-2 text-center text-10 text-text-tertiary">
-            {win?.loadingNewer ? (
-              <span className="inline-flex items-center justify-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                {t("chatHistory.loadingNewer")}
-              </span>
-            ) : (
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 hover:text-text-secondary"
-                onClick={() => void loadNewer(sessionId)}
-              >
-                <ChevronDown size={12} />
-                {t("chatHistory.jumpToLatest")}
-              </button>
-            )}
-          </div>
-        )}
-      </OverlayScrollbar>
+          {waiting && (
+            <ChatTurnStatusLine
+              className="px-4"
+              live
+              text={
+                pendingName
+                  ? t("chatView.notice.pendingTurn", { name: pendingName })
+                  : t("chatView.notice.pendingTurnGeneric")
+              }
+            />
+          )}
+          {hasMoreNewer && (
+            <div className="py-2 text-center text-10 text-text-tertiary">
+              {win?.loadingNewer ? (
+                <span className="inline-flex items-center justify-center gap-1.5">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {t("chatHistory.loadingNewer")}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 hover:text-text-secondary"
+                  onClick={() => void loadNewer(sessionId)}
+                >
+                  <ChevronDown size={12} />
+                  {t("chatHistory.jumpToLatest")}
+                </button>
+              )}
+            </div>
+          )}
+        </OverlayScrollbar>
         {/* Back-to-bottom arrow — visible only while the reader has scrolled
             up off the tail (and there is content). Same treatment as the
             execute-session button: default-reduced opacity, full on hover. */}
@@ -937,7 +1063,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         {answerTarget && (
           <div className="flex items-center gap-1 px-3 pt-2">
             <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-border-outer text-text-tertiary">
-              {t("chatView.replyingTo")} {answerTarget.meta?.interaction?.question?.slice(0, 30) || ""}
+              {t("chatView.replyingTo")}{" "}
+              {answerTarget.meta?.interaction?.question?.slice(0, 30) || ""}
               <button
                 type="button"
                 onClick={() => setAnswerTarget(null)}
@@ -1006,7 +1133,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                   // Whole-draft replace: picking a model keeps the rest of
                   // the draft but resets the effort (the previous level may
                   // not exist on the new model). Persisted to the session row.
-                  void saveDraft(agentId, { ...draft, model: m, provider: p, reasoning_effort: undefined })
+                  void saveDraft(agentId, {
+                    ...draft,
+                    model: m,
+                    provider: p,
+                    reasoning_effort: undefined,
+                  })
                 }
                 btnId="model"
               />
@@ -1015,7 +1147,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               <ReasoningEffortMenu
                 textHidden={false}
                 effort={reasoningEffort}
-                onChange={(e) => void saveDraft(agentId, { ...draft, reasoning_effort: e })}
+                onChange={(e) =>
+                  void saveDraft(agentId, { ...draft, reasoning_effort: e })
+                }
                 btnId="effort"
               />
             )}
@@ -1023,11 +1157,16 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               <WorkspaceSelector
                 textHidden={false}
                 value={draft.workspace}
-                onChange={(id) => void saveDraft(agentId, { ...draft, workspace: id })}
+                onChange={(id) =>
+                  void saveDraft(agentId, { ...draft, workspace: id })
+                }
               />
             </div>
           </div>
-          <div data-toolbar-cluster="right" className="flex shrink-0 items-center gap-1">
+          <div
+            data-toolbar-cluster="right"
+            className="flex shrink-0 items-center gap-1"
+          >
             <Tooltip content={t("chatPanel.attach")} variant="plain">
               <button
                 className={cn(toolbarIconButton, uploading && "opacity-50")}
