@@ -809,7 +809,8 @@ export function scheduleSendReconciliation(agentId: string, sessionId: string, a
 /** Evict oldest/unused sessions when cache exceeds MAX_CACHED_SESSIONS.
 // NOTE: kept as a reference implementation for future eviction needs;
 // currently dead because (a) `openSessionIds` has no cap (tab strip scrolls
-// horizontally; `syncActiveTabs` keeps it in 1:1 with Runtime Active set),
+// horizontally; `syncActiveTabs` prunes it back to the sessions the Runtime
+// still reports Active, and only `openSession` ever adds one),
 // and (b) `closeTab` reuses the `sessionStates[id]` slot by flipping
 // `isSessionReady = false` rather than deleting it (preserves scroll
 // position on re-open).  If a caller ever needs to bound memory growth from
@@ -1090,7 +1091,7 @@ interface ChatStore {
    * The input box should remain disabled until that event lands (or fire a
    * `session_not_opened` toast with a reopen affordance).
    */
-  openSession: (agentId: string, sessionId: string) => Promise<void>;
+  openSession: (agentId: string, sessionId: string, opts?: { prepend?: boolean }) => Promise<void>;
   /** ADR-038: Close a session tab AND notify the backend.
    *
    * Three side effects:
@@ -1108,14 +1109,19 @@ interface ChatStore {
    * Sync the Desktop tab strip with the Runtime's Active session set.
    *
    * Called by `fetchSessions` after every list fetch (login, reconnect,
-   * manual refresh). The tab strip is the 1:1 mirror of Active sessions:
-   * `activeIds` replaces `openSessionIds` entirely — sessions that are no
-   * longer Active lose their tab (Runtime already closed them); newly Active
-   * ones gain one. `activeSessionId` is preserved when it survives the sync,
-   * otherwise falls to the first entry (or null → chat surface takes over).
+   * manual refresh). Prune-only: a session the Runtime no longer reports
+   * Active loses its tab (closed elsewhere, idle-timeout). A tab is NEVER
+   * added here — opening one is a user action, which is `openSession`'s job.
+   * Adding here would race `closeTab`: it drops the id from `openSessionIds`
+   * and repoints `activeSessionId` in one update while the Runtime's
+   * `close_session` may still be in flight, so a fetch response listing the
+   * session resurrected the tab the user had just closed.
    *
-   * Pure UI operation: no MQTT / HTTP is sent. The Runtime is the source of
-   * truth; this just reflects its state.
+   * `activeSessionId` falls to the first survivor when it was pruned, or null
+   * (chat surface takes over).
+   *
+   * Pure UI operation: no MQTT / HTTP is sent. The Runtime decides what is
+   * still open; the strip is the user's subset of that, not a mirror.
    */
   syncActiveTabs: (agentId: string, activeIds: string[]) => void;
   /** ADR-032 C4c: Send a user-initiated compression action (tool results or summary).
@@ -1773,29 +1779,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   syncActiveTabs: (agentId: string, activeIds: string[]) => {
     set((state) => {
       const agent = getAgentState(state, agentId);
-      // Never drop the foreground session. If `openSession`'s HTTP open
-      // hasn't landed on the Runtime yet when this fetch fires, the
-      // backend reports `is_active: false` for a session the user is
-      // actively looking at. `closeTab` clears `activeSessionId` before
-      // removing the tab, so a surviving `activeSessionId` always means
-      // "still open or being opened" — keep it.
-      const ids =
-        agent.activeSessionId && !activeIds.includes(agent.activeSessionId)
-          ? [agent.activeSessionId, ...activeIds]
-          : activeIds;
-      // Identity check: if the set is unchanged, skip the write so memoized
-      // subscribers don't re-render.
-      if (
-        agent.openSessionIds.length === ids.length &&
-        agent.openSessionIds.every((id, i) => id === ids[i])
-      ) {
-        return {};
-      }
-      const patches: Partial<AgentState> = { openSessionIds: ids };
-      // Keep the foreground session when it survives the sync; otherwise
-      // fall to the first entry, or null (chat surface takes over).
-      if (agent.activeSessionId && !ids.includes(agent.activeSessionId)) {
-        patches.activeSessionId = ids[0] ?? null;
+      // Prune-only: remove tabs for sessions the Runtime no longer reports
+      // as Active (closed by another user, idle-timeout, etc.). NEVER add
+      // tabs here — that is `openSession`'s job. Adding here would race
+      // with closeTab: the fetchSessions response may arrive before the
+      // Runtime processes close_session, resurrecting a tab the user just
+      // closed.
+      const newOpenIds = agent.openSessionIds.filter((id) => activeIds.includes(id));
+      if (newOpenIds.length === agent.openSessionIds.length) return {}; // no change
+      const patches: Partial<AgentState> = { openSessionIds: newOpenIds };
+      // If the foreground tab was pruned, fall to the first survivor or null.
+      if (agent.activeSessionId && !newOpenIds.includes(agent.activeSessionId)) {
+        patches.activeSessionId = newOpenIds[0] ?? null;
       }
       return updateAgentState(state, agentId, patches);
     });
@@ -1891,7 +1886,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    * Single-flight: concurrent opens of the same session share one promise
    * (see `inflightOpens`).
    */
-  openSession: async (agentId: string, sessionId: string) => {
+  openSession: async (agentId: string, sessionId: string, opts?: { prepend?: boolean }) => {
     // Single-flight: a second caller targeting the same session while it
     // is already opening shares that promise instead of re-sending
     // `open_session` and restarting the message load (which would abort
@@ -1910,11 +1905,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const patches: Partial<AgentState> = { activeSessionId: sessionId };
 
         if (!agent.openSessionIds.includes(sessionId)) {
-          // Prepend so a newly-opened exec tab sits next to the pinned chat
-          // tab (the user just created or jumped into it). No cap: the tab
-          // strip scrolls horizontally; `syncActiveTabs` keeps the list in
-          // 1:1 correspondence with the Runtime's Active session set.
-          patches.openSessionIds = [sessionId, ...agent.openSessionIds];
+          // New sessions (just created) prepend to sit next to the pinned
+          // chat tab; opening an existing session (history, drill) appends
+          // so the tab order stays stable.
+          patches.openSessionIds = opts?.prepend
+            ? [sessionId, ...agent.openSessionIds]
+            : [...agent.openSessionIds, sessionId];
         }
 
         // Lazy-create the session state entry so downstream consumers
