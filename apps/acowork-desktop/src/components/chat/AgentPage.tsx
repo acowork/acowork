@@ -105,7 +105,19 @@ export function AgentPage() {
         onOpenChatHistory={() => setHistoryOpen(true)}
       />
       {st.mode === "chat" ? (
-        <AgentChatView agentId={selectedAgentId} sessionId={chatSessionId} />
+        // key on the SESSION, not just a prop (the VirtualMessageList
+        // convention in ChatPanel): this surface owns the FollowController
+        // (`useStickToBottom`) and the `useVirtualizer` inside VirtualRowList,
+        // and every one of their baselines is per-view — the scroll offset,
+        // the armed/jump anchor, the prepared prepend height, the measured
+        // heights. Reusing the instance across a switch applies the previous
+        // session's geometry to the new one; a fresh mount (startup, and the
+        // exec surface via its own key) is the path that positions correctly.
+        <AgentChatView
+          key={chatSessionId}
+          agentId={selectedAgentId}
+          sessionId={chatSessionId}
+        />
       ) : (
         <ChatPanel embedded />
       )}

@@ -659,7 +659,9 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       return;
     }
     const existing = get().byAgent[agentId];
-    if (existing?.resolved) return;
+    if (existing?.resolved) {
+      return;
+    }
     try {
       // One pair, one Chat session (WeChat model): the pair's default
       // session, idempotently created server-side by `ensure_pair`.
@@ -724,7 +726,9 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     });
     // Coming back to the Chat surface: the doorbell only wakes sessions
     // the store knows about, so re-read once on the flip.
-    if (mode === "chat" && chatSessionId) void get().refresh(chatSessionId, true);
+    if (mode === "chat" && chatSessionId) {
+      void get().refresh(chatSessionId, true);
+    }
   },
 
   saveDraft: async (agentId, draft) => {
@@ -760,7 +764,9 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       if (cur && !force && !atTail(cur)) {
         // Equivalence gate (render-perf L3): a doorbell that carries no new
         // row for THIS session must not produce a new store identity at all.
-        if (page.total === cur.total) return;
+        if (page.total === cur.total) {
+          return;
+        }
         set((s) => ({
           windows: { ...s.windows, [chatSessionId]: { ...cur, total: page.total } },
         }));

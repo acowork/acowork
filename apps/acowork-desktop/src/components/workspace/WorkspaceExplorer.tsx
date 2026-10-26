@@ -9,7 +9,7 @@ import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAddToChatTarget, attachWorkspaceRef } from "../../lib/addToChat";
-import { FileTree } from "./FileTree/FileTree";
+import { FileTree, fileTreeViewKey } from "./FileTree/FileTree";
 import { WorkspaceSelector } from "./WorkspaceSelector";
 import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "./FileTree/fileIcons";
@@ -1135,7 +1135,17 @@ export function WorkspaceExplorer() {
                 exec tab no longer blanks the panel. */}
             {selectedAgentId && (
                 <FileTree
-                    key={fontSize}
+                    // View identity, not just the font size (see
+                    // `fileTreeViewKey`): the tree's virtualizer offset belongs
+                    // to one (agent, workspace, session), and reusing the
+                    // instance across a switch carried the previous tree's
+                    // offset into the next one.
+                    key={fileTreeViewKey({
+                        agentId: selectedAgentId,
+                        workspaceId: currentWorkspaceId,
+                        sessionId: activeSessionId,
+                        fontSize,
+                    })}
                     agentId={selectedAgentId}
                     workspaceId={currentWorkspaceId}
                     sessionId={activeSessionId}

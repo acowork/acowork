@@ -59,7 +59,6 @@ export function ChatTurnStatusLine({
         <ViewRunButton
           runName={runName}
           onJump={onJump}
-          className="inline-flex shrink-0 items-center gap-1 text-10 text-text-tertiary transition-colors hover:text-[var(--color-accent)]"
         />
       )}
     </div>

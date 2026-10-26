@@ -602,7 +602,6 @@ const DEFAULT_AGENT_STATE: AgentState = {
 };
 
 const MAX_CACHED_SESSIONS = 32;
-const MAX_OPEN_TABS = 32;
 
 // ── Single-flight "open a session" ─────────────────────────────────────
 // The start orchestrator, the selectAgent resolver, session-tab clicks
@@ -809,12 +808,13 @@ export function scheduleSendReconciliation(agentId: string, sessionId: string, a
 
 /** Evict oldest/unused sessions when cache exceeds MAX_CACHED_SESSIONS.
 // NOTE: kept as a reference implementation for future eviction needs;
-// currently dead because (a) caches are agent-scoped and capped at
-// MAX_OPEN_TABS = 32 by `openSession`, and (b) `closeTab` reuses the
-// `sessionStates[id]` slot by flipping `isSessionReady = false` rather
-// than deleting it (preserves scroll position on re-open).  If a caller
-// ever needs to bound memory growth from huge history loads, call this
-// from the appropriate action — its semantics have not changed.
+// currently dead because (a) `openSessionIds` has no cap (tab strip scrolls
+// horizontally; `syncActiveTabs` keeps it in 1:1 with Runtime Active set),
+// and (b) `closeTab` reuses the `sessionStates[id]` slot by flipping
+// `isSessionReady = false` rather than deleting it (preserves scroll
+// position on re-open).  If a caller ever needs to bound memory growth from
+// huge history loads, call this from the appropriate action — its semantics
+// have not changed.
 */
 export function _evictStaleSessions(
   state: ChatStore,
@@ -1080,7 +1080,7 @@ interface ChatStore {
    * ADR-038: Open a session — full UI + backend activation.
    *
    * Three side effects, all idempotent:
-   *  1. UI: add to `openSessionIds` (cap MAX_OPEN_TABS) and set as `activeSessionId`.
+   *  1. UI: prepend to `openSessionIds` and set as `activeSessionId`.
    *  2. Backend: send MQTT `open_session` — Runtime transitions Closed/NotFound → Active
    *     and acks via `session_opened` (or errors via `session_not_opened`).
    *  3. Local cache: HTTP-load conversation history for the session.
@@ -1104,6 +1104,20 @@ interface ChatStore {
   closeTab: (agentId: string, sessionId: string) => Promise<string | null>;
   /** ADR-015: Get open session IDs for an agent */
   getOpenSessionIds: (agentId: string) => string[];
+  /**
+   * Sync the Desktop tab strip with the Runtime's Active session set.
+   *
+   * Called by `fetchSessions` after every list fetch (login, reconnect,
+   * manual refresh). The tab strip is the 1:1 mirror of Active sessions:
+   * `activeIds` replaces `openSessionIds` entirely — sessions that are no
+   * longer Active lose their tab (Runtime already closed them); newly Active
+   * ones gain one. `activeSessionId` is preserved when it survives the sync,
+   * otherwise falls to the first entry (or null → chat surface takes over).
+   *
+   * Pure UI operation: no MQTT / HTTP is sent. The Runtime is the source of
+   * truth; this just reflects its state.
+   */
+  syncActiveTabs: (agentId: string, activeIds: string[]) => void;
   /** ADR-032 C4c: Send a user-initiated compression action (tool results or summary).
    *  `compressType` is the proto `CompressType` enum value:
    *    1 = SUMMARY, 2 = TOOL_RESULTS. */
@@ -1756,6 +1770,37 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     return getAgentState(get(), agentId).openSessionIds;
   },
 
+  syncActiveTabs: (agentId: string, activeIds: string[]) => {
+    set((state) => {
+      const agent = getAgentState(state, agentId);
+      // Never drop the foreground session. If `openSession`'s HTTP open
+      // hasn't landed on the Runtime yet when this fetch fires, the
+      // backend reports `is_active: false` for a session the user is
+      // actively looking at. `closeTab` clears `activeSessionId` before
+      // removing the tab, so a surviving `activeSessionId` always means
+      // "still open or being opened" — keep it.
+      const ids =
+        agent.activeSessionId && !activeIds.includes(agent.activeSessionId)
+          ? [agent.activeSessionId, ...activeIds]
+          : activeIds;
+      // Identity check: if the set is unchanged, skip the write so memoized
+      // subscribers don't re-render.
+      if (
+        agent.openSessionIds.length === ids.length &&
+        agent.openSessionIds.every((id, i) => id === ids[i])
+      ) {
+        return {};
+      }
+      const patches: Partial<AgentState> = { openSessionIds: ids };
+      // Keep the foreground session when it survives the sync; otherwise
+      // fall to the first entry, or null (chat surface takes over).
+      if (agent.activeSessionId && !ids.includes(agent.activeSessionId)) {
+        patches.activeSessionId = ids[0] ?? null;
+      }
+      return updateAgentState(state, agentId, patches);
+    });
+  },
+
   /** ADR-032 C4c: Send a user-initiated compression action to the Runtime.
    *  ADR-076 §决策 4: over the Gateway's authenticated HTTP API now, so the
    *  Runtime can check that the caller owns the session. */
@@ -1832,7 +1877,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
    * ADR-038: Open a session with full UI + backend activation.
    *
    * Three side effects (idempotent, best-effort):
-   *  1. UI: append to `openSessionIds` if not already present (cap MAX_OPEN_TABS),
+   *  1. UI: prepend to `openSessionIds` if not already present,
    *     set as `activeSessionId`, ensure `sessionStates[sessionId]` exists.
    *  2. Backend: send MQTT `open_session`. Runtime will ack via `session_opened`
    *     (flipping `isSessionReady`) or `session_not_opened` (triggering toast).
@@ -1865,8 +1910,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const patches: Partial<AgentState> = { activeSessionId: sessionId };
 
         if (!agent.openSessionIds.includes(sessionId)) {
-          const newOpenIds = [...agent.openSessionIds, sessionId].slice(-MAX_OPEN_TABS);
-          patches.openSessionIds = newOpenIds;
+          // Prepend so a newly-opened exec tab sits next to the pinned chat
+          // tab (the user just created or jumped into it). No cap: the tab
+          // strip scrolls horizontally; `syncActiveTabs` keeps the list in
+          // 1:1 correspondence with the Runtime's Active session set.
+          patches.openSessionIds = [sessionId, ...agent.openSessionIds];
         }
 
         // Lazy-create the session state entry so downstream consumers

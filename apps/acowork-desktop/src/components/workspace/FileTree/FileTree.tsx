@@ -169,6 +169,31 @@ export function buildRootContextMenuItems(
     ];
 }
 
+/**
+ * Remount key for a mounted tree. The tree owns a virtualizer whose scroll
+ * offset belongs to exactly ONE view — a set of (agent, workspace, session) —
+ * so rendering a different view into the same instance hands it the previous
+ * view's offset (parked wherever that tree happened to be, clamped into a list
+ * of a different length). The render site in `WorkspaceExplorer` keys on this.
+ *
+ * `fontSize` belongs in the identity as well: it is the input to the row height
+ * the virtualizer estimates with, and the estimate has to be rebuilt when it
+ * changes — which is why the render site keyed on it before.
+ *
+ * Nothing durable lives in the instance: tree nodes are stored per
+ * (agent, workspace) in `fileTreeStore` and the expanded set per
+ * (agent, session) in `chatStore`, both keyed exactly like this function.
+ */
+export function fileTreeViewKey(input: {
+    agentId: string;
+    workspaceId: string;
+    sessionId: string | null;
+    fontSize: number;
+}): string {
+    const { agentId, workspaceId, sessionId, fontSize } = input;
+    return `${agentId}\u0000${workspaceId}\u0000${sessionId ?? ""}\u0000${fontSize}`;
+}
+
 export function FileTree({
     agentId,
     workspaceId,

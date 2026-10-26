@@ -417,7 +417,9 @@ export function VirtualRowList<T>({
       },
       scrollToBottom: () => {
         const count = virtualizer.options.count;
-        if (count === 0) return false;
+        if (count === 0) {
+          return false;
+        }
         // Arm the convergence anchor FIRST, before the attach check: a
         // session-switch refresh calls this from the surface's layout effect,
         // which can run while the virtualizer has not discovered its scroll

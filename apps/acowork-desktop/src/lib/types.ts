@@ -1485,6 +1485,16 @@ export interface SessionInfo {
   /** ADR-076 §决策 4: `null`/absent = public (readable by everyone). */
   visibility?: "public" | "private" | null;
   /**
+   * Whether this session is currently Active in the Runtime's in-memory
+   * session map (ADR-038 lifecycle). `fetchSessions` uses this to sync the
+   * Desktop tab strip on login / reconnect: every `is_active` session gets
+   * a tab, sessions that are no longer active lose theirs.
+   *
+   * Absent on responses from an older Runtime — treat `undefined` as `false`
+   * so the tab strip simply does not auto-restore until both sides upgrade.
+   */
+  is_active?: boolean;
+  /**
    * ADR-100 D12: the Chat session this execution session is bound to, when it
    * came from one (the router's `dispatch(new)`, a Chat-surface `+`, or a PM
    * task dispatched from a project group — design 27 §8.2).

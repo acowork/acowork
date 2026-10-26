@@ -4,10 +4,8 @@ import type { NavView } from "../../lib/types";
 import { NavBar } from "./NavBar";
 import { TitleBar } from "./TitleBar";
 import { AgentList } from "../agent-list/AgentList";
-import { AgentPage } from "../chat/AgentPage";
-import { EmptyChatPane } from "../chat/EmptyChatPane";
-import { GroupChatPanel } from "../chat/GroupChatPanel";
 import { GroupMembersPanel } from "../chat/GroupMembersPanel";
+import { MiddleChatPane } from "./MiddleChatPane";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
@@ -1091,8 +1089,9 @@ export function AppLayout() {
             {/* Middle panel — agent session takes priority; an open group or
                 DM chat session renders through GroupChatPanel (a `user_user`
                 pair is the smallest group). Empty state is handled by the
-                panel components themselves. */}
-            {selectedAgentId ? <AgentPage /> : activeGroupId ? <GroupChatPanel /> : <EmptyChatPane />}
+                panel components themselves. `MiddleChatPane` owns the
+                per-view remount key — see its module doc. */}
+            <MiddleChatPane agentId={selectedAgentId} groupId={activeGroupId} />
 
             {/* File editor panel — shown when files are open */}
             {hasOpenFiles && (

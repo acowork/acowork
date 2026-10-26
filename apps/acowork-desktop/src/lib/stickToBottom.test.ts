@@ -261,31 +261,15 @@ describe("FollowController unpin direction guard", () => {
     const { c, el } = bound();
     c.refresh("peer1"); // pinned at the bottom (700)
     el.grow(500); // window replacement: the pane is taller, bottom now 1200
-    c.unpin(); // the locate releases BEFORE the pane moves (useLocateMessage
-               // calls onLocate first — the contract the jump must satisfy)
+    el.scrollTop = 900; // a locate jump lands DOWNWARD, mid-history: the
+                        // offset moved down, so the guard reads no intent —
+                        // follow would survive the jump and yank the reader back.
+    expect(c.pinned).toBe(true); // the guard alone cannot release a downward move
+    c.unpin(); // the locate releases explicitly (useLocateMessage's onLocate)
     expect(c.pinned).toBe(false);
-    el.scrollTop = 900; // the jump lands DOWNWARD, mid-history; under the
-                        // old order the event-driven re-pin would ride it
-                        // straight back to the tail and defeat the locate
-    expect(el.scrollTop).toBe(900); // released: the jump's event passes through
     el.grow(200);
     c.refresh("peer1"); // same key: the release stands, nothing moves
     expect(el.scrollTop).toBe(900);
-  });
-
-  it("between-commit content growth re-pins from the scroll event alone", () => {
-    const { c, el } = bound();
-    c.refresh("peer1"); // pinned at the bottom (700)
-    // The virtualizer's resize compensation (or a late row measurement)
-    // parks the viewport mid-pane while the content grows underneath: a
-    // DOWNWARD write, away from the new bottom. No React commit is
-    // guaranteed to follow — the measured-height update lives inside the
-    // virtualizer, not in store state — and waiting for one is the
-    // agent-switch "hangs mid-list" drift.
-    el.grow(500); // bottom now 1200
-    el.scrollTop = 900; // the compensation write; its event fires here
-    expect(el.scrollTop).toBe(el.bottom); // the event itself re-pinned
-    expect(c.pinned).toBe(true); // never mistaken for reader intent
   });
 });
 

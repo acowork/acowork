@@ -77,9 +77,18 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             Some(disk_cache_write),
         ));
 
+        // Read the snapshot keys once before the loop — Active = present in
+        // the in-memory map (ADR-038 lifecycle; close_session removes the key).
+        let active_ids: std::collections::HashSet<String> = self
+            .session_snapshots
+            .read()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+
         let page_sessions: Vec<SessionSummary> = sessions
             .into_iter()
             .map(|s| SessionSummary {
+                is_active: active_ids.contains(&s.session_id),
                 session_id: s.session_id.clone(),
                 title: s.title,
                 created_at: s.created_at,

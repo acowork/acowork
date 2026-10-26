@@ -35,6 +35,12 @@ pub struct SessionSummary {
     /// never came from a Chat, which keeps the direct composer path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_session_id: Option<String>,
+    /// Whether this session is currently loaded in the Runtime's in-memory
+    /// `sessions` map (ADR-038 `SessionLifecycleState::Active`). The Desktop
+    /// tab strip mirrors this: every `is_active` session gets a tab, and
+    /// `fetchSessions` syncs the full set on login / reconnect.
+    #[serde(default)]
+    pub is_active: bool,
 }
 
 /// Response for `list_sessions` — paginated session list.
