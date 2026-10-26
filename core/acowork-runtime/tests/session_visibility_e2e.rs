@@ -68,8 +68,10 @@ fn meta(sid: &str, owner: &str, visibility: Option<SessionVisibility>, chat: Opt
     }
 }
 
-/// Boot the server over a seeded workspace; returns the port.
-async fn boot(work_dir: PathBuf) -> u16 {
+/// Boot the server over a seeded workspace; returns the port and the
+/// inbound dispatch receiver (keep it alive: dropping it makes every
+/// queued action fail with 503 instead of reaching the loop).
+async fn boot(work_dir: PathBuf) -> (u16, tokio::sync::mpsc::UnboundedReceiver<(String, acowork_runtime::agent::inbound::InboundMessage)>) {
     std::fs::create_dir_all(work_dir.join("memory")).unwrap();
     std::fs::create_dir_all(work_dir.join("conversations")).unwrap();
     let db = SqliteStore::open_dim_agnostic(work_dir.join("memory").join("private.sqlite")).unwrap();
@@ -78,6 +80,14 @@ async fn boot(work_dir: PathBuf) -> u16 {
     store.upsert(&meta("s-private", "u-alice", Some(SessionVisibility::Private), None)).unwrap();
     store.upsert(&meta("s-other-chat", "u-bob", Some(SessionVisibility::Members), Some("chat-2"))).unwrap();
     store.upsert(&meta("s-default", "u-alice", None, None)).unwrap();
+    // The shape chat routing actually creates: no owner, `Members`, bound
+    // to a Chat the answering human is a participant of.
+    let mut unowned = meta("s-unowned", "unused", Some(SessionVisibility::Members), Some("chat-1"));
+    unowned.user_id = None;
+    store.upsert(&unowned).unwrap();
+
+    let (dispatch_tx, dispatch_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, acowork_runtime::agent::inbound::InboundMessage)>();
 
     let snapshots: SharedSessionSnapshots = Arc::new(std::sync::RwLock::new(HashMap::new()));
     let latest: SharedLatestSession = Arc::new(std::sync::RwLock::new(None));
@@ -98,7 +108,7 @@ async fn boot(work_dir: PathBuf) -> u16 {
         INSTANCE_ID.to_string(),
         snapshots,
         latest,
-        Arc::new(tokio::sync::Mutex::new(None)),
+        Arc::new(tokio::sync::Mutex::new(Some(dispatch_tx))),
         Arc::new(std::sync::RwLock::new(Vec::new())),
         Arc::new(tokio::sync::Mutex::new(None)),
         session_metadata,
@@ -120,7 +130,7 @@ async fn boot(work_dir: PathBuf) -> u16 {
     )
     .await
     .expect("runtime http server should start");
-    server.port
+    (server.port, dispatch_rx)
 }
 
 async fn list(port: u16, user: Option<&str>, chats: Option<&str>) -> Vec<String> {
@@ -156,7 +166,7 @@ async fn detail_status(port: u16, sid: &str, user: &str, chats: &str) -> u16 {
 #[tokio::test]
 async fn members_visibility_follows_chat_membership() {
     let dir = tempfile::tempdir().unwrap();
-    let port = boot(dir.path().to_path_buf()).await;
+    let (port, _rx) = boot(dir.path().to_path_buf()).await;
 
     // Owner reads own sessions regardless; membership adds the group's
     // execution session for *other* chat members (§8.2: the participant
@@ -186,5 +196,104 @@ async fn members_visibility_follows_chat_membership() {
 
     // No identity header at all = Unfiltered (local mode / admin).
     let all = list(port, None, None).await;
-    assert_eq!(all.len(), 4, "unfiltered sees everything: {all:?}");
+    assert_eq!(all.len(), 5, "unfiltered sees everything: {all:?}");
+}
+
+/// Design 27 §5.5.4 regression: chat-routed execution sessions are
+/// ownerless + `Members`, and the Gateway's card resolve injects the
+/// answering human's real uid with the chat-membership set — never the
+/// admin wildcard. These endpoints gated on `authorize_write`, whose
+/// predicate ignores membership, so **every** chat-card answer 404'd and
+/// silently degraded into a plain new turn while the tool kept waiting.
+/// They gate on `authorize_read` now; real session mutations stay gated
+/// on write.
+#[tokio::test]
+async fn card_answers_gate_on_membership_not_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port, mut rx) = boot(dir.path().to_path_buf()).await;
+
+    let post = |sid: &str, path: &str, user: &str, chats: &str, body: serde_json::Value| {
+        let sid = sid.to_string();
+        let path = path.to_string();
+        let user = user.to_string();
+        let chats = chats.to_string();
+        tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("http://127.0.0.1:{port}/sessions/{sid}/{path}"))
+                .header("x-user-id", user)
+                .header("x-acowork-chat-scope", chats)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        })
+    };
+
+    // Chat member (not the owner — there is none) answers the question
+    // card: 202, and the answer reaches the dispatch channel.
+    let status = post(
+        "s-unowned",
+        "answer",
+        "u-bob",
+        "chat-1",
+        serde_json::json!({"request_id": "q-1", "answer": "A"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 202, "member may answer ask_question on an ownerless Members session");
+    let (sid, msg) = rx.recv().await.expect("answer dispatched");
+    assert_eq!(sid, "s-unowned");
+    assert!(matches!(msg, acowork_runtime::agent::inbound::InboundMessage::QuestionAnswer { .. }));
+
+    // Same for the approval card.
+    let status = post(
+        "s-unowned",
+        "approval",
+        "u-bob",
+        "chat-1",
+        serde_json::json!({"request_id": "a-1", "approved": true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 202, "member may decide approval on an ownerless Members session");
+    let (_, msg) = rx.recv().await.expect("approval dispatched");
+    assert!(matches!(msg, acowork_runtime::agent::inbound::InboundMessage::ApprovalDecision { .. }));
+
+    // Fail-closed halves: revoked membership still 404 (hidden, not 403 —
+    // no existence oracle), and an unrelated account cannot reach a
+    // Private session's answer channel either.
+    assert_eq!(
+        post("s-unowned", "answer", "u-bob", "", serde_json::json!({"request_id": "q-1", "answer": "A"}))
+            .await
+            .unwrap(),
+        404,
+        "non-member answer stays 404"
+    );
+    assert_eq!(
+        post("s-private", "answer", "u-bob", "chat-1", serde_json::json!({"request_id": "q-1", "answer": "A"}))
+            .await
+            .unwrap(),
+        404,
+        "answer to someone else's Private session stays 404"
+    );
+
+    // The boundary of the relaxation: `stop` is a real session mutation
+    // and stays write-gated — an ownerless Members session is still not
+    // interruptible by a member through the direct session surface.
+    let stop = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{port}/sessions/s-unowned/stop"))
+            .header("x-user-id", "u-bob".to_string())
+            .header("x-acowork-chat-scope", "chat-1".to_string())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    })
+    .await
+    .unwrap();
+    assert_eq!(stop, 404, "stop remains write-gated (§8.2)");
 }

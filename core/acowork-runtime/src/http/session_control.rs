@@ -838,7 +838,17 @@ pub(crate) struct ApprovalBody {
 ///
 /// This is the endpoint that closes the approval-spoofing hole: over MQTT
 /// any client on the broker could publish `approval_decision{approved:
-/// true}` into someone else's session. Here the owner check runs first.
+/// true}` into someone else's session. Here the visibility check runs first.
+///
+/// `authorize_read`, not `authorize_write`: answering a card is not a
+/// session mutation (delete / re-share) — it is an inbound answer from a
+/// human who can see the question (design 27 §5.5.4). The Gateway's
+/// out-of-band card resolve carries the answering human's real uid with
+/// the chat-membership set; `is_writable_by` ignores membership, so an
+/// ownerless `Members` execution session (what chat routing creates) would
+/// 404 every card answer. `is_readable_by` consumes membership and keeps
+/// `Private` fail-closed, so the anti-spoofing property stands: an
+/// unrelated account still cannot reach a session it cannot read.
 pub(crate) async fn post_approval_decision(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
@@ -846,7 +856,7 @@ pub(crate) async fn post_approval_decision(
     body: Option<Json<ApprovalBody>>,
 ) -> Result<StatusCode, ApiError> {
     let scope = scope_from_headers(&headers);
-    authorize_write(&state, &sid, &scope)?;
+    authorize_read(&state, &sid, &scope)?;
     let body = body.map(|Json(b)| b).unwrap_or_default();
 
     let queued = crate::http::server::dispatch_session_action(
@@ -873,6 +883,14 @@ pub(crate) struct AnswerBody {
 }
 
 /// `POST /sessions/{sid}/answer` — answer an `ask_user_question` prompt.
+///
+/// `authorize_read`, same §5.5.4 rationale as [`post_approval_decision`]:
+/// answering a question is not a session mutation, and the request id is
+/// an unguessable capability — only a viewer of the session's event stream
+/// ever sees it, so "may read the question" is exactly "may answer it".
+/// `authorize_write` 404s every chat-card answer because chat-routed
+/// execution sessions are ownerless + `Members`, and `is_writable_by`
+/// ignores the chat-membership set.
 pub(crate) async fn post_question_answer(
     State(state): State<HttpState>,
     Path(sid): Path<String>,
@@ -880,7 +898,7 @@ pub(crate) async fn post_question_answer(
     body: Option<Json<AnswerBody>>,
 ) -> Result<StatusCode, ApiError> {
     let scope = scope_from_headers(&headers);
-    authorize_write(&state, &sid, &scope)?;
+    authorize_read(&state, &sid, &scope)?;
     let body = body.map(|Json(b)| b).unwrap_or_default();
 
     let queued = crate::http::server::dispatch_session_action(

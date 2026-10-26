@@ -230,6 +230,8 @@
     "empty": "채팅에 메시지가 없습니다",
     "routerFallback": "자동으로 배정됨",
     "cardUnanswered": "답변 없음: {{question}}",
+    "cardAnsweredNote": "응답함: {{answer}}",
+    "cardAnsweredInExec": "실행 세션에서 응답함",
     "cardAsk": "Agent 질문",
     "cardApproval": "승인 필요",
     "cardPause": "단계 확인",

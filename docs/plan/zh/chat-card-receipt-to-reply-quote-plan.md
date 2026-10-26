@@ -54,6 +54,8 @@ m.set(r.meta.message_id, r.meta.interaction?.question || r.body);
 | 未答而关闭（轮次结束 / 超时 / 停止） | 完整回执卡 | 卡片槽位内一行安静注记，含被截断的问题 |
 | 开放 / 只读 | 中性描边卡 | 不变 |
 
+这行注记属于**事件文本**的行级档：留在该行内容列（`ml-12`）并带 kind 图标，与轮次级（居中、无图标）区分。两档的完整判据已固化为 transcript 的落点语法，见 [design 27 §5.5.5](../../design/zh/27-intent-messaging-and-group-chat.md) 与共享原语 `ChatEventText`。
+
 i18n：`cardAnswered` / `cardClosed` 失去渲染方，五语删除；新增 `cardUnanswered`（`未获应答：{{question}}`）。
 
 ## 4. 测试

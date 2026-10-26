@@ -31,6 +31,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { truncateQuote } from "./ReplyQuote";
+import { ChatEventText } from "./ChatEventText";
 import { ChatMarkdown } from "./ChatMarkdown";
 
 interface InlineInteractionCardProps {
@@ -93,11 +94,23 @@ function kindConfig(kind: string): KindConfig {
 /** Action button labels for approval / pause kinds. These double as the
  *  answer text sent to the Gateway — `is_affirmative()` recognises them. */
 const APPROVAL_ACTIONS = [
-  { label: "chatView.cardApprove", text: "\u6279\u51c6", tone: "accent" as const },
-  { label: "chatView.cardReject", text: "\u62d2\u7edd", tone: "solid" as const },
+  {
+    label: "chatView.cardApprove",
+    text: "\u6279\u51c6",
+    tone: "accent" as const,
+  },
+  {
+    label: "chatView.cardReject",
+    text: "\u62d2\u7edd",
+    tone: "solid" as const,
+  },
 ];
 const PAUSE_ACTIONS = [
-  { label: "chatView.cardContinue", text: "\u7ee7\u7eed", tone: "accent" as const },
+  {
+    label: "chatView.cardContinue",
+    text: "\u7ee7\u7eed",
+    tone: "accent" as const,
+  },
   { label: "chatView.cardStop", text: "\u505c\u6b62", tone: "solid" as const },
 ];
 
@@ -120,7 +133,12 @@ export function InlineInteractionCard({
 
   const cfg = kindConfig(kind);
   const isListMode = kind === "ask_question" && (it?.options?.length ?? 0) > 0;
-  const actions = kind === "approval" ? APPROVAL_ACTIONS : kind === "pause" ? PAUSE_ACTIONS : null;
+  const actions =
+    kind === "approval"
+      ? APPROVAL_ACTIONS
+      : kind === "pause"
+        ? PAUSE_ACTIONS
+        : null;
   // Two-button action cards (approval / pause) ride a narrow clamp: the tool
   // text wraps to a couple of lines instead of stretching the card to the
   // full content width while the buttons stay tiny — the balance the user
@@ -141,36 +159,50 @@ export function InlineInteractionCard({
     // requested and never got one, and the agent moved on. It stays visible, but
     // as a quiet line in the card's own slot rather than a card shell, because
     // it is a status note, not an utterance.
+    //
+    // The card's slot is the transcript's `row` tier of the shared event-text
+    // grammar (see `ChatEventText`): the note belongs to ONE row, so it stays in
+    // that row's content column (`ml-12`) and keeps the kind glyph — the glyph is
+    // the cue that separates it from a turn-level line ("this belongs to the card
+    // above"). Rendering it through the shared primitive is what keeps the two
+    // tiers from drifting apart again.
     return (
-      <div
-        className="ml-12 my-1 flex max-w-[var(--content-max-width)] items-center gap-1.5 text-10 text-text-tertiary"
+      <ChatEventText
+        anchor="row"
+        icon={cfg.icon}
+        text={t("chatView.cardUnanswered", {
+          question: truncateQuote(question),
+        })}
         title={question}
-      >
-        {cfg.icon}
-        <span className="min-w-0 truncate">
-          {t("chatView.cardUnanswered", { question: truncateQuote(question) })}
-        </span>
-      </div>
+        className="px-4"
+      />
     );
   }
 
   // ── Read-only (admin viewing) ──
   if (readOnly) {
     return (
-      <div className={`ml-12 my-2 ${widthCls} w-fit`}>
-        <div className="overflow-hidden rounded-md border border-border-outer">
-          <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text">
-            {cfg.icon}
-            <span>{t(cfg.titleKey)}</span>
-            {askerName && <span className="ml-auto text-10 font-normal opacity-70">{askerName}</span>}
-          </div>
-          <div className="bg-chat-bubble px-3 py-2.5">
-            {/* Markdown, not a bare text node: the question is model output and
+      <div className="my-2 flex items-start gap-2 px-4">
+        <div className="w-10 shrink-0" />
+        <div className={`min-w-0 ${widthCls}`}>
+          <div className="overflow-hidden rounded-md border border-border-outer">
+            <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text">
+              {cfg.icon}
+              <span>{t(cfg.titleKey)}</span>
+              {askerName && (
+                <span className="ml-auto text-10 font-normal opacity-70">
+                  {askerName}
+                </span>
+              )}
+            </div>
+            <div className="bg-chat-bubble px-3 py-2.5">
+              {/* Markdown, not a bare text node: the question is model output and
                 carries inline code and links. Routed through the shared chat
                 renderer so the `prose` scope -- and every table and link rule
                 globals.css hangs under it -- cannot be forgotten the way the
                 per-surface bubble copies drifted. */}
-            <ChatMarkdown content={question} />
+              <ChatMarkdown content={question} />
+            </div>
           </div>
         </div>
       </div>
@@ -179,75 +211,82 @@ export function InlineInteractionCard({
 
   // ── Open / interactive state ──
   return (
-    <div className={`ml-12 my-2 ${widthCls} w-fit`}>
-      <div className="overflow-hidden rounded-md border border-border-outer">
-        {/* Header bar */}
-        <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text">
-          {cfg.icon}
-          <span>{t(cfg.titleKey)}</span>
-          {askerName && <span className="ml-auto text-10 font-normal opacity-70">{askerName}</span>}
-        </div>
-
-        {/* Body */}
-        <div className="bg-chat-bubble px-3 py-2.5">
-          <div className="mb-2">
-            <ChatMarkdown content={question} />
+    <div className="my-2 flex items-start gap-2 px-4">
+      <div className="w-10 shrink-0" />
+      <div className={`min-w-0 ${widthCls}`}>
+        <div className="overflow-hidden rounded-md border border-border-outer">
+          {/* Header bar */}
+          <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text">
+            {cfg.icon}
+            <span>{t(cfg.titleKey)}</span>
+            {askerName && (
+              <span className="ml-auto text-10 font-normal opacity-70">
+                {askerName}
+              </span>
+            )}
           </div>
 
-          {/* Form A: list selection (ask_question with options) */}
-          {isListMode && (
-            <ListSelection
-              options={it!.options!}
-              selected={selected}
-              onSelect={setSelected}
-              onSubmit={(text) => onAnswer(row, text, true)}
-              onFreeAnswer={() => onAnswer(row, "", false)}
-            />
-          )}
+          {/* Body */}
+          <div className="bg-chat-bubble px-3 py-2.5">
+            <div className="mb-2">
+              <ChatMarkdown content={question} />
+            </div>
 
-          {/* Form B: action buttons (approval / pause / no-options) */}
-          {!isListMode && (
-            <div className="flex flex-wrap gap-2">
-              {actions ? (
-                actions.map((a) => (
-                  <button
-                    key={a.label}
-                    onClick={() => onAnswer(row, a.text, true)}
-                    className={`rounded px-3 py-1.5 text-xs ${a.tone === "accent" ? "btn-accent" : "btn-solid"}`}
-                  >
-                    {t(a.label)}
-                  </button>
-                ))
-              ) : it?.options && it.options.length > 0 ? (
-                // Unknown kind with options → buttons for each option
-                <>
-                  {it.options.map((opt) => (
+            {/* Form A: list selection (ask_question with options) */}
+            {isListMode && (
+              <ListSelection
+                options={it!.options!}
+                selected={selected}
+                onSelect={setSelected}
+                onSubmit={(text) => onAnswer(row, text, true)}
+                onFreeAnswer={() => onAnswer(row, "", false)}
+              />
+            )}
+
+            {/* Form B: action buttons (approval / pause / no-options) */}
+            {!isListMode && (
+              <div className="flex flex-wrap gap-2">
+                {actions ? (
+                  actions.map((a) => (
                     <button
-                      key={opt}
-                      onClick={() => onAnswer(row, opt, true)}
-                      className="rounded btn-accent px-3 py-1.5 text-xs"
+                      key={a.label}
+                      onClick={() => onAnswer(row, a.text, true)}
+                      className={`rounded px-3 py-1.5 text-xs ${a.tone === "accent" ? "btn-accent" : "btn-solid"}`}
                     >
-                      {opt}
+                      {t(a.label)}
                     </button>
-                  ))}
+                  ))
+                ) : it?.options && it.options.length > 0 ? (
+                  // Unknown kind with options → buttons for each option
+                  <>
+                    {it.options.map((opt) => (
+                      <button
+                        key={opt}
+                        onClick={() => onAnswer(row, opt, true)}
+                        className="rounded btn-accent px-3 py-1.5 text-xs"
+                      >
+                        {opt}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => onAnswer(row, "", false)}
+                      className="rounded btn-solid px-3 py-1.5 text-xs"
+                    >
+                      {t("chatView.freeAnswer")}
+                    </button>
+                  </>
+                ) : (
+                  // No options at all → single answer button
                   <button
                     onClick={() => onAnswer(row, "", false)}
-                    className="rounded btn-solid px-3 py-1.5 text-xs"
+                    className="rounded btn-accent px-3 py-1.5 text-xs"
                   >
-                    {t("chatView.freeAnswer")}
+                    {t("chatView.answer")}
                   </button>
-                </>
-              ) : (
-                // No options at all → single answer button
-                <button
-                  onClick={() => onAnswer(row, "", false)}
-                  className="rounded btn-accent px-3 py-1.5 text-xs"
-                >
-                  {t("chatView.answer")}
-                </button>
-              )}
-            </div>
-          )}
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

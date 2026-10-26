@@ -273,6 +273,17 @@ pub struct IntentMeta {
     /// remain readable so old transcripts still project their cards correctly.
     #[serde(default)]
     pub notice_type: String,
+    /// On an `interaction_resolved` notice: how the card's request ended —
+    /// `"answered"` / `"approved"` / `"rejected"` (a human decided, on either
+    /// surface) vs `"timeout"` / `"cancelled"` / `"stopped"` / `"turn_ended"`
+    /// / `"unanswerable"` / `"superseded"` (nobody decided). The chat card
+    /// projection needs the distinction: without it a card answered on the
+    /// execution surface is indistinguishable from one that timed out, and
+    /// the surface lies with "no answer received". Declared here because
+    /// undeclared meta keys are silently dropped at this storage boundary
+    /// (same trap as [`Self::task_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
     /// For an `interaction_request`: the decision payload (§5.5.4).
     /// Required on every card row — a card without a decision to make
     /// is not a card.
@@ -2406,6 +2417,50 @@ mod tests {
         // be on the wire, not just in the typed struct.
         let out = serde_json::to_value(&rows[0]).unwrap();
         assert_eq!(out["meta"]["task_id"], "t-1");
+    }
+
+    #[test]
+    fn interaction_resolved_resolution_survives_the_store_round_trip() {
+        // The Runtime's `close_chat_card` writes this exact shape through
+        // `POST /api/intents/chat-append`
+        // (acowork-runtime/src/agent/loop_interaction.rs). The chat card
+        // projection tells "a human answered on the execution surface"
+        // from "nobody answered" by reading `meta.resolution` off this row
+        // — an undeclared key would be silently dropped here (design 27
+        // decision 29) and every exec-answered card would render as
+        // "no answer received".
+        let wire = serde_json::json!({
+            "session_id": "cs-notice-test",
+            "message": {
+                "seq": 0,
+                "ts": 0,
+                "from": "agent-1",
+                "kind": "system_notice",
+                "body": "",
+                "to": "human-1",
+                "meta": {
+                    "message_id": "ir:card:ask_question:q-1",
+                    "notice_type": "interaction_resolved",
+                    "in_reply_to": "card:ask_question:q-1",
+                    "resolution": "answered",
+                },
+                "attachment_ids": [],
+            }
+        });
+        let req: crate::http::chat_sessions_api::SystemAppendRequest =
+            serde_json::from_value(wire).expect("runtime wire shape must deserialize");
+        assert_eq!(
+            req.message.meta.resolution.as_deref(),
+            Some("answered"),
+            "resolution must be a declared IntentMeta field"
+        );
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let (stored, _) = append_message(&dir, &s.session_id, &req.message, 1).unwrap();
+        assert_eq!(stored.meta.resolution.as_deref(), Some("answered"));
+        let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        let out = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(out["meta"]["resolution"], "answered");
     }
 
     #[test]

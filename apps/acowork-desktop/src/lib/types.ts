@@ -1277,7 +1277,7 @@ export interface DistillerFunnel {
 
 /**
  * Distiller trigger state reported by `GET /memory/consolidation/status`
- * (ADR-071 D1/D2) — the UI "记忆蒸馏" card renders this without polling
+ * (ADR-071 D1/D2) — the UI "记忆沉淀" card renders this without polling
  * the manifest.
  */
 export interface DistillerStatus {
@@ -1288,6 +1288,13 @@ export interface DistillerStatus {
   accumulation_threshold: number;
   idle_secs: number;
   last_run: DistillerLastRun | null;
+  /**
+   * The candidate chain currently in force (ADR-101): the memory service
+   * resolves it, so the card reads it back from here instead of from the
+   * retired `agent_config.json` `distiller_models` field. Empty = no chain of
+   * its own; the service falls back to the Gateway's global compact chain.
+   */
+  models?: CompactModelRef[];
 }
 
 /**

@@ -115,7 +115,7 @@ interface MemoryStore {
   /**
    * Fetch the distiller trigger state — `GET /memory/
    * consolidation/status`. Best-effort: failures leave the previous
-   * status in place (the card falls back to agent_config-driven state).
+   * status in place (the card reloads the same endpoint itself).
    */
   fetchDistillerStatus: (agentId: string) => Promise<void>;
   /**
@@ -374,7 +374,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       const data: ConsolidationStatusResponse = await res.json();
       set({ distillerStatus: data.distiller });
     } catch {
-      // Best-effort — the card still works from agent_config alone.
+      // Best-effort — the card re-reads the same endpoint on mount.
     }
   },
 
@@ -391,7 +391,7 @@ export const useMemoryStore = create<MemoryStore>((set, get) => ({
       const data: ConsolidationStatusResponse = await res.json();
       set({ forgettingStatus: data.forgetting });
     } catch {
-      // Best-effort — the card still works from agent_config alone.
+      // Best-effort — the card re-reads the same endpoint on mount.
     }
   },
 

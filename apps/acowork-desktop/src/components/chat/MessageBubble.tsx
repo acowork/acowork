@@ -23,6 +23,7 @@ import {
 } from "../common/ContextMenu";
 import { copySelectionOrFallback, snapshotSelection } from "../../lib/clipboard";
 import { formatBubbleTime } from "../../lib/formatTime";
+import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -280,10 +281,17 @@ const MessageBubble = React.memo(function MessageBubble({
               // collide with the username row. Hover behaviour is
               // preserved: the timestamp reveals with an opacity
               // fade when the wrapper is hovered. The bubble and
-              // timestamp share a column with `max-w-[85%]` and
-              // `items-start`, so the timestamp's left edge aligns
-              // with the bubble's left edge.
-              <div className="group mt-[6px] max-w-[85%] flex flex-col items-start">
+              // timestamp share a column with `max-w-[85%]`, anchored
+              // by `bubbleMetaAnchor("own")`: the human's own meta
+              // block hugs the bubble's RIGHT edge, the side the bubble
+              // itself is on. It used to be `items-start`, which put
+              // this side's timestamp under the bubble's left edge —
+              // near the row's middle for a short message, far left for
+              // a long one (the reported "sometimes middle, sometimes
+              // left" drift).
+              <div
+                className={`group mt-[6px] max-w-[85%] flex flex-col ${bubbleMetaAnchor("own")}`}
+              >
                 <div
                   className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
                   style={fontSizeStyle}

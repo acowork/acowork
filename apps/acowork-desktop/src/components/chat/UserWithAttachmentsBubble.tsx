@@ -17,6 +17,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
 import { formatBubbleTime } from "../../lib/formatTime";
+import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 
 export interface UserWithAttachmentsBubbleProps {
   /** The user text message (items[0] of the block). */
@@ -162,12 +163,16 @@ export function UserWithAttachmentsBubble({
             BELOW the bubble (not absolutely positioned above) so it
             can never collide with the username row or attachment
             chips. Hover behaviour is preserved: the timestamp
-            reveals with an opacity fade when the wrapper is
-            hovered. The bubble and timestamp share a column with
-            `max-w-[85%]` and `items-start`, so the timestamp's
-            left edge aligns with the bubble's left edge. */}
+            reveals with an opacity fade when the wrapper is hovered. The
+            bubble and timestamp share a column with `max-w-[85%]`, anchored
+            by `bubbleMetaAnchor("own")` — the human's own meta block hugs the
+            bubble's RIGHT edge, the side the bubble is on. It used to be
+            `items-start`, which parked this side's timestamp under the
+            bubble's LEFT edge (`bubbleMetaAnchor.ts` records the defect). */}
         {userMessage.content && (
-          <div className="group mt-[6px] max-w-[85%] flex flex-col items-start">
+          <div
+            className={`group mt-[6px] max-w-[85%] flex flex-col ${bubbleMetaAnchor("own")}`}
+          >
             <div
               className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
               style={fontSizeStyle}

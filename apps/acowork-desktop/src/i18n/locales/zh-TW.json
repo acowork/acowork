@@ -230,6 +230,8 @@
     "empty": "該聊天暫無訊息",
     "routerFallback": "已自動分配任務",
     "cardUnanswered": "未獲應答：{{question}}",
+    "cardAnsweredNote": "已應答：{{answer}}",
+    "cardAnsweredInExec": "已在執行會話應答",
     "cardAsk": "Agent 詢問",
     "cardApproval": "需要審批",
     "cardPause": "步驟確認",

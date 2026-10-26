@@ -110,7 +110,11 @@ vi.mock("../../lib/stickToBottom", () => ({
 vi.mock("../../i18n/useTranslation", () => ({
   useTranslation: () => ({
     t: (key: string, opts?: Record<string, unknown>) =>
-      opts && "question" in opts ? `${key}«${opts.question}»` : key,
+      opts && "question" in opts
+        ? `${key}«${opts.question}»`
+        : opts && "answer" in opts
+          ? `${key}«${opts.answer}»`
+          : key,
   }),
 }));
 
@@ -176,27 +180,26 @@ describe("GroupChatPanel answer quote", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
   });
 
-  it("drops the answered card and quotes its question on the answer bubble", () => {
+  it("renders a chat-surface answer as an event line, not a bubble", () => {
     tail = [
       plainUserRow(1, "start the migration"),
       askCard(2, "card2", "Which schema?"),
       answerRow(3, "v2", "card2"),
     ];
-    const { container } = render(<GroupChatPanel />);
+    render(<GroupChatPanel />);
 
-    // The answer is there, and the receipt card is not.
-    expect(screen.getByText("v2")).toBeTruthy();
+    // The receipt card is gone, and the answer is no longer an utterance
+    // bubble either — a card interaction is a step of the run, so it states
+    // itself as a row-tier event line naming the choice.
     expect(screen.queryByText("chatView.cardAsk")).toBeNull();
     // Nor may it fall through to the unanswered note: somebody did answer.
     // Without this the slot could paint "Unanswered: <question>" — a statement
-    // the transcript would then have to contradict one bubble later.
+    // the transcript would then have to contradict one line later.
     expect(screen.queryByText(/chatView.cardUnanswered/)).toBeNull();
-    // The question rides above the answer instead. The bordered strip is the
-    // quote's inner span (the outer div is only the alignment wrapper).
-    const quote = screen.getByText("Which schema?");
-    expect(quote.parentElement?.className).toContain("border-border-divider");
-    expect(quote.parentElement?.className).not.toContain("--color-accent");
-    expect(container.textContent).toContain("v2");
+    expect(screen.getByText("chatView.cardAnsweredNote«v2»")).toBeTruthy();
+    expect(document.querySelector('[data-event-text="turn"]')).toBeTruthy();
+    // The question was just read in the open card above — no quote strip.
+    expect(screen.queryByText("Which schema?")).toBeNull();
   });
 
   it("paints no quote when in_reply_to points at a row that is not a card", () => {

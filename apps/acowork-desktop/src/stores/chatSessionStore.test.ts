@@ -122,6 +122,38 @@ describe("closedCardIds / humanAnsweredCardIds (design 27 §5.5.4 — card self-
     expect(closedCardIds(rows).has("c1")).toBe(true);
     expect(humanAnsweredCardIds(rows).has("c1")).toBe(true);
   });
+
+  it("an exec-surface answer (interaction_resolved notice) counts as answered", () => {
+    const rows = [
+      user("t1"),
+      card("c1", "t1"),
+      row("system_notice", {
+        message_id: "ir:c1",
+        notice_type: "interaction_resolved",
+        in_reply_to: "c1",
+        resolution: "answered",
+      }),
+    ];
+    expect(closedCardIds(rows).has("c1")).toBe(true);
+    expect(humanAnsweredCardIds(rows).has("c1")).toBe(true);
+  });
+
+  it("a non-decision resolution closes the card but is NOT answered", () => {
+    for (const resolution of ["timeout", "cancelled", "stopped", "turn_ended", "unanswerable", "superseded"]) {
+      const rows = [
+        user("t1"),
+        card("c1", "t1"),
+        row("system_notice", {
+          message_id: "ir:c1",
+          notice_type: "interaction_resolved",
+          in_reply_to: "c1",
+          resolution,
+        }),
+      ];
+      expect(closedCardIds(rows).has("c1")).toBe(true);
+      expect(humanAnsweredCardIds(rows).has("c1")).toBe(false);
+    }
+  });
 });
 
 describe("chatSessionStore freshness loop", () => {

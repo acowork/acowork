@@ -137,6 +137,8 @@
     "empty": "No messages yet",
     "routerFallback": "Assigned automatically",
     "cardUnanswered": "Unanswered: {{question}}",
+    "cardAnsweredNote": "Answered: {{answer}}",
+    "cardAnsweredInExec": "Answered in the execution session",
     "cardAsk": "Agent Question",
     "cardApproval": "Approval Required",
     "cardPause": "Step Confirmation",

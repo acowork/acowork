@@ -287,8 +287,9 @@ export function MemoryPanel() {
       )}
 
       {/* ADR-071 D3/D5: memory distiller settings card (enabled switch,
-          model pick, periodic trigger tuning). Reads/writes
-          agent_config.json via GET/PUT /agents/{id}/config.
+          model pick, periodic trigger tuning). Reads/writes the memory
+          service's policy via GET/PUT
+          /agents/{id}/memory/consolidation/status (ADR-101 P1e).
           Sits between the overview strip (stats + health banner) and the
           main search workflow — the distiller is a control surface, not
           part of the search row. */}
@@ -300,9 +301,9 @@ export function MemoryPanel() {
 
       {/* ADR-057 §5.3 redesign: episodic forgetting settings card
           (enabled switch + half-life / dormant / archive tuning).
-          Reads/writes the four `agent_config.json` forgetting fields via
-          GET/PUT /agents/{id}/config. Sits right below the distill card —
-          both are memory lifecycle control surfaces. */}
+          Reads/writes the `forgetting` half of the same consolidation
+          policy. Sits right below the distill card — both are memory
+          lifecycle control surfaces. */}
       <MemoryForgettingSettings
         agentId={selectedAgentId}
         running={isAgentRunning}
