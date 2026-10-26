@@ -85,8 +85,12 @@ export interface VirtualRowListHandle {
   /** True when the row with this key is within the rendered window. Lets a
    *  surface gate per-row work (e.g. streaming refresh) on actual visibility. */
   isKeyInViewport: (key: string) => boolean;
-  /** Jump to the last row and arm the bottom-pin convergence. Returns false
-   *  when nothing moved (zero items, or no scroll element attached yet). */
+  /** Jump to the last row and arm the bottom-pin convergence. Arms even when
+   *  the virtualizer has not attached its scroll element yet (the late-ref
+   *  window right after a session-switch remount): the pin effect reads the
+   *  surface's container ref directly and rides every commit until the
+   *  element exists and measurements settle, so an armed request is honoured
+   *  without a caller-side retry loop. Returns false only on zero items. */
   scrollToBottom: () => boolean;
   /** Jump to the first row (align: start). No-op on zero items. */
   scrollToTop: () => void;
@@ -379,15 +383,25 @@ export function VirtualRowList<T>({
       scrollToBottom: () => {
         const count = virtualizer.options.count;
         if (count === 0) return false;
+        // Arm the convergence anchor FIRST, before the attach check: a
+        // session-switch refresh calls this from the surface's layout effect,
+        // which can run while the virtualizer has not discovered its scroll
+        // element yet (the late-ref window). The pin effect reads the
+        // surface's scrollContainerRef directly and re-pins on every commit,
+        // and the self-heal bump guarantees a commit once the element appears
+        // — so an armed request lands without any caller-side retry.
+        pinToBottomRef.current = true;
+        pinDeadlineRef.current = performance.now() + BOTTOM_PIN_MAX_MS;
         const el = virtualizer.scrollElement;
-        if (!el) return false;
+        if (!el) {
+          lastPinTopRef.current = 0;
+          return true;
+        }
         // Mount the last item first; the resulting DOM growth is asynchronous
         // (scroll → re-evaluate → commit → ResizeObserver measures →
         // scrollHeight grows again). The armed anchor below rides the bottom
         // through those rounds instead of stopping at the first estimate.
         virtualizer.scrollToIndex(count - 1, { align: "end" });
-        pinToBottomRef.current = true;
-        pinDeadlineRef.current = performance.now() + BOTTOM_PIN_MAX_MS;
         lastPinTopRef.current = el.scrollHeight - el.clientHeight;
         el.scrollTop = lastPinTopRef.current;
         return true;

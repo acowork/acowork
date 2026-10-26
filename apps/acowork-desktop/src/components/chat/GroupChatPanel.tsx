@@ -581,11 +581,25 @@ export function GroupChatPanel() {
   const [mentionActive, setMentionActive] = useState(0);
   const pickerRef = useRef<HTMLDivElement>(null);
 
+  // Virtualized transcript handle (see the adapters below). Declared before the
+  // follow hook: the hook delegates bottom-positioning to the list's
+  // convergence anchor, because a single `scrollTop = scrollHeight` write
+  // cannot land on a virtualized bottom whose height is still an estimate.
+  const listRef = useRef<VirtualRowListHandle | null>(null);
+
+  // Bottom-positioning mechanism for the follow controller — same contract as
+  // in AgentChatView; see VirtualRowList.scrollToBottom for the arming.
+  const positionAtBottom = useCallback(
+    () => listRef.current?.scrollToBottom() ?? false,
+    [],
+  );
+
   const { ref: scrollRef, stickNow, atBottom } = useStickToBottom(
     [win?.tail.length ?? 0, activeGroupId],
     activeGroupId,
     () => {},
     win?.older.length ?? 0,
+    positionAtBottom,
   );
 
   // Merged container capture — a STABLE callback on purpose. An inline arrow is
@@ -640,7 +654,6 @@ export function GroupChatPanel() {
   );
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
-  const listRef = useRef<VirtualRowListHandle | null>(null);
   const estimateRow = useCallback((r: ChatMessageRow) => {
     const body = r.body ?? "";
     const lines = Math.max(1, Math.ceil(body.length / 70));

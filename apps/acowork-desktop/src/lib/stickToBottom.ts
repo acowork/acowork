@@ -57,6 +57,21 @@ export class FollowController {
   pinned = true;
   private el: ScrollEl | null = null;
   private lastKey: string | null | undefined = undefined;
+  /**
+   * The surface's "take me to the bottom" mechanism, when a bare
+   * `scrollTop = scrollHeight` write is not one. It is not, once the list is
+   * virtualized: the total height is an estimate that converges as rows get
+   * measured, and on a session switch the virtualizer may not even own its
+   * scroll element yet (React 19 attaches the parent's ref after the child's
+   * layout effects). A single write then lands at the top (nothing sized) or
+   * mid-list (estimate overshot) and nothing re-pins afterwards. A
+   * virtualized surface hands in its list handle's `scrollToBottom`, which
+   * ARMS a convergence loop — every later commit re-pins until the layout
+   * settles. Returning true means "positioned or armed"; returning false
+   * means the delegate could not take responsibility (e.g. an empty list)
+   * and the raw write below stays as the fallback.
+   */
+  private goToBottom: (() => boolean) | null = null;
   /** Fired on the unpinned -> pinned flip only. The unread badge has to go
    *  away when the reader scrolls down to meet their messages, and that is a
    *  scroll, not a render: without this the screen cannot see it. */
@@ -86,6 +101,19 @@ export class FollowController {
     if (this.pinned === next) return;
     this.pinned = next;
     this.onPinnedChange?.(next);
+  }
+
+  /** Install (or clear) the bottom-positioning mechanism. Called by the hook
+   *  binding when the surface has a virtualized list to delegate to. */
+  setGoToBottom(fn: (() => boolean) | null): void {
+    this.goToBottom = fn;
+  }
+
+  /** The single bottom-write point: prefer the surface's mechanism, fall
+   *  back to the raw write. Never call `el.scrollTop =` anywhere else. */
+  private pinToBottom(): void {
+    if (this.goToBottom?.() === true) return;
+    if (this.el) this.el.scrollTop = this.el.scrollHeight;
   }
 
   /** Callback-ref binding: attach the currently mounted container (null detaches). */
@@ -124,7 +152,7 @@ export class FollowController {
       // the page can well have landed BEFORE this node existed, and the refresh
       // that carried it ran against the previous container (or none). A reader
       // who had scrolled up (`pinned === false`) is left exactly where they are.
-      if (this.pinned) el.scrollTop = el.scrollHeight;
+      if (this.pinned) this.pinToBottom();
     }
   }
 
@@ -139,14 +167,14 @@ export class FollowController {
       this.lastKey = forceKey ?? null;
       this.setPinned(true);
     }
-    if (this.pinned) this.el.scrollTop = this.el.scrollHeight;
+    if (this.pinned) this.pinToBottom();
   }
 
   /** Re-claim the follow (the send path calls this before the echo lands). */
   stickNow(): void {
     if (!this.el) return;
     this.setPinned(true);
-    this.el.scrollTop = this.el.scrollHeight;
+    this.pinToBottom();
   }
 }
 
@@ -165,6 +193,12 @@ export function useStickToBottom(
    *  `overflow-anchor: none` on the viewport so the two mechanisms do not both
    *  compensate. */
   prependSignal?: number,
+  /** The surface's bottom-positioning mechanism — see `FollowController`
+   *  `goToBottom`. A virtualized transcript hands in its list handle's
+   *  `scrollToBottom` (which arms measurement convergence); without it a
+   *  single `scrollTop = scrollHeight` write lands short on a list whose
+   *  total height is still an estimate. */
+  goToBottom?: () => boolean,
 ): {
   ref: (el: HTMLDivElement | null) => void;
   stickNow: () => void;
@@ -183,6 +217,11 @@ export function useStickToBottom(
   // Keep the latest callback without re-creating the ref binding.
   const pinnedRef = useRef(onBecamePinned);
   pinnedRef.current = onBecamePinned;
+  // The bottom-positioning mechanism is kept in a ref too: the controller holds
+  // one stable wrapper across renders and always calls the latest delegate.
+  const goBottomRef = useRef(goToBottom);
+  goBottomRef.current = goToBottom;
+  ctrl.current.setGoToBottom(goToBottom ? () => goBottomRef.current!() : null);
   // Reactive follow flag: the controller reports every pinned flip into this
   // state so the arrow can appear/disappear. Defaults to pinned (a fresh view
   // opens at the tail), matching the controller's own initial bit.

@@ -154,6 +154,61 @@ describe("VirtualRowList shell", () => {
     expect(s2.mountedIndexes()).toContain(29);
   });
 
+  it("scrollToBottom arms through the late-ref window and lands when the container appears", () => {
+    // The session-switch shape: the surface's follow refresh runs in its
+    // layout effect while the virtualizer has not discovered its scroll
+    // element yet (React attaches the parent's ref after this child's
+    // effects). A dropped request left the transcript at the top or stuck on
+    // the estimate; an armed one is honoured on the attach commit and rides
+    // measurement convergence — no caller-side retry loop.
+    const container = document.createElement("div");
+    container.dataset.oh = "400";
+    Object.defineProperty(container, "clientWidth", { configurable: true, get: () => 800 });
+    let st = 0;
+    Object.defineProperty(container, "scrollTop", {
+      configurable: true,
+      get: () => st,
+      set: (v: number) => {
+        st = v;
+      },
+    });
+    Object.defineProperty(container, "clientHeight", { configurable: true, get: () => 400 });
+    Object.defineProperty(container, "scrollHeight", {
+      configurable: true,
+      get: () =>
+        parseFloat((container.firstElementChild as HTMLElement)?.style.height || "0") || 0,
+    });
+    document.body.appendChild(container);
+
+    const lateRef = { current: null as HTMLDivElement | null };
+    const handle = createRef<VirtualRowListHandle>();
+    const list = items(30, nextPrefix());
+    const tree = () => (
+      <VirtualRowList
+        ref={handle}
+        items={list}
+        keyOf={(it) => it.id}
+        scrollContainerRef={lateRef}
+        rowAttrs={() => ({ "data-oh": "40", "data-testid": "row" })}
+        renderItem={() => <span>row</span>}
+      />
+    );
+    const { rerender } = render(tree(), { container });
+
+    // Not attached yet: the request is accepted (armed), nothing positioned.
+    expect(handle.current!.scrollToBottom()).toBe(true);
+    expect(container.scrollTop).toBe(0);
+
+    // The container appears: the next commit must honour the armed anchor.
+    // (A fresh element per render — rerendering the SAME element reference
+    // lets React bail out of the subtree and the effects never run.)
+    lateRef.current = container;
+    act(() => rerender(tree()));
+    const max = container.scrollHeight - container.clientHeight;
+    expect(max).toBeGreaterThan(0);
+    expect(container.scrollTop).toBe(max);
+  });
+
   it("adapter estimateSize is consulted for rows without a measurement", () => {
     const seen: number[] = [];
     const s = setup(items(50, nextPrefix()), {

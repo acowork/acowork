@@ -534,11 +534,21 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // trigger unchanged and does not jump to the bottom; browser scroll
   // anchoring (`overflow-anchor: auto` on the viewport) holds the visible rows
   // put as older content appears above them, recomputing only the thumb.
+  // Bottom-positioning mechanism for the follow controller: the transcript is
+  // virtualized, so a single `scrollTop = scrollHeight` write cannot land on a
+  // bottom whose height is still an estimate (and may not be sized at all on
+  // the session-switch commit). The list handle's scrollToBottom arms the
+  // shell's measurement-convergence anchor instead.
+  const positionAtBottom = useCallback(
+    () => listRef.current?.scrollToBottom() ?? false,
+    [],
+  );
   const { ref: scrollRef, stickNow, atBottom } = useStickToBottom(
     [win?.tail.length ?? 0, sessionId],
     sessionId,
     undefined,
     win?.older.length ?? 0,
+    positionAtBottom,
   );
 
   // Merged container capture — a STABLE callback on purpose. An inline arrow is

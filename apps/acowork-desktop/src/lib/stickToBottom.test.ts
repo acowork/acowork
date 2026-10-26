@@ -198,6 +198,79 @@ describe("FollowController", () => {
   });
 });
 
+/* ---------------- the bottom-positioning delegate ---------------- */
+
+/*
+ * A virtualized transcript cannot be landed on its bottom with a single raw
+ * `scrollTop = scrollHeight` write: the pane's total height is an estimate
+ * that converges asynchronously, and on the session-switch commit the list
+ * may not even have a scroll element yet. The surface therefore hands the
+ * controller a MECHANISM (`setGoToBottom`, wired from `useStickToBottom`'s
+ * `goToBottom` arg); the controller keeps the POLICY (the pinned bit). The
+ * raw write stays as the fallback for plain-DOM consumers.
+ */
+describe("FollowController bottom-positioning delegate", () => {
+  function withDelegate(): { c: FollowController; el: FakeEl; hits: () => number } {
+    const c = new FollowController();
+    const el = new FakeEl();
+    let n = 0;
+    c.setGoToBottom(() => {
+      n += 1;
+      return true;
+    });
+    return { c, el, hits: () => n };
+  }
+
+  it("every bottom write goes through the delegate, never the raw assignment", () => {
+    const { c, el, hits } = withDelegate();
+    c.bind(el); // pinned-on-arrival positioning
+    c.refresh("peer1");
+    c.refresh("peer1");
+    c.stickNow();
+    expect(hits()).toBe(4);
+    expect(el.scrollTop).toBe(0); // the raw write never ran
+  });
+
+  it("a delegate that declines falls back to the raw write", () => {
+    const c = new FollowController();
+    const el = new FakeEl();
+    c.setGoToBottom(() => false); // e.g. no list handle mounted yet
+    c.bind(el);
+    expect(el.scrollTop).toBe(el.bottom);
+  });
+
+  it("clearing the delegate restores the raw write (plain-DOM consumer)", () => {
+    const { c, el } = withDelegate();
+    c.setGoToBottom(null);
+    c.bind(el);
+    c.refresh("peer1");
+    expect(el.scrollTop).toBe(el.bottom);
+  });
+
+  it("a scroll-up still vetoes the delegate: positioning is mechanism, following is policy", () => {
+    const { c, el, hits } = withDelegate();
+    c.bind(el);
+    c.refresh("peer1"); // establish the view key
+    el.userScrollTo(0); // a real scroll-up: the geometry check runs on the element
+    const before = hits();
+    c.refresh("peer1"); // same key, scrolled up -> no positioning at all
+    expect(hits()).toBe(before);
+  });
+
+  it("the hook routes the 5th argument into the controller and refresh through it", () => {
+    const el = new FakeEl();
+    const goToBottom = vi.fn(() => true);
+    const { result, rerender } = renderHook(
+      ({ n }: { n: number }) => useStickToBottom([n], "s", undefined, undefined, goToBottom),
+      { initialProps: { n: 1 } },
+    );
+    act(() => result.current.ref(el as unknown as HTMLDivElement));
+    act(() => rerender({ n: 2 }));
+    expect(goToBottom).toHaveBeenCalled();
+    expect(el.scrollTop).toBe(0); // the raw write never ran
+  });
+});
+
 describe("onBecamePinned", () => {
   /** Bind with the callback and return a call counter. */
   function withCallback(): { c: FollowController; el: FakeEl; hits: () => number } {
