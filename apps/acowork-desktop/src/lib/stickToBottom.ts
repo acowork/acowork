@@ -87,8 +87,7 @@ export class FollowController {
   private onScroll = () => {
     if (!this.el) return;
     const was = this.pinned;
-    const near = isNearBottom(this.el);
-    if (near) {
+    if (isNearBottom(this.el)) {
       this.setPinned(true);
       // An arrival is a SCROLL, never a programmatic re-pin: only the reader's
       // own scroll-down clears the unread badge, so the receipt fires here and
@@ -110,20 +109,6 @@ export class FollowController {
       // through the explicit `unpin()`. Same discipline as the execution
       // surface's direction-guarded `handleScroll`.
       this.setPinned(false);
-    } else if (this.pinned) {
-      // Away from the bottom, yet the reader did not move up: the CONTENT
-      // grew underneath a following reader between commits — a late row
-      // measurement or the virtualizer's own resize compensation wrote a
-      // mid-list offset and the pane is now taller than where that write
-      // parked the viewport. Waiting for the next React commit to re-pin is
-      // not an option: nothing guarantees one (the measured-height update
-      // lives inside the virtualizer, not in store state), and that wait is
-      // exactly the "lands at the bottom, then hangs mid-list" drift seen on
-      // an agent switch with a cold measurement cache. The follow contract
-      // is "stay at the bottom while pinned" — re-claim it from the event
-      // itself. The re-pin lands near-bottom, so the scroll event it fires
-      // takes the `near` branch above and cannot loop.
-      this.pinToBottom();
     }
     this.lastTop = this.el.scrollTop;
   };
@@ -154,8 +139,7 @@ export class FollowController {
   /** The single bottom-write point: prefer the surface's mechanism, fall
    *  back to the raw write. Never call `el.scrollTop =` anywhere else. */
   private pinToBottom(): void {
-    const took = this.goToBottom?.() === true;
-    if (took) return;
+    if (this.goToBottom?.() === true) return;
     if (this.el) this.el.scrollTop = this.el.scrollHeight;
   }
 

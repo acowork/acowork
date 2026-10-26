@@ -52,26 +52,17 @@ export function useLocateMessage(
       setHighlightSeq(pendingLocateSeq);
       onLocate?.();
       target.scrollIntoView({ block: "center" });
-    } else {
-      // Off-viewport in a virtualized window: release the follow BEFORE the
-      // handle moves the pane. The follow rule re-pins from the scroll event
-      // itself when the pane is left away-from-bottom while pinned (the
-      // between-commit measurement drift) — a locate jump is exactly such a
-      // downward move, and riding back to the tail would defeat the locate.
-      // Releasing first makes the jump's own event arrive under
-      // `pinned === false` and pass through untouched.
+    } else if (scrollToSeq?.(pendingLocateSeq)) {
+      // Off-viewport in a virtualized window: the handle moved the pane; the
+      // row mounts on the next commit and paints the flash from there.
+      setHighlightSeq(pendingLocateSeq);
       onLocate?.();
-      if (scrollToSeq?.(pendingLocateSeq)) {
-        // The handle moved the pane; the row mounts on the next commit and
-        // paints the flash from there.
-        setHighlightSeq(pendingLocateSeq);
-      } else {
-        // `jumpToMessage` only stamps a row it just fetched into the window, so
-        // a miss here means the window moved on (a wake reset it to the tail).
-        // Drop the stale stamp rather than strand a pending highlight.
-        clearLocate();
-        return;
-      }
+    } else {
+      // `jumpToMessage` only stamps a row it just fetched into the window, so
+      // a miss here means the window moved on (a wake reset it to the tail).
+      // Drop the stale stamp rather than strand a pending highlight.
+      clearLocate();
+      return;
     }
     if (timerRef.current) window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => {
