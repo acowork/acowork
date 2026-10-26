@@ -425,7 +425,23 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
                 {row.meta?.status}
               </div>
             )}
-            {row.body ? <ChatMarkdown content={row.body} components={chatBlockComponents} /> : (
+            {/* Human input is literal text, markdown is agent speech — the
+                same renderer split the user↔agent thread (`AgentChatView`)
+                and the execution surface (`UserWithAttachmentsBubble`) apply
+                to their user rows. Routing `user_message` through
+                ChatMarkdown here was the drift: the prose shell paints
+                `color: var(--tw-prose-body)` (a page-level near-black) on
+                its own wrapper, which beats the white `text-chat-user-text`
+                the accent-filled own-bubble inherits — the "user bubble text
+                turned black" defect. It also made `**bold**` render bold in
+                a group chat while reading as literal text in the 1:1 chat. */}
+            {row.body ? (
+              row.kind === "user_message" ? (
+                <div className="whitespace-pre-wrap break-words">{row.body}</div>
+              ) : (
+                <ChatMarkdown content={row.body} components={chatBlockComponents} />
+              )
+            ) : (
               <span className="text-xs text-text-tertiary italic">{t("groupChat.emptyTurn")}</span>
             )}
           </div>
