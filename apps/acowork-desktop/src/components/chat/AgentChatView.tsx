@@ -550,7 +550,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => listRef.current?.scrollToBottom() ?? false,
     [],
   );
-  const { ref: scrollRef, stickNow, atBottom } = useStickToBottom(
+  const { ref: scrollRef, stickNow, unpin, atBottom } = useStickToBottom(
     [win?.tail.length ?? 0, sessionId],
     sessionId,
     undefined,
@@ -586,6 +586,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       if (idx < 0) return false;
       return listRef.current?.scrollToKey(`${sessionId}:${seq}`, "center") ?? false;
     },
+    // A locate parks the reader mid-history on purpose: take them out of
+    // the follow, or the persistent anchor rides the next commit back to
+    // the tail (a downward jump carries no scroll-event signal to do it).
+    () => unpin(),
   );
 
   // Stable identities: RowView is memoized, so every prop handed to it must
@@ -830,6 +834,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           items={rows}
           keyOf={rowKeyOf}
           scrollContainerRef={containerRef}
+          followBottom={atBottom}
           estimateSize={estimateRow}
           rowAttrs={(r) => ({ "data-seq": r.seq })}
           rowClassName={(r) =>

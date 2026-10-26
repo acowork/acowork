@@ -594,7 +594,7 @@ export function GroupChatPanel() {
     [],
   );
 
-  const { ref: scrollRef, stickNow, atBottom } = useStickToBottom(
+  const { ref: scrollRef, stickNow, unpin, atBottom } = useStickToBottom(
     [win?.tail.length ?? 0, activeGroupId],
     activeGroupId,
     () => {},
@@ -630,6 +630,10 @@ export function GroupChatPanel() {
       if (idx < 0) return false;
       return listRef.current?.scrollToKey(`${activeGroupId}:${seq}`, "center") ?? false;
     },
+    // A locate parks the reader mid-history on purpose: take them out of
+    // the follow, or the persistent anchor rides the next commit back to
+    // the tail (a downward jump carries no scroll-event signal to do it).
+    () => unpin(),
   );
 
   // Directory for human sender names — best-effort, once per mount.
@@ -1017,6 +1021,7 @@ export function GroupChatPanel() {
           items={rows}
           keyOf={rowKeyOf}
           scrollContainerRef={containerRef}
+          followBottom={atBottom}
           estimateSize={estimateRow}
           rowAttrs={(row) => ({ "data-seq": row.seq })}
           rowClassName={(row) =>

@@ -32,6 +32,14 @@ export function useLocateMessage(
   /** Virtualization fallback: center-scroll the row by seq through the
    *  list handle. Return false when the seq is not in the loaded window. */
   scrollToSeq?: (seq: number) => boolean,
+  /** Fired when the locate scroll is issued (either path). A locate parks
+   *  the reader mid-history ON PURPOSE — the surface must take them out of
+   *  the follow-to-bottom here. The follow rule's scroll-event unpin is
+   *  direction-guarded (a virtualized pane's stale event must not fake
+   *  intent), so a downward jump would otherwise keep the follow alive and
+   *  the persistent anchor would ride the next commit straight back to the
+   *  tail, losing the locate. */
+  onLocate?: () => void,
 ): number | null {
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -42,11 +50,13 @@ export function useLocateMessage(
       getContainer()?.querySelector<HTMLElement>(`[data-seq="${pendingLocateSeq}"]`) ?? null;
     if (target) {
       setHighlightSeq(pendingLocateSeq);
+      onLocate?.();
       target.scrollIntoView({ block: "center" });
     } else if (scrollToSeq?.(pendingLocateSeq)) {
       // Off-viewport in a virtualized window: the handle moved the pane; the
       // row mounts on the next commit and paints the flash from there.
       setHighlightSeq(pendingLocateSeq);
+      onLocate?.();
     } else {
       // `jumpToMessage` only stamps a row it just fetched into the window, so
       // a miss here means the window moved on (a wake reset it to the tail).

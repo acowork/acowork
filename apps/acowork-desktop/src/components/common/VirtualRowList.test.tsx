@@ -20,7 +20,7 @@
  */
 import { act, render } from "@testing-library/react";
 import { createRef } from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualRowList, type VirtualRowListHandle } from "./VirtualRowList";
 
 // Deterministic geometry: offsetHeight from data-oh; elements without the
@@ -43,7 +43,11 @@ function items(n: number, prefix: string): Item[] {
 
 function setup(
   list: Item[],
-  opts: { rowHeight?: number; estimateSize?: (item: Item, index: number, width: number) => number } = {},
+  opts: {
+    rowHeight?: number;
+    estimateSize?: (item: Item, index: number, width: number) => number;
+    followBottom?: boolean;
+  } = {},
 ) {
   const container = document.createElement("div");
   container.dataset.oh = "400";
@@ -70,18 +74,43 @@ function setup(
   const handle = createRef<VirtualRowListHandle>();
   const rowH = opts.rowHeight ?? 40;
 
-  render(
+  // The follow policy is mutable state of the harness: `commit` re-renders
+  // with the CURRENT policy unless a test explicitly changes it (dropping the
+  // prop on every commit would silently release the follow).
+  let follow = opts.followBottom;
+  const renderList = (l: Item[]) => (
     <VirtualRowList
       ref={handle}
-      items={list}
+      items={l}
       keyOf={(it) => it.id}
       scrollContainerRef={{ current: container }}
+      followBottom={follow}
       estimateSize={opts.estimateSize}
       rowAttrs={() => ({ "data-oh": String(rowH), "data-testid": "row" })}
       renderItem={() => <span>row</span>}
-    />,
-    { container },
+    />
   );
+
+  const view = render(renderList(list), { container });
+
+  /** Commit new content (and optionally a new follow policy). */
+  const commit = (l: Item[], nextFollow?: boolean) => {
+    follow = nextFollow === undefined ? follow : nextFollow;
+    act(() => {
+      view.rerender(renderList(l));
+    });
+  };
+
+  /** Let the virtualizer's throttled notifications (real setTimeout in
+   *  virtual-core) land: measurement-driven commits converge the total size,
+   *  exactly like the browser. Follow assertions must run after settling.
+   *  Two rounds so a notify scheduled by the first round's commit is consumed
+   *  inside act too (otherwise it leaks past teardown as an unhandled error). */
+  const settle = () =>
+    act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 10));
+    });
 
   const scroll = (top: number) => {
     act(() => {
@@ -93,7 +122,7 @@ function setup(
   const mountedIndexes = () =>
     Array.from(container.querySelectorAll<HTMLElement>("[data-index]")).map((el) => Number(el.dataset.index));
 
-  return { handle, container, scroll, mountedIndexes };
+  return { handle, container, scroll, mountedIndexes, commit, settle };
 }
 
 let uid = 0;
@@ -223,5 +252,106 @@ describe("VirtualRowList shell", () => {
     const total = parseFloat((s.container.firstElementChild as HTMLElement).style.height);
     expect(total).toBeGreaterThan(0);
     void s;
+  });
+});
+
+/* ---------------- persistent follow (followBottom) ---------------- */
+
+/*
+ * The agent-switch drift: a cold transcript keeps growing AFTER the one-shot
+ * bottom-pin's deadline (async measurements settling, code highlighting,
+ * doorbell window replacement), and a policy that only re-positions on a deps
+ * change never moves again — the reader is left mid-pane. While the surface's
+ * policy says the reader follows the tail, the shell rides EVERY commit to the
+ * bottom. A genuine user scroll-up is silenced locally (the policy's own
+ * release arrives one render later; the gap must not be spent fighting the
+ * reader), and an explicit jump re-syncs the follow from the policy.
+ */
+describe("VirtualRowList followBottom", () => {
+  const maxTop = (container: HTMLElement) => container.scrollHeight - container.clientHeight;
+
+  it("rides every commit to the bottom while the policy follows — past any deadline", async () => {
+    // Only performance.now is faked: the virtualizer's own scheduling stays real.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const prefix = nextPrefix();
+      const s = setup(items(30, prefix), { followBottom: true });
+      await s.settle();
+      expect(maxTop(s.container)).toBeGreaterThan(0);
+      expect(s.container.scrollTop).toBe(maxTop(s.container)); // the mount commit rides
+
+      // Late growth WELL past the armed one-shot's 2s window: measurements
+      // that settle after the deadline (the cold-cache agent switch) must keep
+      // the tail-anchored reader at the bottom.
+      vi.advanceTimersByTime(3000);
+      s.commit(items(60, prefix));
+      await s.settle();
+      expect(s.container.scrollTop).toBe(maxTop(s.container));
+
+      s.commit(items(90, prefix));
+      await s.settle();
+      expect(s.container.scrollTop).toBe(maxTop(s.container));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a user scroll-up silences the follow locally even while the prop stays true", async () => {
+    const prefix = nextPrefix();
+    const s = setup(items(30, prefix), { followBottom: true });
+    await s.settle();
+    expect(s.container.scrollTop).toBe(maxTop(s.container));
+
+    // The reader leaves. The controller's release lands one render later;
+    // the shell must not re-pin underneath them in the meantime.
+    s.scroll(0);
+    await s.settle();
+    expect(s.container.scrollTop).toBe(0); // the silence commit did not re-pin
+
+    s.commit(items(60, prefix));
+    await s.settle();
+    expect(s.container.scrollTop).toBe(0); // late growth does not fight them
+    s.commit(items(90, prefix));
+    await s.settle();
+    expect(s.container.scrollTop).toBe(0);
+  });
+
+  it("an explicit scrollToBottom re-syncs the follow from the policy", async () => {
+    const prefix = nextPrefix();
+    const s = setup(items(30, prefix), { followBottom: true });
+    await s.settle();
+    s.scroll(0); // locally silenced
+    s.commit(items(60, prefix));
+    await s.settle();
+    expect(s.container.scrollTop).toBe(0);
+
+    // The back-to-bottom affordance (or the delegate's jump): an explicit
+    // jump re-arms AND re-syncs the persistent follow from the prop.
+    act(() => {
+      expect(s.handle.current!.scrollToBottom()).toBe(true);
+    });
+    await s.settle();
+    expect(s.container.scrollTop).toBe(maxTop(s.container));
+
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      vi.advanceTimersByTime(3000); // past the one-shot's deadline
+      s.commit(items(90, prefix));
+      await s.settle();
+      expect(s.container.scrollTop).toBe(maxTop(s.container)); // follow, not arm
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("without the prop the shell does NOT ride late growth (one-shot only)", async () => {
+    const prefix = nextPrefix();
+    const s = setup(items(30, prefix)); // no follow policy wired
+    await s.settle();
+    expect(maxTop(s.container)).toBeGreaterThan(0);
+    expect(s.container.scrollTop).toBe(0); // nothing armed, nothing pinned
+    s.commit(items(60, prefix));
+    await s.settle();
+    expect(s.container.scrollTop).toBe(0); // the pre-fix drift behaviour, contained
   });
 });

@@ -41,7 +41,14 @@ class FakeEl implements ScrollEl {
     return this.top;
   }
   set scrollTop(v: number) {
-    this.top = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight));
+    const clamped = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight));
+    if (clamped === this.top) return;
+    this.top = clamped;
+    // Like a browser, ANY offset change dispatches a scroll event — including
+    // a programmatic bottom-pin write. The browser delivers it asynchronously;
+    // the stale-event case (the delivery lands AFTER a later commit grew the
+    // content) is modelled explicitly with `fireScroll()`.
+    this.fns.forEach((f) => f());
   }
   get bottom(): number {
     return this.scrollHeight - this.clientHeight;
@@ -54,12 +61,24 @@ class FakeEl implements ScrollEl {
   }
   /** A user scroll: move (clamped) and fire the listeners, like a browser. */
   userScrollTo(top: number): void {
-    this.scrollTop = top;
+    const before = this.top;
+    this.scrollTop = top; // fires when the offset actually moved
+    if (this.top === before) this.fns.forEach((f) => f()); // same-spot scroll still dispatches
+  }
+  /** Deliver a pending scroll event against the CURRENT geometry: models the
+   *  event of an earlier programmatic write arriving late, after content grew. */
+  fireScroll(): void {
     this.fns.forEach((f) => f());
   }
-  /** Content growth (new messages): the follow decision runs against it. */
+  /** Content growth (new messages): the browser dispatches NO scroll for this. */
   grow(by: number): void {
     this.scrollHeight += by;
+  }
+  /** Content shrink: the browser clamps an out-of-range scrollTop, and the
+   *  clamp lands AT the new bottom (dispatching through the setter). */
+  shrink(by: number): void {
+    this.scrollHeight -= by;
+    if (this.top > this.bottom) this.scrollTop = this.bottom;
   }
   listenerCount(): number {
     return this.fns.length;
@@ -198,8 +217,63 @@ describe("FollowController", () => {
   });
 });
 
-/* ---------------- the bottom-positioning delegate ---------------- */
+/* ---------------- the unpin direction guard ---------------- */
 
+/*
+ * On a virtualized pane the scroll event produced by our own bottom-pin write
+ * can be DELIVERED after a later commit has grown the content: the geometry
+ * then reads "far from the bottom" although nobody moved. Unpinning on that
+ * stale event abandoned the follow mid-convergence — the transcript landed at
+ * the bottom and drifted up as measurements settled (the agent-switch drift).
+ * Unpin therefore requires a genuine upward move; a deliberate programmatic
+ * departure (a locate jump parking mid-history) releases via explicit unpin().
+ */
+describe("FollowController unpin direction guard", () => {
+  it("a stale scroll event after content growth does NOT unpin the follow", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned-on-arrival write lands at the bottom
+    expect(el.scrollTop).toBe(el.bottom);
+    el.grow(500); // a later commit expands the pane (measurements settling)
+    el.fireScroll(); // OUR pin write's event, delivered late: far from bottom,
+                     // but the offset did not move up — no reader intent.
+    expect(c.pinned).toBe(true);
+    c.refresh("peer1"); // the follow still re-pins
+    expect(el.scrollTop).toBe(el.bottom);
+  });
+
+  it("a genuine upward move away from the bottom unpins", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned at the bottom (700)
+    el.grow(500); // content grew; the reader sits above the new bottom, still pinned
+    el.userScrollTo(400); // moved UP (700 -> 400) and away: reader intent
+    expect(c.pinned).toBe(false);
+  });
+
+  it("a shrink clamp lands at the new bottom and keeps the follow", () => {
+    const { c, el } = bound();
+    c.refresh("peer1");
+    el.shrink(400); // window replacement shrinks the pane; the browser clamps
+    expect(el.scrollTop).toBe(el.bottom); // clamp landed at the bottom
+    expect(c.pinned).toBe(true); // not mistaken for a scroll-up
+  });
+
+  it("explicit unpin() releases the follow for a programmatic departure", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned at the bottom (700)
+    el.grow(500); // window replacement: the pane is taller, bottom now 1200
+    el.scrollTop = 900; // a locate jump lands DOWNWARD, mid-history: the
+                        // offset moved down, so the guard reads no intent —
+                        // follow would survive the jump and yank the reader back.
+    expect(c.pinned).toBe(true); // the guard alone cannot release a downward move
+    c.unpin(); // the locate releases explicitly (useLocateMessage's onLocate)
+    expect(c.pinned).toBe(false);
+    el.grow(200);
+    c.refresh("peer1"); // same key: the release stands, nothing moves
+    expect(el.scrollTop).toBe(900);
+  });
+});
+
+/* ---------------- the bottom-positioning delegate ---------------- */
 /*
  * A virtualized transcript cannot be landed on its bottom with a single raw
  * `scrollTop = scrollHeight` write: the pane's total height is an estimate
@@ -250,9 +324,13 @@ describe("FollowController bottom-positioning delegate", () => {
   it("a scroll-up still vetoes the delegate: positioning is mechanism, following is policy", () => {
     const { c, el, hits } = withDelegate();
     c.bind(el);
-    c.refresh("peer1"); // establish the view key
-    el.userScrollTo(0); // a real scroll-up: the geometry check runs on the element
+    c.refresh("peer1"); // establish the view key; the delegate arms
+    // The armed mechanism's landing write (the shell pins on its next commit).
+    // A no-op delegate models the arm; the element only reaches the bottom
+    // when that write lands, exactly like the virtualized pane.
+    el.scrollTop = el.bottom;
     const before = hits();
+    el.userScrollTo(0); // a real scroll-up: the offset genuinely moved up
     c.refresh("peer1"); // same key, scrolled up -> no positioning at all
     expect(hits()).toBe(before);
   });
@@ -430,6 +508,22 @@ describe("useStickToBottom", () => {
     expect(result.current.atBottom).toBe(true);
   });
 
+  it("unpin releases the follow and mirrors into atBottom", () => {
+    // The wiring the virtualized surfaces depend on: useLocateMessage's
+    // onLocate calls unpin(), and the screen feeds the reactive atBottom into
+    // the list's followBottom prop. Both halves of that chain must move on an
+    // explicit release — a downward programmatic scroll carries no event
+    // signal the direction guard may read.
+    const { el, result, rerender } = bindHook({ count: 1, peer: "peer1" });
+    act(() => rerender({ count: 2, peer: "peer1" })); // establishes the view key
+    act(() => result.current.unpin());
+    expect(result.current.isPinned()).toBe(false);
+    expect(result.current.atBottom).toBe(false);
+    el.grow(400);
+    act(() => rerender({ count: 3, peer: "peer1" }));
+    expect(el.scrollTop).toBe(700); // the release stands: nothing re-pinned
+  });
+
   it("re-renders keep the latest onBecamePinned closure without stacking listeners", () => {
     // The callback lives in a ref precisely so a screen can pass a fresh
     // closure every render; a re-render must not re-add a scroll listener
@@ -502,8 +596,16 @@ describe("useStickToBottom through a re-created callback ref", () => {
     Object.defineProperty(HTMLElement.prototype, "scrollTop", {
       configurable: true,
       get: () => top,
-      set: (v: number) => {
-        top = Math.max(0, Math.min(v, content() - 300));
+      set(this: HTMLElement, v: number) {
+        const clamped = Math.max(0, Math.min(v, content() - 300));
+        if (clamped === top) return;
+        top = clamped;
+        // Like a browser, ANY offset change dispatches a scroll event —
+        // including the controller's programmatic bottom-pin write (async in
+        // a browser, synchronous in this harness). Without it the follow
+        // rule's direction baseline (`lastTop`) never sees the pin land and a
+        // reader's scroll-up reads as "no movement".
+        this.dispatchEvent(new Event("scroll"));
       },
     });
     const proto = HTMLElement.prototype as unknown as Record<string, unknown>;

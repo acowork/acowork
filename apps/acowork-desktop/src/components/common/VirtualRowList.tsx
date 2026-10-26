@@ -126,6 +126,16 @@ export interface VirtualRowListProps<T> {
   /** Extra inline styles for the positioned wrapper (merged over the
    *  position/transform the shell owns). */
   rowStyle?: (item: T, index: number) => React.CSSProperties | undefined;
+  /** Persistent follow (render-perf L2 seam, agent-switch drift): while the
+   *  surface's follow POLICY says the reader is at the tail, every commit
+   *  re-pins the bottom — no deadline. A single armed jump (`scrollToBottom`)
+   *  only rides the commits around itself; a virtualized pane keeps growing
+   *  afterwards (cold measurements landing, async row content, window
+   *  replacement), and a reader who never left the tail must ride all of it.
+   *  The surface drives this from `useStickToBottom().atBottom`; a genuine
+   *  user scroll-up is silenced locally (see `userLeftRef`) until the policy
+   *  re-arms, so this never fights the reader. */
+  followBottom?: boolean;
   /** React 19 ref-as-prop: the imperative handle (visible-range queries,
    *  scroll actions). */
   ref?: React.Ref<VirtualRowListHandle>;
@@ -142,6 +152,7 @@ export function VirtualRowList<T>({
   rowAttrs,
   rowClassName,
   rowStyle,
+  followBottom,
   ref,
 }: VirtualRowListProps<T>) {
   // Latest-value refs: every callback below is created once and must read the
@@ -150,6 +161,18 @@ export function VirtualRowList<T>({
   itemsRef.current = items;
   const keyOfRef = useRef(keyOf);
   keyOfRef.current = keyOf;
+
+  // Persistent-follow refs (see `followBottom` on the props). `followActive`
+  // is the prop mirrored into a ref the pin effect reads; it goes false
+  // locally when a real user scroll-up is detected (the policy's own release
+  // arrives one render later — the gap must not be spent fighting the
+  // reader) and true again when the prop re-arms.
+  const followActiveRef = useRef(followBottom ?? false);
+  const prevFollowPropRef = useRef(followBottom ?? false);
+  if ((followBottom ?? false) !== prevFollowPropRef.current) {
+    prevFollowPropRef.current = followBottom ?? false;
+    followActiveRef.current = followBottom ?? false;
+  }
 
   // ── Container width (self-measured) ──────────────────────────────
   // Copied from VirtualMessageList: setState in useLayoutEffect flushes
@@ -325,19 +348,26 @@ export function VirtualRowList<T>({
   }, [safeMeasureElement]);
 
   // ── Bottom-pin convergence (event-driven) ────────────────────────
-  // While armed, re-pin scrollTop to the (still growing) bottom on every
-  // commit: scrollToIndex lands short while never-measured rows above are
-  // under-estimated, and the virtualizer re-renders as measurements land.
-  // Disarms when the user scrolls away (never fights a deliberate scroll-up)
-  // or after BOTTOM_PIN_MAX_MS.
+  // Two riders share this effect:
+  //   - the armed one-shot from `scrollToBottom` (deadline-capped): rides the
+  //     commits around an explicit jump while estimates converge;
+  //   - the persistent follow (`followActiveRef`, policy-driven): rides EVERY
+  //     commit while the reader is following — late measurements, async row
+  //     growth and window replacement all keep a tail-anchored reader at the
+  //     bottom, which is what the one-shot could not promise past its
+  //     deadline (the agent-switch drift).
+  // Both stay silent the moment a genuine user scroll-up is seen: the pane
+  // did NOT shrink yet the offset moved up by more than the release band —
+  // see ./bottomAnchor.ts for why a shrink clamp must not count as intent.
   const pinToBottomRef = useRef(false);
   const lastPinTopRef = useRef(0);
   const pinDeadlineRef = useRef(0);
   useLayoutEffect(() => {
-    if (!pinToBottomRef.current) return;
+    const riding = pinToBottomRef.current || followActiveRef.current;
+    if (!riding) return;
     const el = scrollContainerRef.current;
     if (!el) return;
-    if (performance.now() > pinDeadlineRef.current) {
+    if (!followActiveRef.current && performance.now() > pinDeadlineRef.current) {
       pinToBottomRef.current = false;
       return;
     }
@@ -346,6 +376,11 @@ export function VirtualRowList<T>({
     // not be mistaken for the user scrolling away.
     if (decideBottomPin({ scrollTop: el.scrollTop, max, lastPinTop: lastPinTopRef.current }) === "disarm") {
       pinToBottomRef.current = false;
+      // The reader took over. The policy's own release lands one render
+      // later (its scroll listener is on the same element); until then the
+      // follow must not re-pin underneath them — silence until the prop
+      // re-arms or an explicit jump clears it.
+      followActiveRef.current = false;
       return;
     }
     el.scrollTop = max;
@@ -392,6 +427,10 @@ export function VirtualRowList<T>({
         // — so an armed request lands without any caller-side retry.
         pinToBottomRef.current = true;
         pinDeadlineRef.current = performance.now() + BOTTOM_PIN_MAX_MS;
+        // An explicit jump re-syncs the follow with the policy: the local
+        // silence (set when a user scroll-up was detected) is over — the
+        // reader asked to be at the bottom.
+        followActiveRef.current = prevFollowPropRef.current;
         const el = virtualizer.scrollElement;
         if (!el) {
           lastPinTopRef.current = 0;

@@ -81,17 +81,44 @@ export class FollowController {
    *  show a "back to bottom" affordance while the reader is scrolled up —
    *  `pinned` itself is a plain field, so reading it never re-renders. */
   private onPinnedChange: ((pinned: boolean) => void) | undefined = undefined;
+  /** Last scroll offset seen by `onScroll` — the direction guard's baseline
+   *  (see below). Scroll events are the only writer of this bit. */
+  private lastTop = 0;
   private onScroll = () => {
     if (!this.el) return;
     const was = this.pinned;
-    const next = isNearBottom(this.el);
-    this.setPinned(next);
-    // An arrival is a SCROLL, never a programmatic re-pin: only the reader's
-    // own scroll-down clears the unread badge, so the receipt fires here and
-    // nowhere else (a `refresh`/`stickNow` re-pin or a container adopt must
-    // not fake one).
-    if (next && !was) this.onBecamePinned?.();
+    if (isNearBottom(this.el)) {
+      this.setPinned(true);
+      // An arrival is a SCROLL, never a programmatic re-pin: only the reader's
+      // own scroll-down clears the unread badge, so the receipt fires here and
+      // nowhere else (a `refresh`/`stickNow` re-pin or a container adopt must
+      // not fake one).
+      if (!was) this.onBecamePinned?.();
+    } else if (this.el.scrollTop < this.lastTop - 1) {
+      // Away from the bottom AND a genuine upward move: the reader left.
+      // Geometry alone cannot make this call on a virtualized pane: the
+      // scroll event from our own bottom-pin write can be delivered after a
+      // later commit has grown the content, and reads "far from the bottom"
+      // without anyone having moved. Unpinning on that stale event abandoned
+      // the follow mid-convergence — the transcript landed at the bottom and
+      // then drifted up as measurements settled (the agent-switch drift).
+      // Our writes only ever move DOWN; a clamp from a content shrink lands
+      // AT the new bottom (the near branch above). A decrease can therefore
+      // only come from the reader. A deliberately downward programmatic
+      // scroll (a locate jump parking mid-history) releases the follow
+      // through the explicit `unpin()`. Same discipline as the execution
+      // surface's direction-guarded `handleScroll`.
+      this.setPinned(false);
+    }
+    this.lastTop = this.el.scrollTop;
   };
+
+  /** Release the follow explicitly: the locate jump moves the viewport
+   *  mid-history on purpose, and a DOWNWARD move carries no signal the
+   *  direction guard may read as intent. */
+  unpin(): void {
+    this.setPinned(false);
+  }
 
   /** Single mutation point for `pinned`: keeps `onBecamePinned` firing only
    *  on an arrival (unpinned -> pinned, so a scroll-up or an already-pinned
@@ -202,6 +229,12 @@ export function useStickToBottom(
 ): {
   ref: (el: HTMLDivElement | null) => void;
   stickNow: () => void;
+  /** Release the follow explicitly — for a programmatic scroll that parks
+   *  the reader away from the bottom (a locate jump). The follow rule's
+   *  scroll-event unpin is direction-guarded (a virtualized pane's stale
+   *  event must not fake intent), so a downward programmatic move needs
+   *  this call to take the reader out of the follow. */
+  unpin: () => void;
   /** Read the follow state without subscribing to it: an arrival effect needs
    *  to know whether the new bubble landed in view, and a scroll is not a
    *  render, so making this reactive would re-introduce the hijack. */
@@ -280,7 +313,11 @@ export function useStickToBottom(
     ctrl.current!.stickNow();
   }, []);
 
+  const unpin = useCallback(() => {
+    ctrl.current!.unpin();
+  }, []);
+
   const isPinned = useCallback(() => ctrl.current!.pinned, []);
 
-  return { ref, stickNow, isPinned, atBottom };
+  return { ref, stickNow, unpin, isPinned, atBottom };
 }
