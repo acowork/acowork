@@ -171,7 +171,7 @@ describe("TaskDetailDialog chrome", () => {
   });
 });
 
-describe("TaskDetailDrawer dispatch failure surface", () => {
+describe("TaskDetailDialog dispatch failure surface", () => {
   beforeEach(() => {
     mocks.detail = task();
   });
@@ -183,7 +183,7 @@ describe("TaskDetailDrawer dispatch failure surface", () => {
       dispatch_attempts: 3,
       dispatch_error: "gateway unreachable",
     });
-    render(<TaskDetailDrawer taskId="t-1" onClose={vi.fn()} />);
+    render(<TaskDetailDialog taskId="t-1" onClose={vi.fn()} />);
     // The mocked `t` echoes the key; the banner must be on the overview tab.
     expect(screen.getByText("pm.task.dispatchFailed")).toBeTruthy();
   });
@@ -195,7 +195,7 @@ describe("TaskDetailDrawer dispatch failure surface", () => {
       dispatch_attempts: 5,
       dispatch_error: "gateway unreachable",
     });
-    render(<TaskDetailDrawer taskId="t-1" onClose={vi.fn()} />);
+    render(<TaskDetailDialog taskId="t-1" onClose={vi.fn()} />);
     expect(screen.getByText("pm.task.dispatchAbandoned")).toBeTruthy();
   });
 
@@ -206,7 +206,7 @@ describe("TaskDetailDrawer dispatch failure surface", () => {
       dispatch_attempts: 0,
       dispatch_error: null,
     });
-    render(<TaskDetailDrawer taskId="t-1" onClose={vi.fn()} />);
+    render(<TaskDetailDialog taskId="t-1" onClose={vi.fn()} />);
     expect(screen.queryByText("pm.task.dispatchFailed")).toBeNull();
   });
 });
