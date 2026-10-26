@@ -591,6 +591,9 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         assignee: Option<String>,
         #[serde(default)]
         due_at: Option<chrono::DateTime<chrono::Utc>>,
+        /// 开始时间：到期才由 PM 派发扫描器推送 intent；缺省 = 立即。
+        #[serde(default)]
+        start_at: Option<chrono::DateTime<chrono::Utc>>,
     }
     let a: Args = parse_args("pm_create_task", args)?;
 
@@ -613,6 +616,7 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         attachment_ids: vec![],
         assignee: a.assignee,
         due_at: a.due_at,
+        start_at: a.start_at,
     };
     let task = state
         .store
@@ -640,6 +644,8 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         assignee: Option<Option<String>>,
         #[serde(default, deserialize_with = "deserialize_clearable")]
         due_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+        #[serde(default, deserialize_with = "deserialize_clearable")]
+        start_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
         #[serde(default)]
         depends_on: Option<Vec<Dependency>>,
     }
@@ -660,6 +666,7 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         priority: a.priority,
         assignee: a.assignee,
         due_at: a.due_at,
+        start_at: a.start_at,
         depends_on: a.depends_on,
     };
     let task = state.store.update_task(&a.task_id, input).await?;

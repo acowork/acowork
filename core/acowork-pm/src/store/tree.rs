@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use tokio::fs;
 
@@ -317,13 +317,7 @@ impl TreePmStore {
 
                 index.insert(
                     task_id.clone(),
-                    TaskEntry {
-                        project_id: project_id.clone(),
-                        status: task.status,
-                        assignee: task.assignee.clone(),
-                        depth,
-                        dir_path: task_path.clone(),
-                    },
+                    TaskEntry::new(project_id.clone(), depth, task_path.clone(), &task),
                 );
                 for att in &task.attachments {
                     index.register_attachment(att.id.clone(), task_id.clone());
@@ -981,6 +975,11 @@ impl PmStore for TreePmStore {
             priority: input.priority,
             assignee: input.assignee,
             due_at: input.due_at,
+            start_at: input.start_at,
+            dispatched_at: None,
+            dispatch_message_id: None,
+            dispatch_attempts: 0,
+            dispatch_error: None,
             depends_on: input.depends_on,
             attachments: vec![],
             result: None,
@@ -996,13 +995,7 @@ impl PmStore for TreePmStore {
         let mut index = self.index.write();
         index.insert(
             task_id.clone(),
-            TaskEntry {
-                project_id: project_id.clone(),
-                status: task.status,
-                assignee: task.assignee.clone(),
-                depth,
-                dir_path: dir,
-            },
+            TaskEntry::new(project_id.clone(), depth, dir, &task),
         );
         for dep in &task.depends_on {
             if dep.kind == DependencyKind::Blocks {
@@ -1105,6 +1098,11 @@ impl PmStore for TreePmStore {
             if s == TaskStatus::InProgress {
                 ensure_creation_approved(&task)?;
             }
+            if s != task.status {
+                // 状态跃迁即视为一次新的生命周期：清派发标记，
+                // 回退到 pending 时允许扫描器按 start_at 重新派发。
+                task.clear_dispatch_generation();
+            }
             task.status = s;
         }
         if let Some(p) = input.priority {
@@ -1116,10 +1114,19 @@ impl PmStore for TreePmStore {
                 let project = self.read_project(&entry.project_id).await?;
                 self.ensure_assignee_is_member(&project, &new_assignee)?;
             }
+            if input.assignee.clone().flatten().as_deref() != task.assignee.as_deref()
+                && task.status == TaskStatus::Pending
+            {
+                // 换人 = 需要重新唤醒新执行者
+                task.clear_dispatch_generation();
+            }
             task.assignee = input.assignee.clone().flatten();
         }
         if input.due_at.is_some() {
             task.due_at = input.due_at.flatten();
+        }
+        if input.start_at.is_some() {
+            task.start_at = input.start_at.flatten();
         }
         if let Some(deps) = input.depends_on {
             for dep in &deps {
@@ -1139,13 +1146,7 @@ impl PmStore for TreePmStore {
         index.remove_dependent_refs(id);
         index.insert(
             id.clone(),
-            TaskEntry {
-                project_id: entry.project_id,
-                status: task.status,
-                assignee: task.assignee.clone(),
-                depth: entry.depth,
-                dir_path: entry.dir_path,
-            },
+            TaskEntry::new(entry.project_id, entry.depth, entry.dir_path, &task),
         );
         for dep in &task.depends_on {
             if dep.kind == DependencyKind::Blocks {
@@ -1321,6 +1322,8 @@ impl PmStore for TreePmStore {
 
         task.status = TaskStatus::InProgress;
         task.claimed_at = Some(Utc::now());
+        // 离开 pending 生命周期起点：清派发标记，回退后可被重新派发
+        task.clear_dispatch_generation();
         // P3: Agent 自领后即成为责任人（修复 P1 遗留——claim 不更新 assignee）。
         // MCP 层已校验调用者 instance_id == assignee instance_id（设计 §9.2 / ADR-073）。
         // 联动指派：claim 会把 actor 写为 assignee，actor 必须是项目成员。
@@ -1329,7 +1332,7 @@ impl PmStore for TreePmStore {
         task.assignee = Some(actor.to_string());
         task.updated_at = Utc::now();
         atomic_write_json(&path, &task).await?;
-        self.refresh_entry(&entry, id, task.status, task.assignee.clone());
+        self.refresh_entry(&entry, id, &task);
         Ok(task)
     }
 
@@ -1364,7 +1367,7 @@ impl PmStore for TreePmStore {
         });
         task.updated_at = now;
         atomic_write_json(&path, &task).await?;
-        self.refresh_entry(&entry, id, task.status, task.assignee.clone());
+        self.refresh_entry(&entry, id, &task);
         Ok(task)
     }
 
@@ -1406,6 +1409,9 @@ impl PmStore for TreePmStore {
         };
         if let Some(to) = to {
             validate_transition(task.status, to, id)?;
+            if to != task.status {
+                task.clear_dispatch_generation();
+            }
             task.status = to;
         }
         task.review_status = if approved {
@@ -1415,7 +1421,7 @@ impl PmStore for TreePmStore {
         };
         task.updated_at = Utc::now();
         atomic_write_json(&path, &task).await?;
-        self.refresh_entry(&entry, id, task.status, task.assignee.clone());
+        self.refresh_entry(&entry, id, &task);
         Ok(task)
     }
 
@@ -1639,24 +1645,153 @@ impl PmStore for TreePmStore {
 // ────────────────────────────────────────────────────────────────────────────
 
 impl TreePmStore {
-    fn refresh_entry(
-        &self,
-        entry: &TaskEntry,
-        id: &TaskId,
-        status: TaskStatus,
-        assignee: Option<String>,
-    ) {
+    // ── 派发扫描器支撑（dispatch.rs 唯一消费者）──────────────────────
+
+    /// 纯内存过滤出"到期可派发"的任务 ID：pending + agent 责任人 +
+    /// 创建审批已过 + 未派发过 + `start_at` 为空或已到。
+    /// 不读任何 task.json，每 tick O(pending)。
+    /// Dependency gate over an already-loaded task: blocker statuses come
+    /// from the index, so no extra disk read (the per-candidate
+    /// `compute_blocked_by` re-read the same task.json). A dangling
+    /// reference blocks, matching `compute_blocked_by`.
+    pub fn is_dispatch_blocked(&self, task: &Task) -> bool {
+        let index = self.index.read();
+        task.depends_on.iter().any(|d| {
+            d.kind == DependencyKind::Blocks
+                && !matches!(
+                    index.by_id.get(&d.task_id).map(|e| e.status),
+                    Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+                )
+        })
+    }
+
+    /// The scanner's candidate set, computed entirely from the index (no
+    /// `task.json` reads, no entry clones): pending + past the approval
+    /// gate + `start_at` due + undispatched + agent-assigned + not
+    /// abandoned (attempt bound) + every Blocks prerequisite already
+    /// Done/Cancelled. Sorted by priority then due time; truncated to
+    /// `limit` so a large backlog costs one bounded probe per tick.
+    pub fn dispatch_due_ids(&self, now: DateTime<Utc>, limit: usize) -> Vec<TaskId> {
+        let index = self.index.read();
+        let Some(pending) = index.by_status.get(&TaskStatus::Pending) else {
+            return Vec::new();
+        };
+        let mut due: Vec<&TaskId> = pending
+            .iter()
+            .filter(|id| {
+                index.by_id.get(*id).is_some_and(|e| {
+                    e.dispatched_at.is_none()
+                        && e.review_status != ReviewStatus::Pending
+                        && matches!(&e.assignee, Some(a) if a != "human")
+                        && e.start_at.is_none_or(|s| s <= now)
+                        && e.dispatch_attempts < crate::dispatch::MAX_DISPATCH_ATTEMPTS
+                        && e.blocks.iter().all(|b| {
+                            matches!(
+                                index.by_id.get(b).map(|x| x.status),
+                                Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+                            )
+                        })
+                })
+            })
+            .collect();
+        // Highest priority first (the ordering the per-tick cap truncates by).
+        due.sort_by_key(|id| {
+            let e = &index.by_id[*id];
+            (
+                priority_rank(e.priority),
+                e.start_at.unwrap_or(DateTime::<Utc>::MIN_UTC),
+            )
+        });
+        due.truncate(limit);
+        due.into_iter().cloned().collect()
+    }
+
+    /// The dispatch generation's identity for a scanner push: returns the
+    /// task's persisted `dispatch_message_id`, minting and writing it to
+    /// disk on the first attempt of a generation (crash-safe: a retry —
+    /// or a retry after a PM restart — replays the same id, and the
+    /// Gateway dedupes the chat row and the mailbox budget on it).
+    /// `Ok(None)` = the task left the dispatchable state concurrently
+    /// (claimed / reassigned between the candidate filter and this read);
+    /// the scanner skips it this tick.
+    pub async fn dispatch_identity(&self, id: &TaskId) -> Result<Option<String>> {
+        let entry = match self.index.read().by_id.get(id).cloned() {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        let path = entry.dir_path.join("task.json");
+        let mut task: Task = read_json(&path).await?;
+        if let Some(existing) = task.dispatch_message_id.clone() {
+            return Ok(Some(existing));
+        }
+        if task.status != TaskStatus::Pending || task.dispatched_at.is_some() {
+            return Ok(None);
+        }
+        let minted = format!("pm-{}", uuid::Uuid::new_v4());
+        task.dispatch_message_id = Some(minted.clone());
+        task.updated_at = Utc::now();
+        atomic_write_json(&path, &task).await?;
+        self.refresh_entry(&entry, id, &task);
+        Ok(Some(minted))
+    }
+
+    /// Stamp `dispatched_at` after a successful delivery (idempotent: only
+    /// a still-pending, undispatched task is written). Also clears the
+    /// failure bookkeeping — the generation succeeded.
+    pub async fn mark_dispatched(&self, id: &TaskId) -> Result<()> {
+        let entry = match self.index.read().by_id.get(id).cloned() {
+            Some(e) => e,
+            None => return Ok(()),
+        };
+        let path = entry.dir_path.join("task.json");
+        let mut task: Task = read_json(&path).await?;
+        if task.status != TaskStatus::Pending || task.dispatched_at.is_some() {
+            return Ok(());
+        }
+        let now = Utc::now();
+        task.dispatched_at = Some(now);
+        task.updated_at = now;
+        task.dispatch_attempts = 0;
+        task.dispatch_error = None;
+        atomic_write_json(&path, &task).await?;
+        self.refresh_entry(&entry, id, &task);
+        Ok(())
+    }
+
+    /// Persist one failed dispatch attempt for the current generation:
+    /// bumps `dispatch_attempts` and records the reason on the task record,
+    /// so the bounded-backoff state survives a PM restart and the task
+    /// surface can show *why* nothing was dispatched. Returns the new
+    /// attempt count. A task that left the dispatchable state in the
+    /// meantime is left untouched (returns its current count).
+    pub async fn record_dispatch_failure(&self, id: &TaskId, reason: &str) -> Result<u32> {
+        let entry = match self.index.read().by_id.get(id).cloned() {
+            Some(e) => e,
+            None => return Ok(0),
+        };
+        let path = entry.dir_path.join("task.json");
+        let mut task: Task = read_json(&path).await?;
+        if task.status != TaskStatus::Pending || task.dispatched_at.is_some() {
+            return Ok(task.dispatch_attempts);
+        }
+        task.dispatch_attempts += 1;
+        task.dispatch_error = Some(reason.to_string());
+        atomic_write_json(&path, &task).await?;
+        self.refresh_entry(&entry, id, &task);
+        Ok(task.dispatch_attempts)
+    }
+
+    fn refresh_entry(&self, entry: &TaskEntry, id: &TaskId, task: &Task) {
         let mut index = self.index.write();
         index.remove(id);
         index.insert(
             id.clone(),
-            TaskEntry {
-                project_id: entry.project_id.clone(),
-                status,
-                assignee,
-                depth: entry.depth,
-                dir_path: entry.dir_path.clone(),
-            },
+            TaskEntry::new(
+                entry.project_id.clone(),
+                entry.depth,
+                entry.dir_path.clone(),
+                task,
+            ),
         );
     }
 }
@@ -1691,6 +1826,7 @@ mod tests {
             attachment_ids: vec![],
             assignee: None,
             due_at: None,
+            start_at: None,
         }
     }
 
@@ -2762,5 +2898,291 @@ mod tests {
 
         let reloaded = store.get_project(&p.id).await.unwrap().unwrap();
         assert!(reloaded.members.is_empty(), "legacy project.json must deserialize with empty members");
+    }
+
+    /// 派发扫描器过滤链路：start_at 到期 / 审批闸门 / 幂等标记 / 回退重派。
+    #[tokio::test]
+    async fn dispatch_due_ids_filter_and_idempotence() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+
+        // No start_at = dispatchable immediately.
+        let now_task = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("now") },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.dispatch_due_ids(Utc::now(), 100), vec![now_task.id.clone()]);
+
+        // Future start_at → not due.
+        let future = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    assignee: Some(inst.into()),
+                    start_at: Some(Utc::now() + chrono::Duration::hours(1)),
+                    ..create_task_input("future")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.dispatch_due_ids(Utc::now(), 100), vec![now_task.id.clone()]);
+
+        // Agent-created and unapproved → not dispatched; approval joins candidates.
+        let unapproved = store
+            .create_task_as(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("unapproved") },
+                inst,
+                MemberKind::Agent,
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.dispatch_due_ids(Utc::now(), 100), vec![now_task.id.clone()]);
+        approve_creation(&store, &unapproved.id).await;
+        let mut due = store.dispatch_due_ids(Utc::now(), 100);
+        due.sort_by_key(|t| t.to_string());
+        assert_eq!(due.len(), 2, "approved task joins the candidate set");
+
+        // mark_dispatched → idempotent, leaves the candidate set.
+        store.mark_dispatched(&now_task.id).await.unwrap();
+        let after = store.dispatch_due_ids(Utc::now(), 100);
+        assert_eq!(after, vec![unapproved.id.clone()]);
+        let stamped = store.get_task(&now_task.id).await.unwrap().unwrap();
+        assert!(stamped.dispatched_at.is_some());
+
+        // claim (leaving pending) clears the dispatch stamp; rollback to
+        // pending allows re-dispatch.
+        store.claim_task(&now_task.id, inst).await.unwrap();
+        store
+            .update_task(
+                &now_task.id,
+                UpdateTask { status: Some(TaskStatus::Pending), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(store.dispatch_due_ids(Utc::now(), 100).contains(&now_task.id));
+
+        // A future task must never appear in the candidate set.
+        assert!(!store.dispatch_due_ids(Utc::now(), 100).contains(&future.id));
+
+        // Abandon gate: at the persisted attempt bound the task leaves the
+        // candidates without ever being dispatched; the bound is index-side
+        // now, so the scanner never touches its disk again until a
+        // generation transition resets it.
+        let stuck = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("stuck") },
+                "human",
+            )
+            .await
+            .unwrap();
+        for _ in 0..crate::dispatch::MAX_DISPATCH_ATTEMPTS {
+            store.record_dispatch_failure(&stuck.id, "gateway down").await.unwrap();
+        }
+        assert!(
+            !store.dispatch_due_ids(Utc::now(), 100).contains(&stuck.id),
+            "an abandoned generation drops out of the due set"
+        );
+        store
+            .update_task(
+                &stuck.id,
+                UpdateTask { status: Some(TaskStatus::InProgress), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        store
+            .update_task(
+                &stuck.id,
+                UpdateTask { status: Some(TaskStatus::Pending), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.dispatch_due_ids(Utc::now(), 100).contains(&stuck.id),
+            "a new generation re-arms the attempt bound"
+        );
+
+        // Dependency gate, index-side: a Blocks prerequisite that is not
+        // Done/Cancelled keeps the dependent out of the due set.
+        let blocker = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("blocker") },
+                "human",
+            )
+            .await
+            .unwrap();
+        let dependent = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    assignee: Some(inst.into()),
+                    depends_on: vec![crate::types::Dependency {
+                        task_id: blocker.id.clone(),
+                        kind: crate::types::DependencyKind::Blocks,
+                    }],
+                    ..create_task_input("dependent")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store.dispatch_due_ids(Utc::now(), 100).contains(&dependent.id),
+            "blocked tasks wait for their blocker's own dispatch cycle"
+        );
+        store
+            .update_task(
+                &blocker.id,
+                UpdateTask { status: Some(TaskStatus::Cancelled), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.dispatch_due_ids(Utc::now(), 100).contains(&dependent.id),
+            "a Cancelled blocker releases the dependent (Done answers too)"
+        );
+
+        // Limit: the due set is truncated, so a 10k-task backlog costs one
+        // bounded probe per tick instead of unbounded per-candidate reads.
+        assert!(store.dispatch_due_ids(Utc::now(), 1).len() <= 1);
+    }
+
+    /// Dispatch generation identity lifecycle: minted and persisted before
+    /// the first attempt (crash-safe), reused on retry, reused after a PM
+    /// restart (reopen + rebuild), and replaced after a generation
+    /// transition clears it.
+    #[tokio::test]
+    async fn dispatch_identity_is_persisted_and_reset_per_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PmConfig {
+            data_dir: dir.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
+        let store = TreePmStore::new(cfg.clone()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+        let t = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("idem") },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        // First dispatch: minted and persisted BEFORE the delivery attempt.
+        let id1 = store
+            .dispatch_identity(&t.id)
+            .await
+            .unwrap()
+            .expect("first call mints");
+        assert!(id1.starts_with("pm-"));
+        let persisted = store.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(
+            persisted.dispatch_message_id.as_deref(),
+            Some(id1.as_str()),
+            "the identity is durable BEFORE the first delivery attempt"
+        );
+
+        // Retries reuse the same generation identity (the Gateway dedupes
+        // the chat row and the budget on it).
+        assert_eq!(store.dispatch_identity(&t.id).await.unwrap(), Some(id1.clone()));
+
+        // A failure is durable bookkeeping: the count and the reason live
+        // on the task record, not in the scanner process.
+        assert_eq!(store.record_dispatch_failure(&t.id, "gateway unreachable").await.unwrap(), 1);
+        assert_eq!(store.record_dispatch_failure(&t.id, "gateway unreachable").await.unwrap(), 2);
+
+        // PM restart: still reused after reopening the store and rebuilding
+        // the index (a disk fact, not process state).
+        drop(store);
+        let store = TreePmStore::new(cfg).await.unwrap();
+        store.rebuild_index().await.unwrap();
+        assert_eq!(store.dispatch_identity(&t.id).await.unwrap(), Some(id1.clone()));
+        let kept = store.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(kept.dispatch_attempts, 2, "the backoff count survives a restart");
+        assert_eq!(kept.dispatch_error.as_deref(), Some("gateway unreachable"));
+
+        // A status transition (leaving pending and rolling back) = new
+        // generation: the old identity, the count and the reason are all
+        // cleared, and a fresh identity is minted.
+        store
+            .update_task(
+                &t.id,
+                UpdateTask { status: Some(TaskStatus::InProgress), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        store
+            .update_task(
+                &t.id,
+                UpdateTask { status: Some(TaskStatus::Pending), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        let after = store.get_task(&t.id).await.unwrap().unwrap();
+        assert!(
+            after.dispatch_message_id.is_none() && after.dispatched_at.is_none(),
+            "a generation transition clears the identity together with dispatched_at"
+        );
+        assert_eq!(
+            (after.dispatch_attempts, after.dispatch_error.clone()),
+            (0, None),
+            "abandonment is per generation: the count resets with it"
+        );
+        let id2 = store.dispatch_identity(&t.id).await.unwrap().expect("new generation mints");
+        assert_ne!(id1, id2, "the new generation is a new identity");
+    }
+
+    #[tokio::test]
+    async fn successful_dispatch_clears_failure_bookkeeping() {
+        let cfg = test_config();
+        let store = TreePmStore::new(cfg).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+        let t = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("recover") },
+                "human",
+            )
+            .await
+            .unwrap();
+        store.record_dispatch_failure(&t.id, "transient").await.unwrap();
+        store.mark_dispatched(&t.id).await.unwrap();
+        let done = store.get_task(&t.id).await.unwrap().unwrap();
+        assert!(done.dispatched_at.is_some());
+        assert_eq!((done.dispatch_attempts, done.dispatch_error), (0, None),
+            "a delivered generation carries no stale failure onto the task surface");
     }
 }

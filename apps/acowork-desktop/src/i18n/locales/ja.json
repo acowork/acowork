@@ -229,8 +229,7 @@
   "chatView": {
     "empty": "このチャットにメッセージはありません",
     "routerFallback": "自動で割り当てました",
-    "cardAnswered": "回答済み",
-    "cardClosed": "終了",
+    "cardUnanswered": "回答なし：{{question}}",
     "cardAsk": "Agent の質問",
     "cardApproval": "承認が必要",
     "cardPause": "ステップ確認",
@@ -1634,6 +1633,9 @@
       "edit": "タスクを編集",
       "delete": "タスクを削除",
       "dueDate": "期限",
+      "dispatchFailed": "ディスパッチ失敗（{{attempts}} 回目）：{{error}}",
+      "dispatchAbandoned": "5 回连续失败后已放弃派发：{{error}}。重新指派或变更状态后可重试。",
+      "startDate": "開始日",
       "assignee": "担当者",
       "priority": "優先度",
       "type": "種別",
@@ -1860,6 +1862,8 @@
     "placeholderWithMentions": "送信。@Agent で処理を依頼",
     "send": "送信",
     "emptyTurn": "（出力なし）",
+    "taskChip": "タスク {{id}}",
+    "taskChipCopy": "タスクIDをコピー",
     "readOnly": "読み取り専用 — このプロジェクトのメンバーではありません。"
   }
 }

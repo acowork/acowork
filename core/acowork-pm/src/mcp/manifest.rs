@@ -122,6 +122,11 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "format": "date-time",
             "description": "RFC3339 due timestamp, e.g. 2026-09-05T00:00:00Z"
           },
+          "start_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 start timestamp. The PM dispatch scanner sends the wake-up intent to the assignee agent when start_at is reached (after human approval). Omit or null = dispatch as soon as the task is actionable."
+          },
           "depends_on": {
             "type": "array",
             "items": {
@@ -162,7 +167,17 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "enum": ["pending", "in_progress", "submitted", "done", "rejected", "cancelled"]
           },
           "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
-          "assignee": { "type": ["string", "null"] }
+          "assignee": { "type": ["string", "null"] },
+          "due_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "RFC3339 due timestamp, e.g. 2026-09-05T00:00:00Z. Null clears it."
+          },
+          "start_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "RFC3339 start timestamp. The PM dispatch scanner sends the wake-up intent to the assignee agent when start_at is reached (after human approval). Null clears it (dispatch as soon as the task is actionable)."
+          }
         }
       }
     },
@@ -253,5 +268,37 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
         let raw = parsed["tools"].as_array().unwrap();
         assert_eq!(super::manifest_tools().len(), raw.len());
+    }
+
+    #[test]
+    fn update_and_create_advertise_the_same_schedule_fields() {
+        // The code accepts start_at / due_at on update; if the schema does
+        // not advertise them, the model can never discover them (review
+        // #4). Both tools must speak the same vocabulary.
+        let parsed: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
+        let props = |tool: &str| {
+            parsed["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == tool)
+                .unwrap()["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<String>>()
+        };
+        let create = props("pm_create_task");
+        let update = props("pm_update_task");
+        // The schedule pair is the point of this test; the shared body
+        // fields guard against a rename drifting one tool only.
+        // (`status` is update-only by design: a fresh task starts pending.)
+        for field in ["start_at", "due_at", "title", "description", "priority", "assignee"] {
+            assert!(create.contains(field), "pm_create_task missing {field}");
+            assert!(update.contains(field), "pm_update_task missing {field}");
+        }
+        assert!(!create.contains("status"));
+        assert!(update.contains("status"));
     }
 }

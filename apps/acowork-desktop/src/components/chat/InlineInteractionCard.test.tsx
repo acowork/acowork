@@ -3,9 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { InlineInteractionCard } from "./InlineInteractionCard";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
-// `t` echoes the key so assertions read against the i18n vocabulary directly.
+// `t` echoes the key (plus the interpolated question when a call passes one)
+// so assertions read against the i18n vocabulary directly.
 vi.mock("../../i18n/useTranslation", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, params?: Record<string, string>) =>
+      params && params.question !== undefined ? `${key}«${params.question}»` : key,
+  }),
 }));
 
 type Interaction = NonNullable<ChatMessageRow["meta"]>["interaction"];
@@ -113,10 +117,10 @@ describe("InlineInteractionCard", () => {
     expect(onAnswer).toHaveBeenCalledWith(row, "", false);
   });
 
-  it("collapses an answered card into a read-only receipt", () => {
+  it("paints nothing once the card is answered", () => {
     const onAnswer = vi.fn();
     const row = cardRow("card1", askOpts);
-    render(
+    const { container } = render(
       <InlineInteractionCard
         row={row}
         closed={new Set(["card1"])}
@@ -124,14 +128,18 @@ describe("InlineInteractionCard", () => {
         onAnswer={onAnswer}
       />,
     );
-    expect(screen.getByText(/chatView.cardAnswered/)).toBeTruthy();
+    // The receipt card is gone: it repeated the question and said nothing about
+    // who answered or what they said. The answer bubble's quote line carries the
+    // link now (see ReplyQuote + AgentChatView / GroupChatPanel).
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText(/chatView.cardAnswered/)).toBeNull();
     expect(screen.queryByText("chatView.freeAnswer")).toBeNull();
     expect(onAnswer).not.toHaveBeenCalled();
   });
 
-  it("collapses a closed-but-unanswered card into a closed receipt", () => {
-    const row = cardRow("card1", askOpts);
-    render(
+  it("leaves a quiet one-line note when a card closed with no answer", () => {
+    const row = cardRow("card1", { ...askOpts, question: "Deploy now?" });
+    const { container } = render(
       <InlineInteractionCard
         row={row}
         closed={new Set(["card1"])}
@@ -139,7 +147,18 @@ describe("InlineInteractionCard", () => {
         onAnswer={vi.fn()}
       />,
     );
-    expect(screen.getByText(/chatView.cardClosed/)).toBeTruthy();
+    // The fact that a decision was requested and never got one exists nowhere
+    // else in the transcript, so it must stay visible — but as a line, not a
+    // card shell: no border, no header band, no fill.
+    // Exact string, not a regex: the quoted question contains `?`, which a
+    // RegExp would read as a quantifier.
+    expect(screen.getByText("chatView.cardUnanswered«Deploy now?»")).toBeTruthy();
+    const line = container.querySelector("div");
+    expect(line?.className).not.toContain("border");
+    expect(line?.className).not.toContain("bg-");
+    expect(line?.className).toContain("text-text-tertiary");
+    // And it stays inert: there is nothing left to click.
+    expect(container.querySelector("button")).toBeNull();
   });
 
   it("renders an answerable question with no affordance in read-only mode", () => {

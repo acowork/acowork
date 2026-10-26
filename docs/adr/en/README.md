@@ -120,6 +120,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 92 | [ADR-099](./ADR-099-chat-session-llm-router.md) | LLM Semantic Routing for Chat Sessions (Chat Router) | Accepted | [zh](../zh/ADR-099-chat-session-llm-router.md) |
 | 93 | [ADR-100](./ADR-100-chat-event-log.md) | Chat Event Log — Remove the Execution Status Card, Land In-flight Turns as Point-in-Time Event Rows | Accepted | [zh](../zh/ADR-100-chat-event-log.md) |
 | 94 | [ADR-101](./ADR-101-memory-standalone-mcp-service.md) | Extracting the Memory Module from the Runtime into a Replaceable Standalone Service acowork-memory (MCP Integration) | Proposed (pending architecture review) | [zh](../zh/ADR-101-memory-standalone-mcp-service.md) |
+| 95 | [ADR-102](./ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain.md) | TurnOrigin Vocabulary and PM Dispatch Chain Governance | Accepted | [zh](../zh/ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain.md) |
 
 ---
 

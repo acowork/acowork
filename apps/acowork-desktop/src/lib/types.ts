@@ -675,6 +675,44 @@ export type AttachedItem =
   | AttachedFolderItem;
 
 /**
+ * A workspace reference pending on a composer, picked with "Add to Chat".
+ * Both surfaces hold this shape: the execution view on the execution session
+ * (`chatStore.attachedContext`), the Chat surface on the Chat session
+ * (`chatSessionStore.attachedContext`). It is a live path the Agent reads with
+ * its own tools — NOT a copy of the file (that is what the composer's
+ * Paperclip upload is for).
+ */
+export interface WorkspaceRef {
+  id: string;
+  type: "file" | "directory" | "selection";
+  name: string;
+  absPath: string;
+  /** Line range for `selection` (1-based, inclusive). */
+  startLine?: number;
+  endLine?: number;
+}
+
+/**
+ * The ADR-046 wire arm a pending reference ships as. One mapping for both
+ * surfaces, so a file attached from the Chat surface cannot arrive as a
+ * different item than the same file attached from the execution view.
+ */
+export function workspaceRefToAttachedItem(ref: WorkspaceRef): AttachedItem {
+  if (ref.type === "selection") {
+    return {
+      type: "attached_selection",
+      absPath: ref.absPath,
+      name: ref.name,
+      startLine: ref.startLine ?? 1,
+      endLine: ref.endLine ?? ref.startLine ?? 1,
+    };
+  }
+  return ref.type === "directory"
+    ? { type: "attached_folder", absPath: ref.absPath, name: ref.name }
+    : { type: "attached_file", absPath: ref.absPath, name: ref.name };
+}
+
+/**
  * Convert an `AttachedItem[]` to the JSON wire shape the MQTT boundary
  * sends to the Runtime.
  *

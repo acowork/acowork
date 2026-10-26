@@ -193,6 +193,22 @@ impl PmService {
         });
     }
 
+    /// Start-time-driven task dispatch scanner (see [`crate::dispatch`]).
+    /// No-op without a Gateway (standalone/test mode), same degradation
+    /// rule as provisioning. The scanner stops between ticks once
+    /// `shutdown` is requested.
+    pub fn spawn_dispatch_scanner(
+        self: &Arc<Self>,
+        interval: std::time::Duration,
+        per_tick: usize,
+        shutdown: Arc<acowork_core::shutdown::Shutdown>,
+    ) {
+        let Some(gateway) = self.gateway.clone() else {
+            return;
+        };
+        crate::dispatch::spawn_scanner(self.store.clone(), gateway, interval, per_tick, shutdown);
+    }
+
     /// 优雅停机（flush 待写、关闭 store）。
     pub async fn shutdown(&self) -> Result<()> {
         self.store.shutdown().await

@@ -12,7 +12,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use crate::types::{AttachmentId, ProjectId, TaskId, TaskStatus};
+use chrono::{DateTime, Utc};
+
+use crate::types::{AttachmentId, Priority, ProjectId, ReviewStatus, TaskId, TaskStatus};
 
 /// 二级索引。
 ///
@@ -47,6 +49,47 @@ pub struct TaskEntry {
     ///
     /// 嵌套任务靠此字段 O(1) 定位物理位置；reparent / 删除时同步更新。
     pub dir_path: PathBuf,
+    /// 派发扫描器过滤字段（纯内存过滤，避免每 tick 读 task.json）
+    pub start_at: Option<DateTime<Utc>>,
+    pub dispatched_at: Option<DateTime<Utc>>,
+    pub review_status: ReviewStatus,
+    pub priority: Priority,
+    /// Blocks prerequisites this task waits for (forward edges, derived
+    /// from `task.depends_on`). Lets the scanner's dependency gate run
+    /// purely against index statuses, with no disk reads.
+    pub blocks: Vec<TaskId>,
+    /// Consecutive dispatch failures of the current generation (abandon
+    /// gate: at or above MAX the task no longer enters the due set).
+    pub dispatch_attempts: u32,
+}
+
+impl TaskEntry {
+    /// 从持久化 `Task` 派生索引条目（写路径唯一构造入口，防止字段漂移）。
+    pub(crate) fn new(
+        project_id: ProjectId,
+        depth: u8,
+        dir_path: PathBuf,
+        task: &crate::types::Task,
+    ) -> Self {
+        Self {
+            project_id,
+            status: task.status,
+            assignee: task.assignee.clone(),
+            depth,
+            dir_path,
+            start_at: task.start_at,
+            dispatched_at: task.dispatched_at,
+            review_status: task.review_status,
+            priority: task.priority,
+            blocks: task
+                .depends_on
+                .iter()
+                .filter(|d| d.kind == crate::types::DependencyKind::Blocks)
+                .map(|d| d.task_id.clone())
+                .collect(),
+            dispatch_attempts: task.dispatch_attempts,
+        }
+    }
 }
 
 impl TaskIndex {
@@ -166,6 +209,12 @@ mod tests {
                 assignee: Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string()),
                 depth: 0,
                 dir_path: "/tmp/pm/tasks/t-1".into(),
+                start_at: None,
+                dispatched_at: None,
+                review_status: ReviewStatus::NotRequired,
+                priority: Priority::Normal,
+                blocks: vec![],
+                dispatch_attempts: 0,
             },
         );
         assert_eq!(idx.len(), 1);

@@ -23,12 +23,11 @@
  * mentions channel carries `session_config`.
  */
 
-import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, memo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown } from "lucide-react";
+import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown, ClipboardList } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import type { Components } from "react-markdown";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
 import { toolbarIconButton } from "../../lib/ui-styles";
@@ -42,9 +41,9 @@ import { UserAvatar } from "../common/UserAvatar";
 import { ViewRunButton } from "./ViewRunButton";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
-import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
+import { ReplyQuote } from "./ReplyQuote";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import {
@@ -56,7 +55,8 @@ import {
 } from "./chatTurnState";
 import { InlineInteractionCard } from "./InlineInteractionCard";
 import { detectPaste } from "./pasteDetect";
-import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
+import { ChatMarkdown } from "./ChatMarkdown";
+import { VirtualRowList, type VirtualRowListHandle } from "../common/VirtualRowList";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -78,43 +78,25 @@ import { useLocateMessage } from "../../lib/useLocateMessage";
 // Same markdown shell as AgentChatView's bubbles (kept local on purpose:
 // extracting a shared component would touch two surfaces for one class
 // list — do that when a third chat surface appears).
-const chatMarkdownComponents = {
+/**
+ * Group-surface block typography only. The behavioural overrides (fenced code,
+ * links, table scroll) and the `prose` shell now live in `ChatMarkdown`, shared
+ * with the 1:1 chat and the execution bubbles — see the drift note there.
+ *
+ * Two group behaviours were intentionally dropped when the copies merged, both
+ * toward the house style rather than away from it: fenced code is dedented like
+ * every other surface, and links take `.prose a` (globals.css) instead of a
+ * hard-coded `text-[var(--color-accent)] underline`.
+ */
+const chatBlockComponents: Components = {
   p: ({ children }: { children?: React.ReactNode }) => (
     <p className="mb-2 text-sm leading-relaxed last:mb-0">{children}</p>
   ),
-  pre: ({ children }: { children?: React.ReactNode }) => {
-    const codeEl = Children.toArray(children).find(
-      (child): child is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
-        isValidElement(child) && child.type === "code",
-    );
-    if (codeEl) {
-      const { className, children: codeContent } = codeEl.props;
-      const language = className?.replace(/^language-/, "") || "";
-      const code = Children.toArray(codeContent).join("");
-      return <CodeBlock language={language} code={code} />;
-    }
-    return <pre>{children}</pre>;
-  },
   code: ({ children }: { children?: React.ReactNode }) => (
     <code className="rounded bg-black/10 px-1 py-0.5 text-xs dark:bg-white/10">
       {children}
     </code>
   ),
-  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
-    if (!href) return <span>{children}</span>;
-    return (
-      <a
-        href={href}
-        onClick={(e) => {
-          e.preventDefault();
-          handleChatMarkdownLinkClick(href);
-        }}
-        className="text-[var(--color-accent)] underline"
-      >
-        {children}
-      </a>
-    );
-  },
   ul: ({ children }: { children?: React.ReactNode }) => (
     <ul className="mb-2 list-disc pl-5">{children}</ul>
   ),
@@ -124,28 +106,9 @@ const chatMarkdownComponents = {
   li: ({ children }: { children?: React.ReactNode }) => (
     <li className="text-sm leading-relaxed">{children}</li>
   ),
-  /** Same scroll wrapper as every other desktop markdown surface
-   *  (`MessageBubble` / `CompactionCard` / `MarkdownPreviewView`): a GFM table
-   *  cannot shrink below its widest cell, so unwrapped it widened the bubble
-   *  instead of scrolling inside it. */
-  table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
-    <div className="prose-table-scroll">
-      <table {...rest}>{children}</table>
-    </div>
-  ),
 };
 
-function ChatMarkdown({ content }: { content: string }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={chatMarkdownComponents}
-      urlTransform={markdownUrlTransform}
-    >
-      {content}
-    </ReactMarkdown>
-  );
-}
+
 
 // ── Participant naming ────────────────────────────────────────────────
 
@@ -199,9 +162,59 @@ interface RowProps {
    *  Names the run in the drill-down tooltip while the exec session still has
    *  no title. Resolved by the parent through its message_id → body index. */
   triggerBody?: string;
+  /** Question text of the `interaction_request` card this row answers, when it
+   *  answers one — the one-line quote above the answer bubble. Card-only by
+   *  construction: the parent resolves it through a card-only index. */
+  replyQuote?: string;
 }
 
-function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody }: RowProps) {
+/**
+ * A PM task dispatch chip: the task id as a compact, copyable pill shown
+ * above the human-readable dispatch text. The claim/submit playbook that
+ * wakes the agent is model-facing only (injected into the execution
+ * session's system block, never on this row) — the chip is the sole
+ * machine coordinate the human surface needs. `project_id` is deliberately
+ * absent: the row already lives in that project's own group chat.
+ */
+function TaskChip({ taskId }: { taskId: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(taskId);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable — the id is still visible as the label */
+    }
+  }, [taskId]);
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={copied ? undefined : t("groupChat.taskChipCopy")}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-10 font-medium transition-colors",
+        "border-border-outer bg-[var(--color-accent)]/10 text-text-secondary",
+        "hover:bg-[var(--color-accent)]/20",
+      )}
+    >
+      <ClipboardList className="h-3 w-3 shrink-0" aria-hidden />
+      <span className="max-w-[14rem] truncate">{t("groupChat.taskChip", { id: taskId })}</span>
+      {copied && <span aria-hidden>✓</span>}
+    </button>
+  );
+}
+
+/**
+ * One transcript row. Memoized for the same reason as AgentChatView's RowView:
+ * the composer re-renders this host on every keystroke, and the host re-runs
+ * `rows.map` — without memo that re-parses every markdown body in the window
+ * (chat-transcript render-perf plan L1). Every prop is reference-stable while
+ * the window is unchanged: `nameOf` is a `useCallback`, `closed`/`answered`
+ * are per-window memos, `onAnswer`/`onJumpToExec` are host-level callbacks.
+ */
+const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnswer, onJumpToExec, readOnly, triggerBody, replyQuote }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
@@ -377,6 +390,21 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
             labels={row.meta?.exec_attachments ?? []}
             align={own ? "end" : "start"}
           />
+          {/* A PM task dispatch: the task id rides a chip, not the body —
+              the human text stays clean and the claim/submit playbook never
+              reaches this surface at all. */}
+          {row.kind === "user_message" && row.meta?.task_id && (
+            <div className={cn("mb-1 flex flex-wrap gap-1.5", own ? "justify-end" : "justify-start")}>
+              <TaskChip taskId={row.meta.task_id} />
+            </div>
+          )}
+          {/* What this answer answers. The answered card no longer paints a
+              receipt, so the §5.5.4 `in_reply_to` link surfaces here instead —
+              above the bubble, where the highlight-filled bubble cannot swallow
+              a gray quote line. */}
+          {row.kind === "user_message" && (
+            <ReplyQuote quote={replyQuote} align={own ? "end" : "start"} />
+          )}
           {/* The group column is an `items-start` flex column, so the bubble is
              shrink-to-fit too: without the clamp, content that cannot be
              squeezed (a mermaid SVG's natural width, an unwrapped table, one
@@ -397,7 +425,23 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
                 {row.meta?.status}
               </div>
             )}
-            {row.body ? <ChatMarkdown content={row.body} /> : (
+            {/* Human input is literal text, markdown is agent speech — the
+                same renderer split the user↔agent thread (`AgentChatView`)
+                and the execution surface (`UserWithAttachmentsBubble`) apply
+                to their user rows. Routing `user_message` through
+                ChatMarkdown here was the drift: the prose shell paints
+                `color: var(--tw-prose-body)` (a page-level near-black) on
+                its own wrapper, which beats the white `text-chat-user-text`
+                the accent-filled own-bubble inherits — the "user bubble text
+                turned black" defect. It also made `**bold**` render bold in
+                a group chat while reading as literal text in the 1:1 chat. */}
+            {row.body ? (
+              row.kind === "user_message" ? (
+                <div className="whitespace-pre-wrap break-words">{row.body}</div>
+              ) : (
+                <ChatMarkdown content={row.body} components={chatBlockComponents} />
+              )
+            ) : (
               <span className="text-xs text-text-tertiary italic">{t("groupChat.emptyTurn")}</span>
             )}
           </div>
@@ -425,7 +469,7 @@ function GroupRowView({ row, me, chatSessionId, nameOf, closed, answered, onAnsw
       {own && avatar}
     </div>
   );
-}
+});
 
 // ── Mention resolution ────────────────────────────────────────────────
 
@@ -537,11 +581,25 @@ export function GroupChatPanel() {
   const [mentionActive, setMentionActive] = useState(0);
   const pickerRef = useRef<HTMLDivElement>(null);
 
-  const { ref: scrollRef, stickNow, atBottom } = useStickToBottom(
+  // Virtualized transcript handle (see the adapters below). Declared before the
+  // follow hook: the hook delegates bottom-positioning to the list's
+  // convergence anchor, because a single `scrollTop = scrollHeight` write
+  // cannot land on a virtualized bottom whose height is still an estimate.
+  const listRef = useRef<VirtualRowListHandle | null>(null);
+
+  // Bottom-positioning mechanism for the follow controller — same contract as
+  // in AgentChatView; see VirtualRowList.scrollToBottom for the arming.
+  const positionAtBottom = useCallback(
+    () => listRef.current?.scrollToBottom() ?? false,
+    [],
+  );
+
+  const { ref: scrollRef, stickNow, unpin, atBottom } = useStickToBottom(
     [win?.tail.length ?? 0, activeGroupId],
     activeGroupId,
     () => {},
     win?.older.length ?? 0,
+    positionAtBottom,
   );
 
   // Merged container capture — a STABLE callback on purpose. An inline arrow is
@@ -566,6 +624,16 @@ export function GroupChatPanel() {
     () => containerRef.current,
     pendingLocateSeq,
     () => activeGroupId && useChatSessionStore.getState().clearLocate(activeGroupId),
+    // Virtualization fallback: the row is in the window but not in the DOM.
+    (seq) => {
+      const idx = rowsRef.current.findIndex((r) => r.seq === seq);
+      if (idx < 0) return false;
+      return listRef.current?.scrollToKey(`${activeGroupId}:${seq}`, "center") ?? false;
+    },
+    // A locate parks the reader mid-history on purpose: take them out of
+    // the follow, or the persistent anchor rides the next commit back to
+    // the tail (a downward jump carries no scroll-event signal to do it).
+    () => unpin(),
   );
 
   // Directory for human sender names — best-effort, once per mount.
@@ -581,6 +649,20 @@ export function GroupChatPanel() {
   // as nothing (the shared renderer returns null) and the only state line the
   // surface adds is derived below. No projection layer is needed.
   const rows = useMemo(() => [...(win?.older ?? []), ...(win?.tail ?? [])], [win]);
+  // Virtualization adapters (render-perf L2) — see AgentChatView for the
+  // full rationale. Session-qualified keys, rows ref for the locate
+  // fallback, coarse body-length estimate corrected by measurement.
+  const rowKeyOf = useCallback(
+    (r: ChatMessageRow) => `${activeGroupId}:${r.seq}`,
+    [activeGroupId],
+  );
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const estimateRow = useCallback((r: ChatMessageRow) => {
+    const body = r.body ?? "";
+    const lines = Math.max(1, Math.ceil(body.length / 70));
+    return Math.min(480, 32 + lines * 22);
+  }, []);
   // message_id → body index over the raw window, so a reply (whose trigger is
   // only an `in_reply_to` id) can name the task in its drill-down tooltip when
   // the run has no title yet.
@@ -588,6 +670,19 @@ export function GroupChatPanel() {
     const m = new Map<string, string>();
     for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
       if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
+    }
+    return m;
+  }, [win]);
+  // Card rows only, so an answer can quote the question it answers. Separate
+  // from `bodyById` on purpose: `in_reply_to` also points at plain messages,
+  // and quoting one of those would paint a decision quote where none exists.
+  // Question-first, the same way the card renders its own text — the row body
+  // is only a summary (an approval's reads "Tool approval: bash").
+  const cardQuoteById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
+      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
+      m.set(r.meta.message_id, r.meta.interaction?.question || r.body);
     }
     return m;
   }, [win]);
@@ -838,6 +933,13 @@ export function GroupChatPanel() {
     await useChatStore.getState().openSession(agentId, execSid);
     useChatSessionStore.getState().setMode(agentId, "exec");
   }, [t]);
+  // Void-returning stable handler for memoized rows — an inline
+  // `(aid, sid) => void jumpToExec(aid, sid)` is a fresh identity per render
+  // and would defeat `GroupRowView`'s memo on every keystroke.
+  const handleJumpToExec = useCallback(
+    (agentId: string, execSid: string) => void jumpToExec(agentId, execSid),
+    [jumpToExec],
+  );
 
   if (!activeGroupId) return null;
 
@@ -911,15 +1013,24 @@ export function GroupChatPanel() {
             {t("groupChat.empty")}
           </div>
         )}
-        {rows.map((row) => (
-          <div
-            key={`${row.seq}-${row.meta?.message_id ?? ""}`}
-            data-seq={row.seq}
-            className={cn(
+        {/* Virtualized transcript window (render-perf L2) — see AgentChatView.
+            `key` remounts the shell on group switch (stale-offset contract). */}
+        <VirtualRowList
+          key={activeGroupId}
+          ref={listRef}
+          items={rows}
+          keyOf={rowKeyOf}
+          scrollContainerRef={containerRef}
+          followBottom={atBottom}
+          estimateSize={estimateRow}
+          rowAttrs={(row) => ({ "data-seq": row.seq })}
+          rowClassName={(row) =>
+            cn(
               "scroll-mt-2 transition-colors",
               highlightSeq === row.seq && "bg-[var(--color-accent)]/10",
-            )}
-          >
+            )
+          }
+          renderItem={(row) => (
             <GroupRowView
               row={row}
               me={me}
@@ -928,14 +1039,17 @@ export function GroupChatPanel() {
               closed={closed}
               answered={answered}
               onAnswer={onAnswer}
-              onJumpToExec={(aid, sid) => void jumpToExec(aid, sid)}
+              onJumpToExec={handleJumpToExec}
               triggerBody={
                 row.meta?.in_reply_to ? bodyById.get(row.meta.in_reply_to) : undefined
               }
+              replyQuote={
+                row.meta?.in_reply_to ? cardQuoteById.get(row.meta.in_reply_to) : undefined
+              }
               readOnly={!canPost}
             />
-          </div>
-        ))}
+          )}
+        />
         {/* One aggregated "an agent has your message" line, derived from the
             newest unanswered row — the group twin of the 1:1 waiting line. No
             agent is named: a fan-out can wake more than one, and the reply

@@ -987,9 +987,9 @@ async fn dispatch_inbound(
                         attached_items,
                         content_parts,
                         // Written straight against the execution surface: no
-                        // Chat row precedes it, so the echo stays standalone
-                        // (ADR-100 D12).
-                        chat_trigger_message_id: None,
+                        // Chat row precedes it, so there is nothing to answer
+                        // and no card to write (ADR-100 D12).
+                        surface: Default::default(),
                     },
                 )
                 .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))
@@ -1138,22 +1138,9 @@ async fn deliver_pinned_turn(
 ) -> bool {
     use crate::agent::session::SessionMessage;
 
-    // Same ADR-046 parse the execution surface's write path uses: a
-    // strongly-typed discriminated union, unparseable entries dropped rather
-    // than failing the turn.
-    let attached_items = env
-        .params
-        .get("attached_items")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|d| {
-                    serde_json::from_value::<acowork_core::protocol::AttachedItem>(d.clone()).ok()
-                })
-                .collect::<Vec<_>>()
-        })
-        .filter(|v: &Vec<acowork_core::protocol::AttachedItem>| !v.is_empty());
+    // Same ADR-046 parse the routed path uses — one parse, one meaning for a
+    // reference whichever transport carried the turn.
+    let attached_items = crate::agent::intent_turn::attached_items_from_params(&env.params);
     let content_parts = env
         .params
         .get("content_parts")
@@ -1264,8 +1251,13 @@ async fn deliver_pinned_turn(
                 active_skill,
                 attached_items,
                 content_parts,
-                // The Chat row this turn answers — the echo owes it a reply.
-                chat_trigger_message_id: Some(env.message_id.clone()),
+                // ADR-100 follow-up: the pinned turn's Chat obligations come
+                // from the envelope exactly like the Intent transport's — one
+                // producer, so the row this turn answers, the human who can
+                // answer a card, and the chat's human-presence fact can no
+                // longer be dropped by the conversion that switches it to the
+                // ChatMessage transport.
+                surface: crate::agent::intent_turn::TurnSurface::from_envelope(env),
             },
         )
         .is_ok()
@@ -1451,7 +1443,14 @@ async fn route_intent_legacy(
         for_execution_session: _,
     } = *env;
 
-    let is_response = kind == "response";
+    let origin = acowork_core::intent::TurnOrigin::parse(&kind);
+    let is_response = origin == acowork_core::intent::TurnOrigin::AgentResponse;
+    // A PM dispatch's wake-up playbook is model-facing and ephemeral: it
+    // bypasses the rendered message and history entirely, injected into
+    // the turn's system block (see `ContextBuilder::set_task_brief`).
+    // Origin-gated: a peer's params are never trusted with the system
+    // block (`extract_assignment_brief`).
+    let assignment_brief = crate::agent::intent_turn::extract_assignment_brief(&kind, &params);
     let content = render_intent_message(
         &from,
         &action,
@@ -1481,7 +1480,7 @@ async fn route_intent_legacy(
             // to the session the message was routed into (ADR-099).
             let seed =
                 crate::agent::session::intent_routing::SessionSeed::from_json(&session_config_json);
-            let is_chat_human = kind == "user_message" && !source_chat_session_id.is_empty();
+            let is_chat_human = origin.policy().router_eligible && !source_chat_session_id.is_empty();
             if fresh && is_chat_human {
                 // Degraded router turn: fresh session, bound to the same
                 // chat, mapping re-pointed — the same creation path the
@@ -1495,7 +1494,7 @@ async fn route_intent_legacy(
                     )
                     .await?
             } else {
-                let key = routing_key(&source_chat_session_id, &conversation_id, &message_id);
+                let key = routing_key(&kind, &source_chat_session_id, &conversation_id, &message_id);
                 session_manager
                     .lock()
                     .await
@@ -1546,20 +1545,33 @@ async fn route_intent_legacy(
         );
     }
     let opened_new = target.1;
+    // ADR-100 follow-up: this turn's Chat obligations, produced from the same
+    // envelope fields the route already read. One producer for every
+    // transport: the loop's card writer, the human-awaiting gate and the
+    // terminal echo all read this value instead of re-deriving it.
+    let surface = crate::agent::intent_turn::TurnSurface::new(
+        source_chat_session_id,
+        message_id.clone(),
+        &from,
+        has_human,
+    );
     let sent = session_manager.lock().await.send_to_session(
         &target.0,
         SessionMessage::Intent {
             content,
             message_id,
-            conversation_id,
-            source_chat_session_id,
+            surface,
             from,
             action,
             repo,
             kind,
-            has_human,
             chat_attachment_ids,
+            // A human Chat turn may carry workspace references without a pin
+            // (the Chat surface's composer never pins).
+            attached_items: crate::agent::intent_turn::attached_items_from_params(&params)
+                .unwrap_or_default(),
             in_reply_to,
+            assignment_brief,
         },
     );
     // ADR-100 D11: the routing reaction row — the same conversational fact the

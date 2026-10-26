@@ -1,6 +1,7 @@
 import { FileText, Folder, X, Hash } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useChatSessionStore } from "../../stores/chatSessionStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
 
@@ -10,6 +11,11 @@ const EMPTY_CTX: never[] = [];
 /**
  * Chips showing files/directories/selections attached to the chat input
  * (from right-click "Add to Chat" or programmatic `addAttachedContext`).
+ *
+ * `surface` picks which composer the chips belong to: the execution view
+ * keeps its pending references on the execution session (`chatStore`), the
+ * Chat view on the Chat session (`chatSessionStore`). Same list, same UI,
+ * different owner — see `lib/addToChat.ts`.
  *
  * Interaction:
  *   - Click the chip body → open the workspace ref in the in-app fileTab
@@ -21,26 +27,36 @@ const EMPTY_CTX: never[] = [];
  *     in the body button) so we don't get an invalid
  *     `button-in-button` DOM structure.
  */
-export function AttachedContextChips() {
+export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | "chat" }) {
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
 
-  const attachedContext = useChatStore((s) => {
+  const chatSessionId = useChatSessionStore((s) =>
+    selectedAgentId ? s.byAgent[selectedAgentId]?.chatSessionId ?? null : null,
+  );
+  const chatAttached = useChatSessionStore((s) =>
+    chatSessionId ? s.attachedContext[chatSessionId] ?? EMPTY_CTX : EMPTY_CTX,
+  );
+  const execAttached = useChatStore((s) => {
     if (!selectedAgentId) return EMPTY_CTX;
     const agent = s.agentStates[selectedAgentId];
     if (!agent?.activeSessionId) return EMPTY_CTX;
     const ss = agent.sessionStates[agent.activeSessionId];
     return ss?.attachedContext ?? EMPTY_CTX;
   });
-
-  const removeAttachedContext = useChatStore((s) => s.removeAttachedContext);
+  const attachedContext = surface === "chat" ? chatAttached : execAttached;
 
   if (!selectedAgentId || attachedContext.length === 0) return null;
 
   // Derive the active session's workspace ID once per render — used as
   // the highest-priority candidate root by `resolveAssetAcrossWorkspaces`.
-  const workspaceId = useWorkspaceStore.getState().getSessionWorkspaceId(
-    useChatStore.getState().getActiveSessionId(selectedAgentId) ?? "",
-  );
+  // The Chat surface has no execution session of its own yet, so there is no
+  // priority root and the resolver searches every workspace of the agent.
+  const workspaceId =
+    surface === "chat"
+      ? ""
+      : useWorkspaceStore.getState().getSessionWorkspaceId(
+          useChatStore.getState().getActiveSessionId(selectedAgentId) ?? "",
+        );
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
@@ -54,9 +70,13 @@ export function AttachedContextChips() {
         };
         const handleRemove = (e: React.MouseEvent | React.KeyboardEvent) => {
           e.stopPropagation();
+          if (surface === "chat") {
+            if (chatSessionId) useChatSessionStore.getState().removeAttachedContext(chatSessionId, item.id);
+            return;
+          }
           const sessionId = useChatStore.getState().getActiveSessionId(selectedAgentId);
           if (!sessionId) return;
-          removeAttachedContext(selectedAgentId, sessionId, item.id);
+          useChatStore.getState().removeAttachedContext(selectedAgentId, sessionId, item.id);
         };
         // Folders can't be opened by fileTab yet (silent no-op), so don't
         // pretend they're clickable — keep the body plain and let users

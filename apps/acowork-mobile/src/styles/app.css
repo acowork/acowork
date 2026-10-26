@@ -1895,6 +1895,24 @@
   font-size: 12px;
 }
 
+/* Design 27 §6.4 (v2.8): the task chip on a PM dispatch row — a pill above
+   the bubble, tap copies the bare task id (mobile twin of desktop TaskChip).
+   Neutral hairline and label: the accent belongs to button fills
+   (.boot-primary, the sheet's send), never to a chip outline or a chip
+   label — the same rule .chat-card-line-btn already follows. */
+.chat-task-chip {
+  align-self: flex-start;
+  display: inline-flex;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-label-secondary);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+
 /* ADR-100 D12: an execution surface's attached item, labelled but not
    downloadable — the blob stays in the run. The dashed outline and the muted
    ink say "this is a name, not a link", so it never reads as a broken chip. */

@@ -51,6 +51,7 @@
 
 pub mod api;
 pub mod config;
+pub mod dispatch;
 pub mod error;
 pub mod gateway_client;
 pub mod health;

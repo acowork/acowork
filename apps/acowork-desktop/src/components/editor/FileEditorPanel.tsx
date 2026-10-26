@@ -43,6 +43,7 @@ import { useSearchStore } from "../../stores/searchStore";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
+import { useAddToChatTarget, attachWorkspaceRef } from "../../lib/addToChat";
 
 /**
  * Encode a UTF-8 text string to base64 in a way that survives non-ASCII
@@ -103,9 +104,11 @@ export function FileEditorPanel({ width }: { width: number }) {
     const refreshFile = useFileEditorStore((s) => s.refreshFile);
     const openFile = useFileEditorStore((s) => s.openFile);
     const openPreview = useFileEditorStore((s) => s.openPreview);
-    const addAttachedContext = useChatStore((s) => s.addAttachedContext);
     const getActiveSessionId = useChatStore((s) => s.getActiveSessionId);
     const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
+    // The composer "Add to Chat" writes to: the Chat session on the Chat
+    // surface, the execution session on the exec surface.
+    const addToChatTarget = useAddToChatTarget(selectedAgentId);
     const sessionWorkspaceMap = useWorkspaceStore((s) => s.sessionWorkspaceMap);
     const requestLocate = useWorkspaceStore((s) => s.requestLocate);
     const requestShowWorkspacePanel = useLayoutStore((s) => s.requestShowWorkspacePanel);
@@ -275,15 +278,17 @@ export function FileEditorPanel({ width }: { width: number }) {
     // Note: "loading" is intentionally NOT a reason here. A user can still
     // attach a file mid-load; the attached-context payload only needs the
     // relPath/absPath, not the loaded content.
-    type AddToChatDisabledReason = "no-file" | "url-preview" | "wrong-agent" | "wrong-workspace" | "read-only-session" | null;
+    type AddToChatDisabledReason = "no-file" | "url-preview" | "wrong-agent" | "wrong-workspace" | "read-only-session" | "no-session" | null;
     const addToChatDisabledReason: AddToChatDisabledReason = (() => {
         if (!activeFile) return "no-file";
         if (activeFile.kind === "url") return "url-preview";
         if (activeFile.agentId !== selectedAgentId) return "wrong-agent";
         if (currentWorkspaceId !== null && activeFile.workspaceId !== currentWorkspaceId) return "wrong-workspace";
-        // ADR-076: an attachment only ships with a message we are not
-        // allowed to send, so attaching to a read-only session is a no-op.
-        if (readOnlySession) return "read-only-session";
+        // ADR-076 + design 27 Wave 5: a reference has to land in a composer
+        // that can actually send it. A read-only execution session cannot, but
+        // the Chat surface beside one still can — so the target resolver
+        // decides and `readOnlySession` only picks which tooltip to show.
+        if (addToChatTarget === null) return readOnlySession ? "read-only-session" : "no-session";
         return null;
     })();
 
@@ -1020,15 +1025,12 @@ export function FileEditorPanel({ width }: { width: number }) {
             );
             return;
         }
-        const sessionId = getActiveSessionId(agentId);
-        if (!sessionId) return;
-
         const { startLine, endLine } = selectionRange;
         const lineLabel = startLine === endLine ? `L${startLine}` : `L${startLine}-L${endLine}`;
         // Resolve absolute path from tree root
         const workspaceRoot = getCachedWorkspaceRoot(agentId, activeFile.workspaceId);
         const absPath = workspaceRoot ? `${workspaceRoot}/${activeFile.relPath}` : activeFile.relPath;
-        addAttachedContext(agentId, sessionId, {
+        attachWorkspaceRef(addToChatTarget, {
             id: `${agentId}:${activeFile.relPath}:${startLine}:${endLine}`,
             type: "selection",
             name: `${activeFile.relPath.split("/").pop() || activeFile.relPath} ${lineLabel}`,
@@ -1036,7 +1038,7 @@ export function FileEditorPanel({ width }: { width: number }) {
             startLine,
             endLine,
         });
-    }, [selectedAgentId, activeFile, selectionRange, getActiveSessionId, addAttachedContext]);
+    }, [selectedAgentId, activeFile, selectionRange, addToChatTarget]);
 
     const handleEditorChange = useCallback((value: string | undefined) => {
         if (value === undefined) return;
@@ -1094,18 +1096,16 @@ export function FileEditorPanel({ width }: { width: number }) {
             );
             return;
         }
-        const sessionId = activeSessionId;
-        if (!sessionId) return;
         // Resolve absolute path the same way as the floating selection addToChat.
         const root = getCachedWorkspaceRoot(agentId, file.workspaceId);
         const absPath = root ? `${root}/${file.relPath}` : file.relPath;
-        addAttachedContext(agentId, sessionId, {
+        attachWorkspaceRef(addToChatTarget, {
             id: `${agentId}:${file.relPath}`,
             type: "file",
             name: file.fileName,
             absPath,
         });
-    }, [selectedAgentId, activeSessionId, addAttachedContext]);
+    }, [selectedAgentId, addToChatTarget]);
 
     /**
      * Re-fetch the right-clicked tab's content from Gateway, replacing both
@@ -1221,7 +1221,7 @@ export function FileEditorPanel({ width }: { width: number }) {
         // tabs have no relPath/absPath to attach and no Gateway endpoint
         // to refetch.
         const showFileActions = target.kind === "file";
-        const canAddToChat = showFileActions && addToChatDisabledReason === null && !!activeSessionId;
+        const canAddToChat = showFileActions && addToChatDisabledReason === null;
         const canRefresh = showFileActions && !target.loading;
         // Preview is only useful for files that have a preview view
         // (Markdown / HTML / SVG), and only when the tab is currently in source
@@ -1299,6 +1299,7 @@ export function FileEditorPanel({ width }: { width: number }) {
         openFiles,
         selectedAgentId,
         activeSessionId,
+        addToChatTarget,
         t,
     ]);
 
@@ -1855,7 +1856,9 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 disabled={addToChatDisabledReason !== null}
                                 title={addToChatDisabledReason === "read-only-session"
                                     ? t("chatPanel.readOnlySession")
-                                    : undefined}
+                                    : addToChatDisabledReason === "no-session"
+                                        ? t("workspace.search.addToChatDisabled.no-session")
+                                        : undefined}
                                 className="absolute z-30 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-white shadow-md transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                                 style={{
                                     top: addToChatPos.top,

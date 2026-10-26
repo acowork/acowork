@@ -11,7 +11,7 @@ import type { ChatListAdapterV2 } from "./chatListAdapter";
 import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimator";
 import { StreamingSourceBlock } from "./StreamingSourceBlock";
 import { EmptyState } from "./EmptyState";
-import { decideBottomPin } from "./bottomAnchor";
+import { decideBottomPin } from "../common/bottomAnchor";
 // ADR-050 post-C5 fix: StreamingSourceBlock is used by VML to render
 // isLive assistant blocks (streaming preview).  Thought streaming
 // previews are still rendered inside ExploreBlock via ThinkBlock.

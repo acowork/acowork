@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use acowork_core::intent::{is_task_conversation, TurnOrigin};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -346,8 +347,14 @@ impl SessionSeed {
 /// when the task lives in a shared project group chat) > Chat session
 /// (group chats address one session per chat) > conversation (C/S
 /// follow-ups) > message id (one-shot, never re-keyed).
-pub fn routing_key(chat_session_id: &str, conversation_id: &str, message_id: &str) -> String {
-    if conversation_id.starts_with("task:") {
+///
+/// The task branch is driven by the stamped origin
+/// ([`TurnOrigin::PmTask`]), with the conversation-coordinate test kept as
+/// the mixed-version fallback: an older Gateway still sends
+/// `kind="request"` on a `task:` conversation, and mis-keying it onto the
+/// group's chat session would break §6.2 for the whole task.
+pub fn routing_key(kind: &str, chat_session_id: &str, conversation_id: &str, message_id: &str) -> String {
+    if TurnOrigin::parse(kind) == TurnOrigin::PmTask || is_task_conversation(conversation_id) {
         format!("conv:{}", conversation_id)
     } else if !chat_session_id.is_empty() {
         format!("chat:{}", chat_session_id)
@@ -365,20 +372,27 @@ mod tests {
     #[test]
     fn keys_are_namespaced_by_preference() {
         assert_eq!(
-            routing_key("cs1", "c1", "m1"),
+            routing_key("user_message", "cs1", "c1", "m1"),
             "chat:cs1".to_string(),
             "chat session wins"
         );
-        assert_eq!(routing_key("", "c1", "m1"), "conv:c1".to_string());
-        assert_eq!(routing_key("", "", "m1"), "msg:m1".to_string());
+        assert_eq!(routing_key("", "", "c1", "m1"), "conv:c1".to_string());
+        assert_eq!(routing_key("", "", "", "m1"), "msg:m1".to_string());
     }
 
     #[test]
     fn task_conversation_beats_the_chat_binding() {
         // §6.2: one execution session per (task, agent) even inside the
-        // project group chat.
+        // project group chat. Origin-stamped dispatch:
         assert_eq!(
-            routing_key("cs1", "task:p1:t1", "m1"),
+            routing_key("pm_task", "cs1", "task:p1:t1", "m1"),
+            "conv:task:p1:t1".to_string()
+        );
+        // Mixed-version fallback — an older Gateway still sends
+        // `kind="request"` on the task conversation; the coordinate keeps
+        // the key correct either way:
+        assert_eq!(
+            routing_key("request", "cs1", "task:p1:t1", "m1"),
             "conv:task:p1:t1".to_string()
         );
     }

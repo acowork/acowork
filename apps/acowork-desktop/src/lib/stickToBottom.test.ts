@@ -41,7 +41,14 @@ class FakeEl implements ScrollEl {
     return this.top;
   }
   set scrollTop(v: number) {
-    this.top = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight));
+    const clamped = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight));
+    if (clamped === this.top) return;
+    this.top = clamped;
+    // Like a browser, ANY offset change dispatches a scroll event — including
+    // a programmatic bottom-pin write. The browser delivers it asynchronously;
+    // the stale-event case (the delivery lands AFTER a later commit grew the
+    // content) is modelled explicitly with `fireScroll()`.
+    this.fns.forEach((f) => f());
   }
   get bottom(): number {
     return this.scrollHeight - this.clientHeight;
@@ -54,12 +61,24 @@ class FakeEl implements ScrollEl {
   }
   /** A user scroll: move (clamped) and fire the listeners, like a browser. */
   userScrollTo(top: number): void {
-    this.scrollTop = top;
+    const before = this.top;
+    this.scrollTop = top; // fires when the offset actually moved
+    if (this.top === before) this.fns.forEach((f) => f()); // same-spot scroll still dispatches
+  }
+  /** Deliver a pending scroll event against the CURRENT geometry: models the
+   *  event of an earlier programmatic write arriving late, after content grew. */
+  fireScroll(): void {
     this.fns.forEach((f) => f());
   }
-  /** Content growth (new messages): the follow decision runs against it. */
+  /** Content growth (new messages): the browser dispatches NO scroll for this. */
   grow(by: number): void {
     this.scrollHeight += by;
+  }
+  /** Content shrink: the browser clamps an out-of-range scrollTop, and the
+   *  clamp lands AT the new bottom (dispatching through the setter). */
+  shrink(by: number): void {
+    this.scrollHeight -= by;
+    if (this.top > this.bottom) this.scrollTop = this.bottom;
   }
   listenerCount(): number {
     return this.fns.length;
@@ -195,6 +214,154 @@ describe("FollowController", () => {
       c.stickNow();
     }).not.toThrow();
     expect(c.pinned).toBe(true);
+  });
+});
+
+/* ---------------- the unpin direction guard ---------------- */
+
+/*
+ * On a virtualized pane the scroll event produced by our own bottom-pin write
+ * can be DELIVERED after a later commit has grown the content: the geometry
+ * then reads "far from the bottom" although nobody moved. Unpinning on that
+ * stale event abandoned the follow mid-convergence — the transcript landed at
+ * the bottom and drifted up as measurements settled (the agent-switch drift).
+ * Unpin therefore requires a genuine upward move; a deliberate programmatic
+ * departure (a locate jump parking mid-history) releases via explicit unpin().
+ */
+describe("FollowController unpin direction guard", () => {
+  it("a stale scroll event after content growth does NOT unpin the follow", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned-on-arrival write lands at the bottom
+    expect(el.scrollTop).toBe(el.bottom);
+    el.grow(500); // a later commit expands the pane (measurements settling)
+    el.fireScroll(); // OUR pin write's event, delivered late: far from bottom,
+                     // but the offset did not move up — no reader intent.
+    expect(c.pinned).toBe(true);
+    c.refresh("peer1"); // the follow still re-pins
+    expect(el.scrollTop).toBe(el.bottom);
+  });
+
+  it("a genuine upward move away from the bottom unpins", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned at the bottom (700)
+    el.grow(500); // content grew; the reader sits above the new bottom, still pinned
+    el.userScrollTo(400); // moved UP (700 -> 400) and away: reader intent
+    expect(c.pinned).toBe(false);
+  });
+
+  it("a shrink clamp lands at the new bottom and keeps the follow", () => {
+    const { c, el } = bound();
+    c.refresh("peer1");
+    el.shrink(400); // window replacement shrinks the pane; the browser clamps
+    expect(el.scrollTop).toBe(el.bottom); // clamp landed at the bottom
+    expect(c.pinned).toBe(true); // not mistaken for a scroll-up
+  });
+
+  it("explicit unpin() releases the follow for a programmatic departure", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned at the bottom (700)
+    el.grow(500); // window replacement: the pane is taller, bottom now 1200
+    c.unpin(); // the locate releases BEFORE the pane moves (useLocateMessage
+               // calls onLocate first — the contract the jump must satisfy)
+    expect(c.pinned).toBe(false);
+    el.scrollTop = 900; // the jump lands DOWNWARD, mid-history; under the
+                        // old order the event-driven re-pin would ride it
+                        // straight back to the tail and defeat the locate
+    expect(el.scrollTop).toBe(900); // released: the jump's event passes through
+    el.grow(200);
+    c.refresh("peer1"); // same key: the release stands, nothing moves
+    expect(el.scrollTop).toBe(900);
+  });
+
+  it("between-commit content growth re-pins from the scroll event alone", () => {
+    const { c, el } = bound();
+    c.refresh("peer1"); // pinned at the bottom (700)
+    // The virtualizer's resize compensation (or a late row measurement)
+    // parks the viewport mid-pane while the content grows underneath: a
+    // DOWNWARD write, away from the new bottom. No React commit is
+    // guaranteed to follow — the measured-height update lives inside the
+    // virtualizer, not in store state — and waiting for one is the
+    // agent-switch "hangs mid-list" drift.
+    el.grow(500); // bottom now 1200
+    el.scrollTop = 900; // the compensation write; its event fires here
+    expect(el.scrollTop).toBe(el.bottom); // the event itself re-pinned
+    expect(c.pinned).toBe(true); // never mistaken for reader intent
+  });
+});
+
+/* ---------------- the bottom-positioning delegate ---------------- */
+/*
+ * A virtualized transcript cannot be landed on its bottom with a single raw
+ * `scrollTop = scrollHeight` write: the pane's total height is an estimate
+ * that converges asynchronously, and on the session-switch commit the list
+ * may not even have a scroll element yet. The surface therefore hands the
+ * controller a MECHANISM (`setGoToBottom`, wired from `useStickToBottom`'s
+ * `goToBottom` arg); the controller keeps the POLICY (the pinned bit). The
+ * raw write stays as the fallback for plain-DOM consumers.
+ */
+describe("FollowController bottom-positioning delegate", () => {
+  function withDelegate(): { c: FollowController; el: FakeEl; hits: () => number } {
+    const c = new FollowController();
+    const el = new FakeEl();
+    let n = 0;
+    c.setGoToBottom(() => {
+      n += 1;
+      return true;
+    });
+    return { c, el, hits: () => n };
+  }
+
+  it("every bottom write goes through the delegate, never the raw assignment", () => {
+    const { c, el, hits } = withDelegate();
+    c.bind(el); // pinned-on-arrival positioning
+    c.refresh("peer1");
+    c.refresh("peer1");
+    c.stickNow();
+    expect(hits()).toBe(4);
+    expect(el.scrollTop).toBe(0); // the raw write never ran
+  });
+
+  it("a delegate that declines falls back to the raw write", () => {
+    const c = new FollowController();
+    const el = new FakeEl();
+    c.setGoToBottom(() => false); // e.g. no list handle mounted yet
+    c.bind(el);
+    expect(el.scrollTop).toBe(el.bottom);
+  });
+
+  it("clearing the delegate restores the raw write (plain-DOM consumer)", () => {
+    const { c, el } = withDelegate();
+    c.setGoToBottom(null);
+    c.bind(el);
+    c.refresh("peer1");
+    expect(el.scrollTop).toBe(el.bottom);
+  });
+
+  it("a scroll-up still vetoes the delegate: positioning is mechanism, following is policy", () => {
+    const { c, el, hits } = withDelegate();
+    c.bind(el);
+    c.refresh("peer1"); // establish the view key; the delegate arms
+    // The armed mechanism's landing write (the shell pins on its next commit).
+    // A no-op delegate models the arm; the element only reaches the bottom
+    // when that write lands, exactly like the virtualized pane.
+    el.scrollTop = el.bottom;
+    const before = hits();
+    el.userScrollTo(0); // a real scroll-up: the offset genuinely moved up
+    c.refresh("peer1"); // same key, scrolled up -> no positioning at all
+    expect(hits()).toBe(before);
+  });
+
+  it("the hook routes the 5th argument into the controller and refresh through it", () => {
+    const el = new FakeEl();
+    const goToBottom = vi.fn(() => true);
+    const { result, rerender } = renderHook(
+      ({ n }: { n: number }) => useStickToBottom([n], "s", undefined, undefined, goToBottom),
+      { initialProps: { n: 1 } },
+    );
+    act(() => result.current.ref(el as unknown as HTMLDivElement));
+    act(() => rerender({ n: 2 }));
+    expect(goToBottom).toHaveBeenCalled();
+    expect(el.scrollTop).toBe(0); // the raw write never ran
   });
 });
 
@@ -357,6 +524,22 @@ describe("useStickToBottom", () => {
     expect(result.current.atBottom).toBe(true);
   });
 
+  it("unpin releases the follow and mirrors into atBottom", () => {
+    // The wiring the virtualized surfaces depend on: useLocateMessage's
+    // onLocate calls unpin(), and the screen feeds the reactive atBottom into
+    // the list's followBottom prop. Both halves of that chain must move on an
+    // explicit release — a downward programmatic scroll carries no event
+    // signal the direction guard may read.
+    const { el, result, rerender } = bindHook({ count: 1, peer: "peer1" });
+    act(() => rerender({ count: 2, peer: "peer1" })); // establishes the view key
+    act(() => result.current.unpin());
+    expect(result.current.isPinned()).toBe(false);
+    expect(result.current.atBottom).toBe(false);
+    el.grow(400);
+    act(() => rerender({ count: 3, peer: "peer1" }));
+    expect(el.scrollTop).toBe(700); // the release stands: nothing re-pinned
+  });
+
   it("re-renders keep the latest onBecamePinned closure without stacking listeners", () => {
     // The callback lives in a ref precisely so a screen can pass a fresh
     // closure every render; a re-render must not re-add a scroll listener
@@ -429,8 +612,16 @@ describe("useStickToBottom through a re-created callback ref", () => {
     Object.defineProperty(HTMLElement.prototype, "scrollTop", {
       configurable: true,
       get: () => top,
-      set: (v: number) => {
-        top = Math.max(0, Math.min(v, content() - 300));
+      set(this: HTMLElement, v: number) {
+        const clamped = Math.max(0, Math.min(v, content() - 300));
+        if (clamped === top) return;
+        top = clamped;
+        // Like a browser, ANY offset change dispatches a scroll event —
+        // including the controller's programmatic bottom-pin write (async in
+        // a browser, synchronous in this harness). Without it the follow
+        // rule's direction baseline (`lastTop`) never sees the pin land and a
+        // reader's scroll-up reads as "no movement".
+        this.dispatchEvent(new Event("scroll"));
       },
     });
     const proto = HTMLElement.prototype as unknown as Record<string, unknown>;

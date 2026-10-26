@@ -294,12 +294,29 @@ export function TaskDetailDialog({ taskId, onClose, onEdit, onAddSubtask }: Task
             <dl className="space-y-2 text-xs">
               <Field label={t("pm.task.assignee")} value={assigneeName ?? "—"} />
               <Field
+                label={t("pm.task.startDate")}
+                value={detail.start_at ? formatDateTime(detail.start_at) : "—"}
+              />
+              <Field
                 label={t("pm.task.dueDate")}
                 value={detail.due_at ? formatDateTime(detail.due_at) : "—"}
               />
               <Field label={t("pm.task.createdBy")} value={creatorName ?? "—"} />
               <Field label={t("pm.task.created")} value={formatDateTime(detail.created_at)} />
               <Field label={t("pm.task.updated")} value={formatDateTime(detail.updated_at)} />
+              {/* Dispatch failure is a durable task fact now (the scanner
+                  persists attempts + reason per generation) — surface it
+                  instead of leaving "never dispatched" silent. */}
+              {detail.status === "pending" && !detail.dispatched_at && detail.dispatch_error && (
+                <div className="my-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                  {detail.dispatch_attempts >= 5
+                    ? t("pm.task.dispatchAbandoned", { error: detail.dispatch_error })
+                    : t("pm.task.dispatchFailed", {
+                        attempts: detail.dispatch_attempts,
+                        error: detail.dispatch_error,
+                      })}
+                </div>
+              )}
               {detail.parent_id && (
                 <Field
                   label={t("pm.task.parentTask")}

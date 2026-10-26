@@ -61,6 +61,16 @@ export interface LocateRequest {
 
 interface WorkspaceState {
   workspaces: WorkspaceDir[];
+  /** Which agent instance `workspaces` describes, or `null` when nothing has
+   *  been fetched. The list is a single global array while the UI reads it for
+   *  `selectedAgentId`, and starting another agent fetches for that one — so
+   *  without this tag a stale array from a different agent renders as if it
+   *  were the current agent's, and picking one of those foreign ids writes a
+   *  workspace the current agent does not have (the panel then resolves
+   *  nothing, which reads as "switching does not work"). Consumers gate on it;
+   *  every failure path also re-tags it, so a failed fetch claims the slot
+   *  with an empty list instead of leaving the previous agent's on screen. */
+  workspacesAgentId: string | null;
   /** Per-session current workspace selection. "__agent_home__" = agent home. */
   sessionWorkspaceMap: Record<string, string>;
   loading: boolean;
@@ -170,11 +180,19 @@ function getGatewayUrl(): string {
   return useSettingsStore.getState().gatewayUrl || DEFAULT_GATEWAY_URL;
 }
 
-/** Monotonic counter to discard stale async responses (race-condition guard) */
-let requestSeq = 0;
+/** Monotonic counters that discard stale async responses (race guard).
+ *  Two separate counters on purpose: the list fetch and a workspace write
+ *  produce different state, and sharing one counter meant every
+ *  `setSessionWorkspace` bumped the sequence and silently discarded the
+ *  in-flight `fetchWorkspaces` result — including its `loading: false`, which
+ *  left the selector pinned on "Loading…" with the previous agent's list
+ *  underneath. Rationale for the ownership tag: `workspacesAgentId`. */
+let fetchSeq = 0;
+let writeSeq = 0;
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   workspaces: [],
+  workspacesAgentId: null,
   sessionWorkspaceMap: {},
   loading: false,
   deniedReason: null,
@@ -197,7 +215,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
  * selector dropdown while the fetch is in flight).
  */
 fetchWorkspaces: async (agentId: string) => {
-  const seq = ++requestSeq;
+  const seq = ++fetchSeq;
   set({ loading: true, deniedReason: null });
   try {
     const baseUrl = getGatewayUrl();
@@ -206,12 +224,15 @@ fetchWorkspaces: async (agentId: string) => {
       { tag: `WorkspaceStore.fetchWorkspaces(${agentId})`, logger: log },
     );
     // A newer request may have superseded us while we waited on the
-    // retry loop — drop the result so the winner's data wins.
-    if (seq !== requestSeq) return;
+    // retry loop — drop the result so the winner's data wins. The winner
+    // owns `loading`, so this path deliberately leaves it set.
+    if (seq !== fetchSeq) return;
     if (resp.status === 503) {
-      // All retries exhausted; with503Retry returned the last 503.
+      // All retries exhausted; with503Retry returned the last 503. Claim the
+      // slot with an empty list: this agent's list is unknown, which is not
+      // the same thing as another agent's list.
       log.error(`[WorkspaceStore] fetchWorkspaces(${agentId}) still 503 after retries`);
-      set({ loading: false });
+      set({ workspaces: [], workspacesAgentId: agentId, loading: false });
       return;
     }
     if (resp.status === 403) {
@@ -220,39 +241,39 @@ fetchWorkspaces: async (agentId: string) => {
       log.info(
         `[WorkspaceStore] fetchWorkspaces: 403 — caller is not on the manage list for ${agentId}`,
       );
-      set({ loading: false, deniedReason: "manage" });
+      set({ workspaces: [], workspacesAgentId: agentId, loading: false, deniedReason: "manage" });
       return;
     }
     if (!resp.ok) {
       log.error(`[WorkspaceStore] fetchWorkspaces failed:`, resp.status, resp.statusText);
-      set({ loading: false });
+      set({ workspaces: [], workspacesAgentId: agentId, loading: false });
       return;
     }
     const data = (await resp.json()) as { workspaces: WorkspaceDir[] };
     const workspaces = data.workspaces || [];
     // Discard stale response if a newer request has been issued
-    if (seq !== requestSeq) return;
+    if (seq !== fetchSeq) return;
     set({
       workspaces,
+      workspacesAgentId: agentId,
       loading: false,
     });
   } catch (e) {
     log.error(`[WorkspaceStore] fetchWorkspaces error:`, e);
-    if (seq !== requestSeq) return;
-    set({ loading: false });
+    if (seq !== fetchSeq) return;
+    set({ workspaces: [], workspacesAgentId: agentId, loading: false });
   }
 },
 
   setSessionWorkspace: async (agentId: string, sessionId: string, workspaceId: string) => {
     log.debug("[WorkspaceStore:DEBUG] setSessionWorkspace called", { agentId, sessionId, workspaceId });
-    const seq = ++requestSeq;
-    const prevWorkspaces = get().workspaces;
+    const seq = ++writeSeq;
     const prevMap = { ...get().sessionWorkspaceMap };
     try {
       // ADR-076 §决策 4: authenticated HTTP write (was MQTT, fire-and-forget).
       useChatStore.getState().setSessionWorkspace(agentId, sessionId, workspaceId);
       // Optimistically update local state (Runtime will confirm via session state event)
-      if (seq !== requestSeq) return;
+      if (seq !== writeSeq) return;
       set({
         sessionWorkspaceMap: {
           ...get().sessionWorkspaceMap,
@@ -261,8 +282,11 @@ fetchWorkspaces: async (agentId: string) => {
       });
     } catch (e) {
       log.error("[WorkspaceStore] setSessionWorkspace error:", e);
-      if (seq !== requestSeq) return;
-      set({ workspaces: prevWorkspaces, sessionWorkspaceMap: prevMap });
+      if (seq !== writeSeq) return;
+      // Only the map is rolled back: this action never writes `workspaces`,
+      // and restoring an array it does not own would desync it from
+      // `workspacesAgentId`.
+      set({ sessionWorkspaceMap: prevMap });
     }
   },
 
@@ -596,6 +620,7 @@ fetchWorkspaces: async (agentId: string) => {
   reset: () => {
     set({
       workspaces: [],
+      workspacesAgentId: null,
       sessionWorkspaceMap: {},
       loading: false,
       deniedReason: null,

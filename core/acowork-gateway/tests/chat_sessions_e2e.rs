@@ -1239,12 +1239,15 @@ fn a_pinned_send_into_a_group_files_the_head_row_and_checks_its_target() {
 }
 
 /// ADR-100 D12: the content gate and the attachment check must judge the turn
-/// this Gateway will ACTUALLY deliver, not the bytes that arrived. Three shapes
-/// used to be accepted at the gate and then die — an unpinned send whose only
-/// content was `attached_items` (dropped for want of a pin) reached the store
-/// empty and came back as a 503 wearing a delivery failure, and an entry the
-/// Runtime could not parse would have shown the chat a chip for a file the Agent
-/// never received.
+/// this Gateway will ACTUALLY deliver, not the bytes that arrived. Two shapes
+/// used to be accepted at the gate and then die — a pinned entry the Runtime
+/// could not parse would have shown the chat a chip for a file the Agent never
+/// received, and a label-less item with no text filed an empty row.
+///
+/// The attachment arm is NOT pin-only: a routed turn (the Chat surface's own
+/// composer, which never pins) carries `attached_items` into the `Intent`
+/// shape, so an attachment-only send is content on both paths. `command` stays
+/// pin-only — the Intent shape has no skill arm.
 #[test]
 fn a_send_with_nothing_to_deliver_is_a_readable_400() {
     let _serial = lock_chain();
@@ -1265,24 +1268,38 @@ fn a_send_with_nothing_to_deliver_is_a_readable_400() {
         (code, body)
     };
 
-    // (a) No pin: the items are dropped, so this turn carries nothing.
+    // (a) No pin: the routed turn has an attachment arm too, so a file with no
+    // words is a turn — the Chat surface's "Add to Chat" must not be judged
+    // empty just because it never names a session.
     let unpin = serde_json::json!({
         "chat_session_id": sid, "from_user": root, "text": "",
         "message_id": "msg-cap-1",
-        "attached_items": [{ "type": "file_upload", "documentId": "d", "filename": "x.md", "format": "md", "sizeBytes": 1 }],
+        "attached_items": [{ "type": "attached_file", "name": "src/main.rs", "absPath": "E:/work/demo/src/main.rs" }],
     });
     let (code, body) = post(&unpin);
-    assert_eq!(code, 400, "an unpinned attachment-only send is a format error, not a 503: {code} {body}");
+    assert_eq!(code, 200, "an unpinned attachment-only send is a turn: {code} {body}");
+    let row = messages(http, &token, &sid)["messages"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .rev()
+        .find(|r| r["meta"]["message_id"].as_str() == Some("msg-cap-1"))
+        .expect("an unpinned attachment-only send files its head row")
+        .clone();
+    let raw = serde_json::to_string(&row["meta"]["exec_attachments"]).unwrap();
+    assert!(raw.contains("src/main.rs"), "the routed row keeps the display name: {raw}");
+    assert!(!raw.contains("E:/work/demo") && !raw.contains("absPath"), "no path rides along: {raw}");
 
-    // (b) A pinned entry the Runtime would discard: refused at the boundary
-    // instead of becoming a label for a file nobody got.
+    // (b) An entry the Runtime would discard: refused at the boundary on
+    // either path instead of becoming a label for a file nobody got.
     let bogus = serde_json::json!({
         "chat_session_id": sid, "from_user": root, "text": "look at this",
-        "message_id": "msg-cap-2", "for_execution_session": pin,
+        "message_id": "msg-cap-2",
         "attached_items": [{ "type": "upload", "filename": "notes.md" }],
     });
     let (code, body) = post(&bogus);
-    assert_eq!(code, 400, "an unreadable attached_item is a 400: {code} {body}");
+    assert_eq!(code, 400, "an unreadable attached_item is a 400 unpinned too: {code} {body}");
     let after = messages(http, &token, &sid);
     assert_eq!(
         after["messages"]

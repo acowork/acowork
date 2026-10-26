@@ -1185,11 +1185,15 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   createSession: async (agentId: string, opts: { bindToChat?: boolean } = {}) => {
     try {
+      // Only this agent's list may seed a new session: the array is one
+      // global slot and can hold another agent's workspaces (see
+      // `WorkspaceState.workspacesAgentId`). A foreign id here would bind the
+      // new session to a workspace this agent does not have.
+      const wsState = useWorkspaceStore.getState();
       const lastActiveWs =
-        useWorkspaceStore
-          .getState()
-          .workspaces.find((w) => w.last_active)
-          ?.id ?? null;
+        (wsState.workspacesAgentId === agentId ? wsState.workspaces : []).find(
+          (w) => w.last_active,
+        )?.id ?? null;
 
       // model/provider is managed by Runtime internally via
       // SessionManager::current_model_and_provider() fallback.

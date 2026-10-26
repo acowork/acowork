@@ -204,6 +204,7 @@ mod tests {
                     attachment_ids: vec![],
                     assignee: Some("agent-1".into()),
                     due_at: None,
+                    start_at: None,
                 },
                 "human",
             )

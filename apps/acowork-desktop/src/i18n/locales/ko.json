@@ -229,8 +229,7 @@
   "chatView": {
     "empty": "채팅에 메시지가 없습니다",
     "routerFallback": "자동으로 배정됨",
-    "cardAnswered": "답변됨",
-    "cardClosed": "종료됨",
+    "cardUnanswered": "답변 없음: {{question}}",
     "cardAsk": "Agent 질문",
     "cardApproval": "승인 필요",
     "cardPause": "단계 확인",
@@ -1635,6 +1634,9 @@
       "edit": "작업 편집",
       "delete": "작업 삭제",
       "dueDate": "마감일",
+      "dispatchFailed": "디스패치 실패 ({{attempts}}회차): {{error}}",
+      "dispatchAbandoned": "5회 연속 실패로 디스패치를 중단했습니다: {{error}}. 재할당 또는 상태 변경 후 재시도할 수 있습니다.",
+      "startDate": "시작일",
       "assignee": "담당자",
       "priority": "우선순위",
       "type": "유형",
@@ -1861,6 +1863,8 @@
     "placeholderWithMentions": "보내기 — @Agent로 처리 요청",
     "send": "보내기",
     "emptyTurn": "(출력 없음)",
+    "taskChip": "작업 {{id}}",
+    "taskChipCopy": "작업 ID 복사",
     "readOnly": "읽기 전용 — 이 프로젝트의 멤버가 아닙니다."
   }
 }

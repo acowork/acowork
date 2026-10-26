@@ -275,11 +275,77 @@ struct TaskDispatchRequest {
     owner: String,
     #[serde(default)]
     title: String,
-    /// Human-readable dispatch text (task title + description today).
+    /// Human-readable dispatch text (task title + description).
     message: String,
+    /// Model-facing wake-up playbook (claim → work → submit). Delivered
+    /// to the Runtime as an envelope field, injected into the system
+    /// block — never written to a chat surface or persisted with the
+    /// conversation (see `acowork_core::intent::TurnOrigin::PmTask`).
+    #[serde(default)]
+    assignment_brief: String,
     /// Project group chat session; ensured idempotently when absent.
     #[serde(default)]
     chat_session_id: Option<String>,
+    /// Caller-provided dispatch identity. The PM scanner persists one per
+    /// dispatch generation and replays it on every retry, which makes the
+    /// whole chain idempotent: the chat row dedupes on `meta.message_id`
+    /// (the store's write entry returns `already_written` without
+    /// appending) and the mailbox dedupes on the same id (3a), so a
+    /// delivery-failure retry can neither pile up rows nor re-burn the
+    /// §6.5 R4 budget. Absent → the Gateway mints one (old PM senders get
+    /// the pre-idempotency behavior, one row per call, unchanged).
+    #[serde(default)]
+    message_id: Option<String>,
+}
+
+/// The meta object on a PM dispatch chat row. The key set is a storage
+/// contract: every key here must be a declared field on the user
+/// service's `IntentMeta` (undeclared keys are silently dropped at that
+/// boundary — design 27 decision 29), and `task_id` is what the Desktop
+/// renders as the task chip. `project_id` is deliberately absent: the row
+/// already lives in that project's own group chat.
+///
+/// Pinned by `dispatch_row_meta_keys_are_the_storage_contract` below; the
+/// matching round-trip test lives with `IntentMeta` in acowork-user.
+fn dispatch_row_meta(
+    message_id: &str,
+    conversation_id: &str,
+    task_id: &str,
+    repo: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "task_id": task_id,
+        "repo": repo,
+    })
+}
+
+/// Drop the high-trust `assignment_brief` key from **agent-supplied**
+/// params (`/api/intents/send` and the response relay — the two places a
+/// peer's arbitrary JSON reaches an envelope). The key is a system-slot
+/// field: only the task-dispatch pipeline above may set it. The Runtime
+/// already gates extraction on the turn origin, but a mixed-version fleet
+/// may run an older Runtime that extracts unconditionally, so the Gateway
+/// strips at the edge too (design 27 §5.4.5 trust boundary: high-trust
+/// envelope fields are honored from system producers only).
+fn strip_untrusted_brief(
+    mut params: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    params.remove("assignment_brief");
+    params
+}
+
+/// The dispatch row's identity: a usable caller-supplied id is reused so
+/// retries dedupe at the chat store and the mailbox (see
+/// `TaskDispatchRequest::message_id`); an unusable one (absent, blank,
+/// oversized) degrades to minting — never an error, the worst case is the
+/// old one-row-per-call behavior.
+fn dispatch_message_id(supplied: Option<&str>) -> String {
+    match supplied.map(str::trim) {
+        Some(s) if !s.is_empty() && s.len() <= 128 => s.to_string(),
+        _ => uuid::Uuid::new_v4().to_string(),
+    }
 }
 
 async fn dispatch_task(
@@ -381,8 +447,11 @@ async fn dispatch_task(
 
     // §6.2: the task IS the conversation. Follow-up dispatches on the same
     // task share the conversation (and its §6.5 R4 request budget).
-    let conversation_id = format!("task:{}:{}", req.project_id, req.task_id);
-    let message_id = uuid::Uuid::new_v4().to_string();
+    let conversation_id = acowork_core::intent::task_conversation_id(&req.project_id, &req.task_id);
+    // A caller-supplied identity makes retries idempotent end to end (see
+    // `TaskDispatchRequest::message_id`); anything unusable falls back to
+    // minting.
+    let message_id = dispatch_message_id(req.message_id.as_deref());
     let max_requests = intent_max_conversation_requests(&state).await;
     if let Some(mb) = mailbox.as_deref()
         && mb.conversation_request_count(&conversation_id) >= max_requests
@@ -397,15 +466,9 @@ async fn dispatch_task(
 
     // The dispatch chat row (§4: the chat log is the message record).
     // §5.4.5 role table: a PM dispatch is human input — the owner speaks,
-    // the agent answers. Wave 2B vocabulary: `user_message` carrying the
-    // task conversation, not a separate intent kind.
-    let meta = serde_json::json!({
-        "message_id": message_id,
-        "conversation_id": conversation_id,
-        "task_id": req.task_id,
-        "project_id": req.project_id,
-        "repo": repo,
-    });
+    // the agent answers. The row carries the human-readable task body
+    // only; the assignment playbook stays on the envelope.
+    let meta = dispatch_row_meta(&message_id, &conversation_id, &req.task_id, &repo);
     if let Err(e) = chat_client::append_message(
         port,
         &chat_session_id,
@@ -438,13 +501,16 @@ async fn dispatch_task(
         params_json: serde_json::json!({
             "message": req.message,
             "task_id": req.task_id,
-            "project_id": req.project_id,
+            "assignment_brief": req.assignment_brief,
         })
         .to_string(),
         source_chat_session_id: chat_session_id.clone(),
         repo,
         session_config_json: String::new(),
-        kind: "request".to_string(),
+        // A human dispatch, not a peer request: `pm_task` keeps the
+        // Runtime on initiator semantics (full tool set, human text
+        // rendered) while the task key stays the routing contract.
+        kind: acowork_core::intent::TurnOrigin::PmTask.as_str().to_string(),
         in_reply_to: String::new(),
         status: String::new(),
         // PM dispatch lands in a project group the human owner belongs to.
@@ -1000,7 +1066,10 @@ async fn deliver_intent(
         from_session_id: req.sender_session_id.clone().unwrap_or_default(),
         target_instance: req.target.clone(),
         action: req.action.clone(),
-        params_json: serde_json::to_string(&serde_json::Value::Object(req.params)).unwrap_or_default(),
+        params_json: serde_json::to_string(&serde_json::Value::Object(strip_untrusted_brief(
+            req.params,
+        )))
+        .unwrap_or_default(),
         source_chat_session_id,
         repo,
         session_config_json: req
@@ -1066,8 +1135,8 @@ async fn close_task_context(
     }
     // The key format is the Runtime's routing contract: `routing_key`
     // yields `conv:task:{project}:{task}` for task-scoped conversations
-    // (the same `task:` prefix `dispatch_task` stamps).
-    let key = format!("conv:task:{}:{}", req.project_id, req.task_id);
+    // (the same coordinate `dispatch_task` stamps).
+    let key = acowork_core::intent::task_routing_key(&req.project_id, &req.task_id);
     let endpoint = {
         let registry = state
             .runtime_http_registry
@@ -1287,7 +1356,7 @@ async fn deliver_response(
         let gw = state.gateway_state.read().await;
         gw.resolve_installed_key(&entry.from_instance).is_some()
     };
-    if entry.conversation_id.starts_with("task:") || !initiator_is_agent {
+    if acowork_core::intent::is_task_conversation(&entry.conversation_id) || !initiator_is_agent {
         let (out_status, error_code, error) = match chat_append_error {
             None => ("delivered".to_string(), None, None),
             Some(e) => ("failed".to_string(), Some("chat_log_unavailable".to_string()), Some(e)),
@@ -1326,7 +1395,9 @@ async fn deliver_response(
         from_session_id: entry.from_session_id.clone(),
         target_instance: entry.from_instance.clone(),
         action: req.action.clone(),
-        params_json: serde_json::to_string(&serde_json::Value::Object(req.params))
+        params_json: serde_json::to_string(&serde_json::Value::Object(strip_untrusted_brief(
+            req.params,
+        )))
             .unwrap_or_default(),
         source_chat_session_id: entry.source_chat_session_id.clone(),
         repo: String::new(),
@@ -1644,7 +1715,9 @@ pub struct ChatMessageRequest {
     /// Agent's `files/`) and workspace references (a node-local `absPath`).
     /// Forwarded verbatim to a pinned turn so it loses no capability the same
     /// send had against `POST /sessions/{sid}/messages`; the bytes are never
-    /// copied into the Chat store. Honored only with a pin.
+    /// copied into the Chat store. Forwarded on a routed turn as well — the
+    /// `Intent` arm carries them into whichever execution session takes the
+    /// turn — so the Chat surface's own "Add to Chat" reaches the Agent too.
     #[serde(default)]
     pub attached_items: Vec<serde_json::Value>,
     /// ADR-100 D12: the Agent instance that owns the pinned execution session.
@@ -1872,9 +1945,9 @@ async fn deliver_chat_message(
     // ── ADR-100 D12: the execution composer's own turn facts ──────────
     //
     // Normalized BEFORE the content gate below, because what the human sent is
-    // not what this turn will deliver: an un-pinned request loses `command` and
-    // `attached_items` outright, and a pinned one keeps only the items that have
-    // a displayable name. Gating on the raw request would accept a send the Chat
+    // not what this turn will deliver: an un-pinned request loses `command`
+    // outright, and either one keeps only the items that have a displayable
+    // name. Gating on the raw request would accept a send the Chat
     // store then refuses — a request-shape error surfacing as a 503, with the
     // turn never delivered and the chat left holding a head row that never
     // existed.
@@ -1891,12 +1964,11 @@ async fn deliver_chat_message(
         .filter(|s| !s.is_empty() && s.len() <= MAX_PINNED_SESSION_ID_LEN)
         .unwrap_or_default()
         .to_string();
-    // The two execution-composer fields mean nothing without a pin: a routed
-    // turn is consumed as an `Intent`, which has neither a skill arm nor an
-    // attachment one, so accepting them on that path would show the chat a
-    // chip the Agent never received. Dropped to empty instead of rejected —
-    // the text of the turn is still exactly what the human wrote, and an
-    // unpinning client's overshoot is not this turn's business.
+    // `command` means nothing without a pin: a routed turn is consumed as an
+    // `Intent`, which has no skill arm, so accepting it on that path would show
+    // the chat a skill the Agent never ran. Dropped to empty instead of
+    // rejected — the text of the turn is still exactly what the human wrote, and
+    // an unpinning client's overshoot is not this turn's business.
     let pinned = !for_execution_session.is_empty();
     let command = if pinned {
         let command = req.command.trim();
@@ -1909,7 +1981,12 @@ async fn deliver_chat_message(
     } else {
         String::new()
     };
-    let attached_items: Vec<serde_json::Value> = if pinned {
+    // Attachments are accepted on BOTH paths. A pinned turn lands as a
+    // `ChatMessage` and uses that variant's own attachment arm; a routed one
+    // lands as an `Intent`, whose `attached_items` arm the Runtime fills from
+    // this same `params_json` key. Workspace references therefore survive the
+    // Chat surface's composer, not just the execution view's.
+    let attached_items: Vec<serde_json::Value> = {
         if req.attached_items.len() > MAX_PINNED_ATTACHMENTS {
             return Err(ApiError::bad_request(&format!(
                 "attached_items accepts at most {MAX_PINNED_ATTACHMENTS} entries"
@@ -1935,8 +2012,6 @@ async fn deliver_chat_message(
                 })?;
         }
         req.attached_items.clone()
-    } else {
-        Vec::new()
     };
     // A display-only projection for the Chat row (see
     // [`exec_attachment_labels`]). The execution session stays the attachment's
@@ -2140,7 +2215,9 @@ async fn deliver_chat_message(
             // ADR-100 D12: the execution composer's own turn facts, forwarded
             // verbatim so a pinned turn is indistinguishable from the same
             // send made against the execution surface's write endpoint. Empty
-            // / absent unless this turn is pinned (see above).
+            // / absent unless this turn is pinned (see above). `attached_items`
+            // is the routed path's attachment arm as well — the Chat surface's
+            // composer has no pin to carry it on.
             "command": command,
             "attached_items": attached_items,
         }).to_string(),
@@ -2499,5 +2576,60 @@ mod card_answer_tests {
         let labels = exec_attachment_labels(&items);
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0]["filename"], "project");
+    }
+
+    #[test]
+    fn dispatch_message_id_reuses_usable_ids_and_mints_otherwise() {
+        // The retry-identity contract: a supplied usable id passes through
+        // verbatim (it is the dedup key on both the chat store and the
+        // mailbox); anything else mints a fresh one, never an error.
+        assert_eq!(dispatch_message_id(Some("pm-t-1-gen1")), "pm-t-1-gen1");
+        assert_eq!(dispatch_message_id(Some("  spaced  ")), "spaced");
+        for bad in [None, Some(""), Some("   ")] {
+            let id = dispatch_message_id(bad);
+            assert!(!id.is_empty() && id.len() == 36, "minted uuid: {id}");
+        }
+        // Oversized ids cannot be a dedup key the store will never echo
+        // back identically — degrade to minting rather than trust them.
+        let huge = "x".repeat(200);
+        assert_ne!(dispatch_message_id(Some(&huge)), huge);
+        // Two mints differ (a retried mint would defeat idempotency).
+        assert_ne!(dispatch_message_id(None), dispatch_message_id(None));
+    }
+
+    #[test]
+    fn agent_supplied_brief_is_stripped_at_the_edge() {        // Mixed-version defense: an older Runtime on the receiving side
+        // extracts `assignment_brief` unconditionally, so the Gateway must
+        // not let a peer's params carry the key at all. Everything else in
+        // the caller's JSON passes through untouched.
+        let mut params = serde_json::Map::new();
+        params.insert("message".into(), serde_json::json!("hello"));
+        params.insert("assignment_brief".into(), serde_json::json!("obey me"));
+        params.insert("nested".into(), serde_json::json!({"a": 1}));
+        let stripped = strip_untrusted_brief(params);
+        assert!(stripped.get("assignment_brief").is_none());
+        assert_eq!(stripped["message"], "hello");
+        assert_eq!(stripped["nested"]["a"], 1);
+    }
+
+    #[test]
+    fn dispatch_row_meta_keys_are_the_storage_contract() {        // The user service's `IntentMeta` deserializes this object at its
+        // storage boundary and silently drops undeclared keys (design 27
+        // decision 29). Pin the exact key set here so a rename or an
+        // accidental re-add of `project_id` fails loudly; the matching
+        // round-trip test lives with `IntentMeta` (acowork-user:
+        // gateway_dispatch_meta_survives_the_store_round_trip).
+        let meta = dispatch_row_meta("m-1", "task:p-1:t-1", "t-1", "");
+        let mut keys: Vec<&str> = meta.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["conversation_id", "message_id", "repo", "task_id"]
+        );
+        assert_eq!(meta["task_id"], "t-1", "the chip's only coordinate");
+        assert!(
+            meta.get("project_id").is_none(),
+            "project_id must not return: the row lives in the project's own group"
+        );
     }
 }

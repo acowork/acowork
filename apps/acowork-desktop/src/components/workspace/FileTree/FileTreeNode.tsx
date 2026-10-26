@@ -4,7 +4,7 @@ import { cn } from "../../../lib/utils";
 import { listRowHover } from "../../../lib/ui-styles";
 import { getFileIcon } from "./fileIcons";
 import { SetiIcon } from "../../common/SetiIcon";
-import { useChatStore } from "../../../stores/chatStore";
+import { useAddToChatTarget, attachWorkspaceRef } from "../../../lib/addToChat";
 import { useWorkspaceStore } from "../../../stores/workspaceStore";
 import { useFileEditorStore } from "../../../stores/fileEditorStore";
 import { useTranslation } from "../../../i18n/useTranslation";
@@ -15,7 +15,6 @@ import {
 } from "../../common/ContextMenu";
 import { isGatewayLocal } from "../../../lib/config";
 import type { TreeEntry } from "../../../stores/fileTree";
-import { useSessionReadOnly } from "../../../lib/session-write-access";
 import { isWorkspacePreviewable } from "../../editor/filePreview";
 
 // Lazy-load Tauri dialog to avoid import error in browser dev mode
@@ -31,10 +30,6 @@ interface FileTreeNodeProps {
   entry: TreeEntry;
   depth: number;
   agentId: string;
-  /** Execution session this tree belongs to; `null` in the Chat-surface
-   *  fallback view (no exec session). Gates "Add to Chat" only — the node's
-   *  workspace comes from `workspaceId`, never from the session map. */
-  sessionId: string | null;
   /** Workspace this node lives in (the tree's own workspace). */
   workspaceId: string;
   relPath: string;
@@ -108,7 +103,6 @@ export const FileTreeNode = memo(function FileTreeNode({
   entry,
   depth,
   agentId,
-  sessionId,
   workspaceId,
   relPath,
   absPath,
@@ -238,10 +232,7 @@ export const FileTreeNode = memo(function FileTreeNode({
     handleCommitRename();
   }, [handleCommitRename]);
 
-  const addAttachedContext = useChatStore((s) => s.addAttachedContext);
-  // ADR-076: per-session, and this node renders inside the tree for one
-  // specific session — so gate on that session, not the active one.
-  const readOnlySession = useSessionReadOnly(agentId, sessionId);
+  const addToChatTarget = useAddToChatTarget(agentId);
 
   const handleClick = useCallback(() => {
     if (isDir) {
@@ -278,14 +269,13 @@ export const FileTreeNode = memo(function FileTreeNode({
   }, [isDir, relPath, onContextNewItem]);
 
   const handleAddToChat = useCallback(() => {
-    if (!sessionId) return; // fallback view: no execution session to attach to
-    addAttachedContext(agentId, sessionId, {
+    attachWorkspaceRef(addToChatTarget, {
       id: `${agentId}:${relPath}`,
       type: isDir ? "directory" : "file",
       name: entry.name,
       absPath,
     });
-  }, [agentId, sessionId, isDir, relPath, entry.name, absPath, addAttachedContext]);
+  }, [agentId, isDir, relPath, entry.name, absPath, addToChatTarget]);
 
   const handleDelete = useCallback(async () => {
     const label = isDir ? `directory "${entry.name}"` : `file "${entry.name}"`;
@@ -345,8 +335,8 @@ export const FileTreeNode = memo(function FileTreeNode({
   // Memoised menu items. Rebuilt when the flags that gate item
   // visibility change (previewable / prompt-file / rename / reveal /
   // paste availability) OR when any handler identity changes (they
-  // capture sessionId — e.g. handleAddToChat — so a stale closure here
-  // would route "Add to Chat" to the previously active session). Keeps
+  // capture the Add-to-Chat target — so a stale closure here would route
+  // "Add to Chat" to a composer that is no longer on screen). Keeps
   // the memoized FileTreeNode from churning the ContextMenu child on
   // unrelated re-renders.
   const ctxMenuItems = useMemo<ContextMenuItem[]>(() => {
@@ -356,10 +346,12 @@ export const FileTreeNode = memo(function FileTreeNode({
       key: "add-to-chat",
       icon: <MessageSquarePlus size={14} />,
       label: t("workspace.contextMenu.addToChat"),
-      // ADR-076: the attachment rides along with the next message, which a
-      // viewer of someone else's session may not send. In the fallback view
-      // (no execution session) there is nothing to attach to either.
-      disabled: readOnlySession || !sessionId,
+      // ADR-076 + design 27 Wave 5: the reference lands in whichever composer
+      // is on screen — the Chat session's or the execution session's. The
+      // target is null only when neither can take it (no chat session and no
+      // writable execution session), which is when a viewer of someone else's
+      // session has nowhere to attach at all.
+      disabled: addToChatTarget === null,
       onClick: handleAddToChat,
     });
     if (isPreviewable) {
@@ -447,7 +439,7 @@ export const FileTreeNode = memo(function FileTreeNode({
     onRename,
     onReveal,
     t,
-    readOnlySession,
+    addToChatTarget,
     handleAddToChat,
     handlePreview,
     handleTogglePromptFile,

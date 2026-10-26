@@ -10,10 +10,16 @@
 //   pick is a `session_config` DRAFT held on the Chat session ROW (design 27
 //   §4.5) — the store only caches what the server returned: `setCurrentModel`
 //   needs an active execution session, and a Chat turn's session is created
-//   server-side when the intent lands. The draft rides `sendText`: it seeds
-//   a newly created execution session and is re-applied when a mapped
-//   session is reused — so the choice is fixed BEFORE the turn, not
-//   after, which is the whole point (pick model/workspace/reasoning first).
+//   server-side when the intent lands. The draft rides `sendText`, and per
+//   ADR-099's 2026-10-28 revision it is an initial value for a session the
+//   router CREATES — it is never applied to a session that already exists,
+//   not model, not reasoning, and above all not `workspace`. That is deliberate: the workspace is the directory that
+//   session's files, tools, history and Add-to-Chat references already point
+//   at, and moving it mid-conversation invalidates them. So on the Chat
+//   surface the pick is the conversation's own workspace (it drives this
+//   surface's right-hand panel, see `WorkspaceExplorer`), not a live switch of
+//   anything. Either way the choice is fixed BEFORE the turn, not after, which
+//   is the whole point (pick model/workspace/reasoning first).
 //   Persisting it on the session (not in component state) is what keeps the
 //   last pick across tab switches, reloads and devices.
 // - No SkillsPanel here at all. Skills are auto-loaded by the model, not
@@ -35,11 +41,9 @@
 // carries a discrete drill-down into the execution view:
 // `chatStore.openSession(agentId, execSid)` + mode flip (plan 5.3).
 
-import { Children, isValidElement, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
+import { useCallback, useEffect, useMemo, memo, useRef, useState, type UIEvent } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "../../i18n/useTranslation";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Send, Paperclip, Loader2, ChevronDown, ChevronsDown } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
@@ -51,16 +55,18 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { ViewRunButton } from "./ViewRunButton";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
-import { CodeBlock } from "./CodeBlock";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
+import { ReplyQuote } from "./ReplyQuote";
 import { detectPaste } from "./pasteDetect";
-import { handleChatMarkdownLinkClick, markdownUrlTransform } from "../editor/markdownLinkResolver";
+import { ChatMarkdown } from "./ChatMarkdown";
+import { VirtualRowList, type VirtualRowListHandle } from "../common/VirtualRowList";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { AttachedContextChips } from "./AttachedContextChips";
 import { isFailureStatus, isEmptyTerminalReply, isTurnRoutedNotice, pendingTurn, terminalNoticeKey } from "./chatTurnState";
 import { InlineInteractionCard } from "./InlineInteractionCard";
 import { useLocateMessage } from "../../lib/useLocateMessage";
@@ -73,68 +79,8 @@ import { useAuthStore } from "../../stores/authStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { getGatewayUrl } from "../../lib/config";
 
-/** Strip common leading whitespace from multi-line strings (same helper
- *  the execution bubbles use for indented code blocks). */
-function dedent(code: string): string {
-  const lines = code.split("\n");
-  const nonEmpty = lines.filter((l) => l.trim().length > 0);
-  if (nonEmpty.length === 0) return code.trim();
-  const minIndent = Math.min(...nonEmpty.map((l) => l.match(/^ */)?.[0].length ?? 0));
-  return lines.map((l) => l.slice(minIndent)).join("\n").trim();
-}
 
-// ── Markdown in chat bubbles — same overrides as the execution view,
-//    minimal set (code + safe links). ──────────────────────────────────
-const chatMarkdownComponents = {
-  pre: ({ children }: { children?: React.ReactNode }) => {
-    const childArray = Children.toArray(children);
-    const codeEl = childArray.find(
-      (child): child is React.ReactElement<{ className?: string; children?: React.ReactNode }> =>
-        isValidElement(child) && child.type === "code",
-    );
-    if (codeEl) {
-      const { className, children: codeContent } = codeEl.props;
-      const language = className?.replace(/^language-/, "") || "";
-      const code = dedent(Children.toArray(codeContent).join(""));
-      return <CodeBlock language={language} code={code} />;
-    }
-    return <pre>{children}</pre>;
-  },
-  a: ({ href, children, node: _node, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
-    if (!href) return <span>{children}</span>;
-    return (
-      <a
-        {...rest}
-        href={href}
-        onClick={(e) => {
-          e.preventDefault();
-          handleChatMarkdownLinkClick(href);
-        }}
-      >
-        {children}
-      </a>
-    );
-  },
-  /** Same scroll-wrapper every other desktop markdown surface uses
-   *  (`MessageBubble` / `CompactionCard` / `MarkdownPreviewView`). A GFM table
-   *  cannot shrink-to-fit below its widest cell, so left unwrapped it widened
-   *  the bubble instead of scrolling inside it. */
-  table: ({ children, ...rest }: React.TableHTMLAttributes<HTMLTableElement>) => (
-    <div className="prose-table-scroll">
-      <table {...rest}>{children}</table>
-    </div>
-  ),
-};
 
-function ChatMarkdown({ content }: { content: string }) {
-  return (
-    <div className="prose prose-sm prose-zinc max-w-none prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-sm prose-headings:font-semibold select-text break-words [&_th]:bg-chat-title [&_td]:bg-chat-body [&_tbody_tr]:!bg-transparent">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={markdownUrlTransform} components={chatMarkdownComponents}>
-        {content}
-      </ReactMarkdown>
-    </div>
-  );
-}
 
 // ── Rows ───────────────────────────────────────────────────────────────
 
@@ -161,9 +107,23 @@ interface RowProps {
    *  Names the run in the drill-down tooltip while the exec session still has
    *  no title. Resolved by the parent through its message_id → body index. */
   triggerBody?: string;
+  /** Question text of the `interaction_request` card this row answers, when it
+   *  answers one. Paints the one-line quote above the answer bubble — the
+   *  visible half of the §5.5.4 `in_reply_to` link the answered card used to
+   *  carry. Only cards are quoted: the parent resolves this through a
+   *  card-only index so a reply to any other row kind paints nothing. */
+  replyQuote?: string;
 }
 
-function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed, answered, onAnswer, triggerBody }: RowProps) {
+/**
+ * One transcript row. Memoized: the composer's per-keystroke re-render of the
+ * host must not cascade into `rows.map` re-parsing every markdown body
+ * (chat-transcript render-perf plan L1). All props are value-stable while the
+ * window is unchanged — `row` references come from the store window, Sets are
+ * memoized per window, callbacks are host-level `useCallback`s. The
+ * render-count regression test (`AgentChatView.memo.test.tsx`) locks this.
+ */
+const RowView = memo(function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed, answered, onAnswer, triggerBody, replyQuote }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
@@ -374,6 +334,9 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed
                 keeps a file-with-no-words turn from collapsing to a blank
                 row. */}
             <ExecAttachmentLabels labels={row.meta?.exec_attachments ?? []} />
+            {/* What this answer answers. The card itself is gone once answered
+                (§5.5.4 records the answer here, not on a receipt). */}
+            <ReplyQuote quote={replyQuote} />
             {row.body && (
               <div className="max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
                 <div className="px-4 py-2.5 whitespace-pre-wrap break-words">{row.body}</div>
@@ -394,7 +357,7 @@ function RowView({ row, agentId, chatSessionId, showHeader, onJumpToExec, closed
       </div>
     </div>
   );
-}
+});
 
 // ── View ───────────────────────────────────────────────────────────────
 
@@ -455,6 +418,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // The scroll viewport, captured alongside `useStickToBottom`'s callback ref
   // so the locate effect can query `[data-seq]` rows within it.
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Virtualized row window (render-perf L2): imperative handle for locate
+  // fallbacks (an off-viewport row is NOT in the DOM) and visibility queries.
+  const listRef = useRef<VirtualRowListHandle | null>(null);
 
   // The agent's current model, read-only here (see header comment).
   const [agentModel, setAgentModel] = useState<{ model: string; provider: string } | null>(null);
@@ -483,6 +449,23 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => (win ? [...win.older, ...win.tail] : []),
     [win],
   );
+  // Virtualization adapters (render-perf L2). Keys are session-qualified:
+  // the shell's measured-height cache is module-level, and `seq` is unique
+  // only WITHIN a chat session. `rowsRef` lets the locate fallback resolve a
+  // seq to an index without re-creating the (stamp-keyed) locate effect.
+  const rowKeyOf = useCallback(
+    (r: ChatMessageRow) => `${sessionId}:${r.seq}`,
+    [sessionId],
+  );
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  // Coarse pre-measure estimate from body length; `measureElement` corrects
+  // it on first mount and the shell's cache keeps the real height after.
+  const estimateRow = useCallback((r: ChatMessageRow) => {
+    const body = r.body ?? "";
+    const lines = Math.max(1, Math.ceil(body.length / 70));
+    return Math.min(480, 32 + lines * 22);
+  }, []);
   // message_id → body index, so a reply (whose trigger is only an
   // `in_reply_to` id) can name the task in its drill-down tooltip when the
   // execution session has no title yet.
@@ -490,6 +473,19 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     const m = new Map<string, string>();
     for (const r of rows) {
       if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
+    }
+    return m;
+  }, [rows]);
+  // Card rows only, so an answer can quote the question it answers. Deliberately
+  // separate from `bodyById`: `in_reply_to` also points at plain messages, and
+  // quoting one of those would paint a quote where there is no decision. The
+  // text resolves question-first, exactly as the card itself renders it, so the
+  // quote says what the reader saw on the card (the row body is only a summary).
+  const cardQuoteById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of rows) {
+      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
+      m.set(r.meta.message_id, r.meta.interaction?.question || r.body);
     }
     return m;
   }, [rows]);
@@ -545,11 +541,21 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // trigger unchanged and does not jump to the bottom; browser scroll
   // anchoring (`overflow-anchor: auto` on the viewport) holds the visible rows
   // put as older content appears above them, recomputing only the thumb.
-  const { ref: scrollRef, stickNow, atBottom } = useStickToBottom(
+  // Bottom-positioning mechanism for the follow controller: the transcript is
+  // virtualized, so a single `scrollTop = scrollHeight` write cannot land on a
+  // bottom whose height is still an estimate (and may not be sized at all on
+  // the session-switch commit). The list handle's scrollToBottom arms the
+  // shell's measurement-convergence anchor instead.
+  const positionAtBottom = useCallback(
+    () => listRef.current?.scrollToBottom() ?? false,
+    [],
+  );
+  const { ref: scrollRef, stickNow, unpin, atBottom } = useStickToBottom(
     [win?.tail.length ?? 0, sessionId],
     sessionId,
     undefined,
     win?.older.length ?? 0,
+    positionAtBottom,
   );
 
   // Merged container capture — a STABLE callback on purpose. An inline arrow is
@@ -574,18 +580,34 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => containerRef.current,
     pendingLocateSeq,
     () => clearLocate(sessionId),
+    // Virtualization fallback: the row is in the window but not in the DOM.
+    (seq) => {
+      const idx = rowsRef.current.findIndex((r) => r.seq === seq);
+      if (idx < 0) return false;
+      return listRef.current?.scrollToKey(`${sessionId}:${seq}`, "center") ?? false;
+    },
+    // A locate parks the reader mid-history on purpose: take them out of
+    // the follow, or the persistent anchor rides the next commit back to
+    // the tail (a downward jump carries no scroll-event signal to do it).
+    () => unpin(),
   );
 
-  const handleAnswer = (card: ChatMessageRow, text: string, immediate: boolean) => {
-    if (immediate && text) {
-      stickNow();
-      void sendText(sessionId, text, card.meta?.message_id);
-      dismissExecCard(card);
-      return;
-    }
-    setAnswerTarget(card);
-    textareaRef.current?.focus();
-  };
+  // Stable identities: RowView is memoized, so every prop handed to it must
+  // keep its reference across host re-renders (a keystroke in the composer
+  // re-renders this host; it must not re-render N rows).
+  const handleAnswer = useCallback(
+    (card: ChatMessageRow, text: string, immediate: boolean) => {
+      if (immediate && text) {
+        stickNow();
+        void sendText(sessionId, text, card.meta?.message_id);
+        dismissExecCard(card);
+        return;
+      }
+      setAnswerTarget(card);
+      textareaRef.current?.focus();
+    },
+    [sessionId, stickNow, sendText],
+  );
 
   const handleSend = () => {
     const text = input.trim();
@@ -595,9 +617,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     // A card answer continues the ORIGINAL turn deterministically (it does
     // not go through the Chat Router), so no seed is applied — carrying a
     // draft there would be meaningless. Plain messages carry the draft;
-    // per ADR-099 the router-side seed lands on session creation and, for
-    // model/reasoning, on reuse of an existing session (workspace is only
-    // applied to a newly created one).
+    // per ADR-099's 2026-10-28 revision the router-side seed is an initial
+    // value for the session a routing CREATES and is never applied to one
+    // that already exists.
     const sessionConfig = replyTo ? undefined : (Object.keys(draft).length > 0 ? draft : undefined);
     setInput("");
     const target = answerTarget;
@@ -713,15 +735,25 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // A DELETED session would otherwise cold-open as an empty exec tab whose
   // every load fails into the retry banner, so probe existence first: a
   // definitive 404 is answered with a toast and no navigation.
-  const jumpToExec = async (execSid: string) => {
-    if (!execSid) return;
-    if (!(await sessionExists(agentId, execSid))) {
-      showToast({ type: "info", message: t("chatView.execSessionGone") });
-      return;
-    }
-    await useChatStore.getState().openSession(agentId, execSid);
-    setMode(agentId, "exec");
-  };
+  const jumpToExec = useCallback(
+    async (execSid: string) => {
+      if (!execSid) return;
+      if (!(await sessionExists(agentId, execSid))) {
+        showToast({ type: "info", message: t("chatView.execSessionGone") });
+        return;
+      }
+      await useChatStore.getState().openSession(agentId, execSid);
+      setMode(agentId, "exec");
+    },
+    [agentId, t, setMode],
+  );
+  // The void-returning stable handler handed to memoized rows. An inline
+  // `(sid) => void jumpToExec(sid)` at the call site is a fresh identity every
+  // render and would defeat `RowView`'s memo on every keystroke.
+  const handleJumpToExec = useCallback(
+    (execSid: string) => void jumpToExec(execSid),
+    [jumpToExec],
+  );
 
   const hasMoreOlder = win ? win.firstPos > 0 : false;
   // A locate can park the window mid-history; `!atTail` then opens the
@@ -789,15 +821,29 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         {rows.length === 0 && (
           <div className="py-10 text-center text-sm text-text-tertiary">{t("chatView.empty")}</div>
         )}
-        {rows.map((r, i) => (
-          <div
-            key={`${r.seq}`}
-            data-seq={r.seq}
-            className={cn(
+        {/* Virtualized transcript window (render-perf L2): only viewport rows
+            + overscan are in the DOM, so a keystroke — or a doorbell refresh —
+            costs a bounded number of row renders regardless of loaded pages.
+            Prepend anchoring stays with `useStickToBottom` (scroll-container
+            level; virtualization does not move it). The shell remounts on
+            session change via `key` — the documented contract against a
+            stale scroll offset (white pane). */}
+        <VirtualRowList
+          key={sessionId}
+          ref={listRef}
+          items={rows}
+          keyOf={rowKeyOf}
+          scrollContainerRef={containerRef}
+          followBottom={atBottom}
+          estimateSize={estimateRow}
+          rowAttrs={(r) => ({ "data-seq": r.seq })}
+          rowClassName={(r) =>
+            cn(
               "scroll-mt-2 transition-colors",
               highlightSeq === r.seq && "bg-[var(--color-accent)]/10",
-            )}
-          >
+            )
+          }
+          renderItem={(r, i) => (
             <RowView
               row={r}
               agentId={agentId}
@@ -815,16 +861,19 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 (r.kind === "agent_message" || isTurnRoutedNotice(r)) &&
                 !(rows[i - 1]?.kind === "agent_message" && !isEmptyTerminalReply(rows[i - 1]!))
               }
-              onJumpToExec={(sid) => void jumpToExec(sid)}
+              onJumpToExec={handleJumpToExec}
               triggerBody={
                 r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined
+              }
+              replyQuote={
+                r.meta?.in_reply_to ? cardQuoteById.get(r.meta.in_reply_to) : undefined
               }
               closed={closed}
               answered={answered}
               onAnswer={handleAnswer}
             />
-          </div>
-        ))}
+          )}
+        />
         {/* The waiting line sits where the answer will land: one aggregated
             "the agent has your message" indicator, derived from the newest
             unanswered human row. It replaces the removed dispatch / round-open
@@ -885,7 +934,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         />
         {answerTarget && (
           <div className="flex items-center gap-1 px-3 pt-2">
-            <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-[var(--color-accent)]/20" style={{ color: "var(--color-accent)" }}>
+            <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-border-outer text-text-tertiary">
               {t("chatView.replyingTo")} {answerTarget.meta?.interaction?.question?.slice(0, 30) || ""}
               <button
                 type="button"
@@ -898,6 +947,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             </span>
           </div>
         )}
+        {/* Workspace references picked with "Add to Chat" in the right-hand
+            panel — paths the Agent reads live, not uploaded copies. The
+            uploaded bytes above are a separate list with a separate channel. */}
+        <AttachedContextChips surface="chat" />
         {pendingAttachments.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
             {pendingAttachments.map((a) => (

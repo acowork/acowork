@@ -48,6 +48,14 @@ pub struct ContextBuilder {
     /// sure" rather than fabricate an answer. Injected after retrieved
     /// memory (same slot as `ambiguous_confirmation_hint`).
     abstention_prompt: Option<String>,
+    /// A PM `task` dispatch's wake-up playbook (claim → work → submit).
+    /// Session-lifetime like `skill_summary`: set once when the task's
+    /// Intent arrives, constant thereafter, so Block A stays byte-stable
+    /// (ADR-060 §5.2). Ephemeral by contract — never written to history
+    /// or a Chat surface; after a restart the contract is recoverable
+    /// from the session's own tool-call history. Injected into Block A
+    /// under a `## Task Assignment` heading.
+    task_brief: Option<String>,
     /// ADR-094: agent-level Progressive-mode skills summary (compact
     /// name + description list). Session-lifetime: seeded when the session
     /// is created and replaced by `UpdateSkillInstructions` broadcasts.
@@ -91,6 +99,7 @@ impl ContextBuilder {
             retrieved_memory: None,
             ambiguous_confirmation_hint: None,
             abstention_prompt: None,
+            task_brief: None,
             skill_summary: None,
             active_skill: None,
             reasoning_effort: None,
@@ -433,6 +442,18 @@ impl ContextBuilder {
         self.abstention_prompt.as_deref()
     }
 
+    /// Set the PM task assignment brief (a `task` Intent's wake-up
+    /// playbook). Session-lifetime, set once; see the field doc on
+    /// [`Self::task_brief`].
+    pub fn set_task_brief(&mut self, brief: String) {
+        self.task_brief = Some(brief);
+    }
+
+    /// Get the task assignment brief, if set.
+    pub fn task_brief(&self) -> Option<&str> {
+        self.task_brief.as_deref()
+    }
+
     /// Clear the ambiguous-confirmation hint.
     ///
     /// ADR-054: debug patch empty-string clearing semantics — an empty
@@ -557,6 +578,15 @@ impl ContextBuilder {
         // matches the historical `ambiguous_confirmation_hint` slot.
         if let Some(ref prompt) = self.abstention_prompt {
             system_content.push_str(&format!("\n\n## Memory Abstention Guidance\n{prompt}"));
+        }
+
+        // 2.5.2 PM task assignment brief: the claim → work → submit
+        // playbook of the `task` that owns this session. Session-lifetime
+        // and constant (set once when the task Intent arrives, like
+        // `skill_summary`), so Block A stays byte-stable across the task's
+        // turns. Never part of the user message, never persisted.
+        if let Some(ref brief) = self.task_brief {
+            system_content.push_str(&format!("\n\n## Task Assignment\n{brief}"));
         }
 
         // 2.6 Skill instructions: agent-level Progressive summary + this

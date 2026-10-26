@@ -8,6 +8,14 @@
  * The consumer must render each message row with `data-seq={row.seq}` on a DOM
  * node inside the scroll container, and call this AFTER `useStickToBottom` so
  * the center-scroll wins over the follow-to-bottom on the jump commit.
+ *
+ * Virtualized surfaces (render-perf L2): a row outside the viewport is not in
+ * the DOM, so the `querySelector` miss is not "the window moved on" — it is
+ * the normal case for a locate landing mid-window. `scrollToSeq` is the
+ * fallback: the surface resolves the seq through its list handle
+ * (`VirtualRowList.scrollToKey`). Only when that also reports the row absent
+ * is the stamp stale. Mounted rows keep the `scrollIntoView` path so the
+ * in-viewport behavior (and its scroll-event semantics) is unchanged.
  */
 import { useEffect, useRef, useState } from "react";
 
@@ -21,6 +29,17 @@ export function useLocateMessage(
   pendingLocateSeq: number | null,
   /** Clear the stamp once located (or when the row is genuinely absent). */
   clearLocate: () => void,
+  /** Virtualization fallback: center-scroll the row by seq through the
+   *  list handle. Return false when the seq is not in the loaded window. */
+  scrollToSeq?: (seq: number) => boolean,
+  /** Fired when the locate scroll is issued (either path). A locate parks
+   *  the reader mid-history ON PURPOSE — the surface must take them out of
+   *  the follow-to-bottom here. The follow rule's scroll-event unpin is
+   *  direction-guarded (a virtualized pane's stale event must not fake
+   *  intent), so a downward jump would otherwise keep the follow alive and
+   *  the persistent anchor would ride the next commit straight back to the
+   *  tail, losing the locate. */
+  onLocate?: () => void,
 ): number | null {
   const [highlightSeq, setHighlightSeq] = useState<number | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -29,15 +48,31 @@ export function useLocateMessage(
     if (pendingLocateSeq == null) return;
     const target =
       getContainer()?.querySelector<HTMLElement>(`[data-seq="${pendingLocateSeq}"]`) ?? null;
-    if (!target) {
-      // `jumpToMessage` only stamps a row it just fetched into the window, so
-      // a miss means the window moved on (a wake reset it to the tail). Drop
-      // the stale stamp rather than strand a pending highlight.
-      clearLocate();
-      return;
+    if (target) {
+      setHighlightSeq(pendingLocateSeq);
+      onLocate?.();
+      target.scrollIntoView({ block: "center" });
+    } else {
+      // Off-viewport in a virtualized window: release the follow BEFORE the
+      // handle moves the pane. The follow rule re-pins from the scroll event
+      // itself when the pane is left away-from-bottom while pinned (the
+      // between-commit measurement drift) — a locate jump is exactly such a
+      // downward move, and riding back to the tail would defeat the locate.
+      // Releasing first makes the jump's own event arrive under
+      // `pinned === false` and pass through untouched.
+      onLocate?.();
+      if (scrollToSeq?.(pendingLocateSeq)) {
+        // The handle moved the pane; the row mounts on the next commit and
+        // paints the flash from there.
+        setHighlightSeq(pendingLocateSeq);
+      } else {
+        // `jumpToMessage` only stamps a row it just fetched into the window, so
+        // a miss here means the window moved on (a wake reset it to the tail).
+        // Drop the stale stamp rather than strand a pending highlight.
+        clearLocate();
+        return;
+      }
     }
-    setHighlightSeq(pendingLocateSeq);
-    target.scrollIntoView({ block: "center" });
     if (timerRef.current) window.clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => {
       setHighlightSeq(null);

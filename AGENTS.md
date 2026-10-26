@@ -94,7 +94,7 @@ apps/
 docs/                  # Public architecture docs
   design/{zh,en}/      # 23 zh / 17 en design docs
   module-design/{zh,en}/ # 8 zh / 7 en Rust crate specs
-  adr/{zh,en}/         # 94 ADRs (zh: 94, en: 94 — en is the maintained translation set)
+  adr/{zh,en}/         # 95 ADRs (zh: 95, en: 95 — en is the maintained translation set)
   prd/{zh,en}/         # Platform + Desktop UI/UX PRD
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   mcp-server-research/{zh,en}/
@@ -144,6 +144,8 @@ Agent Runtime (universal binary, Rust)
 - Desktop App = presentation/interaction only — no business logic, no state persistence
 - **Gateway boundary = communication + resource management + reverse proxy.** Agent-private data (skills, prompts, conversations, per-agent embedding, `{install_path}/assets`) is read and written **only through Runtime HTTP** (`core/acowork-gateway/src/http/proxy.rs`), never by direct filesystem access. Since ADR-055 `install_path` is a node-local path, so a Gateway-side `fs` read works in a single-machine setup and returns 5xx the moment Gateway and Node are on different hosts. Enforced by `run_gateway_fs_redline` in `dev/ci.sh`; rationale and the frozen ceilings in [ADR-009 §5](docs/adr/zh/ADR-009-gateway-workspace-isolation.md).
 - **Memory is the service's, not the Runtime's** (ADR-101): panel data reaches the memory service only through `memory_proxy` (`core/acowork-gateway/src/http/memory_proxy.rs`); the Gateway MUST NOT open `instances/*/memory.db`. The one legacy exception is the Node-side migration pass — the pre-ADR-101 `{workspace}/memory/private.sqlite` is read by `acowork-node` (node-local fs owner) and uploaded to the service's `/admin/import`.
+- **Chat transcript rendering is windowed and memoized (render-perf L1-L3).** Transcript surfaces render through `apps/acowork-desktop/src/components/common/VirtualRowList.tsx` (viewport-only rows; content-stable, session-qualified keys; the shell remounts on session switch via React `key`). Row components stay `React.memo` with stable prop identities; prepend scroll-anchoring stays at the scroll-container level (`useStickToBottom` / `useScrollController`), never inside the list shell. Never query a transcript row by DOM selector (`[data-seq]`) as the only locate path — off-viewport rows are not in the DOM; fall back to the shell handle's `scrollToKey`.
+- **Identity-preserving store updates.** A store write path whose new content is equal to what subscribers already hold must not produce a new object identity (no unconditional `set`, no re-parsed row objects on unchanged data). Memoized/windowed surfaces depend on this; `chatSessionStore`'s doorbell path (refresh equivalence gate + `shareRowIdentities` + `wake` coalescing) is the reference implementation. Rationale: `docs/plan/zh/chat-transcript-render-perf-plan.md`.
 
 ## File Reference
 Point to files with Markdown links only: e.g. `[src/lib/foo.ts](src/lib/foo.ts)` or `[src/lib/foo.ts:42](src/lib/foo.ts#L42)`. 

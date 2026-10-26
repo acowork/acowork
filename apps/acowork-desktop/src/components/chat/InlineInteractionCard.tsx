@@ -9,9 +9,11 @@
  *   - **Action buttons** (approval / pause / others): click = immediate
  *
  * Three states per card:
- *   - Open: interactive, accent border + semantic header bg
- *   - Answered: receipt header (neutral) + answer text
- *   - Closed:  receipt header (neutral) + "Closed" + question text
+ *   - Open: interactive, neutral hairline + neutral header
+ *   - Answered: paints nothing — the answer bubble above quotes the question
+ *     (see ReplyQuote), so a receipt here only repeated what is on screen
+ *   - Closed without an answer: one quiet line in the card's slot, because
+ *     "a decision was requested and nobody made it" exists nowhere else
  *
  * Layout strategy (aligned with agent bubbles):
  *   - ml-12 → same horizontal offset as agent bubble content (avatar + gap)
@@ -28,14 +30,16 @@ import { MessageCircleQuestion, ShieldCheck, Pause } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
+import { truncateQuote } from "./ReplyQuote";
+import { ChatMarkdown } from "./ChatMarkdown";
 
 interface InlineInteractionCardProps {
   row: ChatMessageRow;
   /** Cards that can no longer be answered (§5.5.4). */
   closed: Set<string>;
-  /** The subset the human actually replied to — the receipt line says
-   *  "Answered", anything else that closed (turn ended, timeout, stop)
-   *  says "Closed". */
+  /** The subset the human actually replied to. An answered card paints
+   *  nothing (the answer bubble quotes the question); anything else that
+   *  closed — turn ended, timeout, stop — leaves the quiet one-line note. */
   answered: Set<string>;
   /** Resolved display name of the asking agent (the group resolves the
    *  participant; a 1:1 passes its single agent's name). */
@@ -52,6 +56,17 @@ interface InlineInteractionCardProps {
 
 // ── Kind → header config mapping ──────────────────────────────────
 
+/**
+ * Per-kind chrome. Two rules govern the colors here:
+ *
+ *   - A card outline is NEVER the brand highlight. `--color-accent` is
+ *     reserved for button backgrounds (globals.css `.btn-accent` /
+ *     `.bg-accent-strong`), so an ask card wears the neutral hairline and
+ *     its title the regular text tier — same recipe as CodeBlock's title bar.
+ *   - emerald / amber below are SEMANTIC STATUS colors (ok / warning), not
+ *     the highlight. They carry "this needs approval" / "this needs a
+ *     resume", so they stay. Do not "unify" them to `border-border-outer`.
+ */
 interface KindConfig {
   icon: React.ReactNode;
   titleKey: string;
@@ -79,8 +94,8 @@ function kindConfig(kind: string): KindConfig {
       return {
         icon: <MessageCircleQuestion className="h-3.5 w-3.5 shrink-0" />,
         titleKey: "chatView.cardAsk",
-        borderCls: "border-[var(--color-accent)]/30 dark:border-[var(--color-accent)]/40",
-        headerBgCls: "bg-[var(--color-accent)]/10 text-[var(--color-accent-strong)]",
+        borderCls: "border-border-outer",
+        headerBgCls: "bg-chat-title text-text",
       };
   }
 }
@@ -117,22 +132,29 @@ export function InlineInteractionCard({
   const isListMode = kind === "ask_question" && (it?.options?.length ?? 0) > 0;
   const actions = kind === "approval" ? APPROVAL_ACTIONS : kind === "pause" ? PAUSE_ACTIONS : null;
 
-  // ── Receipt states (closed) ──
+  // ── Closed cards ──
   if (closed.has(mid)) {
-    const wasAnswered = answered.has(mid);
+    // Answered: paint nothing. The receipt repeated the question in a full card
+    // shell (header band, hairline, padding) directly above the answer, and
+    // carried nothing else — not the answer text, not who gave it. Both halves
+    // of that fact are on screen without it: the question was just read in the
+    // open card, the answer is the bubble below, and that bubble now quotes the
+    // question (§5.5.4 puts the record on the `in_reply_to` row, not on a card).
+    if (answered.has(mid)) return null;
+    // Closed with nobody answering — the turn ended, timed out, or was stopped.
+    // This is the one fact the transcript would otherwise lose: a decision was
+    // requested and never got one, and the agent moved on. It stays visible, but
+    // as a quiet line in the card's own slot rather than a card shell, because
+    // it is a status note, not an utterance.
     return (
-      <div className="ml-12 my-1 max-w-[var(--content-max-width)] w-fit">
-        <div className="overflow-hidden rounded-md border border-border-outer opacity-70">
-          {/* Header — neutral */}
-          <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text-tertiary">
-            {cfg.icon}
-            <span>{wasAnswered ? t("chatView.cardAnswered") : t("chatView.cardClosed")}</span>
-          </div>
-          {/* Body — receipt line */}
-          <div className="px-3 py-2 text-xs text-text-tertiary">
-            {question}
-          </div>
-        </div>
+      <div
+        className="ml-12 my-1 flex max-w-[var(--content-max-width)] items-center gap-1.5 text-10 text-text-tertiary"
+        title={question}
+      >
+        {cfg.icon}
+        <span className="min-w-0 truncate">
+          {t("chatView.cardUnanswered", { question: truncateQuote(question) })}
+        </span>
       </div>
     );
   }
@@ -148,7 +170,12 @@ export function InlineInteractionCard({
             {askerName && <span className="ml-auto text-10 font-normal opacity-70">{askerName}</span>}
           </div>
           <div className="bg-chat-bubble px-3 py-2.5">
-            <div className="text-xs font-medium text-text">{question}</div>
+            {/* Markdown, not a bare text node: the question is model output and
+                carries inline code and links. Routed through the shared chat
+                renderer so the `prose` scope -- and every table and link rule
+                globals.css hangs under it -- cannot be forgotten the way the
+                per-surface bubble copies drifted. */}
+            <ChatMarkdown content={question} />
           </div>
         </div>
       </div>
@@ -168,7 +195,9 @@ export function InlineInteractionCard({
 
         {/* Body */}
         <div className="bg-chat-bubble px-3 py-2.5">
-          <div className="mb-2 text-xs font-medium text-text">{question}</div>
+          <div className="mb-2">
+            <ChatMarkdown content={question} />
+          </div>
 
           {/* Form A: list selection (ask_question with options) */}
           {isListMode && (

@@ -230,8 +230,7 @@
   "chatView": {
     "empty": "该聊天暂无消息",
     "routerFallback": "已自动分配任务",
-    "cardAnswered": "已回答",
-    "cardClosed": "已结束",
+    "cardUnanswered": "未获应答：{{question}}",
     "cardAsk": "Agent 询问",
     "cardApproval": "需要审批",
     "cardPause": "步骤确认",
@@ -1763,6 +1762,9 @@
       "edit": "编辑任务",
       "delete": "删除任务",
       "dueDate": "截止日期",
+      "dispatchFailed": "派发失败（第 {{attempts}} 次）：{{error}}",
+      "dispatchAbandoned": "派发已放弃（连续 5 次失败）：{{error}}。重新指派或变更状态后可重试。",
+      "startDate": "开始日期",
       "assignee": "负责人",
       "priority": "优先级",
       "type": "类型",
@@ -2022,6 +2024,8 @@
     "send": "发送",
     "mentionLabel": "提及成员",
     "emptyTurn": "（无输出）",
+    "taskChip": "任务 {{id}}",
+    "taskChipCopy": "复制任务 ID",
     "readOnly": "只读 — 你不是该项目的成员。"
   },
   "groupMembers": {

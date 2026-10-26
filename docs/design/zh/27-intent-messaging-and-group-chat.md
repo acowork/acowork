@@ -1,7 +1,9 @@
 # Intent 通信与聊天 Session 设计
 
 > 状态：设计定稿（框架、需求、数据模型、协议、前端、模块边界已确认；API 与 schema 细节待实现设计）
-> 版本：v2.7 | 更新日期：2026-10-24
+> 版本：v2.8 | 更新日期：2026-10-25
+>
+> v2.8 为**轮次来源词汇表与 PM 派发链路修订**（ADR-102）：① Intent 信封 `kind` 定型为四值词汇表（`user_message` / `pm_task` / `request` / `response`，未知与空值按 `request` 保守兜底），接收侧的路由、渲染、角色、写回四个决策点一律由 `TurnOrigin` 策略表决定，废除以 `conversation_id` 前缀字符串匹配猜场景的潜规则；② PM 派发的唤醒 playbook 从用户消息正文拆为信封字段 `assignment_brief`，由 Runtime 注入执行会话的系统块，不进任何聊天表面、不随会话历史持久化；派发 chat 行只带人读文本与 `meta.task_id`（渲染为任务胶囊；`project_id` 移除——行本就活在该项目的群里）；③ 派发触发源收敛为 PM 侧扫描器（`start_at` 到期 + 审批闸门 + 依赖闸门），撤销事件钩子；投递重试以持久化的 `dispatch_message_id` 为代次身份幂等（chat 行与信箱预算每代次各只占一份），退避 60s→5m→15m→30m、五次失败放弃。逐项见 §4.5 字段表、§5.4.2、§5.4.5、§13。
 >
 > v2.7 为**执行会话轮转机制删除**（ADR-099 2026-10-24 修订）：T1（空闲间隔）/ T2（任务终态或发生过 compaction）与已取消的 T3（配置冲突）一并从设计中删除，连 successor / predecessor / handoff 与两个配置项。理由：execute session 本就是可一直追加的会话，压缩过的历史会话同样能继续接 dispatch与迭代；T1/T2 是「没有 LLM 做路由判断」时代用物理信号近似「任务该结束了」的产物，语义决策上提到 Chat 层后它们不再承担任何路由含义，而 T2 的 handoff 摘要正是本设计要消灭的污染。收敛后的规则：执行会话**长命**，上下文卫生只有 compaction 阈值，文件规模只有 JSONL 硬上限，开新会话只有三个显式来源（router `dispatch(new)` / PM task 终态 close / 用户手动新建）。逐项见 §2.4 术语表、§3.3 非功能需求、§3.4 决策 3 / 4 / 23、§4.1、§4.5.2、§6.2。
 >
@@ -235,7 +237,7 @@ graph TB
 
 28. **Router 失败降级，可用性不退步（v2.5 修订降级落点）。**超时（默认 8 s）、provider 报错或连续两次非法工具参数时降级；**chat 来源的人类消息降级时新建执行会话**（`chat_dispatch(Target::New)`，绑定同一 chat、映射重指向），不再复用 `routing_key` 映射——降级意味着没有语义判断，映射也不是语义判断，把可能开新话题的消息猜塞进不相关的历史会话比新建更糟；`PassThrough`（PM / agent-agent / response / kill switch 关闭态）的确定性复用不变，那些链路上 `conversation_id` / `msg:` 键就是任务身份（ADR-099 D8 修订）。**不再为降级写 `system_notice(router_fallback)`**（旧行渲染期隐藏），但降级新建与正常派发同样落一条 `turn_routed` 反应行（决策 20）；消息已落库，不因路由失败丢失（§5.7）。降级不是唯一需要约束的失败面：router 链路上的每个 Gateway HTTP 都有界（历史读 `chat_router.timeout_ms`，写回 15 s，附件拉取 60 s），且 router turn 跑在该 chat 的 drain task 上而不是 MQTT 入站循环上，一个挂起的 Gateway 或慢模型只能放慢这一条 chat 的分配，不能停住该 Agent 的接收面（含 `Stop`）。`chat_router.enabled=false` 时不排队，Chat 消息内联走确定性路由（ADR-099 D8）。
 
-29. **执行视图的输入走 chat 入口，并定向直投指名会话（v2.6）。**绑定 chat 的 execution session，其 composer 的发送走 `POST /api/intents/chat-message` 并携带 `for_execution_session`：Gateway 以**调用者身份**落一条 `user_message`（补上 v2.5 只回写尾、不落头的半轮对话，而不是让 Runtime 以用户身份代写——写入口的身份必须是发起人），Runtime 收到带指名的消息后**跳过 Chat Router** 直投该会话，以 `SessionMessage::ChatMessage`（不是 `Intent`——它没有 `active_skill` / `attached_items` / `content_parts` 三臂）进入与执行面原路径**逐项等价**的流程：slash 技能仍由 Runtime 按 `SkillRegistry` 解析（指令永不信任客户端）、附件仍按 ADR-046 落进本会话 `files/`、JSONL 仍原生记录用户行——**零能力回退**。pin 是提示不是闸门：目标未加载 → 清空 hint 落回正常路由（一次路由调用的代价，不是丢消息）；空内容（无文本、无附件、无 content_parts）的定向发送在查会话之前就判为已完成，不唤醒会话也不烧路由调用。`message_id` 由客户端 mint 并在 chat 行 / 执行会话 JSONL 行 / 乐观气泡三处对齐，所以乐观插入与 reconcile 机制不动。附件**不跨系统搬运**：chat 行只在 `meta.exec_attachments` 带显示名（ADR-009 §5 红线：node-local 路径在 Gateway / Node 分机时必 5xx，而打不开的引用比不写更糟）；该字段必须在 chat 存储的 `IntentMeta` 上声明（未声明的 meta 键会被 serde 静默丢弃，症状是投影写成功而盘上没那一项），且存储的"`user_message` 必须有内容"判据认这枚标签为内容；两端将其渲染为不可点的静音 pill，因此"只交文件不发消息"的回合头行不会是空白气泡。`command` / `attached_items` 只在带 pin 时被采纳（无 pin 则置空而非 400，因为 routed 回合被消费成 Intent、那两条臂本就不存在），带 pin 时受上限护栏：`command` ≤128 字符（是技能名不是指令）、`attached_items` ≤32 条且序列化后 ≤32KB。无绑定、或本地模式（无账号，chat 通道是身份通道）保持原 `POST /sessions/{sid}/messages`；pinned 回合不写 `turn_routed`（未经路由，无去向可宣布）。绑定的 chat 是**项目群**时（PM 任务会话绑的正是派发它的群，决策 26），群里不止一个 agent，"谁来回话"不能由 chat 推出，因此请求另带 `pinned_agent` 指名拥有该执行会话的 instance；它只当**待校验的声明**：必须是本 chat 的 agent 参与者，否则 403 且不落行（本轮的回答要落进这个 chat），未带 pin 的群发仍走 §5.3 归档入口。归属另一半由**接收侧 Runtime** 校验：被指名会话绑的 chat 必须等于本次发送的来源 chat，不符同样清空 hint 落回正常路由——一个 agent 实例服务多个 chat，而 session id 会出现在群成员都读得到的行上，没这道校验任何人都能把文本、slash 技能与 node-local 附件路径注入别人正在跑的任务。头行既然每次都写，尾行就必须在**每一条出口**都写（完成 / 被 stop / 附件读不出来 / agent loop 报错 → `completed` / `aborted` / `failed`，`failed` 只写人可读单行），否则一轮在 chat 里永久显示"处理中"。尾行还兼任关闭 mailbox：pinned 回合没有 Intent 写回可关，所以 `chat-append` 在 `kind=agent_message` 且 `meta.in_reply_to` 非空时、**落库成功之后** `mark_answered`（与 §7.1 的关闭时机一致）；缺这一步，一轮即使答得完好，也会在超时后由 sweeper 在同一 chat 补一条 `fallback-` 的 `failed` 回执。内容门与 `attached_items` 的 ADR-046 union 校验都在 pin 归一化**之后**、投递之前跑：无 pin 时那些字段会被整批丢弃，拿原始请求判内容就会把请求形状错伪装成 503（本轮连头都不落）。绑定值只读自 Runtime 暴露的会话行，前端不发明、不缓存、不改写（§5.5.5）。
+29. **执行视图的输入走 chat 入口，并定向直投指名会话（v2.6）。**绑定 chat 的 execution session，其 composer 的发送走 `POST /api/intents/chat-message` 并携带 `for_execution_session`：Gateway 以**调用者身份**落一条 `user_message`（补上 v2.5 只回写尾、不落头的半轮对话，而不是让 Runtime 以用户身份代写——写入口的身份必须是发起人），Runtime 收到带指名的消息后**跳过 Chat Router** 直投该会话，以 `SessionMessage::ChatMessage`（不是 `Intent`——它没有 `active_skill` / `attached_items` / `content_parts` 三臂）进入与执行面原路径**逐项等价**的流程：slash 技能仍由 Runtime 按 `SkillRegistry` 解析（指令永不信任客户端）、附件仍按 ADR-046 落进本会话 `files/`、JSONL 仍原生记录用户行——**零能力回退**。pin 是提示不是闸门：目标未加载 → 清空 hint 落回正常路由（一次路由调用的代价，不是丢消息）；空内容（无文本、无附件、无 content_parts）的定向发送在查会话之前就判为已完成，不唤醒会话也不烧路由调用。`message_id` 由客户端 mint 并在 chat 行 / 执行会话 JSONL 行 / 乐观气泡三处对齐，所以乐观插入与 reconcile 机制不动。附件**不跨系统搬运**：chat 行只在 `meta.exec_attachments` 带显示名（ADR-009 §5 红线：node-local 路径在 Gateway / Node 分机时必 5xx，而打不开的引用比不写更糟）；该字段必须在 chat 存储的 `IntentMeta` 上声明（未声明的 meta 键会被 serde 静默丢弃，症状是投影写成功而盘上没那一项），且存储的"`user_message` 必须有内容"判据认这枚标签为内容；两端将其渲染为不可点的静音 pill，因此"只交文件不发消息"的回合头行不会是空白气泡。`command` 只在带 pin 时被采纳（无 pin 则置空而非 400，因为 routed 回合被消费成 Intent、那里没有 `active_skill` 臂），`attached_items` 两条路径都采纳（Intent 已补上这一臂：chat 面 "Add to Chat" 选中的工作区引用与执行面走同一条 ADR-046 落盘路径，由本轮实际接手的执行会话实时读取——引用是 node-local 路径，不是文件副本）；带 pin 时受上限护栏：`command` ≤128 字符（是技能名不是指令）、`attached_items` ≤32 条且序列化后 ≤32KB。无绑定、或本地模式（无账号，chat 通道是身份通道）保持原 `POST /sessions/{sid}/messages`；pinned 回合不写 `turn_routed`（未经路由，无去向可宣布）。绑定的 chat 是**项目群**时（PM 任务会话绑的正是派发它的群，决策 26），群里不止一个 agent，"谁来回话"不能由 chat 推出，因此请求另带 `pinned_agent` 指名拥有该执行会话的 instance；它只当**待校验的声明**：必须是本 chat 的 agent 参与者，否则 403 且不落行（本轮的回答要落进这个 chat），未带 pin 的群发仍走 §5.3 归档入口。归属另一半由**接收侧 Runtime** 校验：被指名会话绑的 chat 必须等于本次发送的来源 chat，不符同样清空 hint 落回正常路由——一个 agent 实例服务多个 chat，而 session id 会出现在群成员都读得到的行上，没这道校验任何人都能把文本、slash 技能与 node-local 附件路径注入别人正在跑的任务。头行既然每次都写，尾行就必须在**每一条出口**都写（完成 / 被 stop / 附件读不出来 / agent loop 报错 → `completed` / `aborted` / `failed`，`failed` 只写人可读单行），否则一轮在 chat 里永久显示"处理中"。尾行还兼任关闭 mailbox：pinned 回合没有 Intent 写回可关，所以 `chat-append` 在 `kind=agent_message` 且 `meta.in_reply_to` 非空时、**落库成功之后** `mark_answered`（与 §7.1 的关闭时机一致）；缺这一步，一轮即使答得完好，也会在超时后由 sweeper 在同一 chat 补一条 `fallback-` 的 `failed` 回执。内容门与 `attached_items` 的 ADR-046 union 校验都在 pin 归一化**之后**、投递之前跑：拿原始请求判内容就会把请求形状错伪装成 503（本轮连头都不落）。绑定值只读自 Runtime 暴露的会话行，前端不发明、不缓存、不改写（§5.5.5）。
 
 ### 3.5 现有实现缺陷
 
@@ -309,7 +311,7 @@ v2.2 及之前的「Handoff context 分级」表（T1 空闲间隔只带未决�
 
 以下项**不开放**给普通用户：Compaction 70% / 80% / 95% 阈值（沿用现有 Runtime 行为与配置能力，不因 Intent 重复造配置）、JSONL 硬上限 100,000 行 / 50 MiB（绝对安全上限；实现期可由部署级高级配置调整，但必须保留硬上限语义）。
 
-per-session 的 model / provider / reasoning / workspace 建议由路由时的 `session_config` draft 携带（§4.5.2）：新建会话时作为 seed 应用，复用到已映射会话时在**下一轮**生效（同 ADR-099 D8）——配置差异不再是任何新建或更换窗口的触发条件。
+per-session 的 model / provider / reasoning / workspace 建议由路由时的 `session_config` draft 携带（§4.5.2）：只在新建会话时作为 seed 应用，路由到已映射会话时**不应用**——初值只服务于被创建的那条会话（同 ADR-099「修订（2026-10-28）」）；配置差异不再是任何新建或更换窗口的触发条件。
 
 参数变更需要鉴权并记录审计；更改不重写已有历史。运行中的一次执行使用开始时解析出的配置快照。未提供配置时使用默认值。普通用户只能调整授权范围内的 Agent 级参数，不能修改他人 Agent home 中的 session 文件。
 
@@ -407,7 +409,8 @@ Chat session 里只有一类指向 execution session 内事件的 durable 行：
 | `body` / `attachments` | 至少一个非空 | 给接收 Agent 的消息内容与附件（§4.2.1） |
 | `mentions` | 群聊 @ 时 | 被 @ 的目标 instance id 列表。一条 `user_message` 只落一行，多个目标写在同一行的 `mentions` 里（§5.3.1） |
 | `repo` | 可选 | 本次工作涉及的代码仓库地址（规范化 remote URL）。项目有仓库时由系统在派发时自动注入；发送方不指定目标 Agent 的具体工作目录 |
-| `session_config` | 可选 | model / provider / reasoning-effort / 工作目录的**初值建议**；新建 execution session 时作为 seed 应用（复用已映射会话时按 §4.5.2 从它的下一轮生效），未提供的字段用目标 Agent 默认值。**不含 skills**——技能由模型自动加载，非 session 级初值，chat-message 通道也没有逐条指定技能的入口 |
+| `assignment_brief` | 仅 `pm_task` | PM 派发的唤醒 playbook（claim → 工作 → submit 契约）。**高信任信封字段**：只有系统生产者（task-dispatch 管线）可以填，Runtime 仅当轮次来源为 `pm_task` 时采纳并注入执行会话的系统块（Block A），不进渲染后的用户消息、不落 Chat 表面、不随会话历史持久化；对等 `intent_send` / 卡片应答等 agent 来源的 params 携带该键时，Gateway 在出口剥离、Runtime 在提取与消费两处各设一道来源门控（ADR-102 信任边界：高信任信封字段只认系统生产者） |
+| `session_config` | 可选 | model / provider / reasoning-effort / 工作目录的**初值建议**；新建 execution session 时作为 seed 应用（路由到已映射会话时一律不应用，见 §4.5.2 与 ADR-099「修订（2026-10-28）」），未提供的字段用目标 Agent 默认值。**不含 skills**——技能由模型自动加载，非 session 级初值，chat-message 通道也没有逐条指定技能的入口 |
 | `conversation_id` | Agent 发起时必需 | 一次对话的标识，由发起方在首次 request 时生成，本次对话的后续 request / response 复用。系统据此统计 request 次数（§5.4.5）。**人类发起的轮次留空**，因此人类消息天然不计入对话预算 |
 | `in_reply_to` | 应答时必需 | 被应答消息的 `message_id`；**由系统生成，不是模型可填参数**——它的存在即表示本条是应答（§5.4.5 R2）。人类回答卡片时同样使用此字段（§5.5.4） |
 | `target_agent_session_id` | 路由后关联 | 实际处理本条消息的目标 Agent execution session ID。前端"查看执行过程"的下钻句柄 |
@@ -442,15 +445,17 @@ Chat session 里只有一类指向 execution session 内事件的 durable 行：
 
 Intent 可携带 model / provider / reasoning-effort / 工作目录的目标 Agent session 配置初值；未提供时使用目标 Agent 默认值。该配置不是不可变快照，授权用户可以在 session 生命周期内修改，包括该 session 的工作目录。
 
-**初值是建议，不是命令，但它不会被默默丢掉。**`session_config` 在 execution session **创建的那一刻**被应用为 seed（router `dispatch(new)`、PM 任务首次建立 `conv:task:` 映射，或用户经 `+` 手动新建）；v2.7 删除三态轮转后已没有"配置冲突就新建"这条路，因此会话被**复用**时初值仍然要落地：model / provider / reasoning-effort 通过 `ConversationSession::apply_config`（ADR-047 唯一配置入口）应用到被路由到的那条会话上，立即持久化、从它的下一轮生效——不是把会话重置成初值，也不是拿不到就默默忽略。**`工作目录` 是唯一例外**：把活任务换到一个不同目录下执行不是配置微调，且所有目录切换必须走 `route_workspace_switch` 单入口（§8 红线，带改 per-agent 默认的副作用），所以 workspace 建议只在新建会话时生效，复用时记录分歧日志（要换目录就 `dispatch(new)`）。
+**初值是建议，不是命令，并且只作用于被创建的那条会话。**`session_config` 在 execution session **创建的那一刻**被应用为 seed（router `dispatch(new)`、PM 任务首次建立 `conv:task:` 映射，或用户经 `+` 手动新建）。路由到**已存在**的会话时一个字段都不应用：model / provider / reasoning-effort / workspace 全部保留那条会话自己的值（2026-10-28 修订；此前本节与 ADR-099 验收标准要求复用时"下一轮生效"，workspace 单独例外）。理由是投影的自洽：一个 Chat 是一段对话压着多条可能同时在跑的执行会话，composer 上的 draft 是这段对话对"还没开始的活"的偏好；把它当命令打进一条在跑的会话，等于让一条消息悄悄把任务换到另一个模型或另一个目录，而用户看到的下一个事实是文件写进了错的树。要改一条在跑的会话，去它自己的执行面：model / provider / reasoning-effort 走 `ConversationSession::apply_config`（ADR-047 唯一配置入口，立即持久化、下一轮生效），工作目录走 `route_workspace_switch`（§8 红线单入口，带改 per-agent 默认的副作用）。
 
 应用前必须先钳制到**接收 Agent 自己的允许集**：model / provider 必须落在该 Agent 的 provider list 内，工作目录必须落在其已注册目录集内；越界的字段被丢弃并回退到 Agent 默认，绝不因一个非法建议而失败整条投递。reasoning-effort 不属 provider 允许集，按现有枚举解析——不可解析的值在解析阶段即丢弃，避免落盘后每次读取都解析为 `None`。
 
-**Chat 表面在发送前就能定这些初值。**用户在 Chat tab 直接选 model / reasoning-effort / 工作目录，随本条 `user_message` 一起发出——因为任务一旦发出，Agent 立即开始 execution session 的执行，等切到执行中的 exec tab 再改，模型可能已经跑了好几轮，配置来不及生效。所选值是本条消息的 draft 初值，不改变 Chat session 本身。技能（skills）在 Chat 表面**不展示**：它由模型自动加载，非 session 级初值，chat-message 通道也无对应字段，无可写入口，故直接隐藏该 chip，而不是显出来再提示不可用。
+**Chat 表面在发送前就能定这些初值。**用户在 Chat tab 直接选 model / reasoning-effort / 工作目录，随本条 `user_message` 一起发出——因为任务一旦发出，Agent 立即开始 execution session 的执行，等切到执行中的 exec tab 再改，模型可能已经跑了好几轮，配置来不及生效。所选值持久在 **Chat session 行的 `session_config`** 上（因此跨 tab 切换、重载、换设备都保留），并作为本条消息的 draft 初值随信封发出；它不改变任何 execution session。
+
+**其中工作目录是 Chat 面自己的属性。**它决定 Chat 面右侧工作区面板投影哪个工作区——文件树、搜索、以及"Add to Chat"引用的来源，三处必须是同一个工作区，否则"从 X 目录里选一个文件加进对话、输入框显示的是 Y 目录"自相矛盾。在 Chat 面切换它只写 Chat session 的 `session_config`，**对 execution session 完全无感**：既不重指向任何已有会话的工作目录（那是执行面面板经 `PUT /sessions/{sid}/workspace` 的显式操作，与本处无关），也不因它而新建会话；只有 router 决定 `dispatch(new)` 时它才作为新会话的初值落地。两个面各自投影自己那份事实：执行面看到并切换"这条会话正在哪个目录里跑"，Chat 面看到并切换"这段对话在哪个目录里工作"。技能（skills）在 Chat 表面**不展示**：它由模型自动加载，非 session 级初值，chat-message 通道也无对应字段，无可写入口，故直接隐藏该 chip，而不是显出来再提示不可用。
 
 **这份 draft 落在服务端的 Chat session 记录上，不是前端局部状态。**按"后端是唯一数据源"，model / provider / workspace / reasoning-effort 的选择持久化在 session 行（`ChatSession.session_config`，经 `PATCH /api/chat-sessions/{id}/session-config` 整体覆盖写回，参与者身份即权限，局外人按 §5.3 隐藏 404），因此上一次的选择能扛过切 tab、刷新与换设备；前端的 draft 只是这行的**缓存与乐观显示**，选定即发 PATCH、PATCH 响应回读规范化值、失败即回滚，绝不独立持有一份后端没有的草稿状态（v2.1 修订）。
 
-**显式选择不得被静默丢弃，但不再用"冲突即新建"实现（v2.2）。**`session_config` 只在 execution session 创建的那一刻作为初值；对已存在的会话，配置差异不再是路由信号，而是交给 router 的语义判断：改参数且说明"继续" → `dispatch` 到该会话并按授权修改生效；改参数且描述的是新任务 → `dispatch(new)`，初值用于新会话。`session_config` 缺省的字段表达「无意见」，永不构成冲突。配置修改从被接受后影响后续消息 / 后续执行。正在执行的单次操作使用启动该操作时解析出的配置快照，避免用户更改工作目录后正在进行的文件操作中途切换目录。服务端必须校验用户有权修改目标 Agent 的对应 session 配置；不授权的修改失败，不静默忽略。工作目录的修改只能在目标 Agent 已注册的目录集合内选择，不接受任意路径。
+**显式选择在它作用的那条路径上不得被静默丢弃，但不再用"冲突即新建"实现（v2.2，2026-10-28 修订收窄其作用面）。**`session_config` 只在 execution session 创建的那一刻作为初值；对已存在的会话，配置差异不再是路由信号，而是交给 router 的语义判断：改参数且说明"继续" → `dispatch` 到该会话，该会话保留它自己的配置（draft 不覆盖在跑的会话，见上）；改参数且描述的是新任务 → `dispatch(new)`，初值用于新会话。要改一条在跑的会话的配置，走那条会话自己执行面上的显式修改（受授权校验）。`session_config` 缺省的字段表达「无意见」，永不构成冲突。配置修改从被接受后影响后续消息 / 后续执行。正在执行的单次操作使用启动该操作时解析出的配置快照，避免用户更改工作目录后正在进行的文件操作中途切换目录。服务端必须校验用户有权修改目标 Agent 的对应 session 配置；不授权的修改失败，不静默忽略。工作目录的修改只能在目标 Agent 已注册的目录集合内选择，不接受任意路径。
 
 ### 4.6 Chat session 的串行写入
 
@@ -636,6 +641,8 @@ PM 创建任务并向 Agent 派发时，以任务作为执行 session 边界：
 
 任务逻辑执行上下文对应 Agent execution session 链，不是 Chat session。群聊负责可见的项目交流历史，PM task ID 负责选择目标 Agent 的执行上下文。
 
+**派发触发与幂等（v2.8，ADR-102）。**派发的唯一触发源是 PM 侧扫描器：每 tick 从索引取「pending + 已过审批闸门 + `start_at` 到期（缺省=立即）+ 未派发 + 有 agent 责任人 + 依赖已满足」的候选集，按优先级推送 `POST /api/intents/task-dispatch`（信封 `kind=pm_task`）。事件钩子（创建即派发 / 审批即派发）撤销——触发时机只有一个事实来源（`start_at` 与 `dispatched_at`），不依赖进程内事件链。投递是**代次幂等**的：扫描器在首次尝试**之前**把 `dispatch_message_id` 落盘（`Task` 字段，crash-safe、重启复用），重试以同一身份重放——chat 行按 `meta.message_id` 去重（存储层唯一写入口的既有合同）、信箱预算按 `message_id` 去重（每代次占 1 个名额，投递失败不再能烧穿 §6.5 R4 上限把任务永久饿死）。失败退避 60s→5m→15m→30m，第 5 次失败后放弃并 `error` 日志（放弃按代次计：状态跃迁/换人清除 `dispatch_message_id` 与 `dispatched_at`，新代次重新计数）。派发到项目群的 chat 行只带人读文本（标题+描述）与 `meta.task_id`（前端渲染为任务胶囊，点击复制裸 id）；`project_id` 不进 meta——行本就活在该项目的群里；唤醒 playbook 走信封 `assignment_brief`（§4.5 字段表），不进消息正文、不落历史。
+
 #### 5.4.3 Agent-Agent：三个 session
 
 Agent A 与 Agent B 建立一对一聊天时存在三个互相独立但可关联的 session：
@@ -690,6 +697,8 @@ Intent 采用 C/S 式的所有权模型：一次对话由发起方拥有并负�
 | 人类消息（用户单聊 / 群聊 @ / PM 派单 / cron） | 发起方 | 可用 | 新建 |
 | `agent_message`（别的 Agent 问我） | 应对方 | **不在本轮 tool set 中** | 复用入站值 |
 | 应答（别的 Agent 答我） | 发起方，延续自己的对话 | 可用 | 复用 |
+
+**入站类型是信封 `kind` 字段上的四值词汇表（v2.8，ADR-102），不是靠字符串线索推断的潜规则。**`user_message`（人类聊天轮：单聊 / 群聊 @ / pinned 转投）、`pm_task`（PM 任务派发——人类输入，但路由键是任务身份、不经 router）、`request`（agent 发起的对话请求；空值与未知值保守兜底为本项，覆盖 cron 与混版的旧生产者）、`response`（应答回传）。每个值在 `acowork-core::intent::TurnOrigin` 的策略表上对应一行 `{router_eligible, render_envelope, responder, write_back}`：路由资格、渲染形态（人读文本还是完整信封）、本轮角色（R1 的工具裁剪依据）、写回义务四个决策点**查同一张表**，生产端（Gateway 各构造点）显式盖章，消费端不再各自从 `conversation_id` 前缀或 kind 字面量反推场景。`pm_task` 与 `user_message` 的差别只在路由资格一项——它是人类输入，角色与渲染与聊天轮相同（v2.8 修复的正是它此前骑 `request` 值、被按应对方裁剪 `ask_user_question` 并被渲染成信封 JSON 的错位）。task 坐标（`task:{project}:{task}` 与 `conv:task:{project}:{task}`）的格式常量与判定/构造函数同样收在 `acowork-core::intent`，feature 代码不得裸写 `starts_with`。
 
 R1 的强制点在工具可见性：应对方 turn 的工具集合里没有 `intent_send`，同时移除 `ask_user_question`（靠工具可见性强制，不是运行时报错）。模型看不到这两个工具，因此既不会尝试，也不会消耗 token 想别的路子绕过去——比运行时报错更省，也更硬。
 
@@ -933,6 +942,7 @@ chat 侧不读 execution session 的 `live_state`：既不读时投影为持续�
 - **@ 选择器**：只有 @ 到 Agent 才触发执行；@ 到人仅产生提及，不触发（§5.3.1）。
 - **多 Agent 并发**：同一消息 @ 多个 Agent 时，各自独立地跑一轮（chat 侧只有一条群级等待行，不逐个点名）。
 - **成员变更**：被移出群的成员，其视图中的历史群消息保留，但群 execution session 立即不可达（§8.3）。
+- **任务胶囊（v2.8）**：PM 派发的 `user_message` 行在气泡上方渲染一枚胶囊（`meta.task_id` 存在即渲染，文案「任务 {id}」，点击复制裸 id）；行正文只有人读文本，唤醒 playbook 不上任何聊天表面（§5.4.2）。胶囊是派发行唯一的机器坐标展示——`project_id` 不进 meta，也不渲染。
 
 ### 6.5 移动端
 
@@ -1164,6 +1174,8 @@ v2.0 重排了章节。代码注释中对本设计的 `§` 引用需按此表更
 ## 13. 变更记录
 
 保留历史修订要点（原文照录；其中 § 引用为当时的旧编号，新旧对照见 §12。v2.2 / v2.0 等条目中描述的 T1/T2/T3 轮转与 handoff 机制**已在 v2.7 整体删除**，仅作历史记录保留）
+
+> v2.8 修订（轮次来源词汇表与 PM 派发链路，ADR-102）：① Intent 信封 `kind` 收为四值词汇表 `user_message` / `pm_task` / `request` / `response`（空值与未知值兜底 `request`，cron 与混版旧生产者落保守侧），生产端在 Gateway 各构造点显式盖章，消费端（路由资格 / 渲染形态 / responder 角色 / 写回义务四个决策点）统一查 `acowork-core::intent::TurnOrigin` 策略表；task 坐标格式常量与判定/构造函数收进同一模块，feature 代码禁止裸 `starts_with("task:")`。修复的错位：PM 派发此前骑 `kind="request"`，被按应对方裁剪 `ask_user_question` / `intent_send`（人类任务轮失去向人提问的能力），并在执行 transcript 里渲染成整个信封 JSON、经会话标题派生二次泄漏到群聊回执。② PM 派发消息拆分：人读文本（标题+描述）进群聊 chat 行，唤醒 playbook 拆为信封字段 `assignment_brief`，Runtime 注入执行会话系统块（ADR-060 字节稳定：每代次常量），不进渲染文本、不落会话历史、不进任何聊天表面；群聊按 `meta.task_id` 渲染任务胶囊（该键必须在 chat 存储 `IntentMeta` 上声明——决策 29 的静默丢弃陷阱在本键上真实发生过一次，两端各有测试钉住），`project_id` 从派发行 meta 移除。信任边界：`assignment_brief` 是高信任字段，Runtime 按来源门控（提取与消费两道），Gateway 对 agent 来源 params 在出口剥离（保护混部旧 Runtime）。③ 派发触发源收敛为 PM 扫描器（`start_at` 到期 + 审批 + 依赖三闸门），撤销事件钩子；重试幂等：`Task.dispatch_message_id` 首试前落盘、按代次复用，chat 行与信箱预算每代次各占一份，退避 60s→5m→15m→30m、五次失败放弃并 error 日志（放弃按代次计，跃迁即重计）。逐项见 §4.5 字段表（`assignment_brief` 行）、§5.4.2（触发与幂等段）、§5.4.5（词汇表段）、§6（任务胶囊）。协议面：task-dispatch 是 Gateway 内部服务间端点，契约（`assignment_brief` / 可选 `message_id` / kind=`pm_task`）以本文 §4.5 字段表为准，不重复收录进 protocols/http；版本偏差注记（新 Gateway→旧 Runtime 会把 `pm_task` 兜底成 responder 语义，多节点部署 Runtime 先行或同批）见 runbooks。
 
 > v2.7 修订（执行会话轮转机制删除，取代 v2.2 的三态轮转模型）：T1（空闲间隔）/ T2（PM task 终态或本次执行发生过 compaction）与已在 v2.2 取消的 T3（配置冲突）一并删除，连 successor / predecessor 会话对、`handoff_note` 通道、`rotation_handoff` transcript 标记、`last_compaction_summary` 派生列、以及 `intent_idle_rotate_hours` / `intent_handoff_max_tokens` 两个配置项（含 Agent 设置卡片与五份 locale）。理由：execute session 本就是可一直追加、持续交互的会话，每一轮都重新读全量 JSONL（ADR-032），压缩过的会话同样能继续接 dispatch——「压缩过就该换窗口」没有依据；T1/T2 是「没有 LLM 做路由判断」时代用物理信号近似「任务该结束了」的产物，语义决策上提到 Chat Router 后不再承担任何路由含义；T2 的 handoff 摘要与「新任务不被旧摘要污染」的目标直接冲突。收敛后的唯一规则：执行会话**长命**，上下文卫生只有 compaction 阈值，文件规模只有既有 JSONL 硬上限，开新执行会话只有三个显式来源（router `dispatch(new)` / PM task 终态 close / 用户经 `+` 手动新建）。不变面：`turn_mode` 仍只有 new / continue 两态（ADR-100 D11），`chat_dispatch` 返回值随之从三元收回二元，transcript 不新增 tag，映射可指向已压缩的会话且不做健康检查，压缩自身的恢复跳过仍用 `last_compaction_offset`；历史 JSONL 里的 `rotation_handoff` 行不迁移、不清理，仍从聊天渲染中过滤。详见 ADR-099「修订（2026-10-24）」，逐项见 §2.4 / §3.3 / §3.4 决策 3、4、23 / §4.1 / §4.5.2 / §5.4.1 / §5.4.2 / §6.2。
 

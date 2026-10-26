@@ -347,6 +347,9 @@ export interface ChatMessageRow {
      *  `user_message` that an execution view's composer sent. Labels only — the
      *  bytes stay in that run, so the chip is inert (design 27 §4.2.1). */
     exec_attachments?: ExecAttachmentLabel[]
+    /** Design 27 §6.4 (v2.8): a PM task dispatch row carries the bare task id;
+     *  rendered as a task chip. The dispatch's playbook never reaches chat. */
+    task_id?: string
   }
   attachment_ids?: string[]
   attachments?: Array<{ id: string; name: string; mime: string; size: number }>

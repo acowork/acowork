@@ -182,7 +182,7 @@ describe("AgentChatView event-log wiring", () => {
     expect(sendTextMock).toHaveBeenCalledWith(SESSION, "A", "card2");
   });
 
-  it("collapses an answered card to a receipt and keeps the answer bubble", () => {
+  it("drops an answered card and quotes the question on the answer bubble", () => {
     windows = {
       [SESSION]: {
         older: [],
@@ -198,12 +198,18 @@ describe("AgentChatView event-log wiring", () => {
     };
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
 
-    // No live card once the human answered — the request folded to a receipt.
+    // No live card once the human answered.
     expect(screen.queryByText("chatView.freeAnswer")).toBeNull();
-    // The card row now reads as an answered receipt (the §5.5.4 closure text).
-    expect(screen.getByText(/chatView.cardAnswered/)).toBeTruthy();
-    // The answer itself is just a normal user bubble.
+    // No receipt either — it repeated the question without saying who answered
+    // or what they said. The slot is empty now.
+    expect(screen.queryByText(/chatView.cardAnswered/)).toBeNull();
+    // And the slot must not fall through to the unanswered note either: an
+    // answered card that reads "Unanswered: …" is worse than the receipt was.
+    expect(screen.queryByText(/chatView.cardUnanswered/)).toBeNull();
+    // The answer is a normal user bubble, and the link to the question rides
+    // above it as the quote line (§5.5.4: the answer row IS the record).
     expect(screen.getByText("B")).toBeTruthy();
+    expect(screen.getByText("Pick one")).toBeTruthy();
   });
 
   it("drops a retired milestone from an old transcript and derives the wait line", () => {

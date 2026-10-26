@@ -62,6 +62,16 @@ struct Cli {
     #[arg(long, default_value = "60")]
     agent_sync_interval_secs: u64,
 
+    /// 派发扫描器 tick 间隔（毫秒，默认 1000）。任务 `start_at` 到期后
+    /// 最迟一个 tick 内派发 intent（见 `dispatch` 模块）。
+    #[arg(long, default_value = "1000")]
+    dispatch_interval_ms: u64,
+
+    /// 每个 tick 最多派发的任务数（防止到期积压一次性打爆 Gateway
+    /// 每会话请求预算）。
+    #[arg(long, default_value = "10")]
+    dispatch_per_tick: usize,
+
     /// 日志级别
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -174,7 +184,21 @@ async fn main() {
     // group chats existed) get their group chat backfilled, idempotently.
     service.spawn_group_chat_backfill();
 
-    // 把实际绑定端口写入 port_file（Gateway supervisor 读取）
+    // Graceful shutdown: created before the scanner so it can hand the
+    // same flag to the dispatch loop; signals set the flag, main waits,
+    // then flushes the store.
+    let shutdown = acowork_core::shutdown::Shutdown::new();
+    acowork_core::shutdown::install_signal_handlers(shutdown.clone());
+
+    // The dispatch scanner — the single dispatch trigger source (see the
+    // `dispatch` module); stops between ticks on the shutdown flag.
+    service.spawn_dispatch_scanner(
+        std::time::Duration::from_millis(cli.dispatch_interval_ms),
+        cli.dispatch_per_tick,
+        shutdown.clone(),
+    );
+
+    // Write the actually-bound port to port_file (read by the Gateway supervisor).
     if let Some(path) = &cli.port_file {
         if let Err(e) = std::fs::write(path, addr.port().to_string()) {
             tracing::error!(path = %path.display(), error = %e, "Failed to write port file");
@@ -183,9 +207,6 @@ async fn main() {
         tracing::info!(path = %path.display(), port = addr.port(), "Port file written");
     }
 
-    // 优雅停机：等待信号 → flush store
-    let shutdown = acowork_core::shutdown::Shutdown::new();
-    acowork_core::shutdown::install_signal_handlers(shutdown.clone());
     while !shutdown.is_shutting_down() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

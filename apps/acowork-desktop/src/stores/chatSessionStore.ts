@@ -18,6 +18,14 @@
  *   view. `ponytail:` ceiling — the chat view updates at doorbell
  *   cadence, not token cadence; upgrade path is folding the existing
  *   `chatAdapterStore` stream into the status card.
+ *   Render-perf L1+L2+L3 (docs/plan/zh/chat-transcript-render-perf-plan.md)
+ *   executed the OTHER half of the v1 assumption: the transcript is now
+ *   memoized (L1), windowed through the shared `VirtualRowList` shell —
+ *   only viewport rows are in the DOM (L2), and the doorbell path is
+ *   reference-disciplined: an unchanged re-read sets nothing, and a changed
+ *   one reuses the row objects it already had (L3). Do NOT write new chat
+ *   surfaces against the old "full re-render per doorbell" cost model.
+ *   Streaming itself remains unbuilt (the plan's deliberate non-goal).
  *
  * Freshness is push-first: `acowork/users/{me}/chat/changed` (the same
  * doorbell the human↔human inbox rides, published by the user service
@@ -28,6 +36,8 @@
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
 import { SessionAccessError } from "../lib/session-control";
+import { toWireAttachedItems, workspaceRefToAttachedItem } from "../lib/types";
+import type { WorkspaceRef } from "../lib/types";
 import { useAuthStore } from "./authStore";
 
 // ── Wire types (mirror `chat_sessions_api.rs` responses) ──────────────
@@ -62,6 +72,10 @@ export interface ChatMessageRow {
     mentions?: string[];
     status?: string;
     repo?: string;
+    /** A PM task dispatch (`pm_task` origin): the task id, rendered as a
+     *  chip on the group-chat bubble so the human text stays clean (the
+     *  claim/submit playbook is model-facing only, never on this row). */
+    task_id?: string;
     notice_type?: string;
     /** ADR-099: reserved producer label (`chat_router`). No writer emits it
      *  yet — the router's plain-text answer says "nothing to open" by
@@ -225,8 +239,9 @@ export interface ChatSessionConfig {
  *  `sessionConfig` is the initiator's `session_config` suggestion (design
  *  27 §4.5): model / workspace / reasoning-effort chosen on the Chat
  *  surface before sending. It rides the intent envelope and seeds the
- *  execution session — at creation, and re-applied (from its next turn) when
- *  a mapped session is reused. `undefined` = use the
+ *  execution session — at creation, and never on a reuse: a session that
+ *  already exists keeps its own model / reasoning / workspace (ADR-099's
+ *  revision of 2026-10-28). `undefined` = use the
  *  agent's own defaults. */
 function sendChatMessage(
   me: string,
@@ -235,6 +250,7 @@ function sendChatMessage(
   inReplyTo?: string,
   sessionConfig?: ChatSessionConfig,
   attachmentIds?: string[],
+  attachedItems?: unknown[],
 ): Promise<void> {
   return req<void>("POST", "/api/intents/chat-message", {
     chat_session_id: chatSessionId,
@@ -243,6 +259,11 @@ function sendChatMessage(
     in_reply_to: inReplyTo ?? "",
     ...(sessionConfig ? { session_config: sessionConfig } : {}),
     ...(attachmentIds && attachmentIds.length > 0 ? { attachment_ids: attachmentIds } : {}),
+    // ADR-046 workspace references picked with "Add to Chat". The Gateway
+    // forwards them to whichever execution session takes this routed turn
+    // (design 27 §4.2.1) — they are paths, not bytes, so nothing is copied
+    // into the Chat store.
+    ...(attachedItems && attachedItems.length > 0 ? { attached_items: attachedItems } : {}),
   });
 }
 
@@ -504,6 +525,16 @@ interface ChatSessionStore {
    *  this slot is hydrated by `openAgent` and updated by `saveDraft`'s
    *  response — never an independent frontend state. */
   draft: Record<string, ChatSessionConfig>;
+  /** Workspace references ("Add to Chat") pending on this Chat surface's
+   *  composer, keyed by chat session id. The execution view keeps its own list
+   *  on the execution session (`chatStore.attachedContext`); a reference goes to
+   *  whichever composer is on screen (see `lib/addToChat`). `sendText` clears it
+   *  on a send that landed, so a failed send keeps what the human attached. */
+  attachedContext: Record<string, WorkspaceRef[]>;
+  /** Land a reference on this Chat session's composer. Idempotent by `id`:
+   *  attaching the same path twice is one chip, not two. */
+  addAttachedContext(chatSessionId: string, ref: WorkspaceRef): void;
+  removeAttachedContext(chatSessionId: string, id: string): void;
 
   openAgent(agentId: string): Promise<void>;
   /** Project group chats currently on screen (keyed by session id) —
@@ -565,12 +596,56 @@ const emptyWindow = (): Window => ({
  *  (after a locate jump) keeps the reader's place. */
 const atTail = (w: Window): boolean => w.lastPos >= w.total - 1;
 
+/** Row content equality for the doorbell path (render-perf L3). The chat log
+ *  is append-only and rows immutable (`append_message` dedups by
+ *  `message_id` and returns the existing row; nothing rewrites a line), so
+ *  this is only ever comparing two parses of the same bytes — a full
+ *  `JSON.stringify` compare is exact, needs no maintenance as the row shape
+ *  grows, and costs milliseconds against the re-render it prevents. */
+const rowEquals = (a: ChatMessageRow, b: ChatMessageRow): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
+
+/** Structural sharing for a re-read newest page: keep the existing row
+ *  object whenever the content is unchanged, so a doorbell that appended
+ *  one row repaints ONE memoized row instead of handing every mounted row
+ *  a fresh JSON identity (which no memo can survive). Keyed by `seq` —
+ *  unique within this session, and the window only ever spans one session. */
+function shareRowIdentities(
+  prev: ChatMessageRow[],
+  next: ChatMessageRow[],
+): ChatMessageRow[] {
+  if (prev.length === 0) return next;
+  const bySeq = new Map<number, ChatMessageRow>();
+  for (const r of prev) bySeq.set(r.seq, r);
+  return next.map((r) => {
+    const old = bySeq.get(r.seq);
+    return old !== undefined && rowEquals(old, r) ? old : r;
+  });
+}
+
 export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   byAgent: {},
   openGroupIds: {},
   windows: {},
   sending: {},
   draft: {},
+  attachedContext: {},
+
+  addAttachedContext: (chatSessionId, ref) => {
+    set((s) => {
+      const list = s.attachedContext[chatSessionId] ?? [];
+      if (list.some((c) => c.id === ref.id)) return {};
+      return { attachedContext: { ...s.attachedContext, [chatSessionId]: [...list, ref] } };
+    });
+  },
+
+  removeAttachedContext: (chatSessionId, id) => {
+    set((s) => {
+      const list = s.attachedContext[chatSessionId];
+      if (!list) return {};
+      return { attachedContext: { ...s.attachedContext, [chatSessionId]: list.filter((c) => c.id !== id) } };
+    });
+  },
 
   openAgent: async (agentId) => {
     const me = useAuthStore.getState().account?.user_id;
@@ -683,18 +758,43 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       // or an explicit `force` (open / send / tab flip), resets to the tail.
       // We still fold in the new `total` so the "newer" affordance stays true.
       if (cur && !force && !atTail(cur)) {
+        // Equivalence gate (render-perf L3): a doorbell that carries no new
+        // row for THIS session must not produce a new store identity at all.
+        if (page.total === cur.total) return;
         set((s) => ({
           windows: { ...s.windows, [chatSessionId]: { ...cur, total: page.total } },
         }));
         return;
       }
-      const n = page.messages.length;
+      // At-tail (or forced) re-read. The log is append-only with immutable
+      // rows, so `total` + the last row's `seq` pins the newest page exactly:
+      // unchanged on both means the window already holds these bytes — skip
+      // the set entirely (no new `windows` identity, no virtualizer churn,
+      // no re-render of a single mounted row). A forced refresh always lands
+      // (the caller may be re-claiming the tail from a different shape).
+      const lastOld = cur?.tail[cur.tail.length - 1];
+      const lastNew = page.messages[page.messages.length - 1];
+      if (
+        cur &&
+        !force &&
+        cur.older.length === 0 &&
+        cur.total === page.total &&
+        cur.tail.length === page.messages.length &&
+        (lastOld?.seq ?? -1) === (lastNew?.seq ?? -2)
+      ) {
+        return;
+      }
+      // Rows that survived are handed back their old object identities
+      // (structural sharing): a doorbell that appended one row repaints one
+      // memoized row, not every mounted one.
+      const tail = shareRowIdentities(cur?.tail ?? [], page.messages);
+      const n = tail.length;
       set((s) => ({
         windows: {
           ...s.windows,
           [chatSessionId]: {
             ...emptyWindow(),
-            tail: page.messages,
+            tail,
             total: page.total,
             firstPos: page.total - n,
             lastPos: page.total - 1,
@@ -831,8 +931,21 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     let ok = false;
     try {
       if (inReplyTo && attachmentIds?.length) throw new Error("card replies cannot include attachments");
-      await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds);
+      // Workspace references picked with "Add to Chat" ride this turn as the
+      // ADR-046 union. A card answer continues an existing turn through the
+      // answer channel, which has no attachment arm, so refs are carried on a
+      // plain message only — and cleared only when that message landed, so a
+      // failed send leaves the human's chips where they were.
+      const refs = get().attachedContext[chatSessionId] ?? [];
+      const attachedItems =
+        inReplyTo || refs.length === 0
+          ? undefined
+          : toWireAttachedItems(refs.map(workspaceRefToAttachedItem));
+      await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, attachedItems);
       ok = true;
+      if (attachedItems) {
+        set((s) => ({ attachedContext: { ...s.attachedContext, [chatSessionId]: [] } }));
+      }
     } catch (e) {
       console.warn("[chatSessionStore] send failed:", e);
     } finally {
@@ -848,20 +961,40 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
 
   upload: (chatSessionId, file) => uploadChatAttachment(chatSessionId, file),
 
-  wake: async () => {
-    // The doorbell names nothing (no subscription ACL on the broker). The
-    // chat session is pinned — even while the exec surface is shown its
-    // in-flight turn drives the chat tab's status, so refresh regardless of
-    // `mode`.
-    for (const st of Object.values(get().byAgent)) {
-      if (st.chatSessionId) await get().refresh(st.chatSessionId);
-    }
-    // Open project group chats ride the same doorbell.
-    for (const sid of Object.keys(get().openGroupIds)) {
-      await get().refresh(sid);
-    }
-  },
+  wake: () => wakeCoalesced(get),
 }));
+
+// ── Doorbell wake coalescing (render-perf L3) ──────────────────────
+// The doorbell is content-free — it says only "something changed
+// somewhere" — and one agent turn rings it several times (pointer row,
+// card row, terminal row, per participant). A trailing 250ms debounce
+// turns a burst into ONE re-read round; the latency is invisible next to
+// the HTTP round trip, and the transcript (not the badge — unread counts
+// ride the session list) is the only thing delayed. Within a round the
+// per-session re-reads run in PARALLEL (they were a serial `await` loop:
+// N sessions cost N round trips); per-session ordering stays safe because
+// `refresh` re-reads the store state only after its own fetch resolved.
+const WAKE_DEBOUNCE_MS = 250;
+let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function wakeCoalesced(get: () => ChatSessionStore): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (wakeTimer !== null) clearTimeout(wakeTimer);
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null;
+      const s = get();
+      const ids = new Set<string>();
+      // The chat session is pinned — even while the exec surface is shown
+      // its in-flight turn drives the chat tab's status, so refresh
+      // regardless of `mode`. Open project group chats ride the same bell.
+      for (const st of Object.values(s.byAgent)) {
+        if (st.chatSessionId) ids.add(st.chatSessionId);
+      }
+      for (const sid of Object.keys(s.openGroupIds)) ids.add(sid);
+      Promise.allSettled([...ids].map((id) => s.refresh(id))).then(() => resolve());
+    }, WAKE_DEBOUNCE_MS);
+  });
+}
 
 /** Presence fan-out target: the chat/changed doorbell also wakes agent
  *  chats. Called from `chatStore`'s single `user-chat-changed` listener

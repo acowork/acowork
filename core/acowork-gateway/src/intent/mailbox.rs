@@ -154,8 +154,34 @@ impl IntentMailbox {
     /// §6.5 R4: only `request` messages count against the conversation
     /// limit — a response closes a round, it does not extend it. An
     /// empty `kind` reads as request (cron / pre-Phase-2 producers).
+    ///
+    /// Idempotent on `message_id`: a retry of the same dispatch (the PM
+    /// scanner persists its dispatch identity and reuses it across
+    /// attempts) refreshes the existing entry instead of adding a second
+    /// one, and the conversation budget counts *generations*, not
+    /// attempts — otherwise a delivery-failure retry loop would starve
+    /// its own conversation (§6.5 R4) and the chat log would fill with
+    /// duplicate rows. Delivery facts are monotonic: a recorded
+    /// `delivered_at` / `answered_at` is never cleared by a later record
+    /// of the same id.
     pub fn record(&self, entry: MailboxEntry) -> Result<MailboxEntry, MailboxError> {
         let mut inner = self.inner.lock().unwrap();
+        if let Some(existing) = inner
+            .entries
+            .iter_mut()
+            .find(|e| e.message_id == entry.message_id)
+        {
+            let mut merged = entry.clone();
+            if merged.delivered_at.is_empty() {
+                merged.delivered_at = existing.delivered_at.clone();
+            }
+            if merged.answered_at.is_empty() {
+                merged.answered_at = existing.answered_at.clone();
+            }
+            *existing = merged;
+            self.save_locked(&inner)?;
+            return Ok(entry);
+        }
         if !entry.conversation_id.is_empty() && entry.kind != "response" {
             *inner
                 .conversation_requests
@@ -332,6 +358,36 @@ mod tests {
         assert_eq!(mb.conversation_request_count("c1"), 2, "§13-13: count must survive restart");
         assert_eq!(mb.conversation_request_count("c2"), 1);
         assert_eq!(mb.conversation_request_count("nope"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_is_idempotent_on_message_id() {
+        // The PM scanner persists its dispatch identity and retries with
+        // the same message_id. Without dedup every failed attempt would
+        // burn a §6.5 R4 budget slot (the task starves permanently once
+        // the conversation hits the cap) and pile duplicate rows into the
+        // chat log. One generation = one entry = one slot, across reloads.
+        let dir = std::env::temp_dir().join(format!("acowork-mailbox-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("intent_mailbox.json");
+        {
+            let mb = IntentMailbox::open(&path);
+            mb.record(entry("m1", "c1")).unwrap();
+            mb.mark_delivered("m1").unwrap();
+            // Retry of the same generation: refreshes, never re-counts.
+            mb.record(entry("m1", "c1")).unwrap();
+            assert_eq!(mb.conversation_request_count("c1"), 1, "a retry must not re-count");
+            assert!(
+                mb.get("m1").unwrap().delivered(),
+                "a re-record must not undo the delivered fact (monotonic)"
+            );
+            // A new generation on the same conversation still counts.
+            mb.record(entry("m2", "c1")).unwrap();
+            assert_eq!(mb.conversation_request_count("c1"), 2);
+        }
+        let mb = IntentMailbox::open(&path);
+        assert_eq!(mb.conversation_request_count("c1"), 2, "dedup count survives reload");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

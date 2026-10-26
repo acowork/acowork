@@ -523,7 +523,7 @@ describe("REPRO: add to file routes to old session after new session creation", 
     };
 
     const { rerender, container } = render(
-      <FileTreeNode {...baseProps} sessionId="sess-old" />,
+      <FileTreeNode {...baseProps} />,
     );
     const row = container.querySelector('[data-rel-path="foo.txt"]')!;
 
@@ -559,10 +559,11 @@ describe("REPRO: add to file routes to old session after new session creation", 
     });
     expect(useChatStore.getState().getActiveSessionId(AGENT)).toBe("sess-new");
 
-    // Step 3: WorkspaceExplorer's reactive selector pushes sessionId=NEW
-    // into the tree. The memoised menu MUST rebuild its closures —
-    // otherwise the chip lands in OLD despite NEW being active.
-    rerender(<FileTreeNode {...baseProps} sessionId="sess-new" />);
+    // Step 3: the tree's `sessionId` prop is gone — the node subscribes to
+    // the active session through `useAddToChatTarget`, so the memoised menu
+    // rebuilds on its own. A no-op rerender proves nothing was captured from
+    // a stale prop; the chip must land in NEW.
+    rerender(<FileTreeNode {...baseProps} />);
     await clickAddToChat();
 
     expect(

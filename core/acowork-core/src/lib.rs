@@ -67,6 +67,7 @@ pub mod error_codes;
 pub mod event_bus;
 pub mod health;
 pub mod install;
+pub mod intent;
 pub mod logging;
 pub mod lsp;
 pub mod manifest;

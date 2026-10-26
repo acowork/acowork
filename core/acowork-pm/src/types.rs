@@ -354,8 +354,41 @@ pub struct Task {
     /// 解析为显示名时，由调用方按 `instance_id` 查 agent directory（`meta.display_name ?? meta.name`）。
     #[serde(default)]
     pub assignee: Option<String>,
+    /// 截止时间（可选）。
     #[serde(default)]
     pub due_at: Option<DateTime<Utc>>,
+    /// 开始时间（可选）：派发扫描器在 `start_at <= now` 时才向 assignee
+    /// agent 推送 intent；`None` = 立即（下一个 tick 派发）。
+    #[serde(default)]
+    pub start_at: Option<DateTime<Utc>>,
+    /// Idempotence marker for dispatch: written by the scanner after a
+    /// successful delivery (design 27 §5.4 revision: the trigger moved from
+    /// "assignment event" to "start_at reached", single trigger source).
+    /// Cleared when the task leaves `pending`, so a rollback re-dispatches.
+    #[serde(default)]
+    pub dispatched_at: Option<DateTime<Utc>>,
+    /// The dispatch generation's identity — the `message_id` the Gateway
+    /// stamps on the dispatch chat row and the mailbox entry. The scanner
+    /// persists it *before* the first delivery attempt (crash-safe) and
+    /// replays it on every retry: both the chat store and the mailbox
+    /// dedupe on it, so a failing retry loop can neither pile up
+    /// duplicate rows nor re-burn the conversation's request budget.
+    /// Cleared together with `dispatched_at` on a status transition or a
+    /// reassignment — a new generation gets a fresh identity.
+    #[serde(default)]
+    pub dispatch_message_id: Option<String>,
+    /// Consecutive dispatch failures within the current generation.
+    /// Persisted so a PM restart cannot re-arm the bounded backoff (the
+    /// in-process-only counter was the known ceiling in the scanner's
+    /// `ponytail:` note); cleared with the generation.
+    #[serde(default)]
+    pub dispatch_attempts: u32,
+    /// Last dispatch failure reason. Kept on the task record so "task
+    /// never dispatched" is a visible condition on the task surface
+    /// (REST / MCP / UI) instead of a scanner-only log line; cleared on a
+    /// successful dispatch and with the generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_error: Option<String>,
     /// 前置依赖（跨树/跨项目皆可）。
     ///
     /// **派生字段** `is_blocked` / `blocked_by` 在 API 响应层计算，**不**写入此结构。
@@ -374,6 +407,20 @@ pub struct Task {
     pub claimed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub submitted_at: Option<DateTime<Utc>>,
+}
+
+impl Task {
+    /// End the current dispatch generation. Every path that clears
+    /// `dispatched_at` (status transition, reassignment, claim, review)
+    /// must go through here so the generation identity can never
+    /// outlive the generation it belongs to — a stale id would make the
+    /// next dispatch dedupe against the previous generation's chat row.
+    pub fn clear_dispatch_generation(&mut self) {
+        self.dispatched_at = None;
+        self.dispatch_message_id = None;
+        self.dispatch_attempts = 0;
+        self.dispatch_error = None;
+    }
 }
 
 fn default_review() -> ReviewStatus {
@@ -442,6 +489,9 @@ pub struct CreateTask {
     /// 截止时间（可选；`pm_create_task` 的 `due` 参数）。
     #[serde(default)]
     pub due_at: Option<DateTime<Utc>>,
+    /// 开始时间（可选）：到期才派发 intent 给 assignee agent；缺省 = 立即。
+    #[serde(default)]
+    pub start_at: Option<DateTime<Utc>>,
 }
 
 fn default_task_type() -> TaskType {
@@ -511,6 +561,9 @@ pub struct UpdateTask {
     pub assignee: Option<Option<String>>, // `null` 表示清空
     #[serde(default, deserialize_with = "deserialize_clearable")]
     pub due_at: Option<Option<DateTime<Utc>>>,
+    /// `null` 表示清空（清空 = 立即派发）。
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    pub start_at: Option<Option<DateTime<Utc>>>,
     pub depends_on: Option<Vec<Dependency>>,
 }
 
@@ -671,6 +724,11 @@ mod tests {
             priority: Priority::Normal,
             assignee: None,
             due_at: None,
+            start_at: None,
+            dispatched_at: None,
+            dispatch_message_id: None,
+            dispatch_attempts: 0,
+            dispatch_error: None,
             depends_on: vec![],
             attachments: vec![],
             result: None,

@@ -895,12 +895,20 @@ export interface PmTask {
   review_status: 'not_required' | 'pending' | 'approved' | 'rejected'
   priority: 'low' | 'normal' | 'high' | 'urgent'
   assignee?: string | null
+  /** RFC3339 wake-up time; the PM dispatch scanner pushes the task when due. */
+  start_at?: string | null
   due_at?: string | null
   created_by: string
   created_at: string
   updated_at: string
   claimed_at?: string | null
   submitted_at?: string | null
+  /** Design 27 §5.4.2: set once the scanner pushed the wake-up intent. */
+  dispatched_at?: string | null
+  /** Consecutive failed dispatch attempts (bounded backoff, then abandoned). */
+  dispatch_attempts?: number
+  /** Last dispatch failure reason; shown on the task surface (D3). */
+  dispatch_error?: string | null
   result?: { text: string; attachment_ids?: string[] } | null
   is_blocked?: boolean
   blocked_by?: string[]
