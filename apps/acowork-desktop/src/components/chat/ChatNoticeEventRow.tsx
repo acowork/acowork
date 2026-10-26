@@ -14,6 +14,7 @@
  * its card as the answered/closed receipt and paints nothing here.
  */
 
+import { ChatEventText } from "./ChatEventText";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
@@ -39,20 +40,27 @@ export function ChatNoticeEventRow({ row, className }: ChatNoticeEventRowProps) 
   if (RETIRED_NOTICES.has(noticeType)) return null;
   // The router-fallback receipt is keyed by notice_type, not body: the
   // runtime writes a bodyless row and every surface owns the wording.
+  // Both branches below are channel receipts — a fact about the channel, not
+  // about any one row — so they wear the transcript's `turn` tier of the shared
+  // event-text grammar (see `ChatEventText`): centered and icon-less.
   if (noticeType === "router_fallback") {
     return (
-      <div className={`flex items-center justify-center gap-2 py-1 text-10 text-text-tertiary ${className ?? ""}`}>
-        <span>{t("chatView.routerFallback")}</span>
-      </div>
+      <ChatEventText
+        anchor="turn"
+        text={t("chatView.routerFallback")}
+        className={className}
+      />
     );
   }
 
   const text = row.body || row.meta?.status || "";
   if (!text) return null;
   return (
-    <div className={`flex items-center justify-center gap-2 py-1 text-10 text-text-tertiary ${className ?? ""}`}>
-      <span>{text === "routerFallback" ? t("chatView.routerFallback") : text}</span>
-    </div>
+    <ChatEventText
+      anchor="turn"
+      text={text === "routerFallback" ? t("chatView.routerFallback") : text}
+      className={className}
+    />
   );
 }
 

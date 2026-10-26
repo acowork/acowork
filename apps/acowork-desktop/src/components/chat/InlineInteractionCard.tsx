@@ -31,6 +31,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { truncateQuote } from "./ReplyQuote";
+import { ChatEventText } from "./ChatEventText";
 import { ChatMarkdown } from "./ChatMarkdown";
 
 interface InlineInteractionCardProps {
@@ -141,16 +142,20 @@ export function InlineInteractionCard({
     // requested and never got one, and the agent moved on. It stays visible, but
     // as a quiet line in the card's own slot rather than a card shell, because
     // it is a status note, not an utterance.
+    //
+    // The card's slot is the transcript's `row` tier of the shared event-text
+    // grammar (see `ChatEventText`): the note belongs to ONE row, so it stays in
+    // that row's content column (`ml-12`) and keeps the kind glyph — the glyph is
+    // the cue that separates it from a turn-level line ("this belongs to the card
+    // above"). Rendering it through the shared primitive is what keeps the two
+    // tiers from drifting apart again.
     return (
-      <div
-        className="ml-12 my-1 flex max-w-[var(--content-max-width)] items-center gap-1.5 text-10 text-text-tertiary"
+      <ChatEventText
+        anchor="row"
+        icon={cfg.icon}
+        text={t("chatView.cardUnanswered", { question: truncateQuote(question) })}
         title={question}
-      >
-        {cfg.icon}
-        <span className="min-w-0 truncate">
-          {t("chatView.cardUnanswered", { question: truncateQuote(question) })}
-        </span>
-      </div>
+      />
     );
   }
 

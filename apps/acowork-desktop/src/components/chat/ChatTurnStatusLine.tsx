@@ -1,18 +1,23 @@
 /**
- * ChatTurnStatusLine — the centered, chrome-free line that carries a chat
- * turn's STATE, shared by the 1:1 thread and the group panel.
+ * ChatTurnStatusLine — the line that carries a chat turn's STATE, shared by the
+ * 1:1 thread and the group panel.
  *
  * ADR-100 revision: state is not conversation. A turn's dispatch / round-open
  * milestones are derived at render time (see `chatTurnState`) and never
  * persisted; the only durable state rows left are terminal outcomes
  * (aborted / failed / timeout), which explain why a message went unanswered.
  *
- * Either way the line stays OUT of a bubble. A bubble belongs to something a
+ * Either way the line stays OUT of a bubble, and it wears the transcript's
+ * `turn` tier (see `ChatEventText`): centered and icon-less, because it speaks
+ * for the whole turn rather than for one row. A bubble belongs to something a
  * participant said; "interrupted" is the platform talking, and padding it into
  * an agent-shaped bubble made a stop read like the agent's own words.
+ *
+ * This is the turn-tier call site of the shared event-text grammar — the
+ * `ChatEventText` docblock is the rule, this file is one caller of it.
  */
 
-import { cn } from "../../lib/utils";
+import { ChatEventText } from "./ChatEventText";
 import { ViewRunButton } from "./ViewRunButton";
 
 interface ChatTurnStatusLineProps {
@@ -42,25 +47,15 @@ export function ChatTurnStatusLine({
   className,
 }: ChatTurnStatusLineProps) {
   return (
-    <div
-      className={cn("flex items-center justify-center gap-1.5 py-1", className)}
-      role={live ? "status" : undefined}
-    >
-      <span
-        className={cn(
-          "text-10 text-text-tertiary",
-          live && "thinking-shimmer",
-          danger && "text-red-500",
-        )}
-      >
-        {text}
-      </span>
-      {onJump && (
-        <ViewRunButton
-          runName={runName}
-          onJump={onJump}
-        />
-      )}
-    </div>
+    <ChatEventText
+      anchor="turn"
+      text={text}
+      live={live}
+      danger={danger}
+      className={className}
+      trailing={
+        onJump && <ViewRunButton runName={runName} onJump={onJump} />
+      }
+    />
   );
 }

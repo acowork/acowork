@@ -820,6 +820,21 @@ Between sending a message and the Agent's reply being stored there can be severa
 
 **Division of labour with §5.5.4.** `interaction_request` means "someone must decide" — it blocks and requires an answer; the running wait line means "received, being worked on" — it does not block and requires nothing of anyone, but it is **not conversation content**: it lives only in the current window and is never persisted. Both can exist within one turn (an approval raised mid-execution). Single chat (1:1), a human group-chat @, and a PM task dispatch all take the same routing, share one row-type contract, and share one renderer (`ChatNoticeEventRow` + `InlineInteractionCard` + the centered status line), so all three read as one grammar.
 
+**The placement grammar of "event text": pick the one axis the fact belongs to, and there are only two (settled in v2.6).** The small gray lines in a chat stream — neither a participant's utterance (a bubble) nor a control — are collectively **event text**. Where one lands is not the renderer's choice, it follows from **whom the fact belongs to**:
+
+| Tier | Who the fact belongs to | Placement | Existing instances |
+|---|---|---|---|
+| **Turn tier** `turn` | No single row: the turn's outcome, the in-flight wait, a channel receipt | **Centered, icon-less** — it speaks for the whole transcript and has no row to attach to | The terminal line (`aborted` / `failed` / `timeout`), the derived wait line, `delivery_failed` / `budget_exhausted` / `router_fallback` channel receipts |
+| **Row tier** `row` | **One row**, occupying that row's own slot | That row's **content column** (`ml-12`, the same gutter as a bubble body) **and led by the kind glyph** | The "unanswered: …" note a decision card leaves behind when nobody answered it (§5.5.4) |
+
+**The two tiers must be distinguishable at a glance, and the cue is single: is there an icon.** An icon means "this is a fact about one row"; no icon means "the turn / the channel is talking". The cue is not decoration — the same "unanswered" sentence recurs card by card in an interleaved card stream, and without the glyph a reader cannot tell whether it speaks about the card right above it or about the whole turn; in the previous revision both tiers had identical size and color, so the positional difference read as nothing but "misplaced".
+
+**Placement has exactly one implementation entry point.** The shared primitive `ChatEventText` (`anchor: "turn" | "row"`) carries the two tiers, and all three existing renderers (`ChatTurnStatusLine`, `ChatNoticeEventRow`, the closed-card branch of `InlineInteractionCard`) delegate to it. A new piece of event text **must** declare which tier of fact it states instead of hand-writing its own class string — that is precisely the path by which the tiers would drift back apart.
+
+**Not in this grammar**: the paging bands ("load earlier" / "jump to latest") are list-level chrome and always centered; the execution surface's iteration-limit / error notices are bordered banners with their own appearance.
+
+**A different axis of the same family: a bubble's own meta block** (quote line, timestamp, "view run") never competes with event text — it **hugs the bubble's own outer edge** (an agent bubble's left edge, a human bubble's right edge), well inside the bubble's width, so it lands identically for a narrow and a wide bubble. The rule has one definition, `bubbleMetaAnchor(side: "own" | "peer")`, read by all four bubble columns across the 1:1, group, and execution surfaces.
+
 ### 5.6 PM Integration and Identity
 
 A PM task dispatch is a project owner sending a message to an Agent through the project group chat:
