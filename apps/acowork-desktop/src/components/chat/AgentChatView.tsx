@@ -72,6 +72,7 @@ import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote } from "./ReplyQuote";
+import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
 import {
@@ -380,8 +381,16 @@ const RowView = memo(function RowView({
           )}
           {/* Clamp on the global content-width variable, not a hardcoded
               percentage: same as GroupChatPanel's own row — a long message
-              reaches the agent bubble's line length and follows the setting. */}
-          <div className="group mt-[6px] max-w-[var(--content-max-width)] flex flex-col items-start">
+              reaches the agent bubble's line length and follows the setting.
+              The cross-axis anchor comes from `bubbleMetaAnchor`: every meta
+              unit below (the answer quote, the bubble, the hover timestamp)
+              hugs the human's side of the row. It used to be `items-start`,
+              which stranded this side's timestamp under the bubble's LEFT
+              edge — near the middle for a short message, far left for a long
+              one — while the group panel already hugged the outer edge. */}
+          <div
+            className={`group mt-[6px] max-w-[var(--content-max-width)] flex flex-col ${bubbleMetaAnchor("own")}`}
+          >
             {/* Attachment chips — independent units above the text bubble,
                 right-aligned: same grammar as the execution session's
                 `UserWithAttachmentsBubble`. The bubble never wraps them. */}

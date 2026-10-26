@@ -44,6 +44,7 @@ import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote } from "./ReplyQuote";
+import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import {
@@ -361,7 +362,11 @@ const GroupRowView = memo(function GroupRowView({ row, me, chatSessionId, nameOf
         <div
           className={cn(
             "group mt-[6px] flex max-w-[var(--content-max-width)] flex-col",
-            own ? "items-end" : "items-start",
+            // Same rule as the 1:1 thread: the meta block hugs the bubble's own
+            // outer edge (see `bubbleMetaAnchor`). This surface already did it;
+            // it now reads from the one home of the rule so the two chat
+            // surfaces cannot drift apart again.
+            bubbleMetaAnchor(own ? "own" : "peer"),
           )}
         >
           {/* Attachment chips above the bubble, on the speaker's side — same
