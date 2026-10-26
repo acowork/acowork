@@ -81,6 +81,7 @@ import {
   type VirtualRowListHandle,
 } from "../common/VirtualRowList";
 import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
+import { useToolbarCollapse } from "../common/useToolbarCollapse";
 import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
@@ -952,6 +953,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     null;
   const reasoningEffort =
     draft.reasoning_effort ?? defaultEffortOf(currentModelEntry);
+  // Toolbar responsive collapse — same engine the execution-session
+  // composer uses (shared `useToolbarCollapse`); folds model → reasoning →
+  // workspace labels left-to-right when the pane narrows.
+  const { setToolbarRef, textHidden } = useToolbarCollapse();
 
   // Auto-pagination: reaching the top band triggers the next older page — no
   // click. Guarded by `hasMore` and the in-flight `loadingOlder` flag so it
@@ -1187,12 +1192,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             draft that seeds the execution session on send (design 27 §4.5).
             Skills are intentionally absent — not session-seeded, no chat-message
             channel, so nothing to show here (hidden, not disabled). */}
-        <div className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]">
+        <div ref={setToolbarRef} className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]">
           <div className="flex items-center gap-1 min-w-0 overflow-visible">
             {availableModels.length > 0 && agentModel && (
               <ModelMenu
                 wrapperRef={undefined}
-                textHidden={false}
+                textHidden={textHidden.model}
                 models={availableModels}
                 accountsByProvider={providerAccounts}
                 currentModel={currentModelId}
@@ -1214,7 +1219,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             )}
             {reasoningEffort != null && (
               <ReasoningEffortMenu
-                textHidden={false}
+                textHidden={textHidden.effort}
                 effort={reasoningEffort}
                 onChange={(e) =>
                   void saveDraft(agentId, { ...draft, reasoning_effort: e })
@@ -1224,7 +1229,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             )}
             <div className="min-w-0">
               <WorkspaceSelector
-                textHidden={false}
+                textHidden={textHidden.ws}
                 value={draft.workspace}
                 onChange={(id) =>
                   void saveDraft(agentId, { ...draft, workspace: id })
