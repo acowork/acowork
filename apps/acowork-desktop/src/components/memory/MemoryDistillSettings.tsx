@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { httpApiError } from "../../lib/api-error";
-import type { VaultKeyEntry, DistillerStatus } from "../../lib/types";
+import type {
+  CompactModelRef,
+  ConsolidationStatusResponse,
+  DistillerStatus,
+  VaultKeyEntry,
+} from "../../lib/types";
 import { fetchProviders } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -11,25 +16,47 @@ import { ModelPriorityList } from "../common/ModelPriorityList";
 import { StyledInput } from "../common/StyledInput";
 import { ListBox, ExpandableRow } from "../common/list";
 import { log } from "../../lib/logger";
-import { with503Retry } from "../../lib/httpRetry";
+import { with503Retry, WRITE_503_RETRY } from "../../lib/httpRetry";
+import {
+  distillerForm,
+  minutesToSecs,
+  parsePositiveInt,
+} from "./consolidationPolicy";
 
 /**
- * "记忆蒸馏" settings card — top of the memory panel (ADR-071 D3/D5).
+ * `distiller` half of a `PUT /memory/consolidation/status` body. An absent key
+ * means "keep the current value" service-side, and the service runs
+ * `deny_unknown_fields`, so this type is the whole writable surface.
+ */
+type DistillerPatch = {
+  enabled?: boolean;
+  interval_secs?: number;
+  accumulation_threshold?: number;
+  idle_secs?: number;
+  models?: CompactModelRef[];
+};
+
+/**
+ * "记忆沉淀" settings card — top of the memory panel (ADR-071 D3/D5).
  *
- * Reads/writes the five `agent_config.json` distiller fields through the
- * same `GET/PUT /agents/{id}/config` contract the Agent Setup panel uses:
- * the card only ever touches `agent_config.json` (runtime layer 1);
- * manifest `[memory.distiller]` stays the first-run seed / fallback.
+ * Reads/writes the distiller policy that the memory service actually acts on
+ * (ADR-101 P1e): `GET` / `PUT /api/agents/{id}/memory/consolidation/status`,
+ * persisted per instance as `{instance_dir}/consolidation.json`. The knobs used
+ * to live in `agent_config.json`; that copy is gone from `AgentConfig`, so
+ * writing it was a silent no-op — the card showed the user's toggle until it
+ * remounted, and every agent switch read the empty config back as "off".
  *
- * - Enabled switch → `distiller_enabled`
- * - Model list → `distiller_models` (ordered `{provider_id, model_id}[]`), same
+ * - Enabled switch → `distiller.enabled`
+ * - Model list → `distiller.models` (ordered `{provider_id, model_id}[]`), same
  *   provider/model option source as the Harness compact-model card
- *   (vault keys + provider display names).
- * - Interval / accumulation / idle inputs → the three trigger fields.
+ *   (vault keys + provider display names); empty = no chain of its own, the
+ *   service falls back to the Gateway's global compact chain.
+ * - Interval / accumulation / idle inputs → the three trigger fields, minutes
+ *   on screen and seconds on the wire.
  *
- * Empty number inputs mean "no runtime opinion" — the field is not sent
- * (fallback: manifest → system default). Blur saves the numeric fields;
- * the switch and model pick save immediately on change.
+ * Every field always holds a concrete value service-side, so reloading the
+ * card shows what is in force rather than a blank "no opinion". Blur saves the
+ * numeric fields; the switch and model pick save immediately on change.
  *
  * Visual grammar: level-1 collapsible card (same shell as the Status-tab
  * Session Status / Tools-tab Builtin Tools / Debug-tab Context Snapshots
@@ -55,60 +82,55 @@ export function MemoryDistillSettings({
 
   const [loaded, setLoaded] = useState(false);
   const [enabled, setEnabled] = useState(false);
-  // Ordered distiller-model candidates (ADR-056 list semantics);
-  // empty = "no runtime opinion", fall back to manifest → global list.
-  const [models, setModels] = useState<
-    { provider_id: string; model_id: string }[]
-  >([]);
+  // Ordered distiller-model candidates (ADR-056 list semantics); empty = this
+  // instance has no chain of its own, so the service falls back to the
+  // Gateway's global compact chain.
+  const [models, setModels] = useState<CompactModelRef[]>([]);
   const [intervalInput, setIntervalInput] = useState("");
   const [accInput, setAccInput] = useState("");
   const [idleInput, setIdleInput] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [savingField, setSavingField] = useState<string | null>(null);
 
-  // ── Load the runtime distiller fields from agent_config.json ─────────
+  // Bumped whenever the selected agent changes. In-flight loads and saves
+  // compare against it before writing state, so a slow response for the agent
+  // the user just left cannot repaint the card for the agent they are on.
+  const generationRef = useRef(0);
+
+  const applyStatus = useCallback((data: ConsolidationStatusResponse) => {
+    const form = distillerForm(data.distiller);
+    setEnabled(form.enabled);
+    setModels(form.models);
+    setIntervalInput(form.intervalMinutes);
+    setAccInput(form.accumulation);
+    setIdleInput(form.idleMinutes);
+  }, []);
+
+  // ── Load the distiller policy the service is actually running ─────────
   const loadConfig = useCallback(async () => {
     if (!agentId || !running) return;
+    const generation = generationRef.current;
     try {
       const res = await with503Retry(
-        () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/config`),
+        () =>
+          fetch(
+            `${getGatewayUrl()}/api/agents/${agentId}/memory/consolidation/status`,
+          ),
         { tag: `MemoryDistillSettings.loadConfig(${agentId})`, logger: log },
       );
       if (!res.ok) return;
-      const data = await res.json();
-      // Same nested envelope as AgentSetupTab: `{ agent_id, config, … }`.
-      const cfg = (data?.config ?? {}) as {
-        distiller_enabled?: boolean | null;
-        distiller_models?: { provider_id: string; model_id: string }[] | null;
-        distiller_interval_minutes?: number | null;
-        distiller_accumulation_threshold?: number | null;
-        distiller_idle_minutes?: number | null;
-      };
-      setEnabled(!!cfg.distiller_enabled);
-      setModels(cfg.distiller_models ?? []);
-      setIntervalInput(
-        cfg.distiller_interval_minutes != null
-          ? String(cfg.distiller_interval_minutes)
-          : "",
-      );
-      setAccInput(
-        cfg.distiller_accumulation_threshold != null
-          ? String(cfg.distiller_accumulation_threshold)
-          : "",
-      );
-      setIdleInput(
-        cfg.distiller_idle_minutes != null
-          ? String(cfg.distiller_idle_minutes)
-          : "",
-      );
+      const data: ConsolidationStatusResponse = await res.json();
+      if (generation !== generationRef.current) return;
+      applyStatus(data);
     } catch {
-      // Best-effort: runtime not reachable yet; keep last values.
+      // Best-effort: the service is not reachable yet; keep last values.
     } finally {
       setLoaded(true);
     }
-  }, [agentId, running]);
+  }, [agentId, running, applyStatus]);
 
   useEffect(() => {
+    generationRef.current += 1;
     setLoaded(false);
     void loadConfig();
   }, [loadConfig]);
@@ -119,18 +141,27 @@ export function MemoryDistillSettings({
   // select; `/api/models` supplies human-readable provider names.
   const [options, providerNames] = useModelOptions();
 
-  // ── PUT a single distiller field to agent_config.json ────────────────
-  const putField = useCallback(
-    async (field: string, value: unknown): Promise<boolean> => {
+  // ── PUT a patch to the service's consolidation policy ────────────────
+  const patchDistiller = useCallback(
+    async (field: string, patch: DistillerPatch): Promise<boolean> => {
       if (!agentId) return false;
+      const generation = generationRef.current;
       setSavingField(field);
       try {
-        const res = await fetch(
-          `${getGatewayUrl()}/api/agents/${agentId}/config`,
+        const res = await with503Retry(
+          () =>
+            fetch(
+              `${getGatewayUrl()}/api/agents/${agentId}/memory/consolidation/status`,
+              {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ distiller: patch }),
+              },
+            ),
           {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ [field]: value }),
+            policy: WRITE_503_RETRY,
+            tag: `MemoryDistillSettings.patch(${agentId})`,
+            logger: log,
           },
         );
         if (!res.ok) {
@@ -144,10 +175,15 @@ export function MemoryDistillSettings({
                     status: res.status,
                   }),
           });
-          // Roll the optimistic local update back to the server's truth.
-          void loadConfig();
+          // Roll the optimistic local update back to the service's truth.
+          if (generation === generationRef.current) void loadConfig();
           return false;
         }
+        // The PUT answers with the new status: adopt it so the card shows what
+        // is actually in force rather than what we hoped was in force.
+        const data: ConsolidationStatusResponse = await res.json();
+        if (generation !== generationRef.current) return true;
+        applyStatus(data);
         return true;
       } catch (e) {
         log.warn("[MemoryDistillSettings] save failed:", field, e);
@@ -155,13 +191,13 @@ export function MemoryDistillSettings({
           type: "error",
           message: t("memoryPanel.distillerSaveFailed", { status: "network" }),
         });
-        void loadConfig();
+        if (generation === generationRef.current) void loadConfig();
         return false;
       } finally {
         setSavingField(null);
       }
     },
-    [agentId, addToast, t, loadConfig],
+    [agentId, addToast, t, loadConfig, applyStatus],
   );
 
   const handleToggle = (v: boolean) => {
@@ -172,36 +208,35 @@ export function MemoryDistillSettings({
     // auto-collapses because the body becomes inert (all inputs are
     // disabled when `!enabled` anyway).
     setExpanded(v);
-    void putField("distiller_enabled", v);
+    void patchDistiller("distiller_enabled", { enabled: v });
   };
 
-  const handleModelsChange = (
-    next: { provider_id: string; model_id: string }[],
-  ) => {
-    // Optimistic local update; on PUT failure reload the persisted list.
+  const handleModelsChange = (next: CompactModelRef[]) => {
+    // Optimistic local update; a failed save reloads the persisted chain.
     setModels(next);
-    void putField("distiller_models", next.length > 0 ? next : null).then(
-      (ok) => {
-        if (!ok) void loadConfig();
-      },
-    );
+    void patchDistiller("distiller_models", { models: next });
   };
 
+  /**
+   * Persist one numeric field. An unparseable / out-of-range input is not a
+   * value the service would accept, and there is no "unset" state to clear
+   * any more — re-read the service's truth instead of writing junk or leaving
+   * the input claiming a value that was never saved.
+   */
   const saveNumber = (
     field: string,
+    patchKey: "interval_secs" | "accumulation_threshold" | "idle_secs",
     raw: string,
     setter: (v: string) => void,
+    coerce: (raw: string) => number | null,
   ) => {
     setter(raw);
-    const trimmed = raw.trim();
-    if (trimmed === "") {
-      // Empty → clear runtime opinion (fall back to manifest / defaults).
-      void putField(field, null);
+    const value = coerce(raw);
+    if (value == null) {
+      void loadConfig();
       return;
     }
-    const n = Number(trimmed);
-    if (!Number.isFinite(n) || n <= 0) return; // keep last value; do not persist junk
-    void putField(field, n);
+    void patchDistiller(field, { [patchKey]: value });
   };
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -337,8 +372,10 @@ export function MemoryDistillSettings({
                   onBlur={(e) =>
                     saveNumber(
                       "distiller_interval_minutes",
+                      "interval_secs",
                       e.target.value,
                       setIntervalInput,
+                      minutesToSecs,
                     )
                   }
                   disabled={!running || !enabled}
@@ -358,8 +395,10 @@ export function MemoryDistillSettings({
                   onBlur={(e) =>
                     saveNumber(
                       "distiller_accumulation_threshold",
+                      "accumulation_threshold",
                       e.target.value,
                       setAccInput,
+                      parsePositiveInt,
                     )
                   }
                   disabled={!running || !enabled}
@@ -377,7 +416,13 @@ export function MemoryDistillSettings({
                   placeholder={String(30)}
                   onChange={(e) => setIdleInput(e.target.value)}
                   onBlur={(e) =>
-                    saveNumber("distiller_idle_minutes", e.target.value, setIdleInput)
+                    saveNumber(
+                      "distiller_idle_minutes",
+                      "idle_secs",
+                      e.target.value,
+                      setIdleInput,
+                      minutesToSecs,
+                    )
                   }
                   disabled={!running || !enabled}
                   className={numInputCls}
@@ -443,8 +488,8 @@ function useModelOptions(): [
         }
         setOptions(opts);
       } catch {
-        // Tauri bridge unavailable (web preview) — dropdown stays empty;
-        // the agent_config value is still shown via the stale fallback.
+        // Tauri bridge unavailable (web preview) — dropdown stays empty, so the
+        // saved chain is still listed above but cannot be extended.
       }
     })();
     return () => {
