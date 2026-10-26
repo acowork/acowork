@@ -190,6 +190,10 @@ function ProvidersTab() {
       await invoke("remove_key", { provider, accountId: undefined });
       await fetchKeys();
       await loadProviders();
+      // Same shared signal the add/edit paths dispatch — the shell's model
+      // inventory must drop the removed provider's models and account
+      // aliases; nothing else reloads it until the next connect edge.
+      window.dispatchEvent(new CustomEvent('models-added'));
     } catch (e) {
       alert(`${t("harness.failedRemoveKey")}: ${e}`);
     }

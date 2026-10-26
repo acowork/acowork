@@ -11,7 +11,6 @@ import type { ToolApprovalNeededEvent, AttachedItem } from "../../lib/types";
 import { isProcessing, getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
-import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { blobToBase64 } from "./clipboardImageExt";
 import { detectPaste } from "./pasteDetect";
@@ -20,7 +19,7 @@ import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock } from "lucide-react";
-import type { ChatMessage, VaultKeyEntry, ModelEntry, ProviderAccount } from "../../lib/types";
+import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
 import { blockIndexOfRawMessage } from "./messageFolder";
@@ -664,8 +663,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     sendStop,
     setCurrentModel,
     setReasoningEffort,
-    setAvailableModels,
-    setProviderAccounts,
     continueExecution,
     resolveApproval,
     resolveApprovalByToolCallId,
@@ -911,86 +908,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     initialAtBottom: scrollSnapshot?.atBottom,
     initialFirstVisibleBlockId: scrollSnapshot?.firstVisibleBlockId,
   });
-
-  // Load available models: configured providers (from vault) + capabilities (from models API)
-  const loadModels = useCallback(async () => {
-    try {
-      const keys = await invoke<VaultKeyEntry[]>("list_keys");
-
-      // Accounts per provider — drives the model menu's account level.
-      const accountsByProvider: Record<string, ProviderAccount[]> = {};
-      for (const key of keys) {
-        if (!key.account_id) continue;
-        (accountsByProvider[key.provider] ??= []).push({
-          accountId: key.account_id,
-          alias: key.alias?.trim() || key.provider,
-          preview: key.key_preview ?? "",
-        });
-      }
-      setProviderAccounts(accountsByProvider);
-
-      // Build (provider, configuredModelIds, modelCapabilities) tuples, skipping empty entries.
-      // `models` is provider-level config shared by every account of that
-      // provider, so collapse the per-account rows first — otherwise a
-      // 3-key provider would refetch the same model list 3 times.
-      const byProvider = new Map<string, VaultKeyEntry>();
-      for (const key of keys) if (!byProvider.has(key.provider)) byProvider.set(key.provider, key);
-
-      const entries = [...byProvider.values()].map(key => ({
-        provider: key.provider,
-        modelIds: key.models?.length
-          ? key.models
-          : key.default_model ? [key.default_model] : [],
-        modelCapabilities: key.model_capabilities,
-      })).filter(e => e.modelIds.length > 0);
-
-      // Fetch capabilities for all providers in parallel
-      const results = await Promise.allSettled(
-        entries.map(e => fetchProviderModels(e.provider))
-      );
-
-      const allModels: ModelEntry[] = [];
-      entries.forEach((entry, i) => {
-        const apiModels = results[i].status === "fulfilled"
-          ? (results[i].value.models ?? [])
-          : [];
-        for (const modelId of entry.modelIds) {
-          const info = apiModels.find(m => m.id === modelId);
-          allModels.push({
-            name: modelId,
-            provider: entry.provider,
-            tool_call: info?.tool_call ?? undefined,
-            reasoning: info?.reasoning ?? undefined,
-            input_modalities: info?.input_modalities ?? undefined,
-            default_reasoning_effort: entry.modelCapabilities?.[modelId]?.default_reasoning_effort ?? undefined,
-          });
-        }
-      });
-
-      // Deduplicate by model name + provider
-      const uniqueModels = allModels.filter(
-        (m, i, arr) => arr.findIndex(x => x.name === m.name && x.provider === m.provider) === i
-      );
-      setAvailableModels(uniqueModels);
-    } catch {
-      // Gateway may not be running
-    }
-  }, [setAvailableModels, setProviderAccounts]);
-
-  useEffect(() => {
-    loadModels();
-  }, [gatewayStatus, loadModels]);
-
-  // Vault keys changed elsewhere (Harness providers tab, onboarding,
-  // the inline model picker below) — `models-added` is the shared
-  // "keys saved" signal. Refresh the model list so newly added
-  // providers/models show up immediately without a remount.
-  useEffect(() => {
-    const handler = () => void loadModels();
-    window.addEventListener("models-added", handler);
-    return () => window.removeEventListener("models-added", handler);
-  }, [loadModels]);
-
 
   // Persist scroll state across top-level navigation.  AppLayout unmounts the
   // whole chat subtree for Settings/Harness/Docs/Projects, so component-local

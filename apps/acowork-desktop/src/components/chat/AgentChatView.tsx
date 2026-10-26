@@ -110,6 +110,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { sessionExists } from "../../lib/session-control";
 import { showToast } from "../common/ToastProvider";
 import { useAuthStore } from "../../stores/authStore";
+import { useGatewayStore } from "../../stores/gatewayStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { getGatewayUrl } from "../../lib/config";
 
@@ -558,7 +559,14 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     model: string;
     provider: string;
   } | null>(null);
+  // Re-run on `gatewayStatus`: this is one of the two conditions that decide
+  // whether the model button exists at all (the other is `availableModels`),
+  // and a Gateway HTTP call issued before the connection is up fails. Keyed on
+  // the status so an early failure retries once the Gateway answers, instead
+  // of leaving the toolbar model-less until the surface remounts.
+  const gatewayConnected = useGatewayStore((s) => s.status === "connected");
   useEffect(() => {
+    if (!gatewayConnected) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -574,7 +582,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             model: string;
             provider: string;
           };
-          setAgentModel(data);
+          // Re-check after the await: with `gatewayConnected` in the deps,
+          // a flap (connected → error → connected) can overlap two runs for
+          // the same agentId, and the slow older response must not overwrite
+          // the newer one's result.
+          if (!cancelled) setAgentModel(data);
         }
       } catch {
         /* toolbar simply shows no model chip */
@@ -583,7 +595,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [agentId]);
+  }, [agentId, gatewayConnected]);
 
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win]);
   // Virtualization adapters (render-perf L2). Keys are session-qualified:
