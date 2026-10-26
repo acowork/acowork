@@ -1073,12 +1073,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         chatStore.batchUpdateSessionStatuses(agentId, mismatches);
       }
 
-      // Tab strip = Runtime Active session set (ADR-038 lifecycle).
-      // Only sync when the response actually carried a sessions array —
-      // a missing field means the fetch hit a non-session-list endpoint
-      // (e.g. test mock, or a proxy error page); syncing on that would
-      // clear tabs the user just opened.
-      if (data.sessions !== undefined) {
+      // Tab strip prunes to the Runtime Active set (ADR-038 lifecycle);
+      // only `openSession` ever adds a tab. Gate on the Runtime actually
+      // reporting `is_active` — an undefined field on every row means an
+      // older Runtime that predates this feature, and pruning on that would
+      // wipe every tab.
+      if (data.sessions !== undefined && sessions.some((s) => s.is_active !== undefined)) {
         const activeIds = sessions.filter((s) => s.is_active).map((s) => s.session_id);
         chatStore.syncActiveTabs(agentId, activeIds);
       }
@@ -1180,7 +1180,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     // ADR-047: openSession now internally calls loadSession (config + state),
     // so the fresh session's backend `idle` state and config are reflected
     // in the UI before the user types anything.
-    await useChatStore.getState().openSession(agentId, sessionId);
+    await useChatStore.getState().openSession(agentId, sessionId, { prepend: true });
     // ADR-014: Refresh the session list so the freshly-created entry is
     // visible in the sidebar/session dropdown.
     get().fetchSessions(agentId);
