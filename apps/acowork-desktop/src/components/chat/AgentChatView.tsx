@@ -538,9 +538,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // refresh (poll tick, re-render with a fresh object) yank an upward-scrolling
   // reader back down. Deps key on `tail.length` — the appended newest page —
   // NOT the total rows, so `loadOlder` (which prepends into `older`) leaves the
-  // trigger unchanged and does not jump to the bottom; browser scroll
-  // anchoring (`overflow-anchor: auto` on the viewport) holds the visible rows
-  // put as older content appears above them, recomputing only the thumb.
+  // trigger unchanged and does not jump to the bottom; the hook's prepend
+  // anchoring (see `useStickToBottom`) holds the visible rows put as older
+  // content appears above them — the viewport sets `overflow-anchor: none`
+  // so the browser does not double-compensate (its native anchor latches onto
+  // the top control and shoves the reading position down instead).
   // Bottom-positioning mechanism for the follow controller: the transcript is
   // virtualized, so a single `scrollTop = scrollHeight` write cannot land on a
   // bottom whose height is still an estimate (and may not be sized at all on
