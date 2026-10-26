@@ -287,6 +287,7 @@ Step 5: Install first Agent
 
 **Agent switching linkage**:
 - When user switches to a different Agent, automatically reload that Agent's workspace list
+- The list is **one global array carrying the agent it describes** (`workspacesAgentId`). Starting another Agent fetches for that one and overwrites the slot, so consumers render and allow picking only when the tag matches the selected Agent, and a failed fetch still claims the slot with an empty list — "this Agent's list is unknown" is not the same thing as "here is another Agent's list", which can be clicked and write a workspace id the current Agent does not own. On a mismatch the list is re-fetched and the panel recovers within a frame
 - Restore that Agent's last current workspace selection
 
 **State management**:

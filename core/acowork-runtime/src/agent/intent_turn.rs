@@ -491,6 +491,33 @@ pub async fn post_intent_response(
     }
 }
 
+/// Parse the ADR-046 attachment union an Intent envelope carries (design 27
+/// §4.2.1, ADR-100 D12).
+///
+/// Both transports that take a human Chat turn read the same `attached_items`
+/// key the Gateway stamped into `params_json`: the pinned path feeds
+/// `SessionMessage::ChatMessage`'s own arm, the routed path the `Intent` one.
+/// One parse for both, so a reference never means two things on the wire.
+///
+/// An entry the Runtime cannot read is dropped, not fatal — the turn still
+/// runs with what could be parsed (same rule the Chat-attachment pull applies).
+pub fn attached_items_from_params(
+    params: &Value,
+) -> Option<Vec<acowork_core::protocol::AttachedItem>> {
+    params
+        .get("attached_items")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|d| {
+                    serde_json::from_value::<acowork_core::protocol::AttachedItem>(d.clone()).ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|v: &Vec<acowork_core::protocol::AttachedItem>| !v.is_empty())
+}
+
 /// Pull one Chat attachment pinned to the durable `user_message` row this
 /// Intent answers (design 27 §4.2.1). The bytes travel over node-auth HTTP
 /// through the Gateway (`GET /api/intents/chat-attachments/…`), never over

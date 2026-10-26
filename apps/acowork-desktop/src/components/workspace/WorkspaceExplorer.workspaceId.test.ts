@@ -1,9 +1,17 @@
 /**
- * Self-check for the right-panel workspace fallback chain (the fix for
- * "closing every exec session blanks the workspace file list"):
- *   active exec session → its mapped workspace (else agent home)
- *   no exec session     → the Chat session's `session_config` draft
- *                         workspace (else agent home)
+ * Self-check for the right-panel workspace chain. The panel belongs to the
+ * surface that is on screen:
+ *
+ *   execution surface → the active session's workspace (its real working
+ *                       directory), else agent home
+ *   Chat surface      → the Chat session's OWN workspace pick, falling back to
+ *                       the session's (display default only) and then agent
+ *                       home
+ *
+ * The Chat-surface branch is what keeps the composer chip and the panel from
+ * showing two different workspaces — and what makes Chat-surface "Add to Chat"
+ * coherent, since the tree the reference comes from is that same workspace. A
+ * Chat-surface pick never re-points an execution session.
  */
 import { describe, it, expect } from "vitest";
 import { resolveExplorerWorkspaceId } from "./WorkspaceExplorer";
@@ -12,19 +20,28 @@ describe("resolveExplorerWorkspaceId", () => {
     const map = { "s-1": "w-a" };
 
     it("prefers the active execution session's workspace", () => {
-        expect(resolveExplorerWorkspaceId("s-1", map, "w-draft")).toBe("w-a");
+        expect(resolveExplorerWorkspaceId("s-1", map, "w-draft", false)).toBe("w-a");
     });
 
     it("falls back to agent home for a session with no mapped workspace", () => {
-        expect(resolveExplorerWorkspaceId("s-9", map, "w-draft")).toBe("__agent_home__");
+        expect(resolveExplorerWorkspaceId("s-9", map, "w-draft", false)).toBe("__agent_home__");
     });
 
-    it("uses the Chat draft workspace when no exec session is active", () => {
-        expect(resolveExplorerWorkspaceId(null, map, "w-draft")).toBe("w-draft");
+    it("execution surface with no session at all → agent home, draft ignored", () => {
+        expect(resolveExplorerWorkspaceId(null, map, "w-draft", false)).toBe("__agent_home__");
     });
 
-    it("falls back to agent home with neither session nor draft", () => {
-        expect(resolveExplorerWorkspaceId(null, map, undefined)).toBe("__agent_home__");
-        expect(resolveExplorerWorkspaceId(null, map, null)).toBe("__agent_home__");
+    it("Chat surface: the Chat session's own pick wins over the session's", () => {
+        expect(resolveExplorerWorkspaceId("s-1", map, "w-draft", true)).toBe("w-draft");
+    });
+
+    it("Chat surface with no pick yet mirrors the session's workspace", () => {
+        expect(resolveExplorerWorkspaceId("s-1", map, undefined, true)).toBe("w-a");
+        expect(resolveExplorerWorkspaceId("s-1", map, null, true)).toBe("w-a");
+    });
+
+    it("Chat surface with neither a pick nor a session → agent home", () => {
+        expect(resolveExplorerWorkspaceId(null, map, undefined, true)).toBe("__agent_home__");
+        expect(resolveExplorerWorkspaceId("s-9", map, undefined, true)).toBe("__agent_home__");
     });
 });

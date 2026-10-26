@@ -8,7 +8,7 @@ import { useChatSessionStore } from "../../stores/chatSessionStore";
 import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { useActiveSessionReadOnly } from "../../lib/session-write-access";
+import { useAddToChatTarget, attachWorkspaceRef } from "../../lib/addToChat";
 import { FileTree } from "./FileTree/FileTree";
 import { WorkspaceSelector } from "./WorkspaceSelector";
 import { SetiIcon } from "../common/SetiIcon";
@@ -38,19 +38,33 @@ function abbreviatePath(path: string): string {
 }
 
 /**
- * Workspace the right panel shows. Priority: the active execution
- * session's workspace (the real working directory) → the Chat surface's
- * `session_config` draft workspace (the user's expressed pick, design 27
- * §4.5) → agent home. Exported for its own test — the fallback chain is
- * the fix for "closing every exec tab blanks the panel".
+ * Workspace the right panel shows. The panel belongs to whichever surface is
+ * on screen (same two-composers rule as "Add to Chat", see `lib/addToChat`):
+ *
+ *  - **Chat surface** → the Chat session's OWN workspace: its
+ *    `session_config` draft pick, falling back to the execution session's
+ *    (as a read-only display default when the chat has never picked) and then
+ *    agent home. Picking here writes the Chat session's config and never a
+ *    session workspace — an execution session is not re-pointed by a
+ *    Chat-surface choice; the pick only seeds a session the router creates.
+ *  - **Execution surface** → the active session's workspace (the real working
+ *    directory), else agent home.
+ *
+ * Exported for its own test — the fallback chain is the fix for "closing every
+ * exec tab blanks the panel", and the Chat-surface branch is the fix for "the
+ * composer chip and the panel show different workspaces".
  */
 export function resolveExplorerWorkspaceId(
     activeSessionId: string | null,
     sessionWorkspaceMap: Record<string, string>,
     chatDraftWorkspace: string | null | undefined,
+    onChatSurface: boolean,
 ): string {
-    if (activeSessionId) return sessionWorkspaceMap[activeSessionId] ?? "__agent_home__";
-    return chatDraftWorkspace ?? "__agent_home__";
+    const sessionWs = activeSessionId
+        ? (sessionWorkspaceMap[activeSessionId] ?? "__agent_home__")
+        : "__agent_home__";
+    if (onChatSurface) return chatDraftWorkspace ?? sessionWs;
+    return sessionWs;
 }
 
 export function WorkspaceExplorer() {
@@ -83,34 +97,47 @@ export function WorkspaceExplorer() {
     const activeSessionId = useChatStore((s) =>
         selectedAgentId ? s.getActiveSessionId(selectedAgentId) : null,
     );
-    // Right-panel fallback (design 27 §4.5, the user-visible half): with no
-    // execution session to mirror, the panel follows the Chat surface's
-    // `session_config` draft — the workspace the user picked on the composer.
-    // Without this the whole tree blanked the moment the last exec tab
-    // closed, even though the chat surface still showed a workspace chip.
+    // The Chat surface owns its workspace (design 27 §4.5): the panel mirrors
+    // the Chat session's own pick, not the execution session's working
+    // directory. Picking there writes the Chat session's config and never a
+    // session workspace, so an execution session is untouched by it. This is
+    // also what makes Chat-surface "Add to Chat" coherent — the tree and the
+    // composer chip are the same workspace. (Before this, the tree blanked the
+    // moment the last exec tab closed, and with a session open the panel
+    // silently disagreed with the chip.)
     const chatSessionId = useChatSessionStore((s) =>
         selectedAgentId ? s.byAgent[selectedAgentId]?.chatSessionId ?? null : null,
     );
+    const onChatSurface = useChatSessionStore((s) =>
+        selectedAgentId ? s.byAgent[selectedAgentId]?.mode === "chat" : false,
+    );
+    // Whichever surface the panel belongs to. A closed exec tab leaves the
+    // panel on the Chat surface even if the tab strip still says "exec", so
+    // with no session to mirror the Chat's own pick is the only honest source
+    // (this is also what keeps the tree from blanking when the last exec tab
+    // closes).
+    const chatSurface = (onChatSurface || activeSessionId === null) && chatSessionId !== null;
     const chatDraft = useChatSessionStore((s) =>
         chatSessionId ? s.draft[chatSessionId] : undefined,
     );
     const currentWorkspaceId = resolveExplorerWorkspaceId(
         activeSessionId, sessionWorkspaceMap, chatDraft?.workspace,
+        chatSurface,
     );
-    // ADR-076: read-only sessions cannot mutate the chat (no new messages, no
-    // attached-context edits). Mirrors FileEditorPanel's `addToChatDisabledReason`
-    // gating so the search-result "add to chat" affordance behaves identically.
-    const readOnlySession = useActiveSessionReadOnly();
-    const addAttachedContext = useChatStore((s) => s.addAttachedContext);
+    // ADR-076 + design 27 Wave 5: a reference goes to the composer that is on
+    // screen (Chat session or execution session). Read-only execution sessions
+    // cannot send the next message, so they are not a target — but a Chat
+    // surface next to one still is. Mirrors FileEditorPanel's
+    // `addToChatDisabledReason` gating so both "add to chat" entries behave alike.
+    const addToChatTarget = useAddToChatTarget(selectedAgentId);
 
     // Search-result "add to chat" eligibility. The search hits the currently
     // selected workspace, so "wrong agent/workspace" reasons from the editor
     // panel don't apply — only the session-side gates remain.
     const searchAddToChatDisabledReason: "no-agent" | "no-session" | "read-only-session" | null =
         !selectedAgentId ? "no-agent"
-            : !activeSessionId ? "no-session"
-                : readOnlySession ? "read-only-session"
-                    : null;
+            : addToChatTarget === null ? (activeSessionId ? "read-only-session" : "no-session")
+                : null;
 
     // ADR-078 (2026-XX revision) — git strip source: (agent, workspace) of
     // the currently selected session workspace. Independent of whether any
@@ -568,11 +595,10 @@ export function WorkspaceExplorer() {
      * stay a pure store mutation.
      */
     const handleSearchAddToChat = useCallback((item: { name: string; relPath: string }) => {
-        if (!selectedAgentId || !activeSessionId) return;
-        if (searchAddToChatDisabledReason !== null) return;
+        if (!selectedAgentId || searchAddToChatDisabledReason !== null) return;
         const root = getCachedWorkspaceRoot(selectedAgentId, currentWorkspaceId);
         const absPath = root ? `${root}/${item.relPath}` : item.relPath;
-        addAttachedContext(selectedAgentId, activeSessionId, {
+        attachWorkspaceRef(addToChatTarget, {
             id: `${selectedAgentId}:${item.relPath}`,
             type: "file",
             name: item.name,
@@ -584,7 +610,7 @@ export function WorkspaceExplorer() {
             type: "info",
             message: t("workspace.search.addedToChat", { name: item.name }),
         });
-    }, [selectedAgentId, activeSessionId, currentWorkspaceId, searchAddToChatDisabledReason, addAttachedContext, addToast, t]);
+    }, [selectedAgentId, activeSessionId, currentWorkspaceId, searchAddToChatDisabledReason, addToChatTarget, addToast, t]);
 
     const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === "Escape") {
@@ -880,12 +906,12 @@ export function WorkspaceExplorer() {
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-right-panel">
             {/* Workspace selector + action buttons */}
             <div className="flex items-center gap-0.5 border-b border-border-divider px-1.5 py-1.5">
-                {/* With no execution session the panel mirrors the Chat
-                    surface's draft — the selector edits the draft too
-                    (same whole-draft replace as the composer chip). */}
+                {/* On the Chat surface the panel mirrors the Chat session's
+                    own workspace — the selector edits that config, exactly
+                    like the composer chip, and never a session workspace. */}
                 <WorkspaceSelector
                     dropDirection="down"
-                    {...(!activeSessionId && chatSessionId && selectedAgentId
+                    {...(chatSurface && selectedAgentId
                         ? {
                             value: currentWorkspaceId,
                             onChange: (id: string) =>

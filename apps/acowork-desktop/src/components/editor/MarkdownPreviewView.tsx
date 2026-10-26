@@ -182,10 +182,11 @@ export function MarkdownPreviewView({ file }: MarkdownPreviewViewProps) {
     useEffect(() => {
         const aid = file.agentId;
         if (!aid) return;
-        const state = useWorkspaceStore.getState();
-        if (state.workspaces.length === 0 && !state.loading) {
-            void state.fetchWorkspaces(aid);
-        }
+        // "Already loaded" means loaded *for this agent*: the list is one
+        // global slot and can be holding another agent's entries, which would
+        // both skip the fetch and feed the resolver foreign workspace roots.
+        if (useWorkspaceStore.getState().workspacesAgentId === aid) return;
+        void useWorkspaceStore.getState().fetchWorkspaces(aid);
     }, [file.agentId]);
 
     /**

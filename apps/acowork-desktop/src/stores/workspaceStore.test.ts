@@ -169,3 +169,65 @@ describe("workspaceStore.fetchWorkspaces — 403 is a state, not a silent empty"
         expect(useWorkspaceStore.getState().deniedReason).toBeNull();
     });
 });
+
+/**
+ * The list is ONE global array while the UI reads it for `selectedAgentId`,
+ * and starting another agent fetches for that one. Field report: right after
+ * starting agent B, B's chat-surface workspace menu listed agent A's
+ * workspaces, and picking one did nothing — it wrote a workspace id B does not
+ * own, so the panel resolved nothing. Two store defects fed it:
+ *   - every failure path left A's array in place (only `loading` was cleared),
+ *   - `setSessionWorkspace` shared the fetch's stale-response counter, so a
+ *     workspace write discarded the in-flight list — and its `loading: false`.
+ */
+describe("workspaceStore.fetchWorkspaces ownership", () => {
+    it("a failed fetch for another agent claims the slot instead of leaving A's list", async () => {
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(() =>
+                Promise.resolve({ ok: false, status: 500, statusText: "boom", json: () => Promise.resolve({}) } as Response),
+            ),
+        );
+        useWorkspaceStore.setState({ workspaces: [makeWorkspace({ id: "ws-a" })], workspacesAgentId: "agent-A" });
+
+        await useWorkspaceStore.getState().fetchWorkspaces("agent-B");
+
+        const s = useWorkspaceStore.getState();
+        // An empty list says "unknown for B". A's list says "pick me", and B
+        // cannot.
+        expect(s.workspaces).toEqual([]);
+        expect(s.workspacesAgentId).toBe("agent-B");
+        expect(s.loading).toBe(false);
+    });
+
+    it("a concurrent workspace write does not swallow the in-flight list", async () => {
+        let releaseList: ((v: Response) => void) | null = null;
+        vi.stubGlobal(
+            "fetch",
+            vi.fn((input: string) =>
+                String(input).includes("/workspaces/tree") || String(input).includes("/sessions/")
+                    ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) } as Response)
+                    : new Promise<Response>((res) => {
+                        releaseList = res;
+                      }),
+            ),
+        );
+        useWorkspaceStore.setState({ workspaces: [makeWorkspace({ id: "ws-a" })], workspacesAgentId: "agent-A" });
+
+        const inflight = useWorkspaceStore.getState().fetchWorkspaces("agent-B");
+        // The user switches workspace while B's list is still on the wire.
+        await useWorkspaceStore.getState().setSessionWorkspace("agent-B", "sess-1", "ws-b");
+        releaseList!({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ workspaces: [makeWorkspace({ id: "ws-b" })] }),
+        } as Response);
+        await inflight;
+
+        const s = useWorkspaceStore.getState();
+        expect(s.workspaces.map((w) => w.id)).toEqual(["ws-b"]);
+        expect(s.workspacesAgentId).toBe("agent-B");
+        // The discarded-result path used to leave this pinned at true.
+        expect(s.loading).toBe(false);
+    });
+});

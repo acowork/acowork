@@ -240,6 +240,12 @@ pub enum SessionMessage {
         kind: String,
         /// Chat attachment ids from a human Chat message. Runtime pulls from Gateway HTTP.
         chat_attachment_ids: Vec<String>,
+        /// ADR-100 D12: the ADR-046 attachment union the sender carried — for a
+        /// human Chat turn, the workspace references ("Add to Chat") picked on
+        /// the surface. Unlike `chat_attachment_ids` these need no pull: the
+        /// path is node-local and this agent's own tools read it. Empty for
+        /// agent-to-agent Intents, which have no attachment channel.
+        attached_items: Vec<acowork_core::protocol::AttachedItem>,
         /// Design 27 §5.3.1: the durable `user_message` row the attachments
         /// are pinned to. For a 1:1 chat message this is empty (the
         /// attachment coordinate is `message_id`, which matches the row). For
@@ -1433,6 +1439,7 @@ impl SessionTask {
                     repo: _,
                     kind,
                     chat_attachment_ids,
+                    attached_items,
                     in_reply_to,
                     assignment_brief,
                 }) => {
@@ -1520,7 +1527,7 @@ impl SessionTask {
                     let mut intent_content_parts: Option<
                         Vec<acowork_core::providers::traits::ContentPart>,
                     > = None;
-                    let intent_attached_items: Option<Vec<acowork_core::protocol::AttachedItem>> =
+                    let mut intent_attached_items: Option<Vec<acowork_core::protocol::AttachedItem>> =
                         if chat_attachment_ids.is_empty() {
                             None
                         } else if chat_id.is_empty() {
@@ -1588,15 +1595,12 @@ impl SessionTask {
                             if items.is_empty() {
                                 None
                             } else {
-                                llm_message = build_attachment_hint(
-                                    &llm_message,
-                                    Some(&items),
-                                    Some(agent_loop.core.config.work_dir.as_str()),
-                                );
                                 // Images flow to the LLM multimodally, same
                                 // as the execution surface; a derive failure
                                 // only drops the image parts (the file hint
-                                // above already stands).
+                                // below already stands). The hint itself is
+                                // built once, after the workspace references
+                                // join this turn's attachment list.
                                 match crate::agent::attachment_to_image::derive_image_parts(
                                     agent_loop.core.attachment_service(),
                                     &items,
@@ -1618,6 +1622,22 @@ impl SessionTask {
                                 Some(items)
                             }
                         };
+                    // ADR-100 D12: the workspace references ("Add to Chat") join
+                    // the pulled uploads. They need no pull — the path is
+                    // node-local and this agent's own tools read it — so they
+                    // arrive as parsed. One hint for the union, in the order the
+                    // composer attached them.
+                    intent_attached_items = merge_intent_attachments(
+                        intent_attached_items.take(),
+                        attached_items,
+                    );
+                    if let Some(items) = intent_attached_items.as_ref() {
+                        llm_message = build_attachment_hint(
+                            &llm_message,
+                            Some(items),
+                            Some(agent_loop.core.config.work_dir.as_str()),
+                        );
+                    }
                     last_user_message = Some((content.clone(), message_id.clone()));
                     let result = agent_loop
                         .run(
@@ -2470,6 +2490,23 @@ async fn echo_terminal_row(
     }
 }
 
+/// Merge the two arms a routed Chat turn can arrive with into the one list the
+/// turn sees (ADR-100 D12). They are independent — uploads are pulled by Chat
+/// attachment id, workspace references arrive already parsed — so either one
+/// alone must survive the merge, and `None` means this turn attached nothing.
+fn merge_intent_attachments(
+    pulled: Option<Vec<acowork_core::protocol::AttachedItem>>,
+    references: Vec<acowork_core::protocol::AttachedItem>,
+) -> Option<Vec<acowork_core::protocol::AttachedItem>> {
+    let pulled = pulled.unwrap_or_default();
+    if pulled.is_empty() && references.is_empty() {
+        return None;
+    }
+    let mut merged = pulled;
+    merged.extend(references);
+    Some(merged)
+}
+
 fn build_attachment_hint(
     user_content: &str,
     items: Option<&[acowork_core::protocol::AttachedItem]>,
@@ -2611,6 +2648,38 @@ mod tests {
         let json = serde_json::to_string(&item).unwrap();
         assert!(!json.contains("width"));
         assert!(!json.contains("height"));
+    }
+
+    /// ADR-100 D12: a routed Chat turn merges its two attachment arms, and
+    /// either one alone must survive the merge — on the Chat surface a workspace
+    /// reference arrives with no uploaded blob beside it (nothing pins the turn,
+    /// so `chat_attachment_ids` is empty).
+    #[test]
+    fn test_merge_intent_attachments_keeps_either_arm() {
+        use super::merge_intent_attachments;
+        use acowork_core::protocol::AttachedItem;
+        let reference = || AttachedItem::AttachedFile {
+            abs_path: "E:/work/demo/src/main.rs".to_string(),
+            name: "src/main.rs".to_string(),
+            client_id: None,
+        };
+        let upload = AttachedItem::FileUpload {
+            document_id: "doc-1".to_string(),
+            filename: "notes.md".to_string(),
+            format: "md".to_string(),
+            size_bytes: 3,
+            client_id: None,
+        };
+
+        assert!(merge_intent_attachments(None, Vec::new()).is_none());
+        assert_eq!(
+            merge_intent_attachments(None, vec![reference()]).unwrap().len(),
+            1,
+            "a reference-only routed turn is still an attached turn"
+        );
+        let both = merge_intent_attachments(Some(vec![upload.clone()]), vec![reference()]).unwrap();
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0], upload, "the pulled upload keeps its slot ahead of the reference");
     }
 
     // -----------------------------------------------------------------

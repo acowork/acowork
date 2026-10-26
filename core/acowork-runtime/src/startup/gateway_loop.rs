@@ -1138,22 +1138,9 @@ async fn deliver_pinned_turn(
 ) -> bool {
     use crate::agent::session::SessionMessage;
 
-    // Same ADR-046 parse the execution surface's write path uses: a
-    // strongly-typed discriminated union, unparseable entries dropped rather
-    // than failing the turn.
-    let attached_items = env
-        .params
-        .get("attached_items")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|d| {
-                    serde_json::from_value::<acowork_core::protocol::AttachedItem>(d.clone()).ok()
-                })
-                .collect::<Vec<_>>()
-        })
-        .filter(|v: &Vec<acowork_core::protocol::AttachedItem>| !v.is_empty());
+    // Same ADR-046 parse the routed path uses — one parse, one meaning for a
+    // reference whichever transport carried the turn.
+    let attached_items = crate::agent::intent_turn::attached_items_from_params(&env.params);
     let content_parts = env
         .params
         .get("content_parts")
@@ -1579,6 +1566,10 @@ async fn route_intent_legacy(
             repo,
             kind,
             chat_attachment_ids,
+            // A human Chat turn may carry workspace references without a pin
+            // (the Chat surface's composer never pins).
+            attached_items: crate::agent::intent_turn::attached_items_from_params(&params)
+                .unwrap_or_default(),
             in_reply_to,
             assignment_brief,
         },

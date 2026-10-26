@@ -548,7 +548,6 @@ export function FileTree({
                             entry={node.entry}
                             depth={node.depth}
                             agentId={agentId}
-                            sessionId={sessionId}
                             workspaceId={workspaceId}
                             relPath={node.relPath}
                             absPath={workspaceRoot ? `${workspaceRoot}/${node.relPath}` : node.relPath}

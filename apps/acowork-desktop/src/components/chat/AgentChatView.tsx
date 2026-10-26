@@ -10,10 +10,16 @@
 //   pick is a `session_config` DRAFT held on the Chat session ROW (design 27
 //   §4.5) — the store only caches what the server returned: `setCurrentModel`
 //   needs an active execution session, and a Chat turn's session is created
-//   server-side when the intent lands. The draft rides `sendText`: it seeds
-//   a newly created execution session and is re-applied when a mapped
-//   session is reused — so the choice is fixed BEFORE the turn, not
-//   after, which is the whole point (pick model/workspace/reasoning first).
+//   server-side when the intent lands. The draft rides `sendText`, and per
+//   ADR-099's 2026-10-28 revision it is an initial value for a session the
+//   router CREATES — it is never applied to a session that already exists,
+//   not model, not reasoning, and above all not `workspace`. That is deliberate: the workspace is the directory that
+//   session's files, tools, history and Add-to-Chat references already point
+//   at, and moving it mid-conversation invalidates them. So on the Chat
+//   surface the pick is the conversation's own workspace (it drives this
+//   surface's right-hand panel, see `WorkspaceExplorer`), not a live switch of
+//   anything. Either way the choice is fixed BEFORE the turn, not after, which
+//   is the whole point (pick model/workspace/reasoning first).
 //   Persisting it on the session (not in component state) is what keeps the
 //   last pick across tab switches, reloads and devices.
 // - No SkillsPanel here at all. Skills are auto-loaded by the model, not
@@ -60,6 +66,7 @@ import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { AttachedContextChips } from "./AttachedContextChips";
 import { isFailureStatus, isEmptyTerminalReply, isTurnRoutedNotice, pendingTurn, terminalNoticeKey } from "./chatTurnState";
 import { InlineInteractionCard } from "./InlineInteractionCard";
 import { useLocateMessage } from "../../lib/useLocateMessage";
@@ -606,9 +613,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     // A card answer continues the ORIGINAL turn deterministically (it does
     // not go through the Chat Router), so no seed is applied — carrying a
     // draft there would be meaningless. Plain messages carry the draft;
-    // per ADR-099 the router-side seed lands on session creation and, for
-    // model/reasoning, on reuse of an existing session (workspace is only
-    // applied to a newly created one).
+    // per ADR-099's 2026-10-28 revision the router-side seed is an initial
+    // value for the session a routing CREATES and is never applied to one
+    // that already exists.
     const sessionConfig = replyTo ? undefined : (Object.keys(draft).length > 0 ? draft : undefined);
     setInput("");
     const target = answerTarget;
@@ -935,6 +942,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             </span>
           </div>
         )}
+        {/* Workspace references picked with "Add to Chat" in the right-hand
+            panel — paths the Agent reads live, not uploaded copies. The
+            uploaded bytes above are a separate list with a separate channel. */}
+        <AttachedContextChips surface="chat" />
         {pendingAttachments.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
             {pendingAttachments.map((a) => (

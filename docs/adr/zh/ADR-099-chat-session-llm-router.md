@@ -1,7 +1,7 @@
 # ADR-099：Chat Session 的 LLM 语义路由（Chat Router）
 
 - **编号**：ADR-099
-- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下。2026-10-23 修订：D8 降级语义——chat 来源的人类消息降级时**新建**执行会话，见 D8。2026-10-24 修订：**推翻 D1 的「执行层保留物理轮转」，T1/T2 轮转整体删除**——执行会话长命、压缩就地处理、开新会话只由语义决定，见「修订（2026-10-24）」）
+- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下。2026-10-23 修订：D8 降级语义——chat 来源的人类消息降级时**新建**执行会话，见 D8。2026-10-24 修订：**推翻 D1 的「执行层保留物理轮转」，T1/T2 轮转整体删除**——执行会话长命、压缩就地处理、开新会话只由语义决定，见「修订（2026-10-24）」。2026-10-28 修订：**推翻验收标准 1 的「复用时 seed 落到被路由到的会话」**——`session_config` 只是新建初值，路由到已存在的会话时一个字段都不应用，见「修订（2026-10-28）」）
 - **日期**：2026-10-21
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊）、设计 29（Chat Session 上下文编排）、ADR-060（Prompt Cache 友好的上下文块重排）、ADR-063（包级 Prompt 覆盖）、ADR-066（Provider Cache Tokens）、ADR-076（多用户账号体系）、ADR-085（Agent 生命周期状态机）、ADR-092（用户消息身份与有界读取）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
@@ -170,7 +170,7 @@ graph TD
 
 对应背景中的三个现象：
 
-1. **改参数不再强制新建**：router 判断「同一任务 + 参数变更」时复用现有 session；只有新任务才新建。复用时 draft 的 model / provider / reasoning_effort 必须落到被路由到的会话——走 `ConversationSession::apply_config`（ADR-047 的唯一配置入口：立即持久化、`config_version` 递增、SessionTask 在下一个 turn boundary 应用），即「配置下一轮生效」。`workspace` 是唯一例外：把活任务换工作目录不是配置微调，必须走 `route_workspace_switch`（ADR-034 §8 的单入口，含改 per-agent 默认的副作用），因此 workspace 建议只在新建会话时生效，复用时记录分歧日志而不是静默丢弃。
+1. **改参数不再强制新建**：router 判断「同一任务 + 参数变更」时复用现有 session；只有新任务才新建。复用时 draft 的 `session_config` **不落到被路由到的会话**：被复用的会话保留它自己的 model / provider / reasoning_effort / workspace，draft 只作为**新建会话的初值**生效（2026-10-28 修订推翻本条原先的「配置下一轮生效」，见「修订（2026-10-28）」）。要改一条在跑的会话，走它自己执行面上的 `apply_config`（ADR-047）与 `route_workspace_switch`（ADR-034 §8）。
 2. **语义无关不再复用**：router 对无关输入选择 `dispatch(new)`。
 3. **摘要不污染新任务**：新任务从空白 session 开始；已选定任务内的上下文膨胀由压缩就地处理，不产生 successor。
 
@@ -219,6 +219,16 @@ graph TD
 3. **单一规则**：开新执行会话只有三个来源，全部是显式决定——router 的 `dispatch(target="new")`、PM 任务终态 close、用户手动新建（D9）；上下文卫生只有 ADR-011 / ADR-061 的压缩；文件规模只有设计 15 的 100,000 行 / 50 MiB 硬上限。
 
 不受本修订影响的：`turn_mode` 仍只有 new / continue 两态（ADR-100 D11）；`dispatch(target="new")` 仍是新开一条任务而非轮转（无 predecessor、不携带 handoff）；transcript 不新增 tag；映射可指向已压缩的会话，不做健康检查。压缩自身的恢复跳过仍用 `last_compaction_offset`。
+
+## 修订（2026-10-28）：`session_config` 只是新建初值，复用时一律不应用
+
+推翻验收标准 1 的后半句（「复用时 draft 的 model / provider / reasoning_effort 必须落到被路由到的会话」），并把原 workspace 例外推广到全部字段：**seed 只在该次路由新建会话时作为初值应用；路由到已存在的会话时一个字段都不应用**。`apply_seed_to_session` 连同其 workspace 分歧日志一并删除。
+
+动机是用户视角的自洽。一个 Chat 是一段对话压着多条执行会话，它们可能同时在跑、各自在不同工作目录。chat composer 上的 draft 是这段对话对「还没开始的活」的偏好，不是对某条在跑的会话下达的命令。旧规则下「chat 面选了 W、router 把这一轮路由进一条已在 V 里跑的旧会话」，那一轮实际在 V 干活而 chat 面显示 W——两个面都对不上，右侧工作区 Add-to-Chat 的前提（composer 显示的工作区就是这轮干活的工作区）自相矛盾。新规则下不变量各自闭合：**chat 的 composer 与 chat 的右侧面板一致，执行会话的 composer 与该会话的面板一致；chat 与执行会话之间不需要一致**（本就允许多条并行）。
+
+明确接受的代价：从 chat 面改 model / reasoning，若 router 判定复用旧会话，这一轮不生效，只对 chat 之后新开的会话生效。要改一条在跑的会话，去它自己的执行面——那里有 `apply_config`（ADR-047 唯一配置入口）与 `route_workspace_switch`（ADR-034 §8 唯一工作区入口），改的是它自己看得见的状态。
+
+不受影响的：`dispatch(target="new")` 仍是 draft 落地的显式通道；PM 任务 / agent↔agent 的确定性复用不变（键即任务身份），但其 seed 同样不再覆盖已存在的会话；`clamp_seed` 仍只在创建路径按应答方 provider 列表钳制 model/provider、按注册表丢弃未知 workspace。
 
 ## 测试
 

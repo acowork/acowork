@@ -36,6 +36,8 @@
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
 import { SessionAccessError } from "../lib/session-control";
+import { toWireAttachedItems, workspaceRefToAttachedItem } from "../lib/types";
+import type { WorkspaceRef } from "../lib/types";
 import { useAuthStore } from "./authStore";
 
 // ── Wire types (mirror `chat_sessions_api.rs` responses) ──────────────
@@ -237,8 +239,9 @@ export interface ChatSessionConfig {
  *  `sessionConfig` is the initiator's `session_config` suggestion (design
  *  27 §4.5): model / workspace / reasoning-effort chosen on the Chat
  *  surface before sending. It rides the intent envelope and seeds the
- *  execution session — at creation, and re-applied (from its next turn) when
- *  a mapped session is reused. `undefined` = use the
+ *  execution session — at creation, and never on a reuse: a session that
+ *  already exists keeps its own model / reasoning / workspace (ADR-099's
+ *  revision of 2026-10-28). `undefined` = use the
  *  agent's own defaults. */
 function sendChatMessage(
   me: string,
@@ -247,6 +250,7 @@ function sendChatMessage(
   inReplyTo?: string,
   sessionConfig?: ChatSessionConfig,
   attachmentIds?: string[],
+  attachedItems?: unknown[],
 ): Promise<void> {
   return req<void>("POST", "/api/intents/chat-message", {
     chat_session_id: chatSessionId,
@@ -255,6 +259,11 @@ function sendChatMessage(
     in_reply_to: inReplyTo ?? "",
     ...(sessionConfig ? { session_config: sessionConfig } : {}),
     ...(attachmentIds && attachmentIds.length > 0 ? { attachment_ids: attachmentIds } : {}),
+    // ADR-046 workspace references picked with "Add to Chat". The Gateway
+    // forwards them to whichever execution session takes this routed turn
+    // (design 27 §4.2.1) — they are paths, not bytes, so nothing is copied
+    // into the Chat store.
+    ...(attachedItems && attachedItems.length > 0 ? { attached_items: attachedItems } : {}),
   });
 }
 
@@ -516,6 +525,16 @@ interface ChatSessionStore {
    *  this slot is hydrated by `openAgent` and updated by `saveDraft`'s
    *  response — never an independent frontend state. */
   draft: Record<string, ChatSessionConfig>;
+  /** Workspace references ("Add to Chat") pending on this Chat surface's
+   *  composer, keyed by chat session id. The execution view keeps its own list
+   *  on the execution session (`chatStore.attachedContext`); a reference goes to
+   *  whichever composer is on screen (see `lib/addToChat`). `sendText` clears it
+   *  on a send that landed, so a failed send keeps what the human attached. */
+  attachedContext: Record<string, WorkspaceRef[]>;
+  /** Land a reference on this Chat session's composer. Idempotent by `id`:
+   *  attaching the same path twice is one chip, not two. */
+  addAttachedContext(chatSessionId: string, ref: WorkspaceRef): void;
+  removeAttachedContext(chatSessionId: string, id: string): void;
 
   openAgent(agentId: string): Promise<void>;
   /** Project group chats currently on screen (keyed by session id) —
@@ -610,6 +629,23 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   windows: {},
   sending: {},
   draft: {},
+  attachedContext: {},
+
+  addAttachedContext: (chatSessionId, ref) => {
+    set((s) => {
+      const list = s.attachedContext[chatSessionId] ?? [];
+      if (list.some((c) => c.id === ref.id)) return {};
+      return { attachedContext: { ...s.attachedContext, [chatSessionId]: [...list, ref] } };
+    });
+  },
+
+  removeAttachedContext: (chatSessionId, id) => {
+    set((s) => {
+      const list = s.attachedContext[chatSessionId];
+      if (!list) return {};
+      return { attachedContext: { ...s.attachedContext, [chatSessionId]: list.filter((c) => c.id !== id) } };
+    });
+  },
 
   openAgent: async (agentId) => {
     const me = useAuthStore.getState().account?.user_id;
@@ -895,8 +931,21 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     let ok = false;
     try {
       if (inReplyTo && attachmentIds?.length) throw new Error("card replies cannot include attachments");
-      await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds);
+      // Workspace references picked with "Add to Chat" ride this turn as the
+      // ADR-046 union. A card answer continues an existing turn through the
+      // answer channel, which has no attachment arm, so refs are carried on a
+      // plain message only — and cleared only when that message landed, so a
+      // failed send leaves the human's chips where they were.
+      const refs = get().attachedContext[chatSessionId] ?? [];
+      const attachedItems =
+        inReplyTo || refs.length === 0
+          ? undefined
+          : toWireAttachedItems(refs.map(workspaceRefToAttachedItem));
+      await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, attachedItems);
       ok = true;
+      if (attachedItems) {
+        set((s) => ({ attachedContext: { ...s.attachedContext, [chatSessionId]: [] } }));
+      }
     } catch (e) {
       console.warn("[chatSessionStore] send failed:", e);
     } finally {

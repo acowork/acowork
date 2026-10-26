@@ -643,6 +643,13 @@ async fn run_turn(
                                 repo: envelope.repo.clone(),
                                 kind: envelope.kind.clone(),
                                 chat_attachment_ids: envelope.chat_attachment_ids.clone(),
+                                // Same arm the pinned path fills on its
+                                // `ChatMessage`: a workspace reference means one
+                                // thing whichever transport carried the turn.
+                                attached_items: crate::agent::intent_turn::attached_items_from_params(
+                                    &envelope.params,
+                                )
+                                .unwrap_or_default(),
                                 in_reply_to: envelope.in_reply_to.clone(),
                                 // The router only takes Chat-originated
                                 // turns (policy.router_eligible); a PM

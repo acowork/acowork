@@ -636,68 +636,6 @@ impl SessionManager {
         }
     }
 
-    /// ADR-099: apply an initiator's `session_config` suggestion to a session
-    /// that already exists instead of dropping it.
-    ///
-    /// A config difference alone never opens a new session, but the seed still
-    /// has to land somewhere — otherwise a model switch requested from the chat
-    /// surface would be silently ignored, on both the router path and the
-    /// kill-switch path. `ConversationSession::apply_config` is THE config entry
-    /// point (ADR-047): it persists immediately, bumps `config_version`, and the
-    /// running SessionTask picks the change up at the next turn boundary —
-    /// exactly the "effective from the next turn" the router contract promises.
-    ///
-    /// `workspace` is deliberately not applied here. Moving a live task to a
-    /// different working directory is not a config tweak: it changes the paths
-    /// under an in-flight loop, and every real switch must go through
-    /// `route_workspace_switch` (ADR-034 §8, the single entry point). A seed
-    /// that wants a different workspace therefore reaches the session only when
-    /// a session is created for it — the router expresses that with
-    /// `dispatch(target="new")`. The divergence is logged rather than dropped.
-    ///
-    /// Best-effort by design: a session that is not live keeps its own config.
-    pub(crate) fn apply_seed_to_session(
-        &self,
-        session_id: &str,
-        seed: Option<&super::intent_routing::SessionSeed>,
-    ) {
-        let Some(seed) = seed.filter(|s| !s.is_empty()) else {
-            return;
-        };
-        let Some(handle) = self.get_session(session_id) else {
-            return;
-        };
-        let Some(conv) = &handle.conversation else {
-            return;
-        };
-        if let Some(workspace) = seed.workspace.as_deref()
-            && workspace != conv.workspace_id().unwrap_or_default()
-        {
-            tracing::info!(
-                session_id = %session_id,
-                suggested_workspace = %workspace,
-                current_workspace = ?conv.workspace_id(),
-                "ADR-099: workspace suggestion on a reused session is not applied — continue it with dispatch(new)"
-            );
-        }
-        let delta = crate::agent::session_config::SessionConfigDelta {
-            model: seed.model.clone(),
-            provider: seed.provider.clone(),
-            reasoning_effort: seed.reasoning_effort.clone(),
-            ..Default::default()
-        };
-        if delta.model.is_none() && delta.reasoning_effort.is_none() {
-            return;
-        }
-        conv.apply_config(&delta);
-        tracing::info!(
-            session_id = %session_id,
-            has_model = delta.model.is_some(),
-            has_effort = delta.reasoning_effort.is_some(),
-            "ADR-099: session_config suggestion applied to the reused session (next turn)"
-        );
-    }
-
     /// Design 27 §6.1: resolve (or create) the execution session that owns an
     /// intent context for this agent. `key` comes from
     /// `intent_routing::routing_key`. A mapped session that is still Active is
@@ -749,9 +687,11 @@ impl SessionManager {
                 // Idempotent: re-stamps only when the binding or the
                 // `Members` visibility is still missing.
                 self.stamp_chat_binding(chat_id, sid);
-                // Continuation still honors the suggestion — effective from
-                // the next turn.
-                self.apply_seed_to_session(sid, seed.as_ref());
+                // ADR-099 revision: the seed is an initial value for a session
+                // this call CREATES, never a command into a live one. A reused
+                // session keeps its own model, reasoning effort and working
+                // directory — changing those belongs to that session's own
+                // surface (its composer, its workspace panel).
                 return Ok((sid.clone(), false));
             }
             tracing::info!(
@@ -935,11 +875,12 @@ impl SessionManager {
                     })?;
                 self.stamp_chat_binding(Some(chat_session_id), &session_id);
             }
-            // ADR-099 acceptance criterion 1: a config change reaches the
-            // session the message was routed into, from the next turn. Selecting
-            // an older session is a reuse, not a creation — `opened_new` stays
-            // `false` either way.
-            self.apply_seed_to_session(&session_id, seed.as_ref());
+            // ADR-099 revision: a seed is the chat's preference for the work it
+            // has not started yet, not a command into a running session. A Chat
+            // is one conversation over several execution sessions — possibly
+            // live at the same time, each in its own tree — so applying a draft
+            // here would let a message silently move or re-model a task the
+            // user is watching. `dispatch(new)` is how the draft takes effect.
             return Ok((session_id, false));
         }
 
@@ -5788,13 +5729,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 
-    /// ADR-099: a `session_config` seed that differs from the mapped
+    /// ADR-099 revision: a `session_config` seed that differs from the mapped
     /// session's own config never opens a new session — a config change alone
-    /// is not new work, the router is the only judge of that. It must still
-    /// LAND: the reused session takes the suggestion, effective from its next
-    /// turn. Dropping it silently is the bug this pins.
+    /// is not new work, the router is the only judge of that. And it does not
+    /// land either: a reused session keeps its own model, effort and working
+    /// directory, because the draft is the chat's preference for work it has
+    /// not started, not a command into a session that may be mid-task.
     #[tokio::test]
-    async fn config_seed_is_applied_to_a_reused_session() {
+    async fn config_seed_alone_neither_rotates_nor_reconfigures() {
         let work_dir =
             std::env::temp_dir().join(format!("acowork-not3-{}", Uuid::new_v4()));
         let config = crate::config::RuntimeConfig {
@@ -5834,7 +5776,7 @@ mod tests {
             .expect("create chat session");
         assert!(first_new, "a first routing creates the session");
         // A conflicting seed (different reasoning effort) reuses the mapped
-        // session: no new session, and the suggestion lands on the old one.
+        // session: no new session, and no re-configuration of the old one.
         let seed = crate::agent::session::intent_routing::SessionSeed {
             reasoning_effort: Some("high".into()),
             ..Default::default()
@@ -5843,17 +5785,17 @@ mod tests {
             .route_intent_session("chat:cs-not3", Some(seed), None)
             .await
             .expect("reuse under a config seed");
-        assert_eq!(sid, sid2, "ADR-099: a config seed alone creates nothing");
+        assert_eq!(sid, sid2, "a config seed alone creates nothing");
         assert!(!opened_new, "the mapped session was reused, not created");
-        // The existing session takes the suggestion — never dropped (D5).
+        // The existing session keeps its own config — the seed is not applied.
         let conv = manager
             .get_session(&sid2)
             .and_then(|h| h.conversation.clone())
             .expect("reused conversation");
         assert_eq!(
             conv.reasoning_effort().as_deref(),
-            Some("high"),
-            "a reused session must apply the initiator's session_config"
+            None,
+            "a reused session is not re-configured by an initiator's seed"
         );
 
         let _ = std::fs::remove_dir_all(&work_dir);
@@ -5896,14 +5838,14 @@ mod tests {
         (manager, work_dir)
     }
 
-    /// ADR-099 acceptance criterion 1 on the router path: the `session_config`
-    /// draft a `dispatch` carries must land on the session it picked, on both
-    /// reuse branches — the target already being the mapped session, and the
-    /// target being a different (still live) session whose mapping the dispatch
-    /// re-points. A suggestion that only applies when a session is *created*
-    /// is the bug this pins.
+    /// ADR-099 revision: a `session_config` draft is an initial value for the
+    /// session a dispatch CREATES. On either reuse branch — the target already
+    /// being the mapped session, or a different live session whose mapping the
+    /// dispatch re-points — the reused session keeps its own config, because a
+    /// Chat may have several execution sessions live at once and a message must
+    /// not re-model or re-home one the user is watching.
     #[tokio::test]
-    async fn chat_dispatch_applies_the_seed_on_every_reuse_branch() {
+    async fn chat_dispatch_applies_the_seed_only_when_it_opens_a_session() {
         use crate::agent::chat_router::tool::Target;
         use crate::agent::session::intent_routing::SessionSeed;
 
@@ -5918,14 +5860,22 @@ mod tests {
                 .and_then(|c| c.reasoning_effort())
         };
 
-        // Branch A — target is the mapped session: no re-point, but the draft
-        // still takes effect from the next turn.
-        let (cur, _) = manager
-            .chat_dispatch("cs-cur", Target::New, None)
+        // Creation — the draft is the new session's initial config.
+        let (cur, opened_new) = manager
+            .chat_dispatch("cs-cur", Target::New, Some(effort("high")))
             .await
             .expect("open a session for the chat");
+        assert!(opened_new, "dispatch(new) always starts fresh");
+        assert_eq!(
+            effective(&manager, &cur).as_deref(),
+            Some("high"),
+            "the session created by this dispatch takes the seed"
+        );
+
+        // Reuse branch A — target is the mapped session: no re-point, and the
+        // session's own config stays as it is.
         let (same, opened_new) = manager
-            .chat_dispatch("cs-cur", Target::Existing(cur.clone()), Some(effort("high")))
+            .chat_dispatch("cs-cur", Target::Existing(cur.clone()), Some(effort("low")))
             .await
             .expect("dispatch to the current session");
         assert_eq!(same, cur, "continuing the mapped target creates nothing");
@@ -5933,13 +5883,13 @@ mod tests {
         assert_eq!(
             effective(&manager, &cur).as_deref(),
             Some("high"),
-            "the mapped target takes the dispatched session_config"
+            "a reused session is not re-configured by the draft"
         );
 
-        // Branch B — target is a different live session: the chat mapping
-        // follows the choice, and so does the seed.
+        // Reuse branch B — target is a different live session: the chat mapping
+        // follows the choice; the session's config does not follow the draft.
         let (other, _) = manager
-            .chat_dispatch("cs-two", Target::New, None)
+            .chat_dispatch("cs-two", Target::New, Some(effort("medium")))
             .await
             .expect("first session of the second chat");
         let (prev, _) = manager
@@ -5958,8 +5908,8 @@ mod tests {
         assert_eq!(chosen, other);
         assert_eq!(
             effective(&manager, &other).as_deref(),
-            Some("low"),
-            "switching to a live session is a reuse, not a creation — the seed applies"
+            Some("medium"),
+            "switching to a live session is a reuse, not a creation — its own config wins"
         );
         assert_eq!(effective(&manager, &prev).as_deref(), None);
         // The chat now resolves to the session it was pointed at.
@@ -5968,6 +5918,19 @@ mod tests {
             .await
             .expect("mapping follows the dispatch");
         assert_eq!(reused, other, "the mapping was re-pointed");
+
+        // The intent path holds the same rule: a seed on a mapped, live session
+        // is not applied.
+        let (again, _) = manager
+            .route_intent_session("chat:cs-two", Some(effort("high")), None)
+            .await
+            .expect("routing the next message reuses it");
+        assert_eq!(again, other);
+        assert_eq!(
+            effective(&manager, &other).as_deref(),
+            Some("medium"),
+            "route_intent_session reuses without re-configuring"
+        );
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }

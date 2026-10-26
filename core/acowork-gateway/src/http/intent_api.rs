@@ -1715,7 +1715,9 @@ pub struct ChatMessageRequest {
     /// Agent's `files/`) and workspace references (a node-local `absPath`).
     /// Forwarded verbatim to a pinned turn so it loses no capability the same
     /// send had against `POST /sessions/{sid}/messages`; the bytes are never
-    /// copied into the Chat store. Honored only with a pin.
+    /// copied into the Chat store. Forwarded on a routed turn as well — the
+    /// `Intent` arm carries them into whichever execution session takes the
+    /// turn — so the Chat surface's own "Add to Chat" reaches the Agent too.
     #[serde(default)]
     pub attached_items: Vec<serde_json::Value>,
     /// ADR-100 D12: the Agent instance that owns the pinned execution session.
@@ -1943,9 +1945,9 @@ async fn deliver_chat_message(
     // ── ADR-100 D12: the execution composer's own turn facts ──────────
     //
     // Normalized BEFORE the content gate below, because what the human sent is
-    // not what this turn will deliver: an un-pinned request loses `command` and
-    // `attached_items` outright, and a pinned one keeps only the items that have
-    // a displayable name. Gating on the raw request would accept a send the Chat
+    // not what this turn will deliver: an un-pinned request loses `command`
+    // outright, and either one keeps only the items that have a displayable
+    // name. Gating on the raw request would accept a send the Chat
     // store then refuses — a request-shape error surfacing as a 503, with the
     // turn never delivered and the chat left holding a head row that never
     // existed.
@@ -1962,12 +1964,11 @@ async fn deliver_chat_message(
         .filter(|s| !s.is_empty() && s.len() <= MAX_PINNED_SESSION_ID_LEN)
         .unwrap_or_default()
         .to_string();
-    // The two execution-composer fields mean nothing without a pin: a routed
-    // turn is consumed as an `Intent`, which has neither a skill arm nor an
-    // attachment one, so accepting them on that path would show the chat a
-    // chip the Agent never received. Dropped to empty instead of rejected —
-    // the text of the turn is still exactly what the human wrote, and an
-    // unpinning client's overshoot is not this turn's business.
+    // `command` means nothing without a pin: a routed turn is consumed as an
+    // `Intent`, which has no skill arm, so accepting it on that path would show
+    // the chat a skill the Agent never ran. Dropped to empty instead of
+    // rejected — the text of the turn is still exactly what the human wrote, and
+    // an unpinning client's overshoot is not this turn's business.
     let pinned = !for_execution_session.is_empty();
     let command = if pinned {
         let command = req.command.trim();
@@ -1980,7 +1981,12 @@ async fn deliver_chat_message(
     } else {
         String::new()
     };
-    let attached_items: Vec<serde_json::Value> = if pinned {
+    // Attachments are accepted on BOTH paths. A pinned turn lands as a
+    // `ChatMessage` and uses that variant's own attachment arm; a routed one
+    // lands as an `Intent`, whose `attached_items` arm the Runtime fills from
+    // this same `params_json` key. Workspace references therefore survive the
+    // Chat surface's composer, not just the execution view's.
+    let attached_items: Vec<serde_json::Value> = {
         if req.attached_items.len() > MAX_PINNED_ATTACHMENTS {
             return Err(ApiError::bad_request(&format!(
                 "attached_items accepts at most {MAX_PINNED_ATTACHMENTS} entries"
@@ -2006,8 +2012,6 @@ async fn deliver_chat_message(
                 })?;
         }
         req.attached_items.clone()
-    } else {
-        Vec::new()
     };
     // A display-only projection for the Chat row (see
     // [`exec_attachment_labels`]). The execution session stays the attachment's
@@ -2211,7 +2215,9 @@ async fn deliver_chat_message(
             // ADR-100 D12: the execution composer's own turn facts, forwarded
             // verbatim so a pinned turn is indistinguishable from the same
             // send made against the execution surface's write endpoint. Empty
-            // / absent unless this turn is pinned (see above).
+            // / absent unless this turn is pinned (see above). `attached_items`
+            // is the routed path's attachment arm as well — the Chat surface's
+            // composer has no pin to carry it on.
             "command": command,
             "attached_items": attached_items,
         }).to_string(),

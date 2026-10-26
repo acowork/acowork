@@ -16,6 +16,10 @@ import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
 import { RemoteFolderPicker } from "./RemoteFolderPicker";
 
+/** Stable empty list for the "this array is not ours" case (see the
+ *  `workspaces` selector below) — a fresh `[]` per render would churn. */
+const EMPTY_WORKSPACES: WorkspaceDir[] = [];
+
 function workspaceDisplayName(dir: WorkspaceDir) {
   const name = (dir.alias?.trim() || dir.path).split(/[\\/]+/).filter(Boolean).pop() || dir.path;
   return name;
@@ -44,8 +48,20 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
   // registration recover transparently.
   const { gatewayUrl, gatewayMode } = useSettingsStore();
   const { addToast } = useToast();
-  const { workspaces, sessionWorkspaceMap, loading, deniedReason, fetchWorkspaces, setSessionWorkspace } =
+  const { sessionWorkspaceMap, loading, deniedReason: deniedReasonRaw, fetchWorkspaces, setSessionWorkspace, workspacesAgentId } =
     useWorkspaceStore();
+  // The denial is a fact about the list that was fetched, so it travels with
+  // the ownership tag: a 403 on the agent someone else just started must not
+  // pin *this* agent's panel into the "not on the manage list" copy.
+  const deniedReason = workspacesAgentId === selectedAgentId ? deniedReasonRaw : null;
+  // The list is a single global array; only render the one that describes the
+  // selected agent. A foreign array is worse than an empty one — its ids can
+  // be clicked and written into this agent's session (see
+  // `WorkspaceState.workspacesAgentId`). Stable module-level empty array so a
+  // mismatch does not hand memoized rows a fresh identity per render.
+  const workspaces = useWorkspaceStore((s) =>
+    s.workspacesAgentId === selectedAgentId ? s.workspaces : EMPTY_WORKSPACES,
+  );
   const activeSessionId = useChatStore((s) => {
     if (!selectedAgentId) return null;
     return s.getActiveSessionId(selectedAgentId);
@@ -78,8 +94,15 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
       useWorkspaceStore.getState().reset();
       return;
     }
+    // `workspacesAgentId` is in the dependency list on purpose: starting
+    // another agent fetches for *that* agent and overwrites this one's slot
+    // (the list is one global array). When it does, re-fetch so the current
+    // agent's panel stops showing — and stop being able to pick — a foreign
+    // workspace. The guard below is what keeps that from looping: once the
+    // slot describes this agent, there is nothing to re-fetch.
+    if (workspacesAgentId === selectedAgentId) return;
     void fetchWorkspaces(selectedAgentId);
-  }, [selectedAgentId, fetchWorkspaces]);
+  }, [selectedAgentId, workspacesAgentId, fetchWorkspaces]);
 
   // Close on outside click
   useEffect(() => {
@@ -217,9 +240,13 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
     if (!selectedAgentId || deletingId) return;
     setDeletingId(id);
     try {
-      // If the deleted workspace is the current session's workspace, fallback to agent home
-      if (currentWsId === id && activeSessionId) {
-        await setSessionWorkspace(selectedAgentId, activeSessionId, "__agent_home__");
+      // If the deleted workspace is the one in view, fall back to agent home —
+      // on the surface that owns the pick. Draft mode (Chat surface) clears
+      // its own config; it must never write a session workspace, which is the
+      // execution session's working directory.
+      if (currentWsId === id) {
+        if (onChange) onChange("__agent_home__");
+        else if (activeSessionId) await setSessionWorkspace(selectedAgentId, activeSessionId, "__agent_home__");
       }
       const response = await fetch(`${gatewayUrl}/api/agents/${selectedAgentId}/workspaces/${id}`, {
         method: "DELETE",
@@ -236,7 +263,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
       setDeletingId(null);
     }
     setConfirmDelete(null);
-  }, [selectedAgentId, gatewayUrl, addToast, fetchWorkspaces, deletingId, currentWsId, activeSessionId, setSessionWorkspace]);
+  }, [selectedAgentId, gatewayUrl, addToast, fetchWorkspaces, deletingId, currentWsId, activeSessionId, setSessionWorkspace, onChange]);
 
   const handleToggleAccess = useCallback(async (dir: WorkspaceDir) => {
     if (!selectedAgentId) return;
