@@ -1993,8 +1993,8 @@ impl AgentLoop {
         // ── ⑧.25 Context-aware tool result trimming ──
         // After pre-trim removed old history, also truncate individual
         // tool results that exceed the remaining context budget.
-        // This prevents a single large shell/grep/file_read output from
-        // overflowing the window when appended, which would cause the
+        // This prevents a single large shell output (e.g. `cat`, `grep`)
+        // from overflowing the window when appended, which would cause the
         // FIFO/emergency trim to delete ALL messages including the
         // results themselves, crashing the session with "context depleted".
         // ADR-094 follow-up: a `load_skill` body is the procedure the model is

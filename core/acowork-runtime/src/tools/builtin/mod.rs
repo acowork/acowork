@@ -9,18 +9,62 @@
 //! | http_request | network:<url> |
 //! | web_fetch | network:<url> |
 //! | shell | filesystem:exec |
-//! | file_read | filesystem:read:<path> |
 //! | file_write | filesystem:write:<path> |
 //! | file_edit | filesystem:write:<path> |
 //! | doc_reader | filesystem:read:<path> |
-//! | glob_search | filesystem:read:<path> |
-//! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
 //! | chat_history_read | (no permission table entry) — participation is enforced server-side (design 27 §5.6) |
 //! | rag_query | rag:query + network:<rag_url> (registered in agent_init.rs) |
-//! | context_abandon | context:write - RETIRED (dead code, not registered) |
 //! | ask_user_question | (no permission — LLM-initiated, always allowed) |
 //! | codebase | (no permission table entry) - TEMPORARILY UNREGISTERED |
+//! | file_read | filesystem:read:<path> - DEPRECATED, UNREGISTERED |
+//! | glob_search | filesystem:read:<path> - DEPRECATED, UNREGISTERED |
+//! | content_search | filesystem:read:<path> - DEPRECATED, UNREGISTERED |
+//! | context_abandon | context:write - RETIRED (dead code, not registered) |
+//!
+//! # Deprecated / unregistered tools
+//!
+//! Three filesystem *reading* tools are deprecated: `file_read`,
+//! `glob_search`, and `content_search`. The platform-side replacement is
+//! the shell tool surface (`bash` / `powershell` / `shell`), which the
+//! agent already needs for everything else and which reaches the same
+//! files with `cat` / `sed -n` / `grep` / `Select-String`. Dropping the
+//! three dedicated readers removes a per-tool context-budget and
+//! path-policy surface that the shell wrapper enforces anyway, and it
+//! removes the "which of these four do I call?" choice the LLM has to
+//! make before it can look at a file.
+//!
+//! They are **unregistered**, not deleted: `pub mod` declarations stay,
+//! so the sources (`tools/builtin/{file_read,glob_search,content_search}.rs`)
+//! keep compiling with their unit tests live, and
+//! [`crate::tools::wrappers::PathGuardedTool`] keeps their names in its
+//! filesystem-tool match list so a re-registration is still path-guarded
+//! by construction. Because they are absent from the code registry:
+//!
+//! - the Runtime never offers them to the LLM;
+//! - `agent_tools.json` rows for them are dropped by
+//!   [`crate::agent_config::merge_tools_config`] on the next startup and
+//!   written back, so they disappear from the Tools panel instead of
+//!   lingering as unrenderable ghosts (they are deliberately NOT added
+//!   to [`CONDITIONALLY_REGISTERED_TOOL_NAMES`] — that list exists to
+//!   *preserve* preferences for tools that may legitimately be absent
+//!   one boot, which is not the case here);
+//! - the wizard catalog (`acowork_core::tools::BUILTIN_TOOLS`) omits
+//!   them, so no create/clone/publish flow can offer the checkbox.
+//!
+//! Note what the shell replacement does and does not inherit: shell output
+//! is capped and rate-limited by `tools/wrappers.rs`, and shell command
+//! approval is governed by `security/shell_risk.rs`, but per-argument path
+//! validation (`PathGuardedTool`) is a filesystem-tool concern — the shell
+//! is scoped by its working directory plus the workspace resolver instead.
+//!
+//! To bring them back: re-add the three `Arc::new(...)` entries in
+//! `all_builtin_tools`, their `BUILTIN_TOOLS` catalog rows, and reverse
+//! the prompt text at the sites tagged `DEPRECATED-TOOL`
+//! (`file_edit.rs`'s spec description and the two `SameToolFlood`
+//! messages in `agent/loop_tools.rs`).
+//!
+//! # Temporarily unregistered: `codebase`
 //!
 //! ponytail: the `codebase` tool is temporarily out of the builtin
 //! registry — it is neither registered at startup nor pushed
@@ -110,7 +154,13 @@ use crate::tools::workspace_resolver::SharedResolver;
 /// - Linux/macOS: Single "shell" tool using system shell
 ///
 /// # Arguments
-/// * `resolver` - Workspace directory resolver (single source of truth)
+/// * `_resolver` - Workspace directory resolver (single source of truth).
+///   Currently consumed only by the deprecated `glob_search` /
+///   `content_search` constructors (module header), so the binding is
+///   prefixed with `_`. It stays in the signature deliberately: this
+///   factory's argument list mirrors the tool pool's assembly
+///   dependencies one-to-one, and re-registering the two search tools
+///   should not have to change a public signature.
 /// * `tool_http_timeout_ms` - Default HTTP timeout in milliseconds for built-in tools
 /// * `mcp_notifier` - Optional McpConfigNotifier for mcp_install/mcp_uninstall event notification.
 /// * `agent_home` - Agent home directory (from `config().work_dir`). Required by mcp_install/mcp_uninstall
@@ -127,7 +177,7 @@ use crate::tools::workspace_resolver::SharedResolver;
 /// (which is the `work_dir` runtime state root).
 #[allow(clippy::too_many_arguments)]
 pub fn all_builtin_tools(
-    resolver: &SharedResolver,
+    _resolver: &SharedResolver,
     tool_http_timeout_ms: u64,
     mcp_notifier: McpNotifyRef,
     agent_home: String,
@@ -153,12 +203,14 @@ pub fn all_builtin_tools(
         Arc::new(web_fetch::WebFetchTool::with_timeout(
             Duration::from_millis(tool_http_timeout_ms),
         )),
-        Arc::new(file_read::FileReadTool::new()),
+        // DEPRECATED-TOOL: `file_read`, `glob_search` and `content_search`
+        // are deliberately not constructed here (module header). Their
+        // modules stay compiled, and the `resolver` parameter stays so
+        // restoring them is a three-line edit rather than a signature
+        // change that ripples into `agent_init.rs` and the test helper.
         Arc::new(file_write::FileWriteTool::new()),
         Arc::new(file_edit::FileEditTool::new()),
         Arc::new(doc_reader::DocReaderTool::new()),
-        Arc::new(glob_search::GlobSearchTool::new(resolver)),
-        Arc::new(content_search::ContentSearchTool::new(resolver)),
         Arc::new(intent_send::IntentSendTool::new(intent_send_config.clone())),
         Arc::new(chat_history_read::ChatHistoryReadTool::new(intent_send_config)),
         Arc::new(ask_user_question::AskUserQuestionTool::new()),
@@ -273,6 +325,29 @@ mod tests {
     }
 
     #[test]
+    fn test_all_builtin_tools_does_not_register_deprecated_filesystem_readers() {
+        // `file_read` / `glob_search` / `content_search` are deprecated and
+        // unregistered (module header): they must not reach the LLM tool
+        // surface. Pinning this here is what keeps the deprecation from
+        // silently reversing — the modules stay compiled, so re-adding a
+        // constructor call would otherwise be an unremarkable one-liner.
+        let (resolver, timeout, mcp, agent_home, intent_cfg, package_dir) = make_test_deps();
+
+        let tools = all_builtin_tools(
+            &resolver, timeout, mcp, agent_home, intent_cfg, package_dir,
+        );
+
+        let names = tool_names(&tools);
+        for deprecated in ["file_read", "glob_search", "content_search"] {
+            assert!(
+                !names.contains(&deprecated.to_string()),
+                "{deprecated} must NOT be registered (deprecated filesystem reader); got: {:?}",
+                names
+            );
+        }
+    }
+
+    #[test]
     fn test_all_builtin_tools_default_includes_core_tools() {
         // Regression: platform-tool changes only affect the compression
         // tools; all other core tools are always present.
@@ -283,16 +358,16 @@ mod tests {
         );
 
         let names = tool_names(&tools);
-        // Core tools that must always be present (sanity check)
+        // Core tools that must always be present (sanity check).
+        // Filesystem *reading* is intentionally absent: `file_read`,
+        // `glob_search` and `content_search` are deprecated and
+        // unregistered — see the module header.
         for required in [
             "http_request",
             "web_fetch",
-            "file_read",
             "file_write",
             "file_edit",
             "doc_reader",
-            "glob_search",
-            "content_search",
             "intent_send",
             "ask_user_question",
             "todo_write",

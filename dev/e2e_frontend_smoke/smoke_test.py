@@ -58,6 +58,10 @@ TIMEOUT = 30
 AGENT_ID = "com.acowork.senior-engineer"
 NODE_ID = "smoke-node"
 
+# Builtin tool used by TC-SETUP-02/04 to exercise the enable/disable round-trip.
+# Must be a tool the Runtime actually registers and that no other case depends on.
+PROBE_TOOL = "doc_reader"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENT_PACKAGE = REPO_ROOT / "examples" / "agent-packages" / f"{AGENT_ID}.agent"
 
@@ -1143,8 +1147,12 @@ def test_tc_chat_07_send_message(mq, sid):
 
 
 def test_tc_chat_08_tool_call(mq, sid):
-    """TC-CHAT-08: trigger file_read tool call (needs LLM + file_read enabled)."""
-    print("\n── TC-CHAT-08: file_read tool call ──")
+    """TC-CHAT-08: trigger a tool call (needs LLM + a reading tool enabled).
+
+    The prompt asks for a file read; which tool answers it is the agent
+    choice, so this case only asserts that a tool_call round-trips.
+    """
+    print("\n── TC-CHAT-08: tool call ──")
     if not LLM_ENABLED:
         skip("LLM case — set SMOKE_LLM=1 to enable")
         return
@@ -1168,7 +1176,7 @@ def test_tc_chat_08_tool_call(mq, sid):
             saw_tool = True
             ok(f"tool_call: {msg['tool_name']}")
         elif msg["event"] == "done":
-            ok("done after tool flow" if saw_tool else "done (no tool_call — check file_read config)")
+            ok("done after tool flow" if saw_tool else "done (no tool_call — check the agent tool config)")
             return
         elif msg["event"] == "error":
             fail(f"messages/error: {msg['error']}")
@@ -1373,24 +1381,57 @@ def test_tc_harness_02_03_provider(http, base):
         fail(f"provider delete: HTTP {r.status_code} — FIXUP NEEDED for {pid}")
 
 
-def test_tc_setup_02_04_file_read(http, base, ctx):
-    """TC-SETUP-02+04: temporarily enable file_read tool, restore after."""
-    print("\n── TC-SETUP-02/04: file_read enable→restore ──")
-    r = http.get(f"{base}/api/agents/{AGENT_ID}/config")
-    if r.status_code != 200:
-        fail(f"config HTTP {r.status_code} {r.text[:200]}")
+def test_tc_setup_02_04_tool_toggle(http, base, ctx):
+    """TC-SETUP-02+04: toggle one builtin tool on/off, restore after.
+
+    Probes the ADR-040-follow-up `/builtin-tools` surface (the one the
+    ToolsTab uses) with `doc_reader`: unconditionally registered, not a
+    protected tool, and not needed by any other case here — so the flip
+    is observable without perturbing the rest of the run. `file_read`
+    used to be the probe tool and is now deprecated/unregistered; an
+    unknown name is silently dropped per ADR-029 §7, which would have
+    turned this case into a no-op that still reported green.
+    """
+    print("\n── TC-SETUP-02/04: builtin tool toggle ──")
+
+    def enabled_set():
+        r = http.get(f"{base}/api/agents/{AGENT_ID}/builtin-tools")
+        if r.status_code != 200:
+            raise AssertionError(f"builtin-tools HTTP {r.status_code} {r.text[:200]}")
+        entries = r.json().get("tools", [])
+        state = {e["name"]: bool(e.get("enabled")) for e in entries}
+        return state, {n for n, on in state.items() if on}
+
+    try:
+        before, before_on = enabled_set()
+    except AssertionError as e:
+        fail(str(e))
         return
-    tools = r.json().get("tools", {})
-    before = tools.get("file_read", {}).get("enabled", False)
-    r = http.put(f"{base}/api/agents/{AGENT_ID}/config",
-                 json={"tools": {"file_read": {"enabled": True}}})
-    if not assert_status(r, 200, "enable file_read"):
+    if PROBE_TOOL not in before:
+        fail(f"{PROBE_TOOL} is not a registered builtin tool: {sorted(before)}")
         return
-    ctx["file_read_before"] = before
-    r = http.put(f"{base}/api/agents/{AGENT_ID}/config",
-                 json={"tools": {"file_read": {"enabled": before}}})
-    if assert_status(r, 200, f"restore file_read={before}"):
-        ctx.pop("file_read_before", None)
+    ctx["builtin_tools_before"] = before
+
+    def put(names, label):
+        r = http.put(f"{base}/api/agents/{AGENT_ID}/builtin-tools",
+                     json={"builtin_tools": sorted(names)})
+        if not assert_status(r, 200, label):
+            return None
+        return {e["name"]: bool(e.get("enabled")) for e in r.json().get("tools", [])}
+
+    # 1) turn the probe on (it may already be on — the assert still pins
+    #    that the write is echoed back, which is what the ToolsTab relies on)
+    got = put(before_on | {PROBE_TOOL}, f"enable {PROBE_TOOL}")
+    if got is None or got.get(PROBE_TOOL) is not True:
+        fail(f"{PROBE_TOOL} did not become enabled: {got and got.get(PROBE_TOOL)}")
+        return
+    # 2) restore the persisted set verbatim
+    got = put(before_on, f"restore {PROBE_TOOL}={before[PROBE_TOOL]}")
+    if got is None or got.get(PROBE_TOOL) != before[PROBE_TOOL]:
+        fail(f"{PROBE_TOOL} did not restore to {before[PROBE_TOOL]}: {got and got.get(PROBE_TOOL)}")
+        return
+    ctx.pop("builtin_tools_before", None)
+    ok(f"{PROBE_TOOL} enable→restore round-trip")
 
 
 def test_tc_ws_02_add_workspace(http, base, ctx):
@@ -2269,7 +2310,7 @@ def main():
             test_tc_settings_04_users_list(http, base)
             test_tc_settings_05_07_user(http, base)
             test_tc_harness_02_03_provider(http, base)
-            test_tc_setup_02_04_file_read(http, base, ctx)
+            test_tc_setup_02_04_tool_toggle(http, base, ctx)
             test_tc_ws_02_add_workspace(http, base, ctx)
             test_tc_ws_03_tree(http, base, ctx)
             test_tc_ws_04_07_file_crud(http, base, ctx)

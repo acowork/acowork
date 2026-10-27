@@ -596,8 +596,8 @@ impl AgentLoop {
                         }
                     }
                     // Periodic control polling during tool execution.
-                    // Without this branch, a slow tool (e.g. file_read on large file)
-                    // would block the select! at rx.recv() until timeout, making
+                    // Without this branch, a slow tool (e.g. a shell `cat` on a
+                    // huge file) would block the select! at rx.recv() until timeout, making
                     // control signals unresponsive for potentially minutes.
                     _ = tokio::time::sleep(Duration::from_millis(500)) => {
                         match self.poll_control() {
@@ -1433,10 +1433,13 @@ impl AgentLoop {
         for idx in 0..deduped_calls.len() {
             if let Some(pos) = blocked_info.iter().position(|(i, _)| *i == idx) {
                 let msg = match &blocked_info[pos].1 {
+                    // DEPRECATED-TOOL: the hint used to name `file_read`,
+                    // which is no longer registered (tools/builtin/mod.rs).
+                    // It is now tool-agnostic so it stays actionable.
                     LoopPattern::SameToolFlood => {
                         "Loop detected: this tool has been called too many times in a short period. \
                          Please STOP using this tool and try a different approach \
-                         (e.g., use file_read to verify results, or switch to another tool)."
+                         (e.g., verify the current state with a different tool, or switch to another tool)."
                     }
                     _ => {
                         "Loop detected: this tool call has been blocked because it was repeated too many times with the same parameters. Try a different approach."
@@ -1552,12 +1555,15 @@ impl AgentLoop {
                     match level {
                         ResponseLevel::Warning => {
                             let warning_content = match &pattern {
+                                // DEPRECATED-TOOL: see the SameToolFlood
+                                // branch in `block` above — the hint used to
+                                // name the now-unregistered `file_read`.
                                 LoopPattern::SameToolFlood => {
                                     format!(
                                         "[System Warning] {message} \
                                          This tool has been called excessively. \
                                          Please STOP using this tool and try a different approach \
-                                         (e.g., use file_read to verify results, or switch to another tool) \
+                                         (e.g., verify the current state with a different tool, or switch to another tool) \
                                          to complete the task."
                                     )
                                 }

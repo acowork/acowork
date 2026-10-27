@@ -28,6 +28,14 @@ pub use traits::{Tool, ToolResult, ToolSpec};
 /// `codebase` (LSP-backed) is deliberately absent: it is temporarily
 /// unregistered in the Runtime (see `tools/builtin/mod.rs`), so listing
 /// it would offer the user a checkbox that can never take effect.
+///
+/// `file_read`, `glob_search` and `content_search` are absent for the
+/// same reason: they are deprecated and no longer registered by
+/// `all_builtin_tools` (the platform-side replacement is the shell tool
+/// surface — `cat` / `sed -n` / `grep` / `Select-String`). This catalog is
+/// the only source the create wizard reads, so dropping the rows here is
+/// what keeps a new agent from being created with a `[[tools]]` entry for
+/// a tool its Runtime will never expose.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BuiltinToolInfo {
     /// Tool name as registered in the Runtime (`Tool::name()`).
@@ -55,11 +63,8 @@ pub struct BuiltinToolInfo {
 /// `agent_mcp_tools.json` under their prefixed names (ADR-069), so a
 /// builtin checkbox for them could never take effect.
 pub const BUILTIN_TOOLS: &[BuiltinToolInfo] = &[
-    BuiltinToolInfo { name: "file_read",       description: "Read file contents (with line range)",                     group: Some("Filesystem") },
     BuiltinToolInfo { name: "file_write",      description: "Create or overwrite files",                                group: Some("Filesystem") },
     BuiltinToolInfo { name: "file_edit",       description: "Edit files via line-based patches",                        group: Some("Filesystem") },
-    BuiltinToolInfo { name: "glob_search",     description: "Find files matching a glob pattern",                       group: Some("Filesystem") },
-    BuiltinToolInfo { name: "content_search",  description: "Search file contents by regex",                             group: Some("Filesystem") },
     BuiltinToolInfo { name: "doc_reader",      description: "Read structured documents (PDF, DOCX, ...)",              group: Some("Filesystem") },
     BuiltinToolInfo { name: "http_request",    description: "Make raw HTTP requests",                                    group: Some("Network") },
     BuiltinToolInfo { name: "web_fetch",       description: "Fetch and extract readable content from web pages",        group: Some("Network") },
@@ -97,6 +102,21 @@ mod tests {
             !BUILTIN_TOOLS.iter().any(|t| t.name == "codebase"),
             "codebase must not be offered in the wizard catalog"
         );
+    }
+
+    #[test]
+    fn builtin_tool_catalog_excludes_deprecated_filesystem_readers() {
+        // `file_read` / `glob_search` / `content_search` are deprecated and
+        // unregistered in the Runtime (see `tools/builtin/mod.rs`). The
+        // wizard catalog drives `create_agent`'s `[[tools]]` output, so a
+        // row here would mint a manifest entry for a tool the agent can
+        // never call.
+        for name in ["file_read", "glob_search", "content_search"] {
+            assert!(
+                !BUILTIN_TOOLS.iter().any(|t| t.name == name),
+                "{name} must not be offered in the wizard catalog (deprecated filesystem reader)"
+            );
+        }
     }
 
     #[test]

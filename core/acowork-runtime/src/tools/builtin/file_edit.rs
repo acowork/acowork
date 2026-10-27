@@ -86,7 +86,12 @@ impl FileEditTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "file_edit".to_string(),
-            description: "Edit a file by replacing an exact string match with new content. Exact matching is preferred; Ensure that before calling, use file_read to re-read the target area; Strictly copy old_text byte-by-byte: indentation, CRLF, and trailing whitespace must exactly match the actual file.".to_string(),
+            // DEPRECATED-TOOL: this description used to tell the model to
+            // "use file_read to re-read the target area". `file_read` is
+            // unregistered (see `tools/builtin/mod.rs`), so the instruction
+            // now names the shell commands that actually exist. Restore the
+            // old wording together with the registration.
+            description: "Edit a file by replacing an exact string match with new content. Exact matching is preferred; Ensure that before calling, you have re-read the target area (e.g. `sed -n '120,140p' <path>` on bash, `Get-Content <path> | Select-Object -Skip 119 -First 21` on PowerShell) so old_text is copied from the file rather than from memory; Strictly copy old_text byte-by-byte: indentation, CRLF, and trailing whitespace must exactly match the actual file.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
