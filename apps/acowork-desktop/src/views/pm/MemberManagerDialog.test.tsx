@@ -14,7 +14,7 @@
  *   ("?" absent, display_name present, remove button enabled). If the wiring
  *   ever regresses to a per-callsite agentStore-only join, this goes red.
  *
- * Stub strategy mirrors `TaskDetailDialog.test.tsx`: `vi.mock` the leaf
+ * Stub strategy mirrors `TaskEditDialog.test.tsx`: `vi.mock` the leaf
  * stores (no network, no i18n), assert on the rendered DOM.
  */
 import { describe, it, expect, vi } from "vitest";

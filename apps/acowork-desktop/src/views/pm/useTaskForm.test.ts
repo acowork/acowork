@@ -1,5 +1,6 @@
 /**
- * Regression tests for the assignee dropdown (TaskEditDialog).
+ * Regression tests for the assignee dropdown and the date fields
+ * behind the task form (`useTaskForm`, extracted from the retired TaskEditDialog).
  *
  * ADR-073 background:
  *   Before ADR-073 was fully applied to acowork-pm, the assignee dropdown
@@ -148,7 +149,8 @@ describe("assignee dropdown options", () => {
   });
 });
 /**
- * Date-field round-trip (plan §8 debt: TaskEditDialog timezone drift).
+ * Date-field round-trip (plan §8 debt: the timezone drift the old TaskEditDialog
+ * had).
  * The date input carries a *local* calendar day; the stored instant is
  * local midnight. The old code (`new Date("YYYY-MM-DD")`) parsed as UTC
  * midnight, so users west of UTC saw the previous day after a re-edit.
@@ -156,9 +158,9 @@ describe("assignee dropdown options", () => {
  * UTC-midnight storage would render 08:00 local, local-midnight storage
  * renders 00:00 — the assertions below pin the local-midnight semantics.
  */
-describe("TaskEditDialog date fields", () => {
+describe("task form date fields", () => {
   it("stores a date field as local midnight", async () => {
-    const { localDateFieldToIso } = await import("./TaskEditDialog");
+    const { localDateFieldToIso } = await import("./useTaskForm");
     const iso = localDateFieldToIso("2026-10-30");
     const d = new Date(iso);
     expect(d.getFullYear()).toBe(2026);
@@ -169,13 +171,13 @@ describe("TaskEditDialog date fields", () => {
   });
 
   it("round-trips iso back to the same local calendar day", async () => {
-    const { localDateFieldToIso, isoToLocalDate } = await import("./TaskEditDialog");
+    const { localDateFieldToIso, isoToLocalDate } = await import("./useTaskForm");
     expect(isoToLocalDate(localDateFieldToIso("2026-10-30"))).toBe("2026-10-30");
     expect(isoToLocalDate(localDateFieldToIso("2026-02-01"))).toBe("2026-02-01");
   });
 
   it("tolerates empty and malformed input", async () => {
-    const { isoToLocalDate } = await import("./TaskEditDialog");
+    const { isoToLocalDate } = await import("./useTaskForm");
     expect(isoToLocalDate(null)).toBe("");
     expect(isoToLocalDate(undefined)).toBe("");
     expect(isoToLocalDate("not-a-date")).toBe("not-a-date");

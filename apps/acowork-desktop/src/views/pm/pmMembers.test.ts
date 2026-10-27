@@ -14,7 +14,7 @@
  *     而服务端 `ensure_assignee_is_member` 是允许的（它只查 members）
  *   - 任务卡片 / 详情抽屉里的创建者显示成裸 UUID
  *
- *   纯函数，无需挂 React 就能钉住映射（同 `TaskEditDialog.test.ts` 的做法）。
+ *   纯函数，无需挂 React 就能钉住映射（同 `useTaskForm.test.ts` 的做法）。
  */
 import { describe, it, expect } from "vitest";
 import { memberOptions, resolveActorLabel, resolveMember, resolveMembers } from "./pmMembers";
