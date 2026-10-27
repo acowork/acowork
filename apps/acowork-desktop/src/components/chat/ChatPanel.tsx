@@ -3158,7 +3158,7 @@ export function ModelMenu({
 
           {/* Level 1: grouped model list (level 2 — accounts — flies out on
               the right; this panel no longer swaps to show it). */}
-          <div className="max-h-[420px] overflow-y-auto py-1">
+          <OverlayScrollbar maxHeight={420} className="py-1">
             {groups.length === 0 ? (
               <div className="px-3 py-2 text-xs text-text-tertiary">{t("chatPanel.modelMenuNoMatch")}</div>
             ) : (
@@ -3246,7 +3246,7 @@ export function ModelMenu({
                 </div>
               ))
             )}
-          </div>
+          </OverlayScrollbar>
 
           {/* Divider */}
           <div className="border-t border-border-divider" />
@@ -3285,7 +3285,7 @@ export function ModelMenu({
               visibility: flyoutPos ? "visible" : "hidden",
             }}
           >
-            <div className="max-h-[420px] overflow-y-auto py-1.5">
+            <OverlayScrollbar maxHeight={420} className="py-1.5">
               {visibleAccounts.length === 0 ? (
                 <div className="px-3 py-2 text-xs text-text-tertiary">{t("chatPanel.modelMenuNoMatch")}</div>
               ) : (
@@ -3325,7 +3325,7 @@ export function ModelMenu({
                   );
                 })
               )}
-            </div>
+            </OverlayScrollbar>
           </div>
         )}
         </>
