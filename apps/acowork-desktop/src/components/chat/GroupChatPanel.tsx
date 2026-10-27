@@ -142,19 +142,46 @@ function useParticipantNamer(directory: DirectoryUser[]) {
     for (const u of directory) m.set(u.user_id, u);
     return m;
   }, [directory]);
+  // Name **and** avatar come from the same lookup: the account directory for
+  // people, the agent registry for agents. Resolving the name but leaving the
+  // avatar blank used to fall back to `userProfileStore` — i.e. the logged-in
+  // account's icon on every other participant's bubble (t-9764c5fa).
   return useCallback(
-    (id: string): { name: string; isAgent: boolean } => {
+    (id: string): ParticipantWho => {
       const agent = agentsMap[id]?.meta;
       if (agent) {
-        return { name: agent.display_name ?? agent.name ?? id, isAgent: true };
+        return {
+          name: agent.display_name ?? agent.name ?? id,
+          isAgent: true,
+          avatarUrl: agent.avatar ?? null,
+          builtinAvatarId: agent.builtin_avatar ?? null,
+        };
       }
       const user = dirById.get(id);
       if (user)
-        return { name: user.display_name || user.username, isAgent: false };
-      return { name: id.slice(0, 8), isAgent: false };
+        return {
+          name: user.display_name || user.username,
+          isAgent: false,
+          avatarUrl: user.avatar ?? null,
+          builtinAvatarId: user.builtin_avatar ?? null,
+        };
+      return {
+        name: id.slice(0, 8),
+        isAgent: false,
+        avatarUrl: null,
+        builtinAvatarId: null,
+      };
     },
     [agentsMap, dirById],
   );
+}
+
+/** What a participant id resolves to on this surface. */
+interface ParticipantWho {
+  name: string;
+  isAgent: boolean;
+  avatarUrl: string | null;
+  builtinAvatarId: string | null;
 }
 
 // ── Row renderer ──────────────────────────────────────────────────────
@@ -165,7 +192,7 @@ interface RowProps {
   /** Chat session the row belongs to — attachment thumbnails are addressed
    *  through it (the `files/` dir is session-scoped, §4.2.1). */
   chatSessionId: string;
-  nameOf: (id: string) => { name: string; isAgent: boolean };
+  nameOf: (id: string) => ParticipantWho;
   /** Cards that can no longer be answered (§5.5.4). */
   closed: Set<string>;
   /** The subset the human actually replied to — the line says "Answered",
@@ -324,8 +351,8 @@ const GroupRowView = memo(function GroupRowView({
   }
 
   const own = row.kind === "user_message" && row.from === me;
-  const who = own
-    ? { name: profile.displayName, isAgent: false }
+  const who: ParticipantWho = own
+    ? { name: profile.displayName, isAgent: false, avatarUrl: null, builtinAvatarId: null }
     : nameOf(row.from);
   const failed = isFailureStatus(row.meta?.status);
   const agentMeta = who.isAgent ? agentsMap[row.from]?.meta : undefined;
@@ -394,15 +421,15 @@ const GroupRowView = memo(function GroupRowView({
     <UserAvatar
       displayName={profile.displayName}
       avatarUrl={profile.backendAvatarUrl ?? null}
-      builtinAvatarId={profile.backendBuiltinAvatarId ?? null}
+      builtinAvatarId={profile.backendBuiltinAvatarId ?? undefined}
       size={40}
       className="mt-1 shrink-0"
     />
   ) : (
     <UserAvatar
       displayName={who.name}
-      avatarUrl={null}
-      builtinAvatarId={null}
+      avatarUrl={who.avatarUrl}
+      builtinAvatarId={who.builtinAvatarId}
       size={40}
       className="mt-1 shrink-0"
     />
@@ -890,7 +917,13 @@ export function GroupChatPanel() {
       .filter((p) => p.id !== me)
       .map((p) => {
         const who = nameOf(p.id);
-        return { id: p.id, name: who.name, isAgent: who.isAgent };
+        return {
+          id: p.id,
+          name: who.name,
+          isAgent: who.isAgent,
+          avatarUrl: who.avatarUrl,
+          builtinAvatarId: who.builtinAvatarId,
+        };
       })
       .filter((p) => p.name);
   }, [group, me, nameOf]);
@@ -1350,8 +1383,8 @@ export function GroupChatPanel() {
                     ) : (
                       <UserAvatar
                         displayName={c.name}
-                        avatarUrl={null}
-                        builtinAvatarId={null}
+                        avatarUrl={c.avatarUrl}
+                        builtinAvatarId={c.builtinAvatarId}
                         size={20}
                         className="shrink-0"
                       />

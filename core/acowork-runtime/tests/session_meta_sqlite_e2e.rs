@@ -26,7 +26,7 @@ fn make_meta(sid: &str, last_active: &str, title: &str) -> SessionMeta {
         session_id: sid.to_string(),
         agent_id: "test-agent".to_string(),
         created_at: "2026-01-01T00:00:00.000Z".to_string(),
-        user_id: None,
+        initiator: None,
         visibility: None,
         title: Some(title.to_string()),
         workspace_id: None,

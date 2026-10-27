@@ -1785,7 +1785,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // with closeTab: the fetchSessions response may arrive before the
       // Runtime processes close_session, resurrecting a tab the user just
       // closed.
-      const newOpenIds = agent.openSessionIds.filter((id) => activeIds.includes(id));
+      // The foreground tab survives regardless: a session opened from
+      // history (or drilled into from a Chat reply) is legitimately not in
+      // the Runtime's live set — a read-only one is never activated at all,
+      // because `openSession` skips the backend `open_session` it may not
+      // call. Pruning it dropped `activeSessionId` to null and parked the
+      // panel on "Loading session…" forever (regression t-9764c5fa).
+      const newOpenIds = agent.openSessionIds.filter(
+        (id) => activeIds.includes(id) || id === agent.activeSessionId,
+      );
       if (newOpenIds.length === agent.openSessionIds.length) return {}; // no change
       const patches: Partial<AgentState> = { openSessionIds: newOpenIds };
       // If the foreground tab was pruned, fall to the first survivor or null.

@@ -761,6 +761,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         }
       }
 
+      // Something else opened a session while we awaited (a drill into an
+      // execution session from a Chat reply, a `session_created` event):
+      // that one is the user's intent, and overwriting it would yank the
+      // panel to an unrelated session right after the jump.
+      if (useChatStore.getState().agentStates[agentId]?.activeSessionId) {
+        return "noop";
+      }
       // ADR-038: opening from the sidebar / start flow is a "first-open"
       // scenario, so we use the full openSession (UI + backend activation
       // + message/config load) instead of the strict setActiveTab.

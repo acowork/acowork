@@ -19,6 +19,7 @@ import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
+import { useInitiatorIdentity } from "../../lib/sessionInitiator";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock } from "lucide-react";
 import type { ChatMessage, VaultKeyEntry, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
@@ -820,9 +821,34 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // User profile fields — subscribed at ChatPanel level and passed as props
   // to MessageBubble so React.memo can detect profile changes (name/avatar
   // edits should update all rendered message bubbles instantly).
-  const userDisplayName = useUserProfileStore((s) => s.profile.displayName);
-  const userAvatarUrl = useUserProfileStore((s) => s.profile.backendAvatarUrl);
-  const userBuiltinAvatarId = useUserProfileStore((s) => s.profile.backendBuiltinAvatarId);
+  const profileDisplayName = useUserProfileStore((s) => s.profile.displayName);
+  const profileAvatarUrl = useUserProfileStore((s) => s.profile.backendAvatarUrl);
+  const profileBuiltinAvatarId = useUserProfileStore(
+    (s) => s.profile.backendBuiltinAvatarId,
+  );
+  // ADR-076 §决策 4: the human side of *this* execution session is its
+  // initiator, not the logged-in account. The profile above is only the
+  // fallback for the viewer's own / pre-accounts sessions — using it
+  // unconditionally repainted somebody else's session with the current
+  // account's identity after an account switch (t-9764c5fa).
+  const activeSessionInitiator = useAgentStore((s) => {
+    if (!selectedAgentId || !currentSessionId) return null;
+    return (
+      s.agents[selectedAgentId]?.sessions.find(
+        (x) => x.session_id === currentSessionId,
+      )?.initiator ?? null
+    );
+  });
+  const initiatorIdentity = useInitiatorIdentity(activeSessionInitiator);
+  const userDisplayName = initiatorIdentity?.displayName ?? profileDisplayName;
+  const userAvatarUrl = initiatorIdentity
+    ? initiatorIdentity.avatarUrl
+    : profileAvatarUrl;
+  // `undefined` = "ask the profile store", which is what keeps the viewer's
+  // own local icon; an explicit `null` would mean "this person has none".
+  const userBuiltinAvatarId = initiatorIdentity
+    ? initiatorIdentity.builtinAvatarId
+    : (profileBuiltinAvatarId ?? undefined);
 
   // Global state and actions — selectors to avoid full-store re-render
   // `effectiveConnection` is the watchdog's 6-state summary (see

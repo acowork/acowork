@@ -62,7 +62,15 @@ export interface UserAvatarProps {
   className?: string;
   /** Custom avatar file path (from backend user profile, e.g. "assets/avatar-01.png"). */
   avatarUrl?: string | null;
-  /** Builtin avatar icon ID (from backend user profile, e.g. "icon-05"). */
+  /**
+   * Builtin avatar icon ID (from backend user profile, e.g. "icon-05").
+   *
+   * `undefined` = "this is me / unknown", so the logged-in profile's local
+   * icon may stand in. `null` = "this is somebody else and they have none",
+   * which must fall back to the derived icon for **their** name — never to
+   * the logged-in account's icon, or a multi-user surface paints every other
+   * participant with the viewer's own avatar (regression t-9764c5fa).
+   */
   builtinAvatarId?: string | null;
 }
 
@@ -99,10 +107,17 @@ export function UserAvatar({
     if (iconId) setProfile({ avatarIcon: iconId });
   }, [profileIconId, setProfile]);
 
-  // ADR-017: Resolution priority
+  // ADR-017: Resolution priority. The profile icon is only consulted when the
+  // caller did not identify the person at all (`builtinAvatarId === undefined`).
+  const ownIconId =
+    builtinAvatarId === undefined &&
+    profileIconId &&
+    BUILTIN_ICONS[profileIconId]
+      ? profileIconId
+      : null;
   const iconId =
     (_icon && BUILTIN_ICONS[_icon] ? _icon : null) ??
-    (profileIconId && BUILTIN_ICONS[profileIconId] ? profileIconId : null) ??
+    ownIconId ??
     fallbackIconId ??
     "icon-01";
 

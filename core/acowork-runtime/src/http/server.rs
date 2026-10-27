@@ -3933,7 +3933,7 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
-            user_id: None,
+            initiator: None,
             visibility: None,
             title: Some("Test Session".to_string()),
             workspace_id: None,
@@ -4188,7 +4188,7 @@ mod tests {
             session_id: String::new(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
-            user_id: None,
+            initiator: None,
             visibility: None,
             title: None,
             workspace_id: None,
@@ -6427,7 +6427,7 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
-            user_id: None,
+            initiator: None,
             visibility: None,
             title: None,
             workspace_id: None,
@@ -6734,7 +6734,7 @@ mod tests {
         // in-memory `ConversationSession` is the writer for meta on any
         // config change, so a file-only edit would be clobbered by the
         // next `write_meta()`.
-        conv.set_user_id(Some("u-owner".to_string()));
+        conv.set_initiator(Some("u-owner".to_string()));
         let session_config_slot = Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
@@ -6874,7 +6874,7 @@ mod tests {
 
         let sid = "20260101_120000_actions";
         let (_config_svc, conv) = make_test_session_config_service(&temp_dir, sid);
-        conv.set_user_id(Some("u-owner".to_string()));
+        conv.set_initiator(Some("u-owner".to_string()));
         conv.set_visibility(Some(crate::conversation::SessionVisibility::Private));
 
         // Real dispatch channel, so we can read back what each handler queued.
@@ -7157,7 +7157,7 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
-            user_id: None,
+            initiator: None,
             visibility: None,
             title: Some("Test".to_string()),
             workspace_id: Some("ws-1".to_string()),

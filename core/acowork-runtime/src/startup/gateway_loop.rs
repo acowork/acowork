@@ -1218,16 +1218,15 @@ async fn deliver_pinned_turn(
     // Refusing returns `false`, which is the pin's existing "hint, not gate"
     // contract: the hint is dropped and the turn routes normally, so the sender
     // still reaches this agent — just not through a session that is not theirs.
-    let bound_chat = session_manager
+    let (bound_chat, initiator) = session_manager
         .lock()
         .await
         .get_session(session_id)
         .and_then(|handle| {
-            handle
-                .conversation
-                .as_ref()
-                .and_then(|conv| conv.chat_session_id())
-        });
+            let conv = handle.conversation.as_ref()?;
+            Some((conv.chat_session_id(), conv.initiator()))
+        })
+        .unwrap_or((None, None));
     let Some(bound_chat) = bound_chat.filter(|c| !c.is_empty()) else {
         return false;
     };
@@ -1239,6 +1238,31 @@ async fn deliver_pinned_turn(
             "pinned execution session belongs to another chat — dropping the pin and routing normally"
         );
         return false;
+    }
+    // ADR-076 §决策 4: the session's initiator is the only identity allowed to
+    // write it, and the pin IS the execution surface's write path — a turn
+    // never passes through `SessionMeta::is_writable_by`, which guards the HTTP
+    // control plane. Without this check the single-initiator rule would live
+    // only in the Desktop's disabled composer: every member of a group can read
+    // the run's `agent_session_id` off the chat rows they hold, name it here,
+    // and type into somebody else's task.
+    //
+    // Refusing returns `false`, the pin's existing "hint, not gate" contract:
+    // the sender still reaches this agent, just in a session of its own.
+    match initiator.as_deref().map(str::trim) {
+        // Pre-accounts / local-mode rows carry no initiator — nobody to
+        // exclude, the same rule `is_writable_by` applies to them.
+        None | Some("") => {}
+        Some(owner) if owner != env.from.trim() => {
+            tracing::warn!(
+                session_id = %session_id,
+                pinned_initiator = %owner,
+                sender = %env.from,
+                "pinned execution session was initiated by somebody else — dropping the pin and routing normally"
+            );
+            return false;
+        }
+        Some(_) => {}
     }
     session_manager
         .lock()
@@ -1491,10 +1515,17 @@ async fn route_intent_legacy(
                         &source_chat_session_id,
                         crate::agent::chat_router::tool::Target::New,
                         seed,
+                        Some(from.as_str()),
                     )
                     .await?
             } else {
-                let key = routing_key(&kind, &source_chat_session_id, &conversation_id, &message_id);
+                let key = routing_key(
+                    &kind,
+                    &source_chat_session_id,
+                    &from,
+                    &conversation_id,
+                    &message_id,
+                );
                 session_manager
                     .lock()
                     .await
@@ -1505,6 +1536,11 @@ async fn route_intent_legacy(
                         // that session to the group, so follow-ups there can find
                         // it. Empty for agent-to-agent and cron intents.
                         Some(source_chat_session_id.as_str()),
+                        // ADR-076 §决策 4: the session's initiator is the
+                        // envelope's `from` — the human who sent the message,
+                        // or the agent instance that started the work. Never
+                        // the account this Runtime happens to be carrying.
+                        Some(from.as_str()),
                     )
                     .await?
             }
@@ -1993,6 +2029,7 @@ mod tests {
                 key,
                 crate::agent::session::intent_routing::SessionSeed::from_json(""),
                 None,
+                None,
             )
             .await
             .expect("test session")
@@ -2057,6 +2094,56 @@ mod tests {
             chat_sessions.chat_is_busy("cs-stale"),
             "the turn falls back to the router rather than vanishing with the pin"
         );
+    }
+
+    /// ADR-076 §决策 4: the pin may not carry a turn into a session somebody
+    /// else initiated. Everything else about the pin passes here — the session
+    /// is loaded and bound to the sender's own chat, because a group member
+    /// reads its id off the chat rows they hold — so without the initiator
+    /// check the single-initiator rule would live only in the Desktop's
+    /// disabled composer.
+    #[tokio::test]
+    async fn a_pin_naming_another_members_session_does_not_take_that_turn() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, _chat_sessions) = chat_router_test_pair(dir.path());
+        let key = crate::agent::session::intent_routing::chat_key("cs-group", "u-alice");
+        let alice_sid = sm
+            .lock()
+            .await
+            .route_intent_session(&key, None, Some("cs-group"), Some("u-alice"))
+            .await
+            .expect("alice's run")
+            .0;
+
+        let mut alice = chat_envelope("cs-group", "keep going");
+        alice.from = "u-alice".into();
+        assert!(
+            deliver_pinned_turn(&sm, &alice_sid, &alice).await,
+            "the initiator's own pin is delivered to her run"
+        );
+
+        let mut bob = chat_envelope("cs-group", "do my bidding");
+        bob.from = "u-bob".into();
+        assert!(
+            !deliver_pinned_turn(&sm, &alice_sid, &bob).await,
+            "a fellow group member must not write into alice's run"
+        );
+
+        // An agent-initiated session has no human initiator, so no human pin
+        // may enter it either.
+        let agent_sid = sm
+            .lock()
+            .await
+            .route_intent_session(
+                &crate::agent::session::intent_routing::chat_key("cs-group", "agent-inst"),
+                None,
+                Some("cs-group"),
+                Some("agent-inst"),
+            )
+            .await
+            .expect("agent-initiated run")
+            .0;
+        assert!(!deliver_pinned_turn(&sm, &agent_sid, &alice).await);
     }
 
     /// A textless, attachment-less send is not a turn at all. It is settled
