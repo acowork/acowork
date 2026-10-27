@@ -40,6 +40,7 @@ import {
   ChevronDown,
   ChevronsDown,
   ClipboardList,
+  ArrowRight,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { Components } from "react-markdown";
@@ -137,6 +138,11 @@ const chatBlockComponents: Components = {
  *  another machine, removed account) falls back to a short id. */
 function useParticipantNamer(directory: DirectoryUser[]) {
   const agentsMap = useAgentStore((s) => s.agents);
+  // The logged-in account is deliberately absent from `list_directory` (the
+  // contact picker excludes the caller), so resolve "me" from the live profile
+  // or every message addressed to me paints its raw uuid.
+  const me = useAuthStore((s) => s.account?.user_id ?? "");
+  const profile = useUserProfileStore((s) => s.profile);
   const dirById = useMemo(() => {
     const m = new Map<string, DirectoryUser>();
     for (const u of directory) m.set(u.user_id, u);
@@ -157,6 +163,14 @@ function useParticipantNamer(directory: DirectoryUser[]) {
           builtinAvatarId: agent.builtin_avatar ?? null,
         };
       }
+      if (me && id === me) {
+        return {
+          name: profile.displayName || id.slice(0, 8),
+          isAgent: false,
+          avatarUrl: profile.backendAvatarUrl ?? null,
+          builtinAvatarId: profile.backendBuiltinAvatarId ?? null,
+        };
+      }
       const user = dirById.get(id);
       if (user)
         return {
@@ -172,7 +186,7 @@ function useParticipantNamer(directory: DirectoryUser[]) {
         builtinAvatarId: null,
       };
     },
-    [agentsMap, dirById],
+    [agentsMap, dirById, me, profile],
   );
 }
 
@@ -209,6 +223,10 @@ interface RowProps {
    *  Names the run in the drill-down tooltip while the exec session still has
    *  no title. Resolved by the parent through its message_id → body index. */
   triggerBody?: string;
+  /** Sender of the message this row answers (`in_reply_to`'s `from`) — the
+   *  counterparty of an execution-session echo row whose own `to` is empty.
+   *  Resolved by the parent through its message_id → from index. */
+  triggerFrom?: string;
   /** Question text of the `interaction_request` card this row answers, when it
    *  answers one — the one-line quote above the answer bubble. Card-only by
    *  construction: the parent resolves it through a card-only index. */
@@ -264,6 +282,54 @@ function TaskChip({ taskId }: { taskId: string }) {
 }
 
 /**
+ * The recipients a message is addressed to, resolved from the durable row's
+ * own coordinates — the "who is this for" the group surface otherwise leaves
+ * to guesswork. A `user_message` names its target in `to`, except an @-fan-out
+ * broadcast which leaves `to` empty and lists the woken agents in
+ * `meta.mentions`; an `agent_message` names the initiator it answers in `to`.
+ * Empty when the row carries no address (a human-to-human row, an old
+ * broadcast) — then no chip is painted. The whole capsule is a display
+ * affordance; the transient-execution-session binding lives in the data, the
+ * chip just shows it.
+ */
+function rowToTargets(
+  row: ChatMessageRow,
+  triggerFrom?: string,
+): string[] {
+  if (row.to) return [row.to];
+  if (row.kind === "user_message") return row.meta?.mentions ?? [];
+  // An execution-session echo row answers one specific message: its
+  // counterparty is that trigger's sender, resolved from `in_reply_to`
+  // (`to` is empty on this write path — the address lives on the row it
+  // answers).
+  if (triggerFrom) return [triggerFrom];
+  return [];
+}
+
+/**
+ * A "who is this addressed to" pill — the counterparty of the execution
+ * session this message was bound to. Rendered uniformly on both user and
+ * agent messages so the group reads as one exchange per row, not a wall of
+ * unattributed bubbles. The display name comes from the row's caller (the
+ * same `nameOf` the avatar uses); an unknown id falls back to its short form.
+ */
+function ToChip({ name }: { name: string }) {
+  const { t } = useTranslation();
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-10 font-medium",
+        "border-border-outer bg-[var(--color-accent)]/10 text-text-secondary",
+      )}
+    >
+      <span className="font-semibold">{t("groupChat.toChip")}</span>
+      <ArrowRight className="h-3 w-3 shrink-0" aria-hidden />
+      <span className="max-w-[14rem] truncate">{name}</span>
+    </span>
+  );
+}
+
+/**
  * One transcript row. Memoized for the same reason as AgentChatView's RowView:
  * the composer re-renders this host on every keystroke, and the host re-runs
  * `rows.map` — without memo that re-parses every markdown body in the window
@@ -282,6 +348,7 @@ const GroupRowView = memo(function GroupRowView({
   onJumpToExec,
   readOnly,
   triggerBody,
+  triggerFrom,
   replyQuote,
   answeredCardKind,
   chatAnswered,
@@ -356,12 +423,20 @@ const GroupRowView = memo(function GroupRowView({
     : nameOf(row.from);
   const failed = isFailureStatus(row.meta?.status);
   const agentMeta = who.isAgent ? agentsMap[row.from]?.meta : undefined;
+  // Who this row is addressed to (see `rowToTargets`). Resolved outside the
+  // kind branches so the hook order stays unconditional; empty means the row
+  // carries no address and no chip is painted.
+  const toTargets = rowToTargets(row, triggerFrom);
   // The exec session behind an agent reply — a group / routed reply carries
   // `sender_session_id` (the answering agent's own session). Same formula as
   // AgentChatView, so finished / failed / empty-bodied replies are all
   // drillable.
   const execSid =
     row.meta?.agent_session_id || row.meta?.sender_session_id || "";
+  // "View run" rides the same header chip row as the TO capsule — one row
+  // above the bubble instead of split across top and bottom.
+  const showRunChip =
+    row.kind === "agent_message" && who.isAgent && !!execSid;
 
   // A terminal reply with nothing in it IS its outcome ("interrupted",
   // "failed"): paint the centered status line with the drill into the run,
@@ -472,6 +547,38 @@ const GroupRowView = memo(function GroupRowView({
             bubbleMetaAnchor(own ? "own" : "peer"),
           )}
         >
+          {/* Header chips, one horizontal row: who the message is addressed
+              to (TO), the PM task coordinate, and the agent reply's run
+              drill-down — so a row reads at a glance instead of stacking
+              chips vertically. One TO capsule per target: an @-fan-out row
+              wakes several agents and shows them all. */}
+          {(toTargets.length > 0 ||
+            (row.kind === "user_message" && row.meta?.task_id) ||
+            showRunChip) && (
+            <div
+              className={cn(
+                "mb-1 flex flex-wrap items-center gap-1.5",
+                own ? "justify-end" : "justify-start",
+              )}
+            >
+              {toTargets.map((id) => (
+                <ToChip key={id} name={nameOf(id).name} />
+              ))}
+              {row.kind === "user_message" && row.meta?.task_id && (
+                <TaskChip taskId={row.meta.task_id} />
+              )}
+              {showRunChip && (
+                <ViewRunButton
+                  runName={
+                    execRunName?.trim() ||
+                    truncateTaskName(triggerBody) ||
+                    undefined
+                  }
+                  onJump={() => onJumpToExec(row.from, execSid)}
+                />
+              )}
+            </div>
+          )}
           {/* Attachment chips above the bubble, on the speaker's side — same
               grammar as the 1:1 chat surface. An attachments-only message
               paints chips alone and the empty-bubble placeholder is suppressed
@@ -502,19 +609,6 @@ const GroupRowView = memo(function GroupRowView({
             labels={row.meta?.exec_attachments ?? []}
             align={own ? "end" : "start"}
           />
-          {/* A PM task dispatch: the task id rides a chip, not the body —
-              the human text stays clean and the claim/submit playbook never
-              reaches this surface at all. */}
-          {row.kind === "user_message" && row.meta?.task_id && (
-            <div
-              className={cn(
-                "mb-1 flex flex-wrap gap-1.5",
-                own ? "justify-end" : "justify-start",
-              )}
-            >
-              <TaskChip taskId={row.meta.task_id} />
-            </div>
-          )}
           {/* What this answer answers. The answered card no longer paints a
               receipt, so the §5.5.4 `in_reply_to` link surfaces here instead —
               above the bubble, where the highlight-filled bubble cannot swallow
@@ -574,23 +668,6 @@ const GroupRowView = memo(function GroupRowView({
             </div>
           )}
           <div className="mt-1 flex items-center gap-2">
-            {/* Drill-into-exec affordance — the group twin of the 1:1 chat
-                surface's button: a discrete control under the bubble, not a
-                whole-bubble click, so selecting the reply text never fires a
-                jump. Present on every local agent reply with a resolved exec
-                session, empty body included. Same brain glyph as the exec
-                tabs (design 27 §6.1) — the button and its destination are
-                the same thing. */}
-            {!own && who.isAgent && row.kind === "agent_message" && execSid && (
-              <ViewRunButton
-                runName={
-                  execRunName?.trim() ||
-                  truncateTaskName(triggerBody) ||
-                  undefined
-                }
-                onJump={() => onJumpToExec(row.from, execSid)}
-              />
-            )}
             <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
             </span>
@@ -821,6 +898,15 @@ export function GroupChatPanel() {
     const m = new Map<string, string>();
     for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
       if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
+    }
+    return m;
+  }, [win]);
+  // message_id → sender index, so an echo row with an empty `to` can name the
+  // counterparty from the message it answers (`in_reply_to`'s `from`).
+  const fromById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
+      if (r.meta?.message_id) m.set(r.meta.message_id, r.from);
     }
     return m;
   }, [win]);
@@ -1254,6 +1340,11 @@ export function GroupChatPanel() {
                 triggerBody={
                   row.meta?.in_reply_to
                     ? bodyById.get(row.meta.in_reply_to)
+                    : undefined
+                }
+                triggerFrom={
+                  row.meta?.in_reply_to
+                    ? fromById.get(row.meta.in_reply_to)
                     : undefined
                 }
                 replyQuote={

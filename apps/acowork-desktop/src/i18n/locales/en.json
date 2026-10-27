@@ -2014,6 +2014,7 @@
     "mentionLabel": "Mention a member",
     "emptyTurn": "(no output)",
     "taskChip": "Task {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "Copy task id",
     "readOnly": "Read-only — you are not a member of this project."
   },

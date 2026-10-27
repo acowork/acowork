@@ -1860,6 +1860,7 @@
     "send": "傳送",
     "emptyTurn": "（無輸出）",
     "taskChip": "任務 {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "複製任務 ID",
     "readOnly": "唯讀 — 您不是該專案的成員。"
   }

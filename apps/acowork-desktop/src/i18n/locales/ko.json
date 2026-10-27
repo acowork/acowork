@@ -1870,6 +1870,7 @@
     "send": "보내기",
     "emptyTurn": "(출력 없음)",
     "taskChip": "작업 {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "작업 ID 복사",
     "readOnly": "읽기 전용 — 이 프로젝트의 멤버가 아닙니다."
   }

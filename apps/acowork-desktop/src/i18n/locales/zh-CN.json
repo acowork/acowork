@@ -2031,6 +2031,7 @@
     "mentionLabel": "提及成员",
     "emptyTurn": "（无输出）",
     "taskChip": "任务 {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "复制任务 ID",
     "readOnly": "只读 — 你不是该项目的成员。"
   },

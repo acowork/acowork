@@ -1869,6 +1869,7 @@
     "send": "送信",
     "emptyTurn": "（出力なし）",
     "taskChip": "タスク {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "タスクIDをコピー",
     "readOnly": "読み取り専用 — このプロジェクトのメンバーではありません。"
   }
