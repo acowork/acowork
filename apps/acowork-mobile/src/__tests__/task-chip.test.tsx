@@ -28,6 +28,8 @@ function renderRow(row: ChatMessageRow): string {
     agentName: 'agent',
     closed: false,
     answered: false,
+    answeredCards: new Set<string>(),
+    chatAnswered: new Set<string>(),
     onOpenExec: () => {},
     onAnswerCard: () => {},
   }

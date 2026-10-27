@@ -2058,6 +2058,55 @@
   margin: -2px 0 2px 2px;
 }
 
+/* The one line above an answer bubble naming the question it answers (the
+   mobile twin of the desktop ReplyQuote). It rides ABOVE the bubble, never
+   inside: the own bubble is accent-filled with white text, and a tertiary-gray
+   quote inside it would be unreadable. Neutral hairline + tertiary label — the
+   highlight belongs to the bubble fill, never to a quote rule. */
+.chat-reply-quote {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin: 2px 0 4px;
+  padding-left: 6px;
+  border-left: 2px solid var(--color-separator, rgba(128, 128, 128, 0.3));
+  font-size: 11px;
+  color: var(--color-label-secondary, #888);
+  align-self: flex-end;
+  max-width: 100%;
+}
+.chat-reply-quote-mark {
+  flex: none;
+  opacity: 0.6;
+}
+.chat-reply-quote-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Back-to-bottom arrow on the agent chat: the reader scrolled up off the tail.
+   `position: sticky` (not an overlay) for the same reason as `.chat-newpill`:
+   `.screen` is not a positioned ancestor, and a chip that only ever grows the
+   content below the reader cannot shift what they are looking at. */
+.chat-scroll-pill {
+  position: sticky;
+  bottom: var(--space-2);
+  align-self: center;
+  flex: none;
+  z-index: 2;
+  padding: 6px 14px;
+  border: 1px solid var(--color-separator, rgba(128, 128, 128, 0.3));
+  border-radius: 999px;
+  background: var(--color-bg-elevated);
+  color: var(--color-label-secondary, #888);
+  font-size: var(--font-sm);
+  line-height: 1.3;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
 /* Decision-card bottom sheet body (§6.5). */
 .chat-sheet-question {
   font-size: 15px;

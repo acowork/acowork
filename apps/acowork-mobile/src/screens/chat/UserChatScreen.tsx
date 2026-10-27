@@ -207,7 +207,7 @@ export function UserChatScreen() {
                         </div>
                         <div className="msg-stack">
                           {turn.items.map((m) => (
-                            <Bubble key={m.id} msg={m} />
+                            <Bubble key={m.id} msg={m} literal />
                           ))}
                         </div>
                       </div>

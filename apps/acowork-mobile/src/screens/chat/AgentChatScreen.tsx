@@ -88,14 +88,48 @@ export function closedCardIds(rows: ChatMessageRow[]): Set<string> {
   return closed
 }
 
-/** Cards a human actually answered — narrows `closed` for the wording. */
-export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
+/** Cards answered on THIS surface — a `user_message` row addressed to the
+ *  card. The chat-side subset of [`humanAnsweredCardIds`]: the surface uses
+ *  it to suppress the Runtime's duplicate `interaction_resolved` notice, so a
+ *  chat-side answer is recorded exactly once (by its own event line). Mirrors
+ *  the desktop `chatAnsweredCardIds`. */
+export function chatAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
   return new Set(
     rows
       .filter((r) => r.kind === 'user_message')
       .map((r) => r.meta?.in_reply_to)
       .filter((s): s is string => !!s),
   )
+}
+
+/** Resolutions that mean a human decided. Everything else (timeout / stopped /
+ *  turn_ended / cancelled / unanswerable / superseded) closes a card without
+ *  claiming an answer. Mirrors the desktop `DECISION_RESOLUTIONS`. */
+const DECISION_RESOLUTIONS = new Set(['answered', 'approved', 'rejected'])
+
+/** Cards a human actually answered. Two shapes carry that fact:
+ *  - a `user_message` addressed to the card (answered on THIS surface);
+ *  - the Runtime's `interaction_resolved` notice with a decision resolution
+ *    ("answered"/"approved"/"rejected") — answered on the execution surface,
+ *    where the reply never rides the chat answer channel. A non-decision
+ *    resolution means nobody answered, so it stays out.
+ *  Narrower than [`closedCardIds`]: it exists so a surface can tell "you
+ *  answered this" from "this request is just no longer open". Mirrors the
+ *  desktop `humanAnsweredCardIds`. */
+export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
+  const answered = chatAnsweredCardIds(rows)
+  for (const r of rows) {
+    const mid = r.meta?.in_reply_to
+    if (
+      mid &&
+      r.kind === 'system_notice' &&
+      r.meta?.notice_type === 'interaction_resolved' &&
+      DECISION_RESOLUTIONS.has(r.meta?.resolution ?? '')
+    ) {
+      answered.add(mid)
+    }
+  }
+  return answered
 }
 
 /**
@@ -247,6 +281,9 @@ export function AgentChatScreen() {
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win])
   const closed = useMemo(() => closedCardIds(rows), [rows])
   const answeredHuman = useMemo(() => humanAnsweredCardIds(rows), [rows])
+  // The narrower "answered on THIS surface" half — what tells the Runtime's
+  // duplicate `interaction_resolved` notice to stay silent.
+  const answeredHere = useMemo(() => chatAnsweredCardIds(rows), [rows])
   // message_id → body, so the routing reaction bubble (ADR-100 D11) can name
   // the task off its trigger message — the mobile twin of the desktop index.
   const bodyById = useMemo(() => {
@@ -256,10 +293,32 @@ export function AgentChatScreen() {
     }
     return m
   }, [rows])
+  // Card rows only, so an answer can name the interaction kind it answers
+  // (ask_question/approval render as an event line, pause keeps its message
+  // form) and quote the question it answers — the mobile twin of the desktop
+  // `cardKindById` / `cardQuoteById` pair. Card-only on purpose: `in_reply_to`
+  // also points at plain messages, and quoting one would paint a decision
+  // quote where no decision was asked.
+  const cardKindById = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of rows) {
+      if (r.kind !== 'interaction_request' || !r.meta?.message_id) continue
+      m.set(r.meta.message_id, r.meta.interaction?.kind ?? '')
+    }
+    return m
+  }, [rows])
+  const cardQuoteById = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of rows) {
+      if (r.kind !== 'interaction_request' || !r.meta?.message_id) continue
+      m.set(r.meta.message_id, r.meta.interaction?.question || r.body)
+    }
+    return m
+  }, [rows])
   // Derived live state — one aggregated line while the newest message waits.
   const waiting = pendingTurn(rows, sending, closed)
 
-  const { ref: scrollRef } = useStickToBottom([rows.length, sessionId], sessionId, () => {
+  const { ref: scrollRef, stickNow, atBottom } = useStickToBottom([rows.length, sessionId], sessionId, () => {
     if (sessionId) void useChatSessionStore.getState().loadOlder(sessionId)
   })
 
@@ -268,6 +327,8 @@ export function AgentChatScreen() {
     if (!trimmed || sending || !sessionId) return
     setDraft('')
     setAnswering(null)
+    // Sending re-claims the follow (the IM convention), before the echo lands.
+    stickNow()
     void useChatSessionStore.getState().sendText(sessionId, trimmed, inReplyTo)
   }
 
@@ -368,6 +429,12 @@ export function AgentChatScreen() {
                   agentName={agent?.name ?? 'Agent'}
                   closed={!!(r.meta?.message_id && closed.has(r.meta.message_id))}
                   answered={!!(r.meta?.message_id && answeredHuman.has(r.meta.message_id))}
+                  answeredCardKind={
+                    r.meta?.in_reply_to ? cardKindById.get(r.meta.in_reply_to) : undefined
+                  }
+                  replyQuote={r.meta?.in_reply_to ? cardQuoteById.get(r.meta.in_reply_to) : undefined}
+                  answeredCards={answeredHuman}
+                  chatAnswered={answeredHere}
                   onOpenExec={openExec}
                   onAnswerCard={(card) => setAnswering(card)}
                   triggerBody={r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined}
@@ -384,6 +451,23 @@ export function AgentChatScreen() {
                 {agent?.name ? `${agent.name}正在处理…` : '正在处理…'}
               </span>
             </div>
+          ) : null}
+          {/* Back-to-bottom arrow — visible only while the reader has scrolled
+              up off the tail (and there is content). Tapping is the explicit
+              act that re-claims the follow, the same convention the "N new
+              messages" pill encodes on the human thread. `position: sticky`
+              rather than an overlay, for the same reason as that pill: it only
+              ever sits below the reader's position, so showing it cannot shift
+              what they are looking at. */}
+          {atBottom === false && rows.length > 0 ? (
+            <button
+              type="button"
+              className="chat-scroll-pill"
+              onClick={stickNow}
+              aria-label="回到底部"
+            >
+              回到底部 ↓
+            </button>
           ) : null}
         </div>
 
@@ -443,6 +527,22 @@ export interface RowProps {
    *  twin of the desktop `triggerBody` — mobile has no session-title store
    *  read here, so the trigger body is the name. */
   triggerBody?: string
+  /** Interaction kind of the card this row answers (`ask_question` /
+   *  `approval` / `pause`), resolved through the parent's card-only index. An
+   *  ask/approval answer is a step of the run, not an utterance, so it renders
+   *  as a centered event line; a PAUSE answer keeps reading as a message. */
+  answeredCardKind?: string
+  /** Question text of the card this row answers — the one-line quote above the
+   *  answer bubble (card-only, so a reply to a plain message paints nothing). */
+  replyQuote?: string
+  /** Cards a human answered on either surface (`humanAnsweredCardIds`). Paired
+   *  with `chatAnswered`, tells an exec-surface decision from a nobody-answered
+   *  closure. */
+  answeredCards: ReadonlySet<string>
+  /** Cards answered on THIS surface (`chatAnsweredCardIds`): their answer row
+   *  already states the outcome, so the Runtime's duplicate resolution notice
+   *  must stay silent. */
+  chatAnswered: ReadonlySet<string>
 }
 
 /** Mobile twin of the desktop task chip (design 27 §6.4, v2.8): a PM
@@ -470,8 +570,33 @@ export function TaskChip({ taskId }: { taskId: string }) {
   )
 }
 
+/** Bound a quoted question so one line stays one line. Longer than
+ *  `truncateTaskName` because this is the question itself, not a label for it.
+ *  The mobile twin of the desktop `ReplyQuote.truncateQuote`. */
+export function truncateQuote(text: string | undefined): string {
+  const collapsed = (text ?? '').trim().replace(/\s+/g, ' ')
+  if (!collapsed) return ''
+  return collapsed.length > 60 ? `${collapsed.slice(0, 60)}…` : collapsed
+}
+
+/** One line above an answer bubble naming the question it answers — the mobile
+ *  twin of the desktop `ReplyQuote`. Card-only: the parent resolves it through
+ *  a card-only index, so a reply to a plain message paints nothing. It rides
+ *  ABOVE the bubble, never inside it: the own bubble is accent-filled with
+ *  white text, and a tertiary-gray quote inside it would be unreadable. */
+export function ReplyQuote({ quote }: { quote?: string }) {
+  const text = truncateQuote(quote)
+  if (!text) return null
+  return (
+    <div className="chat-reply-quote" title={quote}>
+      <span className="chat-reply-quote-mark" aria-hidden>↳</span>
+      <span className="chat-reply-quote-text">{text}</span>
+    </div>
+  )
+}
+
 export function RowView(props: RowProps) {
-  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, onOpenExec, onAnswerCard, triggerBody } = props
+  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, onOpenExec, onAnswerCard, triggerBody, answeredCardKind, replyQuote, answeredCards, chatAnswered } = props
   const routed = isTurnRoutedNotice(row)
   const execSid =
     row.kind === 'agent_message' || routed
@@ -503,6 +628,25 @@ export function RowView(props: RowProps) {
             </button>
           ) : null}
         </div>
+      </div>
+    )
+  }
+  // A decision answered on THIS surface. The card interaction is a step of
+  // the run, not an utterance — so it states itself as a centered event line,
+  // the sibling of the unanswered note the card leaves behind. PAUSE answers
+  // are excluded: that text IS the new turn's prompt and must read as a
+  // message (so it falls through to the user bubble below, quote included).
+  if (
+    row.kind === 'user_message' &&
+    answeredCardKind &&
+    answeredCardKind !== 'pause' &&
+    !(row.attachments && row.attachments.length > 0)
+  ) {
+    return (
+      <div className="chat-turn-status">
+        <span className="chat-turn-status-text" title={row.body}>
+          已回复：{truncateQuote(row.body)}
+        </span>
       </div>
     )
   }
@@ -540,8 +684,22 @@ export function RowView(props: RowProps) {
           {row.kind === 'user_message' && row.meta?.task_id ? (
             <TaskChip taskId={row.meta.task_id} />
           ) : null}
+          {/* What this answer answers (card-only). The card itself is gone once
+              answered (§5.5.4 records the answer here, not on a receipt), so a
+              PAUSE answer names its question with this one line above the
+              bubble. */}
+          {row.kind === 'user_message' ? <ReplyQuote quote={replyQuote} /> : null}
           <div className={`bubble${isSelf ? ' bubble-self' : ' bubble-peer'}`}>
-            <div className="bubble-text">{renderMarkdown(row.body)}</div>
+            {/* Human input is literal text, markdown is agent speech — the house
+                grammar the desktop surfaces apply to their user rows. Routing a
+                `user_message` through the markdown renderer would make
+                `**bold**` render bold in one surface while reading literally in
+                another, and would pick up the md sub-styles (`.md-quote`'s
+                secondary gray) that are unreadable on the accent-filled bubble's
+                white text. */}
+            <div className={`bubble-text${row.kind === 'user_message' ? ' bubble-raw' : ''}`}>
+              {row.kind === 'user_message' ? row.body : renderMarkdown(row.body)}
+            </div>
             {row.attachments && row.attachments.length > 0 ? (
               <div className="chat-attachments">
                 {row.attachments.map((a) => (
@@ -602,9 +760,24 @@ export function RowView(props: RowProps) {
     // writing them, and an old transcript's copies must not paint either —
     // state belongs to the live surface, not to history.
     if (RETIRED_NOTICES.has(noticeType)) return null
-    // A card closure paints as the answered/closed receipt on its own card,
-    // never a separate line; other receipts render their body.
-    if (noticeType === 'interaction_resolved') return null
+    // A card's closure. A nobody-answered close stays on the CARD (its state
+    // line reads "已结束"), so this row is silent for it. A human decision made
+    // on the EXECUTION surface never arrives here as a message row — this
+    // notice is the transcript's only record of it, and it says so as a
+    // centered event line, not a bubble (a card interaction is a step of the
+    // run, not an utterance). The chat-side decision is suppressed: its own
+    // answer row already stated the outcome.
+    if (noticeType === 'interaction_resolved') {
+      const cardId = row.meta?.in_reply_to ?? ''
+      if (cardId && answeredCards.has(cardId) && !chatAnswered.has(cardId)) {
+        return (
+          <div className="chat-turn-status">
+            <span className="chat-turn-status-text">已在执行会话中回复</span>
+          </div>
+        )
+      }
+      return null
+    }
     // The router-fallback receipt is keyed by notice_type (bodyless row);
     // the surface owns the wording.
     if (noticeType === 'router_fallback') {
