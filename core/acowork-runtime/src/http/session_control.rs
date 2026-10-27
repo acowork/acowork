@@ -386,20 +386,11 @@ pub(crate) async fn post_create_session(
         );
     }
 
+    // The `sessions/created` announce is NOT published here: it lives inside
+    // `SessionManager::create_frontend_session`, the funnel every creation
+    // path shares, so an out-of-band session (PM task dispatch, cron turn,
+    // chat router dispatch) announces itself too (regression t-b2167242).
     let created_at = chrono::Utc::now().to_rfc3339();
-    publish_lifecycle(
-        &state,
-        "created",
-        acowork_core::mqtt_proto::data_envelope::Payload::SessionCreated(
-            acowork_core::mqtt_proto::SessionCreated {
-                agent_id: state.agent_id.clone(),
-                session_id: sid.clone(),
-                title: String::new(),
-                created_at: created_at.clone(),
-            },
-        ),
-    )
-    .await;
 
     tracing::info!(session_id = %sid, owner = ?scope.user_id(), "HTTP: session created");
     Ok((

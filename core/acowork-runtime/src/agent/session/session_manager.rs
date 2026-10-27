@@ -61,7 +61,9 @@ pub enum SessionOpenOutcome {
 }
 
 /// Configuration for SessionManager.
-#[derive(Debug, Clone)]
+// (no `Debug`: the session-event publisher below wraps an MQTT handle that
+// has no `Debug` impl, and nothing formats this config.)
+#[derive(Clone)]
 pub struct SessionManagerConfig {
     /// Channel capacity for each session's inbound message queue
     pub inbound_channel_capacity: usize,
@@ -83,6 +85,15 @@ pub struct SessionManagerConfig {
     /// When set, each session's AgentLoop forwards control events here
     /// so the caller can relay them to Gateway.
     pub chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
+    /// ADR-034 §4: publisher for `acowork/agents/{id}/sessions/created`.
+    /// Every creation path funnels through `create_frontend_session` (HTTP
+    /// `POST /sessions`, intent routing, the chat router's `dispatch(new)`),
+    /// and the session list on every client is maintained from this one
+    /// event — a silently created session leaves the Desktop's session list
+    /// and tab strip stale until it re-enters the agent. `None` = no broker
+    /// (standalone/tests), which degrades to "no event", never to a failed
+    /// creation.
+    pub session_events: Option<crate::mqtt::MqttChunkPublisher>,
     /// Full tool specs (name, schema) for ALL registered built-in tools.
     /// Stored so that tool definitions can be hot-rebuilt when `active_tools`
     /// changes without requiring access to the ToolRegistry (which is behind Arc).
@@ -140,6 +151,7 @@ impl Default for SessionManagerConfig {
             },
             history_max_tokens: 128_000,
             chunk_tx: None,
+            session_events: None,
             full_tool_specs: Vec::new(),
             identity_context: None,
             protocol_type: ProtocolType::default(),
@@ -1254,7 +1266,36 @@ impl SessionManager {
         // ADR-035 Phase 3: EnableNotify removed — push drives all streaming,
         // no front/back suppression mechanism remains.
 
+        // ADR-034 §4: tell every subscriber the session list grew. This
+        // is the single announce point for *all* creation paths — the HTTP
+        // handler used to be the only publisher, so a session the Runtime
+        // created on its own (a PM task dispatch routed into a new execution
+        // session, a cron turn, the chat router's `dispatch(new)`) reached no
+        // one: the Desktop's session list and tab strip stayed stale until
+        // the agent was re-entered (regression t-b2167242).
+        self.announce_session_created(&session_id);
+
         Ok(session_id)
+    }
+
+    /// Publish `SessionCreated` for a session this manager just created
+    /// (topic: `acowork/agents/{id}/sessions/created`, QoS 1, non-retained).
+    ///
+    /// Best-effort by construction: the publish runs on its own task so a
+    /// broker hiccup can neither fail nor delay the creation, and a missing
+    /// publisher (no broker) is a no-op. Subscribers treat the event as a
+    /// "the list changed, refetch" hint — sid is the only field they act on.
+    fn announce_session_created(&self, session_id: &str) {
+        let Some(publisher) = self.config.session_events.clone() else {
+            return;
+        };
+        let envelope = session_created_envelope(&self.core.config.agent_id, session_id);
+        let sid = session_id.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = publisher.publish_lifecycle("created", &envelope).await {
+                tracing::warn!(session_id = %sid, error = %e, "failed to publish session_created");
+            }
+        });
     }
 
     /// Design 27 §6.1: like `create_frontend_session`, but the session is
@@ -4124,6 +4165,30 @@ After installation, ask the user to re-enable the MCP server.",
     }
 }
 
+/// The `SessionCreated` envelope a fresh session announces itself with.
+///
+/// Split out from [`SessionManager::announce_session_created`] purely so the
+/// payload is unit-testable: the announce itself is a fire-and-forget
+/// `tokio::spawn`, so a wrong field (empty sid, mismatched agent) would never
+/// fail a test that only exercised the publish call.
+fn session_created_envelope(
+    agent_id: &str,
+    session_id: &str,
+) -> acowork_core::mqtt_proto::DataEnvelope {
+    use acowork_core::mqtt_proto::{data_envelope::Payload, DataEnvelope, SessionCreated};
+    DataEnvelope {
+        version: 1,
+        payload: Some(Payload::SessionCreated(SessionCreated {
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            // The title is generated after the first turn; subscribers refetch
+            // `GET /sessions` for it (sid is the only actionable field).
+            title: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })),
+    }
+}
+
 /// Handle a SessionTask panic: promote the session to [`SessionStatus::Errored`]
 /// and emit a terminal [`ChunkEvent::Error`] so the frontend exits the
 /// "replying…" / "agent is running" UI immediately.
@@ -4840,6 +4905,27 @@ mod tests {
     }
 
     // ── panic handler (handle_session_task_panic) ─────────────────
+
+    /// The `sessions/created` announce payload. Pinned because the publish is
+    /// fire-and-forget: a spotless test around "the creation path runs" would
+    /// still pass while every Desktop subscriber silently ignored the event
+    /// for a wrong `event_type` / empty sid (regression t-b2167242).
+    #[test]
+    fn session_created_envelope_carries_agent_and_session() {
+        let envelope = session_created_envelope("agent-1", "sess-1");
+        assert_eq!(envelope.version, 1);
+        match envelope.payload {
+            Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionCreated(created)) => {
+                assert_eq!(created.agent_id, "agent-1");
+                assert_eq!(created.session_id, "sess-1");
+                assert!(
+                    !created.created_at.is_empty(),
+                    "created_at must be stamped (ISO 8601)"
+                );
+            }
+            other => panic!("expected SessionCreated payload, got {other:?}"),
+        }
+    }
 
     /// End-to-end: a SessionTask panic must (1) promote the watch status to
     /// `Errored` and (2) emit a terminal `ChunkEvent::Error` so the frontend
