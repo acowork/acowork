@@ -78,6 +78,15 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/api/chat-sessions/{session_id}/session-config",
             patch(patch_session_config),
         )
+        // Group chat persona override (design 29 §3.1 / ADR-099): the group's
+        // editable `chat.md`, surfaced in the group's settings panel. Seeded
+        // with the built-in default on first read. Participation is the
+        // permission (hidden 404 for outsiders, same §5.3 rule); `user_group`
+        // / `project_group` only — a DM keeps the agent's own package persona.
+        .route(
+            "/api/chat-sessions/{session_id}/chat-md",
+            get(get_chat_md).put(put_chat_md).delete(delete_chat_md),
+        )
         // Plan 5.2: non-default sessions are deletable; the default pair
         // session and project groups refuse in the storage layer. Shares
         // the `{participant}` pattern with the list GET because matchit
@@ -273,6 +282,43 @@ pub struct SessionConfigRequest {
 pub struct MessagePage {
     pub messages: Vec<SessionMessage>,
     pub total: u64,
+}
+
+/// `PUT /api/chat-sessions/{session_id}/chat-md` — the group's chat-layer
+/// prompt override (ADR-099, extended). Whole-file replace.
+#[derive(Debug, Deserialize)]
+pub struct ChatMdRequest {
+    pub content: String,
+}
+
+/// Response of `GET` / `PUT .../chat-md`.
+#[derive(Debug, Serialize)]
+pub struct ChatMdResponse {
+    /// The editable prompt body — the stored `chat.md` with the non-trimmable
+    /// `# Safety` tail stripped off. The tail is appended by the store and the
+    /// runtime and is never shown for editing (a member could not change it, so
+    /// hiding it beats surfacing text that a save would silently revert).
+    pub content: String,
+    /// True while the body still equals the built-in default, so the panel
+    /// can show a "reset to default" affordance without diffing client-side.
+    pub is_default: bool,
+    /// Whether the caller may write this prompt (group owner or admin, ADR-098
+    /// governance). Read is open to every participant; the panel renders
+    /// read-only when this is false instead of letting a plain member try a
+    /// save and take the 403.
+    pub editable: bool,
+}
+
+/// `GET /internal/chat-sessions/{session_id}` view — the durable record plus
+/// the derived `chat_prompt` (a group session's `chat.md`, seeded on first
+/// read) the Gateway forwards to the Runtime so a per-chat prompt override
+/// reaches the chat router. Flattened so existing readers see the same shape.
+#[derive(Debug, Serialize)]
+struct InternalSession {
+    #[serde(flatten)]
+    session: ChatSession,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_prompt: Option<String>,
 }
 
 /// `GET /api/chat-sessions/{session_id}/search` — in-conversation
@@ -853,6 +899,103 @@ async fn patch_session_config(
     Ok(Json(session))
 }
 
+// ── Group chat prompt (`chat.md`, ADR-099 extended) ───────────────────
+
+/// `GET /api/chat-sessions/{session_id}/chat-md` — the group's chat-layer
+/// prompt, seeded with the built-in default on first read. Participation is
+/// the read permission (§5.3, a stranger gets the hidden 404); `editable` in
+/// the body tells the panel whether this caller may write it (owner/admin).
+/// `user_group` / `project_group` only (a DM edits the agent's package
+/// `prompts/chat.md`).
+async fn get_chat_md(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+) -> Result<Json<ChatMdResponse>, ApiError> {
+    let dir = data_dir(&state)?;
+    let who = ctx.effective_user_id().to_string();
+    let is_admin = ctx.is_admin();
+    let resp = offload(move || {
+        let session = chat_sessions::load(&dir, &session_id)?;
+        if !session.participants.iter().any(|p| p.id == who) {
+            return Err("not_a_participant".to_string());
+        }
+        let content = chat_sessions::read_chat_md(&dir, &session)?
+            .ok_or_else(|| "this chat session has no chat.md".to_string())?;
+        let editable = chat_sessions::can_govern_group(&session, &who, is_admin);
+        // `is_default` compares stripped bodies, so it is unaffected by the
+        // tail; the response hides the tail from the editor.
+        let is_default = chat_sessions::is_default_chat_md(&content);
+        Ok(ChatMdResponse {
+            content: acowork_core::chat_prompt::strip_chat_prompt_tail(&content).to_string(),
+            is_default,
+            editable,
+        })
+    })
+    .await?;
+    Ok(Json(resp))
+}
+
+/// `PUT /api/chat-sessions/{session_id}/chat-md` — replace the group's
+/// chat-layer prompt. Read stays open to participants, but the write is
+/// governed like every other group mutation: owner-or-admin (ADR-098), checked
+/// under the session lock in the store. A non-member gets the hidden 404, a
+/// plain member 403; the store enforces the kind and the size cap, writes the
+/// normalized bytes (body + safety tail) atomically, and the response strips
+/// the tail back off so the editor only ever shows the editable body.
+async fn put_chat_md(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+    Json(req): Json<ChatMdRequest>,
+) -> Result<Json<ChatMdResponse>, ApiError> {
+    if req.content.len() > chat_sessions::MAX_CHAT_MD_BYTES {
+        return Err(ApiError::payload_too_large(&format!(
+            "chat.md exceeds {} bytes",
+            chat_sessions::MAX_CHAT_MD_BYTES
+        )));
+    }
+    let dir = data_dir(&state)?;
+    let who = ctx.effective_user_id().to_string();
+    let is_admin = ctx.is_admin();
+    let content = req.content;
+    let resp = offload(move || {
+        // Participation, governance, the cap and the atomic write all happen
+        // together under the store's session lock, so a concurrent transfer
+        // cannot flip the gate mid-write.
+        // The client sends the body only (no tail); the store re-appends the
+        // canonical `# Safety` tail, then we strip it back off so the editor
+        // keeps showing exactly what the caller can edit.
+        let written = chat_sessions::write_chat_md(&dir, &session_id, &content, &who, is_admin)?;
+        let is_default = chat_sessions::is_default_chat_md(&written);
+        Ok(ChatMdResponse {
+            content: acowork_core::chat_prompt::strip_chat_prompt_tail(&written).to_string(),
+            is_default,
+            editable: true,
+        })
+    })
+    .await?;
+    Ok(Json(resp))
+}
+
+/// `DELETE /api/chat-sessions/{session_id}/chat-md` — drop the group's prompt
+/// override so the next read re-seeds the built-in default ("restore default").
+/// Governed exactly like the write (owner-or-admin under the session lock; a
+/// non-member gets the hidden 404, a plain member 403). Idempotent: resetting
+/// an already-default group is a no-op 204.
+async fn delete_chat_md(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let dir = data_dir(&state)?;
+    let who = ctx.effective_user_id().to_string();
+    let is_admin = ctx.is_admin();
+    offload(move || chat_sessions::reset_chat_md(&dir, &session_id, &who, is_admin))
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+}
+
 // ── Attachments (§4.2.1, plan 3.5) ────────────────────────────────────
 
 /// `POST /api/chat-sessions/{session_id}/files` — multipart upload with a
@@ -1274,15 +1417,27 @@ async fn system_remove_participant(
 
 /// `GET /internal/chat-sessions/{session_id}` — session metadata for the
 /// Gateway's delivery pipeline (participants for authorization, the `repo`
-/// binding for §4.1 injection). Read-only, loopback-only like the rest of
-/// the internal surface.
+/// binding for §4.1 injection, and the group's `chat.md` prompt override,
+/// ADR-099 extended). Read-only, loopback-only like the rest of the internal
+/// surface.
 async fn system_load_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<ChatSession>, ApiError> {
+) -> Result<Json<InternalSession>, ApiError> {
     let dir = data_dir_any(&state).await;
-    let session = offload(move || chat_sessions::load(&dir, &session_id)).await?;
-    Ok(Json(session))
+    let view = offload(move || {
+        let session = chat_sessions::load(&dir, &session_id)?;
+        // Seeding side effect on a read is intentional: a group session's
+        // `chat.md` is created (with the built-in default) the first time the
+        // Gateway loads it, so every group has one without a migration pass.
+        let chat_prompt = chat_sessions::read_chat_md(&dir, &session)?;
+        Ok(InternalSession {
+            session,
+            chat_prompt,
+        })
+    })
+    .await?;
+    Ok(Json(view))
 }
 
 /// `GET /internal/chat-sessions/{session_id}/messages?offset&limit&who` —
@@ -2245,6 +2400,232 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn group_chat_md_is_seeded_editable_and_non_participant_hidden() {
+        // ADR-099 (extended) on the wire: a user_group's `chat.md` is seeded
+        // with the built-in default on first read, editable only by the owner
+        // (a plain member gets 403), hidden (404) from a non-member, and every
+        // stored body carries the non-trimmable safety tail.
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+        let (_carol, carol_token) = make_user(&app, &admin, "carol").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // First read seeds the built-in default (the whole prompt, scenario
+        // section included).
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json(resp).await;
+        assert_eq!(body["is_default"].as_bool(), Some(true));
+        assert_eq!(body["editable"].as_bool(), Some(true));
+        // The editor shows the writable body (scenario section included) but
+        // never the non-trimmable `# Safety` tail it will be saved with.
+        let seeded = body["content"].as_str().unwrap();
+        assert!(seeded.contains("## Scenario"));
+        assert!(!seeded.contains("# Safety"));
+
+        // The owner may replace the whole file. They send the body only; the
+        // store re-appends the safety tail on disk, and the response strips it
+        // back off — so what they see is exactly what they wrote.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                Some(r#"{"content":"Custom group kernel."}"#),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json(resp).await;
+        let expected = "Custom group kernel.";
+        assert_eq!(body["content"].as_str(), Some(expected));
+        assert_eq!(body["is_default"].as_bool(), Some(false));
+        assert_eq!(body["editable"].as_bool(), Some(true));
+
+        // A plain member reads it (server reports editable = false) but a write
+        // is refused 403 — the write is owner/admin only (ADR-098).
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json(resp).await["editable"].as_bool(), Some(false));
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                Some(r#"{"content":"member takeover."}"#),
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Durable across reads.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            json(resp).await["content"].as_str(),
+            Some(expected)
+        );
+
+        // Carol is not a member: 404 for read, write, and reset — no leak.
+        for (method, body) in [
+            ("GET", None),
+            ("PUT", Some(r#"{"content":"sneak"}"#)),
+            ("DELETE", None),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(req(
+                    method,
+                    &format!("/api/chat-sessions/{session_id}/chat-md"),
+                    body,
+                    Some(&carol_token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
+    async fn group_chat_md_reset_restores_default_and_is_owner_gated() {
+        // "Restore default" on the wire: a plain member's DELETE is 403, the
+        // owner's drops the override so the next read re-seeds the built-in
+        // default (Custom → Default badge flips back), and resetting an
+        // already-default group is an idempotent 204.
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // Make it Custom first.
+        app.clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                Some(r#"{"content":"Custom group kernel."}"#),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+
+        // A plain member cannot reset it (403), only the owner/admin can.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The owner resets: 204, and the next read is the default again.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let body = json(resp).await;
+        assert_eq!(body["is_default"].as_bool(), Some(true));
+        let seeded = body["content"].as_str().unwrap();
+        assert!(!seeded.contains("Custom group kernel."));
+        assert!(seeded.contains("## Scenario"));
+        assert!(!seeded.contains("# Safety"));
+
+        // Idempotent: resetting an already-default group is still 204.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}/chat-md"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
