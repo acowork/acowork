@@ -277,6 +277,16 @@ async fn run_turn(
     let prepared = {
         let guard = session_manager.lock().await;
         let core = guard.core();
+        // A group session's own `chat.md` (forwarded by the Gateway in the
+        // delivery params) wins over the package's `prompts/chat.md`; either
+        // one replaces the whole built-in prompt (ADR-099, extended).
+        let session_prompt = envelope
+            .params
+            .get("chat_prompt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let package_persona = core.chat_persona();
         let block_a = build_block_a(
             &PersonaSource {
                 display_name: core.manifest.display_name.as_deref(),
@@ -284,7 +294,7 @@ async fn run_turn(
                 role: core.manifest.role.as_deref(),
                 description: &core.manifest.description,
             },
-            core.chat_persona().as_deref(),
+            session_prompt.or(package_persona.as_deref()),
             &chat_kind,
             guard.identity_context(),
         );

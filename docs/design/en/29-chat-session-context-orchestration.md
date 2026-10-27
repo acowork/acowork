@@ -47,19 +47,24 @@ Block C and the current message are merged into one user message to avoid two co
 ### 3.1 Composition order
 
 ```
-[CHAT_ROUTER_BASE_PROMPT]        // Runtime constant, not overridable
+[chat.md override]               // present and non-blank: replaces all three layers below
+                                 // a session-scoped (group) chat.md wins over the package prompts/chat.md
+                                 // only {{agent_name}} is substituted
+— otherwise the built-in default —
+[CHAT_ROUTER_BASE_PROMPT]        // Runtime constant (acowork_core::chat_prompt)
                                  // role boundary / dispatch contract / decision rules / safety rules
-## Persona                       // chat.md or manifest fallback
+## Persona                       // manifest fallback
 <persona text>
 ## Scenario                      // 1:1 or group, two stable variants
 <scenario text>
+— appended in both cases —
 ## Identity                      // user language / timezone (identity_context)
 <identity text>
 ```
 
-The order is fixed and the separator is fixed (`\n\n`); no content-based sorting and no conditional omission beyond the documented fallbacks.
+The order is fixed and the separator is fixed (`\n\n`); no content-based sorting and no conditional omission beyond the documented fallbacks. The kernel, persona and scenario literals live in `acowork_core::chat_prompt`: `acowork-user` seeds a group session's `chat.md` from them and `acowork-runtime` assembles the built-in default from them, so the two can never drift.
 
-### 3.2 Base (not overridable)
+### 3.2 Base
 
 The base is maintained by the Runtime and contains:
 
@@ -68,21 +73,21 @@ The base is maintained by the Runtime and contains:
 3. Decision rules: answer / hand off / create / clarify (aligned with ADR-099's routing guidelines, whose core is the cost asymmetry of dispatch: a wrong handoff is far more expensive than a missed one — when unsure, ask);
 4. Safety rules: use only information in the candidate list; never restate other chats; never promise execution details; never @ another agent on the human's behalf.
 
-`prompts/chat.md` may **replace only the Persona section**, never the base. Even if an author writes "you can edit code directly", the router has no such tool and cannot act on it.
+When a `chat.md` is present and non-blank it **replaces the whole built-in chat prompt body** (kernel + persona + scenario), with only `{{agent_name}}` substituted; absent, the built-in default is used. Two parts are never the file's to drop. First, the `# Safety` invariants are a non-trimmable tail the Runtime re-appends to the body on every turn (`chat_prompt::with_chat_prompt_tail`), so removing them from a `chat.md` has no effect on what the model sees. Second, the safety boundary is structural, not literal: the router only ever holds `dispatch` and the two read-only tools, so rewriting the prompt cannot grant it a new capability (ADR-099 D6). A group's `chat.md` is also **writable only by its owner or an admin** (ADR-098 governance) and read by any participant, so one member cannot inject a prompt that steers another member's agent. The right-hand panel edits the body only — the `# Safety` tail is not shown there (the `chat-md` API returns the body with the tail stripped) and is re-applied by the store and the Runtime on save, so a member is never handed editable text that saving would silently revert.
 
-### 3.3 Persona
+### 3.3 Persona and the `chat.md` precedence
 
-Priority:
+Any non-blank `chat.md` replaces the whole built-in prompt, **not just the persona section**. Lookup order:
 
-1. `prompts/chat.md` (optional, ≤ 4KB, whitespace-only counts as absent);
-2. manifest `display_name` / `name` + `role` + `description`, assembled into one sentence;
-3. final fallback: `display_name`.
+1. session-scoped `chat.md`: `acowork-user`'s `chat-sessions/{id}/chat.md`, `user_group` / `project_group` only, read by any participant and editable only by the group owner or an admin (ADR-098) from the group's right-hand settings panel; seeded with the built-in default (group variant, including the non-trimmable `# Safety` tail) on first read;
+2. package `prompts/chat.md` (≤ 16KB, whitespace-only counts as absent; seeded with the built-in default on agent start, the layer a 1:1 chat uses);
+3. the built-in default = kernel + manifest persona (`display_name` / `name` + `role` + `description` assembled into one sentence) + scenario.
 
 `chat.md` joins the ADR-063 `OVERRIDABLE_PROMPTS` list:
 
 - excluded from execute system-prompt assembly (the same exclusion rule as `summary.md`);
 - refreshed by `POST /agents/{id}/prompts/reload`;
-- its final assembly is visible in the Debug panel.
+- viewable and editable in the Debug panel.
 
 ### 3.4 Scenario section
 
@@ -308,7 +313,7 @@ Metrics are observational only and never change routing behaviour.
 | chat history read fails | this turn uses Block A + Block C only; the prompt notes history is unavailable; fall back to the legacy router |
 | current message matching fails | do not delete history; allow one duplicate |
 | provider has no cache | behaviour unchanged, only extra token cost |
-| `chat.md` too long/unreadable | log a WARN and fall back to the manifest persona |
+| `chat.md` too long/unreadable | truncate on a UTF-8 boundary when too long; log a WARN and fall back to the built-in default prompt when unreadable |
 | Block A assembly fails | use the built-in base + display_name so the turn stays available |
 
 ## 9. Test Plan
@@ -317,7 +322,7 @@ Metrics are observational only and never change routing behaviour.
 - **Prefix stability**: with the window not exceeded, `prefix_hash` is unchanged for N consecutive turns; trims happen only at the threshold; `anchor_seq` moves in batches.
 - **Block isolation**: Block A has no dynamic content; Block C has no history; the current message appears exactly once.
 - **Cache markers**: after Anthropic serialisation, `cache_control` appears only at the intended positions; OpenAI requests do not carry it.
-- **Prompt layering**: `chat.md` replaces only the Persona; missing file falls back to the manifest; `chat.md` never enters the execute prompt.
+- **Prompt layering**: any non-blank `chat.md` replaces the whole built-in chat prompt; absent, the built-in default (kernel + manifest persona + scenario) is used; `chat.md` never enters the execute prompt.
 - **Regression**: routing results after a trim equal those without a trim (fixed MockProvider output).
 
 ## 10. Relationship to Other Documents

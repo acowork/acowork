@@ -623,9 +623,18 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // ADR-101: the distiller moved to the memory service, so the override moved
     // with it — the Runtime no longer loads `prompts/distiller-merge.md`.
 
-    // ADR-099: optional chat router persona. Replaces only the persona
-    // section of the chat-layer system prompt; the kernel stays built-in.
-    let chat_persona = load_or_trace("chat.md", "chat router persona");
+    // ADR-099 (extended): `prompts/chat.md` is the whole chat-layer prompt,
+    // not just the persona section. Seed it on first boot with the built-in
+    // default so the Debug tab always opens a real, editable file; a missing
+    // file keeps the built-in default in force.
+    crate::package::prompt_builder::seed_chat_prompt(
+        &loaded.package_dir,
+        loaded.manifest.display_name.as_deref(),
+        &loaded.manifest.name,
+        loaded.manifest.role.as_deref(),
+        &loaded.manifest.description,
+    );
+    let chat_persona = load_or_trace("chat.md", "chat prompt override");
 
     // ── Step 3.5: Load skill registry ───────────────────────────────
     // Kept alive on the boot context (not discarded) so Phase B injects it

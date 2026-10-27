@@ -496,6 +496,175 @@ pub(crate) fn messages_path(dir: &Path) -> PathBuf {
     dir.join("messages.jsonl")
 }
 
+/// The session's editable group-chat prompt override (`chat.md`).
+///
+/// Design 29 §3.1 / ADR-099 (extended): the whole chat-layer system prompt is
+/// replaceable by a `chat.md` file. A package supplies `prompts/chat.md`; a
+/// *group* session supplies its own copy here, and it wins over the package
+/// one for every agent that answers in this chat (a group is one shared
+/// voice). Seeded on first touch with [`default_group_chat_md`] so the group's
+/// settings panel always opens a real file instead of an empty "create it"
+/// state.
+fn chat_md_path(dir: &Path) -> PathBuf {
+    dir.join("chat.md")
+}
+
+/// The hardcoded default a group session's `chat.md` starts from — the
+/// "software's built-in prompt" the operator then edits in place.
+///
+/// It is the **whole** group chat prompt (kernel + a generic persona + the
+/// group scenario) — the built-in default `acowork-runtime` would assemble
+/// when no `chat.md` exists, so a group always opens a real, editable file.
+/// The persona stays generic (not the answering agent's manifest persona)
+/// because any member may answer; `{{agent_name}}` is substituted per
+/// answering agent at turn time.
+pub fn default_group_chat_md() -> String {
+    acowork_core::chat_prompt::default_chat_prompt(
+        true,
+        acowork_core::chat_prompt::DEFAULT_CHAT_PERSONA,
+    )
+}
+
+/// True when a stored `chat.md` is still the built-in default. Compares the
+/// body with the (Runtime-re-appliable) safety tail stripped, so a file that
+/// merely lost or kept the tail still reads as "default" — the badge tracks the
+/// prompt the writer chose, not the invariant the Runtime re-adds each turn.
+pub fn is_default_chat_md(content: &str) -> bool {
+    acowork_core::chat_prompt::strip_chat_prompt_tail(content)
+        == acowork_core::chat_prompt::strip_chat_prompt_tail(&default_group_chat_md())
+}
+
+/// ADR-098 governance gate shared by the group writes (rename / transfer /
+/// chat prompt): the caller must be the group owner or an admin. A
+/// `project_group` has no user-service owner (the PM service creates it), so
+/// only an admin governs its prompt. The caller must already have cleared the
+/// participation check — a non-member gets the hidden 404, never this.
+pub fn can_govern_group(session: &ChatSession, who: &str, is_admin: bool) -> bool {
+    is_admin || session.owner.as_deref() == Some(who)
+}
+
+/// Upper bound on a session `chat.md`, shared with the runtime's own cap
+/// ([`acowork_core::chat_prompt::MAX_CHAT_PROMPT_BYTES`]) so a session file
+/// cannot smuggle in a prompt longer than the runtime would accept anyway.
+pub const MAX_CHAT_MD_BYTES: usize = acowork_core::chat_prompt::MAX_CHAT_PROMPT_BYTES;
+
+/// Kinds whose chat surface carries a group prompt file. 1:1 kinds do not:
+/// a DM uses the agent's own package `prompts/chat.md` (debug panel).
+fn carries_chat_md(kind: SessionKind) -> bool {
+    matches!(kind, SessionKind::UserGroup | SessionKind::ProjectGroup)
+}
+
+/// Read a group session's `chat.md`, seeding [`default_group_chat_md`] on the
+/// first touch. `Ok(None)` for kinds without a prompt file; an unreadable file
+/// is surfaced as `Err` (the caller answers 5xx) rather than masked by the
+/// default — same rule as the package loader. A failed seed write is
+/// best-effort: the content is still returned, so a read-only data dir keeps
+/// the surface working.
+pub fn read_chat_md(data_dir: &Path, session: &ChatSession) -> Result<Option<String>, String> {
+    if !carries_chat_md(session.kind) {
+        return Ok(None);
+    }
+    let path = chat_md_path(&session_dir(data_dir, &session.session_id));
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let seed = default_group_chat_md();
+            let _ = fs::write(&path, &seed);
+            Ok(Some(seed))
+        }
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Overwrite a group session's `chat.md` (the per-chat customization).
+///
+/// Governance is checked here, under the session lock, from a freshly loaded
+/// row — not from a caller's stale snapshot, so a concurrent `transfer_owner`
+/// cannot flip the gate mid-write (ADR-098). The caller must be a participant
+/// (else `not_a_participant` → hidden 404) and the group owner or an admin
+/// (else `not_authorized` → 403). Only `user_group` / `project_group` carry the
+/// file.
+///
+/// The stored bytes are normalized with [`with_chat_prompt_tail`](
+/// acowork_core::chat_prompt::with_chat_prompt_tail) so the file always ends
+/// with the non-trimmable safety tail the Runtime re-applies anyway, and the
+/// size cap reserves room for it — a body saved at the cap is never silently
+/// truncated on the next turn. The write is atomic (tmp + rename) under the
+/// lock. Returns the exact bytes now stored.
+pub fn write_chat_md(
+    data_dir: &Path,
+    session_id: &str,
+    content: &str,
+    who: &str,
+    is_admin: bool,
+) -> Result<String, String> {
+    let body_budget =
+        MAX_CHAT_MD_BYTES - acowork_core::chat_prompt::CHAT_PROMPT_TAIL_RESERVE_BYTES;
+    let dir = session_dir(data_dir, session_id);
+    let lock_handle = session_lock(&dir);
+    let _guard = lock(&lock_handle);
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    if !carries_chat_md(session.kind) {
+        return Err("this chat session has no editable chat.md".to_string());
+    }
+    if !can_govern_group(&session, who, is_admin) {
+        return Err("not_authorized".to_string());
+    }
+    let body = acowork_core::chat_prompt::strip_chat_prompt_tail(content);
+    if body.len() > body_budget {
+        return Err(format!(
+            "chat.md exceeds the {MAX_CHAT_MD_BYTES}-byte cap (incl. the safety tail)"
+        ));
+    }
+    let content = acowork_core::chat_prompt::with_chat_prompt_tail(body);
+    let path = chat_md_path(&dir);
+    let tmp = path.with_extension("md.tmp");
+    fs::write(&tmp, &content).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })?;
+    Ok(content)
+}
+
+/// Reset a group session's `chat.md` to the built-in default by removing the
+/// override file — the next [`read_chat_md`] re-seeds [`default_group_chat_md`]
+/// on first touch, so there is no default text to duplicate on the client. Same
+/// governance as [`write_chat_md`]: a participant (else `not_a_participant` →
+/// hidden 404) who is the group owner or an admin (else `not_authorized` → 403),
+/// checked under the session lock. Only `user_group` / `project_group` carry the
+/// file. `Ok(())` is also returned when no override existed (already default).
+pub fn reset_chat_md(
+    data_dir: &Path,
+    session_id: &str,
+    who: &str,
+    is_admin: bool,
+) -> Result<(), String> {
+    let dir = session_dir(data_dir, session_id);
+    let lock_handle = session_lock(&dir);
+    let _guard = lock(&lock_handle);
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    if !carries_chat_md(session.kind) {
+        return Err("this chat session has no editable chat.md".to_string());
+    }
+    if !can_govern_group(&session, who, is_admin) {
+        return Err("not_authorized".to_string());
+    }
+    let path = chat_md_path(&dir);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        // No override file: already on the default, nothing to reset.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 fn projects_index_path(data_dir: &Path) -> PathBuf {
     data_dir.join("chat-sessions.projects.json")
 }
@@ -2365,6 +2534,99 @@ mod tests {
         let human = Participant::new("human-1", ParticipantIdentity::Human);
         let agent = Participant::new("agent-1", ParticipantIdentity::Agent);
         ensure_pair(dir, human, agent, SessionKind::UserAgent, 100).expect("pair")
+    }
+
+    fn group_session(dir: &Path) -> ChatSession {
+        let humans = [Participant::new("u-a", ParticipantIdentity::Human)];
+        create_session(dir, SessionKind::UserGroup, &humans, "G", Some("u-a"), None, 1)
+            .expect("group")
+    }
+
+    #[test]
+    fn group_chat_md_is_seeded_read_and_rewritten_but_one_to_one_has_none() {
+        let dir = temp_dir();
+        let group = group_session(&dir);
+        // First touch writes the built-in default and returns it...
+        let seeded = read_chat_md(&dir, &group).expect("read").expect("group has chat.md");
+        assert_eq!(seeded, default_group_chat_md());
+        assert!(session_dir(&dir, &group.session_id).join("chat.md").exists());
+        // ...and the same bytes come back untouched on the next read (no
+        // re-seed, no drift).
+        assert_eq!(read_chat_md(&dir, &group).unwrap().unwrap(), seeded);
+
+        // A rewrite is stored normalized: the body plus the re-applicable
+        // safety tail, exactly what the Runtime emits for that body.
+        let written = write_chat_md(&dir, &group.session_id, "Custom kernel.", "u-a", false).unwrap();
+        let expected = acowork_core::chat_prompt::with_chat_prompt_tail("Custom kernel.");
+        assert_eq!(written, expected);
+        assert_eq!(read_chat_md(&dir, &group).unwrap().unwrap(), expected);
+
+        // A 1:1 session carries no group prompt file at all: a DM uses the
+        // agent's own package `prompts/chat.md`.
+        let pair = pair_session(&dir);
+        assert!(read_chat_md(&dir, &pair).unwrap().is_none());
+        assert!(write_chat_md(&dir, &pair.session_id, "nope", "human-1", false).is_err());
+    }
+
+    #[test]
+    fn chat_md_write_is_gated_on_owner_or_admin() {
+        let dir = temp_dir();
+        let group = group_session(&dir); // owner = "u-a"
+        // A non-owner member is refused (403 vocabulary), leaving the file
+        // at its seeded default.
+        add_participant(
+            &dir,
+            &group.session_id,
+            &Participant::new("u-b", ParticipantIdentity::Human),
+            1,
+        )
+        .expect("invite");
+        assert_eq!(
+            write_chat_md(&dir, &group.session_id, "Takeover.", "u-b", false).unwrap_err(),
+            "not_authorized"
+        );
+        assert!(is_default_chat_md(&read_chat_md(&dir, &group).unwrap().unwrap()));
+        // The owner writes, and an admin who is a member writes a project group
+        // (a project group has no user-service owner, so only an admin governs
+        // it — participation is still the entry gate, matching rename/transfer).
+        assert!(write_chat_md(&dir, &group.session_id, "Owner edit.", "u-a", false).is_ok());
+        let proj = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &[Participant::new("pm", ParticipantIdentity::Human)],
+            "P",
+            None,
+            Some("proj-gate"),
+            1,
+        )
+        .expect("project group");
+        // A non-admin member of the project group is refused (no owner to match).
+        assert_eq!(
+            write_chat_md(&dir, &proj.session_id, "nope", "pm", false).unwrap_err(),
+            "not_authorized"
+        );
+        add_participant(
+            &dir,
+            &proj.session_id,
+            &Participant::new("admin-1", ParticipantIdentity::Human),
+            1,
+        )
+        .expect("invite admin");
+        assert!(write_chat_md(&dir, &proj.session_id, "Admin edit.", "admin-1", true).is_ok());
+    }
+
+    #[test]
+    fn chat_md_over_the_cap_is_refused() {
+        let dir = temp_dir();
+        let group = group_session(&dir);
+        let too_long = "a".repeat(MAX_CHAT_MD_BYTES + 1);
+        assert!(write_chat_md(&dir, &group.session_id, &too_long, "u-a", false).is_err());
+        // The file is left untouched by a refused write.
+        let _ = read_chat_md(&dir, &group);
+        assert_eq!(
+            fs::read_to_string(session_dir(&dir, &group.session_id).join("chat.md")).unwrap(),
+            default_group_chat_md()
+        );
     }
 
     #[test]

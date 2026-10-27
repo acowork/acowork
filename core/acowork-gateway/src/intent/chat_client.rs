@@ -77,6 +77,12 @@ pub struct SessionInfo {
     pub participants: Vec<ParticipantRef>,
     #[serde(default)]
     pub repo: Option<String>,
+    /// A group session's `chat.md` chat-prompt override (ADR-099, extended),
+    /// forwarded to the Runtime so the per-chat prompt reaches the chat
+    /// router. Absent for 1:1 kinds and for a group that never had one
+    /// seeded.
+    #[serde(default)]
+    pub chat_prompt: Option<String>,
 }
 
 /// The subset of `SessionMessage` the Gateway writes (system append).

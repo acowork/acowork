@@ -47,19 +47,24 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 ### 3.1 组合顺序
 
 ```
-[CHAT_ROUTER_BASE_PROMPT]        // Runtime 常量，不可覆盖
+[chat.md 覆盖]                   // 存在且非空白：整段替换下面三层
+                                 // 会话级（群聊）chat.md 优先于包级 prompts/chat.md
+                                 // 只有 {{agent_name}} 被替换
+— 无覆盖时为内置默认 —
+[CHAT_ROUTER_BASE_PROMPT]        // Runtime 常量（acowork_core::chat_prompt）
                                  // 角色边界 / dispatch 契约 / 决策规则 / 安全规则
-## Persona                       // chat.md 或 manifest 回退
+## Persona                       // manifest 回退
 <persona text>
 ## Scenario                      // 1:1 或 group，两个稳定变体
 <scenario text>
+— 两种情况都追加 —
 ## Identity                      // 用户语言 / 时区（identity_context）
 <identity text>
 ```
 
-顺序固定，段间分隔符固定（`\n\n`），不做任何按内容排序或条件性省略之外的拼接。
+顺序固定，段间分隔符固定（`\n\n`），不做任何按内容排序或条件性省略之外的拼接。基座、Persona 与场景段的字面量集中于 `acowork_core::chat_prompt`：`acowork-user` 用它给群聊会话的 `chat.md` 播种、`acowork-runtime` 用它组装内置默认，二者不会漂移。
 
-### 3.2 基座（不可覆盖）
+### 3.2 基座
 
 基座由 Runtime 维护，包含：
 
@@ -68,21 +73,21 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致，核心是 dispatch 代价不对称：错发远比漏发贵，不确定就问）；
 4. 安全规则：只使用候选清单中的信息；不复述其他 chat 的内容；不承诺执行细节；不代人类 @ 其他 agent。
 
-包内 `prompts/chat.md` **只能替换 Persona 段**，不能替换基座。这样即使 agent 作者写了"你可以直接改代码"，router 也没有对应工具，行为不会被诱导。
+`chat.md` 存在且非空白时**整段替换**内置 chat prompt 正文（基座 + Persona + 场景段），只替换 `{{agent_name}}`；缺省时使用内置默认。有两部分不是该文件能删掉的。其一，`# Safety` 不变量是一段不可裁剪的尾块，Runtime 每轮都会重新追加到正文末尾（`chat_prompt::with_chat_prompt_tail`），从 `chat.md` 里删掉它对模型实际看到的内容没有影响。其二，安全边界由结构而非提示词字面量保证：router 只有 `dispatch` 与两个只读工具，改写提示词不会给它新的能力（ADR-099 D6）。此外，群聊的 `chat.md` **仅群主或管理员可写**（ADR-098 治理），任何成员可读，因此单个成员无法注入一段去操控他人 agent 的提示词。群聊右侧设置面板只编辑正文——`# Safety` 尾块不在面板中显示（`chat-md` 接口返回的是剥掉尾块后的正文），保存时由存储与 Runtime 重新追加，因此不会把成员改不动的内容摆进可编辑框再静默还原。
 
-### 3.3 Persona
+### 3.3 Persona 与 chat.md 来源优先级
 
-来源优先级：
+任一份非空白的 `chat.md` 都整段替换内置 prompt，**不再只替换 Persona 段**。按序查找：
 
-1. `prompts/chat.md`（可选，≤ 4KB，空白文件视为缺失）；
-2. manifest 的 `display_name` / `name` + `role` + `description` 自动拼装（一句话人格）；
-3. 最终兜底：`display_name`。
+1. 会话级 `chat.md`：`acowork-user` 的 `chat-sessions/{id}/chat.md`，仅 `user_group` / `project_group`，任何成员可读、仅群主或管理员可写（ADR-098），从群聊右侧设置面板编辑；首读时用内置默认（群聊变体，含不可裁剪的 `# Safety` 尾块）生成；
+2. 包级 `prompts/chat.md`（≤ 16KB，空白文件视为缺失；agent 启动时若无则用内置默认生成，单聊走这一档）；
+3. 内置默认 = 基座 + manifest 人格（`display_name` / `name` + `role` + `description` 拼成一句）+ 场景段。
 
 `chat.md` 纳入 ADR-063 的 `OVERRIDABLE_PROMPTS` 清单：
 
 - 从 execute system prompt 的拼接中排除（与 `summary.md` 同一排除规则）；
 - 由 `POST /agents/{id}/prompts/reload` 同步刷新；
-- Debug 面板可查看最终组装结果。
+- Debug 面板可查看与编辑。
 
 ### 3.4 场景段
 
@@ -308,7 +313,7 @@ S2           idle     3h  task  Review ADR-098
 | chat 历史读取失败 | 本轮只带 Block A + Block C，prompt 提示"历史不可用"，降级旧路由 |
 | 当前消息匹配失败 | 不删除历史，允许重复一次 |
 | provider 不支持 cache | 行为不变，仅多 token 开销 |
-| `chat.md` 超长/不可读 | 记录 WARN，回退 manifest 人格 |
+| `chat.md` 超长/不可读 | 超长按 UTF-8 边界截断；不可读记录 WARN，回退内置默认提示词 |
 | Block A 组装异常 | 使用内置基座 + display_name，保证可用 |
 
 ## 9. 测试计划
@@ -317,7 +322,7 @@ S2           idle     3h  task  Review ADR-098
 - **前缀稳定性**：窗口未越界时，连续 N 轮 `prefix_hash` 不变；裁剪只在阈值处发生；`anchor_seq` 批量前移。
 - **Block 隔离**：Block A 不含动态内容；Block C 不含历史；当前消息只出现一次。
 - **缓存标记**：Anthropic 序列化后 `cache_control` 只出现在预期位置；OpenAI 请求不携带该字段。
-- **prompt 分层**：`chat.md` 只替换 Persona；缺失回退 manifest；`chat.md` 不进入 execute prompt。
+- **prompt 分层**：任一份非空白 `chat.md` 整段替换内置 chat prompt；缺省回退内置默认（基座 + manifest 人格 + 场景段）；`chat.md` 不进入 execute prompt。
 - **回归**：窗口裁剪后路由结果与未裁剪时一致（MockProvider 固定输出）。
 
 ## 10. 与其他文档的关系

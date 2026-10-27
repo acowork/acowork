@@ -1613,6 +1613,10 @@ async fn deliver_mentions(
                 "message": req.text,
                 "chat_attachment_ids": req.attachment_ids,
                 "chat_kind": chat_kind,
+                // ADR-099 (extended): the group's `chat.md` prompt override,
+                // when it has one, replaces the whole chat-layer prompt for
+                // this chat's router turn.
+                "chat_prompt": session.chat_prompt,
             })
             .to_string(),
             source_chat_session_id: req.chat_session_id.clone(),
@@ -2212,6 +2216,9 @@ async fn deliver_chat_message(
             "message": req.text,
             "chat_attachment_ids": req.attachment_ids,
             "chat_kind": session.kind,
+            // ADR-099 (extended): a group's `chat.md` prompt override, when
+            // present, replaces the whole chat-layer prompt for this turn.
+            "chat_prompt": session.chat_prompt,
             // ADR-100 D12: the execution composer's own turn facts, forwarded
             // verbatim so a pinned turn is indistinguishable from the same
             // send made against the execution surface's write endpoint. Empty
@@ -2393,6 +2400,7 @@ mod card_answer_tests {
                 chat_client::ParticipantRef::Legacy("agent-legacy".into()),
             ],
             repo: None,
+            chat_prompt: None,
         };
         assert!(is_agent_participant(&session, "agent-a"));
         assert!(
