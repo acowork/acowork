@@ -37,15 +37,26 @@ Tool Dispatcher
 | `http_request`         | HTTP 请求（GET/POST/PUT/DELETE） | `network:<url_pattern>`   | 支持 method 参数选择 HTTP 方法，JSON 响应自动解析，JSON body 和表单                                                                                                                                                       |
 | `web_fetch`            | 获取网页内容                     | `network:<url_pattern>`   | HTML → Markdown 转换，Agent 直接获得可读文本                                                                                                                                                                              |
 | `shell`                | 执行 shell 命令                  | `filesystem:exec`         | 受沙箱限制，超时可中断                                                                                                                                                                                                    |
-| `file_read`            | 读取文件                         | `filesystem:read:<path>`  | 限制在工作区和授权目录内                                                                                                                                                                                                  |
+| ~~`file_read`~~        | ~~读取文件~~                     | ~~`filesystem:read:<path>`~~ | **已弃用** — 不再注册，manifest 声明无效；文件读取走 `bash`/`powershell`/`shell`（`cat`、`sed -n`、`Get-Content`）。实现保留在 `tools/builtin/file_read.rs`，仅不进入注册表                                                                                                                                                                                                  |
 | `file_write`           | 写入文件                         | `filesystem:write:<path>` | 限制在工作区和授权目录内                                                                                                                                                                                                  |
 | `file_edit`            | 精确编辑文件                     | `filesystem:write:<path>` | 基于行范围的编辑（替换/插入/删除），比 file_write 更精准                                                                                                                                                                  |
-| `glob_search`          | 文件名模式搜索                   | `filesystem:read:<path>`  | 支持 glob 模式匹配，返回文件路径列表                                                                                                                                                                                      |
-| `content_search`       | 文件内容搜索                     | `filesystem:read:<path>`  | 类似 grep，支持正则表达式，返回匹配行及上下文                                                                                                                                                                             |
+| ~~`glob_search`~~      | ~~文件名模式搜索~~               | ~~`filesystem:read:<path>`~~ | **已弃用** — 同上，改用 shell 的 `find` / `Get-ChildItem`；实现保留在 `tools/builtin/glob_search.rs`                                                                                                                                                                                      |
+| ~~`content_search`~~   | ~~文件内容搜索~~                 | ~~`filesystem:read:<path>`~~ | **已弃用** — 同上，改用 shell 的 `grep -rn` / `Select-String`；实现保留在 `tools/builtin/content_search.rs`                                                                                                                                                                             |
 | `intent_send`          | 发送 Intent 到其他 Agent         | `intent:send:<target>`    | 通过 Gateway 路由                                                                                                                                                                                                         |
 | ~~`identity_store`~~   | ~~写入用户身份信息~~             | ~~`identity:write`~~      | **已删除** — 用户身份管理已迁移至 Gateway UserProfile，详见 `18-user-identity-simplified.md`                                                                                                                              |
 | ~~`identity_query`~~   | ~~查询用户身份信息~~             | ~~`identity:read`~~       | **已删除** — 用户身份管理已迁移至 Gateway UserProfile                                                                                                                                                                     |
 | ~~`identity_observe`~~ | ~~订阅身份变更通知~~             | ~~`identity:observe`~~    | **已删除** — 用户身份管理已迁移至 Gateway UserProfile                                                                                                                                                                     |
+
+> **弃用说明（`file_read` / `glob_search` / `content_search`）**
+>
+> 这三个"文件读取"工具已从 Runtime 注册表取消注册，属于**弃用但未删除**：
+>
+> - 源码与单元测试保留并继续编译（`core/acowork-runtime/src/tools/builtin/{file_read,glob_search,content_search}.rs`），`pub mod` 声明不撤
+> - `all_builtin_tools()` 不再构造它们，因此 LLM 侧工具面、前端工具面板、创建向导的内置工具列表都不会出现
+> - manifest 里残留的 `[[tools]] name = "file_read"` 之类声明会被 `init_tools_config_from_manifest` / `merge_tools_config` 静默丢弃并回写 `agent_tools.json`，不会变成渲染不出来的幽灵行；克隆与发布同样走这条路径，无需额外迁移
+> - 替代能力是 shell 工具面：读文件 `cat` / `Get-Content`、按行读 `sed -n`、按名搜 `find` / `Get-ChildItem`、按内容搜 `grep -rn` / `Select-String`。输出上限与路径校验由 `tools/wrappers.rs` 的 shell 包装统一承担，与原先三个专用工具的红线一致
+>
+> 恢复方式见 `core/acowork-runtime/src/tools/builtin/mod.rs` 模块头。
 
 ### 2.1 平台支持矩阵
 
@@ -54,11 +65,11 @@ Tool Dispatcher
 | `http_request`         |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | `web_fetch`            |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | `shell`                |    ✅    |   ✅   |   ✅   |    ❌    |   ❌   | 仅桌面端           |
-| `file_read`            |    ✅    |   ✅   |   ✅   |    ⚠️    |   ⚠️   | 全平台，移动端受限 |
+| ~~`file_read`~~        |    ❌    |   ❌   |   ❌   |    ❌    |   ❌   | **已弃用，不注册** |
 | `file_write`           |    ✅    |   ✅   |   ✅   |    ⚠️    |   ⚠️   | 全平台，移动端受限 |
 | `file_edit`            |    ✅    |   ✅   |   ✅   |    ⚠️    |   ⚠️   | 全平台，移动端受限 |
-| `glob_search`          |    ✅    |   ✅   |   ✅   |    ⚠️    |   ⚠️   | 全平台，移动端受限 |
-| `content_search`       |    ✅    |   ✅   |   ✅   |    ⚠️    |   ⚠️   | 全平台，移动端受限 |
+| ~~`glob_search`~~      |    ❌    |   ❌   |   ❌   |    ❌    |   ❌   | **已弃用，不注册** |
+| ~~`content_search`~~   |    ❌    |   ❌   |   ❌   |    ❌    |   ❌   | **已弃用，不注册** |
 | `intent_send`          |    ✅    |   ✅   |   ✅   |    ✅    |   ✅   | 全平台             |
 | ~~`identity_store`~~   |    ❌    |   ❌   |   ❌   |    ❌    |   ❌   | **已删除**         |
 | ~~`identity_query`~~   |    ❌    |   ❌   |   ❌   |    ❌    |   ❌   | **已删除**         |
@@ -84,11 +95,11 @@ Tool Dispatcher
 - Agent 在 manifest 中声明 `required = true` 时，移动端安装检查直接拒绝
 - Agent 声明 `required = false`（默认）时，移动端安装成功，但 `shell` 工具不注册到可用工具列表
 
-`file_read` / `file_write` / `file_edit` / `glob_search` / `content_search`（移动端受限）：
+`file_write` / `file_edit` / `doc_reader`（移动端受限；`file_read` / `glob_search` / `content_search` 已弃用且不注册，文件读取与搜索由 shell 工具承担，其路径范围同样受下面的白名单约束）：
 - iOS App Sandbox 只允许访问自己容器内的文件
 - Android Scoped Storage 限制了外部存储访问
 - 降级行为：路径白名单自动收窄到 Agent 工作目录（`<agent_data_dir>/workspace/`），超出范围的路径请求返回权限错误
-- `glob_search` / `content_search` 的搜索范围同样限制在 Agent 工作目录内
+- shell 工具的文件搜索范围同样限制在 Agent 工作目录与授权目录内
 - 桌面端路径白名单由 `filesystem:read/write:<path>` 权限控制，可授权任意目录
 
 **运行时平台检测：**
@@ -518,7 +529,7 @@ LLM 输出 tool_calls: [{name, arguments}, ...]
 | SDK 延后                                  | Phase 2+                                                     | Phase 1 手动导出函数足够，SDK 降低门槛但不阻塞核心功能                                                                                                                                                                  |
 | Builtin 范围                              | 仅平台基础设施级                                             | SaaS 集成（Jira/Notion/LinkedIn 等）由独立 Agent 提供，不内置；垂直能力走 WASM Tool 或独立 Agent                                                                                                                        |
 | web_fetch 内置                             | 是                                                           | 几乎所有 Agent 都需要，是平台级基础设施                                                                                                                                     |
-| file_edit/glob_search/content_search 内置 | 是                                                           | 文件操作三件套（读+写+编辑+搜索），缺少任一个都会导致 Agent 用 file_write 模拟低效操作                                                                                                                                  |
+| file_edit/glob_search/content_search 内置 | 是（`glob_search`/`content_search` 后已弃用，见 §2.1）                                                           | 文件操作三件套（读+写+编辑+搜索），缺少任一个都会导致 Agent 用 file_write 模拟低效操作                                                                                                                                  |
 | RAG 工具类型                              | 独立 type="rag"，配置驱动 Opt-In                             | 企业 RAG 是外部服务接入，不是内置工具也不是 WASM 工具，需要独立的声明和执行模型；仅 manifest 声明时注册，无 RAG 的 Agent 零侵入                                                                                         |
 | RAG 凭据安全                              | Vault 引用，运行时获取                                       | 与内置工具 API Key 管理一致，不明文出现在 manifest 或进程环境变量                                                                                                                                                       |
 | RAG 触发模型                              | 混合双触发（自动 + 显式）                                    | 自动触发（步骤② Retrieve）解决"LLM 不知道该不该查"；显式触发（步骤⑤ tool_call）解决"需要更精确查询"；均由 manifest 配置驱动 opt-in（ADR-012，详见 plan-p4.md）                                                          |

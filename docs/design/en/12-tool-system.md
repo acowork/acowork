@@ -38,15 +38,39 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 | `http_request` | HTTP requests (GET/POST/PUT/DELETE) | `network:<url_pattern>` | Supports method parameter for HTTP method selection; JSON responses auto-parsed; supports JSON body and form |
 | `web_fetch` | Fetch web page content | `network:<url_pattern>` | HTML → Markdown conversion, Agent directly receives readable text |
 | `shell` | Execute shell commands | `filesystem:exec` | Subject to sandbox restrictions, interruptible on timeout |
-| `file_read` | Read file | `filesystem:read:<path>` | Restricted to workspace and authorized directories |
+| ~~`file_read`~~ | ~~Read file~~ | ~~`filesystem:read:<path>`~~ | **Deprecated** — no longer registered, so a manifest declaration has no effect. File reading goes through `bash`/`powershell`/`shell` (`cat`, `sed -n`, `Get-Content`). The implementation stays in `tools/builtin/file_read.rs`, it is only out of the registry |
 | `file_write` | Write file | `filesystem:write:<path>` | Restricted to workspace and authorized directories |
 | `file_edit` | Precise file editing | `filesystem:write:<path>` | Line range based editing (replace/insert/delete), more precise than file_write |
-| `glob_search` | Filename pattern search | `filesystem:read:<path>` | Supports glob pattern matching, returns file path list |
-| `content_search` | File content search | `filesystem:read:<path>` | Similar to grep, supports regex, returns matching lines and context |
+| ~~`glob_search`~~ | ~~Filename pattern search~~ | ~~`filesystem:read:<path>`~~ | **Deprecated** — same as above, use the shell's `find` / `Get-ChildItem`; implementation stays in `tools/builtin/glob_search.rs` |
+| ~~`content_search`~~ | ~~File content search~~ | ~~`filesystem:read:<path>`~~ | **Deprecated** — same as above, use the shell's `grep -rn` / `Select-String`; implementation stays in `tools/builtin/content_search.rs` |
 | `intent_send` | Send Intent to other Agents | `intent:send:<target>` | Routed via Gateway |
 | ~~`identity_store`~~ | ~~Write user identity information~~ | ~~`identity:write`~~ | **Deleted** — User identity management migrated to Gateway UserProfile, see `18-user-identity-simplified.md` |
 | ~~`identity_query`~~ | ~~Query user identity information~~ | ~~`identity:read`~~ | **Deleted** — User identity management migrated to Gateway UserProfile |
 | ~~`identity_observe`~~ | ~~Subscribe to identity change notifications~~ | ~~`identity:observe`~~ | **Deleted** — User identity management migrated to Gateway UserProfile |
+
+> **Deprecation note (`file_read` / `glob_search` / `content_search`)**
+>
+> These three file-*reading* tools are unregistered from the Runtime
+> registry — deprecated, not deleted:
+>
+> - Sources and unit tests stay compiled
+>   (`core/acowork-runtime/src/tools/builtin/{file_read,glob_search,content_search}.rs`);
+>   the `pub mod` declarations are not removed.
+> - `all_builtin_tools()` no longer constructs them, so they never reach the
+>   LLM tool surface, the frontend Tools panel, or the create wizard's builtin
+>   tool list.
+> - A leftover `[[tools]] name = "file_read"` in a manifest is silently dropped
+>   by `init_tools_config_from_manifest` / `merge_tools_config` and written back
+>   to `agent_tools.json`, so it cannot linger as an unrenderable ghost row.
+>   Clone and publish take the same path — no migration step is needed.
+> - The replacement capability is the shell tool surface: `cat` / `Get-Content`
+>   to read, `sed -n` for a line range, `find` / `Get-ChildItem` for names,
+>   `grep -rn` / `Select-String` for content. Output caps and path validation
+>   are enforced by the shell wrapper in `tools/wrappers.rs`, i.e. the same
+>   red lines the three dedicated tools used to enforce themselves.
+>
+> To restore them, follow the checklist in the
+> `core/acowork-runtime/src/tools/builtin/mod.rs` module header.
 
 ### 2.1 Platform Support Matrix
 
@@ -55,11 +79,11 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 | `http_request` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | `web_fetch` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | `shell` | ✅ | ✅ | ✅ | ❌ | ❌ | Desktop only |
-| `file_read` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | All platforms, mobile restricted |
+| ~~`file_read`~~ | ❌ | ❌ | ❌ | ❌ | ❌ | **Deprecated, not registered** |
 | `file_write` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | All platforms, mobile restricted |
 | `file_edit` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | All platforms, mobile restricted |
-| `glob_search` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | All platforms, mobile restricted |
-| `content_search` | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | All platforms, mobile restricted |
+| ~~`glob_search`~~ | ❌ | ❌ | ❌ | ❌ | ❌ | **Deprecated, not registered** |
+| ~~`content_search`~~ | ❌ | ❌ | ❌ | ❌ | ❌ | **Deprecated, not registered** |
 | `intent_send` | ✅ | ✅ | ✅ | ✅ | ✅ | All platforms |
 | ~~`identity_store`~~ | ❌ | ❌ | ❌ | ❌ | ❌ | **Deleted** |
 | ~~`identity_query`~~ | ❌ | ❌ | ❌ | ❌ | ❌ | **Deleted** |
@@ -85,11 +109,11 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 - When Agent declares `required = true` in manifest, mobile install is directly rejected
 - When Agent declares `required = false` (default), mobile install succeeds, but `shell` tool is not registered in available tool list
 
-`file_read` / `file_write` / `file_edit` / `glob_search` / `content_search` (Mobile restricted):
+`file_write` / `file_edit` / `doc_reader` (Mobile restricted; `file_read` / `glob_search` / `content_search` are deprecated and unregistered — reading and searching files is carried by the shell tools, whose path scope is bounded by the same allow-list below):
 - iOS App Sandbox only allows access to files within its own container
 - Android Scoped Storage restricts external storage access
 - Degradation behavior: path allow-list automatically narrowed to Agent working directory (`<agent_data_dir>/workspace/`); out-of-range path requests return permission errors
-- `glob_search` / `content_search` search range also limited to Agent working directory
+- the shell tools' file search range is likewise limited to the Agent working directory and authorized directories
 - Desktop path allow-list controlled by `filesystem:read/write:<path>` permission, can authorize any directory
 
 **Runtime Platform Detection:**
@@ -522,7 +546,7 @@ Process each tool_call one by one:
 | SDK deferred | Phase 2+ | Phase 1 manual export functions sufficient, SDK lowers barrier but doesn't block core |
 | Builtin scope | Platform infrastructure level only | SaaS integration (Jira/Notion/LinkedIn etc.) provided by independent Agents, not built-in; vertical capabilities via WASM Tool or independent Agent |
 | web_fetch built-in | Yes | Nearly all Agents need it, platform-level infrastructure |
-| file_edit/glob_search/content_search built-in | Yes | File ops trio (read+write+edit+search); missing any one leads Agent to inefficient simulation with file_write |
+| file_edit/glob_search/content_search built-in | Yes (`glob_search`/`content_search` later deprecated — see §2.1) | File ops trio (read+write+edit+search); missing any one leads Agent to inefficient simulation with file_write |
 | RAG tool type | Independent type="rag", config-driven Opt-In | Enterprise RAG is external service integration, not built-in tool nor WASM tool, needs independent declaration and execution model; only registers when manifest declares, zero intrusion for Agents without RAG |
 | RAG credential security | Vault reference, runtime fetch | Consistent with built-in tool API Key management, not plaintext in manifest or process env vars |
 | RAG trigger model | Hybrid dual trigger (auto + explicit) | Auto trigger (Step ② Retrieve) solves "LLM doesn't know whether to query"; explicit trigger (Step ⑤ tool_call) solves "needs more precise query"; both opt-in driven by manifest config (ADR-012, see plan-p4.md) |
