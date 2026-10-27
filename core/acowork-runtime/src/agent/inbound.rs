@@ -211,6 +211,16 @@ pub enum InboundMessage {
         message_id: String,
         command: String,
         params_json: String,
+        /// The account that typed this message, when the transport carries one
+        /// (the Gateway's verified `x-user-id` scope on
+        /// `POST /sessions/{sid}/messages`). Empty for the MQTT path, which
+        /// carries no identity.
+        ///
+        /// It becomes the turn's `answerable_by`: a chat-bound execution
+        /// session writes an interactive card into its chat, and a card with
+        /// nobody to answer it is a dead button, so without this the card is
+        /// not written at all.
+        answerable_by: String,
     },
     /// ADR-029 + ADR-052: agent-level builtin-tool enabled-flag update.
     ///

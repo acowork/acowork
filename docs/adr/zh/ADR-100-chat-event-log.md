@@ -1,8 +1,8 @@
 # ADR-100：Chat 事件日志化——移除执行状态卡片，在途轮次落时间点事件行
 
 - **编号**：ADR-100
-- **状态**：已接受（Rev. 5，2026-10-24：ADR-099 删除轮转后 `opened_new` 的取值面收敛，见 D11；Rev. 4，2026-10-23：执行视图的输入改走 chat 入口 + 定向直投，见 D12；Rev. 3：路由反应行落盘 + 头像不变量，见 D11；Rev. 2：撤销中间状态落盘，见 D10）
-- **日期**：2026-10-22（Rev. 2 / Rev. 3 / Rev. 4：2026-10-23；Rev. 5：2026-10-24）
+- **状态**：已接受（Rev. 6，2026-10-27：非 pinned 的本地回合由运行时补齐 chat 坐标，卡片不再丢失，见 D12 补记；Rev. 5，2026-10-24：ADR-099 删除轮转后 `opened_new` 的取值面收敛，见 D11；Rev. 4，2026-10-23：执行视图的输入改走 chat 入口 + 定向直投，见 D12；Rev. 3：路由反应行落盘 + 头像不变量，见 D11；Rev. 2：撤销中间状态落盘，见 D10）
+- **日期**：2026-10-22（Rev. 2 / Rev. 3 / Rev. 4：2026-10-23；Rev. 5：2026-10-24；Rev. 6：2026-10-27）
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊 §5.5.4 / §5.5.5 / §6）、ADR-099（Chat Router，D3 投递时锚定 pointer）、ADR-086（移动端多会话）、ADR-049（Session 状态子态）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
 
@@ -19,6 +19,8 @@ v2.1（ADR-099 同期）在 chat 事件日志之上叠加了一块 **live 状态
 > **修订 Rev. 4（2026-10-23）**：D9 把绑定 chat 的执行会话的**输出**回写进了 chat，但那条回合的**人类消息本身**仍只存在执行会话的 JSONL 里——chat 因此呈现"只有回答、没有提问"的半轮对话。最省事修法（Runtime 以用户身份代写一行）被否决：写入口的身份必须是发起人。Rev. 4 把入口换掉而非补写：**执行视图的 composer 改走 chat 入口**（`POST /api/intents/chat-message`），并携带 `for_execution_session` 指名目标执行会话；Runtime 收到带指名的消息后**跳过 Chat Router** 直投该会话，以 `SessionMessage::ChatMessage`（不是 Intent）进入原执行面同一套处理，因此技能、附件、JSONL 用户行零能力回写。一个过期 id 只多花一次路由，不丢一条消息。详见 D12。
 
 > **修订 Rev. 5（2026-10-24）**：ADR-099 的 2026-10-24 修订删除了执行会话的物理轮转，`chat_dispatch` / `route_intent_session` 的返回值随之从三元收回**二元**（`(session_id, opened_new)`）。D11 的 `opened_new` 语义不变：它仍是"这一轮是否物理新建了会话"的一次性事实，只是取值面不再包含 rotation 分支——reuse（含 `dispatch(existing)` 切换到另一存活会话）报 `false`，仅物理新建报 `true`。`turn_mode` 的两态、durable 写法与渲染契约均不变。
+
+> **修订 Rev. 6（2026-10-27）**：Rev. 4 把"这一轮对 chat 负有哪些义务"记在**客户端的 pin**上，而 pin 的 chat id 来自会话列表行——Router 创建的会话从不发 `session_created`，桌面端可能压根没有那一行。于是执行视图发出的消息落回 `POST /sessions/{sid}/messages`（`surface` 为空），该轮既不在 chat 里留下人类消息，`ask_user_question` / 审批卡片也无处可落：群聊看不见"这一跑停在等什么"，只留着上一次的中断状态。修法不是再加一层客户端判据，而是**由运行时补齐 surface**：会话的 chat 绑定（durable）给 chat id，写入口已验证的调用者（`x-user-id` scope）给 `answerable_by`；`card_target()` 因此只要求"有 chat + 有可答人"，**不再要求触发行**——§5.5.4 的答案通道本来按卡片自身 id 解析，触发行只是渲染上的归属坐标。卡片以 standalone 形态落盘（`in_reply_to` 为空）。仍然缺的是 Rev. 4 的**头行**：Runtime 不能以用户身份写 `user_message`（D12 已否决该做法），非 pinned 回合在 chat 里依旧没有提问行——补那一半要么客户端把 pin 修好，要么改身份模型。
 
 ## 背景
 
@@ -269,6 +271,6 @@ D12 把 pinned 回合投成 `SessionMessage::ChatMessage`，转换时只从信�
 
 **Rev. 5（D13）补充：**
 
-- 后端（`intent_turn.rs` 单测，钉住根因而非症状）：`pinned_turn_surface_keeps_its_card_target` 断言换传输后卡片三坐标（chat / 触发行 / 可答人）与 `has_human` 仍在；`request_turn_owes_its_card_to_the_pair_session_it_was_bound_to` 锁定 Intent 传输走同一产出函数；`unbound_or_senderless_turn_writes_no_card` 覆盖 mailbox-only 与无发送人两种"写不出可答卡片"的情形；`a_bound_chat_alone_does_not_make_a_card` 保证 D9 的本地回合仍不写卡片、只拿绑定做回显；`waiting_is_not_aborted` 锁定 `TurnOutcome` 四态字符串。
+- 后端（`intent_turn.rs` 单测，钉住根因而非症状）：`pinned_turn_surface_keeps_its_card_target` 断言换传输后卡片三坐标（chat / 触发行 / 可答人）与 `has_human` 仍在；`request_turn_owes_its_card_to_the_pair_session_it_was_bound_to` 锁定 Intent 传输走同一产出函数；`unbound_or_senderless_turn_writes_no_card` 覆盖 mailbox-only 与无发送人两种"写不出可答卡片"的情形；`a_bound_chat_with_an_answering_human_makes_a_standalone_card` 锁定 Rev. 6：绑定 chat 的本地回合只要知道谁可答就照样写卡片（standalone，无触发行）；`waiting_is_not_aborted` 锁定 `TurnOutcome` 四态字符串。
 - 回归：`cargo test -p acowork-runtime --lib`（1783 通过）+ `cargo clippy -p acowork-runtime --all-targets -- -D warnings`。
 - 手工验收（真实项目群）：群内 @ 一个 agent 让它提问 → `ask_user_question` 卡片出现在群聊且可就地作答；触发工具审批 → 审批卡片同样落在群里；迭代上限触发的 pause → 群内出现"回复以继续"卡片且终态行状态为 `waiting` 而非 `aborted`；同一问题在执行视图与群聊两处都可答，先答者生效（§5.5.4 一个问题两个回答面）。

@@ -756,6 +756,14 @@ pub(crate) async fn post_send_message(
             message_id: body.message_id,
             command: body.command,
             params_json: body.params_json,
+            // The Gateway verified this caller before proxying, and
+            // `authorize_write` above already checked the scope may write this
+            // session. It is the one honest answer to "who can answer a card
+            // this turn raises in the bound chat" (ADR-100 Rev. 6); the
+            // client's `for_execution_session` pin answers the same question
+            // but only when it has the binding, which a router-created
+            // session's client row may not carry.
+            answerable_by: scope.user_id().unwrap_or_default().to_string(),
         },
     )
     .await;

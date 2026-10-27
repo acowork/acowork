@@ -906,6 +906,7 @@ async fn dispatch_inbound(
             message_id,
             command,
             params_json,
+            answerable_by,
         } => {
             // Parse params_json to extract attached_items (ADR-046 replaces
             // the prior document_ids + content_parts + attached_context
@@ -987,9 +988,19 @@ async fn dispatch_inbound(
                         attached_items,
                         content_parts,
                         // Written straight against the execution surface: no
-                        // Chat row precedes it, so there is nothing to answer
-                        // and no card to write (ADR-100 D12).
-                        surface: Default::default(),
+                        // Chat row precedes it, so there is nothing to thread
+                        // a card under (ADR-100 D12). The session's own chat
+                        // binding still supplies the chat and the caller
+                        // supplies who can answer, so `session_task` completes
+                        // the surface there and the card lands standalone —
+                        // otherwise a group chat never saw the question a
+                        // resumed run had stopped on (ADR-100 Rev. 6).
+                        surface: crate::agent::intent_turn::TurnSurface::new(
+                            String::new(),
+                            String::new(),
+                            &answerable_by,
+                            None,
+                        ),
                     },
                 )
                 .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))

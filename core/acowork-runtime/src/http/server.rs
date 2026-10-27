@@ -6970,7 +6970,9 @@ mod tests {
                 "owner must be able to POST /{action}"
             );
 
-            // 3. ...and the queued message is the pre-migration one.
+            // 3. ...and the queued message is the pre-migration one, plus the
+            // verified caller the card writer needs as its answer target
+            // (ADR-100 Rev. 6: without it a chat-bound turn writes no card).
             let (queued_sid, msg) = dispatch_rx.try_recv().expect("owner request must dispatch");
             assert_eq!(queued_sid, sid, "/{action} must route to its session");
 
@@ -6981,9 +6983,15 @@ mod tests {
                         content,
                         message_id,
                         params_json,
+                        answerable_by,
                         ..
                     },
-                ) => content == "hi" && message_id == "m1" && params_json == r#"{"a":1}"#,
+                ) => {
+                    content == "hi"
+                        && message_id == "m1"
+                        && params_json == r#"{"a":1}"#
+                        && answerable_by == "u-owner"
+                }
                 ("stop", InboundMessage::Stop { reason }) => reason == "user_requested",
                 ("continue", InboundMessage::ContinueExecution { session_id, reason }) => {
                     session_id == sid && reason == "user_requested"
