@@ -27,9 +27,11 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { ListBox, ExpandableRow } from "../common/list";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
 import { showToast } from "../common/ToastProvider";
+import { GroupChatPromptCard } from "./GroupChatPromptCard";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
@@ -65,6 +67,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
   const [directory, setDirectory] = useState<DirectoryUser[]>([]);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -166,27 +169,47 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
       )}
 
       <div className={cn(CAPSULE_PANE_CN, "flex-1 bg-right-panel")}>
-        <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center gap-1.5 border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary">
-          <span className="min-w-0 flex-1 truncate" title={group.title}>
-            {t("groupMembers.title")}（{participants.length}）
-          </span>
-          {/* Rename is owner/admin-only (backend re-checks in the session
-              lock); a plain member sees the name, not the pencil. */}
-          {canGovern && (
-            <button
-              type="button"
-              onClick={() => setRenameOpen(true)}
-              aria-label={t("groupMembers.rename")}
-              title={t("groupMembers.renameTitle")}
-              data-testid="group-rename-button"
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
-            >
-              <Pencil className="h-3 w-3" />
-            </button>
-          )}
+        {/* Panel header — a generic settings title, matching the agent
+            RightPanel tab header. The group's own name is edited inside the
+            members card now (the rename affordance moved off this line). */}
+        <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary">
+          <span className="min-w-0 flex-1 truncate">{t("groupSettings.title")}</span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          {/* Members card — the unified `ListBox` + `ExpandableRow` grammar of
+              the agent Settings tab. Rename is owner/admin-only and sits in the
+              card header's trailing slot (backend re-checks under the session
+              lock; a plain member sees no pencil). */}
+          <ListBox dividers={false}>
+            <ExpandableRow
+              open={membersOpen}
+              onToggle={() => setMembersOpen((v) => !v)}
+              title={t("groupMembers.title")}
+              ariaLabel={t("groupMembers.title")}
+              meta={
+                <span className="shrink-0 rounded bg-panel-inset px-1.5 py-0.5 text-10 text-text-tertiary">
+                  {participants.length}
+                </span>
+              }
+              trailing={
+                canGovern ? (
+                  <span className="flex shrink-0 items-center" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      onClick={() => setRenameOpen(true)}
+                      aria-label={t("groupMembers.rename")}
+                      title={t("groupMembers.renameTitle")}
+                      data-testid="group-rename-button"
+                      className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                  </span>
+                ) : undefined
+              }
+              bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
+            >
           <div className="flex flex-wrap gap-x-2 gap-y-4">
             {participants.map((p) => {
               const who = nameOf(p.id);
@@ -285,6 +308,14 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
               </button>
             )}
           </div>
+            </ExpandableRow>
+          </ListBox>
+          {/* Group chat prompt — its own card (same `ListBox`/`ExpandableRow`
+              grammar as the members card). Read is open to every participant
+              (the backend answers a hidden 404 to a non-member); the card
+              renders read-only unless the server marks this caller as
+              owner/admin. */}
+          {canManage && <GroupChatPromptCard sessionId={group.session_id} />}
         </div>
 
         {canManage && (

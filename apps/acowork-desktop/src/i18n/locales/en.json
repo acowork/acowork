@@ -2035,6 +2035,24 @@
     "mustTransferBeforeLeave": "Transfer the owner role before leaving",
     "governForbidden": "Only the group owner or an admin can do this"
   },
+  "groupChatPrompt": {
+    "title": "Group chat prompt (chat.md)",
+    "isDefault": "Default",
+    "unsaved": "Unsaved",
+    "hint": "The whole chat prompt for this group. Saving it replaces the app's built-in default for every agent that answers here. The mandatory `# Safety` guardrail is appended automatically and is not shown or editable here.",
+    "readOnlyHint": "The whole chat prompt for this group. Only the group owner or an admin can edit it. The mandatory `# Safety` guardrail is appended automatically and is not shown here.",
+    "save": "Save",
+    "restore": "Restore default",
+    "saved": "Group chat prompt saved",
+    "saveFailed": "Save failed",
+    "custom": "Custom",
+    "edit": "Edit",
+    "restored": "Group chat prompt restored to default",
+    "restoreFailed": "Restore failed"
+  },
+  "groupSettings": {
+    "title": "Group settings"
+  },
   "newGroup": {
     "title": "New group",
     "nameLabel": "Group name",
