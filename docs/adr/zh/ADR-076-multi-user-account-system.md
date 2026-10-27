@@ -56,7 +56,8 @@
 1. **multi_user 模式下 session 隔离是强制默认**：除 admin 外，所有 session 维度的读写（list / messages / state / files）必须经过 user_id 过滤；漏掉任何一处 = 数据泄漏。local 模式下不启用 session 过滤（见 §决策 12）。**（当前状态：✅ 已满足——Runtime 读路径过滤 + 写路径 owner 校验 + 控制面 HTTP 化均已落地，见 §决策 4 Phase D 实施记录。）**
 2. **admin 不能伪造 user_id**：admin 视图下"以 user A 身份看 session"通过 `?as_user=<user_id>` query 实现，但 `as_user` 不会被普通 user 使用；token 中 `role` 字段在签发时定死，不接受请求内覆盖。
 3. **账号凭据加密不依赖 Vault unlocked**：账号读路径在 Vault locked 状态下退化为 401（无法解密 → 无法登录），但**账号列表（不含密码）的元数据允许在 Vault locked 时展示**（仅元数据，如 username/role/created_at），便于锁屏场景下仍能选账号。
-4. **session.user_id 写入是 immutable**：一个 session 一旦创建绑定 user_id 后**不再修改**（迁移/导入等场景除外，且必须 admin 操作）；这保证会话历史"主人"的不可篡改性。
+4. **session.initiator 写入是 immutable**：一个 session 一旦创建绑定发起方后**不再修改**（迁移/导入等场景除外，且必须 admin 操作）；这保证会话历史"主人"的不可篡改性。
+4a. **执行 session 只有一个发起方，且不可群聊**：执行 session = (绑定的 chat session, initiator)，非发起方只读（admin 也**不可写**，只可 `as_user` 只读巡检）；同一群里不同人 @ 同一个 agent 是两次任务、两个执行 session（见 §决策 4 v2）。
 5. **聊天双方对等**：用户 A → 用户 B 的消息存在 `min(a,b)/chats/max(a,b)/` 目录下，双方 GET / POST 对称，无需在 Gateway 内维护 per-user 状态机。
 6. **密码修改强制旧密码**：改密 API 接受 `old_password + new_password`，避免 token 泄漏后任意改密；admin 不能改他人密码（必须先 reset 再走首次登录改密流程）。
 
@@ -372,7 +373,7 @@ pub enum SessionVisibility { Public, Private }
 
 | scope \ session | public（含 `visibility = None`） | private |
 |---|---|---|
-| admin（`x-user-id: *`） | 可读可写 | 可读可写 |
+| admin（`x-user-id: *` + `x-acowork-scope-admin`） | 可读，**写仅限自己发起的** | 可读，**写仅限自己发起的**（见 §决策 4 v2） |
 | owner | 可读可写 | 可读可写 |
 | 其他 user | 可读 | **404**（不可读、不可写） |
 | local（无头） | 可读可写 | 可读可写 |
@@ -525,6 +526,55 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 - **`GET /sessions/latest` 对非 owner 多一次往返**：见上文安全检查点。缓存值不解 scope。曾经的理由是"解 scope 需要一次全量扫描"——该前提已被 `meta/` 内存索引推翻（见 §5.5「已结清：`meta/` 目录的全量扫」），现在解 scope 只是对已排序行的内存过滤，不再需要新缓存。**行为暂不改**：本轮是纯性能改动，改 `/latest` 的可见性语义要有自己的测试与文档；升级路径已开放——用 `with_meta_index` 取调用者可见的最新行即可。
 - **`visibility` 开关已有 UI（此项已结清）**：`SessionVisibilityToggle` 挂在输入框工具行，仅 owner 可点（`can_write === false` 渲染为 disabled）。**新会话默认值已结清（本次）**：有主会话创建即 `Private`，无主（local / 升级前数据）维持 `None` = 公开——见 §决策 4「默认值的两种含义」。原先那句「per-agent 默认可见性仍未做且刻意留白」**问题已消解**：被留白的是「admin 能否强制某个 agent 的会话可见性」，那是一个 admin 级策略（"这个 agent 的对话是团队共享日志"），与"新会话默认私有"不是同一层，也不再有需求把它当成默认值的替代品；真要做得是 `accounts.json`/配置里的 admin 字段，届时另立决策。
 - **会话内存回收与会话生命周期解耦（未解决，独立议题）**：`SessionManager::evict_idle_sessions` 定义了但**全仓无调用者**（死代码）；实际回收只有 agent 级自动休眠（`process::exit`），而它的续期含**全局** `ActiveHeartbeat`（任何 Desktop 选中该 agent 都续期，不带 user 身份）。因此"观众不该激活会话"是与该缺口直接相关的设计约束：不再给这个没有 per-session GC 的系统增加参与者。详见 §5.5。
+
+#### §决策 4 v2：执行会话只有一个发起方（`initiator`）
+
+**触发**：多用户实测串号（t-9764c5fa）。切到 B 账号后：群聊里 A 的气泡显示成 B 的头像与名字；点「查看执行」跳执行 session 一直 loading；在 session 历史里打开 A 的执行 session，里面的人显示成 B。以 A 的身份派发任务，群聊显示发起人是项目 owner，执行 session 里却显示 A。
+
+**根因三条，全部属于本决策的缺口**：
+
+1. **记录错**：执行 session 的 owner 取的是该 Runtime **最后一次** `update_user_identity` 推送的 profile（`acowork/global/user_profile` 是 retained 单值主题），即"最后登录的人"，而不是真正发起的那个。
+2. **渲染错**：执行面与群聊的 user 气泡身份从**当前登录账号**的 profile store 读，而不是 session 的 owner。
+3. **路由错**：群聊的路由 key 是 `chat:{chat_session_id}`——一个群 + 一个 agent 只有**一个**执行 session，A 和 B 的 @ 落进同一段对话，于是"执行 session"事实上变成了多人群聊。
+
+**不变量（新增，不可协商）**：
+
+- 执行 session = **(绑定的 chat session, 发起方)** 的任务执行记录，**只有一个发起方**，创建时写死、此后不可改。
+- 执行 session **永不承载多人对话**。多人对话是 chat session 的职责，执行 session 是"某人在某个 chat 里交给某个 agent 的那件事"。
+- 发起方可以继续在自己的执行 session 里交互；**非发起方只读**（人看、agent 不写）。
+- **admin 也不能写别人的执行 session**。规则若对 admin 开口，规则就等于不存在。admin 保留 `as_user` **只读巡检**的能力（读全量，写只写自己发起的）。
+- 发起方可以是人（账号 UUID）或 agent（instance UUID，群内 agent 互相派活）；agent 发起的执行 session **任何人类都不可写**。
+
+**改名（与不变量同批落地，避免"user_id 有时指账号有时指发起方"的歧义）**：
+
+| 旧 | 新 | 说明 |
+|---|---|---|
+| `SessionMeta.user_id` | `SessionMeta.initiator` | 侧车 JSON 保留 `#[serde(alias = "user_id")]`，不迁移历史文件 |
+| `sessions.user_id`（SQLite 列） | `sessions.initiator` | 一条 `ALTER TABLE ... RENAME COLUMN`（memory schema v8） |
+| `ConversationSession::set_user_id` | `set_initiator` | |
+| `create_agent_owned_session` | `create_intent_session` | 改为接收信封里的真实发起方，不再读 `last_user_profile` |
+
+`user_id` 这个名字此后**只属于账号体系**：`DirectoryUser.user_id`、Chat participant、PM `created_by`、`SessionScope.uid`。
+
+**`SessionScope` 拆三种**（此前 `Unfiltered` 同时代表 local 和 admin，导致 admin 天然可写一切）：
+
+| scope | 来源 | 读 | 写 |
+|---|---|---|---|
+| `Unfiltered` | local 模式（无 `x-user-id` 头） | 全部 | 全部（没有账号，也就没人可排除） |
+| `Admin { uid }` | `x-user-id: *` + `x-acowork-scope-admin: <uid>` | 全部（含 `as_user`） | 仅 `initiator == uid` |
+| `User { uid, chats }` | `x-user-id: <uid>`（+ `x-acowork-chat-scope`） | 自己的 + `Public` + 所属 chat 的 `Members` | 仅自己的 |
+
+注入点各一处：Gateway 只在 `auth_middleware`（真实请求）与 `runtime_scope_headers`（Runtime 反代）写这两个头，Runtime 只从 `SessionScope::from_headers` 读。
+
+**执行面的写路径才是真正的门**：执行视图发消息走的是 intent 的 pin 通道（`for_execution_session`，ADR-100 D12），**不经过** `is_writable_by`——那个谓词守的是 HTTP 控制面（open/close/delete/config）。所以在 `deliver_pinned_turn` 里补了同一条规则的第二道门：pin 只能指向**绑定到本 chat 且 initiator == 发送方**的 session。不满足就丢弃 pin 走普通路由（"hint 不是 gate"的既有契约），发送方照样能到达 agent，只是进的是自己的 session。没有这道门，单一发起方规则只活在 Desktop 那个被 disable 的输入框里——群成员手上都有本群 chat 行，读得到别人的 `agent_session_id`。
+
+**候选列表在 speaker 未知时 fail-closed**：`is_own` 对"有 initiator 但不知道谁说"返回不可见（local 模式下 initiator 恒为空，走不到这一支），避免把别人的执行记录塞进 router 的候选。
+
+**路由**：群聊路由 key 变为 `chat:{chat_session_id}:{initiator}`，Chat Router 的候选列表按 `initiator` 过滤。因此"同一个群里 B 也 @ 同一个 agent"是新的一次任务、新的执行 session，而不是续写 A 的那一份。PM 任务链 `conv:task:{project}:{task}` 天然单发起方，不变。
+
+**Desktop**：执行面的身份来自 session 的 `initiator`（人查账号目录 `GET /api/users/directory`，agent 查 `agentStore.agents`），不再读 `userProfileStore`；`initiator == 我` 时才回落到本机 profile。群聊里他人的头像走账号目录，不回落当前账号 profile。
+
+**实现记录**：`acowork-core`（`SessionScope` 三态 + 谓词）、`acowork-memory`（schema v8）、`acowork-sqlite`、`acowork-runtime`（改名 + 发起方落盘 + 路由 key + 候选过滤）、`acowork-gateway`（admin scope 头）、Desktop（身份/只读 tab/`setMode`/`resolveActiveSession`）。测试：`chat_routed_sessions_carry_the_members_binding` 同文件内新增"同群两个发起方 → 两个执行 session 且互不可写"，Desktop 侧 `apps/acowork-desktop/src/stores/execInitiator.test.ts`。
 
 ### 决策 5：管理员角色 — `role = "admin"` 绕过过滤 + 特殊权限
 

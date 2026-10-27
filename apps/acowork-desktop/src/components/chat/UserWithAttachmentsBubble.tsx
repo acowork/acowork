@@ -193,7 +193,8 @@ export function UserWithAttachmentsBubble({
       <UserAvatar
         displayName={liveUserName ?? undefined}
         avatarUrl={liveUserAvatarUrl ?? null}
-        builtinAvatarId={liveUserBuiltinAvatarId ?? null}
+        // Tri-state passthrough — `null` must stay `null` (see MessageBubble).
+        builtinAvatarId={liveUserBuiltinAvatarId}
         size={40}
         className="shrink-0 mt-1"
       />

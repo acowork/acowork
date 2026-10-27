@@ -19,7 +19,7 @@ fn meta(sid: &str, title: &str) -> SessionMeta {
         session_id: sid.to_string(),
         agent_id: "agent".into(),
         created_at: "2026-01-01T00:00:00.000Z".into(),
-        user_id: None,
+        initiator: None,
         visibility: None,
         title: Some(title.into()),
         workspace_id: None,

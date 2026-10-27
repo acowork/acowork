@@ -33,6 +33,10 @@ use crate::http::server::HttpState;
 ///
 /// Kept in sync with `acowork-gateway`'s `auth_middleware::USER_SCOPE_HEADER`.
 pub(crate) const USER_SCOPE_HEADER: &str = "x-user-id";
+/// The administrator's own uid, injected beside [`USER_SCOPE_HEADER`] when
+/// `x-user-id` is the `*` sentinel (ADR-076 §决策 4). Kept in sync with the
+/// Gateway's `auth_middleware::ADMIN_SCOPE_HEADER`.
+pub(crate) const ADMIN_SCOPE_HEADER: &str = "x-acowork-scope-admin";
 /// Comma-separated Chat session ids the caller participates in
 /// (design 27 §8.2). Kept in sync with the Gateway's injection.
 pub(crate) const CHAT_SCOPE_HEADER: &str = "x-acowork-chat-scope";
@@ -78,6 +82,7 @@ fn err(status: StatusCode, message: impl Into<String>) -> ApiError {
 pub(crate) fn scope_from_headers(headers: &HeaderMap) -> SessionScope {
     SessionScope::from_headers(
         headers.get(USER_SCOPE_HEADER).and_then(|v| v.to_str().ok()),
+        headers.get(ADMIN_SCOPE_HEADER).and_then(|v| v.to_str().ok()),
         headers.get(CHAT_SCOPE_HEADER).and_then(|v| v.to_str().ok()),
     )
 }
@@ -190,7 +195,11 @@ pub(crate) fn authorize_read(
 ///   could flip a shared ownerless session to private and hide it from
 ///   everyone, or flip an unclaimed-but-private one back and re-share it.
 fn may_change_visibility(meta: &SessionMeta, scope: &SessionScope) -> bool {
-    meta.user_id.is_some() || matches!(scope, SessionScope::Unfiltered)
+    meta.initiator.is_some()
+        || matches!(
+            scope,
+            SessionScope::Unfiltered | SessionScope::Admin { .. }
+        )
 }
 
 /// Authorize a **write** to `sid`. Returns the meta on success.
@@ -261,9 +270,10 @@ async fn publish_lifecycle(
 ///
 /// Membership comes from the Gateway-injected `x-acowork-chat-scope` — the
 /// same set the `Members` read check uses, and the same trust rule (the
-/// middleware strips any client-supplied copy). `Unfiltered` (administrator,
-/// or `AUTH_MODE=local` where there is no account system at all) has nothing
-/// to check against and binds directly.
+/// middleware strips any client-supplied copy). `Unfiltered` (`AUTH_MODE=local`,
+/// where there is no account system at all) has nothing to check against and
+/// binds directly; an administrator binds through its own membership, exactly
+/// like any other account.
 ///
 /// A `false` answer skips the binding; it never rejects the creation. The
 /// header is best-effort injection, and an unbound session is merely not a
@@ -271,7 +281,9 @@ async fn publish_lifecycle(
 fn may_bind_chat(scope: &SessionScope, chat_id: &str) -> bool {
     match scope {
         SessionScope::Unfiltered => true,
-        SessionScope::User { chats, .. } => chats.iter().any(|c| c == chat_id),
+        SessionScope::Admin { chats, .. } | SessionScope::User { chats, .. } => {
+            chats.iter().any(|c| c == chat_id)
+        }
     }
 }
 
@@ -327,7 +339,7 @@ pub(crate) async fn post_create_session(
     let body = body.map(|Json(b)| b).unwrap_or_default();
 
     let sm = session_manager(&state).await?;
-    let owner = scope.user_id().map(str::to_string);
+    let owner = scope.caller_uid().map(str::to_string);
     let sid = sm
         .lock()
         .await
@@ -392,13 +404,13 @@ pub(crate) async fn post_create_session(
     // chat router dispatch) announces itself too (regression t-b2167242).
     let created_at = chrono::Utc::now().to_rfc3339();
 
-    tracing::info!(session_id = %sid, owner = ?scope.user_id(), "HTTP: session created");
+    tracing::info!(session_id = %sid, initiator = ?scope.caller_uid(), "HTTP: session created");
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
             "session_id": sid,
             "created_at": created_at,
-            "owner": scope.user_id(),
+            "initiator": scope.caller_uid(),
             "visibility": decision.effective,
             "chat_session_id": bound_chat,
         })),
@@ -1002,7 +1014,7 @@ mod tests {
             "message_count": 0,
         });
         let mut meta: SessionMeta = serde_json::from_value(raw).expect("meta fixture parses");
-        meta.user_id = owner.map(str::to_string);
+        meta.initiator = owner.map(str::to_string);
         meta
     }
 
@@ -1025,7 +1037,12 @@ mod tests {
         );
         assert!(
             may_change_visibility(&meta(None), &SessionScope::Unfiltered),
-            "admin / local mode is never blocked"
+            "local mode is never blocked"
+        );
+        assert!(
+            may_change_visibility(&meta(None), &SessionScope::admin("u-admin")),
+            "the admin variant is the administrator, not Unfiltered — an
+             unclaimed session is re-shareable by them (ADR-076 §决策 4)"
         );
     }
 

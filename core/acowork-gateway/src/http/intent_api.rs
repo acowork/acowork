@@ -1844,7 +1844,7 @@ async fn resolve_card_answer(
     let mut req = crate::http::proxy::runtime_http_client()
         .post(format!("{endpoint}/sessions/{agent_session_id}/{path}"))
         .headers(crate::http::auth_middleware::runtime_scope_headers(
-            from_user, &chats,
+            from_user, None, &chats,
         ))
         .json(&body);
     if let Some(node_token) =

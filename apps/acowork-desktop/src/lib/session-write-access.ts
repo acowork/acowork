@@ -1,9 +1,11 @@
 //! ADR-076 §决策 4 — one place that answers "may I write to this session?".
 //!
 //! The backend is the source of truth: `can_write` on the session summary,
-//! resolved by `SessionMeta::is_writable_by` (true for the owner, and for
-//! admins / `local` mode regardless of owner). The frontend must NOT
-//! re-derive it from `visibility` — a public session is readable by
+//! resolved by `SessionMeta::is_writable_by` (true for the session's
+//! initiator, and for `local` mode where there are no accounts; an
+//! administrator is deliberately NOT exempt — an execution session has
+//! exactly one initiator). The frontend must NOT re-derive it from
+//! `visibility` — a public session is readable by
 //! everyone but owned by exactly one account.
 //!
 //! This is a hook rather than a prop on purpose. ADR-076 gated the

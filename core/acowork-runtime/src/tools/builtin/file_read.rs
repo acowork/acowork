@@ -23,7 +23,7 @@ impl FileReadTool {
     pub fn spec_value() -> ToolSpec {
         ToolSpec {
             name: "file_read".to_string(),
-            description: "Read up to 100 lines of a file (start_line..end_line, 1-based, inclusive). Hard limit: 100 lines per call — any larger range is REJECTED with a paginate hint, wasting a round-trip. Safe pattern when you don't know file length: request start_line=N, end_line=N+99 (a sliding 100-line window). For longer reads, paginate across multiple calls. Always use content_search FIRST to anchor start_line at the relevant code; never guess a large end_line to \"read the whole file\". start_line and end_line are both required.".to_string(),
+            description: "Read up to 100 lines of a file (start_line..end_line, 1-based, inclusive). Hard limit: 100 lines per call — a range one line over is silently clamped to 100, anything larger is REJECTED with a paginate hint, wasting a round-trip. Safe pattern when you don't know file length: request start_line=N, end_line=N+99 (a sliding 100-line window). For longer reads, paginate across multiple calls. Always use content_search FIRST to anchor start_line at the relevant code; never guess a large end_line to \"read the whole file\". start_line and end_line are both required.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -82,15 +82,13 @@ impl Tool for FileReadTool {
             }
         };
 
-        // Validate range
-        if start_line_raw == 0 {
-            return Ok(ToolResult {
-                ok: false,
-                content: String::new(),
-                error: Some("start_line must be >= 1 (1-based)".to_string()),
-                token_usage: None,
-            });
-        }
+        // Validate range.
+        //
+        // Tolerance: models routinely misread "lines 1..100 inclusive"
+        // as start_line=0 (0-based) — one line off. Clamp it to 1
+        // instead of rejecting: a rejected call burns a round-trip to
+        // fix an off-by-one.
+        let start_line_raw = start_line_raw.max(1);
         if end_line_raw < start_line_raw {
             return Ok(ToolResult {
                 ok: false,
@@ -102,7 +100,13 @@ impl Tool for FileReadTool {
             });
         }
         let requested = (end_line_raw - start_line_raw + 1) as usize;
-        if requested > super::MAX_LINES_PER_CALL {
+        // One line over the cap is the classic off-by-one ("up to 100
+        // lines" read as 101). Clamp to the capped window instead of
+        // rejecting — the next-page hint points at the remainder.
+        // Anything larger stays an error with the paginate template.
+        let end_line_raw = if requested == super::MAX_LINES_PER_CALL + 1 {
+            start_line_raw + super::MAX_LINES_PER_CALL as u64 - 1
+        } else if requested > super::MAX_LINES_PER_CALL {
             return Ok(ToolResult {
                 ok: false,
                 content: String::new(),
@@ -116,7 +120,9 @@ impl Tool for FileReadTool {
                 )),
                 token_usage: None,
             });
-        }
+        } else {
+            end_line_raw
+        };
 
         let full_path = acowork_core::path_utils::resolve(path, work_dir);
         tracing::debug!(
@@ -396,7 +402,9 @@ mod tests {
     // ── Parameter validation ────────────────────────────────────
 
     #[tokio::test]
-    async fn e2e_start_line_zero_errors_as_one_based() {
+    async fn e2e_start_line_zero_is_clamped_to_one_based() {
+        // start_line=0 is a 0-based off-by-one, not a real error: clamp
+        // it to 1 instead of burning a round-trip.
         let (_dir, p) = build_lines_file(10);
         let result = FileReadTool::new()
             .execute(
@@ -409,8 +417,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!result.ok);
-        assert!(result.error.as_deref().unwrap().contains("1-based"));
+        assert!(result.ok, "{:?}", result.error);
+        assert!(result.content.contains("1: "), "got: {}", result.content);
+        assert!(result.content.contains("5: "), "got: {}", result.content);
     }
 
     #[tokio::test]
@@ -486,7 +495,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_range_one_over_max_lines_errors() {
+    async fn e2e_range_one_over_max_lines_is_clamped() {
+        // "up to 100 lines" misread as 101 → clamp to the capped window
+        // instead of rejecting the call.
         let (_dir, p) = build_lines_file(MAX_LINES_PER_CALL + 1);
         let result = FileReadTool::new()
             .execute(
@@ -499,8 +510,17 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!result.ok);
-        assert!(result.error.as_deref().unwrap().contains("Range too large"));
+        assert!(result.ok, "{:?}", result.error);
+        assert!(
+            result.content.contains(&format!("{MAX_LINES_PER_CALL}: ")),
+            "got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains(&format!("{}: ", MAX_LINES_PER_CALL + 1)),
+            "must stop at the cap: {}",
+            result.content
+        );
     }
 
     // ── Out-of-range handling ───────────────────────────────────

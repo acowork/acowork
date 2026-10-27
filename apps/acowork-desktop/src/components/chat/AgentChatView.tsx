@@ -473,7 +473,7 @@ const RowView = memo(function RowView({
         <UserAvatar
           displayName={profile.displayName}
           avatarUrl={profile.backendAvatarUrl ?? null}
-          builtinAvatarId={profile.backendBuiltinAvatarId ?? null}
+          builtinAvatarId={profile.backendBuiltinAvatarId ?? undefined}
           size={40}
           className="shrink-0 mt-1"
         />

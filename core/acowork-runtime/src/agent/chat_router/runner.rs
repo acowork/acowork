@@ -609,7 +609,10 @@ async fn run_turn(
             let target = args.target.clone();
             let delivered = {
                 let mut guard = session_manager.lock().await;
-                match guard.chat_dispatch(&chat_id, target, seed).await {
+                match guard
+                    .chat_dispatch(&chat_id, target, seed, Some(envelope.from.as_str()))
+                    .await
+                {
                     Ok((session_id, opened_new)) => {
                         let content = dispatch_content(opened_new, brief.as_deref(), text);
                         // §5.5.5 pending queue: record BEFORE delivering. The
