@@ -10,7 +10,6 @@ triggers:
   - weekly report
   - project status
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ Bad news should be surfaced early with options and a recommended recovery path.
 
 1. **Collect evidence from sources**
    - Use `mcp_memory__memory_recall` to retrieve plan, sprint commitment, previous status, velocity, risks, blockers, and decisions
-   - Use `file_read` to inspect tracking files, task lists, changelogs, PRs, release notes, test results, or meeting notes
+   - Use your shell tool (`cat`, `Get-Content`) to inspect tracking files, task lists, changelogs, PRs, release notes, test results, or meeting notes
    - Collect completed, in-progress, blocked, at-risk, and newly discovered work
    - Separate verified facts from estimates and self-reported status
 

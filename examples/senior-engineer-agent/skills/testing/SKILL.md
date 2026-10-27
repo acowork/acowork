@@ -11,7 +11,6 @@ triggers:
   - integration test
   - TDD
 tool_deps:
-  - file_read
   - file_write
   - shell
   - mcp_memory__memory_recall
@@ -30,7 +29,7 @@ If you did not see the test fail for the expected reason, you have not proven th
 
 1. **Analyze the target and conventions**
    - Use `mcp_memory__memory_recall` to retrieve project-specific testing conventions and known edge cases
-   - Use `file_read` to inspect the code under test, existing tests, fixtures, and test commands
+   - Use your shell tool (`cat`, `Get-Content`) to inspect the code under test, existing tests, fixtures, and test commands
    - Identify the public contract: inputs, outputs, side effects, error conditions, and invariants
    - Find similar tests in the codebase and follow their style
    - Avoid adding new test libraries unless the project already uses them or the user approves

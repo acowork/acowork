@@ -10,7 +10,6 @@ triggers:
   - risk analysis
   - risk register
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ Every High or Medium risk needs an owner, trigger, mitigation, contingency, resi
 
 1. **Load context and history**
    - Use `mcp_memory__memory_recall` to retrieve historical risks, incidents, estimate misses, dependency failures, and mitigation patterns
-   - Use `file_read` to inspect PRD, sprint plan, task breakdown, architecture/design docs, dependency lists, and status reports
+   - Use your shell tool (`cat`, `Get-Content`) to inspect PRD, sprint plan, task breakdown, architecture/design docs, dependency lists, and status reports
    - Identify assumptions that, if false, would threaten scope, schedule, quality, cost, or trust
 
 2. **Identify risks by category**

@@ -10,7 +10,6 @@ triggers:
   - plan sprint
   - iteration planning
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -33,7 +32,7 @@ A sprint goal is the commitment; individual stories are the forecast.
    - Apply retrospective actions as explicit sprint planning constraints
 
 2. **Inspect and refine backlog**
-   - Use `file_read` to examine backlog, PRD, task breakdown, risk register, and dependencies
+   - Use your shell tool (`cat`, `Get-Content`) to examine backlog, PRD, task breakdown, risk register, and dependencies
    - Check readiness for each candidate item:
      - Clear acceptance criteria
      - Estimate available

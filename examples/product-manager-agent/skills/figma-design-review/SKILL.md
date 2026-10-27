@@ -10,7 +10,6 @@ triggers:
   - 设计评审
   - 原型评审
 tool_deps:
-  - file_read
   - file_write
   - network
   - mcp_memory__memory_store
@@ -29,7 +28,7 @@ If direct Figma access is unavailable, ask for screenshots, exported frames, pro
 
 1. **Load product and design context**
    - Use `mcp_memory__memory_recall` to retrieve PRD decisions, user segments, Figma review findings, design standards, and launch constraints
-   - Use `file_read` to inspect PRD, acceptance criteria, user flow, prior design notes, screenshots, or exported Figma specs
+   - Use your shell tool (`cat`, `Get-Content`) to inspect PRD, acceptance criteria, user flow, prior design notes, screenshots, or exported Figma specs
    - Use `network` only when a Figma or design reference is available and access is allowed
    - Identify design source: Figma file, prototype, screenshot, exported frames, or written spec
 

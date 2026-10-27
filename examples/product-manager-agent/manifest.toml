@@ -26,7 +26,7 @@ type = "Network"
 # Tool opt-in declarations (ADR-029).
 # Product Manager focuses on strategy, PRD writing, roadmap prioritization,
 # Figma/feature review, and launch planning. Tools cover those workflows:
-#   - file_*/doc_reader/glob_search/content_search → PRDs, specs, references
+#   - file_write/file_edit/doc_reader             → PRDs, specs, references
 #   - http_request/web_fetch                      → market & competitor research
 #   - mcp_memory__* (hosted memory MCP, ADR-101)   → long-term project context
 #   - intent_send                                  → coordinate with engineering agents

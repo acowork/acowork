@@ -28,7 +28,7 @@ type = "Network"
 # defect management, release acceptance, and regression management. This is a
 # planning/management role, not a test-execution role — tools cover authoring
 # and review, not running test commands:
-#   - file_*/doc_reader/glob_search/content_search → test plans, cases, defect reports
+#   - file_write/file_edit/doc_reader             → test plans, cases, defect reports
 #   - http_request/web_fetch                      → research test tools & practices
 #   - mcp_memory__* (hosted memory MCP, ADR-101)   → quality history & known issues
 #   - intent_send                                  → coordinate with dev/PM agents

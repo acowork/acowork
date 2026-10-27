@@ -27,7 +27,7 @@ type = "Network"
 # Project Manager focuses on requirements analysis, task decomposition,
 # progress tracking, risk assessment, and team coordination. Tools cover those
 # workflows:
-#   - file_*/doc_reader/glob_search/content_search → project docs, status reports
+#   - file_write/file_edit/doc_reader             → project docs, status reports
 #   - http_request/web_fetch                      → research tools/methodologies
 #   - mcp_memory__* (hosted memory MCP, ADR-101)   → project history & decisions
 #   - intent_send                                  → coordinate team member agents

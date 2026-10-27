@@ -11,7 +11,6 @@ triggers:
   - 架构策略
   - 架构设计
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -23,7 +22,7 @@ tool_deps:
 
 1. **Explore context**
    - Use `mcp_memory__memory_recall` to retrieve prior architecture decisions and project constraints
-   - Use `file_read` to inspect existing structure, docs, interfaces, and conventions
+   - Use your shell tool (`cat`, `Get-Content`) to inspect existing structure, docs, interfaces, and conventions
    - Identify current system shape, integration points, operational constraints, and known pain points
    - Separate facts from assumptions
 

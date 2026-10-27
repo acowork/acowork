@@ -10,7 +10,6 @@ triggers:
   - 产品需求
   - 需求文档
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ Do not write vague requirements that cannot be accepted or rejected.
 
 1. **Load context**
    - Use `mcp_memory__memory_recall` to retrieve product decisions, research insights, roadmap constraints, Figma review findings, and stakeholder preferences
-   - Use `file_read` to inspect strategy, research, roadmap, existing PRDs, Figma exports/specs, support feedback, and technical constraints
+   - Use your shell tool (`cat`, `Get-Content`) to inspect strategy, research, roadmap, existing PRDs, Figma exports/specs, support feedback, and technical constraints
    - Separate facts, assumptions, decisions, and open questions
 
 2. **Clarify problem and goals**

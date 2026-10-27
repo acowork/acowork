@@ -11,7 +11,6 @@ triggers:
   - 风险评估
   - 回滚计划
 tool_deps:
-  - file_read
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -22,7 +21,7 @@ tool_deps:
 
 1. **Establish scope**
    - Use `mcp_memory__memory_recall` to retrieve prior incidents, architecture decisions, and project constraints
-   - Use `file_read` to inspect the proposed change, affected files, interfaces, and deployment path
+   - Use your shell tool (`cat`, `Get-Content`) to inspect the proposed change, affected files, interfaces, and deployment path
    - Identify touched subsystems, public contracts, data stores, security boundaries, and operational dependencies
 
 2. **Classify risk tier**

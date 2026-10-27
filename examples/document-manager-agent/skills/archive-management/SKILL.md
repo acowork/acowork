@@ -10,7 +10,6 @@ triggers:
   - 文档归档
   - retention
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ Archiving should preserve retrievability and context. Do not simply move files w
 
 1. **Identify archive candidates**
    - Use `mcp_memory__memory_recall` to retrieve archive rules, document lifecycle policies, and canonical sources
-   - Use `file_read` to inspect document inventory, indexes, stale docs, superseded docs, and duplicates
+   - Use your shell tool (`cat`, `Get-Content`) to inspect document inventory, indexes, stale docs, superseded docs, and duplicates
    - Determine why each document should be archived: obsolete, superseded, historical snapshot, duplicate, completed project, or compliance retention
 
 2. **Assess archive impact**

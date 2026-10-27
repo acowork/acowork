@@ -10,7 +10,6 @@ triggers:
   - work breakdown
   - decompose
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ Each task must be small enough to complete, review, and verify independently.
 
 1. **Confirm source of truth**
    - Use `mcp_memory__memory_recall` to retrieve PRD, prior breakdowns, decisions, velocity, estimation accuracy, and constraints
-   - Use `file_read` to inspect requirements, architecture/design docs, backlog, and existing plans
+   - Use your shell tool (`cat`, `Get-Content`) to inspect requirements, architecture/design docs, backlog, and existing plans
    - Confirm goal, in-scope items, non-goals, acceptance criteria, and required delivery date
    - If the source has unresolved scope questions, stop and ask before decomposing
 

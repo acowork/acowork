@@ -10,7 +10,6 @@ triggers:
   - 整理文档
   - docs IA
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ Organize documents around how readers find and use information, not around how f
 
 1. **Load inventory and conventions**
    - Use `mcp_memory__memory_recall` to retrieve taxonomy, naming conventions, canonical sources, and archive rules
-   - Use `file_read` to inspect existing docs tree, README files, indexes, summaries, and document inventories
+   - Use your shell tool (`cat`, `Get-Content`) to inspect existing docs tree, README files, indexes, summaries, and document inventories
    - Identify current navigation, duplicate areas, stale docs, orphan docs, and missing entry points
 
 2. **Define information architecture**

@@ -10,7 +10,6 @@ triggers:
   - markdown
   - HTML
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ Format conversion must preserve meaning, structure, links, metadata, code blocks
 
 1. **Confirm source and target**
    - Use `mcp_memory__memory_recall` to retrieve format preferences, templates, and publishing rules
-   - Use `file_read` to inspect source document and related assets
+   - Use your shell tool (`cat`, `Get-Content`) to inspect source document and related assets
    - Confirm target format, audience, destination, required metadata, and fidelity expectations
    - Identify unsupported elements before conversion
 

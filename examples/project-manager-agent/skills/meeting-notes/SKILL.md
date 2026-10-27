@@ -10,7 +10,6 @@ triggers:
   - meeting minutes
   - take notes
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ Every decision needs rationale. Every action item needs one owner, due date, and
 
 1. **Prepare context**
    - Use `mcp_memory__memory_recall` to retrieve project context, prior decisions, open action items, stakeholder preferences, and unresolved questions
-   - Use `file_read` to inspect agenda, prior notes, status report, risk register, or relevant project docs
+   - Use your shell tool (`cat`, `Get-Content`) to inspect agenda, prior notes, status report, risk register, or relevant project docs
    - Document meeting purpose, desired outcomes, attendees, decision-makers, and absent stakeholders
    - Bring forward unresolved action items from prior meetings
 

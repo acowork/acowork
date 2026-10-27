@@ -10,7 +10,6 @@ triggers:
   - persona
   - journey map
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ Research output must distinguish evidence from interpretation. Do not treat one 
 
 1. **Define research objective**
    - Use `mcp_memory__memory_recall` to retrieve prior research, personas, segments, product decisions, and open assumptions
-   - Use `file_read` to inspect PRDs, analytics, support tickets, feedback, interview notes, and roadmap questions
+   - Use your shell tool (`cat`, `Get-Content`) to inspect PRDs, analytics, support tickets, feedback, interview notes, and roadmap questions
    - Define research question, target segment, decision to inform, and confidence needed
 
 2. **Plan research method**

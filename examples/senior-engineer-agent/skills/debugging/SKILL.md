@@ -10,7 +10,6 @@ triggers:
   - troubleshoot
   - investigate
 tool_deps:
-  - file_read
   - file_write
   - shell
   - mcp_memory__memory_recall
@@ -29,7 +28,7 @@ If you cannot explain why the bug happens, do not change production code except 
 
 1. **Reproduce and capture facts**
    - Use `mcp_memory__memory_recall` to check whether a similar issue, convention, or known failure mode exists
-   - Use `file_read` to inspect relevant source, tests, configuration, and docs
+   - Use your shell tool (`cat`, `Get-Content`) to inspect relevant source, tests, configuration, and docs
    - Use `shell` to run the exact failing command or scenario
    - Record environment, inputs, expected behavior, actual behavior, logs, stack traces, and frequency
    - If the issue is not reproducible, gather more evidence instead of guessing

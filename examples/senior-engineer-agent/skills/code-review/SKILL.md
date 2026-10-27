@@ -9,7 +9,6 @@ triggers:
   - 审查代码
   - PR review
 tool_deps:
-  - file_read
   - mcp_memory__memory_recall
   - mcp_memory__memory_store
 ---
@@ -26,7 +25,7 @@ Critical and Important issues must be resolved before proceeding unless the user
 
 1. **Understand scope and intent**
    - Use `mcp_memory__memory_recall` to retrieve project-specific coding standards, architectural boundaries, and prior review feedback
-   - Use `file_read` to inspect changed files, surrounding context, tests, docs, and relevant interfaces
+   - Use your shell tool (`cat`, `Get-Content`) to inspect changed files, surrounding context, tests, docs, and relevant interfaces
    - Identify change type: bug fix, feature, refactor, config, dependency, docs, or generated artifact
    - Identify claimed behavior and acceptance criteria from the request, commit message, or PR description
    - If scope is too large or mixed, recommend splitting before deep review

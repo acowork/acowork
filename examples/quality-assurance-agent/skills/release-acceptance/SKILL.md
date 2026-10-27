@@ -10,7 +10,6 @@ triggers:
   - 发布验收
   - 发布质量
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ No release recommendation without evidence. A release decision must state Go, No
 
 1. **Load release context**
    - Use `mcp_memory__memory_recall` to retrieve release history, quality gates, accepted risks, defect trends, and prior rollback issues
-   - Use `file_read` to inspect release plan, test reports, defect list, risk register, monitoring plan, rollback plan, and release notes
+   - Use your shell tool (`cat`, `Get-Content`) to inspect release plan, test reports, defect list, risk register, monitoring plan, rollback plan, and release notes
    - Confirm release scope, target date, stakeholders, and decision-maker
 
 2. **Evaluate quality gates**

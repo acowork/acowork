@@ -10,7 +10,6 @@ triggers:
   - 产品定位
   - strategy
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ Product strategy must connect user value, business outcome, differentiation, and
 
 1. **Load context**
    - Use `mcp_memory__memory_recall` to retrieve prior product decisions, user segments, metrics, roadmap constraints, and stakeholder preferences
-   - Use `file_read` to inspect product docs, research, analytics exports, roadmap, PRDs, support feedback, and competitive notes
+   - Use your shell tool (`cat`, `Get-Content`) to inspect product docs, research, analytics exports, roadmap, PRDs, support feedback, and competitive notes
    - Separate facts, assumptions, open questions, and decisions already made
 
 2. **Clarify strategic frame**

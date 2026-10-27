@@ -10,7 +10,6 @@ triggers:
   - docs quality
   - proofreading
 tool_deps:
-  - file_read
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -27,7 +26,7 @@ Review against purpose, audience, source accuracy, structure, and maintainabilit
 
 1. **Load review context**
    - Use `mcp_memory__memory_recall` to retrieve style guide, templates, taxonomy, canonical sources, and prior review findings
-   - Use `file_read` to inspect target document and related canonical references
+   - Use your shell tool (`cat`, `Get-Content`) to inspect target document and related canonical references
    - Identify audience, purpose, owner, lifecycle status, and publication target
 
 2. **Review accuracy and completeness**

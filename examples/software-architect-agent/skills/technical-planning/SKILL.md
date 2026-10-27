@@ -11,7 +11,6 @@ triggers:
   - 技术计划
   - 实施计划
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -23,7 +22,7 @@ tool_deps:
 
 1. **Read the approved design**
    - Use `mcp_memory__memory_recall` to retrieve relevant decisions and conventions
-   - Use `file_read` to inspect the design/spec, existing file structure, tests, and implementation patterns
+   - Use your shell tool (`cat`, `Get-Content`) to inspect the design/spec, existing file structure, tests, and implementation patterns
    - Confirm scope, non-goals, constraints, and acceptance criteria
 
 2. **Map file responsibilities**

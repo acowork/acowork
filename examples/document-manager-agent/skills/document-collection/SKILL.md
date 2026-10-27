@@ -10,7 +10,6 @@ triggers:
   - 收集资料
   - gather documents
 tool_deps:
-  - file_read
   - file_write
   - network
   - mcp_memory__memory_store
@@ -31,7 +30,7 @@ Do not mix source material with interpretation. Every collected item needs prove
    - Ask one focused question when scope is ambiguous
 
 2. **Collect source materials**
-   - Use `file_read` to inspect local documents, notes, specs, plans, meeting records, exports, and indexes
+   - Use your shell tool (`cat`, `Get-Content`) to inspect local documents, notes, specs, plans, meeting records, exports, and indexes
    - Use `network` only for provided or approved links and references
    - Capture files, links, titles, authors, dates, versions, owners, and related topics
    - Do not collect secrets, credentials, or private personal data into docs

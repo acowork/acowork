@@ -10,7 +10,6 @@ triggers:
   - 发布计划
   - 上线计划
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ A launch is not complete when code ships. It is complete when target users can d
 
 1. **Load launch context**
    - Use `mcp_memory__memory_recall` to retrieve product strategy, prior launches, stakeholder preferences, known risks, and metric baselines
-   - Use `file_read` to inspect PRD, roadmap, acceptance report, release readiness, support docs, analytics plan, and communication drafts
+   - Use your shell tool (`cat`, `Get-Content`) to inspect PRD, roadmap, acceptance report, release readiness, support docs, analytics plan, and communication drafts
    - Confirm target users, launch scope, release date, channels, and decision owner
 
 2. **Define launch goals and audience**

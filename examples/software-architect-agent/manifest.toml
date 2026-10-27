@@ -30,8 +30,8 @@ type = "Shell"
 # Software Architect investigates systems, reviews designs, and plans technical
 # work — the broadest tool set among user agents, mirroring the senior engineer's
 # shell + LSP needs for architecture review and infrastructure investigation:
-#   - file_*/doc_reader/glob_search/content_search → navigate and author designs
-#   - bash/powershell/shell                       → investigate infra, run analysis tools
+#   - file_write/file_edit/doc_reader             → author and review design docs
+#   - bash/powershell/shell                       → investigate infra, read/search source, run analysis tools
 #   - http_request/web_fetch                     → research patterns & best practices
 #   - codebase                                    → LSP-based code intelligence for review
 #   - mcp_memory__* (hosted memory MCP, ADR-101)   → architecture decisions and trade-offs

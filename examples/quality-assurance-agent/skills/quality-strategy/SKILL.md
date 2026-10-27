@@ -10,7 +10,6 @@ triggers:
   - 质量策略
   - 质量管理
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ Quality strategy must be risk-based and evidence-driven. Do not define generic q
 
 1. **Load context**
    - Use `mcp_memory__memory_recall` to retrieve prior quality gates, defect trends, release history, flaky tests, and accepted risks
-   - Use `file_read` to inspect PRD, architecture docs, roadmap, release plan, support issues, test reports, and incident history
+   - Use your shell tool (`cat`, `Get-Content`) to inspect PRD, architecture docs, roadmap, release plan, support issues, test reports, and incident history
    - Identify product area, release target, users, stakeholders, compliance needs, and operational constraints
 
 2. **Identify quality risks**

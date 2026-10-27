@@ -10,7 +10,6 @@ triggers:
   - product requirements
   - gather requirements
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ If a requirement is ambiguous, ask one focused question before turning it into s
 
 1. **Collect context and sources**
    - Use `mcp_memory__memory_recall` to retrieve project context, stakeholder preferences, prior requirements, decisions, and constraints
-   - Use `file_read` to inspect docs, meeting notes, backlog items, roadmap, support issues, and customer feedback
+   - Use your shell tool (`cat`, `Get-Content`) to inspect docs, meeting notes, backlog items, roadmap, support issues, and customer feedback
    - Identify sources: users, business stakeholders, engineering, operations, compliance, support, market, and dependencies
    - Separate facts, assumptions, opinions, and open questions
 

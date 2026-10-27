@@ -11,7 +11,6 @@ triggers:
   - README
   - guide
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_recall
 ---
@@ -21,7 +20,7 @@ tool_deps:
 ## Execution Steps
 
 1. **Understand what needs documentation**
-   - Use `file_read` to examine the code or system that needs documentation
+   - Use your shell tool (`cat`, `Get-Content`) to examine the code or system that needs documentation
    - Use `mcp_memory__memory_recall` to retrieve any prior documentation decisions, style guides, or templates
    - Determine the documentation type:
      - **API Reference**: Auto-generated from code annotations (rustdoc, JSDoc, docstrings)

@@ -10,7 +10,6 @@ triggers:
   - regression suite
   - flaky tests
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ Prioritize tests that protect critical user journeys, high-change areas, high-de
 
 1. **Load regression context**
    - Use `mcp_memory__memory_recall` to retrieve defect history, flaky tests, release escapes, critical paths, and prior regression scope
-   - Use `file_read` to inspect test plan, test reports, automation suite, changelog, PR list, release scope, and known issues
+   - Use your shell tool (`cat`, `Get-Content`) to inspect test plan, test reports, automation suite, changelog, PR list, release scope, and known issues
    - Identify changed areas and impacted user journeys
 
 2. **Perform change impact analysis**

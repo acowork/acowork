@@ -9,7 +9,6 @@ triggers:
   - QA plan
   - 测试计划
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -27,7 +26,7 @@ Do not create a plan that only lists test types without explaining what risk eac
 
 1. **Confirm scope and inputs**
    - Use `mcp_memory__memory_recall` to retrieve prior test plans, defect history, flaky tests, environment constraints, and release gates
-   - Use `file_read` to inspect PRD, design docs, task breakdown, architecture, risk register, and release plan
+   - Use your shell tool (`cat`, `Get-Content`) to inspect PRD, design docs, task breakdown, architecture, risk register, and release plan
    - Confirm in-scope features, out-of-scope areas, target platforms, environments, data needs, and release timeline
    - Identify unresolved questions that block planning
 

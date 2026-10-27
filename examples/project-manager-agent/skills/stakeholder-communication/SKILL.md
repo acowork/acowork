@@ -10,7 +10,6 @@ triggers:
   - executive summary
   - stakeholder communication
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ Do not hide bad news. State the situation, impact, options, recommendation, and 
 
 1. **Identify audience and purpose**
    - Use `mcp_memory__memory_recall` to retrieve stakeholder profiles, communication preferences, prior feedback, and decision patterns
-   - Use `file_read` to inspect relevant PRD, plan, status report, risk register, or meeting notes
+   - Use your shell tool (`cat`, `Get-Content`) to inspect relevant PRD, plan, status report, risk register, or meeting notes
    - Identify audience type: executive, product, engineering, team, customer, partner, compliance, operations
    - Define communication purpose: inform, decide, escalate, align, unblock, or confirm
    - Identify the decision-maker and affected stakeholders

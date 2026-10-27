@@ -10,7 +10,6 @@ triggers:
   - 路线图
   - 优先级
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -28,7 +27,7 @@ Do not prioritize by stakeholder volume alone; use evidence, impact, effort, con
 
 1. **Load candidate context**
    - Use `mcp_memory__memory_recall` to retrieve strategy, roadmap decisions, metrics, user insights, stakeholder preferences, and prior trade-offs
-   - Use `file_read` to inspect backlog, PRDs, research, analytics, support feedback, risk register, and dependency plans
+   - Use your shell tool (`cat`, `Get-Content`) to inspect backlog, PRDs, research, analytics, support feedback, risk register, and dependency plans
    - Normalize candidate items so each has user, problem, expected outcome, and effort estimate
 
 2. **Select prioritization model**

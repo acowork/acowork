@@ -27,7 +27,7 @@ type = "Network"
 # Document Manager focuses on collecting, organizing, archiving, writing,
 # reviewing, and converting documentation. Tools cover the full doc lifecycle:
 #   - doc_reader              → PRIMARY tool: read PDF/Word/Excel/PowerPoint
-#   - file_*/glob_search/content_search → organize, write, search knowledge base
+#   - file_write/file_edit    → organize and write knowledge-base docs
 #   - http_request/web_fetch             → gather external references
 #   - mcp_memory__* (hosted memory MCP, ADR-101)   → knowledge-base persistence across sessions
 #   - intent_send             → coordinate with content-owner agents

@@ -10,7 +10,6 @@ triggers:
   - 验收
   - 产品验收
 tool_deps:
-  - file_read
   - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -26,7 +25,7 @@ Do not accept a feature by impression. Acceptance requires evidence against PRD,
 
 1. **Load acceptance basis**
    - Use `mcp_memory__memory_recall` to retrieve PRD decisions, Figma review findings, known risks, and accepted trade-offs
-   - Use `file_read` to inspect PRD, acceptance criteria, design specs, test reports, release notes, and known issues
+   - Use your shell tool (`cat`, `Get-Content`) to inspect PRD, acceptance criteria, design specs, test reports, release notes, and known issues
    - Identify in-scope requirements and non-goals
 
 2. **Validate requirement coverage**
