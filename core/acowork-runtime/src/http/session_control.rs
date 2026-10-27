@@ -766,7 +766,7 @@ pub(crate) async fn post_send_message(
             // client's `for_execution_session` pin answers the same question
             // but only when it has the binding, which a router-created
             // session's client row may not carry.
-            answerable_by: scope.user_id().unwrap_or_default().to_string(),
+            answerable_by: scope.caller_uid().unwrap_or_default().to_string(),
         },
     )
     .await;
