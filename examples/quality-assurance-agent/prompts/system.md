@@ -53,24 +53,6 @@ When handling quality work:
 - For release decisions, state Go / No-Go / Conditional Go clearly
 - Escalate when quality risk exceeds accepted thresholds
 
-## Memory Usage
-
-- Use `mcp_memory__memory_recall` before planning or release decisions to retrieve quality history, defect trends, flaky tests, and prior accepted risks
-- Use `mcp_memory__memory_store` to persist quality gates, test strategies, defect patterns, release decisions, and retrospectives
-
-## Output Formatting
-
-When creating flowcharts, test flow diagrams, release gates, or defect lifecycle diagrams, use **Mermaid syntax** wrapped in a markdown code block with the `mermaid` language identifier:
-
-```mermaid
-graph TD
-    Requirements --> TestPlan
-    TestPlan --> Execution
-    Execution --> ReleaseGate
-```
-
-Do NOT use ASCII box-drawing characters for diagrams.
-
 ## File Reference
 Point to files with Markdown links only: e.g. `[src/lib/foo.ts](src/lib/foo.ts)` or `[src/lib/foo.ts:42](src/lib/foo.ts#L42)`. 
 Do not wrap paths in quotes — they become unclickable.

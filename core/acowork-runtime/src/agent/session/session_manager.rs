@@ -61,7 +61,9 @@ pub enum SessionOpenOutcome {
 }
 
 /// Configuration for SessionManager.
-#[derive(Debug, Clone)]
+// (no `Debug`: the session-event publisher below wraps an MQTT handle that
+// has no `Debug` impl, and nothing formats this config.)
+#[derive(Clone)]
 pub struct SessionManagerConfig {
     /// Channel capacity for each session's inbound message queue
     pub inbound_channel_capacity: usize,
@@ -83,6 +85,15 @@ pub struct SessionManagerConfig {
     /// When set, each session's AgentLoop forwards control events here
     /// so the caller can relay them to Gateway.
     pub chunk_tx: Option<mpsc::Sender<SessionChunkEvent>>,
+    /// ADR-034 §4: publisher for `acowork/agents/{id}/sessions/created`.
+    /// Every creation path funnels through `create_frontend_session` (HTTP
+    /// `POST /sessions`, intent routing, the chat router's `dispatch(new)`),
+    /// and the session list on every client is maintained from this one
+    /// event — a silently created session leaves the Desktop's session list
+    /// and tab strip stale until it re-enters the agent. `None` = no broker
+    /// (standalone/tests), which degrades to "no event", never to a failed
+    /// creation.
+    pub session_events: Option<crate::mqtt::MqttChunkPublisher>,
     /// Full tool specs (name, schema) for ALL registered built-in tools.
     /// Stored so that tool definitions can be hot-rebuilt when `active_tools`
     /// changes without requiring access to the ToolRegistry (which is behind Arc).
@@ -140,6 +151,7 @@ impl Default for SessionManagerConfig {
             },
             history_max_tokens: 128_000,
             chunk_tx: None,
+            session_events: None,
             full_tool_specs: Vec::new(),
             identity_context: None,
             protocol_type: ProtocolType::default(),
@@ -572,6 +584,7 @@ impl SessionManager {
         key: &str,
         seed: Option<super::intent_routing::SessionSeed>,
         source_chat_session_id: Option<&str>,
+        initiator: Option<&str>,
     ) -> Result<(String, bool)> {
         let mapped = {
             let map = self
@@ -590,7 +603,7 @@ impl SessionManager {
         let chat_id = source_chat_session_id
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .or_else(|| key.strip_prefix("chat:"));
+            .or_else(|| super::intent_routing::chat_id_from_key(key));
         if let Some(sid) = &mapped {
             if self.get_session(sid).is_some() {
                 // ADR-099: an explicit `session_config` never forces a new
@@ -613,9 +626,7 @@ impl SessionManager {
                 "Intent routing entry points at a non-active session — opening a fresh one"
             );
         }
-        let new_sid = self
-            .create_agent_owned_session(None, seed.as_ref())
-            .await?;
+        let new_sid = self.create_intent_session(initiator, seed.as_ref()).await?;
         self.stamp_chat_binding(chat_id, &new_sid);
         self.intent_map
             .lock()
@@ -684,7 +695,7 @@ impl SessionManager {
             }
         }
 
-        let chat_key = format!("chat:{chat_session_id}");
+        let chat_key = super::intent_routing::chat_key(chat_session_id, owner_user_id.unwrap_or(""));
         let mut current: Option<String> = None;
         let mut task_ids = HashSet::new();
         {
@@ -742,10 +753,11 @@ impl SessionManager {
         chat_session_id: &str,
         target: crate::agent::chat_router::tool::Target,
         seed: Option<super::intent_routing::SessionSeed>,
+        initiator: Option<&str>,
     ) -> Result<(String, bool)> {
         use crate::agent::chat_router::tool::Target;
 
-        let key = format!("chat:{chat_session_id}");
+        let key = super::intent_routing::chat_key(chat_session_id, initiator.unwrap_or(""));
         let seed = self.clamp_seed(seed);
 
         let existing = match target {
@@ -797,7 +809,7 @@ impl SessionManager {
             return Ok((session_id, false));
         }
 
-        let new_sid = self.create_agent_owned_session(None, seed.as_ref()).await?;
+        let new_sid = self.create_intent_session(initiator, seed.as_ref()).await?;
         self.stamp_chat_binding(Some(chat_session_id), &new_sid);
         self.intent_map
             .lock()
@@ -1162,15 +1174,16 @@ impl SessionManager {
     /// notifications — all in a single atomic operation.
     ///
     /// Returns the new session ID on success.
-    /// ADR-076 §决策 4: `user_id` is the creating account, or `None`
-    /// under `AUTH_MODE=local` (no account system). It is recorded once
-    /// on the session meta and never reassigned.
+    /// ADR-076 §决策 4: `initiator` is who started this session (an account,
+    /// or an agent instance), or `None` under `AUTH_MODE=local` (no account
+    /// system). It is recorded once on the session meta and never
+    /// reassigned.
     pub async fn create_frontend_session(
         &mut self,
         workspace_id: Option<&str>,
         model: Option<&str>,
         provider: Option<&str>,
-        user_id: Option<&str>,
+        initiator: Option<&str>,
     ) -> Result<String> {
         let session_id = crate::conversation::generate_session_id();
         let committed_lines = Self::new_committed_lines();
@@ -1202,7 +1215,7 @@ impl SessionManager {
         // ADR-076 §决策 4: stamp the owner before the session task starts,
         // so the very first meta write already carries it and a concurrent
         // list can never observe an ownerless session it just created.
-        conv.set_user_id(user_id.map(|u| u.to_string()));
+        conv.set_initiator(initiator.map(|u| u.to_string()));
 
         // ADR-076 §决策 4: an owned session starts **private**.
         //
@@ -1218,7 +1231,7 @@ impl SessionManager {
         // The per-session switch is still the way out, and because the
         // value is on disk rather than implied, that switch now shows the
         // truth instead of claiming "public" for a session nobody can read.
-        if user_id.is_some() {
+        if initiator.is_some() {
             conv.set_visibility(Some(crate::conversation::SessionVisibility::Private));
         }
 
@@ -1254,27 +1267,64 @@ impl SessionManager {
         // ADR-035 Phase 3: EnableNotify removed — push drives all streaming,
         // no front/back suppression mechanism remains.
 
+        // ADR-034 §4: tell every subscriber the session list grew. This
+        // is the single announce point for *all* creation paths — the HTTP
+        // handler used to be the only publisher, so a session the Runtime
+        // created on its own (a PM task dispatch routed into a new execution
+        // session, a cron turn, the chat router's `dispatch(new)`) reached no
+        // one: the Desktop's session list and tab strip stayed stale until
+        // the agent was re-entered (regression t-b2167242).
+        self.announce_session_created(&session_id);
+
         Ok(session_id)
     }
 
-    /// Design 27 §6.1: like `create_frontend_session`, but the session is
-    /// owned by the **agent account** (`last_user_profile` — the account
-    /// bound to this Runtime via `UserProfileUpdate`), not the requesting
-    /// human. An intent execution session is agent-private working state:
-    /// the human surface is the Chat session, and the Session-history list
-    /// must not fill up with background responder sessions. Falls back to
-    /// the caller-provided owner when no profile is cached (and to
-    /// ownerless/local mode when neither exists).
-    pub async fn create_agent_owned_session(
+    /// Publish `SessionCreated` for a session this manager just created
+    /// (topic: `acowork/agents/{id}/sessions/created`, QoS 1, non-retained).
+    ///
+    /// Best-effort by construction: the publish runs on its own task so a
+    /// broker hiccup can neither fail nor delay the creation, and a missing
+    /// publisher (no broker) is a no-op. Subscribers treat the event as a
+    /// "the list changed, refetch" hint — sid is the only field they act on.
+    fn announce_session_created(&self, session_id: &str) {
+        let Some(publisher) = self.config.session_events.clone() else {
+            return;
+        };
+        let envelope = session_created_envelope(&self.core.config.agent_id, session_id);
+        let sid = session_id.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = publisher.publish_lifecycle("created", &envelope).await {
+                tracing::warn!(session_id = %sid, error = %e, "failed to publish session_created");
+            }
+        });
+    }
+
+    /// Design 27 §6.1 / ADR-076 §决策 4: create the execution session for an
+    /// inbound intent, stamped with **who initiated it** — the envelope's
+    /// `from` (a human account for a chat/PM dispatch, an agent instance for
+    /// agent-initiated work).
+    ///
+    /// The initiator is taken from the message, never from
+    /// `last_user_profile`: that profile is whatever account last pushed an
+    /// identity to this Runtime, so using it stamped every execution session
+    /// with the *last logged-in user* — the bug where user B's session shows
+    /// user A's name and avatar (and the reason B could never open A's).
+    /// `None` only where the transport carries no identity (cron, local
+    /// mode), which stays ownerless.
+    pub async fn create_intent_session(
         &mut self,
-        requester_user_id: Option<&str>,
+        initiator: Option<&str>,
         seed: Option<&super::intent_routing::SessionSeed>,
     ) -> Result<String> {
-        let agent_user = self
-            .last_user_profile
-            .as_ref()
-            .map(|p| p.user_id.clone())
-            .filter(|id| !id.is_empty());
+        // ADR-076 §决策 4: an initiator is an **account** or an **agent
+        // instance**. The cron trigger key (`cron:<trigger_id>`, ADR-073 —
+        // stamped as the envelope's `from`) is neither, so normalizing it to
+        // `None` keeps the session ownerless and public, as the doc above
+        // promises. Stamping it verbatim would hide every cron session from
+        // all human accounts (`Private` with an unmatchable owner).
+        let initiator = initiator
+            .map(str::trim)
+            .filter(|id| !id.is_empty() && !id.starts_with("cron:"));
         // Design 27 §4.5: apply the initiator's (already clamped) session-
         // config suggestion at creation. `workspace` is validated against
         // the resolver here — an unknown id is dropped so it can never
@@ -1291,7 +1341,7 @@ impl SessionManager {
                 seeded_workspace,
                 seed.and_then(|s| s.model.as_deref()),
                 seed.and_then(|s| s.provider.as_deref()),
-                agent_user.as_deref().or(requester_user_id),
+                initiator,
             )
             .await?;
         if let Some(effort) = seed.and_then(|s| s.reasoning_effort.as_deref())
@@ -4124,6 +4174,30 @@ After installation, ask the user to re-enable the MCP server.",
     }
 }
 
+/// The `SessionCreated` envelope a fresh session announces itself with.
+///
+/// Split out from [`SessionManager::announce_session_created`] purely so the
+/// payload is unit-testable: the announce itself is a fire-and-forget
+/// `tokio::spawn`, so a wrong field (empty sid, mismatched agent) would never
+/// fail a test that only exercised the publish call.
+fn session_created_envelope(
+    agent_id: &str,
+    session_id: &str,
+) -> acowork_core::mqtt_proto::DataEnvelope {
+    use acowork_core::mqtt_proto::{data_envelope::Payload, DataEnvelope, SessionCreated};
+    DataEnvelope {
+        version: 1,
+        payload: Some(Payload::SessionCreated(SessionCreated {
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            // The title is generated after the first turn; subscribers refetch
+            // `GET /sessions` for it (sid is the only actionable field).
+            title: String::new(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })),
+    }
+}
+
 /// Handle a SessionTask panic: promote the session to [`SessionStatus::Errored`]
 /// and emit a terminal [`ChunkEvent::Error`] so the frontend exits the
 /// "replying…" / "agent is running" UI immediately.
@@ -4841,6 +4915,27 @@ mod tests {
 
     // ── panic handler (handle_session_task_panic) ─────────────────
 
+    /// The `sessions/created` announce payload. Pinned because the publish is
+    /// fire-and-forget: a spotless test around "the creation path runs" would
+    /// still pass while every Desktop subscriber silently ignored the event
+    /// for a wrong `event_type` / empty sid (regression t-b2167242).
+    #[test]
+    fn session_created_envelope_carries_agent_and_session() {
+        let envelope = session_created_envelope("agent-1", "sess-1");
+        assert_eq!(envelope.version, 1);
+        match envelope.payload {
+            Some(acowork_core::mqtt_proto::data_envelope::Payload::SessionCreated(created)) => {
+                assert_eq!(created.agent_id, "agent-1");
+                assert_eq!(created.session_id, "sess-1");
+                assert!(
+                    !created.created_at.is_empty(),
+                    "created_at must be stamped (ISO 8601)"
+                );
+            }
+            other => panic!("expected SessionCreated payload, got {other:?}"),
+        }
+    }
+
     /// End-to-end: a SessionTask panic must (1) promote the watch status to
     /// `Errored` and (2) emit a terminal `ChunkEvent::Error` so the frontend
     /// exits the "replying…" state. This is the automated guard for the
@@ -5335,7 +5430,7 @@ mod tests {
                 session_id: survivor_id.to_string(),
                 agent_id: "com.test.delete_latest".to_string(),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
-                user_id: None,
+                initiator: None,
                 visibility: None,
                 title: Some("Survivor".to_string()),
                 workspace_id: None,
@@ -5454,7 +5549,7 @@ mod tests {
             .await
             .expect("create owned session");
         let meta = read_session_meta(&conversations, &owned).expect("read owned meta");
-        assert_eq!(meta.user_id.as_deref(), Some("u-alice"));
+        assert_eq!(meta.initiator.as_deref(), Some("u-alice"));
         assert_eq!(
             meta.visibility,
             Some(SessionVisibility::Private),
@@ -5475,12 +5570,123 @@ mod tests {
             .await
             .expect("create ownerless session");
         let meta = read_session_meta(&conversations, &ownerless).expect("read ownerless meta");
-        assert_eq!(meta.user_id, None);
+        assert_eq!(meta.initiator, None);
         assert_eq!(
             meta.visibility, None,
             "local mode must keep writing nothing — absent means public"
         );
         assert!(meta.is_readable_by(&SessionScope::user("u-bob")));
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    /// ADR-076 §决策 4: an execution session is stamped with the initiator the
+    /// **message** carried, not with whatever account last pushed an identity
+    /// to this Runtime.
+    ///
+    /// Using `last_user_profile` is what made every execution session look
+    /// like it belonged to the last person who logged in: their name and
+    /// avatar on somebody else's run, and no way for the real initiator to be
+    /// recognized (t-9764c5fa).
+    #[tokio::test]
+    async fn intent_sessions_are_stamped_with_the_envelope_initiator() {
+        use crate::conversation::{SessionScope, read_session_meta};
+
+        let mut config = crate::config::RuntimeConfig::default();
+        let work_dir = std::env::temp_dir().join(format!("acowork-initiator-{}", Uuid::new_v4()));
+        config.work_dir = work_dir.to_string_lossy().to_string();
+
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.initiator"
+            version = "1.0.0"
+            name = "Test initiator"
+            description = "Pin the execution-session initiator"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider =
+            Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+        let conversations = work_dir.join("conversations");
+
+        // The Runtime is "logged in" as someone else entirely.
+        manager.update_user_identity(Some(acowork_core::protocol::UserProfile {
+            user_id: "u-last-login".into(),
+            display_name: "Last Login".into(),
+            language: "en".into(),
+            timezone: "UTC".into(),
+            city: None,
+            country: None,
+            occupation: None,
+            avatar: None,
+            builtin_avatar: None,
+            communication_style: None,
+            custom: Default::default(),
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            is_active: true,
+        }));
+
+        let sid = manager
+            .create_intent_session(Some("u-initiator"), None)
+            .await
+            .expect("create intent session");
+        let meta = read_session_meta(&conversations, &sid).expect("read meta");
+
+        assert_eq!(
+            meta.initiator.as_deref(),
+            Some("u-initiator"),
+            "the initiator comes from the message, not from the cached profile"
+        );
+        assert!(
+            meta.is_writable_by(&SessionScope::user("u-initiator")),
+            "the initiator can write their own execution session"
+        );
+        assert!(
+            !meta.is_writable_by(&SessionScope::user("u-last-login")),
+            "the last logged-in account cannot"
+        );
+
+        // An agent-initiated turn stamps the agent instance, so no human
+        // holds the write — exactly the single-initiator rule.
+        let agent_sid = manager
+            .create_intent_session(Some("8f7be9a6-agent-instance"), None)
+            .await
+            .expect("create agent-initiated session");
+        let meta = read_session_meta(&conversations, &agent_sid).expect("read meta");
+        assert_eq!(meta.initiator.as_deref(), Some("8f7be9a6-agent-instance"));
+        assert!(!meta.is_writable_by(&SessionScope::user("u-initiator")));
+
+        // A cron trigger key is neither an account nor an instance: it must
+        // normalize to ownerless + public, not stamp as an unmatchable owner
+        // that hides the session from every human account.
+        let cron_sid = manager
+            .create_intent_session(Some("cron:trig-1"), None)
+            .await
+            .expect("create cron-initiated session");
+        let meta = read_session_meta(&conversations, &cron_sid).expect("read meta");
+        assert_eq!(meta.initiator, None, "cron sender stays ownerless");
+        assert!(
+            meta.is_readable_by(&SessionScope::user("u-initiator"))
+                && meta.is_writable_by(&SessionScope::user("u-initiator")),
+            "an ownerless cron session stays open to signed-in accounts"
+        );
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }
@@ -5529,7 +5735,7 @@ mod tests {
         let conversations = work_dir.join("conversations");
 
         let (sid, _) = manager
-            .route_intent_session("chat:cs-group-1", None, None)
+            .route_intent_session("chat:cs-group-1", None, None, None)
             .await
             .expect("route chat session");
         let meta = read_session_meta(&conversations, &sid).expect("read chat-bound meta");
@@ -5537,16 +5743,53 @@ mod tests {
         assert_eq!(meta.chat_session_id.as_deref(), Some("cs-group-1"));
         // The routing reuse path must not re-stamp or lose the binding.
         let (sid2, _) = manager
-            .route_intent_session("chat:cs-group-1", None, None)
+            .route_intent_session("chat:cs-group-1", None, None, None)
             .await
             .expect("reuse chat session");
         assert_eq!(sid, sid2, "same chat session, same execution session");
         let meta2 = read_session_meta(&conversations, &sid2).expect("reread meta");
         assert_eq!(meta2.chat_session_id.as_deref(), Some("cs-group-1"));
 
+        // ADR-076 §决策 4: two members addressing the same agent in the same
+        // group chat are two pieces of work. Their routing keys differ, so
+        // the second @ opens its own session instead of typing into the
+        // first one's (the multi-user execution session the design forbids).
+        let (alice_sid, alice_new) = manager
+            .route_intent_session(
+                &crate::agent::session::intent_routing::chat_key("cs-group-1", "u-alice"),
+                None,
+                Some("cs-group-1"),
+                Some("u-alice"),
+            )
+            .await
+            .expect("route alice");
+        let (bob_sid, bob_new) = manager
+            .route_intent_session(
+                &crate::agent::session::intent_routing::chat_key("cs-group-1", "u-bob"),
+                None,
+                Some("cs-group-1"),
+                Some("u-bob"),
+            )
+            .await
+            .expect("route bob");
+        assert!(alice_new && bob_new, "a different initiator is a new task");
+        assert_ne!(alice_sid, bob_sid, "one execution session per initiator");
+        let alice_meta = read_session_meta(&conversations, &alice_sid).expect("alice meta");
+        let bob_meta = read_session_meta(&conversations, &bob_sid).expect("bob meta");
+        assert_eq!(alice_meta.initiator.as_deref(), Some("u-alice"));
+        assert_eq!(bob_meta.initiator.as_deref(), Some("u-bob"));
+        assert!(
+            !alice_meta.is_writable_by(&SessionScope::user("u-bob")),
+            "bob must not write alice's execution session"
+        );
+        assert!(
+            !alice_meta.is_writable_by(&SessionScope::admin("u-admin")),
+            "and neither must an admin"
+        );
+
         // A `conv:` key keeps the pre-Wave-4 shape: no binding, private.
         let (csid, _) = manager
-            .route_intent_session("conv:c-1", None, None)
+            .route_intent_session("conv:c-1", None, None, None)
             .await
             .expect("route conv session");
         let cmeta = read_session_meta(&conversations, &csid).expect("read conv meta");
@@ -5610,7 +5853,7 @@ mod tests {
 
         let key = "conv:task:proj-1:T-7:com.test.task_bind";
         let (sid, _) = manager
-            .route_intent_session(key, None, Some("cs-project-group"))
+            .route_intent_session(key, None, Some("cs-project-group"), None)
             .await
             .expect("route task session");
         let meta = read_session_meta(&conversations, &sid).expect("read task meta");
@@ -5633,7 +5876,7 @@ mod tests {
 
         // No source chat → no binding (pre-Wave-4 shape).
         let (plain, _) = manager
-            .route_intent_session("conv:c-2", None, None)
+            .route_intent_session("conv:c-2", None, None, None)
             .await
             .expect("route conv session");
         let plain_meta = read_session_meta(&conversations, &plain).expect("read conv meta");
@@ -5684,7 +5927,7 @@ mod tests {
         )));
 
         let (sid, first_new) = manager
-            .route_intent_session("chat:cs-not3", None, None)
+            .route_intent_session("chat:cs-not3", None, None, None)
             .await
             .expect("create chat session");
         assert!(first_new, "a first routing creates the session");
@@ -5695,7 +5938,7 @@ mod tests {
             ..Default::default()
         };
         let (sid2, opened_new) = manager
-            .route_intent_session("chat:cs-not3", Some(seed), None)
+            .route_intent_session("chat:cs-not3", Some(seed), None, None)
             .await
             .expect("reuse under a config seed");
         assert_eq!(sid, sid2, "a config seed alone creates nothing");
@@ -5775,7 +6018,7 @@ mod tests {
 
         // Creation — the draft is the new session's initial config.
         let (cur, opened_new) = manager
-            .chat_dispatch("cs-cur", Target::New, Some(effort("high")))
+            .chat_dispatch("cs-cur", Target::New, Some(effort("high")), None)
             .await
             .expect("open a session for the chat");
         assert!(opened_new, "dispatch(new) always starts fresh");
@@ -5788,7 +6031,7 @@ mod tests {
         // Reuse branch A — target is the mapped session: no re-point, and the
         // session's own config stays as it is.
         let (same, opened_new) = manager
-            .chat_dispatch("cs-cur", Target::Existing(cur.clone()), Some(effort("low")))
+            .chat_dispatch("cs-cur", Target::Existing(cur.clone()), Some(effort("low")), None)
             .await
             .expect("dispatch to the current session");
         assert_eq!(same, cur, "continuing the mapped target creates nothing");
@@ -5802,11 +6045,11 @@ mod tests {
         // Reuse branch B — target is a different live session: the chat mapping
         // follows the choice; the session's config does not follow the draft.
         let (other, _) = manager
-            .chat_dispatch("cs-two", Target::New, Some(effort("medium")))
+            .chat_dispatch("cs-two", Target::New, Some(effort("medium")), None)
             .await
             .expect("first session of the second chat");
         let (prev, _) = manager
-            .chat_dispatch("cs-two", Target::New, None)
+            .chat_dispatch("cs-two", Target::New, None, None)
             .await
             .expect("second session of the second chat");
         assert_ne!(prev, other, "dispatch(new) always starts fresh");
@@ -5815,6 +6058,7 @@ mod tests {
                 "cs-two",
                 Target::Existing(other.clone()),
                 Some(effort("low")),
+                None,
             )
             .await
             .expect("go back to the older session");
@@ -5827,7 +6071,7 @@ mod tests {
         assert_eq!(effective(&manager, &prev).as_deref(), None);
         // The chat now resolves to the session it was pointed at.
         let (reused, _) = manager
-            .route_intent_session("chat:cs-two", None, None)
+            .route_intent_session("chat:cs-two", None, None, None)
             .await
             .expect("mapping follows the dispatch");
         assert_eq!(reused, other, "the mapping was re-pointed");
@@ -5835,7 +6079,7 @@ mod tests {
         // The intent path holds the same rule: a seed on a mapped, live session
         // is not applied.
         let (again, _) = manager
-            .route_intent_session("chat:cs-two", Some(effort("high")), None)
+            .route_intent_session("chat:cs-two", Some(effort("high")), None, None)
             .await
             .expect("routing the next message reuses it");
         assert_eq!(again, other);
@@ -5861,14 +6105,14 @@ mod tests {
         // Fresh creation — the fallback's destination and the router's
         // `new` verdict alike.
         let (first, fresh) = manager
-            .chat_dispatch("cs-open", Target::New, None)
+            .chat_dispatch("cs-open", Target::New, None, None)
             .await
             .expect("first dispatch creates");
         assert!(fresh, "Target::New on a fresh chat creates a session");
 
         // Registry reuse: same chat, same session, not new.
         let (again, again_new) = manager
-            .route_intent_session("chat:cs-open", None, None)
+            .route_intent_session("chat:cs-open", None, None, None)
             .await
             .expect("mapping reuse");
         assert_eq!(again, first);
@@ -5876,14 +6120,14 @@ mod tests {
 
         // Existing-target dispatch to the mapped session: reuse, not new.
         let (_, onto_same) = manager
-            .chat_dispatch("cs-open", Target::Existing(first.clone()), None)
+            .chat_dispatch("cs-open", Target::Existing(first.clone()), None, None)
             .await
             .expect("existing target");
         assert!(!onto_same, "dispatch(existing) never reports new");
 
         // A second chat creating its own session is new again.
         let (second, fresh2) = manager
-            .chat_dispatch("cs-open", Target::New, None)
+            .chat_dispatch("cs-open", Target::New, None, None)
             .await
             .expect("second dispatch creates");
         assert!(fresh2, "Target::New always starts fresh");
@@ -5892,7 +6136,7 @@ mod tests {
         // A brand-new registry key creates — and is reported as new, so a
         // first PM task also gets an honest "启动新任务" reaction.
         let (_, task_new) = manager
-            .route_intent_session("conv:task:p:T1:com.test.x", None, None)
+            .route_intent_session("conv:task:p:T1:com.test.x", None, None, None)
             .await
             .expect("task session created");
         assert!(task_new, "a first-time registry key creates its session");

@@ -71,6 +71,12 @@
 
 单一人类面组件（`GroupChatPanel` + kind 分派的成员面板）覆盖 `user_user` / `user_group` / `project_group` 三种 kind，差异仅由 `kind` 驱动。
 
+### D7 — `project_group` 的 `owner` 是 PM 项目 owner（由 PM 推送）
+
+`project_group` 原先在 user 服务侧没有 owner，因此该频道的 `chat.md`（ADR-099）只有平台管理员能改。现在 PM 在每次 `ensure` / `sync_group` 时把 `Project::owner()`（`owner_id ?? created_by`）连同成员名册一起推给 `acowork-user`，会话行缓存它——与 `title` / `participants` / `repo` 同形：上游服务拥有该关系，chat 行只缓存事实。于是项目 owner 治理自己频道的提示词，与治理项目本身一致；所有权转移经同一次 sync 抵达 chat 域（即使新旧 owner 都还在名册里）。
+
+成员名册仍由 PM 中介、用户面只读（上表不变）。`title` 同理随 PM 收敛——`project_group` 的用户侧改名被拒，PM 的标题是它唯一的来源。
+
 ## 后果
 
 - **存储/组件收敛**：三套人类面降到一套 + kind 分派，检索 / 附件 / 未读只写一遍即全 kind 共享。

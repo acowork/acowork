@@ -1177,10 +1177,12 @@ impl SessionTask {
                     // A pinned turn says so itself; a turn composed straight
                     // against the execution surface has no row of its own but
                     // may still sit in a chat-bound session, whose terminal
-                    // echo lands there (D9). With no trigger row and no answer
-                    // coordinate its `card_target()` stays `None`, so it writes
-                    // no card — the D12 distinction, now expressed by the
-                    // surface instead of a re-read of the binding.
+                    // echo lands there (D9) and whose interactive cards land
+                    // there too (Rev. 6): the binding supplies the chat, the
+                    // write endpoint's verified caller supplies who can answer,
+                    // and only the trigger *row* is missing — a card without a
+                    // thread still answers, so it is written standalone rather
+                    // than dropped.
                     let mut surface = surface;
                     if surface.chat_session_id.is_empty()
                         && let Some(bound) = agent_loop

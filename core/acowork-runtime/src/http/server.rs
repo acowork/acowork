@@ -3933,7 +3933,7 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
-            user_id: None,
+            initiator: None,
             visibility: None,
             title: Some("Test Session".to_string()),
             workspace_id: None,
@@ -4188,7 +4188,7 @@ mod tests {
             session_id: String::new(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
-            user_id: None,
+            initiator: None,
             visibility: None,
             title: None,
             workspace_id: None,
@@ -6427,7 +6427,7 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
-            user_id: None,
+            initiator: None,
             visibility: None,
             title: None,
             workspace_id: None,
@@ -6734,7 +6734,7 @@ mod tests {
         // in-memory `ConversationSession` is the writer for meta on any
         // config change, so a file-only edit would be clobbered by the
         // next `write_meta()`.
-        conv.set_user_id(Some("u-owner".to_string()));
+        conv.set_initiator(Some("u-owner".to_string()));
         let session_config_slot = Arc::new(tokio::sync::Mutex::new(Some(config_svc)));
 
         let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
@@ -6874,7 +6874,7 @@ mod tests {
 
         let sid = "20260101_120000_actions";
         let (_config_svc, conv) = make_test_session_config_service(&temp_dir, sid);
-        conv.set_user_id(Some("u-owner".to_string()));
+        conv.set_initiator(Some("u-owner".to_string()));
         conv.set_visibility(Some(crate::conversation::SessionVisibility::Private));
 
         // Real dispatch channel, so we can read back what each handler queued.
@@ -6970,7 +6970,9 @@ mod tests {
                 "owner must be able to POST /{action}"
             );
 
-            // 3. ...and the queued message is the pre-migration one.
+            // 3. ...and the queued message is the pre-migration one, plus the
+            // verified caller the card writer needs as its answer target
+            // (ADR-100 Rev. 6: without it a chat-bound turn writes no card).
             let (queued_sid, msg) = dispatch_rx.try_recv().expect("owner request must dispatch");
             assert_eq!(queued_sid, sid, "/{action} must route to its session");
 
@@ -6981,9 +6983,15 @@ mod tests {
                         content,
                         message_id,
                         params_json,
+                        answerable_by,
                         ..
                     },
-                ) => content == "hi" && message_id == "m1" && params_json == r#"{"a":1}"#,
+                ) => {
+                    content == "hi"
+                        && message_id == "m1"
+                        && params_json == r#"{"a":1}"#
+                        && answerable_by == "u-owner"
+                }
                 ("stop", InboundMessage::Stop { reason }) => reason == "user_requested",
                 ("continue", InboundMessage::ContinueExecution { session_id, reason }) => {
                     session_id == sid && reason == "user_requested"
@@ -7157,7 +7165,7 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
-            user_id: None,
+            initiator: None,
             visibility: None,
             title: Some("Test".to_string()),
             workspace_id: Some("ws-1".to_string()),

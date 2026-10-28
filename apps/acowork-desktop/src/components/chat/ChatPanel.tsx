@@ -11,7 +11,6 @@ import type { ToolApprovalNeededEvent, AttachedItem } from "../../lib/types";
 import { isProcessing, getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
-import { fetchProviderModels } from "../../lib/gateway-api";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { blobToBase64 } from "./clipboardImageExt";
 import { detectPaste } from "./pasteDetect";
@@ -19,8 +18,9 @@ import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
+import { useInitiatorIdentity } from "../../lib/sessionInitiator";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock } from "lucide-react";
-import type { ChatMessage, VaultKeyEntry, ModelEntry, ProviderAccount } from "../../lib/types";
+import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
 import { blockIndexOfRawMessage } from "./messageFolder";
@@ -80,6 +80,7 @@ import { RetryWaitBanner } from "./RetryWaitBanner";
 import { SessionTabBar } from "./SessionTabBar";
 import { SkillsPanel } from "../skills/SkillsPanel";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
+import { useToolbarCollapse } from "../common/useToolbarCollapse";
 import { DocumentChip } from "./DocumentChip";
 import { AttachedContextChips } from "./AttachedContextChips";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
@@ -480,10 +481,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // ── Toolbar responsive collapse ──────────────────────────────────
   // The bottom toolbar (model / think / workspace / skills + upload buttons)
   // must keep all buttons non-overlapping when the panel width narrows.
-  // We measure each button's full width vs. its icon-only width and greedily
-  // fold labels — starting from the leftmost button (model) and moving
-  // rightward (effort → ws → sk) — until the row fits.
-  const toolbarRef = useRef<HTMLDivElement>(null);
+  // The measurement/fold engine is shared with the Chat surface composer
+  // (see `useToolbarCollapse`); here we only wire it to this toolbar.
   // Per-button refs kept ONLY for the inner Menu components' click-outside
   // detection (ModelMenu/ReasoningEffortMenu use useMergedRef internally).
   // The toolbar collapse measurement no longer reads these — it queries
@@ -492,205 +491,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const effortBtnRef = useRef<HTMLDivElement>(null);
   const wsBtnRef = useRef<HTMLDivElement>(null);
   const skBtnRef = useRef<HTMLDivElement>(null);
-  const [textHidden, setTextHidden] = useState<Record<string, boolean>>({
-    model: false,
-    effort: false,
-    ws: false,
-    sk: false,
-  });
+  const { setToolbarRef, textHidden } = useToolbarCollapse();
 
-  // ── Toolbar responsive collapse ───────────────────────────────
-  //
-  // IMPLEMENTATION: a `ref` callback (NOT a useEffect on toolbarRef).
-  //
-  // Why ref callback instead of useEffect?
-  //
-  // ModelMenu and ReasoningEffortMenu are conditionally rendered:
-  //   - ModelMenu:     `availableModels.length > 0 && selectedAgent?.alive`
-  //   - ReasoningMenu: `selectedAgent?.alive && currentReasoningEffort != null`
-  //
-  // On cold start the toolbar div itself may render before its
-  // conditionally-rendered children, or vice versa, depending on the
-  // order of state hydration.  useEffect with `[]` runs once on mount
-  // and then never again — so if it runs BEFORE the model/effort buttons
-  // exist, ResizeObserver is attached to a half-formed DOM and stays
-  // attached even when the buttons arrive later, BUT the observer's
-  // initial synchronous callback already fired with the half-formed
-  // state and cached "no buttons → no fold" forever.
-  //
-  // A ref callback fires every time React attaches the ref to a DOM
-  // node — and crucially, when the toolbar div re-mounts due to React
-  // reconciler activity (StrictMode double-invoke, or any parent state
-  // that causes ChatPanel's children to re-render and remount the
-  // toolbar subtree), the OLD ref is called with `null` (cleanup) and
-  // the NEW ref is called with the new node (setup).  This naturally
-  // tears down and re-installs the observer across all "toolbar
-  // identity" changes, which is exactly what we need.
-  //
-  // Inside the ref callback we ALSO install a MutationObserver on the
-  // toolbar subtree to catch button-set changes that don't cause the
-  // toolbar itself to remount (agent becomes running → model menu
-  // appears inside the toolbar).
-  const toolbarRefCallback = useCallback((node: HTMLDivElement | null) => {
-    // Always update the shared ref so other code can read it.
-    toolbarRef.current = node;
-    if (!node) return;
-
-    // ── Imperative, fully self-contained measurement engine ──────
-    //
-    // This closure captures nothing from React component state.  It
-    // reads/writes the DOM directly.  State sync to React happens
-    // through setTextHidden only at the end of a measurement, so
-    // even if React is in the middle of a render, the DOM stays
-    // visually consistent (we apply visibility BEFORE setting state).
-    let measuring = false;
-    let rafId = 0;
-
-    const measure = () => {
-      if (measuring) return;
-      measuring = true;
-      try {
-        const els = Array.from(
-          node.querySelectorAll<HTMLElement>("[data-toolbar-btn]"),
-        );
-        if (els.length === 0) return;
-
-        const spans = els.map((el) => ({
-          id: el.dataset.toolbarBtn as string,
-          text: el.querySelector<HTMLElement>("[data-toolbar-text]"),
-          chev: el.querySelector<HTMLElement>("[data-toolbar-chevron]"),
-          // icon-only width (text hidden) — measured first so it's stable.
-          iconWidth: el.offsetWidth,
-        }));
-
-        // Reveal all text/chevron to read true full widths.
-        spans.forEach(({ text, chev }) => {
-          if (text) text.style.display = "";
-          if (chev) chev.style.display = "";
-        });
-        const fullWidths = els.map((el) => el.offsetWidth);
-
-        const GAP = 4;
-        const totalGaps = (els.length - 1) * GAP;
-
-        // Layout constants: container padding (px-3 = 12px each side),
-        // gap-2 between the left cluster and right cluster.
-        // The right cluster's width is MEASURED, not counted: it is
-        // a row of icon-only buttons whose own width is whatever the
-        // DOM gives it, so reading `offsetWidth` covers "added a new
-        // button", "button label changes", "icon-only stays icon-only
-        // under all conditions" without anyone editing a number here.
-        // The left cluster is the one with a foldable text-vs-icon
-        // delta, so it stays in the per-button loop below.
-        const PAD_X = 24;
-        const FLEX_GAP = 8;
-        const rightCluster = node.querySelector<HTMLElement>(
-          '[data-toolbar-cluster="right"]',
-        );
-        // ponytail: ceiling — if the right cluster is missing (early
-        // mount race), fall back to 0 so the fold still has a valid
-        // available width. The next ResizeObserver / MutationObserver
-        // tick re-measures. Upgrade: hoist this into a ResizeObserver
-        // on the right cluster itself so it never races.
-        const RIGHT_CLUSTER_W = rightCluster?.offsetWidth ?? 0;
-        const available = node.offsetWidth
-                        - PAD_X - FLEX_GAP - RIGHT_CLUSTER_W;
-
-        // Progressive collapse from LEFT to RIGHT (matches the
-        // documented product behavior: model hides first, then effort,
-        // then ws, then sk — preserving the rightmost buttons which
-        // are usually the most context-relevant).
-        //
-        // Algorithm:
-        //   1. Start with all buttons fully visible.
-        //   2. If totalFull > available, fold the leftmost button.
-        //   3. Recheck; if still overflowing, fold the next leftmost.
-        //   4. Stop when it fits OR every button is folded.
-        //
-        // Folding a button changes total width by exactly
-        // (fullWidth - iconWidth) — the button stays in the row,
-        // its trailing gap-1 to the next button is unchanged.
-
-        const fold = new Array<boolean>(spans.length).fill(false);
-        let current = fullWidths.reduce((a, b) => a + b, 0) + totalGaps;
-        for (let i = 0; i < spans.length; i++) {
-          if (current <= available) break;
-          fold[i] = true;
-          current -= (fullWidths[i] - spans[i].iconWidth);
-        }
-
-        // Apply visibility to DOM synchronously (user sees correct
-        // layout this frame), THEN sync React state.
-        spans.forEach(({ text, chev }, i) => {
-          const display = fold[i] ? "none" : "";
-          if (text) text.style.display = display;
-          if (chev) chev.style.display = display;
-        });
-
-        setTextHidden((prev) => {
-          let changed = false;
-          const next = { ...prev };
-          spans.forEach(({ id }, i) => {
-            if (next[id] !== fold[i]) {
-              next[id] = fold[i];
-              changed = true;
-            }
-          });
-          return changed ? next : prev;
-        });
-      } finally {
-        measuring = false;
-      }
-    };
-
-    const scheduleMeasure = () => {
-      if (rafId !== 0) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = 0;
-        measure();
-      });
-    };
-
-    // ResizeObserver: container width changes.
-    const ro = new ResizeObserver(() => scheduleMeasure());
-    ro.observe(node);
-
-    // MutationObserver: button-set changes. `attributes: true` covers
-    // WorkspaceSelector's text change (it updates the label when the
-    // user picks a different workspace) which DOES affect width.
-    const mo = new MutationObserver((mutations) => {
-      const relevant = mutations.some(
-        (m) =>
-          m.type === "childList" ||
-          m.type === "characterData" ||
-          (m.type === "attributes" && m.attributeName === "data-toolbar-text"),
-      );
-      if (relevant) scheduleMeasure();
-    });
-    mo.observe(node, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ["data-toolbar-text"],
-    });
-
-    // Schedule the initial measurement for the next frame so React
-    // has time to commit children (especially the conditionally-
-    // rendered model/effort buttons).
-    scheduleMeasure();
-
-    // Stash teardown on the node so the next ref callback can clean
-    // up.  Without this, a re-mount would leak observers.
-    (node as unknown as { __toolbarTeardown__?: () => void }).__toolbarTeardown__ = () => {
-      ro.disconnect();
-      mo.disconnect();
-      if (rafId !== 0) {
-        cancelAnimationFrame(rafId);
-        rafId = 0;
-      }
-    };
-  }, []);
 
   // Per-agent + per-session state selectors.
   // messages and sessionStatus are split into granular selectors because
@@ -820,9 +622,34 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // User profile fields — subscribed at ChatPanel level and passed as props
   // to MessageBubble so React.memo can detect profile changes (name/avatar
   // edits should update all rendered message bubbles instantly).
-  const userDisplayName = useUserProfileStore((s) => s.profile.displayName);
-  const userAvatarUrl = useUserProfileStore((s) => s.profile.backendAvatarUrl);
-  const userBuiltinAvatarId = useUserProfileStore((s) => s.profile.backendBuiltinAvatarId);
+  const profileDisplayName = useUserProfileStore((s) => s.profile.displayName);
+  const profileAvatarUrl = useUserProfileStore((s) => s.profile.backendAvatarUrl);
+  const profileBuiltinAvatarId = useUserProfileStore(
+    (s) => s.profile.backendBuiltinAvatarId,
+  );
+  // ADR-076 §决策 4: the human side of *this* execution session is its
+  // initiator, not the logged-in account. The profile above is only the
+  // fallback for the viewer's own / pre-accounts sessions — using it
+  // unconditionally repainted somebody else's session with the current
+  // account's identity after an account switch (t-9764c5fa).
+  const activeSessionInitiator = useAgentStore((s) => {
+    if (!selectedAgentId || !currentSessionId) return null;
+    return (
+      s.agents[selectedAgentId]?.sessions.find(
+        (x) => x.session_id === currentSessionId,
+      )?.initiator ?? null
+    );
+  });
+  const initiatorIdentity = useInitiatorIdentity(activeSessionInitiator);
+  const userDisplayName = initiatorIdentity?.displayName ?? profileDisplayName;
+  const userAvatarUrl = initiatorIdentity
+    ? initiatorIdentity.avatarUrl
+    : profileAvatarUrl;
+  // `undefined` = "ask the profile store", which is what keeps the viewer's
+  // own local icon; an explicit `null` would mean "this person has none".
+  const userBuiltinAvatarId = initiatorIdentity
+    ? initiatorIdentity.builtinAvatarId
+    : (profileBuiltinAvatarId ?? undefined);
 
   // Global state and actions — selectors to avoid full-store re-render
   // `effectiveConnection` is the watchdog's 6-state summary (see
@@ -862,8 +689,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     sendStop,
     setCurrentModel,
     setReasoningEffort,
-    setAvailableModels,
-    setProviderAccounts,
     continueExecution,
     resolveApproval,
     resolveApprovalByToolCallId,
@@ -1109,86 +934,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     initialAtBottom: scrollSnapshot?.atBottom,
     initialFirstVisibleBlockId: scrollSnapshot?.firstVisibleBlockId,
   });
-
-  // Load available models: configured providers (from vault) + capabilities (from models API)
-  const loadModels = useCallback(async () => {
-    try {
-      const keys = await invoke<VaultKeyEntry[]>("list_keys");
-
-      // Accounts per provider — drives the model menu's account level.
-      const accountsByProvider: Record<string, ProviderAccount[]> = {};
-      for (const key of keys) {
-        if (!key.account_id) continue;
-        (accountsByProvider[key.provider] ??= []).push({
-          accountId: key.account_id,
-          alias: key.alias?.trim() || key.provider,
-          preview: key.key_preview ?? "",
-        });
-      }
-      setProviderAccounts(accountsByProvider);
-
-      // Build (provider, configuredModelIds, modelCapabilities) tuples, skipping empty entries.
-      // `models` is provider-level config shared by every account of that
-      // provider, so collapse the per-account rows first — otherwise a
-      // 3-key provider would refetch the same model list 3 times.
-      const byProvider = new Map<string, VaultKeyEntry>();
-      for (const key of keys) if (!byProvider.has(key.provider)) byProvider.set(key.provider, key);
-
-      const entries = [...byProvider.values()].map(key => ({
-        provider: key.provider,
-        modelIds: key.models?.length
-          ? key.models
-          : key.default_model ? [key.default_model] : [],
-        modelCapabilities: key.model_capabilities,
-      })).filter(e => e.modelIds.length > 0);
-
-      // Fetch capabilities for all providers in parallel
-      const results = await Promise.allSettled(
-        entries.map(e => fetchProviderModels(e.provider))
-      );
-
-      const allModels: ModelEntry[] = [];
-      entries.forEach((entry, i) => {
-        const apiModels = results[i].status === "fulfilled"
-          ? (results[i].value.models ?? [])
-          : [];
-        for (const modelId of entry.modelIds) {
-          const info = apiModels.find(m => m.id === modelId);
-          allModels.push({
-            name: modelId,
-            provider: entry.provider,
-            tool_call: info?.tool_call ?? undefined,
-            reasoning: info?.reasoning ?? undefined,
-            input_modalities: info?.input_modalities ?? undefined,
-            default_reasoning_effort: entry.modelCapabilities?.[modelId]?.default_reasoning_effort ?? undefined,
-          });
-        }
-      });
-
-      // Deduplicate by model name + provider
-      const uniqueModels = allModels.filter(
-        (m, i, arr) => arr.findIndex(x => x.name === m.name && x.provider === m.provider) === i
-      );
-      setAvailableModels(uniqueModels);
-    } catch {
-      // Gateway may not be running
-    }
-  }, [setAvailableModels, setProviderAccounts]);
-
-  useEffect(() => {
-    loadModels();
-  }, [gatewayStatus, loadModels]);
-
-  // Vault keys changed elsewhere (Harness providers tab, onboarding,
-  // the inline model picker below) — `models-added` is the shared
-  // "keys saved" signal. Refresh the model list so newly added
-  // providers/models show up immediately without a remount.
-  useEffect(() => {
-    const handler = () => void loadModels();
-    window.addEventListener("models-added", handler);
-    return () => window.removeEventListener("models-added", handler);
-  }, [loadModels]);
-
 
   // Persist scroll state across top-level navigation.  AppLayout unmounts the
   // whole chat subtree for Settings/Harness/Docs/Projects, so component-local
@@ -2924,14 +2669,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
 
           {/* Bottom toolbar — @container for responsive button text collapse */}
           <div
-            ref={(node) => {
-              // Cleanup the previous install (if any) before handing
-              // off to the ref callback, which re-installs on the new
-              // node.  This handles re-mounts cleanly.
-              const prev = (toolbarRef.current as unknown as { __toolbarTeardown__?: () => void } | null);
-              prev?.__toolbarTeardown__?.();
-              toolbarRefCallback(node);
-            }}
+            ref={setToolbarRef}
             className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]"
           >
             {/* Left: feature buttons */}
@@ -3446,7 +3184,7 @@ export function ModelMenu({
 
           {/* Level 1: grouped model list (level 2 — accounts — flies out on
               the right; this panel no longer swaps to show it). */}
-          <div className="max-h-[420px] overflow-y-auto py-1">
+          <OverlayScrollbar maxHeight={420} className="py-1">
             {groups.length === 0 ? (
               <div className="px-3 py-2 text-xs text-text-tertiary">{t("chatPanel.modelMenuNoMatch")}</div>
             ) : (
@@ -3534,7 +3272,7 @@ export function ModelMenu({
                 </div>
               ))
             )}
-          </div>
+          </OverlayScrollbar>
 
           {/* Divider */}
           <div className="border-t border-border-divider" />
@@ -3573,7 +3311,7 @@ export function ModelMenu({
               visibility: flyoutPos ? "visible" : "hidden",
             }}
           >
-            <div className="max-h-[420px] overflow-y-auto py-1.5">
+            <OverlayScrollbar maxHeight={420} className="py-1.5">
               {visibleAccounts.length === 0 ? (
                 <div className="px-3 py-2 text-xs text-text-tertiary">{t("chatPanel.modelMenuNoMatch")}</div>
               ) : (
@@ -3613,7 +3351,7 @@ export function ModelMenu({
                   );
                 })
               )}
-            </div>
+            </OverlayScrollbar>
           </div>
         )}
         </>

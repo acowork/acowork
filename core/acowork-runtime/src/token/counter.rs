@@ -147,28 +147,41 @@ impl TokenCounter {
             tokens += self.count_text(name) + 1;
         }
 
-        // Content tokens: prefer content_parts if available, else fall back to .content
-        if let Some(ref parts) = message.content_parts {
-            for part in parts {
-                match part {
-                    acowork_core::providers::traits::ContentPart::Text { text } => {
-                        tokens += self.count_text(text);
-                    }
-                    acowork_core::providers::traits::ContentPart::ImageUrl { image_url } => {
-                        if let Some(pt) = protocol_type {
-                            tokens += estimate_image_tokens(
-                                pt,
-                                image_url.width,
-                                image_url.height,
-                                image_url.detail.as_deref(),
-                            );
+        // Content tokens, through the same accessor the providers use.
+        // Counting "the parts, else the content" valued every image turn's text
+        // at zero tokens — the derived part list holds images only and the
+        // user's message lives in `content` — which then skewed the context
+        // budget and compaction against turns that were longer than measured.
+        match message.message_content() {
+            acowork_core::providers::traits::MessageContent::Text(text) => {
+                tokens += self.count_text(text);
+            }
+            acowork_core::providers::traits::MessageContent::Parts {
+                leading_text,
+                parts,
+            } => {
+                if let Some(text) = leading_text {
+                    tokens += self.count_text(text);
+                }
+                for part in parts {
+                    match part {
+                        acowork_core::providers::traits::ContentPart::Text { text } => {
+                            tokens += self.count_text(text);
                         }
-                        // If protocol_type is unknown, skip image tokens (best-effort)
+                        acowork_core::providers::traits::ContentPart::ImageUrl { image_url } => {
+                            if let Some(pt) = protocol_type {
+                                tokens += estimate_image_tokens(
+                                    pt,
+                                    image_url.width,
+                                    image_url.height,
+                                    image_url.detail.as_deref(),
+                                );
+                            }
+                            // If protocol_type is unknown, skip image tokens (best-effort)
+                        }
                     }
                 }
             }
-        } else {
-            tokens += self.count_text(&message.content);
         }
 
         // Tool calls overhead
@@ -202,6 +215,35 @@ impl Default for TokenCounter {
 mod tests {
     use super::*;
     use acowork_core::providers::traits::{FunctionCall, ToolCall};
+
+    /// An image turn carries its pictures in `content_parts` and its words in
+    /// `content`. Counting one "or" the other billed every such turn as if the
+    /// user had typed nothing, which is what fed a too-small number to the
+    /// context budget and to compaction.
+    #[test]
+    fn image_turn_counts_its_text_and_its_image() {
+        use acowork_core::providers::traits::{ChatMessage, ContentPart, ImageUrlPart};
+        let counter = TokenCounter::new();
+        let text = "the delete button style is wrong, copy the memory panel one";
+        let msg = ChatMessage::user_multimodal(
+            text,
+            vec![ContentPart::ImageUrl {
+                image_url: ImageUrlPart {
+                    url: "data:image/png;base64,iVBORw0KGgo=".into(),
+                    detail: None,
+                    width: Some(800),
+                    height: Some(600),
+                },
+            }],
+        );
+        let with_text = counter.count_message(&msg, None);
+        let text_only = counter.count_message(&ChatMessage::user(text), None);
+        assert!(
+            with_text >= text_only,
+            "image turn ({with_text}) must not cost less than the same text alone ({text_only})"
+        );
+    }
+
 
     #[test]
     fn test_count_text_default_ratio() {

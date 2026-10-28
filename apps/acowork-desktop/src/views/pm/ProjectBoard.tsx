@@ -4,7 +4,7 @@
  * 对齐 UX 设计 §3.1/§3.2：
  * - 组合 ProjectHeader（标题/描述/统计/新建/菜单）+ KanbanBoard（4 列）
  * - 三态：未选中项目 → 空提示；加载中 → 骨架；错误 → 重试
- * - 新建任务：通过 onNewTask 上抛给 ProjectsView（由 TaskEditDialog 处理）
+ * - 新建任务：通过 onNewTask 上抛给 ProjectsView（打开 TaskEditDialog 新建态）
  */
 
 import { useTranslation } from "../../i18n/useTranslation";
@@ -20,7 +20,7 @@ interface ProjectBoardProps {
   error?: string | null;
   onRetry?: () => void;
   onOpenTask?: (taskId: string) => void;
-  /** 新建任务（打开 TaskEditDialog create 模式） */
+  /** 新建任务（打开 TaskEditDialog 新建态） */
   onNewTask?: () => void;
 }
 

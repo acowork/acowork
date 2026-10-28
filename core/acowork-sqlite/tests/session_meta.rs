@@ -13,7 +13,7 @@
 //!    the same `.sqlite` file (the user's "one file" requirement).
 //! 7. `version` / `corrupted` round-trip, and `PRAGMA user_version` +
 //!    `MIGRATIONS` upgrade an older file in order.
-//! 8. ADR-076 §决策 4: `user_id` / `visibility` round-trip and `prune_to`
+//! 8. ADR-076 §决策 4: `initiator` / `visibility` round-trip and `prune_to`
 //!    buckets the cap per owner.
 
 use std::path::PathBuf;
@@ -77,7 +77,7 @@ fn make_meta(
         model_ratio: Some(1.0),
         last_compaction_offset: Some(0),
         corrupted: false,
-        user_id: None,
+        initiator: None,
         visibility: None,
     chat_session_id: None,
         model_usage: None,
@@ -306,7 +306,7 @@ fn ownership_columns_round_trip_and_prune_buckets_per_owner() -> AcoworkResult<(
     // (the pre-accounts / local-mode shape).
     let alice = |sid: &str, stamp: &str| {
         let mut m = make_meta(sid, stamp, None, "agent");
-        m.user_id = Some("alice".into());
+        m.initiator = Some("alice".into());
         m.visibility = Some(SessionVisibility::Private);
         m
     };
@@ -315,7 +315,7 @@ fn ownership_columns_round_trip_and_prune_buckets_per_owner() -> AcoworkResult<(
     sm.upsert(&alice("a-new", "2026-03-01T00:00:00.000Z"))?;
 
     let mut bob = make_meta("b-1", "2026-01-15T00:00:00.000Z", None, "agent");
-    bob.user_id = Some("bob".into());
+    bob.initiator = Some("bob".into());
     bob.visibility = Some(SessionVisibility::Public);
     sm.upsert(&bob)?;
 
@@ -323,10 +323,10 @@ fn ownership_columns_round_trip_and_prune_buckets_per_owner() -> AcoworkResult<(
 
     // ADR-076 §决策 4: both columns survive a write → read.
     let read_back = sm.get("a-mid")?.expect("alice's row");
-    assert_eq!(read_back.user_id.as_deref(), Some("alice"));
+    assert_eq!(read_back.initiator.as_deref(), Some("alice"));
     assert_eq!(read_back.visibility, Some(SessionVisibility::Private));
     let orphan = sm.get("orphan")?.expect("ownerless row");
-    assert_eq!(orphan.user_id, None);
+    assert_eq!(orphan.initiator, None);
     assert_eq!(orphan.visibility, None);
 
     // The cap is per owner: with max=1, alice loses her 2 oldest and bob keeps
@@ -475,7 +475,16 @@ fn migrations_run_in_order_and_stop_at_stored_version() -> AcoworkResult<()> {
     assert!(cols.iter().any(|c| c == "version"), "v1 added `version`");
     assert!(cols.iter().any(|c| c == "corrupted"), "v1 added `corrupted`");
     // ... and the whole chain runs, so v2's columns land in the same pass.
-    assert!(cols.iter().any(|c| c == "user_id"), "v2 added `user_id`");
+    // v2 added it as `user_id`, v8 renamed it to `initiator` in place
+    // (ADR-076 §决策 4 naming): one column, current name only.
+    assert!(
+        cols.iter().any(|c| c == "initiator"),
+        "v2 added the initiator column, v8 renamed it"
+    );
+    assert!(
+        !cols.iter().any(|c| c == "user_id"),
+        "the pre-rename column name is gone"
+    );
     assert!(cols.iter().any(|c| c == "visibility"), "v2 added `visibility`");
     assert!(cols.iter().any(|c| c == "perf_tps_sum"), "v3 added `perf_tps_sum`");
     assert!(
@@ -509,7 +518,7 @@ fn migrations_run_in_order_and_stop_at_stored_version() -> AcoworkResult<()> {
     assert!(!row.corrupted);
     // ADR-076 §决策 4: a pre-ADR-076 row migrates to ownerless + no explicit
     // visibility, which reads as "public". Nothing is retroactively hidden.
-    assert_eq!(row.user_id, None);
+    assert_eq!(row.initiator, None);
     assert_eq!(row.visibility, None);
     // A pre-perf row migrates to "no measurement", never a fabricated 0.
     assert_eq!(row.perf, None);
@@ -543,14 +552,14 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
     let _ = open_pair(&fresh);
 
     // A v1 database: build it fully, then roll it back to the shape every
-    // database created before ADR-076 has (no `user_id` / `visibility` /
+    // database created before ADR-076 has (no `initiator` / `visibility` /
     // `perf_*` / `chat_session_id`, `user_version = 1`) and let the store
     // upgrade it again.
     let old = dir.path().join("old.sqlite");
     let _ = open_pair(&old);
     open_raw(&old)
         .execute_batch(
-            "ALTER TABLE sessions DROP COLUMN user_id;
+            "ALTER TABLE sessions DROP COLUMN initiator;
              ALTER TABLE sessions DROP COLUMN visibility;
              ALTER TABLE sessions DROP COLUMN perf_tps_sum;
              ALTER TABLE sessions DROP COLUMN perf_tps_samples;
@@ -686,7 +695,11 @@ fn v6_migration_backfills_unknown_breakdown_and_aggregate() -> AcoworkResult<()>
     }
     open_raw(&path)
         .execute_batch(
-            "DROP TABLE token_stats;
+            // A genuine v5 database predates migration 8, so its owner column
+            // is still named `user_id` — restore that name or the v8 rename
+            // fails on reopen.
+            "ALTER TABLE sessions RENAME COLUMN initiator TO user_id;
+             DROP TABLE token_stats;
              ALTER TABLE sessions DROP COLUMN model_usage;
              ALTER TABLE sessions ADD COLUMN last_compaction_summary TEXT;
              PRAGMA user_version = 5;",
@@ -785,11 +798,11 @@ fn upsert_diff_and_delete_maintain_the_aggregate() -> AcoworkResult<()> {
 
     // Prune deducts symmetrically: two owned rows, keep the newest one.
     let mut c = make_meta("c", "2026-01-01T00:00:00.000Z", Some("C"), "agent");
-    c.user_id = Some("u".into());
+    c.initiator = Some("u".into());
     c.model_usage = Some(usage_map(&[("p|m1", usage_entry(10, 1, None))]));
     sm.upsert(&c)?;
     let mut d = make_meta("d", "2026-06-01T00:00:00.000Z", Some("D"), "agent");
-    d.user_id = Some("u".into());
+    d.initiator = Some("u".into());
     d.model_usage = Some(usage_map(&[("p|m1", usage_entry(20, 2, None))]));
     sm.upsert(&d)?;
     let victims = sm.prune_to(1)?;

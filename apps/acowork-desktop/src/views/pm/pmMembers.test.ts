@@ -14,11 +14,19 @@
  *     而服务端 `ensure_assignee_is_member` 是允许的（它只查 members）
  *   - 任务卡片 / 详情抽屉里的创建者显示成裸 UUID
  *
- *   纯函数，无需挂 React 就能钉住映射（同 `TaskEditDialog.test.ts` 的做法）。
+ *   纯函数，无需挂 React 就能钉住映射（同 `useTaskForm.test.ts` 的做法）。
  */
 import { describe, it, expect } from "vitest";
-import { memberOptions, resolveActorLabel, resolveMember, resolveMembers } from "./pmMembers";
+import {
+  canGovern,
+  canGovernProject,
+  memberOptions,
+  resolveActorLabel,
+  resolveMember,
+  resolveMembers,
+} from "./pmMembers";
 import type { PmProjectMember } from "../../lib/pm-types";
+import type { UserAccount } from "../../lib/types";
 
 const USER_ID = "21a727ee-d2ac-4d7a-9bb1-a846cb34cf3c";
 const AGENT_ID = "58ef4139-ce28-46db-9ae9-7daecb042cb5";
@@ -230,5 +238,47 @@ describe("local mode (X-Actor: 'human' sentinel, account=null)", () => {
   it("memberOptions in local mode offers the creator under their profile name", () => {
     const opts = memberOptions([member("human", "user")], agents, null, localProfile);
     expect(opts).toEqual([{ value: "human", label: "admin" }]);
+  });
+});
+// ── Governance: who may mutate a project / a group ─────────────────────
+// The card, the roster buttons and the project settings all read this one
+// predicate, which mirrors the backend gates (`chat_sessions::can_govern_group`
+// and PM's `require_governance`). A plain member must get neither the group
+// prompt nor a project mutation the server would refuse with a 403.
+describe("canGovern / canGovernProject (ADR-098 owner-or-admin)", () => {
+  const account = (user_id: string, role: "user" | "admin" = "user") =>
+    ({ user_id, role }) as unknown as UserAccount;
+  const project = (created_by: string, owner_id?: string) =>
+    ({ created_by, owner_id }) as unknown as Parameters<typeof canGovernProject>[0];
+
+  it("admits the owner", () => {
+    expect(canGovern("u-owner", account("u-owner"), false)).toBe(true);
+  });
+
+  it("admits an admin who is not the owner", () => {
+    expect(canGovern("u-owner", account("u-admin", "admin"), false)).toBe(true);
+  });
+
+  it("refuses a plain member, with or without a known owner", () => {
+    expect(canGovern("u-owner", account("u-plain"), false)).toBe(false);
+    // A project channel whose project has not resolved yet — still nothing.
+    expect(canGovern("", account("u-plain"), false)).toBe(false);
+  });
+
+  it("refuses while no account is resolved (still loading)", () => {
+    expect(canGovern("u-owner", null, false)).toBe(false);
+  });
+
+  it("admits the single local actor with no account at all", () => {
+    // local: `authStore.account` is permanently null and the Gateway injects
+    // the constant actor "human", so the machine's one human governs
+    // everything — including a project an agent created.
+    expect(canGovern("com.acowork.some-agent", null, true)).toBe(true);
+    expect(canGovernProject(project("com.acowork.some-agent"), null, true)).toBe(true);
+  });
+
+  it("follows owner_id over created_by (a transfer moved the governance)", () => {
+    expect(canGovernProject(project("u-old", "u-new"), account("u-new"), false)).toBe(true);
+    expect(canGovernProject(project("u-old", "u-new"), account("u-old"), false)).toBe(false);
   });
 });

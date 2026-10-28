@@ -11,9 +11,13 @@
 //!   the sessions that human started by hand (unbound, same owner). Another
 //!   account's sessions are invisible, whatever their binding.
 //! - **group** — membership *is* the permission (design 27 §8.2). Candidates
-//!   are exactly the sessions bound to this group chat. A 1:1 chat's session
-//!   must never list in a group, and a group's sessions must never list in a
-//!   1:1 chat.
+//!   are the sessions bound to this group chat **and initiated by the
+//!   speaker**. A group executing session belongs to the participant who
+//!   started it (ADR-076 §决策 4: one initiator, no multi-user session), so
+//!   "the work *I* have running here" is the honest list; another member's
+//!   session is not routable from my turn and would otherwise swallow my
+//!   message into their conversation. A 1:1 chat's session must never list in
+//!   a group, and a group's sessions must never list in a 1:1 chat.
 //!
 //! Ordering is `current` first, then most recently active, then title, then
 //! session id — fully determined. Block C is re-rendered every turn, so an
@@ -129,7 +133,8 @@ pub struct SessionCandidate {
 /// Everything the filter needs besides the meta rows.
 pub struct CandidateQuery<'a> {
     pub chat_session_id: &'a str,
-    /// The speaking human — the 1:1 ownership filter. Ignored for groups.
+    /// The speaking human (the initiator of this turn). The candidate list
+    /// only ever offers their own sessions — on every surface.
     pub owner_user_id: Option<&'a str>,
     pub surface: CandidateSurface,
     /// The session the chat is currently mapped to (marked `current`).
@@ -182,19 +187,42 @@ pub fn build_candidates(
 /// The two visibility rules (module docs). A session bound to another chat is
 /// invisible on every surface, which is what keeps a group's `Members`-visible
 /// sessions out of an unrelated private chat's candidate list.
+///
+/// Everything is also gated on the initiator: a session somebody else started
+/// is not this turn's business on any surface. An ownerless session
+/// (pre-accounts, local mode) stays visible — there is nobody it could belong
+/// to instead.
 fn is_visible(meta: &SessionMeta, query: &CandidateQuery<'_>) -> bool {
     let bound = meta.chat_session_id.as_deref();
     if bound == Some(query.chat_session_id) {
-        return true;
+        return is_own(meta, query);
     }
     match query.surface {
         CandidateSurface::Group => false,
         CandidateSurface::Direct => {
-            // Unbound sessions are the human's own manual sessions. The owner
-            // check is what excludes agent-owned responder sessions: they are
-            // created under the agent account, not the speaker's.
-            bound.is_none() && meta.user_id.as_deref() == query.owner_user_id
+            // Unbound sessions are the human's own manual sessions, so an
+            // unowned one is not theirs to list: responder sessions the
+            // agent started on its own have no initiator to match, and
+            // handing those to every account is what made history look
+            // shared.
+            bound.is_none() && meta.initiator.is_some() && is_own(meta, query)
         }
+    }
+}
+
+/// ADR-076 §决策 4: the session was initiated by the speaking human (or by
+/// nobody, which predates the notion).
+fn is_own(meta: &SessionMeta, query: &CandidateQuery<'_>) -> bool {
+    match (meta.initiator.as_deref(), query.owner_user_id) {
+        (None, _) => true,
+        (Some(initiator), Some(speaker)) => initiator == speaker,
+        // An owned session with no known speaker fails CLOSED: "we cannot
+        // tell who is asking" must not mean "show them everybody's runs". A
+        // local-mode deployment never reaches this arm — with no accounts,
+        // no session carries an initiator — so the only turns affected are
+        // the degenerate ones (an older Gateway that sent no `from`), and for
+        // those the router opens a session of its own instead of guessing.
+        (Some(_), None) => false,
     }
 }
 
@@ -266,7 +294,7 @@ mod tests {
             session_id: session_id.to_string(),
             agent_id: "com.acowork.test".to_string(),
             created_at: "2026-10-01T00:00:00+00:00".to_string(),
-            user_id: owner.map(str::to_string),
+            initiator: owner.map(str::to_string),
             visibility: None,
             chat_session_id: bound.map(str::to_string),
             title: Some(title.to_string()),
@@ -375,6 +403,46 @@ mod tests {
             &query(CandidateSurface::Direct, None, &tasks, &terminal, 10),
         );
         assert_eq!(ids(&out), vec!["live"]);
+    }
+
+    /// ADR-076 §决策 4: one execution session per initiator. Two members of
+    /// the same group chat each see their own runs there — never each
+    /// other's, which is what kept a second person out of a session that
+    /// belongs to the first.
+    #[test]
+    fn group_candidates_are_scoped_to_the_speaking_member() {
+        let rows = vec![
+            ("g-alice".to_string(), meta("g-alice", "Alice run", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("g-bob".to_string(), meta("g-bob", "Bob run", "2026-10-21T11:00:00+00:00", Some(CHAT), Some("bob"))),
+            // Pre-accounts session: no initiator to compare, stays visible.
+            ("g-legacy".to_string(), meta("g-legacy", "Legacy", "2026-10-21T09:00:00+00:00", Some(CHAT), None)),
+        ];
+        let tasks = empty_set();
+        let terminal = empty_set();
+        let out = build_candidates(
+            &rows,
+            &HashMap::new(),
+            &query(CandidateSurface::Group, None, &tasks, &terminal, 10),
+        );
+        assert_eq!(ids(&out), vec!["g-alice", "g-legacy"]);
+    }
+
+    /// "We cannot tell who is asking" must not mean "show them every run in
+    /// this chat": an owned session drops out of the candidate list, while a
+    /// pre-accounts (unowned) one stays — there is nobody it could belong to
+    /// instead. Fail closed on the only axis that can leak.
+    #[test]
+    fn an_unknown_speaker_sees_no_owned_sessions() {
+        let rows = vec![
+            ("g-alice".to_string(), meta("g-alice", "Alice run", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("g-legacy".to_string(), meta("g-legacy", "Legacy", "2026-10-21T09:00:00+00:00", Some(CHAT), None)),
+        ];
+        let tasks = empty_set();
+        let terminal = empty_set();
+        let mut q = query(CandidateSurface::Group, None, &tasks, &terminal, 10);
+        q.owner_user_id = None;
+        let out = build_candidates(&rows, &HashMap::new(), &q);
+        assert_eq!(ids(&out), vec!["g-legacy"]);
     }
 
     #[test]

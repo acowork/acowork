@@ -60,7 +60,7 @@ describe("onboarding delegates provider setup to harness", () => {
     const body = onSuccess.slice(0, onSuccess.indexOf("};"));
     expect(body, "keys must be re-read").toContain("loadKeys()");
     expect(body, "providers must be re-read").toContain("loadProviders()");
-    // ChatPanel reloads its model list on this shared signal.
-    expect(body, "ChatPanel must be notified").toContain('"models-added"');
+    // The AppLayout shell reloads the shared model inventory on this signal.
+    expect(body, "model inventory must be notified").toContain('"models-added"');
   });
 });

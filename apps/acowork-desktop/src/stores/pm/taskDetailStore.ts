@@ -27,7 +27,31 @@ interface PmTaskDetailState {
   uploading: boolean;
   error: string | null;
 
+  /**
+   * Which face of the single task dialog is showing; `null` = closed.
+   *
+   * `create` is the only mode without a persisted task, which is also the only
+   * mode where the server-backed tabs (attachments / subtasks) cannot exist:
+   * the upload endpoint is task-scoped
+   * (`POST /tasks/{tid}/attachments`, `core/acowork-pm/src/api/routes.rs`).
+   */
+  mode: TaskDialogMode | null;
+  /** Target project — set on `openCreate`; derived from `detail` otherwise. */
+  projectId: string | null;
+  /** Pre-selected parent task, create mode only ("add subtask" entry). */
+  createParentId: string | null;
+  /**
+   * Task to land on after a create finishes. Set when create was entered from
+   * an open task (the "add subtask" path) so the dialog does not drop the
+   * reader out of the parent they were looking at.
+   */
+  returnTo: string | null;
+
   openTask: (taskId: string) => Promise<void>;
+  /** Open the dialog in create mode (no task row exists yet). */
+  openCreate: (init: { projectId: string; parentId?: string | null; returnTo?: string | null }) => void;
+  /** Switch faces (e.g. a saved create becoming an edit of the new row). */
+  setMode: (mode: TaskDialogMode) => void;
   /** 后台静默刷新（Drawer 已打开时） */
   refresh: () => Promise<void>;
   /** 上传附件 → 成功追加到列表 */
@@ -38,6 +62,9 @@ interface PmTaskDetailState {
   clear: () => void;
 }
 
+/** The three faces of the one task dialog. */
+export type TaskDialogMode = "edit" | "create";
+
 export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
   taskId: null,
   detail: null,
@@ -45,19 +72,59 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
   loading: false,
   uploading: false,
   error: null,
+  mode: null,
+  projectId: null,
+  createParentId: null,
+  returnTo: null,
 
   openTask: async (taskId) => {
-    set({ taskId, loading: true, error: null });
+    set({
+      taskId,
+      mode: "edit",
+      projectId: null,
+      createParentId: null,
+      returnTo: null,
+      loading: true,
+      error: null,
+    });
     try {
       const [detail, attachments] = await Promise.all([
         pmApi.getTask(taskId),
         pmApi.listTaskAttachments(taskId).catch(() => [] as PmAttachmentMeta[]),
       ]);
-      set({ detail, attachments, loading: false, error: null });
+      set({ detail, attachments, projectId: detail.project_id, loading: false, error: null });
     } catch (e) {
       set({ loading: false, error: e instanceof Error ? e.message : String(e) });
       log.warn("[pm:detail] openTask failed:", e);
     }
+  },
+
+  openCreate: ({ projectId, parentId = null, returnTo = null }) => {
+    // A fresh row owns no server state: no detail, no attachments. Everything
+    // the create face must not offer (attachments / subtasks / delete) keys off
+    // `taskId === null`, so there is no second source of truth to drift.
+    set({
+      taskId: null,
+      detail: null,
+      attachments: [],
+      loading: false,
+      uploading: false,
+      error: null,
+      mode: "create",
+      projectId,
+      createParentId: parentId,
+      returnTo,
+    });
+  },
+
+  setMode: (mode) => {
+    const { taskId, mode: current } = get();
+    if (!current) return;
+    // `create` is entered through `openCreate` only — never by switching, and a
+    // taskless dialog cannot switch into the faces that need an id.
+    if (mode === "create") return;
+    if (!taskId) return;
+    set({ mode });
   },
 
   refresh: async () => {
@@ -119,5 +186,9 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
       attachments: [],
       uploading: false,
       error: null,
+      mode: null,
+      projectId: null,
+      createParentId: null,
+      returnTo: null,
     }),
 }));

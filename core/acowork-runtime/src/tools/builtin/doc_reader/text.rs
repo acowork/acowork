@@ -103,14 +103,18 @@ fn extract_whole(text: &str) -> Result<String, String> {
 
 /// Paged path: slice the requested 1-based inclusive line range.
 fn extract_paged(text: &str, start: usize, end: usize) -> Result<String, String> {
-    if start == 0 {
-        return Err("start_line must be >= 1 (1-based)".to_string());
-    }
+    // Tolerance (mirrors file_read): start_line=0 is a 0-based
+    // off-by-one, and a range exactly one line over the cap is the
+    // "up to 100 lines" misread — clamp both instead of burning a
+    // round-trip on the model.
+    let start = start.max(1);
     if end < start {
         return Err(format!("end_line ({end}) must be >= start_line ({start})"));
     }
     let requested = end - start + 1;
-    if requested > super::super::MAX_LINES_PER_CALL {
+    let end = if requested == crate::tools::builtin::MAX_LINES_PER_CALL + 1 {
+        start + super::super::MAX_LINES_PER_CALL - 1
+    } else if requested > super::super::MAX_LINES_PER_CALL {
         return Err(format!(
             "Range too large: {requested} lines requested, max {} per call. \
              Paginate across multiple calls (e.g. start_line: {s}, end_line: {e1}, \
@@ -121,7 +125,9 @@ fn extract_paged(text: &str, start: usize, end: usize) -> Result<String, String>
             e1p1 = start + super::super::MAX_LINES_PER_CALL,
             e2 = end,
         ));
-    }
+    } else {
+        end
+    };
 
     let ranges = line_byte_ranges(text);
     let total = ranges.len();
@@ -310,15 +316,31 @@ mod tests {
     }
 
     #[test]
-    fn paging_rejects_start_line_zero() {
+    fn paging_clamps_start_line_zero_to_one_based() {
+        // start_line=0 is a 0-based off-by-one, not a real error.
         let (_dir, p) = with_temp_lines(&["a", "b", "c"], "x.txt");
         let opts = ExtractOptions {
             start_line: Some(0),
             end_line: Some(2),
             ..Default::default()
         };
-        let err = extract_text(&p, &opts).expect_err("start_line=0 must error");
-        assert!(err.contains("1-based"), "got: {err}");
+        let text = extract_text(&p, &opts).expect("start_line=0 must be clamped");
+        assert_eq!(text, "a\nb\n");
+    }
+
+    #[test]
+    fn paging_clamps_range_one_over_max() {
+        // "up to 100 lines" misread as 101 → clamp to the capped window.
+        let lines: Vec<String> = (0..120).map(|i| format!("L{i}")).collect();
+        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (_dir, p) = with_temp_lines(&line_refs, "big.txt");
+        let opts = ExtractOptions {
+            start_line: Some(1),
+            end_line: Some(crate::tools::builtin::MAX_LINES_PER_CALL + 1),
+            ..Default::default()
+        };
+        let text = extract_text(&p, &opts).expect("one line over max must be clamped");
+        assert_eq!(text.lines().count(), crate::tools::builtin::MAX_LINES_PER_CALL);
     }
 
     #[test]

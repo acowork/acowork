@@ -29,7 +29,7 @@
  * - git tab   : GET /api/agents/{id}/git/log + CommitPicker-style
  *               client-side subject/author/hash filter → virtual log file
  * - 文档 tab  : GET /api/doc/search (doc process) → DocEditor
- * - 项目 tab  : GET /api/pm/search (pm process) → ProjectBoard / TaskDetailDialog
+ * - 项目 tab  : GET /api/pm/search (pm process) → ProjectBoard / TaskEditDialog
  * - 记忆 tab  : GET /api/memory/search?instance_id= (memory service, ADR-101)
  *               → MemoryPanel node — the tab is hidden while the service is
  *               not ready, because the Runtime no longer answers this scope

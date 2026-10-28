@@ -701,7 +701,10 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       set((s) => ({
         byAgent: {
           ...s.byAgent,
-          [agentId]: { chatSessionId: def.session_id, resolved: true, mode: existing?.mode ?? "chat" },
+          // Re-read after the await: `setMode` landing while the fetch was in
+          // flight wrote a placeholder entry, and the pre-await `existing`
+          // snapshot would silently overwrite it back to "chat".
+          [agentId]: { chatSessionId: def.session_id, resolved: true, mode: s.byAgent[agentId]?.mode ?? "chat" },
         },
         // Hydrate the draft cache from the durable session row (§4.5) —
         // absent on the wire means "no draft", shown as the agent's own
@@ -751,8 +754,16 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   setMode: (agentId, mode) => {
     let chatSessionId: string | null = null;
     set((s) => {
-      const st = s.byAgent[agentId];
-      if (!st) return s;
+      // An unresolved agent has no entry yet. Dropping the call here is what
+      // made a drill into an execution session land on the Chat surface
+      // instead: `openAgent` was still in flight, so its later
+      // `{ ..., mode: existing?.mode ?? "chat" }` had no `existing` to
+      // preserve. Writing the placeholder keeps the requested surface.
+      const st = s.byAgent[agentId] ?? {
+        chatSessionId: null,
+        resolved: false,
+        mode,
+      };
       chatSessionId = st.chatSessionId;
       return { byAgent: { ...s.byAgent, [agentId]: { ...st, mode } } };
     });

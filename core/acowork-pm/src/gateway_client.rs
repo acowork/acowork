@@ -41,11 +41,18 @@ impl GatewayClient {
     /// (the project owner at minimum; re-calling with more participants
     /// adds them to the same session). Returns the chat session id when
     /// the Gateway answered; `None` on any failure (logged).
+    ///
+    /// `owner` is `Project::owner()` (`owner_id ?? created_by`). The chat
+    /// domain stores it as the group's ADR-098 governor — the same id that
+    /// may write the group's `chat.md` — so every ensure re-asserts it and a
+    /// transfer or a missed sync cannot leave the chat pointing at the old
+    /// owner.
     pub async fn ensure_group(
         &self,
         project_id: &str,
         title: &str,
         participants: &[String],
+        owner: &str,
     ) -> Option<String> {
         let mut req = self.client.post(format!(
             "{}/api/intents/project-group",
@@ -59,6 +66,7 @@ impl GatewayClient {
                 "project_id": project_id,
                 "title": title,
                 "participants": participants,
+                "owner": owner,
             }))
             .send()
             .await
@@ -98,8 +106,13 @@ impl GatewayClient {
     /// Design 27 §8.3: re-sync the project group's participant set after a
     /// member joins or is removed. Best-effort like provisioning — the PM
     /// store is the source of truth and the next sync converges; a failure
-    /// is logged, never surfaced.
-    pub async fn sync_group(&self, project_id: &str, participants: &[String]) {
+    /// is logged, never surfaced. `owner` (`Project::owner()`) travels with
+    /// the roster so the group's ADR-098 governor — who may write its
+    /// `chat.md` — follows the project on the same call, including a
+    /// transfer that leaves the roster intact. `title` travels for the same
+    /// reason: a project channel has no user-side rename, so this is the only
+    /// path by which a project rename reaches the group's name.
+    pub async fn sync_group(&self, project_id: &str, title: &str, participants: &[String], owner: &str) {
         let mut req = self.client.post(format!(
             "{}/api/intents/project-group/sync",
             self.gateway_url
@@ -110,7 +123,9 @@ impl GatewayClient {
         let resp = match req
             .json(&serde_json::json!({
                 "project_id": project_id,
+                "title": title,
                 "participants": participants,
+                "owner": owner,
             }))
             .send()
             .await
@@ -160,7 +175,6 @@ impl GatewayClient {
         task_id: &str,
         target_agent: &str,
         owner: &str,
-        title: &str,
         message: &str,
         assignment_brief: &str,
         message_id: &str,
@@ -178,7 +192,6 @@ impl GatewayClient {
                 "task_id": task_id,
                 "target_agent": target_agent,
                 "owner": owner,
-                "title": title,
                 "message": message,
                 "assignment_brief": assignment_brief,
                 "message_id": message_id,

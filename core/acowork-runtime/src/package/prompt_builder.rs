@@ -91,7 +91,7 @@ pub const OVERRIDABLE_PROMPTS: &[(&str, &str)] = &[
     // the chat-layer system prompt; the Runtime-owned role/tool/decision
     // kernel is not overridable. Excluded from the execute system prompt by
     // the same `is_overridable_prompt` rule as the entries above.
-    ("chat.md", "chat router persona (ADR-099)"),
+    ("chat.md", "whole chat-layer prompt (ADR-099)"),
 ];
 
 /// O(1) lookup set of overridable filenames. Built lazily on first access
@@ -175,6 +175,48 @@ pub fn load_optional_prompt(package_dir: &Path, filename: &str) -> Option<String
 ///   dialog system prompt.
 pub fn load_compaction_prompt(package_dir: &Path) -> Option<String> {
     load_optional_prompt(package_dir, COMPACTION_PROMPT_FILE)
+}
+
+/// Seed `prompts/chat.md` with the built-in default chat prompt when the
+/// package ships none (ADR-099, extended: the file replaces the WHOLE
+/// chat-layer prompt, not just the persona section).
+///
+/// Rendered for the 1:1 surface — the agent's own chat, which is what the
+/// Debug tab's Prompts & Skills card edits; a group chat carries its own
+/// session-scoped file and never reads this one. Best-effort: a read-only
+/// package dir (or a package with no `prompts/`) simply keeps using the
+/// built-in default.
+pub fn seed_chat_prompt(
+    package_dir: &Path,
+    display_name: Option<&str>,
+    name: &str,
+    role: Option<&str>,
+    description: &str,
+) {
+    let prompts_dir = package_dir.join("prompts");
+    if !prompts_dir.is_dir() {
+        return;
+    }
+    let path = prompts_dir.join("chat.md");
+    if path.exists() {
+        return;
+    }
+    let persona = crate::agent::chat_router::prompt::default_persona(
+        &crate::agent::chat_router::prompt::PersonaSource {
+            display_name,
+            name,
+            role,
+            description,
+        },
+    );
+    let text = acowork_core::chat_prompt::default_chat_prompt(false, &persona);
+    if let Err(e) = fs::write(&path, text) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to seed prompts/chat.md with the built-in chat prompt"
+        );
+    }
 }
 
 /// L2 reload: re-read every file in [`OVERRIDABLE_PROMPTS`] from
@@ -619,6 +661,46 @@ Be friendly and welcoming.
         assert!(core.abstention_prompt.read().unwrap().is_none());
 
         let _ = fs::remove_dir_all(&empty_dir);
+    }
+
+    #[test]
+    fn seed_chat_prompt_writes_the_default_once_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-seed-chat-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+
+        seed_chat_prompt(&dir, Some("Vera"), "vera", Some("Architect"), "Reviews decisions.");
+        let path = dir.join("prompts").join("chat.md");
+        let seeded = fs::read_to_string(&path).unwrap();
+        // The whole built-in prompt for the 1:1 surface, with the manifest
+        // persona rendered in — not just a persona file.
+        assert!(seeded.contains("You are Vera, Architect. Reviews decisions."));
+        assert!(seeded.contains(acowork_core::chat_prompt::SCENARIO_DM));
+
+        // An existing file belongs to the user: never clobbered on the next boot.
+        fs::write(&path, "Mine.").unwrap();
+        seed_chat_prompt(&dir, Some("Vera"), "vera", Some("Architect"), "Reviews decisions.");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "Mine.");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_chat_prompt_skips_a_package_with_no_prompts_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-seed-nodir-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        seed_chat_prompt(&dir, None, "n", None, "d");
+        assert!(!dir.join("prompts").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

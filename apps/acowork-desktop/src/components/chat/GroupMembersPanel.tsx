@@ -18,15 +18,20 @@ import { Plus, Search } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
+import { ListBox, ExpandableRow } from "../common/list";
 import {
   MemberAvatar,
+  canGovernProject,
+  useLocalMode,
   useResolvedMembers,
   withOwner,
   type ResolvedMember,
 } from "../../views/pm/pmMembers";
 import { MemberManagerDialog } from "../../views/pm/MemberManagerDialog";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
+import { GroupChatPromptCard } from "./GroupChatPromptCard";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
+import { useAuthStore } from "../../stores/authStore";
 import { UserGroupMembersPanel } from "./UserGroupMembersPanel";
 
 // `withOwner` lives in `pmMembers` (shared with `MemberManagerDialog`, which
@@ -68,8 +73,10 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
   );
   const projects = usePmProjectStore((s) => s.projects);
   const loadProjects = usePmProjectStore((s) => s.loadProjects);
+  const self = useAuthStore((s) => s.account);
   const [query, setQuery] = useState("");
   const [managerOpen, setManagerOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(true);
 
   const projectId = group?.project_id;
   // Re-derived from the store subscription, so an add / remove inside the
@@ -89,6 +96,12 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
 
   const members = useResolvedMembers(withOwner(project));
   const filtered = useMemo(() => filterMembers(members, query), [members, query]);
+  // The project channel's owner is the backing PM project's (`owner_id ??
+  // created_by`), which PM pushes onto the session row — the same judgement
+  // `MemberManagerDialog` uses to gate transfer and the settings panel uses to
+  // gate the project itself. Owner-or-admin only (ADR-098).
+  const localMode = useLocalMode();
+  const canSeePrompt = canGovernProject(project, self, localMode);
 
   return (
     <div className="relative ml-1 flex shrink-0 flex-col" style={{ width }}>
@@ -102,61 +115,84 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
       )}
 
       <div className={cn(CAPSULE_PANE_CN, "flex-1 bg-right-panel")}>
-        {/* Header — same line-box height contract as RightPanel's tab title
-            so the hairline lines up with the chat pane's header divider. */}
+        {/* Panel header — a generic settings title, matching the agent
+            RightPanel tab header and the user-group panel. */}
         <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary">
-          <span>
-            {t("groupMembers.title")}
-            {project ? `（${members.length}）` : ""}
-          </span>
+          <span className="min-w-0 flex-1 truncate">{t("groupSettings.title")}</span>
         </div>
 
-        {/* Search filter */}
-        <div className="p-3 pb-0">
-          <div className="flex items-center gap-2 rounded-md border border-border-outer bg-panel-block px-2">
-            <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t("groupMembers.searchPlaceholder")}
-              className="h-8 w-full min-w-0 bg-transparent text-xs text-text outline-none placeholder:text-text-disabled"
-            />
-          </div>
-        </div>
-
-        {/* Member grid — avatar over name, WeChat-style. The "+" tile trails
-            the members (only once the project resolves, since adding goes
-            through PM). */}
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
-          {!project ? (
-            <div className="py-6 text-center text-xs text-text-tertiary">
-              {t("groupMembers.loading")}
-            </div>
-          ) : (
-            /* Fixed-width tiles that wrap: the avatar / name cell never
-               stretches or shrinks with the panel width — instead the
-               number of tiles per row adapts to the available space. A
-               `grid-cols-N` would pin the column count and stretch each
-               track (gaps widen when the panel grows, avatars squash when
-               it shrinks), which is the wrong behaviour here. */
-            <div className="flex flex-wrap gap-x-2 gap-y-4">
-              {filtered.map((m) => (
-                <MemberTile key={m.instance_id} member={m} />
-              ))}
-              <button
-                type="button"
-                onClick={() => setManagerOpen(true)}
-                aria-label={t("groupMembers.add")}
-                className="flex w-16 shrink-0 flex-col items-center gap-1"
-              >
-                <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-dashed border-border-outer text-text-tertiary transition-colors hover:border-[var(--color-accent)]/50 hover:text-[var(--color-accent)]">
-                  <Plus size={18} />
-                </span>
-                <span className="w-full truncate text-center text-10 text-text-secondary">
-                  {t("groupMembers.add")}
-                </span>
-              </button>
-            </div>
+          {/* Members card — the same `ListBox` + `ExpandableRow` grammar as the
+              user-group panel and the agent Settings tab. The search filter and
+              the WeChat-style member grid live in the collapsible body; the
+              roster is PM-owned so the only affordance is the manager "+" tile
+              (no inline rename — a project group has no user-service owner). */}
+          <ListBox dividers={false}>
+            <ExpandableRow
+              open={membersOpen}
+              onToggle={() => setMembersOpen((v) => !v)}
+              title={t("groupMembers.title")}
+              ariaLabel={t("groupMembers.title")}
+              meta={
+                project ? (
+                  <span className="shrink-0 rounded bg-panel-inset px-1.5 py-0.5 text-10 text-text-tertiary">
+                    {members.length}
+                  </span>
+                ) : undefined
+              }
+              bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3 space-y-3"
+            >
+              {/* Search filter */}
+              <div className="flex items-center gap-2 rounded-md border border-border-outer bg-panel-block px-2">
+                <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={t("groupMembers.searchPlaceholder")}
+                  className="h-8 w-full min-w-0 bg-transparent text-xs text-text outline-none placeholder:text-text-disabled"
+                />
+              </div>
+              {/* Member grid — avatar over name, WeChat-style. The "+" tile
+                  trails the members (only once the project resolves, since
+                  adding goes through PM). */}
+              {!project ? (
+                <div className="py-6 text-center text-xs text-text-tertiary">
+                  {t("groupMembers.loading")}
+                </div>
+              ) : (
+                /* Fixed-width tiles that wrap: the avatar / name cell never
+                   stretches or shrinks with the panel width — instead the
+                   number of tiles per row adapts to the available space. A
+                   `grid-cols-N` would pin the column count and stretch each
+                   track (gaps widen when the panel grows, avatars squash when
+                   it shrinks), which is the wrong behaviour here. */
+                <div className="flex flex-wrap gap-x-2 gap-y-4">
+                  {filtered.map((m) => (
+                    <MemberTile key={m.instance_id} member={m} />
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setManagerOpen(true)}
+                    aria-label={t("groupMembers.add")}
+                    className="flex w-16 shrink-0 flex-col items-center gap-1"
+                  >
+                    <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-dashed border-border-outer text-text-tertiary transition-colors hover:border-[var(--color-accent)]/50 hover:text-[var(--color-accent)]">
+                      <Plus size={18} />
+                    </span>
+                    <span className="w-full truncate text-center text-10 text-text-secondary">
+                      {t("groupMembers.add")}
+                    </span>
+                  </button>
+                </div>
+              )}
+            </ExpandableRow>
+          </ListBox>
+          {/* Group chat prompt — its own card (same grammar as the members
+              card). Owner-or-admin only (ADR-098): a plain member gets no card
+              at all — neither a read of the prompt nor an edit the backend
+              would refuse. A project channel's owner is the PM project's. */}
+          {canSeePrompt && group?.session_id && (
+            <GroupChatPromptCard sessionId={group.session_id} />
           )}
         </div>
       </div>

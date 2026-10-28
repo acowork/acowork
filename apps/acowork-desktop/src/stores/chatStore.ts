@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, AgentLifecycleState } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
@@ -18,7 +18,7 @@ import { sessionConfigToPatch, deriveSessionTitle, type SessionConfigInput } fro
 import { resolveDefaultReasoningEffort } from "../lib/modelCapabilities";
 import { with503Retry } from "../lib/httpRetry";
 import * as sessionControl from "../lib/session-control";
-import { verifyAgentHealth } from "../lib/gateway-api";
+import { verifyAgentHealth, fetchProviderModels } from "../lib/gateway-api";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
@@ -622,6 +622,102 @@ const inflightLatest = new Map<string, Promise<void>>();
 // ── Single-flight transcript realignment (ADR-050 §16.3) ──────────────
 const inflightRealign = new Map<string, Promise<unknown>>();
 
+// ── Single flight: model inventory ─────────────────────────────────────
+// `availableModels` / `providerAccounts` are read by BOTH composer
+// surfaces (the execution ChatPanel and the Chat-session AgentChatView,
+// whose model / reasoning buttons resolve their capability off this list
+// — see lib/modelCapabilities.ts). A Gateway reconnect and a `models-added`
+// signal can land in the same tick; share one fetch.
+//
+// Coalescing alone is not enough: the vault snapshot is read at the very
+// start of a run, so a `models-added` (a real vault write) landing
+// mid-flight — while the slow per-provider capability fetches still run —
+// would resolve against a pre-write snapshot and hide the new provider.
+// A module-level `models-added` listener counts vault mutations; the load
+// loop re-runs whenever a mutation landed after its snapshot was taken.
+let inflightModels: Promise<void> | null = null;
+let vaultMutationSeq = 0;
+if (typeof window !== "undefined") {
+  window.addEventListener("models-added", () => {
+    vaultMutationSeq += 1;
+  });
+}
+
+/** Test-only: clear the model single-flight / vault-mutation module state.
+ *  A test that asserts mid-flight leaves the lock held; without this the
+ *  next test in the same file would collide with the abandoned run. */
+export function __resetModelInventoryFlightForTests(): void {
+  inflightModels = null;
+  vaultMutationSeq = 0;
+}
+
+/** Field-wise equality for a model inventory row — every field the
+ *  builders below produce is compared. */
+function sameModelEntry(a: ModelEntry, b: ModelEntry): boolean {
+  return (
+    a.name === b.name &&
+    a.provider === b.provider &&
+    a.tool_call === b.tool_call &&
+    a.reasoning === b.reasoning &&
+    a.default_reasoning_effort === b.default_reasoning_effort &&
+    ((a.input_modalities === undefined && b.input_modalities === undefined) ||
+      a.input_modalities?.join(",") === b.input_modalities?.join(","))
+  );
+}
+
+/** Order-sensitive list equality — the inventory order is deterministic
+ *  (vault key order), so a re-read that changed nothing must compare
+ *  equal element by element. */
+function sameModelEntries(a: ModelEntry[], b: ModelEntry[]): boolean {
+  return a.length === b.length && a.every((m, i) => sameModelEntry(m, b[i]));
+}
+
+function sameProviderAccounts(
+  a: Record<string, ProviderAccount[]>,
+  b: Record<string, ProviderAccount[]>,
+): boolean {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const p of ka) {
+    const la = a[p];
+    const lb = b[p];
+    if (!lb || la.length !== lb.length) return false;
+    for (let i = 0; i < la.length; i++) {
+      if (
+        la[i].accountId !== lb[i].accountId ||
+        la[i].alias !== lb[i].alias ||
+        la[i].preview !== lb[i].preview
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * `fetchProviderModels` with a deadline. The underlying fetch has no
+ * timeout of its own, and a hanging provider endpoint behind the Gateway
+ * would keep `Promise.allSettled` pending forever — with the single-flight
+ * lock held, EVERY later refresh (including `models-added` after the user
+ * saves a new provider) would degrade to a no-op until a page reload.
+ * On timeout the fetch counts as a failure, so the provider keeps its
+ * previous capabilities instead of being wiped.
+ */
+async function fetchProviderModelsWithTimeout(
+  provider: string,
+  timeoutMs = 10_000,
+): Promise<Awaited<ReturnType<typeof fetchProviderModels>>> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetchProviderModels(provider, undefined, ctrl.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Re-fetch the tail page when the authoritative record count says our view
  * has diverged from the transcript.
@@ -978,8 +1074,29 @@ interface ChatStore {
    *  backend-authoritative and the Runtime generates a title only once, so a
    *  snapshot title would never be re-pushed to heal a clobber). */
   seedOptimisticTitle: (agentId: string, sessionId: string, userMessage: string) => void;
-  setAvailableModels: (models: ModelEntry[]) => void;
-  setProviderAccounts: (accounts: Record<string, ProviderAccount[]>) => void;
+  /**
+   * Load the shared model inventory: the configured providers (Tauri
+   * vault) plus each provider's model capabilities (Gateway), into
+   * `availableModels` / `providerAccounts`.
+   *
+   * WHY IT LIVES HERE AND NOT IN A COMPONENT: both composer surfaces read
+   * this list (the execution ChatPanel's model / workspace menus and the
+   * Chat-session AgentChatView's model / reasoning buttons), but only one
+   * of the two is mounted at a time (`AgentPage` renders the Chat surface
+   * OR the exec surface per `mode`). Loading it from the exec composer
+   * made it a side effect of that composer mounting — on a desktop restart
+   * that reconnects to an already-running agent, `alive` is true from the
+   * first render, the exec composer never mounts, and the Chat composer's
+   * model / reasoning buttons had no inventory to resolve against.
+   * `AppLayout` now triggers the load (see the effect there) instead.
+   *
+   * Single-flight with compensation: concurrent callers share one fetch, but
+   * a vault write (`models-added`) landing while a load runs forces one
+   * re-read — the running load's snapshot predates the write. Writes that
+   * leave the content unchanged reuse the previous array/object identity,
+   * per the identity-preserving-store-updates rule.
+   */
+  loadAvailableModels: () => Promise<void>;
   /** Set per-session reasoning effort override (auto/off/low/medium/high) */
   setReasoningEffort: (effort: string, agentId: string) => void;
   /**
@@ -1785,7 +1902,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // with closeTab: the fetchSessions response may arrive before the
       // Runtime processes close_session, resurrecting a tab the user just
       // closed.
-      const newOpenIds = agent.openSessionIds.filter((id) => activeIds.includes(id));
+      // The foreground tab survives regardless: a session opened from
+      // history (or drilled into from a Chat reply) is legitimately not in
+      // the Runtime's live set — a read-only one is never activated at all,
+      // because `openSession` skips the backend `open_session` it may not
+      // call. Pruning it dropped `activeSessionId` to null and parked the
+      // panel on "Loading session…" forever (regression t-9764c5fa).
+      const newOpenIds = agent.openSessionIds.filter(
+        (id) => activeIds.includes(id) || id === agent.activeSessionId,
+      );
       if (newOpenIds.length === agent.openSessionIds.length) return {}; // no change
       const patches: Partial<AgentState> = { openSessionIds: newOpenIds };
       // If the foreground tab was pruned, fall to the first survivor or null.
@@ -2535,11 +2660,125 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         set((state) => updateSessionState(state, agentId, sessionId, { sessionContextWindow: previous }));
       });
   },
-  setAvailableModels: (models: ModelEntry[]) => {
-    set({ availableModels: models });
-  },
-  setProviderAccounts: (accounts: Record<string, ProviderAccount[]>) => {
-    set({ providerAccounts: accounts });
+  loadAvailableModels: () => {
+    if (inflightModels) return inflightModels;
+    inflightModels = (async () => {
+      // Re-read while vault writes landed after the snapshot we read — the
+      // classic race: connect edge starts the load, the user saves a new
+      // provider in Harness mid-flight, `models-added` must not be swallowed.
+      let mutationsAtSnapshot: number;
+      do {
+        const keys = await invoke<VaultKeyEntry[]>("list_keys");
+        // Capture the mutation count AFTER the read: the result reflects
+        // every write up to this point, so only later events demand a
+        // re-run (the same read-after-version-check as cache validation —
+        // capturing before the read would re-run for events the read saw).
+        mutationsAtSnapshot = vaultMutationSeq;
+
+        // Accounts per provider — drives the model menu's account level.
+        // Identity-preserving write: the triggers here fire on every
+        // Gateway connect edge, so unchanged content must not hand every
+        // subscriber a fresh object (AGENTS.md, identity-preserving store
+        // updates — these lists feed the memoized transcript surfaces'
+        // parent components).
+        const accountsByProvider: Record<string, ProviderAccount[]> = {};
+        for (const key of keys) {
+          if (!key.account_id) continue;
+          (accountsByProvider[key.provider] ??= []).push({
+            accountId: key.account_id,
+            alias: key.alias?.trim() || key.provider,
+            preview: key.key_preview ?? "",
+          });
+        }
+        set((state) =>
+          sameProviderAccounts(state.providerAccounts, accountsByProvider)
+            ? state
+            : { providerAccounts: accountsByProvider },
+        );
+
+        // Build (provider, configuredModelIds, modelCapabilities) tuples, skipping
+        // empty entries. `models` is provider-level config shared by every account
+        // of that provider, so collapse the per-account rows first — otherwise a
+        // 3-key provider would refetch the same model list 3 times.
+        const byProvider = new Map<string, VaultKeyEntry>();
+        for (const key of keys) if (!byProvider.has(key.provider)) byProvider.set(key.provider, key);
+
+        const entries = [...byProvider.values()].map((key) => ({
+          provider: key.provider,
+          modelIds: key.models?.length
+            ? key.models
+            : key.default_model
+              ? [key.default_model]
+              : [],
+          modelCapabilities: key.model_capabilities,
+        })).filter((e) => e.modelIds.length > 0);
+
+        // Fetch capabilities for all providers in parallel, each behind a
+        // deadline (a hung fetch would wedge the single-flight lock forever).
+        const previousModels = get().availableModels;
+        const results = await Promise.allSettled(
+          entries.map((e) => fetchProviderModelsWithTimeout(e.provider)),
+        );
+
+        // A provider whose fetch FAILED (or timed out) keeps the
+        // capabilities we last resolved for its models rather than being
+        // rewritten with "no capability": one transient 500 must not make
+        // the reasoning control disappear from the composers.
+        const prevCapsByProvider = new Map<string, Map<string, ModelEntry>>();
+        for (const m of previousModels) {
+          let byName = prevCapsByProvider.get(m.provider);
+          if (!byName) {
+            byName = new Map();
+            prevCapsByProvider.set(m.provider, byName);
+          }
+          byName.set(m.name, m);
+        }
+
+        const allModels: ModelEntry[] = [];
+        entries.forEach((entry, i) => {
+          const result = results[i];
+          const apiModels =
+            result.status === "fulfilled" ? (result.value.models ?? []) : null;
+          const prev = prevCapsByProvider.get(entry.provider);
+          for (const modelId of entry.modelIds) {
+            const info = apiModels?.find((m) => m.id === modelId);
+            const prevEntry = prev?.get(modelId);
+            const fallback = apiModels === null ? prevEntry : undefined;
+            allModels.push({
+              name: modelId,
+              provider: entry.provider,
+              tool_call: info?.tool_call ?? fallback?.tool_call ?? undefined,
+              reasoning: info?.reasoning ?? fallback?.reasoning ?? undefined,
+              input_modalities:
+                info?.input_modalities ?? fallback?.input_modalities ?? undefined,
+              default_reasoning_effort:
+                entry.modelCapabilities?.[modelId]?.default_reasoning_effort ??
+                fallback?.default_reasoning_effort ??
+                undefined,
+            });
+          }
+        });
+
+        // Deduplicate by model name + provider
+        const uniqueModels = allModels.filter(
+          (m, i, arr) =>
+            arr.findIndex((x) => x.name === m.name && x.provider === m.provider) === i,
+        );
+        set((state) =>
+          sameModelEntries(state.availableModels, uniqueModels)
+            ? state
+            : { availableModels: uniqueModels },
+        );
+      } while (vaultMutationSeq !== mutationsAtSnapshot);
+    })()
+      .catch(() => {
+        // Vault unreadable (outside the desktop shell) or the Gateway is
+        // not running — keep whatever inventory we already have.
+      })
+      .finally(() => {
+        inflightModels = null;
+      });
+    return inflightModels;
   },
   continueExecution: async (agentId: string, sessionId?: string) => {
     try {

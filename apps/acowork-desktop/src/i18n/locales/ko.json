@@ -1666,8 +1666,12 @@
       "deleteTaskCascadeDesc": "이 작업을 삭제할까요? 하위 작업도 함께 삭제됩니다.",
       "taskNotFound": "작업을 찾을 수 없습니다",
       "taskDeleted": "작업이 삭제되었습니다",
+      "deleteFailed": "삭제 실패: {{error}}",
       "save": "저장",
       "taskSaved": "작업이 저장되었습니다",
+      "discardChangesTitle": "저장하지 않은 변경을 삭제할까요?",
+      "discardChangesDesc": "닫으면 이번 변경 사항이 저장되지 않습니다.",
+      "discardChangesConfirm": "삭제",
       "taskSaveFailed": "저장에 실패했습니다",
       "descriptionPlaceholder": "Markdown 지원...",
       "unassigned": "미배정",
@@ -1866,7 +1870,9 @@
     "send": "보내기",
     "emptyTurn": "(출력 없음)",
     "taskChip": "작업 {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "작업 ID 복사",
-    "readOnly": "읽기 전용 — 이 프로젝트의 멤버가 아닙니다."
+    "readOnly": "읽기 전용 — 이 프로젝트의 멤버가 아닙니다.",
+    "mentionMenu": "@{{name}}"
   }
 }

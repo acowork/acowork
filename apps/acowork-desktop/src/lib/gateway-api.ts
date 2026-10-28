@@ -149,12 +149,15 @@ export async function verifyAgentHealth(
   }
 }
 
-/** Fetch models for a specific provider from Gateway's models cache */
+/** Fetch models for a specific provider from Gateway's models cache.
+ *  `signal` lets callers put a deadline on the fetch — an unreachable or
+ *  hanging upstream must not keep the inventory refresh pending forever. */
 export async function fetchProviderModels(
   providerId: string,
   gatewayUrl = getGatewayUrl(),
+  signal?: AbortSignal,
 ): Promise<ProviderModelsResponse> {
-  const resp = await fetch(`${gatewayUrl}/api/models/${providerId}`);
+  const resp = await fetch(`${gatewayUrl}/api/models/${providerId}`, { signal });
   if (!resp.ok)
     throw new Error(`Failed to fetch models for ${providerId}: ${resp.status}`);
   return resp.json();

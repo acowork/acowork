@@ -353,15 +353,56 @@ impl SessionSeed {
 /// the mixed-version fallback: an older Gateway still sends
 /// `kind="request"` on a `task:` conversation, and mis-keying it onto the
 /// group's chat session would break §6.2 for the whole task.
-pub fn routing_key(kind: &str, chat_session_id: &str, conversation_id: &str, message_id: &str) -> String {
+pub fn routing_key(
+    kind: &str,
+    chat_session_id: &str,
+    initiator: &str,
+    conversation_id: &str,
+    message_id: &str,
+) -> String {
     if TurnOrigin::parse(kind) == TurnOrigin::PmTask || is_task_conversation(conversation_id) {
         format!("conv:{}", conversation_id)
     } else if !chat_session_id.is_empty() {
-        format!("chat:{}", chat_session_id)
+        chat_key(chat_session_id, initiator)
     } else if !conversation_id.is_empty() {
         format!("conv:{}", conversation_id)
     } else {
         format!("msg:{}", message_id)
+    }
+}
+
+/// The routing key for a Chat-surface turn: `chat:{chat_session_id}:{initiator}`.
+///
+/// The initiator is part of the key because an execution session has exactly
+/// one initiator (ADR-076 §决策 4). Two people addressing the same agent in
+/// the same group chat are two different pieces of work, and without the
+/// suffix the second one would land inside the first one's session — the
+/// multi-user session the design forbids. Empty initiator keeps the 2-part
+/// form (local mode / legacy callers), which is also what old mappings on
+/// disk look like.
+///
+/// Upgrade consequence, deliberate: a group's execution session that was
+/// keyed before this change (`chat:{csid}`) is not found by the new 3-part
+/// key, so the first mention after the upgrade opens a fresh session. The
+/// old one stays in the session list as history. Falling back to the 2-part
+/// key would re-open a session whose initiator may be somebody else — the
+/// exact bug this key exists to prevent.
+pub fn chat_key(chat_session_id: &str, initiator: &str) -> String {
+    let initiator = initiator.trim();
+    if initiator.is_empty() {
+        format!("chat:{chat_session_id}")
+    } else {
+        format!("chat:{chat_session_id}:{initiator}")
+    }
+}
+
+/// Recover the Chat session id from a [`chat_key`], old (2-part) or new
+/// (3-part) form.
+pub fn chat_id_from_key(key: &str) -> Option<&str> {
+    let rest = key.strip_prefix("chat:")?;
+    match rest.split_once(':') {
+        Some((chat_id, _initiator)) => Some(chat_id),
+        None => Some(rest),
     }
 }
 
@@ -372,12 +413,12 @@ mod tests {
     #[test]
     fn keys_are_namespaced_by_preference() {
         assert_eq!(
-            routing_key("user_message", "cs1", "c1", "m1"),
-            "chat:cs1".to_string(),
+            routing_key("user_message", "cs1", "u-1", "c1", "m1"),
+            "chat:cs1:u-1".to_string(),
             "chat session wins"
         );
-        assert_eq!(routing_key("", "", "c1", "m1"), "conv:c1".to_string());
-        assert_eq!(routing_key("", "", "", "m1"), "msg:m1".to_string());
+        assert_eq!(routing_key("", "", "u-1", "c1", "m1"), "conv:c1".to_string());
+        assert_eq!(routing_key("", "", "u-1", "", "m1"), "msg:m1".to_string());
     }
 
     #[test]
@@ -385,14 +426,14 @@ mod tests {
         // §6.2: one execution session per (task, agent) even inside the
         // project group chat. Origin-stamped dispatch:
         assert_eq!(
-            routing_key("pm_task", "cs1", "task:p1:t1", "m1"),
+            routing_key("pm_task", "cs1", "u-1", "task:p1:t1", "m1"),
             "conv:task:p1:t1".to_string()
         );
         // Mixed-version fallback — an older Gateway still sends
         // `kind="request"` on the task conversation; the coordinate keeps
         // the key correct either way:
         assert_eq!(
-            routing_key("request", "cs1", "task:p1:t1", "m1"),
+            routing_key("request", "cs1", "u-1", "task:p1:t1", "m1"),
             "conv:task:p1:t1".to_string()
         );
     }

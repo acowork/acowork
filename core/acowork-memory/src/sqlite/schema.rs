@@ -131,8 +131,10 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// 4 = `chat_session_id`; 5 = `last_compaction_summary` + `conversation_state`;
 /// 6 = `model_usage` breakdown column + `token_stats` aggregate table;
 /// 7 = drop `last_compaction_summary` (its only reader, the retired intent
-/// rotation handoff, is gone).
-pub const SCHEMA_VERSION: i64 = 7;
+/// rotation handoff, is gone); 8 = rename `sessions.user_id` to `initiator`
+/// (ADR-076 §决策 4 — the column is the session's initiator, and `user_id`
+/// belongs to the account system).
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -238,6 +240,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
         7,
         "ALTER TABLE sessions DROP COLUMN last_compaction_summary;",
     ),
+    // ADR-076 §决策 4 naming: the column holds *who initiated the session*
+    // (an account, or an agent instance for agent-initiated work), not "the
+    // user of the row". Keeping the old name in SQL while the code says
+    // `initiator` is exactly the confusion the rename removes, and SQLite
+    // renames in place — no table rebuild, no data moved.
+    (
+        8,
+        "ALTER TABLE sessions RENAME COLUMN user_id TO initiator;",
+    ),
 ];
 
 /// Apply every [`MIGRATIONS`] step whose target version is strictly greater
@@ -260,11 +271,37 @@ pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Res
     let tx = conn.transaction()?;
     for (target, sql) in MIGRATIONS {
         if stored < *target {
+            // The v8 rename is the one step that cannot guard inside the SQL
+            // itself (SQLite has no conditional DDL, and `ADD COLUMN`-style
+            // `WHERE NOT EXISTS` guards do not exist for renames). A stored
+            // version below 8 whose `sessions` table already has no `user_id`
+            // — e.g. a database written by an intermediate branch build that
+            // shipped the rename before stamping 8 — would otherwise hard-
+            // fail `open` and strand every session row. Skip the rename when
+            // the source column is absent; the end state (`initiator`) is
+            // identical.
+            if *target == 8 && !has_column(&tx, "sessions", "user_id")? {
+                continue;
+            }
             tx.execute_batch(sql)?;
         }
     }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()
+}
+
+/// Whether `table` currently has a column named `column` (pragma lookup,
+/// used by the v8 rename guard in [`apply_migrations`]).
+fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT name FROM pragma_table_info(?) WHERE name = ?",
+            rusqlite::params![table, column],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
 }
 
 /// Map a node label to its FTS5 table name.
@@ -284,5 +321,78 @@ pub(crate) fn fts_table(label: &str) -> Option<&'static str> {
         Some("fts_conversation")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_migrations, SCHEMA_VERSION};
+
+    /// ADR-076 §决策 4: an existing store keeps its rows across the
+    /// `sessions.user_id` → `initiator` rename. A broken step here does not
+    /// fail loudly — it leaves the memory service unable to open a database
+    /// that holds the user's whole session index.
+    #[test]
+    fn migration_8_renames_the_column_and_keeps_the_data() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        // The v7 shape that every installed store has on disk.
+        conn.execute_batch(
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, user_id TEXT); \
+             INSERT INTO sessions (session_id, user_id) VALUES ('s1', 'u-alice'); \
+             PRAGMA user_version = 7;",
+        )
+        .expect("seed v7 store");
+
+        apply_migrations(&mut conn).expect("migrate");
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(sessions)")
+            .expect("table_info")
+            .query_map([], |r| r.get::<_, String>(1))
+            .expect("rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect");
+        assert!(cols.iter().any(|c| c == "initiator"), "columns: {cols:?}");
+        assert!(!cols.iter().any(|c| c == "user_id"), "columns: {cols:?}");
+
+        let owner: String = conn
+            .query_row("SELECT initiator FROM sessions WHERE session_id = 's1'", [], |r| {
+                r.get(0)
+            })
+            .expect("row survives the rename");
+        assert_eq!(owner, "u-alice");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// The v8 rename is guarded against a missing source column: a database
+    /// written below version 8 that already renamed the column (an
+    /// intermediate branch build) must still open, not strand the whole
+    /// session index on a hard DDL failure.
+    #[test]
+    fn migration_8_is_a_noop_when_the_source_column_is_absent() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, initiator TEXT); \
+             INSERT INTO sessions (session_id, initiator) VALUES ('s1', 'u-alice'); \
+             PRAGMA user_version = 7;",
+        )
+        .expect("seed already-renamed store");
+
+        apply_migrations(&mut conn).expect("open must not fail on the rename");
+
+        let owner: String = conn
+            .query_row("SELECT initiator FROM sessions WHERE session_id = 's1'", [], |r| {
+                r.get(0)
+            })
+            .expect("row intact");
+        assert_eq!(owner, "u-alice");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
     }
 }

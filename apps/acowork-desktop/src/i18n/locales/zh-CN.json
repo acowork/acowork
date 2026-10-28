@@ -1794,8 +1794,12 @@
       "deleteTaskCascadeDesc": "删除该任务？其子任务将一并删除。",
       "taskNotFound": "任务不存在",
       "taskDeleted": "任务已删除",
+      "deleteFailed": "删除失败：{{error}}",
       "save": "保存",
       "taskSaved": "任务已保存",
+      "discardChangesTitle": "放弃未保存的修改？",
+      "discardChangesDesc": "关闭后本次改动不会被保存。",
+      "discardChangesConfirm": "放弃修改",
       "taskSaveFailed": "保存失败",
       "descriptionPlaceholder": "支持 Markdown...",
       "unassigned": "未指派",
@@ -2025,8 +2029,10 @@
     "placeholderWithMentions": "发消息，@Agent 让其处理",
     "send": "发送",
     "mentionLabel": "提及成员",
+    "mentionMenu": "@{{name}}",
     "emptyTurn": "（无输出）",
     "taskChip": "任务 {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "复制任务 ID",
     "readOnly": "只读 — 你不是该项目的成员。"
   },
@@ -2051,6 +2057,24 @@
     "transferFailed": "群主转移失败",
     "mustTransferBeforeLeave": "请先转移群主再退出",
     "governForbidden": "只有群主或管理员可以执行此操作"
+  },
+  "groupChatPrompt": {
+    "title": "群聊提示词 (chat.md)",
+    "isDefault": "默认",
+    "unsaved": "未保存",
+    "hint": "本群聊的整段聊天提示词。保存后覆盖应用内置的默认提示词,对该群里回答的所有 agent 生效。系统会自动追加一段不可删改的 `# Safety` 安全底线,不在此显示、也不可在此编辑。",
+    "readOnlyHint": "本群聊的整段聊天提示词。仅群主或管理员可以编辑。系统会自动追加一段不可删改的 `# Safety` 安全底线,不在此显示。",
+    "save": "保存",
+    "restore": "恢复默认",
+    "saved": "群聊提示词已保存",
+    "saveFailed": "保存失败",
+    "custom": "自定义",
+    "edit": "编辑",
+    "restored": "群聊提示词已恢复默认",
+    "restoreFailed": "恢复失败"
+  },
+  "groupSettings": {
+    "title": "群设置"
   },
   "newGroup": {
     "title": "新建群组",

@@ -433,11 +433,14 @@ pub struct ChatSession {
     pub participants: Vec<Participant>,
     #[serde(default)]
     pub title: String,
-    /// Group owner for a `user_group` (ADR-098 governance). The founder is
-    /// the first owner; ownership moves only via [`transfer_owner`]. `None`
-    /// for every other kind and for sessions written before the field
-    /// existed, so a legacy row deserialises without an owner rather than
-    /// failing to load.
+    /// Group owner (ADR-098 governance): the one who may govern the group —
+    /// rename / transfer / the group `chat.md`. For a `user_group` it is the
+    /// founder, moved only by [`transfer_owner`]. For a `project_group` it is
+    /// the backing PM project's owner, **pushed** by PM through the ensure /
+    /// sync routes (PM owns that relation; the chat row caches the fact the
+    /// same way it caches `title`, `participants` and `repo`). `None` for the
+    /// 1:1 kinds and for sessions written before the field existed, so a
+    /// legacy row deserialises without an owner rather than failing to load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
     /// The Chat surface's last seed pick, persisted server-side (design 27
@@ -496,6 +499,209 @@ pub(crate) fn messages_path(dir: &Path) -> PathBuf {
     dir.join("messages.jsonl")
 }
 
+/// The session's editable group-chat prompt override (`chat.md`).
+///
+/// Design 29 §3.1 / ADR-099 (extended): the whole chat-layer system prompt is
+/// replaceable by a `chat.md` file. A package supplies `prompts/chat.md`; a
+/// *group* session supplies its own copy here, and it wins over the package
+/// one for every agent that answers in this chat (a group is one shared
+/// voice). Seeded on first touch with [`default_group_chat_md`] so the group's
+/// settings panel always opens a real file instead of an empty "create it"
+/// state.
+fn chat_md_path(dir: &Path) -> PathBuf {
+    dir.join("chat.md")
+}
+
+/// The hardcoded default a group session's `chat.md` starts from — the
+/// "software's built-in prompt" the operator then edits in place.
+///
+/// It is the **whole** group chat prompt (kernel + a generic persona + the
+/// group scenario) — the built-in default `acowork-runtime` would assemble
+/// when no `chat.md` exists, so a group always opens a real, editable file.
+/// The persona stays generic (not the answering agent's manifest persona)
+/// because any member may answer; `{{agent_name}}` is substituted per
+/// answering agent at turn time.
+pub fn default_group_chat_md() -> String {
+    acowork_core::chat_prompt::default_chat_prompt(
+        true,
+        acowork_core::chat_prompt::DEFAULT_CHAT_PERSONA,
+    )
+}
+
+/// True when a stored `chat.md` is still the built-in default. Compares the
+/// body with the (Runtime-re-appliable) safety tail stripped, so a file that
+/// merely lost or kept the tail still reads as "default" — the badge tracks the
+/// prompt the writer chose, not the invariant the Runtime re-adds each turn.
+pub fn is_default_chat_md(content: &str) -> bool {
+    acowork_core::chat_prompt::strip_chat_prompt_tail(content)
+        == acowork_core::chat_prompt::strip_chat_prompt_tail(&default_group_chat_md())
+}
+
+/// ADR-098 governance gate shared by the group writes (rename / transfer /
+/// chat prompt): the caller must be the group owner or an admin. Both group
+/// kinds carry an owner id — a `user_group`'s founder (moved by
+/// [`transfer_owner`]) and a `project_group`'s backing PM project owner
+/// (pushed by PM through the ensure / sync routes, see [`create_session`] and
+/// [`sync_group`]) — so the project owner governs their channel's prompt
+/// exactly as they govern the project itself. The caller must already have
+/// cleared the participation check — a non-member gets the hidden 404, never
+/// this.
+pub fn can_govern_group(session: &ChatSession, who: &str, is_admin: bool) -> bool {
+    is_admin || session.owner.as_deref() == Some(who)
+}
+
+/// Converge a session's `owner` to the id its owning service reports. `None`,
+/// an empty id, or an already-matching row are all no-ops (returning `false`),
+/// so a repeated ensure/sync never churns the file. The caller holds the
+/// per-session lock and saves when this returns `true`.
+fn set_owner_if_changed(session: &mut ChatSession, owner: Option<&str>) -> bool {
+    let Some(owner) = owner.map(str::trim).filter(|o| !o.is_empty()) else {
+        return false;
+    };
+    if session.owner.as_deref() == Some(owner) {
+        return false;
+    }
+    session.owner = Some(owner.to_string());
+    true
+}
+
+/// Re-assert a project group's title from PM's copy (the same
+/// converge-on-every-push shape as [`set_owner_if_changed`]). A project
+/// channel's name is the project's name — the user-side rename is refused for
+/// `project_group` — so without this a project rename left the sidebar showing
+/// the title the session was created with, until the next member churn.
+/// An empty title means the caller does not know it and must not blank it.
+fn set_title_if_changed(session: &mut ChatSession, title: &str) -> bool {
+    let title = title.trim();
+    if title.is_empty() || session.title == title {
+        return false;
+    }
+    session.title = title.to_string();
+    true
+}
+
+/// Upper bound on a session `chat.md`, shared with the runtime's own cap
+/// ([`acowork_core::chat_prompt::MAX_CHAT_PROMPT_BYTES`]) so a session file
+/// cannot smuggle in a prompt longer than the runtime would accept anyway.
+pub const MAX_CHAT_MD_BYTES: usize = acowork_core::chat_prompt::MAX_CHAT_PROMPT_BYTES;
+
+/// Kinds whose chat surface carries a group prompt file. 1:1 kinds do not:
+/// a DM uses the agent's own package `prompts/chat.md` (debug panel).
+fn carries_chat_md(kind: SessionKind) -> bool {
+    matches!(kind, SessionKind::UserGroup | SessionKind::ProjectGroup)
+}
+
+/// Read a group session's `chat.md`, seeding [`default_group_chat_md`] on the
+/// first touch. `Ok(None)` for kinds without a prompt file; an unreadable file
+/// is surfaced as `Err` (the caller answers 5xx) rather than masked by the
+/// default — same rule as the package loader. A failed seed write is
+/// best-effort: the content is still returned, so a read-only data dir keeps
+/// the surface working.
+pub fn read_chat_md(data_dir: &Path, session: &ChatSession) -> Result<Option<String>, String> {
+    if !carries_chat_md(session.kind) {
+        return Ok(None);
+    }
+    let path = chat_md_path(&session_dir(data_dir, &session.session_id));
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let seed = default_group_chat_md();
+            let _ = fs::write(&path, &seed);
+            Ok(Some(seed))
+        }
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// Overwrite a group session's `chat.md` (the per-chat customization).
+///
+/// Governance is checked here, under the session lock, from a freshly loaded
+/// row — not from a caller's stale snapshot, so a concurrent `transfer_owner`
+/// cannot flip the gate mid-write (ADR-098). The caller must be a participant
+/// (else `not_a_participant` → hidden 404) and the group owner or an admin
+/// (else `not_authorized` → 403). Only `user_group` / `project_group` carry the
+/// file.
+///
+/// The stored bytes are normalized with [`with_chat_prompt_tail`](
+/// acowork_core::chat_prompt::with_chat_prompt_tail) so the file always ends
+/// with the non-trimmable safety tail the Runtime re-applies anyway, and the
+/// size cap reserves room for it — a body saved at the cap is never silently
+/// truncated on the next turn. The write is atomic (tmp + rename) under the
+/// lock. Returns the exact bytes now stored.
+pub fn write_chat_md(
+    data_dir: &Path,
+    session_id: &str,
+    content: &str,
+    who: &str,
+    is_admin: bool,
+) -> Result<String, String> {
+    let body_budget =
+        MAX_CHAT_MD_BYTES - acowork_core::chat_prompt::CHAT_PROMPT_TAIL_RESERVE_BYTES;
+    let dir = session_dir(data_dir, session_id);
+    let lock_handle = session_lock(&dir);
+    let _guard = lock(&lock_handle);
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    if !carries_chat_md(session.kind) {
+        return Err("this chat session has no editable chat.md".to_string());
+    }
+    if !can_govern_group(&session, who, is_admin) {
+        return Err("not_authorized".to_string());
+    }
+    let body = acowork_core::chat_prompt::strip_chat_prompt_tail(content);
+    if body.len() > body_budget {
+        return Err(format!(
+            "chat.md exceeds the {MAX_CHAT_MD_BYTES}-byte cap (incl. the safety tail)"
+        ));
+    }
+    let content = acowork_core::chat_prompt::with_chat_prompt_tail(body);
+    let path = chat_md_path(&dir);
+    let tmp = path.with_extension("md.tmp");
+    fs::write(&tmp, &content).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })?;
+    Ok(content)
+}
+
+/// Reset a group session's `chat.md` to the built-in default by removing the
+/// override file — the next [`read_chat_md`] re-seeds [`default_group_chat_md`]
+/// on first touch, so there is no default text to duplicate on the client. Same
+/// governance as [`write_chat_md`]: a participant (else `not_a_participant` →
+/// hidden 404) who is the group owner or an admin (else `not_authorized` → 403),
+/// checked under the session lock. Only `user_group` / `project_group` carry the
+/// file. `Ok(())` is also returned when no override existed (already default).
+pub fn reset_chat_md(
+    data_dir: &Path,
+    session_id: &str,
+    who: &str,
+    is_admin: bool,
+) -> Result<(), String> {
+    let dir = session_dir(data_dir, session_id);
+    let lock_handle = session_lock(&dir);
+    let _guard = lock(&lock_handle);
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    if !carries_chat_md(session.kind) {
+        return Err("this chat session has no editable chat.md".to_string());
+    }
+    if !can_govern_group(&session, who, is_admin) {
+        return Err("not_authorized".to_string());
+    }
+    let path = chat_md_path(&dir);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        // No override file: already on the default, nothing to reset.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
 fn projects_index_path(data_dir: &Path) -> PathBuf {
     data_dir.join("chat-sessions.projects.json")
 }
@@ -525,7 +731,11 @@ fn session_lock(dir: &Path) -> Arc<Mutex<()>> {
 ///
 /// `project_group` sessions are idempotent on `project_id`: a second create
 /// for the same project returns the existing session (design 27 §4.4 /
-/// Phase 2). Other kinds are created as given; duplicate participant ids are
+/// Phase 2). The repeat call is not a pure no-op there: an `owner` that is
+/// given is converged onto the existing row, because PM (the authority on who
+/// owns the project) re-asserts it on every ensure and the chat row must not
+/// keep a stale or missing one — ADR-098 governance of the group's `chat.md`
+/// reads it. Other kinds are created as given; duplicate participant ids are
 /// rejected, not silently deduped — a caller that passes the same id twice
 /// is confused about the membership it asked for.
 pub fn create_session(
@@ -559,6 +769,21 @@ pub fn create_session(
         if let Some(existing_id) = index.get(&pid)
             && let Ok(s) = load(data_dir, existing_id)
         {
+            // Idempotent hit. PM re-asserts the project's owner on every
+            // ensure (project creation, member churn, the boot backfill), so
+            // a row written before the owner was carried — or one whose
+            // ownership moved while the Gateway was unreachable — heals here.
+            // Same load → lock → re-load shape as `sync_group`: a concurrent
+            // `append_message` must not lose this write (§8 atomic RMW).
+            let dir = session_dir(data_dir, &s.session_id);
+            let tlock = session_lock(&dir);
+            let _g = lock(&tlock);
+            let mut s = load(data_dir, &s.session_id)?;
+            let owner_changed = set_owner_if_changed(&mut s, owner);
+            let title_changed = set_title_if_changed(&mut s, title);
+            if owner_changed || title_changed {
+                save(&dir, &s)?;
+            }
             return Ok(s);
         }
         let s = write_new(data_dir, kind, participants, title, owner, Some(&pid), now)?;
@@ -2126,10 +2351,23 @@ pub fn list_project_groups(data_dir: &Path) -> Vec<ChatSession> {
 /// case). Removal is the revocation half of §8.3: chat history the former
 /// member wrote stays (the log is append-only), but bound execution
 /// sessions become unreachable for them on their next scope injection.
+///
+/// `owner` is the project's current owner as PM reports it (`Project::owner()`).
+/// Given, it is converged onto the session row — that id is what ADR-098
+/// governance of the group's `chat.md` checks — so an ownership transfer
+/// reaches the chat domain through the same call as the roster. `None` leaves
+/// the stored owner alone (a caller that does not know it must not clear it).
+///
+/// `title` is the project's title, converged the same way: a `project_group`
+/// has no user-side rename (the chat domain refuses it), so PM's title is the
+/// only source and a project rename reaches the sidebar through this call. An
+/// empty title leaves the stored one alone, same rule as `owner`.
 pub fn sync_group(
     data_dir: &Path,
     project_id: &str,
     participants: &[Participant],
+    title: &str,
+    owner: Option<&str>,
     now: i64,
 ) -> Result<ChatSession, String> {
     let existing = read_projects_index(data_dir)
@@ -2143,8 +2381,8 @@ pub fn sync_group(
                 data_dir,
                 SessionKind::ProjectGroup,
                 participants,
-                "",
-                None,
+                title,
+                owner,
                 Some(project_id),
                 now,
             );
@@ -2165,15 +2403,27 @@ pub fn sync_group(
             s.participants.push(p.clone());
         }
     }
-    if s.participants != before {
+    let roster_changed = s.participants != before;
+    // PM re-asserts the project owner on the same call, so a transfer that
+    // leaves the roster intact (the old owner stays on as a member) still
+    // reaches the chat domain — otherwise the new owner would keep reading
+    // `editable: false` on their own group prompt.
+    let owner_changed = set_owner_if_changed(&mut s, owner);
+    let title_changed = set_title_if_changed(&mut s, title);
+    if roster_changed || owner_changed || title_changed {
         save(&dir, &s)?;
-        reindex(data_dir, &s.session_id, Some(&before), &s.participants)?;
+        if roster_changed {
+            reindex(data_dir, &s.session_id, Some(&before), &s.participants)?;
+        }
         // §6.1 doorbell (same rule as `append_message`): a participant-set
         // change is a backend-driven refresh — every human surface viewing
         // this group must re-read. The newcomer discovers the chat (composer
         // unlocks, it leaves the read-only state), the still-listed members
         // refresh the header's member count, and a removed member drops it.
-        // Notify the new set plus whoever was in `before` but is gone (they
+        // An owner- or title-only change fires the same refresh: who may
+        // govern the group (its prompt) and the name it is listed under are
+        // both shown on those surfaces. Notify the new set
+        // plus whoever was in `before` but is gone (they
         // are no longer in the new set, so a removal still reaches them);
         // each id fires once. Typed agents are skipped (no listener).
         for p in s
@@ -2365,6 +2615,215 @@ mod tests {
         let human = Participant::new("human-1", ParticipantIdentity::Human);
         let agent = Participant::new("agent-1", ParticipantIdentity::Agent);
         ensure_pair(dir, human, agent, SessionKind::UserAgent, 100).expect("pair")
+    }
+
+    fn group_session(dir: &Path) -> ChatSession {
+        let humans = [Participant::new("u-a", ParticipantIdentity::Human)];
+        create_session(dir, SessionKind::UserGroup, &humans, "G", Some("u-a"), None, 1)
+            .expect("group")
+    }
+
+    #[test]
+    fn group_chat_md_is_seeded_read_and_rewritten_but_one_to_one_has_none() {
+        let dir = temp_dir();
+        let group = group_session(&dir);
+        // First touch writes the built-in default and returns it...
+        let seeded = read_chat_md(&dir, &group).expect("read").expect("group has chat.md");
+        assert_eq!(seeded, default_group_chat_md());
+        assert!(session_dir(&dir, &group.session_id).join("chat.md").exists());
+        // ...and the same bytes come back untouched on the next read (no
+        // re-seed, no drift).
+        assert_eq!(read_chat_md(&dir, &group).unwrap().unwrap(), seeded);
+
+        // A rewrite is stored normalized: the body plus the re-applicable
+        // safety tail, exactly what the Runtime emits for that body.
+        let written = write_chat_md(&dir, &group.session_id, "Custom kernel.", "u-a", false).unwrap();
+        let expected = acowork_core::chat_prompt::with_chat_prompt_tail("Custom kernel.");
+        assert_eq!(written, expected);
+        assert_eq!(read_chat_md(&dir, &group).unwrap().unwrap(), expected);
+
+        // A 1:1 session carries no group prompt file at all: a DM uses the
+        // agent's own package `prompts/chat.md`.
+        let pair = pair_session(&dir);
+        assert!(read_chat_md(&dir, &pair).unwrap().is_none());
+        assert!(write_chat_md(&dir, &pair.session_id, "nope", "human-1", false).is_err());
+    }
+
+    #[test]
+    fn chat_md_write_is_gated_on_owner_or_admin() {
+        let dir = temp_dir();
+        let group = group_session(&dir); // owner = "u-a"
+        // A non-owner member is refused (403 vocabulary), leaving the file
+        // at its seeded default.
+        add_participant(
+            &dir,
+            &group.session_id,
+            &Participant::new("u-b", ParticipantIdentity::Human),
+            1,
+        )
+        .expect("invite");
+        assert_eq!(
+            write_chat_md(&dir, &group.session_id, "Takeover.", "u-b", false).unwrap_err(),
+            "not_authorized"
+        );
+        assert!(is_default_chat_md(&read_chat_md(&dir, &group).unwrap().unwrap()));
+        // The owner writes, and an admin who is a member writes a project group
+        // (a project group has no user-service owner, so only an admin governs
+        // it — participation is still the entry gate, matching rename/transfer).
+        assert!(write_chat_md(&dir, &group.session_id, "Owner edit.", "u-a", false).is_ok());
+        // A project group is governed the same way — its owner is the backing
+        // PM project's, pushed in by PM through the ensure / sync path. A
+        // plain member is refused; the project owner and an admin write. (The
+        // bug this pins: a project owner could delete the project but not edit
+        // its group prompt, because the chat row carried no owner.)
+        let proj = sync_group(
+            &dir,
+            "proj-gate",
+            &[
+                Participant::new("pm-owner", ParticipantIdentity::Human),
+                Participant::new("pm", ParticipantIdentity::Human),
+            ],
+            "",
+            Some("pm-owner"),
+            1,
+        )
+        .expect("project group");
+        assert_eq!(
+            write_chat_md(&dir, &proj.session_id, "nope", "pm", false).unwrap_err(),
+            "not_authorized"
+        );
+        assert!(
+            write_chat_md(&dir, &proj.session_id, "Project owner edit.", "pm-owner", false).is_ok()
+        );
+        add_participant(
+            &dir,
+            &proj.session_id,
+            &Participant::new("admin-1", ParticipantIdentity::Human),
+            1,
+        )
+        .expect("invite admin");
+        assert!(write_chat_md(&dir, &proj.session_id, "Admin edit.", "admin-1", true).is_ok());
+    }
+
+    /// The project owner is a fact PM pushes, never one the chat domain
+    /// invents. Ensure converges it onto an existing row (so the boot backfill
+    /// heals rows written before the owner was carried, and a sync that does
+    /// not know it must not clear it), and a transfer moves it even when the
+    /// roster is untouched — otherwise the new owner keeps reading their own
+    /// group prompt as `editable: false` and the demoted former owner keeps
+    /// writing it.
+    #[test]
+    fn project_group_owner_follows_pm_across_ensure_and_transfer() {
+        let dir = temp_dir();
+        let roster = [
+            Participant::new("u-old", ParticipantIdentity::Human),
+            Participant::new("u-new", ParticipantIdentity::Human),
+        ];
+        let s = sync_group(&dir, "proj-owner", &roster, "", Some("u-old"), 1).unwrap();
+        assert_eq!(s.owner.as_deref(), Some("u-old"));
+
+        // Repeat ensure with the same owner: the same row, no churn.
+        let again = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &roster,
+            "T",
+            Some("u-old"),
+            Some("proj-owner"),
+            2,
+        )
+        .unwrap();
+        assert_eq!(again.session_id, s.session_id);
+        assert_eq!(again.owner.as_deref(), Some("u-old"));
+
+        // A row created without an owner heals on the next ensure — this is
+        // what the start-time backfill does for pre-fix data.
+        let bare = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &roster,
+            "T2",
+            None,
+            Some("proj-bare"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(bare.owner, None);
+        let healed = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &roster,
+            "T2",
+            Some("u-old"),
+            Some("proj-bare"),
+            2,
+        )
+        .unwrap();
+        assert_eq!(healed.session_id, bare.session_id, "same group, not a new one");
+        assert_eq!(healed.owner.as_deref(), Some("u-old"));
+
+        // Transfer: the roster is unchanged (the old owner stays on as a
+        // member), yet governance moves both ways.
+        let moved = sync_group(&dir, "proj-owner", &roster, "", Some("u-new"), 3).unwrap();
+        assert_eq!(moved.owner.as_deref(), Some("u-new"));
+        assert!(write_chat_md(&dir, &moved.session_id, "new owns it", "u-new", false).is_ok());
+        assert_eq!(
+            write_chat_md(&dir, &moved.session_id, "stale claim", "u-old", false).unwrap_err(),
+            "not_authorized"
+        );
+
+        // A caller that does not know the owner leaves it alone.
+        let kept = sync_group(&dir, "proj-owner", &roster, "", None, 4).unwrap();
+        assert_eq!(kept.owner.as_deref(), Some("u-new"));
+    }
+
+    /// A project channel is named after the project — the chat domain refuses a
+    /// user-side rename of a `project_group` — so PM's title has to converge on
+    /// every push. Before this, a rename left the sidebar showing the title the
+    /// session was created with until the next member churn. An empty title
+    /// means "this caller does not know it", the same rule as the owner.
+    #[test]
+    fn project_group_title_follows_pm() {
+        let dir = temp_dir();
+        let roster = [Participant::new("u-a", ParticipantIdentity::Human)];
+        let s = sync_group(&dir, "proj-title", &roster, "Before", Some("u-a"), 1).unwrap();
+        assert_eq!(s.title, "Before");
+
+        // The rename converges through the same call…
+        let renamed = sync_group(&dir, "proj-title", &roster, "After", Some("u-a"), 2).unwrap();
+        assert_eq!(renamed.title, "After");
+        // …and so does one arriving through the idempotent ensure path (which
+        // is what PM's boot backfill uses), on the same row.
+        let ensured = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &roster,
+            "After again",
+            Some("u-a"),
+            Some("proj-title"),
+            3,
+        )
+        .unwrap();
+        assert_eq!(ensured.session_id, renamed.session_id, "same row");
+        assert_eq!(ensured.title, "After again");
+
+        // A caller that does not know the title must not blank it.
+        let kept = sync_group(&dir, "proj-title", &roster, "", Some("u-a"), 4).unwrap();
+        assert_eq!(kept.title, "After again");
+    }
+
+    #[test]
+    fn chat_md_over_the_cap_is_refused() {
+        let dir = temp_dir();
+        let group = group_session(&dir);
+        let too_long = "a".repeat(MAX_CHAT_MD_BYTES + 1);
+        assert!(write_chat_md(&dir, &group.session_id, &too_long, "u-a", false).is_err());
+        // The file is left untouched by a refused write.
+        let _ = read_chat_md(&dir, &group);
+        assert_eq!(
+            fs::read_to_string(session_dir(&dir, &group.session_id).join("chat.md")).unwrap(),
+            default_group_chat_md()
+        );
     }
 
     #[test]
@@ -3940,6 +4399,8 @@ mod tests {
                             Participant::new("ag2", ParticipantIdentity::Agent),
                             Participant::new(format!("ag{j}"), ParticipantIdentity::Agent),
                         ],
+                        "",
+                        None,
                         100 + j,
                     )
                     .unwrap();
@@ -3971,6 +4432,8 @@ mod tests {
                 Participant::new("ag1", ParticipantIdentity::Agent),
                 Participant::new("ag2", ParticipantIdentity::Agent),
             ],
+            "",
+            None,
             1,
         )
         .unwrap();
@@ -3985,6 +4448,8 @@ mod tests {
                 Participant::new("ag1", ParticipantIdentity::Agent),
                 Participant::new("ag3", ParticipantIdentity::Agent),
             ],
+            "",
+            None,
             2,
         )
         .unwrap();
@@ -4004,6 +4469,8 @@ mod tests {
                 Participant::new("ag1", ParticipantIdentity::Agent),
                 Participant::new("ag3", ParticipantIdentity::Agent),
             ],
+            "",
+            None,
             3,
         )
         .unwrap();
@@ -4028,6 +4495,8 @@ mod tests {
                 Participant::new("owner-h", ParticipantIdentity::Human),
                 Participant::new("ag1", ParticipantIdentity::Agent),
             ],
+            "",
+            None,
             1,
         )
         .unwrap();
@@ -4043,6 +4512,8 @@ mod tests {
                 Participant::new("admin-h", ParticipantIdentity::Human),
                 Participant::new("ag1", ParticipantIdentity::Agent),
             ],
+            "",
+            None,
             2,
         )
         .unwrap();
@@ -4080,6 +4551,8 @@ mod tests {
                 Participant::new("owner-h", ParticipantIdentity::Human),
                 Participant::new("ag1", ParticipantIdentity::Agent),
             ],
+            "",
+            None,
             3,
         )
         .unwrap();
@@ -4099,6 +4572,8 @@ mod tests {
                 Participant::new("owner-h", ParticipantIdentity::Human),
                 Participant::new("ag1", ParticipantIdentity::Agent),
             ],
+            "",
+            None,
             4,
         )
         .unwrap();

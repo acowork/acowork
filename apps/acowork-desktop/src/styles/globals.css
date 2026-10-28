@@ -2164,10 +2164,15 @@ input[type="radio"]:checked {
  * auto/normal — and this file sets both globally (`* { scrollbar-width: thin }`)
  * and on the viewport (`none`). Verified empirically on Chromium 148.
  * So the overlay thumb is the only reliable x-axis affordance. */
+/* `z-index` lifts the thumb above sticky section headers inside the viewport
+   (`sticky top-0 z-10`, e.g. the model menu's provider rows) — without it those
+   rows paint over the thumb. 30 clears the in-content chrome (z-10/z-20) while
+   staying below panels/popovers (z-50). */
 .overlay-scrollbar-track {
   position: absolute;
   inset: 0 0 0 auto;
   width: 8px;
+  z-index: 30;
   box-sizing: border-box;
   pointer-events: none;
   opacity: 0;
@@ -2177,6 +2182,7 @@ input[type="radio"]:checked {
   position: absolute;
   inset: auto 0 0 0;
   height: 8px;
+  z-index: 30;
   box-sizing: border-box;
   pointer-events: none;
   opacity: 0;
