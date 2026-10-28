@@ -55,17 +55,20 @@ import { useChatStore } from "./chatStore";
 const AGENT = "com.acowork.architect";
 const SESSION_FROM_LIST = "sess-from-account-list";
 const SESSION_FROM_LATEST = "sess-from-latest";
+const SESSION_RUNNING = "sess-still-running";
 
 // ── controllable doubles ────────────────────────────────────────────────
 
 const mockFetchLatest = vi.fn();
 const mockFetchSessions = vi.fn();
+const mockFetchActiveSessions = vi.fn();
 const mockCreateSession = vi.fn();
 const mockOpenSession = vi.fn();
 
 const original = {
     fetchLatestSession: useAgentStore.getState().fetchLatestSession,
     fetchSessions: useAgentStore.getState().fetchSessions,
+    fetchActiveSessions: useAgentStore.getState().fetchActiveSessions,
     createSession: useAgentStore.getState().createSession,
     openSession: useChatStore.getState().openSession,
 };
@@ -108,6 +111,10 @@ function seedActiveSession(sessionId: string): void {
 beforeEach(() => {
     mockFetchLatest.mockReset();
     mockFetchSessions.mockReset().mockResolvedValue(undefined);
+    // Default: the Active-set query could not be answered (Runtime booting),
+    // so the resolver takes its pointer path. Tests that exercise the restore
+    // opt in by resolving a value — or `[]` for "nothing is open".
+    mockFetchActiveSessions.mockReset().mockResolvedValue(null);
     mockCreateSession.mockReset().mockResolvedValue(undefined);
     mockOpenSession.mockReset().mockResolvedValue(undefined);
 
@@ -115,6 +122,7 @@ beforeEach(() => {
         agents: {},
         fetchLatestSession: mockFetchLatest,
         fetchSessions: mockFetchSessions,
+        fetchActiveSessions: mockFetchActiveSessions,
         createSession: mockCreateSession,
     } as never);
     useChatStore.setState({
@@ -128,6 +136,7 @@ afterEach(() => {
         agents: {},
         fetchLatestSession: original.fetchLatestSession,
         fetchSessions: original.fetchSessions,
+        fetchActiveSessions: original.fetchActiveSessions,
         createSession: original.createSession,
     } as never);
     useChatStore.setState({
@@ -204,6 +213,72 @@ describe("agentStore.resolveActiveSession", () => {
         expect(mockCreateSession).toHaveBeenCalledWith(AGENT);
         // Activation rides the `session_created` event — nothing to open here.
         expect(mockOpenSession).not.toHaveBeenCalled();
+    });
+
+    it("cold start: restores the Runtime's Active SET — a running session the pointer would miss", async () => {
+        // The session the user left running is still Active in the Runtime,
+        // but it is not the newest one on disk, so `/latest-session` would
+        // name a different session (and the tab strip would lose the running
+        // one). The Active set is the authoritative answer.
+        mockFetchActiveSessions.mockResolvedValue([
+            {
+                session_id: SESSION_RUNNING,
+                created_at: "2026-10-01T00:00:00Z",
+                last_active_at: "2026-10-01T09:00:00Z",
+                message_count: 214,
+                title: "running",
+                is_active: true,
+                can_write: true,
+            },
+        ]);
+
+        const result = await useAgentStore.getState().resolveActiveSession(AGENT);
+
+        expect(result).toBe("opened");
+        expect(mockOpenSession).toHaveBeenCalledWith(AGENT, SESSION_RUNNING);
+        // The pointer path is NOT consulted — the set already answered.
+        expect(mockFetchLatest).not.toHaveBeenCalled();
+        // Background list refresh populates tab titles.
+        expect(mockFetchSessions).toHaveBeenCalledTimes(1);
+    });
+
+    it("cold start: an empty Active set falls through to the pointer path", async () => {
+        mockFetchActiveSessions.mockResolvedValue([]);
+        mockFetchLatest.mockResolvedValue({
+            status: "ok",
+            session_id: SESSION_FROM_LATEST,
+            title: "Latest",
+        });
+
+        const result = await useAgentStore.getState().resolveActiveSession(AGENT);
+
+        expect(result).toBe("opened");
+        expect(mockOpenSession).toHaveBeenCalledWith(AGENT, SESSION_FROM_LATEST);
+        expect(mockFetchLatest).toHaveBeenCalledTimes(1);
+    });
+
+    it("cold start: a failed Active query still resolves via the pointer path", async () => {
+        // `null` = the query failed (503 in the boot window). That is not
+        // "nothing is open", so the legacy path must still be attempted.
+        mockFetchActiveSessions.mockResolvedValue(null);
+        mockFetchLatest.mockResolvedValue({
+            status: "ok",
+            session_id: SESSION_FROM_LATEST,
+            title: "Latest",
+        });
+
+        await useAgentStore.getState().resolveActiveSession(AGENT);
+
+        expect(mockFetchLatest).toHaveBeenCalledTimes(1);
+        expect(mockOpenSession).toHaveBeenCalledWith(AGENT, SESSION_FROM_LATEST);
+    });
+
+    it("warm agent: no restore attempt once a session is already in the foreground", async () => {
+        seedActiveSession("sess-existing");
+
+        await useAgentStore.getState().resolveActiveSession(AGENT);
+
+        expect(mockFetchActiveSessions).not.toHaveBeenCalled();
     });
 
     it("single-flight: concurrent calls share one resolution", async () => {

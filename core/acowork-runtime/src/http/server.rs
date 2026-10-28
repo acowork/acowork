@@ -944,6 +944,13 @@ struct ListSessionsQuery {
     /// Page size (default 20, capped at 200).
     #[serde(default)]
     size: Option<u32>,
+    /// ADR-038: `true` returns only sessions that are `Active` in this
+    /// Runtime right now (resident in the in-memory session map) — the
+    /// desktop tab strip's restore source after a client restart. The set of
+    /// open sessions is Runtime truth, so a client derives it from here
+    /// instead of persisting it. Default `false` = the ordinary history list.
+    #[serde(default)]
+    active: Option<bool>,
 }
 
 /// `GET /sessions` — full session list.
@@ -979,13 +986,14 @@ async fn list_sessions(
 ) -> Result<Json<serde_json::Value>, SessionHttpError> {
     let page = query.page.unwrap_or(1).max(1);
     let size = query.size.unwrap_or(20).clamp(1, 200);
+    let active_only = query.active.unwrap_or(false);
     let scope = crate::http::session_control::scope_from_headers(&headers);
 
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.session_metadata.lock().await;
     let svc = svc.as_ref().ok_or_else(session_not_ready)?;
     let resp = svc
-        .list_sessions(page, size, &scope)
+        .list_sessions(page, size, &scope, active_only)
         .await
         .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(

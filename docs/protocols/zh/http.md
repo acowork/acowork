@@ -662,6 +662,7 @@ Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读�
 | 方法 | 路径 | 用途 | Runtime 路径 |
 |---|---|---|---|
 | GET | `/api/agents/{id}/sessions` | 会话列表（运行时视角，token 统计合并；**按调用者 scope 过滤**） | `/sessions` |
+| GET | `/api/agents/{id}/sessions?active=true` | **仅当前活跃会话**（ADR-038 `Active` = 驻留 Runtime 内存；Desktop 重启后据此重建 tab strip） | `/sessions?active=true` |
 | GET | `/api/agents/{id}/latest-session` | 最新会话（启动时快速定位；**不可读时 404**） | `/sessions/latest` |
 | GET | `/api/agents/{id}/conversations/latest` | 最新会话消息（ADR-034 唯一保留的 conversations 端点） | `/sessions/latest` |
 | GET | `/api/agents/{id}/sessions/{sid}` | 单会话完整状态（合并 meta + state） | `/sessions/{sid}` |
@@ -669,6 +670,14 @@ Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读�
 | GET | `/api/agents/{id}/sessions/{sid}/messages` | 拉取消息历史（支持 cursor 分页） | `/sessions/{sid}/messages` |
 | GET | `/api/agents/{id}/sessions/{sid}/config` | 读取会话 config 快照（ADR-047） | `/sessions/{sid}/config` |
 | PUT | `/api/agents/{id}/sessions/{sid}/config` | 写会话 config（**owner 或 admin**） | `/sessions/{sid}/config` |
+
+> **`?active=true`（ADR-038）**：只返回此刻**驻留 Runtime 内存**的会话，即 `Active` 生命周期
+> 态的集合 —— 它由 `POST .../open` 进入、由 `POST .../close` 退出，因此**就是**"哪些会话当前
+> 是打开着"的权威记录。Desktop 重启后不持久化自己的 tab 列表，而是用这一次查询把后端真值投影
+> 成 tab（前端只做投影，不拥有状态）。与 `scope` 过滤一致，这个过滤**也发生在分页之前**：
+> `total_count` / `total_pages` 描述的是"活跃且可读"的子集，客户端不会翻到看不见的行；
+> 两个过滤是**交集**关系（他人 private 的活跃会话既不出现在列表里，也不出现在 tab 上）。
+> 省略或 `active=false` 即普通的全量历史列表。
 
 > **不可读 = 404，不是 403**。403 会把端点变成"某 session 是否存在"的探测器，正是列表
 > 过滤要藏起来的信息。因此**不存在**与**无权限**返回同一个状态码。

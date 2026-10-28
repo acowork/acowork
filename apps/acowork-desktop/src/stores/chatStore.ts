@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, SessionInfo, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
@@ -414,6 +414,45 @@ interface SessionChatState {
    * missing messages until the next clear+reload cycle.
    */
   messagesStale: boolean;
+  /**
+   * Cursor-integrity flag: true once an HTTP `/messages` window has landed
+   * for the CURRENT cache, i.e. `messageOffset` / `messageLimit` /
+   * `messageTotal` describe a real server-reported window.
+   *
+   * This is a different fact from `messagesStale`, and the two are NOT
+   * interchangeable:
+   *
+   * - `messagesStale` answers "is the array a complete slice of the
+   *   conversation?" — cleared only by a full window load.
+   * - `windowAuthoritative` answers "do the pagination coordinates mean
+   *   anything yet?" — a cache can hold rows and still have no window.
+   *
+   * That second case is normal and must be expected: `record_complete`
+   * appends live tail rows to `messages[]` for a session whose history was
+   * never fetched (a running session right after the Desktop restarts, a
+   * session the user has not opened yet). Those rows are real data, but they
+   * carry no coverage claim — while the flag is false the store must NOT
+   * treat `messageOffset` as the left edge of what it holds. The cursor
+   * union math in `loadSessionMessages` is only valid between two
+   * authoritative windows; over a live-seeded array it fabricates a
+   * `[0, total)` window and permanently hides the head (`hasOlder` false,
+   * scroll-up dead — regression t-f9a9fbc7).
+   *
+   * Set by: a successful `loadSessionMessages` response.
+   * Cleared by: every path that invalidates the window
+   * (`clearMessages` / `clearSessionMessages` / `clearSessionState` /
+   * `trimMessagesTo`). Default false, which is why a freshly created session
+   * state adopts the server's window verbatim on its first load.
+   *
+   * Invariant: every writer that sets `messagesStale: true` also clears this
+   * flag, so "stale" implies "not authoritative" today. The two are kept
+   * separate because they answer different questions (see above) and because
+   * the union branch's `|| messagesStale` arm is defence in depth for a future
+   * writer that forgets. If a third state ever appears, collapse both into a
+   * single `windowState: "none" | "stale" | "authoritative"` discriminator
+   * rather than growing a fourth boolean.
+   */
+  windowAuthoritative: boolean;
   pendingApproval: Record<string, ToolApprovalNeededEvent>;
   pendingQuestions: AskQuestionEvent[];
   isLoadingSession: boolean;
@@ -529,6 +568,7 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   messageLimit: 0,
   messageTotal: 0,
   messagesStale: false,
+  windowAuthoritative: false,
   pendingApproval: {},
   pendingQuestions: [],
   isLoadingSession: false,
@@ -588,6 +628,18 @@ interface AgentState {
    * banner over every other agent's chat.
    */
   llmAvailability: LlmAvailability;
+  /**
+   * Cold-start tab restore latch (see `adoptRuntimeTabs`): true once this
+   * agent's tab strip has been projected from the Runtime's `Active` set in
+   * THIS app launch.
+   *
+   * Lives in the in-memory agent state — deliberately NOT persisted. It is a
+   * client-side one-shot guard, not data: the sessions themselves stay
+   * Runtime truth, and a relaunch must start unreconciled so the projection
+   * runs again. Wiping agent state (logout, agent reset) clears it too, which
+   * is exactly the "ask the backend again" condition.
+   */
+  tabsRestoredFromRuntime: boolean;
 }
 
 const DEFAULT_AGENT_STATE: AgentState = {
@@ -599,6 +651,7 @@ const DEFAULT_AGENT_STATE: AgentState = {
   preferredModel: null,
   preferredProvider: null,
   llmAvailability: "unspecified",
+  tabsRestoredFromRuntime: false,
 };
 
 const MAX_CACHED_SESSIONS = 32;
@@ -1209,6 +1262,46 @@ interface ChatStore {
    * `session_not_opened` toast with a reopen affordance).
    */
   openSession: (agentId: string, sessionId: string, opts?: { prepend?: boolean }) => Promise<void>;
+  /**
+   * Cold-start restore, step 1: may this agent's tab strip still be restored
+   * in this app launch?
+   *
+   * True while the agent's strip is empty AND nothing has been restored for
+   * it yet. Both halves matter: an empty strip is how a fresh process looks
+   * (the Desktop keeps no session state of its own), and the one-shot latch
+   * keeps a later re-entry — agent stop/start, a switch back — from
+   * resurrecting tabs the user closed in the meantime.
+   */
+  needsTabRestore: (agentId: string) => boolean;
+  /**
+   * Cold-start restore, step 2: project the Runtime's `Active` session set
+   * onto the tab strip (ADR-038).
+   *
+   * WHY THIS IS A PROJECTION AND NOT A RESTORE FROM LOCAL STATE: the set of
+   * sessions a user has open lives in the Runtime — `open_session` adds to it,
+   * `close_session` removes from it, and `GET /sessions?active=true` reports
+   * it. So after the Desktop restarts, the honest recovery is to ask, not to
+   * remember: persisting the tab list client-side would be a second copy of
+   * backend truth that drifts (and the Desktop owns no state by convention).
+   *
+   * `rows` are the `is_active` sessions the caller fetched. Tabs are opened
+   * for those the caller may write (`can_write !== false`) — a session
+   * resident only because someone else has it open is not ours to hold. Only
+   * the newest one goes through the full `openSession` path (backend ack +
+   * message load); the rest are added as strip entries, because they are
+   * already `Active` server-side and loading N conversations would fetch N
+   * histories to paint one tab bar.
+   *
+   * `rows === null` means the query FAILED (a transient 503 in the Runtime
+   * boot window, say). That is not an answer, so it neither restores anything
+   * nor latches: a later attempt — the user switching back to the agent — can
+   * still restore. An empty array is a real answer ("nothing is active") and
+   * does latch.
+   *
+   * Returns the foreground session id it opened, or null when there was
+   * nothing to restore (already restored / failed query / no candidates).
+   */
+  adoptRuntimeTabs: (agentId: string, rows: SessionInfo[] | null) => Promise<string | null>;
   /** ADR-038: Close a session tab AND notify the backend.
    *
    * Three side effects:
@@ -1901,7 +1994,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // tabs here — that is `openSession`'s job. Adding here would race
       // with closeTab: the fetchSessions response may arrive before the
       // Runtime processes close_session, resurrecting a tab the user just
-      // closed.
+      // closed. The one place that ADDS in bulk is `adoptRuntimeTabs`, and
+      // it is gated on an empty strip + a once-per-launch latch, so it can
+      // only ever run at cold start.
       // The foreground tab survives regardless: a session opened from
       // history (or drilled into from a Chat reply) is legitimately not in
       // the Runtime's live set — a read-only one is never activated at all,
@@ -2104,6 +2199,73 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     return promise;
   },
 
+  needsTabRestore: (agentId: string) => {
+    const agent = getAgentState(get(), agentId);
+    return !agent.tabsRestoredFromRuntime && agent.openSessionIds.length === 0;
+  },
+
+  adoptRuntimeTabs: async (agentId: string, rows: SessionInfo[] | null) => {
+    // A failed query is not an answer: leave the latch clear so a later
+    // attempt can still restore once the Runtime is reachable.
+    if (rows === null) return null;
+    if (!get().needsTabRestore(agentId)) return null;
+    // Latch before awaiting so a concurrent caller cannot adopt the same strip
+    // twice; the adopt is one-shot per launch per agent by definition.
+    set((state) => updateAgentState(state, agentId, { tabsRestoredFromRuntime: true }));
+
+    // A session resident only because ANOTHER account holds it open is not
+    // ours to show (`can_write === false`; ADR-076 §决策 4). `undefined`
+    // (older Runtime) degrades to "ours" — same rule as the rest of the UI.
+    const candidates = rows
+      .filter((r) => r.is_active !== false && r.can_write !== false)
+      .sort(
+        (a, b) =>
+          new Date(b.last_active_at ?? b.created_at).getTime() -
+          new Date(a.last_active_at ?? a.created_at).getTime(),
+      )
+      .map((r) => r.session_id);
+    if (candidates.length === 0) return null;
+
+    const [foreground, ...rest] = candidates;
+    log.info("[chatStore] restoring tabs from Runtime Active set", {
+      agentId,
+      foreground,
+      tabs: candidates,
+    });
+
+    // Strip entries for the background ones: they are already Active in the
+    // Runtime, so no `open_session` and no history load — just the tab. The
+    // foreground goes through the full path below, which also makes the
+    // activation idempotent on the server (`already_active`).
+    //
+    // NOTE: titles are deliberately NOT seeded here. A restored background tab
+    // has no `sessionStates[id]` yet, so `SessionTabBar` falls back to the
+    // `sessions[]` snapshot (its second tier) and shows "Untitled" if the row
+    // is outside the fetched page. Copying the row's title into the live
+    // overlay tier would fix that label, but the overlay outranks the snapshot
+    // (`seedOptimisticTitle` relies on the opposite invariant), so a later
+    // backend rename would be shadowed by a stale client copy. Titles stay the
+    // snapshot's job — this method owns tabs only.
+
+    // Appended oldest-first: the candidates arrive newest-first (that is how
+    // the foreground was picked), and a tab strip reads chronologically left
+    // to right.
+    if (rest.length > 0) {
+      const chronological = [...rest].reverse();
+      set((state) => {
+        const agent = getAgentState(state, agentId);
+        const missing = chronological.filter((id) => !agent.openSessionIds.includes(id));
+        if (missing.length === 0) return {};
+        return updateAgentState(state, agentId, {
+          openSessionIds: [...agent.openSessionIds, ...missing],
+        });
+      });
+    }
+
+    await get().openSession(agentId, foreground);
+    return foreground;
+  },
+
   /** Apply session metadata (model/provider/workspace_id) from activate_session response.
    *  Sets the session's model/provider and agent's preferredModel, plus syncs workspaceStore. */
   applySessionMeta: (
@@ -2157,6 +2319,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageLimit: 0,
         messageTotal: 0,
         messagesStale: true,
+        // The window is gone: the next load adopts the server's cursor.
+        windowAuthoritative: false,
         pendingApproval: {},
         loadError: null,
         hasMoreIncremental: false,
@@ -2186,6 +2350,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messageLimit: 0,
         messageTotal: 0,
         messagesStale: false,
+        // Reset alongside the cursor — the fields above no longer describe
+        // any server window, so the next load must adopt one verbatim.
+        windowAuthoritative: false,
         pendingApproval: {},
         pendingQuestions: [],
         loadError: null,
@@ -2511,6 +2678,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         // Local truncation makes the cache non-authoritative (tail lost) —
         // force a reload on the next re-entry so the conversation renders whole.
         messagesStale: true,
+        // The slice keeps the OLDEST rows while the cursor was just zeroed,
+        // so nothing about the current coordinates is trustworthy: the next
+        // load adopts the server's window verbatim.
+        windowAuthoritative: false,
       });
     });
   },
@@ -2980,16 +3151,31 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // bleed into the freshly-loaded view.  The tracker now lives
           // in chatAdapterStore; chatStore delegates the cleanup.
           releaseAdapterSession(agentId, sessionId);
-        } else if (ss.messagesStale) {
-          // A stale cache (see `messagesStale`) is NOT a trustworthy
-          // window: its cursor was reset by clearSessionMessages and may
-          // have been bumped by out-of-band writes.  The union math below
-          // assumes the cached range and the server window are contiguous,
-          // which is false here — it would fabricate a `[0, total)` cursor
-          // over a sparse array and set hasOlder=false, permanently hiding
-          // the missing head.  Adopt the server window's cursor verbatim
-          // instead.  (Reachable e.g. after trimMessagesTo leaves a
-          // non-empty but non-authoritative head slice.)
+          // Nothing to union with — the window is the server's window.
+          finalOffset = returnedOffset;
+          finalLimit = returnedLimit;
+        } else if (!ss.windowAuthoritative || ss.messagesStale) {
+          // The cached window is not trustworthy — the union math below is
+          // only valid between two authoritative, contiguous windows, and
+          // there are exactly two ways to not have one:
+          //
+          //  - `!windowAuthoritative`: no HTTP window has ever landed for
+          //    this cache, so `messageOffset` is not "the left edge", it is
+          //    simply unset. This is the live-seeded case: `record_complete`
+          //    appends tail rows for a session whose history was never
+          //    fetched (a session still running when the Desktop starts,
+          //    opened later from the history list). The server answers the
+          //    tail window at `total - limit`, the union math reads that as
+          //    "loading NEWER", and it fabricates `[0, total)` over a 50-row
+          //    array: `hasOlder` false, scroll-up dead until the cache gets
+          //    cleared and reloaded (regression t-f9a9fbc7). `messagesStale`
+          //    cannot catch it — appending a live row is legitimate, so
+          //    nothing marked the cache unclean.
+          //  - `messagesStale`: the cursor was reset by
+          //    `clearSessionMessages` / `trimMessagesTo` and the array is a
+          //    partial slice, possibly bumped by out-of-band writes.
+          //
+          // In both, ADOPT the server window's cursor verbatim.
           finalOffset = returnedOffset;
           finalLimit = returnedLimit;
         } else if (returnedOffset > prevOffset) {
@@ -3032,6 +3218,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // fetched window again (see the messagesStale doc).  hasOlder /
           // hasNewer drive any further pagination.
           messagesStale: false,
+          // The coordinates above now describe a server-reported window, so
+          // subsequent loads may union against them (see windowAuthoritative).
+          windowAuthoritative: true,
           ...(ownsSpinner ? { isLoadingSession: false } : {}),
           loadError: null,
         });
@@ -3233,6 +3422,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // NOT treat "has data" as "has complete data" until a full HTTP load
       // lands (loadSessionMessages clears this back to false).
       messagesStale: true,
+      // Cursor reset: the next load adopts the server's window verbatim
+      // instead of unioning on top of a window that no longer exists.
+      windowAuthoritative: false,
     }));
   },
 

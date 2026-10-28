@@ -43,8 +43,10 @@ pub struct SessionSummary {
     pub chat_session_id: Option<String>,
     /// Whether this session is currently loaded in the Runtime's in-memory
     /// `sessions` map (ADR-038 `SessionLifecycleState::Active`). The Desktop
-    /// tab strip mirrors this: every `is_active` session gets a tab, and
-    /// `fetchSessions` syncs the full set on login / reconnect.
+    /// tab strip mirrors this: every `is_active` session gets a tab. The
+    /// restore path is `list_sessions(active_only = true)` — the Desktop asks
+    /// once per (re)launch and projects the result onto the strip, so the set
+    /// is never cached client-side (`chatStore.adoptRuntimeTabs`).
     #[serde(default)]
     pub is_active: bool,
 }
@@ -132,11 +134,19 @@ pub trait SessionMetadataService: Send + Sync {
     /// ADR-076 §决策 4: `scope` filters the list *before* pagination, so
     /// `total_count` / `total_pages` count only what the caller may read.
     /// Agent-level token totals are summed over the same filtered set.
+    ///
+    /// ADR-038: `active_only` narrows the set to sessions that are `Active`
+    /// in this Runtime right now (resident in the in-memory session map).
+    /// This is the desktop tab strip's restore source after a client
+    /// restart — the *set* of open sessions is Runtime truth, so the client
+    /// derives it instead of remembering it. Also pre-pagination: `total_*`
+    /// describe the resident set.
     async fn list_sessions(
         &self,
         page: u32,
         size: u32,
         scope: &SessionScope,
+        active_only: bool,
     ) -> Result<SessionsListResponse>;
 
     /// Return the most recently active session, if any.
