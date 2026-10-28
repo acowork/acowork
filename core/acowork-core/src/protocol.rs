@@ -454,6 +454,41 @@ pub enum AttachedItem {
     },
 }
 
+/// Metadata of one file attached to a durable chat message (design 27 §4.2.1).
+///
+/// The Gateway produces this from the **stored row** — the user service
+/// re-reads name / mime / size from the session's `files/` dir when it appends
+/// the message, so this is the authoritative description of what the user
+/// attached, never a client claim.
+///
+/// Consumed by the Chat Router in two places that must agree byte for byte:
+/// the history projection (a row already in the transcript) and the current
+/// turn's own view (the message being routed). Bytes are deliberately absent —
+/// the Runtime pulls those over its own attachment route, and only when it
+/// actually needs to hand them to an execution session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatAttachmentMeta {
+    /// Per-field defaults: a row written by an older (or buggier) producer
+    /// must degrade to an incomplete description of the file, never drop the
+    /// whole message from the router's history window.
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+/// Delivery-params key carrying this turn's [`ChatAttachmentMeta`] list.
+///
+/// It lives here, next to the type, because the key crosses a process
+/// boundary that the compiler cannot check: the Gateway writes it and the
+/// Chat Router reads it. Runtime-side the reader is deliberately tolerant
+/// (a wrong shape costs the files, not the turn), which means a renamed key
+/// on one side degrades **silently** to "this turn carried nothing" — the
+/// exact blindness the field exists to remove. One constant, two sides.
+pub const CHAT_ATTACHMENTS_PARAM: &str = "chat_attachments";
+
 /// Legacy — replaced by `AttachedItem` (ADR-046). Retained for
 /// deserialization of old `attached_context` payloads during transition.
 /// Will be removed after all frontend clients ship `attached_items`.

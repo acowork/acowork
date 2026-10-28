@@ -55,6 +55,13 @@ shows an alias, whether it is the session currently bound to this chat
 ("current"), its status, how long ago it was last active, its origin (chat or
 task), and its title.
 
+A user message may also carry an [attachments] line: the files the human sent
+with it, each as filename, media type and size. You cannot open them and must
+never claim to know what is inside one - but they are usually the point of the
+message. Work that needs the file belongs to an execution session. A message
+whose body says it is only attachments is a normal message, not an empty one:
+treat it as the user asking you to deal with those files.
+
 # How to decide
 - Dispatching the wrong message is expensive: it wakes a whole execution
   session with noise and derails the conversation. Not dispatching is cheap:

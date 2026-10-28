@@ -55,6 +55,8 @@ use axum::{
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
+use acowork_core::protocol::{ChatAttachmentMeta, CHAT_ATTACHMENTS_PARAM};
+
 use crate::http::routes::{ApiError, AppState};
 use crate::intent::chat_client;
 use crate::intent::gate::{
@@ -1482,6 +1484,44 @@ pub struct MentionRequest {
     pub attachment_ids: Vec<String>,
 }
 
+/// The `params` payload of a chat delivery — the one place the Chat Router's
+/// input keys are assembled.
+///
+/// Both chat entries (`chat-message` 1:1 and `chat-mention` fan-out) hand the
+/// round to the Runtime as `params_json`, and the Runtime reads keys out of it
+/// by name: `message`, `chat_attachment_ids`, `chat_attachments`, `chat_kind`,
+/// `chat_prompt`. There is no shared struct on the wire, so a key renamed (or
+/// mistyped) on this side is not a compile error — and because the Runtime's
+/// reader is deliberately tolerant, it is not a runtime error either: the turn
+/// simply routes as if it carried nothing. Building both entries here, with the
+/// attachment key taken from [`CHAT_ATTACHMENTS_PARAM`], is what keeps the two
+/// halves of that contract in one place.
+///
+/// `attachments` is the **stored** metadata (the user service re-reads it from
+/// the session's `files/` dir), never a client claim; ids travel separately on
+/// the envelope, and the bytes never travel at all (design 27 §4.2.1).
+fn chat_delivery_params(
+    text: &str,
+    attachment_ids: &[String],
+    attachments: &[ChatAttachmentMeta],
+    chat_kind: &str,
+    chat_prompt: Option<&str>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "message": text,
+        "chat_attachment_ids": attachment_ids,
+        "chat_kind": chat_kind,
+        // ADR-099 (extended): a `chat.md` prompt override, when the session
+        // has one, replaces the whole chat-layer prompt for this turn.
+        "chat_prompt": chat_prompt,
+    });
+    params[CHAT_ATTACHMENTS_PARAM] = serde_json::to_value(attachments)
+        // `Vec<ChatAttachmentMeta>` has no map keys to fail on; degrade to
+        // "no attachments" rather than to a broken params object.
+        .unwrap_or(serde_json::Value::Null);
+    params
+}
+
 /// `POST /api/intents/mentions` — @Agent fan-out in a group chat (§5):
 /// the human utterance is ONE `user_message` row carrying the mentioned
 /// targets in its `mentions` field (§5.3.1); each mentioned agent gets
@@ -1561,7 +1601,11 @@ async fn deliver_mentions(
         "mentions": req.targets,
         "repo": repo,
     });
-    if let Err(e) = chat_client::append_message(
+    // The stored row's attachment metadata (name / mime / size, re-read from
+    // the session's `files/` dir by the store) rides along to every mentioned
+    // agent, so its Chat Router sees what this turn actually carried. Ids still
+    // travel on the envelope; the bytes never travel at all (design 27 §4.2.1).
+    let chat_attachments = match chat_client::append_message(
         port,
         &req.chat_session_id,
         &chat_client::AppendMessage {
@@ -1575,10 +1619,13 @@ async fn deliver_mentions(
     )
     .await
     {
-        return Err(ApiError::service_unavailable(&format!(
-            "user_message chat row append failed — mention fan-out refused: {e}"
-        )));
-    }
+        Ok(stored) => stored,
+        Err(e) => {
+            return Err(ApiError::service_unavailable(&format!(
+                "user_message chat row append failed — mention fan-out refused: {e}"
+            )));
+        }
+    };
 
     let mut results = Vec::new();
     for target in &req.targets {
@@ -1634,15 +1681,13 @@ async fn deliver_mentions(
             from_session_id: String::new(),
             target_instance: target.clone(),
             action: "chat".to_string(),
-            params_json: serde_json::json!({
-                "message": req.text,
-                "chat_attachment_ids": req.attachment_ids,
-                "chat_kind": chat_kind,
-                // ADR-099 (extended): the group's `chat.md` prompt override,
-                // when it has one, replaces the whole chat-layer prompt for
-                // this chat's router turn.
-                "chat_prompt": session.chat_prompt,
-            })
+            params_json: chat_delivery_params(
+                &req.text,
+                &req.attachment_ids,
+                &chat_attachments,
+                &chat_kind,
+                session.chat_prompt.as_deref(),
+            )
             .to_string(),
             source_chat_session_id: req.chat_session_id.clone(),
             repo: repo.clone(),
@@ -2174,7 +2219,11 @@ async fn deliver_chat_message(
         "in_reply_to": req.in_reply_to,
         "exec_attachments": exec_attachments,
     });
-    if let Err(e) = chat_client::append_message(
+    // Stored attachment metadata, not the client's word: the store re-reads
+    // name / mime / size from this session's `files/` dir. Forwarded so the
+    // receiving Chat Router can see what the turn carried (its history window
+    // shows the same line for every older row, so the current turn must match).
+    let chat_attachments = match chat_client::append_message(
         port,
         &req.chat_session_id,
         &chat_client::AppendMessage {
@@ -2188,10 +2237,13 @@ async fn deliver_chat_message(
     )
     .await
     {
-        return Err(ApiError::service_unavailable(&format!(
-            "user_message chat row append failed — delivery refused: {e}"
-        )));
-    }
+        Ok(stored) => stored,
+        Err(e) => {
+            return Err(ApiError::service_unavailable(&format!(
+                "user_message chat row append failed — delivery refused: {e}"
+            )));
+        }
+    };
 
     // §5.5.4 answer channel: an answer to a live card resolves the
     // execution side's pending request and the Agent's current turn
@@ -2230,6 +2282,26 @@ async fn deliver_chat_message(
     // session itself — `routing_key` maps `chat:{session}` onto one
     // execution session (§5.4.4 轮转对单聊生效).
     //
+    // The shared builder owns every key the Chat Router reads (message, ids,
+    // attachment metadata, kind, prompt); only this entry's extras are added
+    // here. ADR-100 D12: the execution composer's own turn facts are forwarded
+    // verbatim so a pinned turn is indistinguishable from the same send made
+    // against the execution surface's write endpoint. Empty / absent unless
+    // this turn is pinned (see above). `attached_items` is the routed path's
+    // attachment arm as well — the Chat surface's composer has no pin to carry
+    // it on.
+    let mut params = chat_delivery_params(
+        &req.text,
+        &req.attachment_ids,
+        &chat_attachments,
+        &session.kind,
+        session.chat_prompt.as_deref(),
+    );
+    {
+        let object = params.as_object_mut().expect("chat params are an object");
+        object.insert("command".to_string(), serde_json::json!(command));
+        object.insert("attached_items".to_string(), serde_json::json!(attached_items));
+    }
     let dreq = delivery::DeliveryRequest {
         message_id: message_id.clone(),
         conversation_id: String::new(),
@@ -2237,22 +2309,7 @@ async fn deliver_chat_message(
         from_session_id: String::new(),
         target_instance: target.clone(),
         action: "chat".to_string(),
-        params_json: serde_json::json!({
-            "message": req.text,
-            "chat_attachment_ids": req.attachment_ids,
-            "chat_kind": session.kind,
-            // ADR-099 (extended): a group's `chat.md` prompt override, when
-            // present, replaces the whole chat-layer prompt for this turn.
-            "chat_prompt": session.chat_prompt,
-            // ADR-100 D12: the execution composer's own turn facts, forwarded
-            // verbatim so a pinned turn is indistinguishable from the same
-            // send made against the execution surface's write endpoint. Empty
-            // / absent unless this turn is pinned (see above). `attached_items`
-            // is the routed path's attachment arm as well — the Chat surface's
-            // composer has no pin to carry it on.
-            "command": command,
-            "attached_items": attached_items,
-        }).to_string(),
+        params_json: params.to_string(),
         source_chat_session_id: req.chat_session_id.clone(),
         repo: repo.clone(),
         session_config_json: req
@@ -2664,5 +2721,58 @@ mod card_answer_tests {
             meta.get("project_id").is_none(),
             "project_id must not return: the row lives in the project's own group"
         );
+    }
+}
+
+#[cfg(test)]
+mod chat_params_tests {
+    use super::*;
+
+    /// The Chat Router reads these keys out of `params_json` by name. Both
+    /// chat entries build it here now, so this is the one place the wire shape
+    /// is decided — and the one place it can be pinned.
+    #[test]
+    fn the_shared_builder_writes_every_key_the_router_reads() {
+        let ids = vec!["att-1".to_string()];
+        let stored = vec![ChatAttachmentMeta {
+            filename: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 12_288,
+        }];
+
+        let params = chat_delivery_params("look at this", &ids, &stored, "user_agent", Some("custom"));
+
+        assert_eq!(params["message"], "look at this");
+        assert_eq!(params["chat_attachment_ids"][0], "att-1");
+        assert_eq!(params["chat_kind"], "user_agent");
+        assert_eq!(params["chat_prompt"], "custom");
+        assert_eq!(
+            params[CHAT_ATTACHMENTS_PARAM],
+            serde_json::json!([
+                {"filename": "report.pdf", "mime": "application/pdf", "size": 12_288}
+            ]),
+            "the stored metadata rides under the shared key, three fields only"
+        );
+    }
+
+    /// The key is the half of the contract the compiler cannot check: the
+    /// Runtime's reader tolerates every wrong shape, so a rename on one side
+    /// reads as "this turn carried nothing" instead of failing. Pin the
+    /// literal, so changing it is a deliberate two-sided decision.
+    #[test]
+    fn the_attachment_key_is_the_agreed_wire_name() {
+        assert_eq!(CHAT_ATTACHMENTS_PARAM, "chat_attachments");
+    }
+
+    /// A turn without files must say so with an empty list, not by omitting
+    /// the key or writing `null`: the Runtime reads "absent" and "empty" the
+    /// same way, but the two are distinguishable in a captured payload — and
+    /// only one of them survives a future `params` round-trip comparison.
+    #[test]
+    fn a_turn_without_files_still_carries_an_empty_list() {
+        let params = chat_delivery_params("just text", &[], &[], "user_group", None);
+        assert_eq!(params[CHAT_ATTACHMENTS_PARAM], serde_json::json!([]));
+        // An absent `chat.md` override keeps its pre-existing wire shape.
+        assert_eq!(params["chat_prompt"], serde_json::Value::Null);
     }
 }
