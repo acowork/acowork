@@ -233,6 +233,40 @@ export async function downloadChatAttachment(
   attachment: ChatAttachment,
   onProgress?: (received: number) => void,
 ): Promise<boolean> {
+  return saveAttachmentFromUrl(
+    `${base(userId, chatId)}/files/${encodeURIComponent(attachment.id)}`,
+    attachment,
+    onProgress,
+  );
+}
+
+/**
+ * Session-scoped download — the same transfer, addressed by chat session
+ * instead of by owning account.
+ *
+ * Why both exist: the account-scoped route needs a `userId`, and the group
+ * surface has none in scope (its store reads everything through
+ * `/api/chat-sessions/…`, which is participation-checked server-side). The
+ * blob is the same; only the URL differs, so the transfer body is shared.
+ */
+export async function downloadChatAttachmentBySession(
+  chatSessionId: string,
+  attachment: ChatAttachment,
+  onProgress?: (received: number) => void,
+): Promise<boolean> {
+  return saveAttachmentFromUrl(
+    `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/files/${encodeURIComponent(attachment.id)}`,
+    attachment,
+    onProgress,
+  );
+}
+
+/** Ask for a path, then let Rust stream the URL to it. */
+async function saveAttachmentFromUrl(
+  url: string,
+  attachment: ChatAttachment,
+  onProgress?: (received: number) => void,
+): Promise<boolean> {
   const picked = await showSaveDialog({
     defaultPath: attachment.filename,
     filters: [{ name: attachment.filename, extensions: [extensionOf(attachment.filename)] }],
@@ -240,11 +274,7 @@ export async function downloadChatAttachment(
   if (!picked) return false;
   const progress = new Channel<number>();
   if (onProgress) progress.onmessage = onProgress;
-  await invoke("download_attachment", {
-    url: `${base(userId, chatId)}/files/${encodeURIComponent(attachment.id)}`,
-    path: picked,
-    onProgress: progress,
-  });
+  await invoke("download_attachment", { url, path: picked, onProgress: progress });
   return true;
 }
 

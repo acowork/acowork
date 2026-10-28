@@ -1889,10 +1889,109 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
+  max-width: 220px;
+  padding: 3px 9px;
+  border: 1px solid var(--color-border);
   border-radius: 10px;
-  background: rgba(0, 0, 0, 0.06);
+  background: rgba(0, 0, 0, 0.04);
+  color: var(--color-label);
   font-size: 12px;
+  text-align: left;
+}
+
+/* An uploaded file is tappable (desktop parity: the same attachment opens on
+   both surfaces). A real <button>, so the platform gives it press feedback and
+   a screen reader gives it a name; the icon slot stays 12pt to keep the glyph
+   on the label's baseline rather than floating above it. */
+.chat-attachment-tappable {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.chat-attachment-tappable:active {
+  background: rgba(0, 0, 0, 0.1);
+}
+.chat-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-attachment-size {
+  flex: none;
+  color: var(--color-label-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Full-screen image viewer: black backdrop, the photo letterboxed inside it.
+   The whole surface is the dismiss target — a full-bleed screenshot must not
+   trap the reader behind a corner ×. */
+.attachment-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.92);
+}
+.attachment-lightbox-surface {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+.attachment-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+.attachment-lightbox-status {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+}
+.attachment-lightbox-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4) calc(var(--space-2) + var(--safe-bottom));
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+}
+.attachment-lightbox-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-lightbox-size {
+  flex: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-variant-numeric: tabular-nums;
+}
+
+/* In-app text preview + the "cannot preview here" notice share one body:
+   a scrollable, monospaced tap target inside the standard sheet. */
+.attachment-text {
+  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-4);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-label);
+}
+.attachment-void {
+  padding: var(--space-3) var(--space-4) var(--space-5);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-label-secondary);
+  text-align: center;
 }
 
 /* Design 27 §6.4 (v2.8): the task chip on a PM dispatch row — a pill above

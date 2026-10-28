@@ -23,8 +23,13 @@
 //   | Wire `AttachedItem` shape     (`type: "attached_file" | "attached_folder" | "attached_selection"`)
 //
 // `file_upload` / `image_upload` are **not** accepted here on purpose:
-// ADR-046 §2.5 says uploaded files are not clickable workspace refs (the
-// runtime owns the body; the UI just shows provenance).
+// this dispatcher's contract is an `absPath` resolved across workspaces, and a
+// chat attachment has none — its bytes live in the user service
+// (`chat-sessions/{sid}/files/`). Uploaded files are therefore clickable, but
+// through a different dispatcher: `lib/openChatAttachment.ts` (ADR-046 §2.5
+// omits uploads from this table, it does not forbid opening them). The
+// execution surface's own uploads stay inert by ADR-100 D12 — those bytes
+// belong to that run, not to this chat.
 //
 // Action selection (preview vs. Monaco edit) is delegated to the shared
 // `pickOpenActionForPath` helper so this dispatcher stays in lock-step

@@ -67,7 +67,6 @@ describe("canPreviewAttachment", () => {
 describe("openAttachmentPreview", () => {
   it("opens a read-only attachment tab carrying the fetched body", () => {
     useFileEditorStore.getState().openAttachmentPreview({
-      userId: "u-1",
       chatId: "chat-1",
       attachmentId: "att-1",
       fileName: "report.ts",
@@ -84,6 +83,9 @@ describe("openAttachmentPreview", () => {
     expect(tab.language).toBe("typescript");
     expect(tab.fileName).toBe("report.ts");
     expect(activeFileId).toBe(tab.id);
+    // The tab is addressed by chat + attachment only (D7): the group surface
+    // has no owning `userId` to key on, and a chat id is already unique.
+    expect(tab.id).toBe("attachment:chat-1:att-1");
     // No workspace behind it — the empty ids are what make the save/refresh
     // /LSP gates in FileEditorPanel skip this tab instead of firing at a
     // non-existent agent workspace.
@@ -94,7 +96,6 @@ describe("openAttachmentPreview", () => {
   it("activates the existing tab instead of stacking duplicates", () => {
     const open = () =>
       useFileEditorStore.getState().openAttachmentPreview({
-        userId: "u-1",
         chatId: "chat-1",
         attachmentId: "att-1",
         fileName: "report.ts",
@@ -117,7 +118,6 @@ describe("openAttachmentPreview", () => {
   it("keeps same-named attachments from different chats in separate tabs", () => {
     const open = (chatId: string, attachmentId: string) =>
       useFileEditorStore.getState().openAttachmentPreview({
-        userId: "u-1",
         chatId,
         attachmentId,
         fileName: "notes.txt",

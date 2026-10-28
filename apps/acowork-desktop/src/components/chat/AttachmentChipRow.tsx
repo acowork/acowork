@@ -21,6 +21,7 @@ import { FileText, Folder, Hash, Loader2, X } from "lucide-react";
 import type { AttachedFileItem, AttachedFolderItem, AttachedItem, AttachedSelectionItem, ImageUploadItem } from "../../lib/types";
 import { getGatewayUrl } from "../../lib/config";
 import { log } from "../../lib/logger";
+import { AttachmentCapsule } from "./AttachmentCapsule";
 import { DocumentChip } from "./DocumentChip";
 
 export interface AttachmentChipRowProps {
@@ -113,18 +114,10 @@ function WorkspaceRefChip({
   onClick?: () => void;
   pending?: boolean;
 }) {
-  const Tag = onClick ? "button" : "div";
   return (
-    <Tag
-      type={Tag === "button" ? "button" : undefined}
-      className={
-        "inline-flex items-center gap-1.5 rounded-md border border-border-outer bg-zinc-50 text-xs text-text-secondary  dark:bg-zinc-800 "
-        + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
-        + (onClick
-          ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
-          : "")
-        + (pending ? " opacity-60" : "")
-      }
+    <AttachmentCapsule
+      compact={compact}
+      pending={pending}
       title={pending ? "等待服务器确认..." : item.absPath}
       onClick={onClick}
     >
@@ -134,7 +127,7 @@ function WorkspaceRefChip({
         <FileText className="h-4 w-4 shrink-0 text-text-tertiary" />
       )}
       <span className="max-w-[200px] truncate font-medium">{item.name}</span>
-    </Tag>
+    </AttachmentCapsule>
   );
 }
 
@@ -149,18 +142,10 @@ function SelectionChip({
   onClick?: () => void;
   pending?: boolean;
 }) {
-  const Tag = onClick ? "button" : "div";
   return (
-    <Tag
-      type={Tag === "button" ? "button" : undefined}
-      className={
-        "inline-flex items-center gap-1.5 rounded-md border border-border-outer bg-zinc-50 text-xs text-text-secondary  dark:bg-zinc-800 "
-        + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
-        + (onClick
-          ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
-          : "")
-        + (pending ? " opacity-60" : "")
-      }
+    <AttachmentCapsule
+      compact={compact}
+      pending={pending}
       title={pending ? "等待服务器确认..." : `${item.absPath}:${item.startLine}-${item.endLine}`}
       onClick={onClick}
     >
@@ -173,7 +158,7 @@ function SelectionChip({
       <span className="text-text-tertiary ">
         {item.startLine}-{item.endLine}
       </span>
-    </Tag>
+    </AttachmentCapsule>
   );
 }
 
@@ -188,18 +173,10 @@ function FolderChip({
   onClick?: () => void;
   pending?: boolean;
 }) {
-  const Tag = onClick ? "button" : "div";
   return (
-    <Tag
-      type={Tag === "button" ? "button" : undefined}
-      className={
-        "inline-flex items-center gap-1.5 rounded-md border border-border-outer bg-zinc-50 text-xs text-text-secondary  dark:bg-zinc-800 "
-        + (compact ? " px-2.5 py-1" : " px-3 py-1.5")
-        + (onClick
-          ? " cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700"
-          : "")
-        + (pending ? " opacity-60" : "")
-      }
+    <AttachmentCapsule
+      compact={compact}
+      pending={pending}
       title={pending ? "等待服务器确认..." : item.absPath}
       onClick={onClick}
     >
@@ -209,7 +186,7 @@ function FolderChip({
         <Folder className="h-4 w-4 shrink-0 text-amber-500" />
       )}
       <span className="max-w-[200px] truncate font-medium">{item.name}</span>
-    </Tag>
+    </AttachmentCapsule>
   );
 }
 
