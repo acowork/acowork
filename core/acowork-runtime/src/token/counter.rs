@@ -41,7 +41,10 @@ pub fn estimate_image_tokens(
     let h = height.unwrap_or(512) as u64;
 
     match protocol_type {
-        ProtocolType::OpenAI => {
+        // ADR-103 §3: the Responses shape bills images with the same
+        // tokenization formula as Chat Completions. `Unknown` is the
+        // read-side tolerance value (falls back to OpenAI behavior, D3).
+        ProtocolType::OpenAI | ProtocolType::Responses | ProtocolType::Unknown => {
             // OpenAI: "low" detail uses fixed 85 tokens.
             // "high"/"auto" tiles the image at 512×512.
             if detail == Some("low") {
@@ -354,5 +357,41 @@ mod tests {
         let counter = TokenCounter::new();
         let count = counter.count_text("a");
         assert!(count >= 1);
+    }
+}
+
+// ── ADR-103 S1: Responses image-token formula ─────────────────────────
+
+#[cfg(test)]
+mod adr103_counter_tests {
+    use super::estimate_image_tokens;
+    use acowork_core::protocol::ProtocolType;
+
+    #[test]
+    fn responses_uses_the_openai_formula() {
+        // §3: Responses bills images with the same tokenization as Chat
+        // Completions — the two must never diverge.
+        for (w, h, detail) in [
+            (Some(1024u32), Some(1024u32), None),
+            (Some(512), Some(512), Some("high")),
+            (Some(2000), Some(300), Some("auto")),
+            (None, None, Some("low")),
+            (Some(100), Some(50), Some("low")),
+        ] {
+            let openai = estimate_image_tokens(&ProtocolType::OpenAI, w, h, detail);
+            let responses = estimate_image_tokens(&ProtocolType::Responses, w, h, detail);
+            let unknown = estimate_image_tokens(&ProtocolType::Unknown, w, h, detail);
+            assert_eq!(openai, responses, "w={w:?} h={h:?} detail={detail:?}");
+            assert_eq!(openai, unknown, "Unknown falls back to OpenAI behavior");
+        }
+        // Spot-check the canonical numbers: 1024x1024 high = 85 + 170*4.
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::Responses, Some(1024), Some(1024), Some("high")),
+            85 + 170 * 4
+        );
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::Responses, Some(1024), Some(1024), Some("low")),
+            85
+        );
     }
 }

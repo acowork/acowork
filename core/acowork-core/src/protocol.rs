@@ -225,7 +225,11 @@ pub struct ProviderListItem {
     pub id: String,
     /// API base URL
     pub base_url: String,
-    /// LLM protocol type
+    /// LLM protocol type (provider-level default). ADR-103 D2: `#[serde(default)]`
+    /// tolerates a missing field in older on-disk payloads (phase-1 read side).
+    /// Note this does NOT rescue unknown enum *values* — that is what
+    /// `ProtocolType::Unknown` (`#[serde(other)]`) is for.
+    #[serde(default)]
     pub protocol_type: ProtocolType,
     /// Available models for this provider with full capabilities
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -252,6 +256,92 @@ pub struct ProviderModelEntry {
     /// Gateway-level max output tokens limit for this model
     #[serde(default = "default_max_output_tokens_limit")]
     pub max_output_tokens_limit: u64,
+    /// User-selected protocol intention for this model (ADR-103 D1/D2).
+    /// `None` = no explicit choice (effective protocol follows npm derivation).
+    /// Written ONLY by an explicit user action (protocol dropdown / REST).
+    /// Whether `Responses` actually takes effect additionally requires
+    /// `protocol_probe ∈ {verified, degraded}` — the D1 gate is decided
+    /// once in the Gateway (`resolve_protocol`); Runtime and frontend only
+    /// consume the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_type: Option<ProtocolType>,
+    /// Per-model base URL override, used when the model's Responses endpoint
+    /// differs from the provider default (e.g. MiniMax: provider base is
+    /// `/anthropic/v1`, Responses needs `/v1`). Written by explicit user
+    /// action; a successful probe may *suggest* a value but MUST NOT write
+    /// it (ADR-103 D10.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Probe verdict for `protocol_type` (ADR-103 D10/D12). Written only by
+    /// the Gateway save/probe path. Gates whether `Responses` takes effect
+    /// (D1); MUST NOT be re-evaluated during a session. NOT delivered to
+    /// Runtime (ADR-103 §3 red line 2) — it is Gateway-side display/gating
+    /// metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_probe: Option<ProtocolProbe>,
+}
+
+/// Probe verdict states (ADR-103 D10.3).
+///
+/// `verified` / `degraded` gate `Responses` ON; `failed` / `stale` /
+/// `unverified` / `Unknown` gate it OFF (effective protocol falls back to
+/// the npm-derived default). Unknown wire values deserialize to `Unknown`
+/// and are treated as "not passed" (D1 MUST).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeState {
+    /// L1+L2+L3 all passed against the real endpoint.
+    Verified,
+    /// Passed, but only after a D8 field trim (e.g. `reasoning` was dropped).
+    Degraded,
+    /// Probe failed — carries the failure class/reason for the UI yellow badge.
+    Failed,
+    /// Provider config changed since the probe; verdict no longer trustworthy.
+    Stale,
+    /// Never probed (default when the field is absent).
+    #[default]
+    Unverified,
+    /// Read-side tolerance for unknown wire values (treated as not-passed).
+    #[serde(other)]
+    Unknown,
+}
+
+impl ProbeState {
+    /// The D1 gate: does this verdict enable the selected `Responses` protocol?
+    /// Only `verified` and `degraded` pass; everything else (including
+    /// `Unknown`) fails.
+    pub fn gates_responses(&self) -> bool {
+        matches!(self, ProbeState::Verified | ProbeState::Degraded)
+    }
+}
+
+/// Persisted probe verdict for a model-level `protocol_type` selection
+/// (ADR-103 D10/D12). Written only by the Gateway probe path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ProtocolProbe {
+    /// Verdict state — the gate input.
+    pub state: ProbeState,
+    /// Probe tiers that passed, e.g. `["L1","L2","L3"]` (D10.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tier_passed: Vec<String>,
+    /// Failure reason shown by the yellow "selected but not enabled" badge
+    /// (D11). Only meaningful when `state == Failed` / `Unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The base URL the probe actually hit, when it differs from the
+    /// provider default (D10.1 `observed_base_url`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_base_url: Option<String>,
+    /// RFC 3339 timestamp of the probe (cache TTL / staleness display).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probed_at: Option<String>,
+}
+
+impl ProtocolProbe {
+    /// Convenience: gate check on the verdict state.
+    pub fn gates_responses(&self) -> bool {
+        self.state.gates_responses()
+    }
 }
 
 /// MCP server list entry — delivered by Gateway to Runtime via AgentHelloResult.
@@ -937,6 +1027,32 @@ pub enum ProtocolType {
     #[default]
     #[serde(alias = "openai-compatible")]
     OpenAI,
+    /// OpenAI Responses API (`POST {base}/responses`) — ADR-103 D3.
+    /// Only ever *effective* when the user explicitly selected it AND the
+    /// Gateway probe passed (D1 gate); nothing writes this value to disk in
+    /// the phase-1 release (D2 two-stage rollout).
+    #[serde(alias = "openai-responses")]
+    Responses,
+    /// ADR-103 D2 phase-1 read-side tolerance: an unknown wire value
+    /// deserializes here instead of hard-failing the whole payload.
+    /// Consumers MUST treat it as "no usable choice" — fall back to the
+    /// npm-derived default with a `warn!`, never guess a concrete protocol.
+    #[serde(other)]
+    Unknown,
+}
+
+impl std::fmt::Display for ProtocolType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ProtocolType::Anthropic => "anthropic",
+            ProtocolType::Google => "google",
+            ProtocolType::Ollama => "ollama",
+            ProtocolType::OpenAI => "openai",
+            ProtocolType::Responses => "responses",
+            ProtocolType::Unknown => "unknown",
+        };
+        f.write_str(s)
+    }
 }
 
 /// Convert MQTT protobuf `LlmProtocol` (as i32) to domain `ProtocolType`.
@@ -951,8 +1067,47 @@ pub fn llm_protocol_to_protocol_type(proto: i32) -> ProtocolType {
         Ok(crate::mqtt_proto::LlmProtocol::Anthropic) => ProtocolType::Anthropic,
         Ok(crate::mqtt_proto::LlmProtocol::Google) => ProtocolType::Google,
         Ok(crate::mqtt_proto::LlmProtocol::Ollama) => ProtocolType::Ollama,
-        // Unspecified or unknown -> default to OpenAI-compatible
-        _ => ProtocolType::OpenAI,
+        Ok(crate::mqtt_proto::LlmProtocol::Responses) => ProtocolType::Responses,
+        Ok(crate::mqtt_proto::LlmProtocol::Openai) => ProtocolType::OpenAI,
+        // Unspecified or unknown -> default to OpenAI-compatible. ADR-103 D3:
+        // this fallback was silent; an old Runtime receiving a value it does
+        // not know (e.g. RESPONSES=5) would send Responses-only models to
+        // /chat/completions. Make the fallback visible (R1 mitigation).
+        _ => {
+            tracing::warn!(
+                proto,
+                "llm_protocol_to_protocol_type: unrecognized LlmProtocol value, falling back to OpenAI-compatible"
+            );
+            ProtocolType::OpenAI
+        }
+    }
+}
+
+/// ADR-103 D2 — model-level proto→domain protocol mapping with
+/// inherit-on-anomaly semantics.
+///
+/// Deliberately NOT `llm_protocol_to_protocol_type`: that maps
+/// `UNSPECIFIED(0)`/unknown to `OpenAI`, which for a *model-level* field
+/// would silently re-classify every model of an Anthropic / Google / Ollama
+/// provider (§3 MQTT row). Here:
+/// - `None` (field absent)  -> `None` = inherit the provider-level protocol.
+/// - `Some(1..=5)`          -> the mapped protocol.
+/// - `Some(0)` / unknown    -> `None` + warn (inherit; never guess).
+pub fn model_protocol_from_proto(proto: Option<i32>) -> Option<ProtocolType> {
+    let v = proto?;
+    match crate::mqtt_proto::LlmProtocol::try_from(v) {
+        Ok(crate::mqtt_proto::LlmProtocol::Openai) => Some(ProtocolType::OpenAI),
+        Ok(crate::mqtt_proto::LlmProtocol::Anthropic) => Some(ProtocolType::Anthropic),
+        Ok(crate::mqtt_proto::LlmProtocol::Google) => Some(ProtocolType::Google),
+        Ok(crate::mqtt_proto::LlmProtocol::Ollama) => Some(ProtocolType::Ollama),
+        Ok(crate::mqtt_proto::LlmProtocol::Responses) => Some(ProtocolType::Responses),
+        _ => {
+            tracing::warn!(
+                proto = v,
+                "model_protocol_from_proto: UNSPECIFIED/unknown model-level protocol; inheriting provider-level (never re-classifying)"
+            );
+            None
+        }
     }
 }
 
@@ -965,6 +1120,9 @@ impl std::str::FromStr for ProtocolType {
             "google" | "gemini" => Ok(ProtocolType::Google),
             "ollama" => Ok(ProtocolType::Ollama),
             "openai" | "openai-compatible" => Ok(ProtocolType::OpenAI),
+            // ADR-103 D3: Responses API (npm `@ai-sdk/openai`-compatible
+            // `POST {base}/responses`).
+            "responses" | "openai-responses" => Ok(ProtocolType::Responses),
             _ => Err(format!("Unknown protocol type: {}", s)),
         }
     }
@@ -2514,5 +2672,112 @@ mod tests {
         // Non-cache fields are intact.
         assert_eq!(parsed.context_window, 200_000);
         assert_eq!(parsed.total_input_tokens, Some(4500));
+    }
+}
+
+// ── ADR-103 S1: protocol-shape read-side tolerance tests ──────────────
+
+#[cfg(test)]
+mod adr103_tests {
+    use super::*;
+
+    #[test]
+    fn responses_variant_serde_roundtrip_and_alias() {
+        let v: ProtocolType = serde_json::from_str("\"responses\"").unwrap();
+        assert_eq!(v, ProtocolType::Responses);
+        // Historical/alias spelling must also parse (D3).
+        let v: ProtocolType = serde_json::from_str("\"openai-responses\"").unwrap();
+        assert_eq!(v, ProtocolType::Responses);
+        // Serialize uses the canonical lowercase name.
+        assert_eq!(serde_json::to_string(&ProtocolType::Responses).unwrap(), "\"responses\"");
+        // Display round-trips through FromStr.
+        assert_eq!("responses".parse::<ProtocolType>().unwrap(), ProtocolType::Responses);
+        assert_eq!("openai-responses".parse::<ProtocolType>().unwrap(), ProtocolType::Responses);
+        assert_eq!(ProtocolType::Responses.to_string(), "responses");
+    }
+
+    #[test]
+    fn unknown_wire_value_deserializes_to_unknown_not_error() {
+        // Phase-1 read side: a future/unknown protocol string must not kill
+        // the whole payload (D2).
+        let v: ProtocolType = serde_json::from_str("\"mistral-jetstream\"").unwrap();
+        assert_eq!(v, ProtocolType::Unknown);
+        assert_eq!(ProtocolType::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn provider_list_item_missing_protocol_type_defaults_to_openai() {
+        // Old on-disk payloads predate the field entirely.
+        let json = r#"{"id":"p","base_url":"http://x","models":[]}"#;
+        let item: ProviderListItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.protocol_type, ProtocolType::OpenAI);
+    }
+
+    #[test]
+    fn provider_model_entry_old_json_has_none_new_fields() {
+        let json = r#"{"id":"m","capabilities":{"context_window":1000,"max_output_tokens":100},"max_output_tokens_limit":100}"#;
+        let e: ProviderModelEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.protocol_type, None);
+        assert_eq!(e.base_url, None);
+        assert_eq!(e.protocol_probe, None);
+        // And serialization omits all three (no on-disk churn).
+        let out = serde_json::to_string(&e).unwrap();
+        assert!(!out.contains("protocol_type"));
+        assert!(!out.contains("protocol_probe"));
+    }
+
+    #[test]
+    fn probe_state_gate_only_verified_and_degraded_pass() {
+        for s in [ProbeState::Verified, ProbeState::Degraded] {
+            assert!(s.gates_responses(), "{s:?} must pass the D1 gate");
+        }
+        for s in [ProbeState::Failed, ProbeState::Stale, ProbeState::Unverified, ProbeState::Unknown] {
+            assert!(!s.gates_responses(), "{s:?} must not pass the D1 gate");
+        }
+        // Unknown wire value tolerated, treated as not-passed.
+        let st: ProbeState = serde_json::from_str("\"telepathic\"").unwrap();
+        assert_eq!(st, ProbeState::Unknown);
+        assert!(!st.gates_responses());
+    }
+
+    #[test]
+    fn model_protocol_from_proto_absent_means_inherit() {
+        // Absent field = inherit provider level — MUST NOT become OpenAI via
+        // llm_protocol_to_protocol_type (which maps UNSPECIFIED -> OpenAI).
+        assert_eq!(model_protocol_from_proto(None), None);
+        // Explicit UNSPECIFIED(0) / unknown values: inherit + warn, never guess.
+        assert_eq!(model_protocol_from_proto(Some(0)), None);
+        assert_eq!(model_protocol_from_proto(Some(99)), None);
+        // Known values map 1:1.
+        assert_eq!(model_protocol_from_proto(Some(1)), Some(ProtocolType::OpenAI));
+        assert_eq!(model_protocol_from_proto(Some(2)), Some(ProtocolType::Anthropic));
+        assert_eq!(model_protocol_from_proto(Some(3)), Some(ProtocolType::Google));
+        assert_eq!(model_protocol_from_proto(Some(4)), Some(ProtocolType::Ollama));
+        assert_eq!(model_protocol_from_proto(Some(5)), Some(ProtocolType::Responses));
+    }
+
+    #[test]
+    fn existing_protocol_wire_names_are_frozen() {
+        // S1 zero-traffic-change boundary: the four pre-ADR-103 variants keep
+        // their exact serde names on disk / REST / MQTT-JSON surfaces.
+        for (v, name) in [
+            (ProtocolType::Anthropic, "\"anthropic\""),
+            (ProtocolType::Google, "\"google\""),
+            (ProtocolType::Ollama, "\"ollama\""),
+            (ProtocolType::OpenAI, "\"openai\""),
+        ] {
+            assert_eq!(serde_json::to_string(&v).unwrap(), name);
+        }
+        // The legacy alias still parses.
+        let v: ProtocolType = serde_json::from_str("\"openai-compatible\"").unwrap();
+        assert_eq!(v, ProtocolType::OpenAI);
+    }
+
+    #[test]
+    fn llm_protocol_to_protocol_type_covers_responses() {
+        assert_eq!(llm_protocol_to_protocol_type(5), ProtocolType::Responses);
+        // Provider-level semantics unchanged: UNSPECIFIED/unknown -> OpenAI.
+        assert_eq!(llm_protocol_to_protocol_type(0), ProtocolType::OpenAI);
+        assert_eq!(llm_protocol_to_protocol_type(42), ProtocolType::OpenAI);
     }
 }

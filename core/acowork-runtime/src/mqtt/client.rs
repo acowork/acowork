@@ -298,6 +298,19 @@ fn map_provider_refs_to_list_items(
                         thinking_mode: None,
                     },
                     max_output_tokens_limit: m.max_output_tokens_limit,
+                    // ADR-103 D2: model-level effective protocol / base_url
+                    // override as decided by the Gateway. Absent = inherit
+                    // the provider-level entry. Probe verdicts are not
+                    // delivered (§3 red line 2), so `protocol_probe` stays
+                    // `None` on the Runtime side.
+                    protocol_type: acowork_core::protocol::model_protocol_from_proto(
+                        m.protocol_type,
+                    ),
+                    base_url: m
+                        .base_url
+                        .clone()
+                        .filter(|u| !u.is_empty()),
+                    protocol_probe: None,
                 })
                 .collect(),
             compact_model: if pr.compact_model.is_empty() {
@@ -2961,5 +2974,71 @@ mod tests {
         drop(sub_client);
         drop(client);
         drop(broker);
+    }
+}
+
+// ── ADR-103 S1: model-level wire mapping tests ────────────────────────
+
+#[cfg(test)]
+mod adr103_wire_tests {
+    use super::map_provider_refs_to_list_items;
+    use acowork_core::mqtt_proto::{
+        LlmProtocol, ProviderModelRef, ProviderRef,
+    };
+    use acowork_core::protocol::ProtocolType;
+
+    fn model(id: &str, proto: Option<i32>, base: Option<&str>) -> ProviderModelRef {
+        ProviderModelRef {
+            id: id.to_string(),
+            capabilities: None,
+            max_output_tokens_limit: 0,
+            protocol_type: proto,
+            base_url: base.map(|s| s.to_string()),
+        }
+    }
+
+    fn provider(protocol: LlmProtocol, models: Vec<ProviderModelRef>) -> ProviderRef {
+        ProviderRef {
+            id: "anthropic".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            protocol_type: protocol as i32,
+            models,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn absent_model_protocol_inherits_provider_level_not_openai() {
+        // The §3 red line: an Anthropic provider's models must NOT be
+        // re-classified to OpenAI just because the model-level field is absent.
+        let list = map_provider_refs_to_list_items(&[provider(
+            LlmProtocol::Anthropic,
+            vec![model("claude-x", None, None)],
+        )]);
+        let m = &list[0].models[0];
+        assert_eq!(m.protocol_type, None, "absent = inherit, not a concrete value");
+        assert_eq!(m.base_url, None);
+        assert_eq!(m.protocol_probe, None, "probe verdicts are never delivered");
+        assert_eq!(list[0].protocol_type, ProtocolType::Anthropic);
+    }
+
+    #[test]
+    fn present_model_protocol_maps_through_the_safe_helper() {
+        let list = map_provider_refs_to_list_items(&[provider(
+            LlmProtocol::Anthropic,
+            vec![
+                model("a", Some(LlmProtocol::Responses as i32), Some("https://x/v1")),
+                model("b", Some(LlmProtocol::Unspecified as i32), None),
+                model("c", Some(99), Some("")),
+            ],
+        )]);
+        // Some(RESPONSES) -> effective Responses override.
+        assert_eq!(list[0].models[0].protocol_type, Some(ProtocolType::Responses));
+        assert_eq!(list[0].models[0].base_url.as_deref(), Some("https://x/v1"));
+        // Some(UNSPECIFIED) / Some(garbage) -> inherit (None), never OpenAI.
+        assert_eq!(list[0].models[1].protocol_type, None);
+        assert_eq!(list[0].models[2].protocol_type, None);
+        // Empty base_url string normalizes to None.
+        assert_eq!(list[0].models[2].base_url, None);
     }
 }

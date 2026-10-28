@@ -180,7 +180,17 @@ pub fn create_provider_with_wiring(
             Arc::new(provider)
         }
 
-        ProtocolType::OpenAI => {
+        ProtocolType::OpenAI | ProtocolType::Unknown => {
+            // ADR-103 D3: `Unknown` is the read-side tolerance value for an
+            // unrecognized wire protocol. It must never silently masquerade
+            // as the status quo — make the fallback visible, then behave as
+            // OpenAI-compatible (the historical default).
+            if matches!(protocol_type, ProtocolType::Unknown) {
+                tracing::warn!(
+                    provider = provider_name,
+                    "unrecognized protocol_type delivered; falling back to OpenAI-compatible provider (ADR-103 D3)"
+                );
+            }
             tracing::info!(provider = provider_name, "Using OpenAI-compatible provider");
             let mut provider = if let Some(url) = base_url {
                 OpenAIProvider::with_base_url_and_timeouts(
@@ -201,6 +211,63 @@ pub fn create_provider_with_wiring(
             };
             install_wiring(&mut provider, &wiring);
             Arc::new(provider)
+        }
+
+        ProtocolType::Responses => {
+            // ADR-103 D4: standalone Responses provider. Wiring (CompatCache)
+            // is NOT installed — the completions-shaped cache keys and
+            // fallback chain do not apply to this wire format.
+            tracing::info!(
+                provider = provider_name,
+                "Using OpenAI Responses protocol provider"
+            );
+            let provider = crate::providers::responses::ResponsesProvider::with_base_url_and_timeouts(
+                base_url,
+                api_key,
+                t.request_timeout,
+                t.connect_timeout,
+                t.stream_read_timeout,
+            );
+            Arc::new(provider)
+        }
+    }
+}
+
+/// ADR-103 D2 — model-level two-stage input for provider construction.
+///
+/// Selects the construction branch via `model.protocol_type.or(provider
+/// .protocol_type)` and the per-model base URL override. The value delivered
+/// at model level is the Gateway-resolved *effective* protocol (§3 red line
+/// 1) — this function only consumes it, it never re-derives or gates.
+///
+/// When `model_id` is given but no matching entry exists, falls back to the
+/// provider level with a `warn!` (D2 MUST: never guess).
+pub fn effective_protocol_and_base(
+    provider: &acowork_core::protocol::ProviderListItem,
+    model_id: Option<&str>,
+) -> (ProtocolType, String) {
+    match model_id.and_then(|mid| provider.models.iter().find(|m| m.id == mid)) {
+        Some(m) => {
+            let proto = m
+                .protocol_type
+                .clone()
+                .unwrap_or_else(|| provider.protocol_type.clone());
+            let base = m
+                .base_url
+                .clone()
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| provider.base_url.clone());
+            (proto, base)
+        }
+        None => {
+            if let Some(mid) = model_id {
+                tracing::warn!(
+                    provider_id = %provider.id,
+                    model_id = %mid,
+                    "model entry not found in provider list; falling back to provider-level protocol/base_url"
+                );
+            }
+            (provider.protocol_type.clone(), provider.base_url.clone())
         }
     }
 }
@@ -336,5 +403,117 @@ mod tests {
             infer_protocol_type("unknown-provider"),
             ProtocolType::OpenAI
         );
+    }
+}
+
+// ── ADR-103 S1: router construction-branch tests ──────────────────────
+
+#[cfg(test)]
+mod adr103_router_tests {
+    use super::*;
+    use acowork_core::protocol::{ProbeState, ProtocolProbe, ProviderModelEntry};
+
+    fn model(
+        id: &str,
+        proto: Option<ProtocolType>,
+        base: Option<&str>,
+    ) -> ProviderModelEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "capabilities": { "context_window": 1000u64, "max_output_tokens": 100u64 },
+            "max_output_tokens_limit": 4096u64,
+            "protocol_type": proto,
+            "base_url": base,
+        }))
+        .unwrap()
+    }
+
+    fn provider(proto: ProtocolType, models: Vec<ProviderModelEntry>) -> acowork_core::protocol::ProviderListItem {
+        acowork_core::protocol::ProviderListItem {
+            id: "p".into(),
+            base_url: "https://provider/v1".into(),
+            protocol_type: proto,
+            models,
+            compact_model: None,
+            custom: false,
+        }
+    }
+
+    #[test]
+    fn responses_branch_reaches_the_responses_provider_without_compat_wiring() {
+        // Wiring carries a provider id; compat_cache is deliberately None
+        // here because the Responses branch MUST NOT install it (D4) — the
+        // branch's non-use is pinned by construction, not by a live cache.
+        let wiring = ProviderWiring {
+            provider_id: Some("p".into()),
+            compat_cache: None,
+        };
+        let p = create_provider_with_wiring(
+            "openai",
+            &ProtocolType::Responses,
+            Some("k"),
+            Some("https://api.openai.com/v1"),
+            None,
+            wiring,
+        );
+        assert_eq!(p.name(), "openai-responses");
+    }
+
+    #[test]
+    fn unknown_branch_falls_back_to_openai_compatible() {
+        let p = create_provider_with_wiring(
+            "mystery",
+            &ProtocolType::Unknown,
+            Some("k"),
+            None,
+            None,
+            ProviderWiring::default(),
+        );
+        assert_eq!(p.name(), "openai");
+    }
+
+    #[test]
+    fn effective_protocol_inherits_and_overrides() {
+        // No model-level fields -> provider level, provider base_url.
+        let p = provider(ProtocolType::Anthropic, vec![model("m1", None, None)]);
+        let (proto, base) = effective_protocol_and_base(&p, Some("m1"));
+        assert_eq!(proto, ProtocolType::Anthropic);
+        assert_eq!(base, "https://provider/v1");
+        // Model-level Responses (Gateway-resolved effective value) + base override.
+        let p = provider(
+            ProtocolType::OpenAI,
+            vec![model("m1", Some(ProtocolType::Responses), Some("https://mm/v1"))],
+        );
+        let (proto, base) = effective_protocol_and_base(&p, Some("m1"));
+        assert_eq!(proto, ProtocolType::Responses);
+        assert_eq!(base, "https://mm/v1");
+        // Unknown model id -> provider level + warn (never guess).
+        let (proto, base) = effective_protocol_and_base(&p, Some("nope"));
+        assert_eq!(proto, ProtocolType::OpenAI);
+        assert_eq!(base, "https://provider/v1");
+        // No model id at all -> provider level, silent.
+        let (proto, _) = effective_protocol_and_base(&p, None);
+        assert_eq!(proto, ProtocolType::OpenAI);
+    }
+
+    #[test]
+    fn runtime_never_uses_probe_even_if_present() {
+        // Defense-in-depth: even if a probe somehow rode along in the domain
+        // entry, construction consumes only protocol_type/base_url — there is
+        // no probe input to effective_protocol_and_base at all. The type
+        // signature is the guarantee; this test pins the field presence.
+        let mut m = model("m1", Some(ProtocolType::Responses), None);
+        m.protocol_probe = Some(ProtocolProbe {
+            state: ProbeState::Failed,
+            tier_passed: vec![],
+            reason: None,
+            observed_base_url: None,
+            probed_at: None,
+        });
+        let p = provider(ProtocolType::OpenAI, vec![m]);
+        let (proto, _) = effective_protocol_and_base(&p, Some("m1"));
+        // Runtime consumes the Gateway-resolved value verbatim (red line 1):
+        // re-gating here would be a second decision point.
+        assert_eq!(proto, ProtocolType::Responses);
     }
 }

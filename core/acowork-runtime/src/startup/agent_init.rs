@@ -713,13 +713,22 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         Some(api_key.as_str())
                     };
                     let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-                    let model_id = prov
-                        .models
-                        .first()
+                    let chosen_model = prov.models.first();
+                    let model_id = chosen_model
                         .map(|m| m.id.clone())
                         .unwrap_or_else(|| "default".to_string());
-                    let proto_str =
-                        acowork_core::protocol::llm_protocol_to_protocol_type(prov.protocol_type);
+                    // ADR-103 D2: consume the Gateway-resolved model-level
+                    // protocol / base_url override; absent = inherit the
+                    // provider level (never re-derive here).
+                    let proto_str = chosen_model
+                        .and_then(|m| acowork_core::protocol::model_protocol_from_proto(m.protocol_type))
+                        .unwrap_or_else(|| {
+                            acowork_core::protocol::llm_protocol_to_protocol_type(prov.protocol_type)
+                        });
+                    let effective_base_url: Option<&str> = chosen_model
+                        .and_then(|m| m.base_url.as_deref())
+                        .filter(|u| !u.is_empty())
+                        .or((!prov.base_url.is_empty()).then_some(prov.base_url.as_str()));
                     let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
 
                     // Load (or initialize) the per-agent compatibility cache.
@@ -740,7 +749,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         &prov.id,
                         &proto_str,
                         api_key_opt,
-                        Some(&prov.base_url),
+                        effective_base_url,
                         timeouts,
                         wiring,
                     );

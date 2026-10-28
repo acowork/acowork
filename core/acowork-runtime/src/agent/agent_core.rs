@@ -1101,14 +1101,22 @@ impl AgentCore {
             provider_id: Some(provider_meta.id.clone()),
             compat_cache: self.compat_cache.clone(),
         };
+        // ADR-103 D2: the compact provider is built for the provider's
+        // compact model — consume the model-level protocol/base_url the
+        // same way the session path does.
+        let (effective_protocol, effective_base_url) =
+            crate::providers::router::effective_protocol_and_base(
+                &provider_meta,
+                provider_meta.compact_model.as_deref(),
+            );
         let raw = crate::providers::router::create_provider_with_wiring(
             &provider_meta.id,
-            &provider_meta.protocol_type,
+            &effective_protocol,
             api_key.as_deref(),
-            if provider_meta.base_url.is_empty() {
+            if effective_base_url.is_empty() {
                 None
             } else {
-                Some(&provider_meta.base_url)
+                Some(effective_base_url.as_str())
             },
             timeouts,
             wiring,
@@ -1525,6 +1533,9 @@ mod tests {
                     id: "test-model".into(),
                     capabilities: caps,
                     max_output_tokens_limit: 32_768,
+                    protocol_type: None,
+                    base_url: None,
+                    protocol_probe: None,
                 }],
                 compact_model: None,
                 custom: false,
@@ -2580,6 +2591,9 @@ mod tests {
                 id: model_id.to_string(),
                 capabilities: test_model_caps(context_window, 16_384),
                 max_output_tokens_limit: 32_768,
+                protocol_type: None,
+                base_url: None,
+                protocol_probe: None,
             }],
             compact_model: None,
             custom: false,

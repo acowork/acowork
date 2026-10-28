@@ -623,11 +623,14 @@ impl SessionTask {
         if let Some(ref provider_id) = session.provider
             && let Some(new_provider) = session_core.build_provider_for(
                 provider_id,
+                session.model.as_deref(),
                 session.account_id.as_deref(),
-                &core_mut.config,
-                &core_mut.global_provider_list,
-                &core_mut.provider_key_vault,
-                core_mut.compat_cache.as_ref(),
+                &crate::agent::session_core::ProviderBuildContext {
+                    config: &core_mut.config,
+                    global_provider_list: &core_mut.global_provider_list,
+                    provider_key_vault: &core_mut.provider_key_vault,
+                    compat_cache: core_mut.compat_cache.as_ref(),
+                },
             )
         {
             let model = session.model.clone().unwrap_or_default();

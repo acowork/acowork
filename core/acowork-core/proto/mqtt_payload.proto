@@ -342,6 +342,10 @@ enum LlmProtocol {
   LLM_PROTOCOL_ANTHROPIC = 2;   // Anthropic Messages API
   LLM_PROTOCOL_GOOGLE = 3;      // Google Gemini
   LLM_PROTOCOL_OLLAMA = 4;      // Ollama native
+  // ADR-103 D3: OpenAI Responses API. Values 1-4 keep their meaning; an
+  // old Runtime receiving 5 falls back to OpenAI-compatible WITH a warn
+  // (llm_protocol_to_protocol_type). Release order: read side first.
+  LLM_PROTOCOL_RESPONSES = 5;   // OpenAI Responses API
 }
 
 /// Model entry within a provider reference.
@@ -349,6 +353,18 @@ message ProviderModelRef {
   string id = 1;
   ModelCapabilities capabilities = 2;
   uint64 max_output_tokens_limit = 3;
+  // ADR-103 D2: (provider, model)-grained protocol resolution. ABSENT =
+  // inherit the provider-level `ProviderRef.protocol_type`. This MUST NOT
+  // be translated through llm_protocol_to_protocol_type when absent — that
+  // maps UNSPECIFIED(0) to OpenAI and would silently re-classify every
+  // model of an Anthropic/Google/Ollama provider.
+  optional LlmProtocol protocol_type = 4;
+  // ADR-103 D2: per-model base URL override, present only when the
+  // Gateway-resolved effective protocol is Responses and an override was
+  // configured. Empty/absent = provider base_url.
+  optional string base_url = 5;
+  // NOTE: probe verdicts (protocol_probe) are deliberately NOT delivered —
+  // they are Gateway-side gating/display metadata (ADR-103 §3 red line 2).
 }
 
 /// Model capabilities (mirrors ModelCapabilitiesInfo).

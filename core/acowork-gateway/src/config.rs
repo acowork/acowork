@@ -85,6 +85,10 @@ pub struct GatewayConfig {
     /// HTTP API configuration
     #[serde(default)]
     pub http: HttpConfig,
+    /// LLM protocol feature configuration (ADR-103). New section; the
+    /// default values reproduce the pre-ADR-103 behavior, so no migration.
+    #[serde(default)]
+    pub llm: LlmConfig,
     /// Default LLM provider for agents
     /// When set, Gateway delivers this provider's config to agents via gRPC.
     /// If not set, falls back to the first key stored in Vault.
@@ -784,6 +788,19 @@ impl Default for HttpConfig {
     }
 }
 
+/// LLM protocol feature configuration (ADR-103 §4.3/§4.4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LlmConfig {
+    /// Global kill switch for the OpenAI Responses API provider shape.
+    /// Default `false` = the pre-ADR-103 behavior: `resolve_protocol` forces
+    /// the npm-derived default, the `Responses` branch is unreachable, and
+    /// (from S5 on) the probe endpoint is disabled too. Read at startup;
+    /// v1 has NO hot-reload — changing it requires a Gateway restart so a
+    /// running session can never see its protocol switch mid-flight.
+    #[serde(default)]
+    pub responses_api_enabled: bool,
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -924,6 +941,9 @@ impl GatewayConfig {
                 }
                 http
             },
+            // ADR-103: `[llm]` section — file value or default; no CLI/env
+            // override in v1 (read once at startup, no hot-reload).
+            llm: file_config.as_ref().map(|c| c.llm.clone()).unwrap_or_default(),
             default_provider: file_config
                 .as_ref()
                 .and_then(|c| c.default_provider.clone()),
@@ -1144,6 +1164,7 @@ impl Default for GatewayConfig {
             max_iterations: default_max_iterations(),
             dev_mode: true,
             http: HttpConfig::default(),
+            llm: LlmConfig::default(),
             default_provider: None,
             default_model: None,
             max_output_tokens_limit: default_max_output_tokens_limit(),

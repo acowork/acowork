@@ -78,6 +78,9 @@ async fn seed_provider_list(state: &AppState, dir: &std::path::Path) {
                     thinking_mode: None,
                 },
                 max_output_tokens_limit: 32_768,
+                protocol_type: None,
+                base_url: None,
+                protocol_probe: None,
             }],
         },
         ProviderListItem {
@@ -105,6 +108,9 @@ async fn seed_provider_list(state: &AppState, dir: &std::path::Path) {
                     thinking_mode: None,
                 },
                 max_output_tokens_limit: 16_384,
+                protocol_type: None,
+                base_url: None,
+                protocol_probe: None,
             }],
         },
     ];

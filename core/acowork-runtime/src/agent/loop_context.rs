@@ -624,11 +624,14 @@ impl AgentLoop {
 
         match self.session_core.build_provider_for(
             &resolved.provider_id,
+            Some(resolved.model_id.as_str()),
             None,
-            &self.core.config,
-            &self.core.global_provider_list,
-            &self.core.provider_key_vault,
-            self.core.compat_cache.as_ref(),
+            &super::session_core::ProviderBuildContext {
+                config: &self.core.config,
+                global_provider_list: &self.core.global_provider_list,
+                provider_key_vault: &self.core.provider_key_vault,
+                compat_cache: self.core.compat_cache.as_ref(),
+            },
         ) {
             Some(p) => {
                 tracing::info!(
@@ -2377,11 +2380,17 @@ mod tests {
                         id: "deepseek-v4-flash".to_string(),
                         capabilities: caps(128_000),
                         max_output_tokens_limit: 32_768,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     },
                     ProviderModelEntry {
                         id: "deepseek-v4-pro".to_string(),
                         capabilities: caps(128_000),
                         max_output_tokens_limit: 32_768,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     },
                 ],
             },
@@ -2396,11 +2405,17 @@ mod tests {
                         id: "qwen2.5:0.5b".to_string(),
                         capabilities: caps(32_000),
                         max_output_tokens_limit: 16_384,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     },
                     ProviderModelEntry {
                         id: "llama3:8b".to_string(),
                         capabilities: caps(8_000),
                         max_output_tokens_limit: 8_192,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     },
                 ],
             },
