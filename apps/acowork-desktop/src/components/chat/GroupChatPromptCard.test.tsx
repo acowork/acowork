@@ -10,7 +10,8 @@
  *     its own prompt files;
  *   - when the server reports `editable: false`, no edit / restore affordance
  *     is rendered at all — a plain member is never handed a control the backend
- *     would refuse with a 403;
+ *     would refuse with a 403 (the panels go further and hide the whole card
+ *     from a non-owner / non-admin);
  *   - `editable: true` + a custom override shows the restore shortcut, which
  *     DELETEs the override and re-reads so the badge flips back in place.
  */
@@ -108,3 +109,4 @@ describe("GroupChatPromptCard", () => {
     expect(fetchMock.mock.calls[2][1].method).toBeUndefined();
   });
 });
+

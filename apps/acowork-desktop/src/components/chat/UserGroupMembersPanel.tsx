@@ -32,6 +32,7 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
 import { showToast } from "../common/ToastProvider";
 import { GroupChatPromptCard } from "./GroupChatPromptCard";
+import { canGovern } from "../../views/pm/pmMembers";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
@@ -58,7 +59,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
   const { t } = useTranslation();
   const me = useAuthStore((s) => s.account?.user_id ?? "");
   const account = useAuthStore((s) => s.account);
-  const isAdmin = useAuthStore((s) => s.account?.role === "admin");
+  const localMode = useAuthStore((s) => s.mode) === "local";
   const token = useAuthStore((s) => s.accessToken);
   const agents = useAgentStore((s) => s.agents);
   const removeMember = useProjectGroupStore((s) => s.removeMember);
@@ -79,11 +80,12 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
 
   const participants = group.participants ?? [];
   const canManage = participants.some((p) => p.id === me);
-  // ADR-098 governance: owner-or-admin, mirroring `MemberManagerDialog`'s
-  // transfer gate. The backend enforces the same check in the session lock.
+  // ADR-098 governance: owner-or-admin, mirroring the backend's
+  // `can_govern_group` in the session lock. A plain member gets neither the
+  // rename / transfer / remove affordances nor the group prompt card.
   const owner = group.owner ?? "";
   const isOwner = !!owner && owner === me;
-  const canGovern = canManage && (isOwner || isAdmin);
+  const governs = canManage && canGovern(owner, account, localMode);
 
   const nameOf = useMemo(() => {
     const byId = new Map<string, DirectoryUser>();
@@ -193,7 +195,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
                 </span>
               }
               trailing={
-                canGovern ? (
+                governs ? (
                   <span className="flex shrink-0 items-center" onClick={(e) => e.stopPropagation()}>
                     <button
                       type="button"
@@ -223,8 +225,8 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
               // Removing ANOTHER member is owner-or-admin only (the backend
               // re-checks); a plain member sees no ×, and leaves via the
               // bottom button instead (self-removal always allowed).
-              const canRemove = canGovern && !isOwnerTile;
-              const canSetOwner = canGovern && !isOwnerTile && isHuman;
+              const canRemove = governs && !isOwnerTile;
+              const canSetOwner = governs && !isOwnerTile && isHuman;
               return (
                 <div
                   key={p.id}
@@ -311,11 +313,10 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
             </ExpandableRow>
           </ListBox>
           {/* Group chat prompt — its own card (same `ListBox`/`ExpandableRow`
-              grammar as the members card). Read is open to every participant
-              (the backend answers a hidden 404 to a non-member); the card
-              renders read-only unless the server marks this caller as
-              owner/admin. */}
-          {canManage && <GroupChatPromptCard sessionId={group.session_id} />}
+              grammar as the members card). Owner-or-admin only (ADR-098): a
+              plain member gets no card at all — neither a read of the prompt
+              nor an edit the backend would refuse. */}
+          {governs && <GroupChatPromptCard sessionId={group.session_id} />}
         </div>
 
         {canManage && (

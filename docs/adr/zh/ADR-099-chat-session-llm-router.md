@@ -116,7 +116,7 @@ execute prompt（`prompts/system.md` + `constraints.md` + 其他 `prompts/*.md` 
 2. Persona 段：manifest 的 `name`/`role`/`description` 回退，上限 4KB；
 3. 场景段：1:1 / 群聊两个稳定变体。
 
-`chat.md` 存在且非空白时**整段替换**上述三层（只替换 `{{agent_name}}`）——唯独 `# Safety` 段除外，Runtime 每轮都会把它作为不可裁剪的尾块重新追加到正文末尾。来源优先级为：群聊会话级 `chat-sessions/{id}/chat.md`（`acowork-user`，任何成员可读、仅群主或管理员可写——ADR-098——从群聊右侧设置面板编辑，首读时用内置默认生成）> 包级 `prompts/chat.md`（agent 启动时若无则用内置默认生成）> 内置默认。包级 `chat.md` 纳入 ADR-063 的包级 override 清单，因此也从 execute prompt 拼接中排除；`POST /agents/{id}/prompts/reload` 同步刷新。安全边界由**结构而非字面量**保证：`# Safety` 尾块无法被 `chat.md` 删除，群聊提示词仅群主或管理员可改写（因此单个成员无法操控他人的 agent），且 router 只有 `dispatch` 与两个只读信息工具，改写提示词字面量不能给它新能力。router 不加载 skills、workspace prompt file，也不**自动注入** retrieved memory——只允许通过 `memory_recall` 按需检索（D3）。
+`chat.md` 存在且非空白时**整段替换**上述三层（只替换 `{{agent_name}}`）——唯独 `# Safety` 段除外，Runtime 每轮都会把它作为不可裁剪的尾块重新追加到正文末尾。来源优先级为：群聊会话级 `chat-sessions/{id}/chat.md`（`acowork-user`，人类面上仅群主或管理员可读可写——ADR-098——从群聊右侧设置面板编辑，普通成员不渲染该卡片；接口层的读仍对参与者开放，首读时用内置默认生成）> 包级 `prompts/chat.md`（agent 启动时若无则用内置默认生成）> 内置默认。包级 `chat.md` 纳入 ADR-063 的包级 override 清单，因此也从 execute prompt 拼接中排除；`POST /agents/{id}/prompts/reload` 同步刷新。安全边界由**结构而非字面量**保证：`# Safety` 尾块无法被 `chat.md` 删除，群聊提示词仅群主或管理员可改写（因此单个成员无法操控他人的 agent），且 router 只有 `dispatch` 与两个只读信息工具，改写提示词字面量不能给它新能力。router 不加载 skills、workspace prompt file，也不**自动注入** retrieved memory——只允许通过 `memory_recall` 按需检索（D3）。
 
 > 修订（chat.md 整段可覆盖）：原 D6 规定 `prompts/chat.md` **只替换 Persona 段**、基座不可覆盖。现按需求改为整段可覆盖，并新增会话级（群聊）`chat.md`；基座与场景段的字面量迁到 `acowork_core::chat_prompt`，供 `acowork-user`（播种群聊文件）与 `acowork-runtime`（组装内置默认）共用。安全保证改由工具集结构承担。设计 29 §3.1–3.3 已同步。
 

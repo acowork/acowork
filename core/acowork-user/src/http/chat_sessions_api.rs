@@ -1255,12 +1255,21 @@ async fn system_ensure_pair(
 #[derive(Debug, Deserialize)]
 pub struct SystemGroupRequest {
     pub project_id: String,
-    /// Group chat title (usually the project title).
+    /// Group chat title — the project title. Converged onto the session row
+    /// on both ensure and sync (a `project_group` has no user-side rename, so
+    /// PM's title is its only source). Empty = leave the stored title alone.
     #[serde(default)]
     pub title: String,
     /// Initial participants — the project owner at minimum; members are
     /// added by the Gateway as they join the project.
     pub participants: Vec<String>,
+    /// The project's current owner (`Project::owner()`), pushed by PM. It is
+    /// what ADR-098 governance of the group `chat.md` checks on a
+    /// `project_group` (which has no user-side `transfer_owner`), so PM re-
+    /// asserts it on every ensure / sync. Absent = leave the stored owner
+    /// alone (a caller that does not know it must not clear it).
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// `POST /internal/chat-sessions/group` — idempotently ensure the one
@@ -1285,7 +1294,7 @@ async fn system_ensure_group(
             SessionKind::ProjectGroup,
             &participants,
             &req.title,
-            None,
+            req.owner.as_deref(),
             Some(&req.project_id),
             now_unix(),
         )
@@ -1295,9 +1304,10 @@ async fn system_ensure_group(
 }
 
 /// `POST /internal/chat-sessions/group/sync` — set the group's participant
-/// list to exactly `participants` (design 27 §8.3). The remove case is the
-/// revocation half: the dropped id loses the bound execution sessions on
-/// its next scope injection.
+/// list to exactly `participants` and converge the project's title and owner
+/// onto the session row (design 27 §8.3). The remove case is the revocation
+/// half: the dropped id loses the bound execution sessions on its next scope
+/// injection.
 async fn system_sync_group(
     State(state): State<AppState>,
     Json(req): Json<SystemGroupRequest>,
@@ -1309,7 +1319,14 @@ async fn system_sync_group(
     let auth = state.auth_service.clone();
     let session = offload(move || {
         let participants = typed_participants(auth.as_ref(), &req.participants, None);
-        chat_sessions::sync_group(&dir, &req.project_id, &participants, now_unix())
+        chat_sessions::sync_group(
+            &dir,
+            &req.project_id,
+            &participants,
+            &req.title,
+            req.owner.as_deref(),
+            now_unix(),
+        )
     })
     .await?;
     Ok(Json(session))
@@ -2626,6 +2643,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// A project channel's prompt is governed by the project's owner, not only
+    /// by a platform admin. PM pushes `Project::owner()` through the internal
+    /// sync (the Gateway mediates it on create / member churn / transfer), and
+    /// that human then reads `editable: true` and writes. Before this the owner
+    /// of a project — the one who may delete it — got a read-only card and a
+    /// 403 on their own group prompt.
+    #[tokio::test]
+    async fn project_group_chat_md_is_governed_by_the_project_owner() {
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (owner, owner_token) = make_user(&app, &admin, "pmowner").await;
+        let (_member, member_token) = make_user(&app, &admin, "pmmember").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/group/sync",
+                Some(&format!(
+                    r#"{{"project_id":"proj-http","participants":["{owner}","{_member}"],"owner":"{owner}"}}"#
+                )),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sid = json(resp).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            json(app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/internal/chat-sessions/{sid}"),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap())
+            .await["owner"]
+                .as_str(),
+            Some(owner.as_str()),
+            "PM's owner lands on the session row"
+        );
+
+        // The project owner reads their prompt as writable and writes it.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{sid}/chat-md"),
+                None,
+                Some(&owner_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(json(resp).await["editable"].as_bool(), Some(true));
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/api/chat-sessions/{sid}/chat-md"),
+                Some(r#"{"content":"Owner-written kernel."}"#),
+                Some(&owner_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(json(resp).await["content"]
+            .as_str()
+            .unwrap()
+            .contains("Owner-written kernel."));
+        // A plain member of the same channel still gets 403.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &format!("/api/chat-sessions/{sid}/chat-md"),
+                Some(r#"{"content":"Takeover."}"#),
+                Some(&member_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

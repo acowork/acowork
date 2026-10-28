@@ -27,7 +27,7 @@
 //! | 路径 | 策略 |
 //! |------|------|
 //! | `/api/pm/*`（REST，Desktop） | **覆盖** `X-Actor` 为可信身份。`multi_user` 下 = token 身份（`AuthContext.effective_user_id`）；`local` 下回退常量 `human`。客户端自报的 `X-Actor`（如伪造 `agent:xxx`）被丢弃 |
-//! | `/api/pm/mcp`（MCP，Agent） | **校验** `X-MCP-Actor`：agent_id ∈ Gateway `installed_agents` → 透传（可信）；否则**剥离**（→ 匿名，仅只读工具，设计 §9.3） |
+//! | `/api/pm/mcp`（MCP，Agent） | **校验** `X-MCP-Actor`：agent_id ∈ Gateway `installed_agents` → 透传（可信）；否则**剥离**（→ 匿名，仅只读工具，设计 §9.3）。客户端自报的 `X-Actor` 同样**剥离**（不注入替代值） |
 //!
 //! 安全语义：REST 面只允许人类操作（`created_by`/reviewer = 真实 user_id）；
 //! Agent 身份只能经 MCP `X-MCP-Actor` 表达，且必须通过 Gateway Agent 目录校验。
@@ -155,7 +155,8 @@ async fn pm_proxy_handler(
 ///   constant under `local` (ADR-076 §决策 10 / §决策 12).
 /// - **MCP path** (`is_mcp = true`): validate `X-MCP-Actor` — agent_id in
 ///   Gateway `installed_agents` passes through; otherwise strip (→ anonymous,
-///   read-only tools only).
+///   read-only tools only). A client-claimed `X-Actor` is dropped here too (PM
+///   reads it as the caller identity), and nothing is injected in its place.
 fn build_trusted_headers(
     headers: &HeaderMap,
     is_mcp: bool,
@@ -190,7 +191,12 @@ fn build_trusted_headers(
                     out.insert(name, value.clone());
                 }
                 // 不可信 / 缺失 → 不注入（匿名只读，设计 §9.3）
-            } else {
+            } else if name != "x-actor" {
+                // PM reads `x-actor` as the caller identity (its project
+                // governance gate, including the `human` local-actor bypass).
+                // The MCP face has no REST actor, so a client-claimed one is
+                // dropped here exactly as on the REST branch below — otherwise
+                // `x-actor: human` on this path forges the local actor.
                 out.insert(name, value.clone());
             }
         } else {
@@ -687,6 +693,23 @@ mod tests {
         assert!(
             echoed.get("x-mcp-actor").is_none(),
             "untrusted X-MCP-Actor must be stripped (anonymous), got: {echoed}"
+        );
+    }
+
+    /// MCP 路径：客户端自报的 `X-Actor` 被剥离。PM 拿它当调用方身份（项目
+    /// 治理门 + `human` 本地 actor 豁免），而 MCP 面没有 REST 身份，所以
+    /// 客户端声称 `human` 不能替它拿到本地 actor 的权限。
+    #[tokio::test]
+    async fn mcp_path_strips_a_client_claimed_x_actor() {
+        let state = test_app_state();
+        let port = start_echo_pm_server().await;
+        set_pm_process(&state, port).await;
+
+        let echoed = proxy_echo_headers(state, "/api/pm/mcp", &[("x-actor", "human")]).await;
+
+        assert!(
+            echoed.get("x-actor").is_none(),
+            "a client-claimed X-Actor must not travel on the MCP path, got: {echoed}"
         );
     }
 

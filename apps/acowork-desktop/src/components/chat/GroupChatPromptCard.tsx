@@ -19,10 +19,11 @@
  * (`DELETE .../chat-md`) so the next read re-seeds the built-in default, and
  * flips the badge back without leaving the panel.
  *
- * Read is open to every participant (a stranger gets a hidden 404), but the
- * server decides who may write it — the group owner or an admin (ADR-098
- * governance). Only that set sees the edit / restore controls; a plain member
- * reads the status without being handed a save the backend would refuse (403).
+ * The card is owner-or-admin only (ADR-098 governance): a plain member does
+ * not get the card at all — neither a read of the prompt nor a save the
+ * backend would refuse (403). The panels gate it through `canGovern` /
+ * `canGovernProject` (`views/pm/pmMembers`); the server stays the authority on
+ * who may write it.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Pencil, RotateCcw } from "lucide-react";

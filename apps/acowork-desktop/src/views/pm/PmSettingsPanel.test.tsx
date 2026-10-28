@@ -54,23 +54,29 @@ vi.mock("../../stores/agentStore", () => ({
     selector({ agents: {}, fetchAgents: mocks.fetchAgents }),
 }));
 
-vi.mock("../../stores/authStore", () => ({
-  useAuthStore: (selector: (state: Record<string, unknown>) => unknown) =>
-    selector({
-      account: {
-        user_id: MOCK_USER_ID,
-        username: "admin",
-        display_name: "admin",
-        role: "admin",
-        language: "zh-CN",
-        timezone: "Asia/Shanghai",
-        avatar: null,
-        builtin_avatar: null,
-        created_at: "2026-01-01T00:00:00Z",
-        updated_at: "2026-01-01T00:00:00Z",
-      },
-    }),
-}));
+vi.mock("../../stores/authStore", () => {
+  // Mutable like `MemberManagerDialog.test.tsx`: one test flips the caller to a
+  // plain member to pin the governance gate, then restores it.
+  (globalThis as unknown as { __panelAccount: unknown }).__panelAccount = {
+    user_id: "21a727ee-d2ac-4d7a-9bb1-a846cb34cf3c",
+    username: "admin",
+    display_name: "admin",
+    role: "admin",
+    language: "zh-CN",
+    timezone: "Asia/Shanghai",
+    avatar: null,
+    builtin_avatar: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  };
+  return {
+    useAuthStore: (selector: (state: Record<string, unknown>) => unknown) =>
+      selector({
+        account: (globalThis as unknown as { __panelAccount: unknown }).__panelAccount,
+        mode: "multi_user",
+      }),
+  };
+});
 
 vi.mock("../../stores/userProfileStore", () => ({
   useUserProfileStore: (selector: (state: Record<string, unknown>) => unknown) =>
@@ -179,6 +185,83 @@ describe("PmSettingsPanel", () => {
     await waitFor(() => {
       expect(mocks.deleteProject).toHaveBeenCalledWith("p-panel");
     });
+  });
+
+  it("gates the project mutations on owner-or-admin", () => {
+    // PM's `require_governance` refuses rename / delete / roster for anyone but
+    // the project owner or an admin. The panel mirrors it: the info stays
+    // readable but read-only, and the "项目操作" card is not rendered at all.
+    const BOB = "cccc0000-0000-0000-0000-000000000000";
+    (globalThis as unknown as { __panelAccount: unknown }).__panelAccount = {
+      user_id: BOB,
+      username: "bob",
+      display_name: "Bob",
+      role: "user",
+      language: "zh-CN",
+      timezone: "Asia/Shanghai",
+      avatar: null,
+      builtin_avatar: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    try {
+      renderPanel();
+      // Readable…
+      expect(screen.getByText("ACowork")).toBeTruthy();
+      // …but not writable.
+      expect((screen.getByLabelText("pm.projectName") as HTMLInputElement).disabled).toBe(true);
+      expect((screen.getByLabelText("pm.projectRemark") as HTMLTextAreaElement).disabled).toBe(true);
+      expect(screen.queryByText("pm.settingsPanel.actions")).toBeNull();
+      expect(screen.queryByText("common.deleteProject")).toBeNull();
+    } finally {
+      (globalThis as unknown as { __panelAccount: unknown }).__panelAccount = {
+        user_id: MOCK_USER_ID,
+        username: "admin",
+        display_name: "admin",
+        role: "admin",
+        language: "zh-CN",
+        timezone: "Asia/Shanghai",
+        avatar: null,
+        builtin_avatar: null,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      };
+    }
+  });
+
+  it("the owner (not an admin) keeps every affordance", () => {
+    // The gate is owner OR admin, not admin only — the project creator is the
+    // one who must be able to rename and delete their own project.
+    (globalThis as unknown as { __panelAccount: unknown }).__panelAccount = {
+      user_id: MOCK_USER_ID,
+      username: "carol",
+      display_name: "Carol",
+      role: "user",
+      language: "zh-CN",
+      timezone: "Asia/Shanghai",
+      avatar: null,
+      builtin_avatar: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+    };
+    try {
+      renderPanel();
+      expect((screen.getByLabelText("pm.projectName") as HTMLInputElement).disabled).toBe(false);
+      expect(screen.getByText("common.deleteProject")).toBeTruthy();
+    } finally {
+      (globalThis as unknown as { __panelAccount: unknown }).__panelAccount = {
+        user_id: MOCK_USER_ID,
+        username: "admin",
+        display_name: "admin",
+        role: "admin",
+        language: "zh-CN",
+        timezone: "Asia/Shanghai",
+        avatar: null,
+        builtin_avatar: null,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z",
+      };
+    }
   });
 
   it("close button forwards to onClose", () => {

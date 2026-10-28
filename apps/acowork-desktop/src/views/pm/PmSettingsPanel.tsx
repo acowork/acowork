@@ -26,6 +26,7 @@ import { showToast } from "../../components/common/ToastProvider";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { MemberManagerSection } from "./MemberManagerDialog";
+import { canGovernProject, useLocalMode, useSelfAccount } from "./pmMembers";
 import type { PmProject } from "../../lib/pm-types";
 
 interface PmSettingsPanelProps {
@@ -37,6 +38,13 @@ interface PmSettingsPanelProps {
 export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPanelProps) {
   const { t } = useTranslation();
   const project = usePmProjectStore((s) => s.selected);
+  // The backend gates every project mutation on owner-or-admin (PM's
+  // `require_governance`); mirror it so a plain member gets no affordance the
+  // server would refuse. The roster half is gated inside `MemberManagerSection`
+  // (shared with the group-chat dialog), so it is not repeated here.
+  const self = useSelfAccount();
+  const localMode = useLocalMode();
+  const canGovern = canGovernProject(project, self, localMode);
 
   return (
     <div className="relative ml-1 flex shrink-0 flex-col" style={{ width }}>
@@ -72,14 +80,16 @@ export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPan
           <OverlayScrollbar fill="flex" className="p-3">
             <div className="space-y-2">
               <SettingsCard title={t("pm.settingsPanel.info")}>
-                <ProjectInfoSection project={project} />
+                <ProjectInfoSection project={project} canGovern={canGovern} />
               </SettingsCard>
               <SettingsCard title={t("pm.settingsPanel.members")}>
                 <MemberManagerSection project={project} />
               </SettingsCard>
-              <SettingsCard title={t("pm.settingsPanel.actions")}>
-                <ProjectActionsSection project={project} />
-              </SettingsCard>
+              {canGovern && (
+                <SettingsCard title={t("pm.settingsPanel.actions")}>
+                  <ProjectActionsSection project={project} />
+                </SettingsCard>
+              )}
               <SettingsCard title={t("pm.settingsPanel.service")}>
                 <ServiceStatusSection />
               </SettingsCard>
@@ -116,11 +126,13 @@ function SettingsCard({
 }
 
 /** 项目信息 — 常驻输入框（名字 / 备注，失焦自动保存）+ 项目图标选择器。 */
-function ProjectInfoSection({ project }: { project: PmProject }) {
+function ProjectInfoSection({ project, canGovern }: { project: PmProject; canGovern: boolean }) {
   const { t } = useTranslation();
   const updateProjectMeta = usePmProjectStore((s) => s.updateProjectMeta);
   const healthy = usePmHealthStore((s) => s.healthy);
-  const offline = healthy === false;
+  // 非 owner/admin 走同一套禁用：后端 `require_governance` 会 403，输入框只读
+  // 展示（项目名/备注本身是可见信息）。
+  const blocked = healthy === false || !canGovern;
 
   // 输入框为本地草稿（受控）；失焦 / Enter 时与非空旧值比较后回写，避免
   // 无关 keystroke 打到 store。project 变化（切换选中）时用最新值重置草稿。
@@ -169,7 +181,7 @@ function ProjectInfoSection({ project }: { project: PmProject }) {
         <ProjectIconPicker
           project={project}
           value={currentIcon}
-          disabled={offline}
+          disabled={blocked}
           onChange={(ref) => void saveIcon(ref)}
         />
         <div className="min-w-0">
@@ -185,7 +197,7 @@ function ProjectInfoSection({ project }: { project: PmProject }) {
         <label className="block text-xs font-medium text-text-secondary">{t("pm.projectName")}</label>
         <input
           value={titleDraft}
-          disabled={offline}
+          disabled={blocked}
           onChange={(e) => setTitleDraft(e.target.value)}
           onBlur={saveTitle}
           onKeyDown={(e) => {
@@ -204,7 +216,7 @@ function ProjectInfoSection({ project }: { project: PmProject }) {
         <label className="block text-xs font-medium text-text-secondary">{t("pm.projectRemark")}</label>
         <textarea
           value={descDraft}
-          disabled={offline}
+          disabled={blocked}
           onChange={(e) => setDescDraft(e.target.value)}
           onBlur={saveDesc}
           className="w-full resize-y rounded border border-input-border bg-input-bg px-2 py-1 text-xs text-text-tertiary outline-none focus:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"

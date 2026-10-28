@@ -21,6 +21,8 @@ import { CAPSULE_PANE_CN } from "../common/capsule";
 import { ListBox, ExpandableRow } from "../common/list";
 import {
   MemberAvatar,
+  canGovernProject,
+  useLocalMode,
   useResolvedMembers,
   withOwner,
   type ResolvedMember,
@@ -29,6 +31,7 @@ import { MemberManagerDialog } from "../../views/pm/MemberManagerDialog";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { GroupChatPromptCard } from "./GroupChatPromptCard";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
+import { useAuthStore } from "../../stores/authStore";
 import { UserGroupMembersPanel } from "./UserGroupMembersPanel";
 
 // `withOwner` lives in `pmMembers` (shared with `MemberManagerDialog`, which
@@ -70,6 +73,7 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
   );
   const projects = usePmProjectStore((s) => s.projects);
   const loadProjects = usePmProjectStore((s) => s.loadProjects);
+  const self = useAuthStore((s) => s.account);
   const [query, setQuery] = useState("");
   const [managerOpen, setManagerOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(true);
@@ -92,6 +96,12 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
 
   const members = useResolvedMembers(withOwner(project));
   const filtered = useMemo(() => filterMembers(members, query), [members, query]);
+  // The project channel's owner is the backing PM project's (`owner_id ??
+  // created_by`), which PM pushes onto the session row — the same judgement
+  // `MemberManagerDialog` uses to gate transfer and the settings panel uses to
+  // gate the project itself. Owner-or-admin only (ADR-098).
+  const localMode = useLocalMode();
+  const canSeePrompt = canGovernProject(project, self, localMode);
 
   return (
     <div className="relative ml-1 flex shrink-0 flex-col" style={{ width }}>
@@ -178,11 +188,12 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
             </ExpandableRow>
           </ListBox>
           {/* Group chat prompt — its own card (same grammar as the members
-              card). Read is open to every participant (the backend answers a
-              hidden 404 to a non-member); the card renders read-only unless the
-              server marks this caller as an admin (a project group has no
-              user-service owner). */}
-          {group?.session_id && <GroupChatPromptCard sessionId={group.session_id} />}
+              card). Owner-or-admin only (ADR-098): a plain member gets no card
+              at all — neither a read of the prompt nor an edit the backend
+              would refuse. A project channel's owner is the PM project's. */}
+          {canSeePrompt && group?.session_id && (
+            <GroupChatPromptCard sessionId={group.session_id} />
+          )}
         </div>
       </div>
 

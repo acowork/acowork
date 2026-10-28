@@ -205,9 +205,15 @@ async fn ensure_project_group(
     drop(gw);
     let port = user_port
         .ok_or_else(|| ApiError::service_unavailable("project groups require the user service"))?;
-    let session = chat_client::ensure_group(port, &req.project_id, &req.title, &req.participants)
-        .await
-        .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    let session = chat_client::ensure_group(
+        port,
+        &req.project_id,
+        &req.title,
+        &req.participants,
+        req.owner.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::unprocessable_entity(&e))?;
     Ok(Json(serde_json::json!({
         "session_id": session.session_id,
         "participants": session.participants,
@@ -217,9 +223,15 @@ async fn ensure_project_group(
 #[derive(Debug, Deserialize)]
 struct ProjectGroupRequest {
     project_id: String,
+    /// The project title, converged onto the session row by both ensure and
+    /// sync. Empty = leave the stored title alone.
     #[serde(default)]
     title: String,
     participants: Vec<String>,
+    /// The project's current owner (`Project::owner()`), forwarded to the
+    /// user service so the group's ADR-098 governance follows the project.
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 /// `POST /api/intents/project-group/sync` — set the project group's
@@ -244,9 +256,15 @@ async fn sync_project_group(
     drop(gw);
     let port = user_port
         .ok_or_else(|| ApiError::service_unavailable("project groups require the user service"))?;
-    let session = chat_client::sync_group(port, &req.project_id, &req.participants)
-        .await
-        .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    let session = chat_client::sync_group(
+        port,
+        &req.project_id,
+        &req.participants,
+        &req.title,
+        req.owner.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::unprocessable_entity(&e))?;
     Ok(Json(serde_json::json!({
         "session_id": session.session_id,
         "participants": session.participants,
@@ -273,8 +291,6 @@ struct TaskDispatchRequest {
     target_agent: String,
     /// Dispatching human identity (project owner) — the chat row's `from`.
     owner: String,
-    #[serde(default)]
-    title: String,
     /// Human-readable dispatch text (task title + description).
     message: String,
     /// Model-facing wake-up playbook (claim → work → submit). Delivered
@@ -388,12 +404,21 @@ async fn dispatch_task(
             let session = chat_client::ensure_group(
                 port,
                 &req.project_id,
-                if req.title.is_empty() {
-                    "Project group chat"
-                } else {
-                    &req.title
-                },
+                // Same rule as the owner below: `req.title` is the *task* title,
+                // not `Project::title()`, and the user service converges the
+                // title it is handed. Passing it would rename the project
+                // channel to the dispatched task on every dispatch. `""` = "this
+                // caller does not know it" — a cold create then has no title
+                // until PM's ensure / sync (or the boot backfill) sets it, which
+                // is strictly better than naming a channel after one task.
+                "",
                 &participants,
+                // No project owner here: `req.owner` is the task's *creator*
+                // (`Task::created_by`, an agent for MCP-created tasks), not
+                // `Project::owner()`. Writing it would hand the group prompt's
+                // ADR-098 governance to whoever filed the task. `None` leaves
+                // the stored owner alone; PM's own ensure / sync sets it.
+                None,
             )
             .await
             .map_err(|e| ApiError::unprocessable_entity(&e))?;
