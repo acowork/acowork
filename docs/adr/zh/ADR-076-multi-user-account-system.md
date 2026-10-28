@@ -394,6 +394,7 @@ pub enum SessionVisibility { Public, Private }
 - **agent 冷启动会话**：Runtime 启动时发现磁盘上没有会话，会**自动建一个**（`session_init`，为的是 `/latest-session` 立刻有东西可返、ChatPanel 不空白）。它诞生在任何账号开口之前，**没有任何人可以是它的 owner**。此前它落在"无主 = 公开"那一列 → 在多用户下**每个账号都能读、且都能写**，而 Desktop 的 `selectAgent → /latest-session` 正好会把它返回给每个账号：**第一个用户和第二个用户在同一段对话里打字**。
 - **修法**：把它标成 `Some(Private)`，并让谓词承认"**无主 + Private = 无人认领**"——除 admin 外谁都读不到、谁也都写不了。语义是诚实的：没有主人的私有会话 = 不属于任何人，那就不该交给任何账号。无主 + `None` / `Public` 仍是"公开"，升级前的历史数据与 local 模式因此零改动（local 下调用者 scope 恒为 `Unfiltered`，谓词第一分支直接短路）。
 - **配套**：认领权收窄。`authorize_write` 对无主历史数据是刻意宽松的（否则用户写不了自己的旧会话），但"**谁能重新共享**它"是更窄的问题——否则任一账号都能把一个共享的无主会话一键设为私有藏起来，或把无人认领的私有会话翻回公开再共享。现在 `PUT .../visibility` 对无主会话只认 admin（403），规则落在 `may_change_visibility` 一处。
+- **无主 + `Members`（被 chat 绑定的执行会话）**：`Members` 对写而言等同 `Private`——群成员只读，不拥有该会话（design 27 §8.2），这条对有 initiator 的会话不变。但"无主 + `Members`"会因此变成**谁都写不了、却又能被成员读到**的死会话：ChatPanel 按 `can_write=false` 把输入框锁成"由其他账号共享"，没有任何界面能解锁它。这类行真实存在于升级数据里——admin scope 还没有自带 uid 的时期，`POST /sessions` 记不下 initiator，会话却照样被 chat 绑定置成 `Members`。**规则：无主 + `Members` 时 admin 可写**。没有 initiator 就没有"单发起人"可保护，而 admin 认领是无主 + `Members` 唯一的出口；`Private` 仍是例外（admin 也不写）。
 - **客户端配套**：`/latest-session` 从 agent 级缓存作答，多用户下只要有两个账号用过这个 agent，它就会返回 404（不接受泄漏 id，见 §决策 4 的 404 语义）。这不是"服务还没起来"，重试治不了——ADR 原文写的行为就是"**让客户端回退到过滤后的列表**"。Desktop 现在照做：`/latest-session` 拿不到时先看自己 scope 过滤后的列表（有行就开最新那条，**不再空转 10 秒**），列表也是空的才建一条自己的（有主 + 私有）。
 
 逐条判定不受影响（表三列语义不变），变的只是"新建的有主会话落在哪一列"与"无主会话按标志分两列"。显式 `visibility` 仍可在 `POST /sessions` 的 body 里覆盖创建默认值，per-session 开关照旧是逃生口。

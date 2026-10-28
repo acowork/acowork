@@ -7692,7 +7692,33 @@ mod tests {
         };
         assert!(unowned.is_readable_by(&member));
         assert!(!unowned.is_readable_by(&owner));
+        // §8.2 boundary unchanged: membership is a read grant, so a plain
+        // account never writes an ownerless chat-bound session either.
         assert!(!unowned.is_writable_by(&member), "membership never writes");
+        assert!(
+            !unowned.is_writable_by(&outsider),
+            "reading comes first: a non-participant cannot write"
+        );
+        // Regression (admin's own chat-bound session read-only after a
+        // rebuild): with no initiator there is no single-initiator rule to
+        // defeat, and an unclaimed chat-bound session is otherwise
+        // unreachable from every surface — locked as "shared by another
+        // account" for everyone, admin included. The administrator may adopt
+        // it; that is what makes such a row recoverable at all.
+        let admin = SessionScope::Admin {
+            uid: "u-root".into(),
+            chats: vec!["cs-group-1".into()],
+        };
+        assert!(unowned.is_writable_by(&admin), "admin may adopt an ownerless session");
+        assert!(unowned.is_writable_by(&SessionScope::admin("u-root")));
+        assert!(
+            !SessionMeta {
+                visibility: Some(SessionVisibility::Private),
+                ..unowned.clone()
+            }
+            .is_writable_by(&admin),
+            "ownerless `Private` stays closed even to an admin"
+        );
 
         // `Members` without a binding is inert: nothing to match against,
         // so only owner / admin reach it.
