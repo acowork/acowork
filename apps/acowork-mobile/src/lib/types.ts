@@ -325,6 +325,12 @@ export interface ChatMessageRow {
     status?: string
     repo?: string
     notice_type?: string
+    /** On an `interaction_resolved` notice: how the card's request ended —
+     *  "answered"/"approved"/"rejected" (a human decided, on either surface)
+     *  vs "timeout"/"cancelled"/"stopped"/"turn_ended"/"unanswerable"/
+     *  "superseded" (nobody answered). Mirrors the desktop `ChatMessageRow`;
+     *  see `humanAnsweredCardIds`. */
+    resolution?: string
     /** Routing-resolved execution session that HANDLED a request — set on the
      *  `turn_started` pointer and `interaction_request` card. */
     agent_session_id?: string

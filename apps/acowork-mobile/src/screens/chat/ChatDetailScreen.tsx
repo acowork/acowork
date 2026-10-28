@@ -384,7 +384,7 @@ export function ChatDetailScreen() {
                       {turn.items.map((item) =>
                         item.type === 'explore'
                           ? <ExploreBlock key={`explore-${item.items[0]!.id}`} items={item.items} />
-                          : <Bubble key={item.msg.id} msg={item.msg} />,
+                          : <Bubble key={item.msg.id} msg={item.msg} literal={turn.isUser} />,
                       )}
                     </div>
                   </div>

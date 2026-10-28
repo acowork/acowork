@@ -19,13 +19,23 @@ export function toMs(ts: number): number {
 /** `payload` as written by `mapConversationEntries`. */
 type ToolPayload = { type?: string; name?: string }
 
-export function Bubble({ msg }: { msg: ChatMessage }) {
+/** `literal` renders the body as plain text instead of markdown. Human input
+ *  is literal text, markdown is agent speech (the house grammar); a caller
+ *  whose rows are ALL human — the user↔user DM — passes `literal` for both
+ *  sides, and the execution detail passes it for the user's own turns. Without
+ *  it `**bold**` renders bold here but literally on the desktop user rows, and
+ *  a `> quote` picks up `.md-quote`'s secondary gray inside the white-text
+ *  accent bubble (`renderMarkdown` declares no color of its own, so the quote
+ *  rule is the whole of the drift). */
+export function Bubble({ msg, literal = false }: { msg: ChatMessage; literal?: boolean }) {
   const tool = (msg.payload ?? {}) as ToolPayload
   if (tool.type === 'tool_call') return <ToolRow msg={msg} name={tool.name ?? 'tool'} />
   const self = msg.role === 'user'
   return (
     <div className={`bubble${self ? ' bubble-self' : ' bubble-peer'}`}>
-      <div className="bubble-text">{renderMarkdown(msg.content)}</div>
+      <div className={`bubble-text${literal ? ' bubble-raw' : ''}`}>
+        {literal ? msg.content : renderMarkdown(msg.content)}
+      </div>
     </div>
   )
 }

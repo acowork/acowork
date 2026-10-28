@@ -22,7 +22,14 @@ class FakeEl implements ScrollEl {
     return this.top
   }
   set scrollTop(v: number) {
-    this.top = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight))
+    const clamped = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight))
+    if (clamped === this.top) return
+    this.top = clamped
+    // Like a browser, ANY offset change dispatches a scroll event — including
+    // a programmatic bottom-pin write. The browser delivers it asynchronously;
+    // the stale-event case (the delivery lands AFTER a later commit grew the
+    // content) is modelled explicitly with `fireScroll()`.
+    this.fns.forEach((f) => f())
   }
   get bottom(): number {
     return this.scrollHeight - this.clientHeight
@@ -35,12 +42,27 @@ class FakeEl implements ScrollEl {
   }
   /** A user scroll: move (clamped) and fire the listeners, like a browser. */
   userScrollTo(top: number): void {
-    this.scrollTop = top
+    const before = this.top
+    this.scrollTop = top // fires when the offset actually moved
+    if (this.top === before) this.fns.forEach((f) => f()) // same-spot scroll still dispatches
+  }
+  /** Deliver a pending scroll event against the CURRENT geometry: models the
+   *  event of an earlier programmatic write arriving late, after content grew. */
+  fireScroll(): void {
     this.fns.forEach((f) => f())
   }
-  /** Content growth (new messages): the follow decision runs against it. */
+  /** Content growth (new messages): the browser dispatches NO scroll for this. */
   grow(by: number): void {
     this.scrollHeight += by
+  }
+  /** Content shrink: the browser clamps an out-of-range scrollTop, and the
+   *  clamp lands AT the new bottom (dispatching through the setter). */
+  shrink(by: number): void {
+    this.scrollHeight -= by
+    if (this.top > this.bottom) this.scrollTop = this.bottom
+  }
+  listenerCount(): number {
+    return this.fns.length
   }
 }
 
@@ -264,5 +286,58 @@ describe('isNearBottom', () => {
 
   it('treats a non-overflowing container as at-bottom', () => {
     expect(isNearBottom({ scrollHeight: 200, scrollTop: 0, clientHeight: 300 })).toBe(true)
+  })
+})
+
+/* ---------------- the unpin direction guard (2b928b54) ----------------
+ *
+ * On a pane whose content grows under the reader, the scroll event produced by
+ * our own bottom-pin write can be DELIVERED after a later commit made the
+ * content taller: the geometry then reads "far from the bottom" although
+ * nobody moved. Unpinning on that stale event abandoned the follow
+ * mid-convergence and the transcript drifted up off the tail. Unpin therefore
+ * requires a genuine upward move; a deliberate programmatic departure releases
+ * via the explicit `unpin()`.
+ */
+describe('FollowController unpin direction guard', () => {
+  it('a stale scroll event after content growth does NOT unpin the follow', () => {
+    const { c, el } = bound()
+    c.refresh('s1') // pinned-on-arrival write lands at the bottom
+    expect(el.scrollTop).toBe(el.bottom)
+    el.grow(500) // a later commit expands the pane
+    el.fireScroll() // OUR pin write's event, delivered late: far from bottom,
+    // but the offset did not move up — no reader intent.
+    expect(c.pinned).toBe(true)
+    c.refresh('s1') // the follow still re-pins
+    expect(el.scrollTop).toBe(el.bottom)
+  })
+
+  it('a genuine upward move away from the bottom unpins', () => {
+    const { c, el } = bound()
+    c.refresh('s1') // pinned at the bottom (700)
+    el.grow(500) // content grew; the reader sits above the new bottom, still pinned
+    el.userScrollTo(400) // moved UP (700 -> 400) and away: reader intent
+    expect(c.pinned).toBe(false)
+  })
+
+  it('a shrink clamp lands at the new bottom and keeps the follow', () => {
+    const { c, el } = bound()
+    c.refresh('s1')
+    el.shrink(400) // a window replacement shrinks the pane; the browser clamps
+    expect(el.scrollTop).toBe(el.bottom)
+    expect(c.pinned).toBe(true) // not mistaken for a scroll-up
+  })
+
+  it('explicit unpin() releases the follow for a programmatic departure', () => {
+    const { c, el } = bound()
+    c.refresh('s1') // pinned at the bottom (700)
+    el.grow(500) // content grew; the reader sits above the new bottom, still pinned
+    el.userScrollTo(900) // a DOWNWARD programmatic jump parks mid-history: the
+    // direction guard reads no upward move, so the follow stands ...
+    expect(c.pinned).toBe(true)
+    c.unpin() // ... and only an explicit call releases it
+    el.grow(200)
+    c.refresh('s1')
+    expect(el.scrollTop).toBe(900) // the follow stays released
   })
 })

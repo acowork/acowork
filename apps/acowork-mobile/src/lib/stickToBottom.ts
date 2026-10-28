@@ -29,7 +29,7 @@
  * controller is what makes the remaining REAL refreshes respect user
  * position.
  */
-import { useCallback, useLayoutEffect, useRef } from 'react'
+import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 
 /** Distance from the bottom that still counts as "at the bottom". */
 export const STICK_PX = 80
@@ -66,30 +66,79 @@ export class FollowController {
    *  away when the reader scrolls down to meet their messages, and that is a
    *  scroll, not a render: without this the screen cannot see it. */
   private onBecamePinned: (() => void) | undefined = undefined
+  /** Fired on EVERY pinned/unpinned flip (both directions, programmatic
+   *  re-pin included). The screen mirrors this into a reactive flag so it can
+   *  show a "back to bottom" affordance while the reader is scrolled up —
+   *  `pinned` itself is a plain field, so reading it never re-renders. */
+  private onPinnedChange: ((pinned: boolean) => void) | undefined = undefined
+  /** Last scroll offset seen by `onScroll` — the direction guard's baseline. */
+  private lastTop = 0
   private onScroll = () => {
     if (!this.el) return
     const was = this.pinned
-    this.pinned = isNearBottom(this.el)
-    // The auto-scroll a `refresh()` performs while already pinned has `was`
-    // true, so it never re-fires — this only reports a user-driven arrival.
-    if (this.pinned && !was) this.onBecamePinned?.()
+    if (isNearBottom(this.el)) {
+      this.setPinned(true)
+      // The auto-scroll a `refresh()` performs while already pinned has `was`
+      // true, so it never re-fires — this only reports a user-driven arrival.
+      if (!was) this.onBecamePinned?.()
+    } else if (this.el.scrollTop < this.lastTop - 1) {
+      // Away from the bottom AND a genuine upward move: the reader left.
+      // Geometry alone cannot make this call — the scroll event from our own
+      // bottom-pin write can be delivered after a later commit has grown the
+      // content, and reads "far from the bottom" without anyone having moved.
+      // Unpinning on that stale event abandoned the follow mid-convergence
+      // (the agent-switch drift: the transcript landed at the bottom and then
+      // drifted up as measurements settled). Our writes only ever move DOWN,
+      // and a clamp from a content shrink lands AT the new bottom (the near
+      // branch above), so a decrease can only come from the reader. A
+      // deliberately downward programmatic scroll releases the follow through
+      // the explicit `unpin()`. Same discipline as the desktop twin.
+      this.setPinned(false)
+    }
+    this.lastTop = this.el.scrollTop
     // Top-edge pagination trigger: fires on USER scrolls into the band; a
     // programmatic jump to the bottom lands far from the top, so the
     // mount-time scroll-to-bottom cannot spuriously trip it.
     if (this.el.scrollTop <= TOP_TRIGGER_PX) this.onNearTop?.()
   }
 
+  /** Single mutation point for `pinned`: `onPinnedChange` reports every flip
+   *  (so the screen can show a "back to bottom" affordance), while
+   *  `onBecamePinned` stays a scroll-only receipt. No-op when unchanged. */
+  private setPinned(next: boolean): void {
+    if (this.pinned === next) return
+    this.pinned = next
+    this.onPinnedChange?.(next)
+  }
+
+  /** Release the follow explicitly: a programmatic scroll that parks the
+   *  reader mid-history moves DOWNWARD, which carries no signal the direction
+   *  guard may read as intent. Nothing on mobile calls this yet — the locate
+   *  jump that scrolls to an off-screen message is a desktop-only path today —
+   *  but the guard cannot be escaped any other way for a downward move, so the
+   *  escape hatch stays complete for that caller. */
+  unpin(): void {
+    this.setPinned(false)
+  }
+
   /** Callback-ref binding: attach the currently mounted container (null detaches). */
-  bind(el: ScrollEl | null, onNearTop?: () => void, onBecamePinned?: () => void): void {
+  bind(
+    el: ScrollEl | null,
+    onNearTop?: () => void,
+    onBecamePinned?: () => void,
+    onPinnedChange?: (pinned: boolean) => void,
+  ): void {
     if (this.el === el) {
       this.onNearTop = onNearTop
       this.onBecamePinned = onBecamePinned
+      this.onPinnedChange = onPinnedChange
       return
     }
     if (this.el) this.el.removeEventListener('scroll', this.onScroll)
     this.el = el
     this.onNearTop = onNearTop
     this.onBecamePinned = onBecamePinned
+    this.onPinnedChange = onPinnedChange
     if (el) {
       el.addEventListener('scroll', this.onScroll, { passive: true })
       // The follow bit is deliberately NOT re-derived from geometry here: a
@@ -118,7 +167,7 @@ export class FollowController {
     if (!this.el) return
     if (forceKey !== this.lastKey) {
       this.lastKey = forceKey ?? null
-      this.pinned = true
+      this.setPinned(true)
     }
     if (this.pinned) this.el.scrollTop = this.el.scrollHeight
   }
@@ -126,7 +175,7 @@ export class FollowController {
   /** Re-claim the follow (the send path calls this before the echo lands). */
   stickNow(): void {
     if (!this.el) return
-    this.pinned = true
+    this.setPinned(true)
     this.el.scrollTop = this.el.scrollHeight
   }
 }
@@ -139,10 +188,23 @@ export function useStickToBottom(
 ): {
   ref: (el: HTMLDivElement | null) => void
   stickNow: () => void
+  /** Release the follow explicitly — the exit for a programmatic scroll that
+   *  parks the reader away from the bottom. The scroll-event unpin is
+   *  direction-guarded (a stale bottom-pin event must not fake intent), so such
+   *  a move has no other way out of the follow. No mobile screen scrolls
+   *  programmatically today, so this is currently called only by tests; it is
+   *  exposed alongside `stickNow` because that caller (a locate jump) is the
+   *  natural next user of this controller. */
+  unpin: () => void
   /** Read the follow state without subscribing to it: an arrival effect needs
    *  to know whether the new bubble landed in view, and a scroll is not a
    *  render, so making this reactive would re-introduce the hijack. */
   isPinned: () => boolean
+  /** Reactive mirror of `isPinned` — true while the reader is at (or has never
+   *  left) the tail. Flips false the moment they scroll up, so a screen can
+   *  show a "back to bottom" arrow WITHOUT any content change re-yanking the
+   *  viewport (the scroll hijack the rule forbids). */
+  atBottom: boolean
 } {
   const ctrl = useRef<FollowController | null>(null)
   if (!ctrl.current) ctrl.current = new FollowController()
@@ -151,12 +213,21 @@ export function useStickToBottom(
   topRef.current = onNearTop
   const bottomRef = useRef(onBecamePinned)
   bottomRef.current = onBecamePinned
+  // Reactive follow flag: the controller reports every pinned flip into this
+  // state so the arrow can appear/disappear. Defaults to pinned (a fresh view
+  // opens at the tail), matching the controller's own initial bit.
+  const [atBottom, setAtBottom] = useState(true)
 
   // Callback ref, not a ref object: screens swap the scroll container across
   // early-return branches, and the listener must always sit on the element
   // that is actually mounted.
   const ref = useCallback((el: HTMLDivElement | null) => {
-    ctrl.current!.bind(el, () => topRef.current?.(), () => bottomRef.current?.())
+    ctrl.current!.bind(
+      el,
+      () => topRef.current?.(),
+      () => bottomRef.current?.(),
+      setAtBottom,
+    )
   }, [])
 
   // The follow runs before paint, in the layout phase: the newest page arrives
@@ -172,7 +243,11 @@ export function useStickToBottom(
     ctrl.current!.stickNow()
   }, [])
 
+  const unpin = useCallback(() => {
+    ctrl.current!.unpin()
+  }, [])
+
   const isPinned = useCallback(() => ctrl.current!.pinned, [])
 
-  return { ref, stickNow, isPinned }
+  return { ref, stickNow, unpin, isPinned, atBottom }
 }
