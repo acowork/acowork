@@ -129,6 +129,33 @@ describe("useTaskForm save path", () => {
     expect(stores.reload).toHaveBeenCalledTimes(1);
   });
 
+  it("joins the run that is already on the wire instead of creating a second row", async () => {
+    // Two clicks inside one frame both pass the `disabled` check (that state
+    // only lands on the next render), so the guard has to live in the save
+    // path itself: the second call joins the first run.
+    let release: (() => void) | undefined;
+    vi.mocked(createTask).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ id: "t-new" } as never);
+        }),
+    );
+    const { result } = renderHook(() => useTaskForm({ projectId: "p-1" }));
+    act(() => result.current.setTitle("新任务"));
+
+    let first: Promise<Awaited<ReturnType<typeof result.current.save>>> | undefined;
+    let second: Promise<Awaited<ReturnType<typeof result.current.save>>> | undefined;
+    await act(async () => {
+      first = result.current.save();
+      second = result.current.save();
+      release?.();
+    });
+
+    await expect(first).resolves.toMatchObject({ ok: true, taskId: "t-new" });
+    await expect(second).resolves.toMatchObject({ ok: true, taskId: "t-new" });
+    expect(createTask).toHaveBeenCalledTimes(1);
+  });
+
   it("reset puts the row back — a discarded draft must not survive into the next edit", () => {
     // The form stays mounted across view <-> edit, so "cancel" that only flips
     // the mode would show the abandoned values again on the next 编辑.

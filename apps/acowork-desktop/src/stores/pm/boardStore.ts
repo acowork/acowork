@@ -50,8 +50,8 @@ interface PmBoardState {
   /** 构建整棵子树（递归） */
   buildTree: (taskId: string) => PmBoardTree | null;
 
-  /** 状态拖动：乐观更新 + PATCH + 失败回滚 */
-  moveTask: (taskId: string, toStatus: TaskStatus) => Promise<void>;
+  /** 状态拖动：乐观更新 + PATCH + 失败回滚。返回是否落定（失败为 false） */
+  moveTask: (taskId: string, toStatus: TaskStatus) => Promise<boolean>;
   /** 审核（submitted → done/rejected）；comment 为拒绝理由（可选） */
   reviewTask: (taskId: string, approved: boolean, comment?: string) => Promise<boolean>;
   /** Reparent：乐观更新 parent + 失败回滚 */
@@ -168,10 +168,12 @@ export const usePmBoardStore = create<PmBoardState>((set, get) => {
           t.id === taskId ? { ...t, ...updated, status: updated.status } : t,
         );
         set({ tasks: next, updatedAt: Date.now() });
+        return true;
       } catch (e) {
         // 回滚
         set({ tasks: prev, error: e instanceof Error ? e.message : String(e) });
         showToast({ type: "error", message: `状态变更失败: ${e instanceof Error ? e.message : e}` });
+        return false;
       }
     },
 
