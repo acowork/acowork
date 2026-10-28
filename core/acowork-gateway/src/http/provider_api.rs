@@ -8,13 +8,23 @@
 //! - DELETE /api/providers/:provider — remove a provider
 //! - PUT    /api/providers/:provider — update a provider (key and/or config)
 //! - GET    /api/providers/:id/logo — provider brand mark, cacheable
+//! - POST   /api/providers/:id/probe — ADR-103 D10 protocol probe (L1/L2/L3)
+//!
+//! ## ADR-103 write path
+//!
+//! Provider writes carry three optional protocol-intent fields (`protocol`,
+//! `model_protocols`, `model_base_urls`). They record *intent*; the D1 gate in
+//! [`models_api::resolve_protocol`] decides whether `responses` actually takes
+//! effect, and that gate needs a passing probe verdict. After the write is
+//! durable, D12 probes the changed `responses` rows and returns the verdicts
+//! in the save response.
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +32,7 @@ use crate::http::models_api;
 use crate::http::routes::{ApiError, AppState, OperationAck};
 use crate::resource_cache;
 use acowork_core::operation::{OperationRecord, OperationState};
-use acowork_core::protocol::ModelCapabilitiesInfo;
+use acowork_core::protocol::{ModelCapabilitiesInfo, ProtocolType};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -39,6 +49,8 @@ pub fn provider_routes() -> Router<AppState> {
             delete(remove_provider_account).patch(update_provider_account),
         )
         .route("/api/providers/{provider}/logo", get(provider_logo))
+        // ADR-103 D10.1: explicit protocol probe (L1/L2, plus L3 on request).
+        .route("/api/providers/{provider}/probe", post(probe_provider))
 }
 
 // ── Response types ────────────────────────────────────────────────────
@@ -133,6 +145,21 @@ pub struct AddProviderRequest {
     /// into the offline models.dev data so the Runtime sees user preferences.
     #[serde(default)]
     pub model_capabilities: Option<HashMap<String, ModelCapabilitiesInfo>>,
+    /// ADR-103 D1: provider-level protocol intent. When present it becomes the
+    /// default protocol of every model in this write; models inherit it unless
+    /// `model_protocols` overrides them.
+    #[serde(default)]
+    pub protocol: Option<ProtocolType>,
+    /// ADR-103 D1: per-model protocol intent (`model id -> protocol`). This is
+    /// the only field that can make `responses` effective, and only after the
+    /// probe verdict gates it in (D1) — writing it here records *intent*, not
+    /// an effective change.
+    #[serde(default)]
+    pub model_protocols: Option<HashMap<String, ProtocolType>>,
+    /// ADR-103 D10.3: per-model base URL override (`model id -> url`), for
+    /// providers whose Responses endpoint differs from the provider default.
+    #[serde(default)]
+    pub model_base_urls: Option<HashMap<String, String>>,
     /// ADR-059 §7.3: the BootstrapState `version` the client read
     /// before writing (optimistic concurrency — stale clients are
     /// rejected with `resource_version_conflict`). Absent → no
@@ -182,12 +209,87 @@ pub struct UpdateProviderRequest {
     /// into the offline models.dev data so the Runtime sees user preferences.
     #[serde(default)]
     pub model_capabilities: Option<HashMap<String, ModelCapabilitiesInfo>>,
+    /// ADR-103 D1: provider-level protocol intent (see `AddProviderRequest`).
+    #[serde(default)]
+    pub protocol: Option<ProtocolType>,
+    /// ADR-103 D1: per-model protocol intent (`model id -> protocol`).
+    #[serde(default)]
+    pub model_protocols: Option<HashMap<String, ProtocolType>>,
+    /// ADR-103 D10.3: per-model base URL override (`model id -> url`).
+    #[serde(default)]
+    pub model_base_urls: Option<HashMap<String, String>>,
 }
 
 /// Generic message response
 #[derive(Serialize)]
 pub struct MessageResponse {
     pub message: String,
+}
+
+/// Response for `POST /api/providers` — the ADR-059 ack plus the ADR-103 probe
+/// verdicts this save produced (D12.1).
+///
+/// `probes` is omitted when nothing was probed, so the wire shape for every
+/// non-`Responses` save stays byte-identical to the pre-ADR-103 ack.
+#[derive(Serialize)]
+pub struct ProviderSaveResponse {
+    #[serde(flatten)]
+    pub ack: OperationAck,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<crate::probe::ProbeReport>,
+}
+
+/// Response for `PUT /api/providers/{provider}` (see [`ProviderSaveResponse`]).
+#[derive(Serialize)]
+pub struct ProviderUpdateResponse {
+    pub message: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<crate::probe::ProbeReport>,
+}
+
+/// Request body for `POST /api/providers/{provider}/probe` (ADR-103 D10.1).
+#[derive(Deserialize)]
+pub struct ProbeProviderRequest {
+    /// Model to probe — must already be configured on the provider.
+    pub model: String,
+    /// Protocol to verify. Only `responses` has an implementation; any other
+    /// value is rejected with 400 rather than silently probing something else.
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// Tier selector. `deep` (L1+L2+L3) is the only tier that can produce a
+    /// positive verdict, so an explicit probe request is always upgraded to it
+    /// (D10.2); the field is accepted for forward compatibility and echoed back
+    /// in the response.
+    #[serde(default)]
+    pub tier: Option<crate::probe::ProbeTier>,
+}
+
+/// Query string for the probe endpoint.
+#[derive(Deserialize)]
+pub struct ProbeQuery {
+    /// Bypass the 24 h verdict cache (D10.5).
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+/// Response for `POST /api/providers/{provider}/probe`.
+#[derive(Debug, Serialize)]
+pub struct ProbeResponse {
+    pub provider: String,
+    pub model: String,
+    pub protocol: String,
+    pub tier: crate::probe::ProbeTier,
+    /// D10.6 verdict: `verified` / `degraded` / `failed`.
+    pub state: acowork_core::protocol::ProbeState,
+    #[serde(flatten)]
+    pub outcome: crate::probe::ProbeOutcome,
+    /// Fields the probe had to strip to get a 2xx (D8 `UnsupportedField` trim).
+    ///
+    /// Always empty in this slice: the trim itself is S7. It is part of the
+    /// D10.1 response contract from the start so the UI can render "degraded:
+    /// reasoning omitted" without a response-shape change later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stripped_fields: Vec<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -431,7 +533,7 @@ fn logo_client() -> &'static reqwest::Client {
 pub async fn add_provider(
     State(state): State<AppState>,
     Json(body): Json<AddProviderRequest>,
-) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
+) -> Result<(StatusCode, Json<ProviderSaveResponse>), ApiError> {
     // ADR-059 §7.3: reject stale writers before touching the vault.
     crate::http::routes::check_expected_version(&state, body.expected_version).await?;
 
@@ -515,6 +617,28 @@ pub async fn add_provider(
         merge_user_capabilities(&mut item, user_caps);
     }
 
+    // 3b2. ADR-103: re-adding an existing provider id keeps the stored
+    //      protocol intent/verdicts of the models that are still configured.
+    if let Some(prev) = gw
+        .resource_cache
+        .provider_list
+        .providers
+        .iter()
+        .find(|p| p.id == body.provider)
+        .cloned()
+    {
+        carry_over_protocol_state(&mut item, &prev);
+    }
+
+    // 3c. ADR-103 D1: record protocol intent. Effective protocol is still
+    //     decided by the D1 gate, which needs a passing probe verdict.
+    apply_protocol_intent(
+        &mut item,
+        body.protocol.clone(),
+        body.model_protocols.as_ref(),
+        body.model_base_urls.as_ref(),
+    );
+
     // 4. Add to in-memory provider list (replace if already exists).
     resource_cache::remove_provider_from_memory(&mut gw, &body.provider);
     gw.resource_cache
@@ -527,6 +651,12 @@ pub async fn add_provider(
     resource_cache::persist_provider_cache(&mut gw, &data_dir);
     let resource_version = gw.resource_cache.provider_list.version;
     drop(gw);
+
+    // 5b. ADR-103 D12.1/D12.2: probe the `responses` rows this write
+    //     introduced, and persist the verdicts. Runs after the save is
+    //     durable (D12.5 — a probe can never fail the save) and outside the
+    //     state lock, because probing is network I/O.
+    let probes = crate::probe::run_save_time_probes(&state, &body.provider, None, false).await;
 
     // 6. Hot-push to running agents — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
@@ -547,7 +677,10 @@ pub async fn add_provider(
         store.insert(record);
     }
 
-    Ok((StatusCode::CREATED, Json(ack)))
+    Ok((
+        StatusCode::CREATED,
+        Json(ProviderSaveResponse { ack, probes }),
+    ))
 }
 
 /// `DELETE /api/providers/:provider` — remove a provider (key + config).
@@ -703,7 +836,7 @@ pub async fn update_provider(
     State(state): State<AppState>,
     Path(provider): Path<String>,
     Json(body): Json<UpdateProviderRequest>,
-) -> Result<Json<MessageResponse>, ApiError> {
+) -> Result<Json<ProviderUpdateResponse>, ApiError> {
     if let Some(ref url) = body.base_url
         && !url.is_empty()
         && !url.starts_with("http://")
@@ -715,6 +848,17 @@ pub async fn update_provider(
     }
 
     let mut gw = state.gateway_state.write().await;
+
+    // 0. ADR-103 D12.2/D12.4: the row as stored *before* this write. It decides
+    //    which models count as "changed" (only those get probed) and whether the
+    //    config changed enough to invalidate earlier probe verdicts.
+    let previous_entry = gw
+        .resource_cache
+        .provider_list
+        .providers
+        .iter()
+        .find(|p| p.id == provider)
+        .cloned();
 
     // 1a. Legacy single-key update path — kept for backwards
     //     compatibility with pre-multi-account clients. When the caller
@@ -817,6 +961,31 @@ pub async fn update_provider(
         merge_user_capabilities(&mut item, user_caps);
     }
 
+    // 5b2. ADR-103: keep the stored protocol intent + verdicts for models that
+    //      survive the rebuild, so a partial update does not silently forget a
+    //      `Responses` selection (or lose the verdict that gates it).
+    if let Some(ref prev) = previous_entry {
+        carry_over_protocol_state(&mut item, prev);
+    }
+
+    // 5c. ADR-103 D1: record protocol intent (see `apply_protocol_intent`).
+    apply_protocol_intent(
+        &mut item,
+        body.protocol.clone(),
+        body.model_protocols.as_ref(),
+        body.model_base_urls.as_ref(),
+    );
+
+    // 5d. ADR-103 D12.4: does this write invalidate earlier probe verdicts?
+    //     Only a moved probe target does — the base URL (here) or the key (a
+    //     verdict describes the credentials it was made with). Adding or
+    //     reordering models does not: it changes nothing about what the
+    //     endpoint answers for the rows that stayed put.
+    let key_changed = has_legacy_key_change || body.keys.iter().any(|k| !k.key.trim().is_empty());
+    let probe_inputs_changed = previous_entry
+        .as_ref()
+        .is_some_and(|prev| crate::probe::service::probe_inputs_changed(prev, &item, key_changed));
+
     // 6. Replace in in-memory list.
     resource_cache::remove_provider_from_memory(&mut gw, &provider);
     gw.resource_cache
@@ -829,18 +998,103 @@ pub async fn update_provider(
     resource_cache::persist_provider_cache(&mut gw, &data_dir);
     drop(gw);
 
+    // 7b. ADR-103 D12: probe only the changed `responses` rows, then persist
+    //     the verdicts. Already durable at this point, so a probe failure can
+    //     never fail the save (D12.5).
+    let probes = crate::probe::run_save_time_probes(
+        &state,
+        &provider,
+        previous_entry,
+        probe_inputs_changed,
+    )
+    .await;
+
     // 8. Hot-push — handled by MQTT publisher trigger below.
     // ADR-033: Trigger MQTT global resource republish after resource change.
     if let Some(ref trigger) = state.mqtt_publisher_trigger {
         trigger.trigger();
     }
 
-    Ok(Json(MessageResponse {
+    Ok(Json(ProviderUpdateResponse {
         message: format!("Key updated for provider: {}", provider),
+        probes,
     }))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+
+/// Carry the stored protocol intent + probe verdicts over to a rebuilt row.
+///
+/// `build_provider_list_item` reconstructs every model from offline data, which
+/// drops the ADR-103 fields (`protocol_type`, `base_url`, `protocol_probe`).
+/// A partial update (rename, capability tweak) must not silently forget that
+/// the user selected `Responses` for a model, nor lose the verdict that gates
+/// it — so the previous state is copied back for every model that survives the
+/// rebuild. Request-supplied intent is applied *after* this and wins.
+fn carry_over_protocol_state(
+    item: &mut acowork_core::protocol::ProviderListItem,
+    previous: &acowork_core::protocol::ProviderListItem,
+) {
+    item.protocol_type = previous.protocol_type.clone();
+
+    for model in &mut item.models {
+        let Some(prev) = previous.models.iter().find(|m| m.id == model.id) else {
+            continue;
+        };
+        model.protocol_type = prev.protocol_type.clone();
+        model.base_url = prev.base_url.clone();
+        model.protocol_probe = prev.protocol_probe.clone();
+    }
+}
+
+/// Apply ADR-103 D1 protocol intent onto a freshly built provider item.
+///
+/// This records **intent** only. Whether `Responses` becomes the effective
+/// protocol is decided exclusively by the D1 gate
+/// (`models_api::resolve_protocol`), which additionally requires a passing
+/// probe verdict — so writing intent here can never change live traffic on its
+/// own (ADR-103 D2 two-stage rollout).
+///
+/// An id in `model_protocols` / `model_base_urls` that the resolved model list
+/// does not contain is dropped with a warning rather than resurrected: the
+/// model list is the source of truth for which models exist.
+fn apply_protocol_intent(
+    item: &mut acowork_core::protocol::ProviderListItem,
+    protocol: Option<ProtocolType>,
+    model_protocols: Option<&HashMap<String, ProtocolType>>,
+    model_base_urls: Option<&HashMap<String, String>>,
+) {
+    if let Some(protocol) = protocol {
+        item.protocol_type = protocol;
+    }
+
+    for model in &mut item.models {
+        if let Some(protocol) = model_protocols.and_then(|m| m.get(&model.id)) {
+            model.protocol_type = Some(protocol.clone());
+        }
+        if let Some(url) = model_base_urls.and_then(|m| m.get(&model.id)) {
+            let trimmed = url.trim();
+            model.base_url = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
+    }
+
+    let known: std::collections::HashSet<&str> =
+        item.models.iter().map(|m| m.id.as_str()).collect();
+    let declared_ids = model_protocols
+        .map(|m| m.keys())
+        .into_iter()
+        .flatten()
+        .chain(model_base_urls.map(|m| m.keys()).into_iter().flatten());
+    for per_model in declared_ids {
+        if !known.contains(per_model.as_str()) {
+            tracing::warn!(
+                provider_id = %item.id,
+                model_id = %per_model,
+                "protocol intent for an unconfigured model ignored"
+            );
+        }
+    }
+}
 
 /// Merge user-provided model capabilities overrides into a ProviderListItem.
 ///
@@ -882,6 +1136,63 @@ fn merge_user_capabilities(
             }
         }
     }
+}
+
+/// `POST /api/providers/:provider/probe` — ADR-103 D10.1 explicit probe.
+///
+/// Probes one configured model and writes the verdict back, so the D1 gate and
+/// the D11 badge both reflect it. Deliberately independent of the platform gate
+/// `llm.responses_api_enabled`: a user must be able to find out whether a
+/// provider supports Responses *before* the platform enables the feature (see
+/// [`crate::probe::service`]).
+///
+/// Probing a failing endpoint is a **200 with `success: false`**, not an HTTP
+/// error: "this endpoint does not speak Responses" is the answer the caller
+/// asked for. Transport/config problems that prevent the probe from running at
+/// all (unknown provider, unknown model, no base URL, unsupported protocol) are
+/// 4xx.
+pub async fn probe_provider(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Query(query): Query<ProbeQuery>,
+    Json(body): Json<ProbeProviderRequest>,
+) -> Result<Json<ProbeResponse>, ApiError> {
+    let protocol = body
+        .protocol
+        .clone()
+        .unwrap_or_else(|| ProtocolType::Responses.to_string());
+    // L3 is the minimum for a verdict (D10.2), so a user-initiated probe never
+    // runs the cheap tier: the whole point of clicking "verify" is the positive
+    // verdict that unlocks the `R` badge.
+    let mut tier = body.tier.unwrap_or(crate::probe::ProbeTier::Deep);
+    if tier != crate::probe::ProbeTier::Deep {
+        tracing::debug!(
+            provider_id = %provider,
+            model = %body.model,
+            "explicit probe upgraded to the deep tier: L3 is required for a verdict"
+        );
+        tier = crate::probe::ProbeTier::Deep;
+    }
+
+    let outcome = crate::probe::probe_one(
+        &state,
+        &provider,
+        &body.model,
+        &protocol,
+        tier,
+        query.force.unwrap_or(false),
+    )
+    .await?;
+
+    Ok(Json(ProbeResponse {
+        provider,
+        model: body.model,
+        protocol,
+        tier,
+        state: outcome.state(),
+        outcome,
+        stripped_fields: Vec::new(),
+    }))
 }
 
 /// Get data_dir from GatewayState config.

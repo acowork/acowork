@@ -96,6 +96,11 @@ pub struct AppState {
     /// mints tokens bound to the caller. Shared with the MQTT dispatch
     /// (enroll consumes them).
     pub enrollment_tokens: Option<crate::mqtt::SharedEnrollmentTokenStore>,
+    /// ADR-103 D10.5: 24 h cache of protocol-probe verdicts, keyed by
+    /// `(provider, model, protocol)`. Kept off `GatewayState` because it is
+    /// derived metadata with a TTL, not configuration: nothing here is
+    /// persisted, and a restart simply re-probes.
+    pub probe_cache: Arc<crate::probe::ProbeCache>,
 }
 
 impl AppState {
@@ -121,6 +126,7 @@ impl AppState {
             agent_owners: None,
             pending_installs: None,
             enrollment_tokens: None,
+            probe_cache: Arc::new(crate::probe::ProbeCache::new()),
         }
     }
 }
@@ -737,6 +743,16 @@ impl ApiError {
 
     /// 403 — authenticated but not permitted (e.g. a non-admin calling an
     /// admin-only account-management route).
+    /// 429 — a caller-supplied operation was throttled (e.g. an ADR-103
+    /// protocol probe charged against the provider's rate-limit bucket).
+    pub fn too_many_requests(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 429,
+            structured: None,
+        }
+    }
+
     pub fn forbidden(msg: &str) -> Self {
         Self {
             error: msg.to_string(),

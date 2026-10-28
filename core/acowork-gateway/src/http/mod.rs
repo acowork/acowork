@@ -32,6 +32,8 @@ pub mod nodes_api;
 pub mod pm_proxy;
 pub mod permission;
 pub mod provider_api;
+#[cfg(test)]
+mod provider_probe_tests;
 pub mod proxy;
 pub mod publish_api;
 pub mod relay_api;

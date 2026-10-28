@@ -906,6 +906,9 @@ async fn concurrent_provider_writes_carry_correct_versions() {
                 compact_model: None,
                 custom: Some(true),
                 model_capabilities: None,
+                protocol: None,
+                model_protocols: None,
+                model_base_urls: None,
                 expected_version: None,
             }),
         )
@@ -924,6 +927,9 @@ async fn concurrent_provider_writes_carry_correct_versions() {
                 compact_model: None,
                 custom: Some(true),
                 model_capabilities: None,
+                protocol: None,
+                model_protocols: None,
+                model_base_urls: None,
                 expected_version: None,
             }),
         )
@@ -943,8 +949,8 @@ async fn concurrent_provider_writes_carry_correct_versions() {
     // still asserted below (its empty shape is a documented contract), and
     // M3 adds the snapshot-fed version of this test.
     let mut provider_versions: Vec<u64> = vec![
-        ack1.resource_version.expect("p1 resource_version"),
-        ack2.resource_version.expect("p2 resource_version"),
+        ack1.0.ack.resource_version.expect("p1 resource_version"),
+        ack2.0.ack.resource_version.expect("p2 resource_version"),
     ];
     provider_versions.sort_unstable();
     assert_eq!(provider_versions, vec![2, 3]);
