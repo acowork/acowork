@@ -10,9 +10,10 @@
  *    assertions ARE the spec (same approach as capsule.test.tsx).
  * 2. The three carried-over capabilities need a persisted row. Attachments
  *    upload to `POST /tasks/{tid}/attachments`, so in create mode they must not
- *    be offered — and saving a new task must land back inside this same box so
- *    they unlock, rather than closing it.
- * 3. Where the reader lands after save / delete / navigate-to-child.
+ *    be offered — and saving a new task must submit first and close the box
+ *    only after the server confirms the row.
+ * 3. Where the reader lands after save / delete / navigate-to-child, and that
+ *    a failed save keeps the box (and the draft) open.
  * 4. One dirty-form guard for every way out (cancel, ESC, backdrop, ×,
  *    navigating to a child), which the old form never had.
  */
@@ -41,6 +42,8 @@ const mocks = vi.hoisted(() => ({
   uploadAttachment: vi.fn(async () => ({ id: "att-1" }) as unknown as PmAttachmentMeta),
   deleteAttachment: vi.fn(async () => true),
   removeTask: vi.fn(),
+  moveTask: vi.fn(async () => true),
+  reviewTask: vi.fn(async () => true),
   deleteTask: vi.fn(async () => ({})),
   save: vi.fn(async () => ({ ok: true, taskId: "t-new" })),
   reset: vi.fn(),
@@ -77,7 +80,12 @@ vi.mock("../../stores/pm/taskDetailStore", () => ({
 
 vi.mock("../../stores/pm/boardStore", () => ({
   usePmBoardStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ tasks: mocks.tasks, removeTask: mocks.removeTask }),
+    selector({
+      tasks: mocks.tasks,
+      removeTask: mocks.removeTask,
+      moveTask: mocks.moveTask,
+      reviewTask: mocks.reviewTask,
+    }),
 }));
 
 // The tree is covered by its own tests; here it is a seam with one clickable
@@ -200,7 +208,9 @@ beforeEach(() => {
   mocks.deleteAttachment.mockClear();
   mocks.removeTask.mockClear();
   mocks.deleteTask.mockClear();
-  mocks.save.mockClear();
+  // Re-seed the save seam: a test that swaps it for a failing one must not
+  // leak that failure into the next test.
+  mocks.save = vi.fn(async () => ({ ok: true, taskId: "t-new" }));
   mocks.reset.mockClear();
 });
 
@@ -319,23 +329,44 @@ describe("the three carried-over capabilities", () => {
 });
 
 describe("where saving and deleting land", () => {
-  it("saving a new task stays in the box, on the new row", async () => {
+  it("saving a new task closes the box — submit first, close after", async () => {
     mocks.mode = "create";
     mocks.detail = null;
     const onClose = vi.fn();
     render(<TaskEditDialog onClose={onClose} />);
     fireEvent.click(screen.getByText("pm.task.save"));
-    await waitFor(() => expect(mocks.openTask).toHaveBeenCalledWith("t-new"));
-    // Closing here would strand the row the user just made: attachments are
-    // the very next thing they want.
+    // The request goes out first; the box closes only once the server says so.
+    await waitFor(() => expect(mocks.save).toHaveBeenCalled());
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("a failed save keeps the box open (the draft is still there)", async () => {
+    mocks.mode = "create";
+    mocks.detail = null;
+    mocks.save = vi.fn(async () => ({ ok: false, reason: "failed", message: "boom" }));
+    const onClose = vi.fn();
+    render(<TaskEditDialog onClose={onClose} />);
+    fireEvent.click(screen.getByText("pm.task.save"));
+    await waitFor(() => expect(mocks.save).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("saving an edit re-reads the row (server-derived fields are not the form's)", async () => {
-    mocks.save = vi.fn(async () => ({ ok: true, taskId: "t-1" }));
-    render(<TaskEditDialog onClose={() => {}} />);
+  it("a subtask save closes the box too — one rule for every shape", async () => {
+    mocks.mode = "create";
+    mocks.detail = null;
+    mocks.returnTo = "t-parent";
+    const onClose = vi.fn();
+    render(<TaskEditDialog onClose={onClose} />);
     fireEvent.click(screen.getByText("pm.task.save"));
-    await waitFor(() => expect(mocks.openTask).toHaveBeenCalledWith("t-1"));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("saving an edit closes the box as well", async () => {
+    mocks.save = vi.fn(async () => ({ ok: true, taskId: "t-1" }));
+    const onClose = vi.fn();
+    render(<TaskEditDialog onClose={onClose} />);
+    fireEvent.click(screen.getByText("pm.task.save"));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("deleting a child returns to its parent instead of closing", async () => {
@@ -470,10 +501,18 @@ describe("audit line", () => {
     expect(screen.queryByText("u-1")).toBeNull();
   });
 
-  it("has no status-transition button — that is the board's job", () => {
+  it("carries a status-transition control — the board drag is not the only way", () => {
     render(<TaskEditDialog onClose={() => {}} />);
-    expect(screen.queryByText(/pm\.task\.moveTo/)).toBeNull();
-    expect(screen.queryByText("pm.task.approve")).toBeNull();
+    // The footer door to `boardStore.moveTask`: not every view lets the user
+    // drag a card, and dragging is a precise act.
+    expect(screen.getByLabelText("pm.task.moveTo")).toBeTruthy();
+  });
+
+  it("has no status control on a task that does not exist yet", () => {
+    mocks.mode = "create";
+    mocks.detail = null;
+    render(<TaskEditDialog onClose={() => {}} />);
+    expect(screen.queryByLabelText("pm.task.moveTo")).toBeNull();
   });
 
   it("shows a failed dispatch while the row is still undispatched", () => {

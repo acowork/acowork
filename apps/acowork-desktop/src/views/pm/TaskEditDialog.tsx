@@ -12,17 +12,25 @@
  * Gating is a server fact, not a layout preference: attachments upload to
  * `POST /tasks/{tid}/attachments` (core/acowork-pm/src/api/routes.rs:106) and
  * children need a parent id, so 附件 / 子任务 / 删除 only exist once the row is
- * persisted. Saving a new task therefore stays in the box and unlocks those
- * sections, instead of closing the dialog the way the old form did.
+ * persisted.
+ *
+ * Saving is "submit, then close": the request goes out first, the box closes
+ * only after the server confirms the row, and a failed save keeps the box open
+ * with the draft intact (see `handleSave`). That is true for every shape of
+ * the form — 新建任务 / 编辑任务 / 新建子任务 — so the box never survives a
+ * successful save and the user never has to click twice to be done.
  *
  * Height is FIXED (`h-[560px]`, capped by `max-h-[86vh]`) with the body
  * scrolling. Sections appearing after the first save, or jumping to a child
  * row, must not resize the dialog — that resize was the "跳来跳去" the old
  * tab shell produced.
  *
- * Status transitions are deliberately absent: they belong to the board (drag
- * between columns) and to the task card's 批准/拒绝 buttons, both of which call
- * the same `boardStore.moveTask`.
+ * Status transitions live in the board (drag between columns) and on the task
+ * card's 批准/拒绝 buttons, both of which call the same `boardStore.moveTask`.
+ * The footer carries a third door to the same write (`TaskStatusMove`): not
+ * every view lets the user drag a card, and dragging is a precise act that
+ * not every user can perform. The dialog is the one task surface, so it must
+ * be able to move a task too.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
@@ -32,6 +40,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { PriorityBadge } from "./PriorityBadge";
 import { TaskTypeIcon } from "./TaskTypeIcon";
 import { SubtaskTree } from "./SubtaskTree";
+import { TaskStatusMove } from "./TaskStatusMove";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
@@ -163,6 +172,8 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   const handleSave = useCallback(async () => {
     const outcome = await form.save();
     if (!outcome.ok) {
+      // The row did not make it: keep the box open with the draft intact, so
+      // the user can fix it and try again instead of losing what they typed.
       showToast({
         type: outcome.reason === "title_required" ? "warning" : "error",
         message:
@@ -173,10 +184,11 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
       return;
     }
     showToast({ type: "success", message: t("pm.task.taskSaved") });
-    // Re-read the row: `is_blocked` / `depth` / `parent_id` are server-derived,
-    // and a new row must become a real row before 附件 / 子任务 can attach to it.
-    void openTask(outcome.taskId);
-  }, [form, openTask, t]);
+    // 保存成功 → 关闭弹框。三种形态一样：新建任务、编辑任务、在任务里新建
+    // 子任务。行已经在服务端了，弹框没有留下的理由；关掉之后看板上的那一行
+    // 就是结果的唯一呈现（`save()` 内部已经 reload 过看板）。
+    onClose();
+  }, [form, onClose, t]);
 
   const handleDelete = useCallback(async () => {
     if (!detail) return;
@@ -470,6 +482,12 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
               </button>
             )}
             <div className="flex-1" />
+            {/* 状态流转：看板拖拽不是唯一路径（看板只读 / 不想拖卡片时，
+                这里就是那条路）。它写的是服务端那一列，不是表单字段 ——
+                所以它不经过 useTaskForm 的保存路径。 */}
+            {hasRow && detail && (
+              <TaskStatusMove task={detail} onMoved={() => void refresh()} />
+            )}
             <button
               type="button"
               onClick={() => navigate()}

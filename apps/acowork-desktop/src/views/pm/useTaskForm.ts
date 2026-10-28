@@ -19,7 +19,7 @@
  * 端点设置"), so an edit that moved the task still issues the second call.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createTask, reparentTask, updateTask } from "../../lib/pm-api";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
@@ -216,7 +216,15 @@ export function useTaskForm({
     [values, snapshot],
   );
 
-  const save = useCallback(async (): Promise<TaskSaveOutcome> => {
+  // A second click while the first save is still in flight must not reach the
+  // server: `saving` disables the button, but that state only lands on the
+  // NEXT render, so two clicks inside one frame would both pass the guard and
+  // create two rows. The in-flight promise is the real guard — a second
+  // `save()` joins the run that is already on the wire instead of issuing
+  // another request.
+  const inflight = useRef<Promise<TaskSaveOutcome> | null>(null);
+
+  const runSave = useCallback(async (): Promise<TaskSaveOutcome> => {
     const title = values.title.trim();
     if (!title) return { ok: false, reason: "title_required" };
     setSaving(true);
@@ -266,6 +274,22 @@ export function useTaskForm({
       setSaving(false);
     }
   }, [values, isEdit, initial, projectId, reloadBoard]);
+
+  const save = useCallback((): Promise<TaskSaveOutcome> => {
+    if (inflight.current) return inflight.current;
+    const run = runSave();
+    inflight.current = run;
+    // Release the slot once the run settles, so the next save starts clean.
+    void run.then(
+      () => {
+        inflight.current = null;
+      },
+      () => {
+        inflight.current = null;
+      },
+    );
+    return run;
+  }, [runSave]);
 
   return {
     values,
