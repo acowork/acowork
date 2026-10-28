@@ -333,6 +333,8 @@ Concrete wire/schema types will be determined during protocol implementation. Ag
 
 What the Agent side receives is still a resolved reference; the Runtime does not read Chat session directories. The attachment read path is the same as the message body: through the trusted service that owns the single write entry point. Delivery carrier: **the MQTT Intent envelope carries attachment ids only - file bytes never ride MQTT messages**. At turn start the Runtime pulls each blob over node-authenticated HTTP (Gateway forwarding the user service's internal streaming endpoint) and materializes it into the agent-home `files/` dir; the user service verifies the durable `user_message` row is addressed to that target and pins that id - the row is the authorization. A failed pull degrades to "this attachment is invisible this turn"; the turn still runs.
 
+**Metadata and bytes travel on different channels.** Attachment metadata (filename / mime / size, re-read by the user service from the session's `files/` dir at append time and never taken from the client) rides the delivery params under `chat_attachments`, so the Chat Router can see which files this turn carries (design 29 §5.1). The envelope field `chat_attachment_ids` still carries ids only, and bytes still never touch MQTT: ids go on the envelope for the execution side to pull, metadata goes in params for the routing decision. A missing key (older Gateway) or a wrong shape degrades to "no attachments this turn" — the cost is one turn's routing quality, never the message.
+
 #### 4.2.2 Cards and runtime status lines
 
 Only one durable row in the Chat session points at an event inside an execution session:

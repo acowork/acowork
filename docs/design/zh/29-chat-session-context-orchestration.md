@@ -211,6 +211,9 @@ Gateway 先落库再投递，因此当前用户消息已在 chat 历史末尾。
 | `draft` | `model=claude-sonnet, workspace=ws-1` | 信封 `session_config_json`，无则为空 |
 | `candidates` | 见 §5.2 | 最多 10 条 |
 | `task` | `project=proj, task=T-12` | 仅 PM 任务相关追问时存在 |
+| `attachments` | `report.pdf (application/pdf, 12KB), shot.png (image/png, 340KB)` | 本轮附件元数据；行格式与 §4.1 的历史投影**完全一致**，且由同一个渲染函数产出 |
+
+附件行只在本轮真的带文件时出现，位置固定在 `[user message]` 之后。它与 Block B 的历史行**逐字节相同**——同一条消息在"正在被路由"和"已经成为历史"两种视角下必须长得一样，否则 router 会引用旧截图却看不见刚附上的那张。
 
 ### 5.2 候选清单格式
 
@@ -241,7 +244,10 @@ S2           idle     3h  task  Review ADR-098
 
 [user message]
 这个登录跳转的问题继续弄一下，顺便看下 ADR-098 的评审意见
+[attachments] login-error.png (image/png, 182KB)
 ```
+
+纯附件轮（`text` 为空或只有空白，附件非空）**不是**空消息：`[user message]` 位置写固定占位 `(no text — the message is its attachments)`，再接附件行。空 body 会让模型当作"没说话"而倾向于不路由；固定占位明确告诉它人发了东西、只是没打字。占位文案逐字节固定（决策可复现性要求），与决策日志的 `attachment_only` 共用同一个谓词，避免"日志说纯附件轮、提示词却渲染了文本"这类漂移。
 
 合并的好处：最后一条消息承载全部「本轮视图」，它前面的历史与 system 保持逐字节稳定。
 
@@ -288,12 +294,16 @@ S2           idle     3h  task  Review ADR-098
   "prefix_hash": "9f2c1a7b",
   "anchor_seq": 42,
   "history_len": 18,
+  "attachments": 1,
+  "attachment_only": false,
   "prompt_tokens": 3120,
   "cache_read_tokens": 2816,
   "cache_write_tokens": 0,
   "hit_rate": 0.90
 }
 ```
+
+`attachments` 是本轮附件**个数**，`attachment_only` 表示这一轮是纯附件轮（§5.3 的占位分支）。两者只记计数与判定，**不记文件名、mime、size**——决策日志是路由元数据，不是消息内容（ADR-096）。加这两个字段的动机是可观测性：在此之前，带附件的一轮与"同样的文字、什么都没带"在日志里完全一样，router 对附件盲视这件事因此一直不可见。旧日志行读作 `attachments: 0` / `attachment_only: false`，向前兼容。
 
 验收指标（首版）：
 
