@@ -3215,6 +3215,25 @@ pub fn scan_sessions_async(
     size: Option<u32>,
     scope: SessionScope,
 ) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
+    scan_sessions_async_filtered(conversations_dir, page, size, scope, None)
+}
+
+/// [`scan_sessions_async`] with an extra pre-pagination predicate on the
+/// ADR-038 `Active` set (`None` = no such filter).
+///
+/// Kept as its own entry point instead of a fifth argument on
+/// [`scan_sessions_async`] because "the sessions resident in the Runtime
+/// right now" is a narrow query — the restore source of the desktop tab strip
+/// and nothing else — while every other caller wants the ordinary history
+/// list.
+#[allow(clippy::type_complexity)]
+pub fn scan_sessions_async_filtered(
+    conversations_dir: PathBuf,
+    page: Option<u32>,
+    size: Option<u32>,
+    scope: SessionScope,
+    active_ids: Option<std::collections::HashSet<String>>,
+) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
     tokio::task::spawn_blocking(move || {
         // ADR-082 §4 step 3: the rows come from the session-meta store
         // (SQLite). `scan_sessions_from_meta` is that store's full-scan form
@@ -3235,7 +3254,7 @@ pub fn scan_sessions_async(
         // per workspace — keeping `is_readable_by` as the reference
         // implementation the SQL would have to match.
         let rows = scan_sessions_from_meta(&conversations_dir);
-        build_session_page(&rows, page, size, &scope)
+        build_session_page(&rows, page, size, &scope, active_ids.as_ref())
     })
 }
 
@@ -3244,18 +3263,26 @@ pub fn scan_sessions_async(
 ///
 /// Split out of [`scan_sessions_async`] so the body reads the same whether
 /// the rows came fresh from disk or out of [`META_INDEX`].
+///
+/// `active_ids` is an optional *pre-pagination* filter: the ADR-038 `Active`
+/// set, i.e. "loaded in the Runtime's in-memory session map". It runs after
+/// the ADR-076 read filter and before the slice for the same reason that
+/// filter does — `total` / `total_pages` must describe the rows the caller
+/// asked for, or a client asking "which sessions are open?" would get short
+/// pages and a page count pointing at rows it never asked about.
 #[allow(clippy::type_complexity)]
 fn build_session_page(
     rows: &[(String, SessionMeta)],
     page: Option<u32>,
     size: Option<u32>,
     scope: &SessionScope,
+    active_ids: Option<&std::collections::HashSet<String>>,
 ) -> (Vec<SessionInfo>, usize, (u64, u64, u64, u64)) {
     // ADR-076 §决策 4: drop sessions `scope` may not read *before*
     // paginating, so `total` / `total_pages` describe what the caller
     // can actually see. Filtering after the slice would hand back
     // short pages and a page count pointing at invisible rows.
-    let sessions: Vec<&(String, SessionMeta)> = rows
+    let readable: Vec<&(String, SessionMeta)> = rows
         .iter()
         .filter(|(_, meta)| meta.is_readable_by(scope))
         .collect();
@@ -3276,9 +3303,11 @@ fn build_session_page(
     //
     // `total_cache_write` is always summed (Anthropic charges 1.25×
     // for `cache_creation_input_tokens` regardless of the regular
-    // input count).
+    // input count). Summed over `readable`, not `sessions`: the aggregate is
+    // a whole-agent counter repair (cold-start), so an `active=true` listing
+    // must not shrink it to the resident subset.
     let (agent_total_input, agent_total_output, agent_total_cache_read, agent_total_cache_write) =
-        sessions.iter().fold(
+        readable.iter().fold(
             (0u64, 0u64, 0u64, 0u64),
             |(acc_in, acc_out, acc_cr, acc_cw), (_, meta)| {
                 let t = meta.tokens.as_ref();
@@ -3290,6 +3319,19 @@ fn build_session_page(
                 )
             },
         );
+
+    // ADR-038: `active=true` narrows the set to sessions resident in the
+    // Runtime right now — same pre-pagination placement as the read filter,
+    // so `total` / `total_pages` describe the resident set. Placed after the
+    // aggregate below so `readable` can be moved, not cloned.
+    let sessions: Vec<&(String, SessionMeta)> = match active_ids {
+        Some(ids) => readable
+            .iter()
+            .copied()
+            .filter(|(sid, _)| ids.contains(sid))
+            .collect(),
+        None => readable,
+    };
 
     let total = sessions.len();
     let page = page.unwrap_or(1).max(1) as usize;
@@ -7885,5 +7927,121 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ADR-038 `active=true`: the "which sessions are resident right now"
+    /// query the desktop tab strip restores from. It must filter *before*
+    /// pagination (same reason as the scope filter) and must intersect with
+    /// the read filter rather than replace it.
+    #[tokio::test]
+    async fn active_filter_runs_before_pagination_and_stays_scope_scoped() {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-scan-active-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let conv = dir.join("conversations");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&conv).unwrap();
+
+        let meta = |sid: &str, owner: &str, at: &str, visibility: Option<SessionVisibility>| {
+            SessionMeta {
+                version: 1,
+                session_id: sid.into(),
+                agent_id: "a".into(),
+                created_at: at.into(),
+                initiator: Some(owner.into()),
+                visibility,
+                title: Some(sid.into()),
+                workspace_id: None,
+                model: None,
+                provider: None,
+                account_id: None,
+                reasoning_effort: None,
+                temperature: None,
+                context_window: None,
+                todos: None,
+                message_count: 0,
+                last_active_at: at.into(),
+                tokens: None,
+                corrupted: false,
+                llm_call_counter: None,
+                perf: None,
+                model_ratio: None,
+                last_compaction_offset: None,
+                chat_session_id: None,
+                model_usage: None,
+            }
+        };
+
+        // Five sessions, newest first by last_active_at. All readable by
+        // alice except s-2, which bob keeps private.
+        for i in 0..5u32 {
+            let sid = format!("s-{i}");
+            let (owner, visibility) = if sid == "s-2" {
+                ("u-bob", Some(SessionVisibility::Private))
+            } else {
+                ("u-alice", None)
+            };
+            write_session_meta(&conv, &meta(&sid, owner, &format!("2026-01-0{}T00:00:00Z", i + 1), visibility))
+                .unwrap();
+        }
+
+        // Three are resident (s-4, s-2, s-0) — one of them not readable.
+        let active: std::collections::HashSet<String> =
+            ["s-4", "s-2", "s-0"].iter().map(|s| s.to_string()).collect();
+
+        let scan = |page: u32, size: u32| {
+            let conv = conv.clone();
+            let active = active.clone();
+            async move {
+                let (sessions, total, _) = scan_sessions_async_filtered(
+                    conv,
+                    Some(page),
+                    Some(size),
+                    SessionScope::user("u-alice"),
+                    Some(active),
+                )
+                .await
+                .unwrap();
+                (
+                    sessions.into_iter().map(|s| s.session_id).collect::<Vec<_>>(),
+                    total,
+                )
+            }
+        };
+
+        // Resident ∩ readable = {s-4, s-0}. `total` counts that intersection
+        // — not the 5 rows on disk, not the 3 resident ones — so a client
+        // never pages into rows it cannot see.
+        let (ids, total) = scan(1, 10).await;
+        assert_eq!(ids, vec!["s-4", "s-0"]);
+        assert_eq!(total, 2);
+
+        // Page size honoured over the filtered set; the second page is still
+        // correct (total + size is what the client pages on).
+        let (ids, total) = scan(1, 1).await;
+        assert_eq!(ids, vec!["s-4"]);
+        assert_eq!(total, 2);
+        let (ids, total) = scan(2, 1).await;
+        assert_eq!(ids, vec!["s-0"]);
+        assert_eq!(total, 2);
+
+        // An empty resident set is a real answer ("nothing is open"), not a
+        // request to fall back to the full list.
+        let (sessions, total, _) = scan_sessions_async_filtered(
+            conv.clone(),
+            None,
+            None,
+            SessionScope::Unfiltered,
+            Some(std::collections::HashSet::new()),
+        )
+        .await
+        .unwrap();
+        assert!(sessions.is_empty());
+        assert_eq!(total, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 

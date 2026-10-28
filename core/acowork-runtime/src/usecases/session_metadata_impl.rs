@@ -47,13 +47,32 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         page: u32,
         size: u32,
         scope: &SessionScope,
+        active_only: bool,
     ) -> Result<SessionsListResponse> {
+        // Read the snapshot keys once, before the scan: Active = present in
+        // the in-memory map (ADR-038 lifecycle; close_session removes the
+        // key). Two uses, one read — the `active=true` pre-pagination filter
+        // and the per-row `is_active` flag must see the same snapshot.
+        let active_ids: std::collections::HashSet<String> = self
+            .session_snapshots
+            .read()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+
         let conversations = self.work_dir.join("conversations");
-        let join = conversation::scan_sessions_async(
+        let join = conversation::scan_sessions_async_filtered(
             conversations.clone(),
             Some(page),
             Some(size),
             scope.clone(),
+            // An empty set is meaningful ("nothing is resident"), so it is
+            // passed through as `Some(empty)` and yields an empty page —
+            // only `active_only == false` turns the filter off.
+            if active_only {
+                Some(active_ids.clone())
+            } else {
+                None
+            },
         );
         // ADR-066: scan_sessions_async returns a 4-tuple
         // (input, output, cache_read, cache_write) — feed all four into
@@ -76,14 +95,6 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             Some(disk_cache_read),
             Some(disk_cache_write),
         ));
-
-        // Read the snapshot keys once before the loop — Active = present in
-        // the in-memory map (ADR-038 lifecycle; close_session removes the key).
-        let active_ids: std::collections::HashSet<String> = self
-            .session_snapshots
-            .read()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
 
         let page_sessions: Vec<SessionSummary> = sessions
             .into_iter()

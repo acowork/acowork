@@ -474,11 +474,14 @@ Gateway does not parse the Runtime response body; all reads and writes are verba
 | Method | Path | Purpose | Runtime path |
 |---|---|---|---|
 | GET | `/api/agents/{id}/sessions` | Session list (Runtime perspective, token stats merged) | `/sessions` |
+| GET | `/api/agents/{id}/sessions?active=true` | **Only currently-active sessions** (ADR-038 `Active` = resident in Runtime memory; the Desktop rebuilds its tab strip from this after a restart) | `/sessions?active=true` |
 | GET | `/api/agents/{id}/latest-session` | Latest session (quick startup lookup) | `/sessions/latest` |
 | GET | `/api/agents/{id}/conversations/latest` | Latest session messages (the only conversations endpoint retained per ADR-034) | `/sessions/latest` |
 | GET | `/api/agents/{id}/sessions/{sid}` | Single session full state (meta + state merged) | `/sessions/{sid}` |
 | GET | `/api/agents/{id}/sessions/{sid}/state` | **legacy alias**: forwards to `/sessions/{sid}` (kept for backward compatibility with old callers) | `/sessions/{sid}` |
 | GET | `/api/agents/{id}/sessions/{sid}/messages` | Fetch message history (cursor pagination) | `/sessions/{sid}/messages` |
+
+> **`?active=true` (ADR-038)**: returns only the sessions **resident in Runtime memory** right now — the `Active` lifecycle set, entered by `POST .../open` and left by `POST .../close`. It is therefore the authoritative record of "which sessions are currently open", which is why the Desktop does not persist its tab list: after a restart it issues this one query and projects the backend truth onto the tab strip (the frontend projects, it does not own the state). Like the caller-scope filter, this filter runs **before** pagination, so `total_count` / `total_pages` describe the "active and readable" subset and a client can never page into rows it may not see; the two filters intersect. Omitted or `active=false` = the ordinary full history list.
 
 ### 5.3 Attachments
 
