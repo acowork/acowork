@@ -12,35 +12,38 @@
 //!   Runtime constructs → this provider is reached).
 //! - S2 (this slice): D5 request mapping + non-streaming `chat()` + usage
 //!   mapping (D6 non-stream half + D6.5).
-//! - S3: streaming SSE (`D6` streaming half) — `chat_stream()` still fails
-//!   with a non-retryable endpoint-unavailable error, so a mis-routed
-//!   session surfaces as a clear provider error instead of a silent
-//!   fallback to `/chat/completions` (ADR-103 D8 MUST NOT list).
+//! - S3 (this slice): streaming SSE (`D6` streaming half) — a pure,
+//!   I/O-free state machine (`SseState`) consumes `data:` payloads and the
+//!   driver closes the stream on the terminal event, never on `[DONE]`.
 //! - S4: URL resolution refinement (`D7`) + full error classification (`D8`).
 
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_core::Stream;
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Serialize;
+use tokio::sync::mpsc;
 
 use acowork_core::providers::traits::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, MessageContent,
-    MessageRole, Provider, ProviderError, ReasoningEffort, StreamEvent, ToolCall, UsageInfo,
-    parse_data_uri,
+    MessageRole, Provider, ProviderError, ProviderErrorType, ReasoningEffort, StreamError,
+    StreamEvent, ToolCall, UsageInfo, parse_data_uri,
 };
 use acowork_core::tools::schema::sanitize_tool_schema;
 
-/// Responses-API-shaped provider. S2: non-streaming `chat()` is live;
-/// `chat_stream()` is the S3 placeholder (visible failure, never a silent
-/// fallback).
+/// Responses-API-shaped provider. S2 delivered non-streaming `chat()`; S3
+/// delivers `chat_stream()` (D6 SSE state machine, terminal-event driven).
 pub struct ResponsesProvider {
     /// Resolved `{base}` — the endpoint is `{base}/responses` (D7, S4).
     base_url: String,
     api_key: Option<String>,
     http_client: Client,
-    #[allow(dead_code)] // consumed by the S3 streaming implementation
-    request_timeout: Duration,
+    stream_read_timeout: Duration,
 }
 
 impl ResponsesProvider {
@@ -52,7 +55,7 @@ impl ResponsesProvider {
         api_key: Option<&str>,
         request_timeout: Duration,
         connect_timeout: Duration,
-        _stream_read_timeout: Duration,
+        stream_read_timeout: Duration,
     ) -> Self {
         let http_client = Client::builder()
             .timeout(request_timeout)
@@ -65,31 +68,8 @@ impl ResponsesProvider {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             api_key: api_key.map(ToString::to_string),
             http_client,
-            request_timeout,
+            stream_read_timeout,
         }
-    }
-
-    /// The S3 placeholder failure point: streaming is not implemented yet.
-    /// Non-retryable with actionable user text (D8 wording family).
-    fn streaming_not_implemented(&self) -> acowork_core::AcoworkError {
-        tracing::warn!(
-            base_url = %self.base_url,
-            "ResponsesProvider.chat_stream invoked before ADR-103 S3: streaming wire mapping not implemented yet"
-        );
-        acowork_core::AcoworkError::Provider(ProviderError {
-            message: format!(
-                "Responses API streaming endpoint unavailable: the SSE wire mapping is not \
-                 implemented in this build (ADR-103 S3 pending). Endpoint: {}/responses",
-                self.base_url
-            ),
-            user_message: "该 provider 的 Responses 流式协议尚未生效，请在模型设置里把协议切回 Chat \
-                           Completions，或等待该版本完成 Responses 流式支持。"
-                .to_string(),
-            status_code: Some(404),
-            error_type: acowork_core::providers::traits::ProviderErrorType::ClientError,
-            retryable: false,
-            retry_after_ms: None,
-        })
     }
 }
 
@@ -585,6 +565,504 @@ fn map_usage(usage: Option<&serde_json::Value>) -> Option<UsageInfo> {
     })
 }
 
+// -- D6: streaming SSE -------------------------------------------------
+
+/// What one decoded `data:` payload asks the streaming driver to do.
+#[derive(Debug)]
+enum SseAction {
+    /// Known-noise or validation-only event -- nothing observable.
+    Ignore,
+    /// Non-terminal events to forward downstream.
+    Emit(Vec<StreamEvent>),
+    /// Terminal event (`completed` / `incomplete` / `failed`): forward these
+    /// and close the stream. This is the ONLY successful way a stream ends
+    /// (ADR-103 D6.1 -- `[DONE]` is never the terminator).
+    Finish(Vec<StreamEvent>),
+}
+
+/// Lifecycle / validation-only events: parsed then dropped, never re-emitted.
+///
+/// Two families live here (D6.7):
+/// - validation-only (`*.done`, `content_part.*`, `output_item.done`): the
+///   text already reached the loop as deltas; re-emitting would duplicate.
+/// - lifecycle noise (`created`, `in_progress`, `queued`).
+const KNOWN_NOISE_EVENTS: &[&str] = &[
+    "response.created",
+    "response.in_progress",
+    "response.queued",
+    "response.content_part.added",
+    "response.content_part.done",
+    "response.output_text.done",
+    "response.reasoning_text.done",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_part.done",
+    "response.function_call_arguments.done",
+];
+
+/// Tool-shaped event families v1 does not consume: noisy by design and
+/// unrelated to chat / tool-call streaming. Ignored without a warning.
+const KNOWN_NOISE_PREFIXES: &[&str] = &[
+    "response.file_search_call.",
+    "response.web_search_call.",
+    "response.code_interpreter_call.",
+    "response.image_generation_call.",
+    "response.mcp_call.",
+    "response.mcp_list_tools.",
+    "response.audio.",
+    "response.refusal.",
+];
+
+fn is_known_noise(event_type: &str) -> bool {
+    KNOWN_NOISE_EVENTS.contains(&event_type)
+        || KNOWN_NOISE_PREFIXES
+            .iter()
+            .any(|prefix| event_type.starts_with(prefix))
+}
+
+/// Pure, I/O-free Responses SSE state machine (ADR-103 D6).
+///
+/// Testable boundary: feed `data:` payloads in wire order, assert the
+/// emitted `StreamEvent`s. Deliberately stateless with respect to
+/// `sequence_number` -- D6.6 forbids reordering or de-duplication on it, so
+/// events are consumed strictly in arrival order.
+struct SseState {
+    /// Set once a terminal event was observed (success or failure).
+    terminated: bool,
+    /// Whether any `function_call` item appeared (drives `finish_reason`).
+    saw_function_call: bool,
+    /// `output_index` -> assigned tool-call index, fixed at item-add time so
+    /// argument chunks cannot drift to another index.
+    tool_index_by_output: HashMap<u64, u64>,
+    next_tool_index: u64,
+    /// Usage is authoritative only in the terminal event's `response`.
+    usage: Option<UsageInfo>,
+    /// D6.7: warn about unknown event types once per stream, never fail.
+    warned_unknown: bool,
+}
+
+impl SseState {
+    fn new() -> Self {
+        Self {
+            terminated: false,
+            saw_function_call: false,
+            tool_index_by_output: HashMap::new(),
+            next_tool_index: 0,
+            usage: None,
+            warned_unknown: false,
+        }
+    }
+
+    /// Resolve (or first-time assign) the tool-call index for an
+    /// `output_index`. Assignment order defines the downstream index, which
+    /// keeps parallel tool calls stable.
+    fn assign_tool_index(&mut self, output_index: u64) -> u64 {
+        if let Some(existing) = self.tool_index_by_output.get(&output_index) {
+            return *existing;
+        }
+        let index = self.next_tool_index;
+        self.next_tool_index += 1;
+        self.tool_index_by_output.insert(output_index, index);
+        index
+    }
+
+    /// D6.5: usage comes from the terminal event's `response.usage` only.
+    fn absorb_terminal_usage(&mut self, value: &serde_json::Value) {
+        self.usage = map_usage(value.get("response").and_then(|r| r.get("usage")));
+    }
+
+    fn finished_event(&self, finish_reason: &str) -> StreamEvent {
+        StreamEvent::Finished(ChatResponse {
+            content: String::new(),
+            tool_calls: None,
+            usage: self.usage.clone(),
+            finish_reason: Some(finish_reason.to_string()),
+            ..Default::default()
+        })
+    }
+
+    /// Dispatch one JSON `data:` payload (D6.2: the type is read from the
+    /// payload, never from the `event:` line).
+    fn on_data(&mut self, payload: &str) -> Result<SseAction, StreamError> {
+        let value: serde_json::Value = serde_json::from_str(payload).map_err(|e| StreamError {
+            message: format!("Responses SSE payload is not valid JSON: {e}"),
+            // Mid-stream corruption; D8 refines whether a retry is safe once
+            // output has already been emitted (S4).
+            error_type: ProviderErrorType::StreamDecodeError,
+            retryable: true,
+            status_code: None,
+        })?;
+
+        let event_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match event_type {
+            // -- content deltas --
+            "response.output_text.delta" => {
+                let delta = value.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                if delta.is_empty() {
+                    Ok(SseAction::Ignore)
+                } else {
+                    Ok(SseAction::Emit(vec![StreamEvent::Content(delta.to_string())]))
+                }
+            }
+            // D6.3: `reasoning_text` (native) and `reasoning_summary_text`
+            // (summary-mode models) are both reasoning deltas; one is not a
+            // fallback for the other.
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                let delta = value.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                if delta.is_empty() {
+                    Ok(SseAction::Ignore)
+                } else {
+                    Ok(SseAction::Emit(vec![StreamEvent::ReasoningContent(
+                        delta.to_string(),
+                    )]))
+                }
+            }
+
+            // -- tool calls --
+            // D6.4: `call_id` / `name` are known only from `output_item.added`;
+            // the argument deltas carry no identity at all.
+            "response.output_item.added" => {
+                let item = value.get("item");
+                let item_type = item
+                    .and_then(|i| i.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if item_type != "function_call" {
+                    return Ok(SseAction::Ignore);
+                }
+                let output_index = value
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                self.assign_tool_index(output_index);
+                self.saw_function_call = true;
+                let call_id = item
+                    .and_then(|i| i.get("call_id"))
+                    .or_else(|| item.and_then(|i| i.get("id")))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = item
+                    .and_then(|i| i.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok(SseAction::Emit(vec![StreamEvent::ToolCallStart(ToolCall {
+                    id: call_id,
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name,
+                        // Arguments arrive as deltas, never on the added item.
+                        arguments: String::new(),
+                    },
+                })]))
+            }
+            "response.function_call_arguments.delta" => {
+                let delta = value.get("delta").and_then(|d| d.as_str()).unwrap_or("");
+                if delta.is_empty() {
+                    return Ok(SseAction::Ignore);
+                }
+                let output_index = value
+                    .get("output_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if !self.tool_index_by_output.contains_key(&output_index) {
+                    // A chunk without a preceding `output_item.added` (lost or
+                    // reordered event). Keep the arguments flowing; the loop
+                    // reconciles by index.
+                    tracing::warn!(
+                        output_index,
+                        "Responses function_call argument chunk arrived without output_item.added -- assigning a fresh tool index"
+                    );
+                }
+                let index = self.assign_tool_index(output_index);
+                Ok(SseAction::Emit(vec![StreamEvent::ToolCallChunk {
+                    index,
+                    arguments: delta.to_string(),
+                }]))
+            }
+            // Validation only: the `added` item already opened the call and
+            // the arguments already streamed as deltas.
+            "response.output_item.done" => {
+                if let Some(item) = value
+                    .get("item")
+                    .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("function_call"))
+                {
+                    let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or("?");
+                    let args = item.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+                    if !args.trim().is_empty()
+                        && serde_json::from_str::<serde_json::Value>(args).is_err()
+                    {
+                        tracing::warn!(
+                            call_id,
+                            "Responses function_call arguments are not valid JSON"
+                        );
+                    }
+                }
+                Ok(SseAction::Ignore)
+            }
+
+            // -- terminal events (D6.1: these alone end the stream) --
+            "response.completed" => {
+                self.absorb_terminal_usage(&value);
+                self.terminated = true;
+                let finish_reason = if self.saw_function_call {
+                    "tool_calls"
+                } else {
+                    "stop"
+                };
+                Ok(SseAction::Finish(vec![self.finished_event(finish_reason)]))
+            }
+            "response.incomplete" => {
+                self.absorb_terminal_usage(&value);
+                let reason = value
+                    .get("response")
+                    .and_then(|r| r.get("incomplete_details"))
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("max_output_tokens");
+                let finish_reason = if reason == "content_filter" {
+                    "content_filter"
+                } else {
+                    "length"
+                };
+                tracing::warn!(
+                    reason = %reason,
+                    finish_reason,
+                    "Responses stream ended incomplete -- truncation is surfaced through finish_reason, never as a silently empty answer (ADR-103 section 5)"
+                );
+                self.terminated = true;
+                Ok(SseAction::Finish(vec![self.finished_event(finish_reason)]))
+            }
+            "response.failed" | "error" => {
+                let err = value
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .or_else(|| value.get("error"));
+                let message = err
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Responses API stream reported a terminal failure");
+                let code = err
+                    .and_then(|e| e.get("code"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                let mut stream_err =
+                    acowork_core::providers::classify_stream_error(&format!("{code} {message}"));
+                stream_err.message = message.to_string();
+                // D8: deltas may already have reached the loop, so an in-band
+                // failure is never retried blindly (class table refined in S4).
+                stream_err.retryable = false;
+                tracing::warn!(code = %code, message = %message, "Responses stream failed in-band");
+                self.terminated = true;
+                Ok(SseAction::Finish(vec![StreamEvent::Error(stream_err)]))
+            }
+
+            other => {
+                if is_known_noise(other) {
+                    tracing::trace!(event_type = other, "Responses SSE known-noise event ignored");
+                } else if !self.warned_unknown {
+                    self.warned_unknown = true;
+                    tracing::warn!(
+                        event_type = other,
+                        "Unrecognized Responses SSE event type -- ignored (warned once per stream, ADR-103 D6.7)"
+                    );
+                }
+                Ok(SseAction::Ignore)
+            }
+        }
+    }
+}
+
+/// Per-stream counters for the single summary log line (no per-chunk noise).
+#[derive(Default)]
+struct SseCounters {
+    payloads: u64,
+    content_chars: u64,
+    reasoning_chars: u64,
+    tool_calls: u64,
+}
+
+/// Feed one raw SSE line to the state machine.
+///
+/// Returns `false` when the driver must stop reading: terminal event
+/// emitted, mid-stream decode failure emitted, or the consumer hung up.
+async fn dispatch_sse_line(
+    tx: &mpsc::Sender<Option<StreamEvent>>,
+    state: &mut SseState,
+    counters: &mut SseCounters,
+    line: &str,
+) -> bool {
+    let line = line.trim_end_matches(['\r', '\n']);
+    // `event:` lines are optional and NOT authoritative (D6.2); comments,
+    // `id:` and `retry:` carry nothing v1 needs.
+    let Some(payload) = line.strip_prefix("data:") else {
+        return true;
+    };
+    let payload = payload.trim();
+    if payload.is_empty() {
+        return true;
+    }
+    if payload == "[DONE]" {
+        // Accepted, never required (D6.1). Termination is decided by the
+        // terminal event or by the EOF truncation check.
+        tracing::debug!(
+            "Responses SSE [DONE] marker ignored -- termination is terminal-event driven"
+        );
+        return true;
+    }
+
+    counters.payloads += 1;
+    match state.on_data(payload) {
+        Ok(SseAction::Ignore) => true,
+        Ok(SseAction::Emit(events)) => {
+            for event in events {
+                match &event {
+                    StreamEvent::Content(text) => {
+                        counters.content_chars += text.chars().count() as u64;
+                    }
+                    StreamEvent::ReasoningContent(text) => {
+                        counters.reasoning_chars += text.chars().count() as u64;
+                    }
+                    StreamEvent::ToolCallStart(_) => counters.tool_calls += 1,
+                    _ => {}
+                }
+                if tx.send(Some(event)).await.is_err() {
+                    return false; // consumer dropped
+                }
+            }
+            true
+        }
+        Ok(SseAction::Finish(events)) => {
+            for event in events {
+                let _ = tx.send(Some(event)).await;
+            }
+            let _ = tx.send(None).await;
+            tracing::debug!(
+                payloads = counters.payloads,
+                content_chars = counters.content_chars,
+                reasoning_chars = counters.reasoning_chars,
+                tool_calls = counters.tool_calls,
+                "Responses SSE stream closed by terminal event"
+            );
+            false
+        }
+        Err(err) => {
+            let _ = tx.send(Some(StreamEvent::Error(err))).await;
+            let _ = tx.send(None).await;
+            false
+        }
+    }
+}
+
+/// `mpsc::Receiver<Option<StreamEvent>>` -> `Stream`. `None` terminates.
+struct ChannelStream {
+    rx: mpsc::Receiver<Option<StreamEvent>>,
+}
+
+impl Stream for ChannelStream {
+    type Item = StreamEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.rx.poll_recv(cx) {
+            Poll::Ready(Some(Some(event))) => Poll::Ready(Some(event)),
+            Poll::Ready(Some(None)) | Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl ResponsesProvider {
+    /// Bridge a `text/event-stream` body into `StreamEvent`s.
+    ///
+    /// I/O shell only: line buffering, per-chunk read timeout, and the
+    /// terminal / truncation decision. All protocol semantics live in
+    /// [`SseState`], so they are testable without a socket.
+    fn sse_to_stream(
+        response: reqwest::Response,
+        stream_read_timeout: Duration,
+    ) -> Box<dyn Stream<Item = StreamEvent> + Send> {
+        let (tx, rx) = mpsc::channel(32);
+        tokio::spawn(async move {
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut state = SseState::new();
+            let mut counters = SseCounters::default();
+
+            loop {
+                let chunk = match tokio::time::timeout(stream_read_timeout, stream.next()).await {
+                    Ok(Some(Ok(chunk))) => chunk,
+                    Ok(Some(Err(e))) => {
+                        let err = acowork_core::providers::classify_stream_error(&format!(
+                            "Responses SSE transport error: {e}"
+                        ));
+                        let _ = tx.send(Some(StreamEvent::Error(err))).await;
+                        return; // MUST NOT emit Finished
+                    }
+                    Ok(None) => break, // EOF -- the terminal check below decides
+                    Err(_) => {
+                        tracing::warn!(
+                            timeout_secs = stream_read_timeout.as_secs(),
+                            "Responses SSE silence: no data within the read timeout"
+                        );
+                        let _ = tx
+                            .send(Some(StreamEvent::Error(StreamError::stream_timeout(
+                                stream_read_timeout.as_secs(),
+                            ))))
+                            .await;
+                        return;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(pos) = buffer.find('\n') {
+                    let line: String = buffer.drain(..=pos).collect();
+                    if !dispatch_sse_line(&tx, &mut state, &mut counters, &line).await {
+                        return;
+                    }
+                }
+            }
+
+            // EOF with a trailing line that had no newline terminator.
+            if !buffer.is_empty() {
+                let tail = std::mem::take(&mut buffer);
+                if !dispatch_sse_line(&tx, &mut state, &mut counters, &tail).await {
+                    return;
+                }
+            }
+
+            if !state.terminated {
+                // D6.1: no terminal event => truncated. `[DONE]` is not a
+                // terminator, so a stream that only sent `[DONE]` lands here.
+                tracing::warn!(
+                    payloads = counters.payloads,
+                    content_chars = counters.content_chars,
+                    reasoning_chars = counters.reasoning_chars,
+                    tool_calls = counters.tool_calls,
+                    "Responses SSE ended without a terminal event -- reporting a truncated stream"
+                );
+                let _ = tx
+                    .send(Some(StreamEvent::Error(StreamError {
+                        message: format!(
+                            "Responses SSE stream ended without a terminal event ({} content chars, {} tool calls already received); the answer is incomplete",
+                            counters.content_chars, counters.tool_calls
+                        ),
+                        error_type: ProviderErrorType::StreamDecodeError,
+                        // Partial output already reached the loop -- retrying
+                        // would duplicate it (D8 TruncatedStream: no retry).
+                        retryable: false,
+                        status_code: None,
+                    })))
+                    .await;
+            }
+        });
+
+        Box::new(ChannelStream { rx })
+    }
+}
+
 // ── Provider trait ────────────────────────────────────────────────────
 
 #[async_trait]
@@ -639,11 +1117,50 @@ impl Provider for ResponsesProvider {
 
     async fn chat_stream(
         &self,
-        _request: ChatRequest,
-    ) -> acowork_core::error::Result<
-        Box<dyn futures_core::Stream<Item = StreamEvent> + Send>,
-    > {
-        Err(self.streaming_not_implemented())
+        request: ChatRequest,
+    ) -> acowork_core::error::Result<Box<dyn Stream<Item = StreamEvent> + Send>> {
+        let mut native = map_request(&request).map_err(acowork_core::AcoworkError::Provider)?;
+        native.stream = true;
+
+        tracing::debug!(
+            url = %format!("{}/responses", self.base_url),
+            model = %native.model,
+            input_items = native.input.len(),
+            has_tools = native.tools.is_some(),
+            "Responses chat_stream request mapped (ADR-103 D5/D6)"
+        );
+
+        let url = format!("{}/responses", self.base_url);
+        let mut req_builder = self.http_client.post(&url);
+        if let Some(ref api_key) = self.api_key {
+            req_builder = req_builder.bearer_auth(api_key);
+        }
+        let response = req_builder
+            .header("Accept", "text/event-stream")
+            .json(&native)
+            .send()
+            .await
+            .map_err(|e| {
+                acowork_core::AcoworkError::Provider(ProviderError::network(format!(
+                    "Responses API streaming request failed: {e}"
+                )))
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let headers = response.headers().clone();
+            let body = response.text().await.unwrap_or_default();
+            // Same shared classification family as the non-streaming path;
+            // Responses-specific refinement stays S4 (D8).
+            let err = crate::providers::from_http_parts(
+                status.as_u16(),
+                format!("Responses API stream error: {status} - {body}"),
+                &headers,
+            );
+            return Err(acowork_core::AcoworkError::Provider(err));
+        }
+
+        Ok(Self::sse_to_stream(response, self.stream_read_timeout))
     }
 
     async fn chat_token_count(&self, messages: &[ChatMessage]) -> acowork_core::error::Result<u64> {
@@ -684,20 +1201,6 @@ mod tests {
     #[test]
     fn name_is_stable_identifier() {
         assert_eq!(provider("https://x.invalid/v1").name(), "openai-responses");
-    }
-
-    #[tokio::test]
-    async fn stream_endpoint_fails_visibly_until_s3() {
-        // The S1 routing chain still ends here for streaming: a mis-routed
-        // session must NOT silently fall back to /chat/completions.
-        let p = provider("https://x.invalid/v1");
-        let err = p
-            .chat_stream(req(vec![ChatMessage::user("hi")]))
-            .await
-            .err()
-            .expect("streaming is an S3 stub");
-        let msg = format!("{err:?}");
-        assert!(msg.contains("S3"), "error text must name the pending slice: {msg}");
     }
 
     // ── D5 request mapping ────────────────────────────────────────────
@@ -1125,5 +1628,438 @@ mod tests {
             .expect_err("empty input must error");
         assert!(format!("{err:?}").contains("empty `input`"));
         m.assert();
+    }
+
+// ── D6 streaming SSE (ADR-103 hard requirements 1–7) ──────────────
+
+    fn sse_frame(payload: serde_json::Value) -> String {
+        format!("data: {payload}\n\n")
+    }
+
+    /// Flatten a state-machine action into the events downstream would see.
+    fn emitted(action: SseAction) -> Vec<StreamEvent> {
+        match action {
+            SseAction::Emit(events) | SseAction::Finish(events) => events,
+            SseAction::Ignore => Vec::new(),
+        }
+    }
+
+    fn feed(state: &mut SseState, payload: serde_json::Value) -> Vec<StreamEvent> {
+        emitted(
+            state
+                .on_data(&payload.to_string())
+                .expect("payload decodes"),
+        )
+    }
+
+    fn content_of(events: &[StreamEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Content(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn drain(stream: Box<dyn Stream<Item = StreamEvent> + Send>) -> Vec<StreamEvent> {
+        // `Pin<Box<..>>` is `Unpin`, so `next()` is available without a
+        // projection macro.
+        let mut stream: Pin<Box<dyn Stream<Item = StreamEvent> + Send>> = Box::into_pin(stream);
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+        events
+    }
+
+    /// Run a full `chat_stream` round-trip against a fake SSE server.
+    async fn stream_against(body: String) -> Vec<StreamEvent> {
+        use mockito::Server;
+        let mut server = Server::new_async().await;
+        let _m = server
+            .mock("POST", "/responses")
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
+            .create_async()
+            .await;
+        let provider = provider(server.url().as_str());
+        let stream = provider
+            .chat_stream(chat_request_with(vec![ChatMessage::user("hi")]))
+            .await
+            .expect("stream must open");
+        drain(stream).await
+    }
+
+    /// D6.1 — the terminal event alone ends the stream.
+    #[tokio::test]
+    async fn completed_event_ends_the_stream_without_a_done_marker() {
+        let body = format!(
+            "{}{}{}",
+            sse_frame(serde_json::json!({"type":"response.output_text.delta","delta":"he"})),
+            sse_frame(serde_json::json!({"type":"response.output_text.delta","delta":"llo"})),
+            sse_frame(serde_json::json!({
+                "type":"response.completed",
+                "response":{"status":"completed","output":[],
+                            "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}
+            })),
+        );
+        assert!(!body.contains("[DONE]"), "the fixture must not rely on [DONE]");
+
+        let events = stream_against(body).await;
+        assert_eq!(content_of(&events), "hello");
+        match events.last().expect("non-empty stream") {
+            StreamEvent::Finished(response) => {
+                assert_eq!(response.finish_reason.as_deref(), Some("stop"));
+                assert_eq!(response.usage.as_ref().expect("usage mapped").total_tokens, 15);
+            }
+            other => panic!("terminal event must yield Finished, got {other:?}"),
+        }
+        assert!(
+            !events.iter().any(|e| matches!(e, StreamEvent::Error(_))),
+            "a completed stream carries no error"
+        );
+    }
+
+    /// D6.1 — EOF with no terminal event is a truncation, never a Finish.
+    #[tokio::test]
+    async fn eof_without_terminal_event_is_truncation_never_finish() {
+        let events = stream_against(sse_frame(
+            serde_json::json!({"type":"response.output_text.delta","delta":"partial"}),
+        ))
+        .await;
+
+        assert_eq!(content_of(&events), "partial");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Finished(_))),
+            "no terminal event means no Finished: {events:?}"
+        );
+        match events.last().expect("non-empty stream") {
+            StreamEvent::Error(err) => {
+                assert!(
+                    !err.retryable,
+                    "a truncated stream is never retried blindly (output already reached the loop)"
+                );
+                assert!(
+                    err.message.contains("without a terminal event"),
+                    "{}",
+                    err.message
+                );
+            }
+            other => panic!("expected a truncation Error, got {other:?}"),
+        }
+    }
+
+    /// D6.1 — `[DONE]` is accepted but is not a terminator.
+    #[tokio::test]
+    async fn done_marker_alone_does_not_terminate_the_stream() {
+        let body = format!(
+            "{}data: [DONE]\n\n",
+            sse_frame(serde_json::json!({"type":"response.output_text.delta","delta":"x"}))
+        );
+        let events = stream_against(body).await;
+        assert_eq!(content_of(&events), "x");
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::Finished(_))));
+        assert!(matches!(events.last(), Some(StreamEvent::Error(_))));
+    }
+
+    /// D6.2 — the event type is read from the JSON payload, not `event:`.
+    #[tokio::test]
+    async fn event_type_comes_from_the_payload_not_the_event_line() {
+        let body = concat!(
+            "event: response.output_text.done\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"live\"}\n\n",
+            "event: response.failed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+        )
+        .to_string();
+
+        let events = stream_against(body).await;
+        assert_eq!(content_of(&events), "live");
+        assert!(
+            matches!(events.last(), Some(StreamEvent::Finished(_))),
+            "the payload type wins over a misleading `event:` line: {events:?}"
+        );
+    }
+
+    /// D6.3 — both reasoning aliases emit reasoning, neither is a fallback.
+    #[test]
+    fn both_reasoning_aliases_emit_reasoning_content() {
+        let mut state = SseState::new();
+        let native = feed(
+            &mut state,
+            serde_json::json!({"type":"response.reasoning_text.delta","delta":"native"}),
+        );
+        let summary = feed(
+            &mut state,
+            serde_json::json!({"type":"response.reasoning_summary_text.delta","delta":"summary"}),
+        );
+
+        match (native.as_slice(), summary.as_slice()) {
+            (
+                [StreamEvent::ReasoningContent(native_text)],
+                [StreamEvent::ReasoningContent(summary_text)],
+            ) => {
+                assert_eq!(native_text, "native");
+                assert_eq!(summary_text, "summary");
+            }
+            other => panic!("expected two ReasoningContent events, got {other:?}"),
+        }
+    }
+
+    /// D6.4 — identity comes from `output_item.added`; chunks map by
+    /// `output_index`, not by arrival order.
+    #[test]
+    fn tool_call_identity_comes_from_output_item_added() {
+        let mut state = SseState::new();
+        let first = feed(
+            &mut state,
+            serde_json::json!({"type":"response.output_item.added","output_index":0,
+                "item":{"type":"function_call","call_id":"call_a","name":"read_file"}}),
+        );
+        let second = feed(
+            &mut state,
+            serde_json::json!({"type":"response.output_item.added","output_index":1,
+                "item":{"type":"function_call","call_id":"call_b","name":"write_file"}}),
+        );
+
+        match (first.as_slice(), second.as_slice()) {
+            ([StreamEvent::ToolCallStart(a)], [StreamEvent::ToolCallStart(b)]) => {
+                assert_eq!((a.id.as_str(), a.function.name.as_str()), ("call_a", "read_file"));
+                assert!(
+                    a.function.arguments.is_empty(),
+                    "arguments never arrive on the added item"
+                );
+                assert_eq!((b.id.as_str(), b.function.name.as_str()), ("call_b", "write_file"));
+            }
+            other => panic!("expected two ToolCallStart events, got {other:?}"),
+        }
+
+        // Chunks arrive out of order relative to the item order.
+        let chunk_b = feed(
+            &mut state,
+            serde_json::json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":"{}"}),
+        );
+        let chunk_a = feed(
+            &mut state,
+            serde_json::json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}),
+        );
+        assert!(matches!(
+            chunk_b.as_slice(),
+            [StreamEvent::ToolCallChunk { index: 1, .. }]
+        ));
+        assert!(matches!(
+            chunk_a.as_slice(),
+            [StreamEvent::ToolCallChunk { index: 0, .. }]
+        ));
+
+        // `output_item.done` restates the arguments — validation only.
+        let done = feed(
+            &mut state,
+            serde_json::json!({"type":"response.output_item.done","output_index":0,
+                "item":{"type":"function_call","call_id":"call_a","name":"read_file","arguments":"{}"}}),
+        );
+        assert!(
+            done.is_empty(),
+            "output_item.done must never re-emit: {done:?}"
+        );
+
+        let terminal = feed(
+            &mut state,
+            serde_json::json!({"type":"response.completed","response":{}}),
+        );
+        assert!(matches!(
+            terminal.as_slice(),
+            [StreamEvent::Finished(r)] if r.finish_reason.as_deref() == Some("tool_calls")
+        ));
+    }
+
+    /// D6.5 — usage is authoritative only on the terminal event.
+    #[test]
+    fn usage_is_only_authoritative_on_the_terminal_event() {
+        let mut state = SseState::new();
+        feed(
+            &mut state,
+            serde_json::json!({"type":"response.output_text.delta","delta":"x",
+                "usage":{"input_tokens":1,"output_tokens":2}}),
+        );
+        assert!(
+            state.usage.is_none(),
+            "per-event usage fragments are ignored"
+        );
+
+        let terminal = feed(
+            &mut state,
+            serde_json::json!({"type":"response.completed","response":{"usage":{
+                "prompt_tokens":7,"completion_tokens":3,"total_tokens":10,
+                "prompt_tokens_details":{"cached_tokens":4},
+                "output_tokens_details":{"reasoning_tokens":2}}}}),
+        );
+        match terminal.as_slice() {
+            [StreamEvent::Finished(response)] => {
+                let usage = response.usage.as_ref().expect("usage mapped");
+                assert_eq!(usage.prompt_tokens, 7);
+                assert_eq!(usage.completion_tokens, 3);
+                assert_eq!(usage.total_tokens, 10);
+                assert_eq!(usage.cache_read_tokens, 4);
+                assert_eq!(usage.reasoning_tokens, 2);
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    /// D6.6 — `sequence_number` never reorders and never de-duplicates.
+    #[test]
+    fn sequence_number_is_ignored_for_ordering_and_dedup() {
+        let mut state = SseState::new();
+        let mut events = Vec::new();
+        for (sequence_number, delta) in [(5u64, "a"), (3, "b"), (5, "c")] {
+            events.extend(feed(
+                &mut state,
+                serde_json::json!({"type":"response.output_text.delta",
+                    "sequence_number":sequence_number,"delta":delta}),
+            ));
+        }
+        assert_eq!(
+            content_of(&events),
+            "abc",
+            "arrival order is preserved and a repeated sequence_number is not a duplicate"
+        );
+    }
+
+    /// D6.7 — validation-only / known-noise events never re-emit text.
+    #[test]
+    fn validation_only_and_noise_events_never_reemit_text() {
+        let mut state = SseState::new();
+        for payload in [
+            serde_json::json!({"type":"response.output_text.done","text":"hello"}),
+            serde_json::json!({"type":"response.content_part.done",
+                "part":{"type":"output_text","text":"hello"}}),
+            serde_json::json!({"type":"response.reasoning_text.done","text":"hm"}),
+            serde_json::json!({"type":"response.output_item.done","item":{"type":"message"}}),
+            serde_json::json!({"type":"response.created","response":{}}),
+            serde_json::json!({"type":"response.file_search_call.searching"}),
+        ] {
+            assert!(
+                feed(&mut state, payload.clone()).is_empty(),
+                "event must be silent: {payload}"
+            );
+        }
+    }
+
+    /// D6.7 — unknown types are warned about once and never fail the stream.
+    #[test]
+    fn unknown_event_types_warn_once_and_never_fail() {
+        let mut state = SseState::new();
+        assert!(feed(&mut state, serde_json::json!({"type":"response.brand_new"})).is_empty());
+        assert!(state.warned_unknown, "the first unknown type is warned about");
+        assert!(
+            feed(&mut state, serde_json::json!({"type":"response.another_new"})).is_empty(),
+            "a second unknown type is still ignored, not an error"
+        );
+    }
+
+    #[test]
+    fn failed_event_is_a_terminal_error_not_a_finish() {
+        let mut state = SseState::new();
+        let action = state
+            .on_data(
+                &serde_json::json!({"type":"response.failed","response":{"error":
+                    {"code":"server_error","message":"upstream exploded"}}})
+                .to_string(),
+            )
+            .expect("payload decodes");
+
+        match emitted(action).as_slice() {
+            [StreamEvent::Error(err)] => {
+                assert_eq!(err.message, "upstream exploded");
+                assert!(
+                    !err.retryable,
+                    "an in-band failure after deltas is never retried blindly"
+                );
+            }
+            other => panic!("expected a single Error, got {other:?}"),
+        }
+        assert!(state.terminated);
+    }
+
+    #[test]
+    fn incomplete_max_output_tokens_surfaces_as_visible_length() {
+        let mut state = SseState::new();
+        let events = feed(
+            &mut state,
+            serde_json::json!({"type":"response.incomplete","response":{
+                "status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
+                "usage":{"input_tokens":3,"output_tokens":64,"total_tokens":67}}}),
+        );
+        match events.as_slice() {
+            [StreamEvent::Finished(response)] => {
+                assert_eq!(
+                    response.finish_reason.as_deref(),
+                    Some("length"),
+                    "truncation must be visible, never a silently empty answer"
+                );
+                assert_eq!(response.usage.as_ref().expect("usage").total_tokens, 67);
+            }
+            other => panic!("expected Finished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn incomplete_content_filter_is_visible_in_the_stream_finish() {
+        let mut state = SseState::new();
+        let events = feed(
+            &mut state,
+            serde_json::json!({"type":"response.incomplete","response":{
+                "incomplete_details":{"reason":"content_filter"}}}),
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::Finished(r)] if r.finish_reason.as_deref() == Some("content_filter")
+        ));
+    }
+
+    #[test]
+    fn malformed_payload_is_a_decode_error() {
+        let mut state = SseState::new();
+        let err = state
+            .on_data("{not json")
+            .expect_err("a malformed payload must not be silently dropped");
+        assert!(matches!(err.error_type, ProviderErrorType::StreamDecodeError));
+    }
+
+    /// The streaming request must carry `stream: true`.
+    #[tokio::test]
+    async fn chat_stream_requests_the_streaming_wire_form() {
+        use mockito::Server;
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/responses")
+            .match_body(mockito::Matcher::Regex("\"stream\":true".to_string()))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_frame(
+                serde_json::json!({"type":"response.completed","response":{}}),
+            ))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let provider = provider(server.url().as_str());
+        let events = drain(
+            provider
+                .chat_stream(chat_request_with(vec![ChatMessage::user("hi")]))
+                .await
+                .expect("stream opens"),
+        )
+        .await;
+
+        assert!(matches!(events.last(), Some(StreamEvent::Finished(_))));
+        mock.assert();
     }
 }
