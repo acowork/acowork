@@ -71,6 +71,12 @@ Rules:
 
 One human-surface component (`GroupChatPanel` + the kind-dispatched member panel) covers the `user_user` / `user_group` / `project_group` kinds, with all differences driven only by `kind`.
 
+### D7 — a `project_group`'s `owner` is the PM project's owner (pushed by PM)
+
+A `project_group` used to have no user-service owner, so only a platform admin could edit its `chat.md` (ADR-099). PM now pushes `Project::owner()` (`owner_id ?? created_by`) alongside the roster on every `ensure` / `sync_group`, and the session row caches it — the same shape as `title` / `participants` / `repo`: the upstream service owns the relation, the chat row caches the fact. The project owner therefore governs their channel's prompt exactly as they govern the project, and an ownership transfer reaches the chat domain on the same call (even when the outgoing owner stays on the roster).
+
+Membership stays PM-mediated and read-only on the user surface (the table above is unchanged). `title` converges from PM for the same reason: a user-side rename of a `project_group` is refused, so PM's title is its only source.
+
 ## Consequences
 
 - **Storage / component convergence**: three human surfaces collapse to one plus kind dispatch; search / attachments / unread are written once and shared across all kinds.

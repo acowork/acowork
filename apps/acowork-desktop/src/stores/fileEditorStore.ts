@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
+import { useAuthStore } from "./authStore";
 import { DEFAULT_GATEWAY_URL } from "../lib/config";
 import { log } from "../lib/logger";
 import type { GitCommitDto } from "./gitStore";
@@ -230,6 +231,11 @@ interface FileEditorState {
     openPreview: (agentId: string, workspaceId: string, relPath: string) => Promise<void>;
     /** Open a file with pre-loaded content (skips Gateway fetch). Used by LSP cross-file navigation. */
     openFileWithContent: (agentId: string, workspaceId: string, relPath: string, content: string, language: string) => void;
+    /** Open a group's `chat.md` (the editable body only — the non-trimmable
+     *  `# Safety` tail is not shown, the server re-appends it on save) as a
+     *  Monaco tab. The session id scopes the tab; Save routes back through the
+     *  chat-prompt endpoint (`saveFile` detects the sentinel workspace). */
+    openGroupChatMd: (sessionId: string, content: string) => void;
     /** Open a read-only virtual tab for an inbox chat attachment (ADR-076).
      *  Content is supplied by the caller (already fetched from the chat
      *  blob route) — no workspace, no Gateway file fetch, never dirty,
@@ -362,6 +368,39 @@ function isShellRiskRulesFile(workspaceId: string, relPath: string): boolean {
 }
 function buildShellRiskRulesUrl(agentId: string): string {
     return `${getGatewayUrl()}/api/agents/${agentId}/shell-risk-rules`;
+}
+
+/**
+ * A group's `chat.md` is a second non-workspace Monaco-editable file, opened
+ * by the group settings panel via `openFileWithContent` under a sentinel
+ * workspace with the session id encoded in the relPath
+ * (`chat-sessions/{sessionId}/chat.md`). Like the shell risk rules it is NOT
+ * under any workspace, so the generic `/workspaces/file` endpoint can neither
+ * read nor write it — the chat-prompt route owns it instead:
+ * `/api/chat-sessions/{sessionId}/chat-md`.
+ *
+ * Two differences from the workspace save path, both handled in `saveFile`:
+ *   - the user-service route authenticates from the bearer token the Gateway
+ *     forwards, so the save MUST attach `Authorization` (workspace saves do
+ *     not — they ride the Gateway's localhost-trusted agent surface);
+ *   - the stored body always carries the non-trimmable `# Safety` tail the
+ *     server re-appends, but the GET/PUT response hides it, so the tab holds
+ *     the editable body only and saving it is round-trip stable.
+ */
+const GROUP_CHAT_MD_WORKSPACE = "__chat_group__";
+const GROUP_CHAT_MD_PREFIX = "chat-sessions/";
+function isGroupChatMd(workspaceId: string): boolean {
+    return workspaceId === GROUP_CHAT_MD_WORKSPACE;
+}
+/** Extract the `{sessionId}` from a `chat-sessions/{sessionId}/chat.md` path. */
+function groupChatMdSessionId(relPath: string): string | null {
+    if (!relPath.startsWith(GROUP_CHAT_MD_PREFIX)) return null;
+    const rest = relPath.slice(GROUP_CHAT_MD_PREFIX.length);
+    const slash = rest.indexOf("/");
+    return slash > 0 ? rest.slice(0, slash) : null;
+}
+function buildGroupChatMdUrl(sessionId: string): string {
+    return `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(sessionId)}/chat-md`;
 }
 
 function detectLanguage(fileName: string): string {
@@ -558,6 +597,18 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             openFiles: [...state.openFiles, newFile],
             activeFileId: fileId,
         }));
+    },
+
+    openGroupChatMd: (sessionId: string, content: string) => {
+        // The agentId slot carries the session id so two groups never share a
+        // tab key; the workspace + relPath are what `saveFile` matches on.
+        get().openFileWithContent(
+            sessionId,
+            GROUP_CHAT_MD_WORKSPACE,
+            `${GROUP_CHAT_MD_PREFIX}${sessionId}/chat.md`,
+            content,
+            "markdown",
+        );
     },
 
     openAttachmentPreview: ({ userId, chatId, attachmentId, fileName, content, language }) => {
@@ -785,15 +836,41 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         }));
 
         try {
-            // Route shell-risk-rules to the dedicated endpoint (the file
-            // is not under any workspace, so /workspaces/file can't write it).
+            // Route by file identity. A group `chat.md` and the shell risk
+            // rules file both live outside any workspace, so neither can go
+            // through the generic `/workspaces/file` write.
+            const chatMdSession = isGroupChatMd(file.workspaceId)
+                ? groupChatMdSessionId(file.relPath)
+                : null;
+            if (isGroupChatMd(file.workspaceId) && !chatMdSession) {
+                // Sentinel workspace but a path we cannot parse — bail rather
+                // than PUT to a wrong session.
+                set((state) => ({
+                    openFiles: state.openFiles.map((f) =>
+                        f.id === fileId
+                            ? { ...f, saving: false, saveError: "malformed group chat.md path" }
+                            : f,
+                    ),
+                }));
+                return;
+            }
             const isRiskRules = isShellRiskRulesFile(file.workspaceId, file.relPath);
-            const url = isRiskRules
-                ? buildShellRiskRulesUrl(file.agentId)
-                : buildFileUrl(file.agentId, file.workspaceId, file.relPath);
+            const url = chatMdSession
+                ? buildGroupChatMdUrl(chatMdSession)
+                : isRiskRules
+                    ? buildShellRiskRulesUrl(file.agentId)
+                    : buildFileUrl(file.agentId, file.workspaceId, file.relPath);
+            // The user-service chat-prompt route authenticates from the bearer
+            // the Gateway forwards; workspace / agent saves ride the trusted
+            // localhost surface and carry no token.
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (chatMdSession) {
+                const token = useAuthStore.getState().accessToken;
+                if (token) headers.Authorization = `Bearer ${token}`;
+            }
             const resp = await fetch(url, {
                 method: "PUT",
-                headers: { "Content-Type": "application/json" },
+                headers,
                 body: JSON.stringify({ content: file.content }),
             });
             if (!resp.ok) {
@@ -850,6 +927,10 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         if (!file) return;
         // Only workspace files have a Gateway file endpoint to refresh against.
         if (file.kind !== "file") return;
+        // A group `chat.md` has no workspace fs source; the settings panel owns
+        // its freshness (a fresh GET on each open), so a disk refresh is a
+        // no-op here rather than a 404 against `/workspaces/file`.
+        if (isGroupChatMd(file.workspaceId)) return;
         // Skip if a load is already running (avoids interleaved responses
         // clobbering the in-flight state).
         if (file.loading) return;

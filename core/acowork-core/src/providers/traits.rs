@@ -354,9 +354,11 @@ pub enum MessageRole {
 /// Content part for multimodal messages.
 ///
 /// When a message contains only text, the `content` field (String) is used for
-/// backward compatibility. When a message contains multimodal parts (e.g. text
-/// and image), `content_parts` is populated and provider serialization layers
-/// should prefer it over the plain `content` field.
+/// backward compatibility. `content_parts` carries the *non-text* payloads: a
+/// caller that derives images server-side (the chat path since ADR-046) puts
+/// only images in it and leaves the user's own words in `content`. Providers
+/// must therefore serialise BOTH — see [`ChatMessage::message_content`], which
+/// owns that rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentPart {
@@ -384,6 +386,38 @@ pub struct ImageUrlPart {
     /// When absent, a default of 512 is used for estimation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+}
+
+/// `(media_type, base64_payload)` for a `data:` URI, `None` for anything else
+/// (a remote `https://` URL has no inlinable bytes).
+///
+/// This is the reading every provider needs before it can put an image on the
+/// wire: Anthropic wants media type and payload as separate fields, Ollama
+/// wants the bare payload in its `images[]` array. Free function rather than a
+/// method so callers holding a `&str` keep their lifetime.
+pub fn parse_data_uri(uri: &str) -> Option<(&str, &str)> {
+    let rest = uri.strip_prefix("data:")?;
+    let semi = rest.find(';')?;
+    let media_type = &rest[..semi];
+    let after_semi = &rest[semi + 1..];
+    let comma = after_semi.find(',')?;
+    if !after_semi[..comma].contains("base64") {
+        return None;
+    }
+    Some((media_type, &after_semi[comma + 1..]))
+}
+
+impl ImageUrlPart {
+    /// See [`parse_data_uri`].
+    pub fn data_uri_parts(&self) -> Option<(&str, &str)> {
+        parse_data_uri(&self.url)
+    }
+
+    /// The base64 payload alone, or `None` when the URL is not a base64 data
+    /// URI.
+    pub fn base64_payload(&self) -> Option<&str> {
+        self.data_uri_parts().map(|(_, data)| data)
+    }
 }
 
 impl ContentPart {
@@ -437,13 +471,31 @@ pub enum CacheControl {
     Persistent,
 }
 
+/// A provider's view of one message's content: either a plain string, or a
+/// part list that may need the message's own text prepended to it.
+///
+/// Produced by [`ChatMessage::message_content`]; see there for why text and
+/// parts are not alternatives.
+#[derive(Debug, Clone, Copy)]
+pub enum MessageContent<'a> {
+    /// No multimodal payload — serialise the string.
+    Text(&'a str),
+    /// Parts present — `leading_text` is the message's `content` when the list
+    /// does not already carry a text block.
+    Parts {
+        leading_text: Option<&'a str>,
+        parts: &'a [ContentPart],
+    },
+}
+
 /// Chat message in conversation
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
     #[serde(default)]
     pub role: MessageRole,
-    /// Plain text content — used when the message has no multimodal parts.
-    /// Providers should prefer `content_parts` over `content` when both are present.
+    /// The message's text. Serialised on its own when there are no
+    /// `content_parts`, and as a leading text block when there are — see
+    /// [`ChatMessage::message_content`].
     #[serde(default)]
     pub content: String,
     /// Multimodal content parts — when present, providers should serialize
@@ -484,6 +536,40 @@ impl ChatMessage {
             content: text_content.into(),
             content_parts: Some(parts),
             ..Default::default()
+        }
+    }
+
+    /// What to put on the wire for this message's content.
+    ///
+    /// The rule lives here rather than in each provider because the two
+    /// representations are easy to get wrong independently: `content_parts`
+    /// holds the non-text payloads, and the text of the message is in
+    /// `content`. Serialising only the parts — which is what a
+    /// "prefer `content_parts` over `content`" reading gives you — drops the
+    /// user's words on every image turn, which is exactly the bug this
+    /// accessor closes.
+    ///
+    /// Borrowed, not cloned: a part carries base64 image data, so building a
+    /// merged `Vec` per request would copy the payload for no reason.
+    pub fn message_content(&self) -> MessageContent<'_> {
+        match self.content_parts.as_deref() {
+            None => MessageContent::Text(&self.content),
+            Some(parts) => {
+                // A caller that supplied its own text part owns its position:
+                // caption-before-image is deliberate for some vision models.
+                let has_text = parts
+                    .iter()
+                    .any(|p| matches!(p, ContentPart::Text { .. }));
+                let leading_text = if has_text || self.content.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.content.as_str())
+                };
+                MessageContent::Parts {
+                    leading_text,
+                    parts,
+                }
+            }
         }
     }
 
@@ -750,6 +836,102 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_data_uri_splits_media_type_from_payload() {
+        assert_eq!(
+            parse_data_uri("data:image/png;base64,iVBORw0KGgo="),
+            Some(("image/png", "iVBORw0KGgo="))
+        );
+    }
+
+    /// A remote URL has no bytes to inline, and pretending otherwise would put
+    /// the URL string into a base64 field.
+    #[test]
+    fn parse_data_uri_rejects_urls_and_non_base64() {
+        assert_eq!(parse_data_uri("https://host/x.png"), None);
+        assert_eq!(parse_data_uri("data:image/png;charset=utf-8,abc"), None);
+        assert_eq!(parse_data_uri("iVBORw0KGgo="), None);
+    }
+
+    #[test]
+    fn image_url_part_exposes_the_bare_payload() {
+        let part = ImageUrlPart {
+            url: "data:image/jpeg;base64,/9j/4AAQ".into(),
+            detail: None,
+            width: None,
+            height: None,
+        };
+        assert_eq!(part.base64_payload(), Some("/9j/4AAQ"));
+    }
+
+    fn image_part() -> ContentPart {
+        ContentPart::ImageUrl {
+            image_url: ImageUrlPart {
+                url: "data:image/png;base64,iVBORw0KGgo=".into(),
+                detail: None,
+                width: None,
+                height: None,
+            },
+        }
+    }
+
+    /// The part list a chat image turn produces carries no text block: the
+    /// images are derived server-side (ADR-046) and the user's words stay in
+    /// `content`. A provider that serialises only the parts drops the message —
+    /// this accessor is the single place that rule is stated.
+    #[test]
+    fn image_only_parts_still_carry_the_message_text() {
+        let msg = ChatMessage::user_multimodal("look at this", vec![image_part()]);
+        match msg.message_content() {
+            MessageContent::Parts { leading_text, parts } => {
+                assert_eq!(leading_text, Some("look at this"));
+                assert_eq!(parts.len(), 1);
+            }
+            other => panic!("expected a part list, got {other:?}"),
+        }
+    }
+
+    /// A caller that built its own text part chose where it goes; the accessor
+    /// must not add a second copy of the message in front of it.
+    #[test]
+    fn a_caller_supplied_text_part_keeps_its_own_position() {
+        let msg = ChatMessage::user_multimodal(
+            "not a second copy",
+            vec![ContentPart::Text {
+                text: "caption first".into(),
+            }, image_part()],
+        );
+        match msg.message_content() {
+            MessageContent::Parts { leading_text, parts } => {
+                assert_eq!(leading_text, None);
+                assert_eq!(parts.len(), 2);
+            }
+            other => panic!("expected a part list, got {other:?}"),
+        }
+    }
+
+    /// An image with no caption must not send an empty text block.
+    #[test]
+    fn blank_text_adds_no_empty_block() {
+        let msg = ChatMessage::user_multimodal("   ", vec![image_part()]);
+        match msg.message_content() {
+            MessageContent::Parts { leading_text, parts } => {
+                assert_eq!(leading_text, None);
+                assert_eq!(parts.len(), 1);
+            }
+            other => panic!("expected a part list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_parts_serialises_as_plain_text() {
+        let msg = ChatMessage::user("hello");
+        assert!(matches!(
+            msg.message_content(),
+            MessageContent::Text("hello")
+        ));
+    }
 
     #[test]
     fn test_provider_error_from_status_429() {

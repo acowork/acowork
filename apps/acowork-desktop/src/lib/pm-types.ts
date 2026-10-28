@@ -206,8 +206,19 @@ export interface CreateTaskInput {
   parent_task_id?: string | null;
   depends_on?: PmDependency[];
   attachment_ids?: string[];
-  /** 开始时间（RFC3339）；缺省 = 任务可执行后下一个扫描 tick 派发 */
+  /** Start time (RFC3339); absent = dispatched on the next scan tick. */
   start_at?: string | null;
+  /**
+   * Assignee (`agent_instance_id` / `user_id`, ADR-073 §决策 11).
+   *
+   * The server has always accepted this on create — see
+   * `CreateTask::assignee` in `core/acowork-pm/src/types.rs`. It was missing
+   * here, which pushed callers into a create-then-PATCH dance that left an
+   * orphan row when the second call failed.
+   */
+  assignee?: string | null;
+  /** Due time (RFC3339). Same story as `assignee`: server-side supported. */
+  due_at?: string | null;
 }
 
 export interface UpdateTaskInput {

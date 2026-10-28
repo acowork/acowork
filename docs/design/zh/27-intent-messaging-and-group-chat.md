@@ -233,7 +233,7 @@ graph TB
 
 26. **PM 派单保持确定性映射。**`conversation_id = task:{project}:{task}` 是任务身份与生命周期边界，不经 router；task 会话创建时绑定项目群聊（`chat_session_id` + Members 可见）从而进入该群候选，`close_intent_context` 记入终态清单并在候选中排除，避免终态任务被"复活"（§5.4.2）。
 
-27. **Chat prompt 与 execute system prompt 分离（v2.2）。**chat prompt = 内置基座（不可覆盖）+ 可选 `prompts/chat.md` 人格段（缺失时回退 manifest 元数据）+ 1:1 / 群聊场景段；不加载 `system.md` / `constraints.md` / 其他 prompts / skills / workspace prompt file / retrieved memory。`chat.md` 纳入 ADR-063 override 清单，因而从 execute prompt 拼接中排除；长度上限 4KB，只替换人格段（设计 29）。
+27. **Chat prompt 与 execute system prompt 分离（v2.2）。**chat prompt = 内置基座 + manifest 人格回退 + 1:1 / 群聊场景段；三者可被 `chat.md` **整段替换**（群聊会话级 `chat-sessions/{id}/chat.md` 优先于包级 `prompts/chat.md`，缺省时用内置默认）。`# Safety` 段是一段不可裁剪的尾块，Runtime 无论如何都会重新追加；群聊的 `chat.md` 仅群主或管理员可写（ADR-098；设计 29 §3.2、ADR-099 D6）。不加载 `system.md` / `constraints.md` / 其他 prompts / skills / workspace prompt file / retrieved memory。包级 `chat.md` 纳入 ADR-063 override 清单，因而从 execute prompt 拼接中排除；长度上限 16KB（设计 29、ADR-099 D6）。
 
 28. **Router 失败降级，可用性不退步（v2.5 修订降级落点）。**超时（默认 8 s）、provider 报错或连续两次非法工具参数时降级；**chat 来源的人类消息降级时新建执行会话**（`chat_dispatch(Target::New)`，绑定同一 chat、映射重指向），不再复用 `routing_key` 映射——降级意味着没有语义判断，映射也不是语义判断，把可能开新话题的消息猜塞进不相关的历史会话比新建更糟；`PassThrough`（PM / agent-agent / response / kill switch 关闭态）的确定性复用不变，那些链路上 `conversation_id` / `msg:` 键就是任务身份（ADR-099 D8 修订）。**不再为降级写 `system_notice(router_fallback)`**（旧行渲染期隐藏），但降级新建与正常派发同样落一条 `turn_routed` 反应行（决策 20）；消息已落库，不因路由失败丢失（§5.7）。降级不是唯一需要约束的失败面：router 链路上的每个 Gateway HTTP 都有界（历史读 `chat_router.timeout_ms`，写回 15 s，附件拉取 60 s），且 router turn 跑在该 chat 的 drain task 上而不是 MQTT 入站循环上，一个挂起的 Gateway 或慢模型只能放慢这一条 chat 的分配，不能停住该 Agent 的接收面（含 `Stop`）。`chat_router.enabled=false` 时不排队，Chat 消息内联走确定性路由（ADR-099 D8）。
 
@@ -486,6 +486,8 @@ Intent 可携带 model / provider / reasoning-effort / 工作目录的目标 Age
 | `GET /chat-sessions/{id}/messages` | acowork-user | Gateway 转发 | 分页读取历史（append-only 快照） |
 | `GET /chat-sessions/{id}/search` | acowork-user | Gateway 转发 | 会话内分类历史查询（文本 / 图片 / 文件，游标分页；ADR-097） |
 | `POST /chat-sessions/{id}/messages` | acowork-user | Runtime / Gateway | **唯一写入口**；分配 `message_id` + `seq` |
+| `GET /chat-sessions/{id}/chat-md` | acowork-user | Gateway 转发 | 读会话级 chat prompt（缺省时按需播种默认；非参与者 404；返回体为剥掉 `# Safety` 尾块后的正文，仅供面板编辑） |
+| `PUT /chat-sessions/{id}/chat-md` | acowork-user | Gateway 转发 | 覆盖会话级 chat prompt（群主 / 管理员；16KB 上限；`# Safety` 尾块由 Runtime 重新追加） |
 | `GET /chat-sessions/default?pair=` | acowork-user | Gateway 转发 | 取某 pair 的默认会话（§5.4.4） |
 | `POST /intent` | acowork-gateway | 前端 / Runtime / PM | Intent 投递入口，仅做通信与资源管理 |
 | `GET /sessions/{sid}` | acowork-runtime | 前端 | 合并 meta + live_state，供 execution 视图的状态展示（§5.5.5） |
@@ -1198,7 +1200,7 @@ v2.0 重排了章节。代码注释中对本设计的 `§` 引用需按此表更
 
 > v2.3 修订（chat 事件日志化，撤销 v2.1 的执行状态卡片）：删除叠在 durable 事件日志上的 live 状态镜像卡片（`ExecSessionStatusCard`）——它与事件日志两块真相永远对不齐（派发后到回复前的可见性空窗、stop 时卡片与仍在跑的 pending 新一轮打架）。chat 回归纯时间点事件日志：早期 pointer 改名 `turn_dispatched`（路由时点，幂等 id `td:{message_id}`）+ `turn_started`（开轮时点，id `ts:{message_id}`）两类并存，终态沿用 `agent_message`；“仍在执行”由新一轮自己的开始行表达，执行过程细节靠“查看执行”跳转进 execution 视图。`interaction_request` 仍为行内决策卡（`InlineInteractionCard`）。1:1、人类群聊 @、PM 任务派发三条链路本就同构（同一 pointer 写入），共用同一渲染器（`ChatNoticeEventRow` + `InlineInteractionCard`），数据侧零新增。两端删除驱动 live 卡片的读时投影。**已在 v2.4 被取代：两类 pointer 行不再写入。**详见新增 ADR（chat 事件日志化）与 §3.4 决策 16–20 / §4.2 / §4.2.2 / §5.5.5 / §6.2 / §6.3 / §6.5。
 
-> v2.2 修订（Chat Router）：每条人类消息（1:1、群聊 @Agent）先经过目标 Agent 的**无状态 Chat Router turn**，工具集只有 `dispatch`，产出回答 / 转交已有执行会话 / 新建；T3 配置冲突轮转删除，T1 降级为 prompt 信号（仅降级路径硬触发），T2 保留且在 router 选定目标后求值；群聊 @ 只决定 agent、不决定执行会话，多话题可并行；PM 派单保持确定性 `task:` 映射，但 task 会话绑定项目群聊并进入候选、终态排除；chat prompt 与 execute system prompt 分离（内置基座 + 可选 `prompts/chat.md` + 场景段）；新增 `dispatch` 不替代 `intent_send` / `chat_history_read` / `ask_user_question`，只按 turn 类型裁剪可见性。详见 ADR-099 与设计 29，逐项见 §2.2 / §3.4 决策 22–28 / §4.1 / §5.1 / §5.4.1 / §5.4.5 / §6.2 / §8.2。
+> v2.2 修订（Chat Router）：每条人类消息（1:1、群聊 @Agent）先经过目标 Agent 的**无状态 Chat Router turn**，工具集只有 `dispatch`，产出回答 / 转交已有执行会话 / 新建；T3 配置冲突轮转删除，T1 降级为 prompt 信号（仅降级路径硬触发），T2 保留且在 router 选定目标后求值；群聊 @ 只决定 agent、不决定执行会话，多话题可并行；PM 派单保持确定性 `task:` 映射，但 task 会话绑定项目群聊并进入候选、终态排除；chat prompt 与 execute system prompt 分离（内置基座 + 可整段覆盖的 `chat.md`，会话级优先于包级 + 场景段）；新增 `dispatch` 不替代 `intent_send` / `chat_history_read` / `ask_user_question`，只按 turn 类型裁剪可见性。详见 ADR-099 与设计 29，逐项见 §2.2 / §3.4 决策 22–28 / §4.1 / §5.1 / §5.4.1 / §5.4.5 / §6.2 / §8.2。
 
 > v2.1 修订（user-agent 单聊微信模型）：每个 (user, agent) 恰好一条 Chat session，作为 Agent 页统一标签栏最左的固定 tab（标题 = Agent 名，不可关闭/删除）；execution session 是同一标签栏里可随意开关的普通 tab，两个表面共存互不销毁，关掉最后一个 exec tab 回落 Chat tab。撤销 v2.0 §5.4.4「点 `+` 新建第二条同 pair 会话」与 §5.5.2「Chat history 按钮」；`pairs.json` 单条语义即正确，原 P1 升级作废；§10.15 鉴权开放问题随入口撤销关闭。ADR-086 决策 8 的多会话并行改由 execution session 层承载。逐项见 §5.4.4 / §6 / §6.1。
 

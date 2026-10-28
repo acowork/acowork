@@ -307,7 +307,7 @@ export function ProfileTab() {
               <UserAvatar
                 size={64}
                 avatarUrl={avatarConfig?.avatar ?? null}
-                builtinAvatarId={avatarConfig?.builtin_avatar ?? null}
+                builtinAvatarId={avatarConfig?.builtin_avatar ?? undefined}
               />
               {/* Pencil badge */}
               <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">

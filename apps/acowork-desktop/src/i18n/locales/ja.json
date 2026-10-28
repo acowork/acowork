@@ -1665,8 +1665,12 @@
       "deleteTaskCascadeDesc": "このタスクを削除しますか？サブタスクも削除されます。",
       "taskNotFound": "タスクが見つかりません",
       "taskDeleted": "タスクを削除しました",
+      "deleteFailed": "削除に失敗しました：{{error}}",
       "save": "保存",
       "taskSaved": "タスクを保存しました",
+      "discardChangesTitle": "保存していない変更を破棄しますか？",
+      "discardChangesDesc": "閉じると今回の変更は保存されません。",
+      "discardChangesConfirm": "破棄",
       "taskSaveFailed": "保存に失敗しました",
       "descriptionPlaceholder": "Markdown 対応...",
       "unassigned": "未割り当て",
@@ -1865,7 +1869,9 @@
     "send": "送信",
     "emptyTurn": "（出力なし）",
     "taskChip": "タスク {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "タスクIDをコピー",
-    "readOnly": "読み取り専用 — このプロジェクトのメンバーではありません。"
+    "readOnly": "読み取り専用 — このプロジェクトのメンバーではありません。",
+    "mentionMenu": "@{{name}}"
   }
 }

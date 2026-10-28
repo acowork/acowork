@@ -23,10 +23,16 @@ pub struct SessionSummary {
     pub provider: Option<String>,
     /// ADR-076 §决策 4: `None` = public (the default).
     pub visibility: Option<SessionVisibility>,
+    /// ADR-076 §决策 4: who initiated this session (an account UUID, or an
+    /// agent instance UUID for agent-initiated work). The execution surface
+    /// shows **this** identity, not the logged-in account's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiator: Option<String>,
     /// ADR-076 §决策 4: may the caller modify this session?
     ///
-    /// Not an ownership flag: admins and `local`-mode callers may write
-    /// sessions they do not own (see `SessionInfo::can_write`).
+    /// Not an ownership flag: a `local`-mode caller may write sessions it
+    /// did not initiate (see `SessionInfo::can_write`). A `false` value means
+    /// the execution view is read-only for this caller.
     pub can_write: bool,
     /// Design 27 §8.2 / ADR-100 D12: the Chat session this execution
     /// session was started from. An execution view's composer sends through

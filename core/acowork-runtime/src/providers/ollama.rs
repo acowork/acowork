@@ -12,8 +12,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use acowork_core::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, FunctionCall, MessageRole, Provider, StreamEvent,
-    ToolCall, UsageInfo,
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, MessageContent, MessageRole,
+    Provider, StreamEvent, ToolCall, UsageInfo,
 };
 
 /// Ollama provider implementation
@@ -85,6 +85,10 @@ struct OllamaOptions {
 struct OllamaMessage {
     role: String,
     content: String,
+    /// Base64 payloads, no `data:` wrapper — the shape Ollama's chat API
+    /// accepts. Absent for text-only messages, so their payloads are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OllamaToolCall>>,
 }
@@ -149,9 +153,46 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<OllamaMessage> {
                 MessageRole::Tool => "tool",
             };
 
+            // Ollama has one string per message plus an `images` array, so the
+            // text is concatenated and the images lifted out. Reading only
+            // `content` — as this did — silently dropped every image the user
+            // attached; reading only the parts would have dropped their words.
+            let mut texts: Vec<&str> = Vec::new();
+            let mut images: Option<Vec<String>> = None;
+            match m.message_content() {
+                MessageContent::Text(text) => texts.push(text),
+                MessageContent::Parts {
+                    leading_text,
+                    parts,
+                } => {
+                    if let Some(text) = leading_text {
+                        texts.push(text);
+                    }
+                    let mut payloads = Vec::new();
+                    for part in parts {
+                        match part {
+                            ContentPart::Text { text } => texts.push(text),
+                            ContentPart::ImageUrl { image_url } => {
+                                match image_url.base64_payload() {
+                                    Some(payload) => payloads.push(payload.to_string()),
+                                    None => tracing::warn!(
+                                        url = %image_url.url,
+                                        "ollama cannot inline a remote image URL, skipping it"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                    if !payloads.is_empty() {
+                        images = Some(payloads);
+                    }
+                }
+            }
             OllamaMessage {
                 role: role.to_string(),
-                content: m.content.clone(),
+                content: texts.join("
+"),
+                images,
                 tool_calls: None, // TODO: convert tool_calls
             }
         })
@@ -288,6 +329,57 @@ impl Stream for OnceStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image(url: &str) -> acowork_core::providers::traits::ContentPart {
+        acowork_core::providers::traits::ContentPart::ImageUrl {
+            image_url: acowork_core::providers::traits::ImageUrlPart {
+                url: url.into(),
+                detail: None,
+                width: None,
+                height: None,
+            },
+        }
+    }
+
+    /// Regression: this provider read `content` alone, so an attached image
+    /// never reached the model. Ollama wants the payload bare in `images[]`.
+    #[test]
+    fn multimodal_message_sends_text_and_bare_base64_images() {
+        let msg = ChatMessage::user_multimodal(
+            "what does this screenshot show?",
+            vec![image("data:image/png;base64,iVBORw0KGgo=")],
+        );
+        let json = serde_json::to_value(convert_messages(&[msg])).unwrap();
+        assert_eq!(json[0]["content"], "what does this screenshot show?");
+        assert_eq!(json[0]["images"][0], "iVBORw0KGgo=");
+        // The wrapper must not survive: Ollama base64-decodes the string.
+        assert!(!json[0]["images"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("data:"));
+    }
+
+    /// A text-only turn must keep the payload it had before images were wired
+    /// up — an empty `images` array is a schema surprise, not a no-op.
+    #[test]
+    fn text_only_message_carries_no_images_key() {
+        let json =
+            serde_json::to_value(convert_messages(&[ChatMessage::user("hello")])).unwrap();
+        assert!(
+            json[0].get("images").is_none(),
+            "no images key expected, got {json}"
+        );
+    }
+
+    /// Ollama's chat API takes base64 only, so a remote URL cannot be inlined
+    /// here. Dropping the image must not drop the message.
+    #[test]
+    fn remote_url_is_skipped_without_losing_the_text() {
+        let msg = ChatMessage::user_multimodal("see the link", vec![image("https://x/y.png")]);
+        let json = serde_json::to_value(convert_messages(&[msg])).unwrap();
+        assert_eq!(json[0]["content"], "see the link");
+        assert!(json[0].get("images").is_none(), "got {json}");
+    }
 
     #[test]
     fn test_ollama_provider_creation() {

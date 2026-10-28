@@ -67,11 +67,17 @@ pub(crate) fn chat_card_id(kind: &str, request_id: &str) -> String {
 impl AgentLoop {
     /// Design 27 §5.5.4 (plan 3.1): drop an `interaction_request` card
     /// into the Chat session that triggered this turn. No-op unless the
-    /// turn's [`crate::agent::intent_turn::TurnSurface`] has a full card
-    /// coordinate (chat + trigger row + a sender who could answer) AND the
-    /// chat is not known to be human-free (`has_human != Some(false)` —
-    /// unknown fails open, the card is harmless if nobody picks it up, the
-    /// row is the durable record of the question).
+    /// turn's [`crate::agent::intent_turn::TurnSurface`] names both a chat
+    /// and a sender who could answer, AND the chat is not known to be
+    /// human-free (`has_human != Some(false)` — unknown fails open, the
+    /// card is harmless if nobody picks it up, the row is the durable
+    /// record of the question).
+    ///
+    /// A missing trigger row is not a reason to skip the card: it only
+    /// means the card has no question to thread under (§5.5.4 answers a
+    /// card against its own id), which is exactly the shape of a turn
+    /// composed in the execution view of a chat-bound session (ADR-100
+    /// Rev. 6).
     ///
     /// Read from the surface, never from `chat_writeback`: the card is a
     /// Chat obligation, the write-back is an agent-to-agent one, and

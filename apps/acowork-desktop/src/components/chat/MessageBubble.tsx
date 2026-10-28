@@ -311,7 +311,11 @@ const MessageBubble = React.memo(function MessageBubble({
           <UserAvatar
             displayName={liveUserName}
             avatarUrl={liveUserAvatarUrl ?? null}
-            builtinAvatarId={liveUserBuiltinAvatarId ?? null}
+            // Pass the tri-state through untouched: `null` means "this other
+            // person has no builtin avatar"; coalescing it to `undefined` here
+            // would fall back to the *viewer's* profile icon on their bubble
+            // (regression t-9764c5fa, ADR-076 §决策 4).
+            builtinAvatarId={liveUserBuiltinAvatarId}
             size={40}
             className="shrink-0 mt-1"
           />

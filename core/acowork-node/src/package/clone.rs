@@ -825,7 +825,7 @@ mod tests {
                     session_id: sid.to_string(),
                     agent_id: "com.test.weather".to_string(),
                     created_at: chrono::Utc::now().to_rfc3339(),
-                    user_id: None,
+                    initiator: None,
                     visibility: None,
                     chat_session_id: None,
                     title: Some("Test session".to_string()),

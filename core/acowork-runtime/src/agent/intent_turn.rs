@@ -103,9 +103,19 @@ impl TurnSurface {
 
     /// Whether this turn may write an interactive card, and where: the
     /// `(chat_session_id, trigger_message_id, answerable_by)` triple §5.5.4
-    /// requires. `None` when any coordinate is missing.
+    /// asks for. `None` when the card would be a dead button.
+    ///
+    /// The *answerability* is the gate (`chat_session_id` + `answerable_by`);
+    /// the trigger row is only the thread coordinate, never the answer one —
+    /// §5.5.4 resolves an answer against the card's own id. So a turn composed
+    /// inside the execution view of a chat-bound session writes a standalone
+    /// card (empty `trigger_message_id`) rather than nothing at all: the
+    /// client's `for_execution_session` pin is a hint that may be missing
+    /// (a router-created session has no client row to read the binding off),
+    /// and losing the card there is what left a group chat blind to the
+    /// question the run had stopped on.
     pub fn card_target(&self) -> Option<(&str, &str, &str)> {
-        if self.chat_session_id.is_empty() || self.trigger_message_id.is_empty() {
+        if self.chat_session_id.is_empty() {
             return None;
         }
         self.answerable_by
@@ -679,17 +689,28 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_chat_alone_does_not_make_a_card() {
-        // A turn composed straight against the execution surface (ADR-100 D9):
-        // the session's own chat binding gets the terminal echo, but there is
-        // no triggering row and no answer coordinate, so no card — the
-        // D12 distinction, expressed by the surface rather than by re-reading
-        // the binding at every consumer.
-        let mut s = TurnSurface::default();
-        assert_eq!(s.card_target(), None);
-        s.chat_session_id = "chat-9".into();
-        assert_eq!(s.card_target(), None);
+    fn a_bound_chat_with_an_answering_human_makes_a_standalone_card() {
+        // A turn composed straight against the execution surface (ADR-100 D9
+        // and the Rev. 6 note): the session's chat binding supplies the chat,
+        // the writer's identity supplies who can answer, and there is no
+        // triggering row — the card still lands, standalone.
+        //
+        // This is the regression that made a group chat blind to a question
+        // the run had stopped on: the answer coordinate is the card's own id
+        // (§5.5.4), so a missing thread must not suppress the card.
+        let s = TurnSurface::new(String::new(), String::new(), "user-1", None);
+        assert_eq!(s.card_target(), None, "no chat yet — the binding fills it in");
+        // What `session_task` produces for a chat-bound session: the binding
+        // supplies the chat, the write endpoint's scope supplies the answerer.
+        let s = TurnSurface {
+            chat_session_id: "chat-9".into(),
+            ..s
+        };
+        assert_eq!(s.card_target(), Some(("chat-9", "", "user-1")));
         assert_eq!(s.echo_chat(), Some("chat-9"));
+        // Unknown human presence fails OPEN (no `Some(false)`), so the
+        // ask_user_question tool stays available and the card is written.
+        assert_eq!(s.has_human, None);
     }
 
     #[test]

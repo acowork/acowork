@@ -59,6 +59,7 @@ pub mod agent_instance_id;
 pub mod agent_overrides;
 pub mod auth;
 pub mod budget;
+pub mod chat_prompt;
 pub mod crlf;
 pub mod defaults;
 pub mod embedding;

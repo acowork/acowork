@@ -1478,9 +1478,11 @@ export interface SessionInfo {
   /**
    * ADR-076 §决策 4: may the signed-in account modify this session?
    *
-   * The backend resolves it (`SessionMeta::is_writable_by`) — `true` for the
-   * owner, and for admins / `local` mode regardless of owner. This is the
-   * single source of truth for disabling the session's write controls
+   * The backend resolves it (`SessionMeta::is_writable_by`) — `true` only for
+   * the session's initiator, and for `local` mode (no accounts at all). An
+   * administrator is deliberately NOT exempt: an execution session has one
+   * initiator and no second writer. This is the single source of truth for
+   * disabling the session's write controls
    * (model, workspace, reasoning effort, title, close, delete); the frontend
    * must not re-derive it from `visibility`.
    *
@@ -1491,6 +1493,17 @@ export interface SessionInfo {
   can_write?: boolean;
   /** ADR-076 §决策 4: `null`/absent = public (readable by everyone). */
   visibility?: "public" | "private" | null;
+  /**
+   * ADR-076 §决策 4: **who initiated this session** — an account user id, or
+   * an agent instance id when the work was started by an agent.
+   *
+   * The execution surface renders its human identity from this, never from
+   * `userProfileStore`: that store holds whoever is logged in *now*, which is
+   * why switching accounts used to repaint somebody else's session with the
+   * new account's name and avatar. `null`/absent = a session from before the
+   * field existed (local mode, legacy data).
+   */
+  initiator?: string | null;
   /**
    * Whether this session is currently Active in the Runtime's in-memory
    * session map (ADR-038 lifecycle). `fetchSessions` uses this to sync the

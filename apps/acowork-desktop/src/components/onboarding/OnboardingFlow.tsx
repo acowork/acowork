@@ -501,8 +501,8 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
   const handleAddFlowSuccess = async () => {
     await loadKeys();
     await loadProviders();
-    // Same shared signal Harness dispatches — ChatPanel listens for it and
-    // reloads its model list immediately.
+    // Same shared signal Harness dispatches — the AppLayout shell listens
+    // for it and reloads the shared model inventory immediately.
     window.dispatchEvent(new CustomEvent("models-added"));
   };
 

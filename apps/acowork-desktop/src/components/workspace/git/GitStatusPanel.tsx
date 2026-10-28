@@ -32,6 +32,7 @@ import { languageForPath } from "../../../lib/monacoLanguage";
 import { useTranslation } from "../../../i18n/useTranslation";
 import { useContextMenu, ContextMenu } from "../../common/ContextMenu";
 import { ConfirmDialog } from "../../common/ConfirmDialog";
+import { OverlayScrollbar } from "../../common/OverlayScrollbar";
 import { showToast } from "../../common/ToastProvider";
 import { cn } from "../../../lib/utils";
 import { listRowHover } from "../../../lib/ui-styles";
@@ -344,11 +345,12 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
     }
     return (
       <>
-      {/* overflow-auto (vs overflow-y-auto): long file paths exceed the
-          panel's width — without an x-scrollbar the path got truncated
-          silently. `min-w-max` on the row lets its content push the
-          scroller wider, mirroring FileTree's virtualizer layout. */}
-      <ul className="flex-1 overflow-auto py-0.5">
+      {/* Overflow moved to the OverlayScrollbar viewport: long file paths
+          exceed the panel's width, so the x-axis still needs to scroll —
+          `showXThumb` + `overflow-x-auto` is the same pairing FileTree uses
+          (the native bar cannot be re-enabled on one axis only). */}
+      <OverlayScrollbar showXThumb className="overflow-x-auto py-0.5">
+        <ul>
         {pagedChanges.map((c) => {
           const meta = statusMeta(c);
           return (
@@ -412,7 +414,8 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
             </li>
           );
         })}
-      </ul>
+        </ul>
+      </OverlayScrollbar>
       {totalPages > 1 && (
         <div
           data-testid="git-status-pagination"

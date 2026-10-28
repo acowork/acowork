@@ -302,6 +302,60 @@ export function useResolvedMembers(
 }
 
 /**
+ * The project's owner id — `owner_id ?? created_by`, the backend's
+ * `Project::owner()`. A transferred ownership is reflected here too
+ * (`created_by` stays the immutable creator). Empty string for a missing
+ * project, so callers can compare against an id without a null check.
+ */
+export function projectOwnerId(
+  project: Pick<PmProject, "created_by" | "owner_id"> | null | undefined,
+): string {
+  if (!project) return "";
+  return project.owner_id ?? project.created_by;
+}
+
+/**
+ * Who may govern a resource: its owner, or a platform admin (ADR-098).
+ *
+ * `ownerId` is the resource's owner from whichever side owns that relation —
+ * the `user_group` founder on the chat session row, the project's
+ * `owner_id ?? created_by` for a project channel. It mirrors the backend gates
+ * (`chat_sessions::can_govern_group`, PM's `require_governance`), so a surface
+ * never offers an affordance the server would refuse with a 403.
+ *
+ * `localMode` is the ADR-076 §决策 12 exemption: under `local` there is no
+ * account store — `self` is always null and the Gateway injects the constant
+ * actor `"human"` for every call. One machine, one human, so that human
+ * governs everything, including a project an agent created through
+ * `pm_create_project` (whose owner id is an instance id no human header can
+ * match). The backend applies the same exemption; both sides must, or local
+ * mode ends up with no governance UI at all.
+ */
+export function canGovern(
+  ownerId: string | null | undefined,
+  self: UserAccount | null,
+  localMode: boolean,
+): boolean {
+  if (localMode) return true;
+  if (!self) return false;
+  return self.role === "admin" || (!!ownerId && ownerId === self.user_id);
+}
+
+/** `canGovern` for a PM project (and the project channel it owns). */
+export function canGovernProject(
+  project: Pick<PmProject, "created_by" | "owner_id"> | null | undefined,
+  self: UserAccount | null,
+  localMode: boolean,
+): boolean {
+  return canGovern(projectOwnerId(project), self, localMode);
+}
+
+/** The deployment's `local` flag — the second argument both helpers above need. */
+export function useLocalMode(): boolean {
+  return useAuthStore((s) => s.mode === "local");
+}
+
+/**
  * The group's full member set for display — the project owner PLUS the
  * recorded members, deduplicated. This mirrors the backend's participant
  * convergence (`acowork-pm` `group_participants`): a `project_group` chat's
@@ -325,7 +379,7 @@ export function withOwner(
   project: Pick<PmProject, "created_by" | "owner_id" | "created_at" | "members"> | null | undefined,
 ): PmProjectMember[] {
   if (!project) return [];
-  const ownerId = project.owner_id ?? project.created_by;
+  const ownerId = projectOwnerId(project);
   if (project.members.some((m) => m.instance_id === ownerId)) {
     return project.members;
   }

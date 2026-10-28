@@ -110,13 +110,15 @@ See Design 29 for details.
 
 ### D6 — Chat prompt strictly separated from the execute prompt
 
-The execute prompt (`prompts/system.md` + `constraints.md` + other `prompts/*.md` + skills) carries the execution identity, tool rules, and engineering conventions; it must not be copied to the router. The chat prompt has three layers:
+The execute prompt (`prompts/system.md` + `constraints.md` + other `prompts/*.md` + skills) carries the execution identity, tool rules, and engineering conventions; it must not be copied to the router. The chat prompt has three layers, the **whole** of which a `chat.md` may override:
 
-1. Runtime built-in base (role boundary, `dispatch` contract, decision and safety rules, **not overridable**);
-2. Persona section: optional `prompts/chat.md`, falling back to the manifest's `name`/`role`/`description`, capped at 4KB;
+1. Runtime built-in base (role boundary, `dispatch` contract, decision and safety rules);
+2. Persona section: manifest `name`/`role`/`description` fallback, capped at 4KB;
 3. Scenario section: two stable variants for 1:1 and group chat.
 
-`chat.md` joins the ADR-063 package-level override list and is therefore also excluded from execute prompt assembly; `POST /agents/{id}/prompts/reload` refreshes it. The router loads no skills, no workspace prompt file, and does **not auto-inject** retrieved memory — memory is reachable only on demand through `memory_recall` (D3).
+When a `chat.md` is present and non-blank it **replaces all three layers** (only `{{agent_name}}` is substituted) — except the `# Safety` section, which the Runtime re-appends to the body as a non-trimmable tail every turn. Precedence: a group session's `chat-sessions/{id}/chat.md` (`acowork-user`, on the human surface readable and editable only by the group owner or an admin — ADR-098 — from the group's right-hand settings panel, the card is not rendered for a plain member while the HTTP read stays open to participants, seeded with the built-in default on first read) > package `prompts/chat.md` (seeded with the built-in default on agent start) > the built-in default. The package `chat.md` joins the ADR-063 package-level override list and is therefore also excluded from execute prompt assembly; `POST /agents/{id}/prompts/reload` refreshes it. The safety boundary is **structural**, not literal: the `# Safety` tail cannot be deleted by a `chat.md`, only the owner or an admin may rewrite a group's prompt so one member cannot steer another's agent, and the router only ever holds `dispatch` and the two read-only information tools, so rewriting the prompt text cannot grant it a new capability. The router loads no skills, no workspace prompt file, and does **not auto-inject** retrieved memory — memory is reachable only on demand through `memory_recall` (D3).
+
+> Revision (`chat.md` now replaces the whole prompt): D6 originally said `prompts/chat.md` **replaces only the Persona section** and the base was not overridable. On request it now replaces the whole prompt, and a session-scoped (group) `chat.md` was added; the kernel and scenario literals moved to `acowork_core::chat_prompt`, shared by `acowork-user` (seeding a group file) and `acowork-runtime` (assembling the built-in default). The safety guarantee is carried by the tool set instead. Design 29 §3.1–3.3 is updated in step.
 
 ### D7 — Group chat and PM dispatch boundaries
 
@@ -184,7 +186,7 @@ Additional acceptance:
 
 - `chat_router.enabled` defaults to true; when disabled a Chat message goes back to ADR-098's inline deterministic route, the only difference being that all three rotation triggers are retired (T3 by this ADR, T1/T2 by the 2026-10-24 revision; see D8) — that path too now only reuses an existing mapping and creates a session when there is none.
 - Moving a router turn onto a per-chat drain task changes no external contract: MQTT payloads, `routing_key`, `intent-sessions.json` and the write-back channels are all as before.
-- Existing packages need no new file: without `prompts/chat.md` the persona falls back to manifest metadata.
+- Existing packages need no new file: on agent start a missing `prompts/chat.md` is seeded from the built-in default (and editable); until then the built-in default prompt is used.
 - Existing `intent-sessions.json` mappings remain valid; candidates include the current mapping, so first run needs no migration.
 - The terminal list is a sidecar `terminal-sessions.json`; no SQLite schema change.
 - Existing JSONL rows tagged `rotation_handoff` are neither cleaned nor promoted to User; the render layer keeps filtering them. The mechanism is retired, so no new such rows appear.

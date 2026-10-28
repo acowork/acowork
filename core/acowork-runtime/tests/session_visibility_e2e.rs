@@ -44,7 +44,7 @@ fn meta(sid: &str, owner: &str, visibility: Option<SessionVisibility>, chat: Opt
         session_id: sid.to_string(),
         agent_id: AGENT_ID.to_string(),
         created_at: "2026-01-01T00:00:00.000Z".to_string(),
-        user_id: Some(owner.to_string()),
+        initiator: Some(owner.to_string()),
         visibility,
         title: Some(sid.to_string()),
         workspace_id: None,
@@ -83,7 +83,7 @@ async fn boot(work_dir: PathBuf) -> (u16, tokio::sync::mpsc::UnboundedReceiver<(
     // The shape chat routing actually creates: no owner, `Members`, bound
     // to a Chat the answering human is a participant of.
     let mut unowned = meta("s-unowned", "unused", Some(SessionVisibility::Members), Some("chat-1"));
-    unowned.user_id = None;
+    unowned.initiator = None;
     store.upsert(&unowned).unwrap();
 
     let (dispatch_tx, dispatch_rx) =
