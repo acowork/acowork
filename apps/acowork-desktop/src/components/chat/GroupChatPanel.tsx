@@ -31,6 +31,7 @@ import {
   useRef,
   useState,
   type UIEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -40,6 +41,7 @@ import {
   ChevronDown,
   ChevronsDown,
   ClipboardList,
+  ArrowRight,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { Components } from "react-markdown";
@@ -95,6 +97,11 @@ import { showToast } from "../common/ToastProvider";
 import { ChatHistoryDialog } from "./ChatHistoryDialog";
 import { OutlineChatHistoryIcon } from "../common/ChatHistoryIcon";
 import { useLocateMessage } from "../../lib/useLocateMessage";
+import {
+  ContextMenu,
+  useContextMenu,
+  type ContextMenuItem,
+} from "../common/ContextMenu";
 
 // Same markdown shell as AgentChatView's bubbles (kept local on purpose:
 // extracting a shared component would touch two surfaces for one class
@@ -137,24 +144,64 @@ const chatBlockComponents: Components = {
  *  another machine, removed account) falls back to a short id. */
 function useParticipantNamer(directory: DirectoryUser[]) {
   const agentsMap = useAgentStore((s) => s.agents);
+  // The logged-in account is deliberately absent from `list_directory` (the
+  // contact picker excludes the caller), so resolve "me" from the live profile
+  // or every message addressed to me paints its raw uuid.
+  const me = useAuthStore((s) => s.account?.user_id ?? "");
+  const profile = useUserProfileStore((s) => s.profile);
   const dirById = useMemo(() => {
     const m = new Map<string, DirectoryUser>();
     for (const u of directory) m.set(u.user_id, u);
     return m;
   }, [directory]);
+  // Name **and** avatar come from the same lookup: the account directory for
+  // people, the agent registry for agents. Resolving the name but leaving the
+  // avatar blank used to fall back to `userProfileStore` — i.e. the logged-in
+  // account's icon on every other participant's bubble (t-9764c5fa).
   return useCallback(
-    (id: string): { name: string; isAgent: boolean } => {
+    (id: string): ParticipantWho => {
       const agent = agentsMap[id]?.meta;
       if (agent) {
-        return { name: agent.display_name ?? agent.name ?? id, isAgent: true };
+        return {
+          name: agent.display_name ?? agent.name ?? id,
+          isAgent: true,
+          avatarUrl: agent.avatar ?? null,
+          builtinAvatarId: agent.builtin_avatar ?? null,
+        };
+      }
+      if (me && id === me) {
+        return {
+          name: profile.displayName || id.slice(0, 8),
+          isAgent: false,
+          avatarUrl: profile.backendAvatarUrl ?? null,
+          builtinAvatarId: profile.backendBuiltinAvatarId ?? null,
+        };
       }
       const user = dirById.get(id);
       if (user)
-        return { name: user.display_name || user.username, isAgent: false };
-      return { name: id.slice(0, 8), isAgent: false };
+        return {
+          name: user.display_name || user.username,
+          isAgent: false,
+          avatarUrl: user.avatar ?? null,
+          builtinAvatarId: user.builtin_avatar ?? null,
+        };
+      return {
+        name: id.slice(0, 8),
+        isAgent: false,
+        avatarUrl: null,
+        builtinAvatarId: null,
+      };
     },
-    [agentsMap, dirById],
+    [agentsMap, dirById, me, profile],
   );
+}
+
+/** What a participant id resolves to on this surface. */
+interface ParticipantWho {
+  name: string;
+  isAgent: boolean;
+  avatarUrl: string | null;
+  builtinAvatarId: string | null;
 }
 
 // ── Row renderer ──────────────────────────────────────────────────────
@@ -165,7 +212,7 @@ interface RowProps {
   /** Chat session the row belongs to — attachment thumbnails are addressed
    *  through it (the `files/` dir is session-scoped, §4.2.1). */
   chatSessionId: string;
-  nameOf: (id: string) => { name: string; isAgent: boolean };
+  nameOf: (id: string) => ParticipantWho;
   /** Cards that can no longer be answered (§5.5.4). */
   closed: Set<string>;
   /** The subset the human actually replied to — the line says "Answered",
@@ -182,6 +229,10 @@ interface RowProps {
    *  Names the run in the drill-down tooltip while the exec session still has
    *  no title. Resolved by the parent through its message_id → body index. */
   triggerBody?: string;
+  /** Sender of the message this row answers (`in_reply_to`'s `from`) — the
+   *  counterparty of an execution-session echo row whose own `to` is empty.
+   *  Resolved by the parent through its message_id → from index. */
+  triggerFrom?: string;
   /** Question text of the `interaction_request` card this row answers, when it
    *  answers one — the one-line quote above the answer bubble. Card-only by
    *  construction: the parent resolves it through a card-only index. */
@@ -194,6 +245,9 @@ interface RowProps {
   /** Cards answered on THIS surface — lets the notice row suppress its
    *  duplicate resolution receipt. */
   chatAnswered: Set<string>;
+  /** Right-click on a participant's avatar / name → the panel's "@name"
+   *  menu. Undefined when the panel has no mention target for that row. */
+  onMentionContextMenu?: (e: ReactMouseEvent, id: string) => void;
 }
 
 /**
@@ -237,6 +291,54 @@ function TaskChip({ taskId }: { taskId: string }) {
 }
 
 /**
+ * The recipients a message is addressed to, resolved from the durable row's
+ * own coordinates — the "who is this for" the group surface otherwise leaves
+ * to guesswork. A `user_message` names its target in `to`, except an @-fan-out
+ * broadcast which leaves `to` empty and lists the woken agents in
+ * `meta.mentions`; an `agent_message` names the initiator it answers in `to`.
+ * Empty when the row carries no address (a human-to-human row, an old
+ * broadcast) — then no chip is painted. The whole capsule is a display
+ * affordance; the transient-execution-session binding lives in the data, the
+ * chip just shows it.
+ */
+function rowToTargets(
+  row: ChatMessageRow,
+  triggerFrom?: string,
+): string[] {
+  if (row.to) return [row.to];
+  if (row.kind === "user_message") return row.meta?.mentions ?? [];
+  // An execution-session echo row answers one specific message: its
+  // counterparty is that trigger's sender, resolved from `in_reply_to`
+  // (`to` is empty on this write path — the address lives on the row it
+  // answers).
+  if (triggerFrom) return [triggerFrom];
+  return [];
+}
+
+/**
+ * A "who is this addressed to" pill — the counterparty of the execution
+ * session this message was bound to. Rendered uniformly on both user and
+ * agent messages so the group reads as one exchange per row, not a wall of
+ * unattributed bubbles. The display name comes from the row's caller (the
+ * same `nameOf` the avatar uses); an unknown id falls back to its short form.
+ */
+function ToChip({ name }: { name: string }) {
+  const { t } = useTranslation();
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-10 font-medium",
+        "border-border-outer bg-[var(--color-accent)]/10 text-text-secondary",
+      )}
+    >
+      <span className="font-semibold">{t("groupChat.toChip")}</span>
+      <ArrowRight className="h-3 w-3 shrink-0" aria-hidden />
+      <span className="max-w-[14rem] truncate">{name}</span>
+    </span>
+  );
+}
+
+/**
  * One transcript row. Memoized for the same reason as AgentChatView's RowView:
  * the composer re-renders this host on every keystroke, and the host re-runs
  * `rows.map` — without memo that re-parses every markdown body in the window
@@ -255,9 +357,11 @@ const GroupRowView = memo(function GroupRowView({
   onJumpToExec,
   readOnly,
   triggerBody,
+  triggerFrom,
   replyQuote,
   answeredCardKind,
   chatAnswered,
+  onMentionContextMenu,
 }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
@@ -324,17 +428,32 @@ const GroupRowView = memo(function GroupRowView({
   }
 
   const own = row.kind === "user_message" && row.from === me;
-  const who = own
-    ? { name: profile.displayName, isAgent: false }
+  const who: ParticipantWho = own
+    ? { name: profile.displayName, isAgent: false, avatarUrl: null, builtinAvatarId: null }
     : nameOf(row.from);
+  // Right-click on a participant's avatar / name → the panel's "@name" menu.
+  // Everyone but me: @-ing an agent wakes it, @-ing a person is a plain
+  // mention — but the picker lists both (§5.3.1), so the menu must too.
+  const openMentionMenu =
+    row.from !== me
+      ? (e: ReactMouseEvent) => onMentionContextMenu?.(e, row.from)
+      : undefined;
   const failed = isFailureStatus(row.meta?.status);
   const agentMeta = who.isAgent ? agentsMap[row.from]?.meta : undefined;
+  // Who this row is addressed to (see `rowToTargets`). Resolved outside the
+  // kind branches so the hook order stays unconditional; empty means the row
+  // carries no address and no chip is painted.
+  const toTargets = rowToTargets(row, triggerFrom);
   // The exec session behind an agent reply — a group / routed reply carries
   // `sender_session_id` (the answering agent's own session). Same formula as
   // AgentChatView, so finished / failed / empty-bodied replies are all
   // drillable.
   const execSid =
     row.meta?.agent_session_id || row.meta?.sender_session_id || "";
+  // "View run" rides the same header chip row as the TO capsule — one row
+  // above the bubble instead of split across top and bottom.
+  const showRunChip =
+    row.kind === "agent_message" && who.isAgent && !!execSid;
 
   // A terminal reply with nothing in it IS its outcome ("interrupted",
   // "failed"): paint the centered status line with the drill into the run,
@@ -381,31 +500,35 @@ const GroupRowView = memo(function GroupRowView({
   // name above the bubble, bubble beside the avatar, timestamp below the
   // bubble revealed on hover.
   const avatar = who.isAgent ? (
-    <AgentAvatar
-      agentId={row.from}
-      displayName={who.name}
-      avatarUrl={agentMeta?.avatar}
-      version={agentMeta?.version}
-      builtinAvatarId={agentMeta?.builtin_avatar ?? null}
-      size={40}
-      className="mt-1 shrink-0"
-    />
+    <span onContextMenu={openMentionMenu} className="shrink-0">
+      <AgentAvatar
+        agentId={row.from}
+        displayName={who.name}
+        avatarUrl={agentMeta?.avatar}
+        version={agentMeta?.version}
+        builtinAvatarId={agentMeta?.builtin_avatar ?? null}
+        size={40}
+        className="mt-1 shrink-0"
+      />
+    </span>
   ) : own ? (
     <UserAvatar
       displayName={profile.displayName}
       avatarUrl={profile.backendAvatarUrl ?? null}
-      builtinAvatarId={profile.backendBuiltinAvatarId ?? null}
+      builtinAvatarId={profile.backendBuiltinAvatarId ?? undefined}
       size={40}
       className="mt-1 shrink-0"
     />
   ) : (
-    <UserAvatar
-      displayName={who.name}
-      avatarUrl={null}
-      builtinAvatarId={null}
-      size={40}
-      className="mt-1 shrink-0"
-    />
+    <span onContextMenu={openMentionMenu} className="shrink-0">
+      <UserAvatar
+        displayName={who.name}
+        avatarUrl={who.avatarUrl}
+        builtinAvatarId={who.builtinAvatarId}
+        size={40}
+        className="mt-1 shrink-0"
+      />
+    </span>
   );
 
   return (
@@ -424,7 +547,12 @@ const GroupRowView = memo(function GroupRowView({
       >
         {who.name && (
           <div className="mt-[2px] flex flex-col">
-            <span className="text-xs text-text-tertiary">{who.name}</span>
+            <span
+              className="text-xs text-text-tertiary"
+              onContextMenu={openMentionMenu}
+            >
+              {who.name}
+            </span>
             {/* Agent role line — mirrors the user↔agent thread
                 (`AgentChatView`), which pairs the name with the agent's
                 role so a group reader can tell which specialist spoke. */}
@@ -445,6 +573,38 @@ const GroupRowView = memo(function GroupRowView({
             bubbleMetaAnchor(own ? "own" : "peer"),
           )}
         >
+          {/* Header chips, one horizontal row: who the message is addressed
+              to (TO), the PM task coordinate, and the agent reply's run
+              drill-down — so a row reads at a glance instead of stacking
+              chips vertically. One TO capsule per target: an @-fan-out row
+              wakes several agents and shows them all. */}
+          {(toTargets.length > 0 ||
+            (row.kind === "user_message" && row.meta?.task_id) ||
+            showRunChip) && (
+            <div
+              className={cn(
+                "mb-1 flex flex-wrap items-center gap-1.5",
+                own ? "justify-end" : "justify-start",
+              )}
+            >
+              {toTargets.map((id) => (
+                <ToChip key={id} name={nameOf(id).name} />
+              ))}
+              {row.kind === "user_message" && row.meta?.task_id && (
+                <TaskChip taskId={row.meta.task_id} />
+              )}
+              {showRunChip && (
+                <ViewRunButton
+                  runName={
+                    execRunName?.trim() ||
+                    truncateTaskName(triggerBody) ||
+                    undefined
+                  }
+                  onJump={() => onJumpToExec(row.from, execSid)}
+                />
+              )}
+            </div>
+          )}
           {/* Attachment chips above the bubble, on the speaker's side — same
               grammar as the 1:1 chat surface. An attachments-only message
               paints chips alone and the empty-bubble placeholder is suppressed
@@ -475,19 +635,6 @@ const GroupRowView = memo(function GroupRowView({
             labels={row.meta?.exec_attachments ?? []}
             align={own ? "end" : "start"}
           />
-          {/* A PM task dispatch: the task id rides a chip, not the body —
-              the human text stays clean and the claim/submit playbook never
-              reaches this surface at all. */}
-          {row.kind === "user_message" && row.meta?.task_id && (
-            <div
-              className={cn(
-                "mb-1 flex flex-wrap gap-1.5",
-                own ? "justify-end" : "justify-start",
-              )}
-            >
-              <TaskChip taskId={row.meta.task_id} />
-            </div>
-          )}
           {/* What this answer answers. The answered card no longer paints a
               receipt, so the §5.5.4 `in_reply_to` link surfaces here instead —
               above the bubble, where the highlight-filled bubble cannot swallow
@@ -547,23 +694,6 @@ const GroupRowView = memo(function GroupRowView({
             </div>
           )}
           <div className="mt-1 flex items-center gap-2">
-            {/* Drill-into-exec affordance — the group twin of the 1:1 chat
-                surface's button: a discrete control under the bubble, not a
-                whole-bubble click, so selecting the reply text never fires a
-                jump. Present on every local agent reply with a resolved exec
-                session, empty body included. Same brain glyph as the exec
-                tabs (design 27 §6.1) — the button and its destination are
-                the same thing. */}
-            {!own && who.isAgent && row.kind === "agent_message" && execSid && (
-              <ViewRunButton
-                runName={
-                  execRunName?.trim() ||
-                  truncateTaskName(triggerBody) ||
-                  undefined
-                }
-                onJump={() => onJumpToExec(row.from, execSid)}
-              />
-            )}
             <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
             </span>
@@ -674,6 +804,9 @@ export function GroupChatPanel() {
   const nameOf = useParticipantNamer(directory);
   const agentsMap = useAgentStore((s) => s.agents);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Right-click on an agent's avatar / name → the "@name" menu. One menu for
+  // the whole panel: the payload carries the right-clicked participant.
+  const mentionMenu = useContextMenu<{ id: string }>();
   // Composer attachments — uploaded into the group's `files/` dir (§4.2.1)
   // before send; the send carries their ids so the durable row and each
   // mentioned agent's execution turn both see them (mirrors AgentChatView).
@@ -797,6 +930,15 @@ export function GroupChatPanel() {
     }
     return m;
   }, [win]);
+  // message_id → sender index, so an echo row with an empty `to` can name the
+  // counterparty from the message it answers (`in_reply_to`'s `from`).
+  const fromById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
+      if (r.meta?.message_id) m.set(r.meta.message_id, r.from);
+    }
+    return m;
+  }, [win]);
   // Card rows only, so an answer can quote the question it answers. Separate
   // from `bodyById` on purpose: `in_reply_to` also points at plain messages,
   // and quoting one of those would paint a decision quote where none exists.
@@ -890,7 +1032,13 @@ export function GroupChatPanel() {
       .filter((p) => p.id !== me)
       .map((p) => {
         const who = nameOf(p.id);
-        return { id: p.id, name: who.name, isAgent: who.isAgent };
+        return {
+          id: p.id,
+          name: who.name,
+          isAgent: who.isAgent,
+          avatarUrl: who.avatarUrl,
+          builtinAvatarId: who.builtinAvatarId,
+        };
       })
       .filter((p) => p.name);
   }, [group, me, nameOf]);
@@ -1117,9 +1265,44 @@ export function GroupChatPanel() {
     [jumpToExec],
   );
 
+  const participants = group?.participants ?? [];
+  // Admin cross-account view: the panel lists groups the admin never joined.
+  // Reading is allowed (server-side admin bypass), posting is not — hide the
+  // composer and card actions for anyone who isn't a participant.
+  const canPost = participants.some((p) => p.id === me);
+
+  // Right-click on an agent's avatar / name → the "@name" menu. No menu
+  // without a composer: a read-only viewer has nowhere to put the mention.
+  // `mentionMenu.openAt` is the hook's stable callback (deps `[]`), so this
+  // handler keeps its identity across renders — the memoized rows take it
+  // as a prop and must not re-render on every composer keystroke.
+  const handleMentionContextMenu = useCallback(
+    (e: ReactMouseEvent, id: string) => {
+      if (!canPost) return;
+      mentionMenu.openAt(e, { id });
+    },
+    [canPost, mentionMenu.openAt],
+  );
+
+  // The menu's one item: drop `@<name> ` into the composer at the caret —
+  // the same text the picker inserts, so the fan-out resolves it (see
+  // `resolveMentions`). No icon: the label already reads `@<name>`, and an
+  // @-icon next to it doubles the glyph.
+  const mentionMenuItems = useMemo<ContextMenuItem<{ id: string }>[]>(() => {
+    const id = mentionMenu.payload?.id;
+    if (!id) return [];
+    const name = nameOf(id).name;
+    return [
+      {
+        key: "mention",
+        label: t("groupChat.mentionMenu", { name }),
+        onClick: () => insertTextAtCaret(`@${name} `),
+      },
+    ];
+  }, [insertTextAtCaret, mentionMenu.payload, nameOf, t]);
+
   if (!activeGroupId) return null;
 
-  const participants = group?.participants ?? [];
   // A `user_user` pair is the smallest group — two people. Render it as a DM:
   // the header shows the peer's name (not the empty session title) and drops
   // the "N members" chip, which is noise for a conversation of exactly two.
@@ -1130,10 +1313,6 @@ export function GroupChatPanel() {
       ? nameOf(peerId).name
       : activeGroupId.slice(0, 8)
     : group?.title || activeGroupId.slice(0, 8);
-  // Admin cross-account view: the panel lists groups the admin never joined.
-  // Reading is allowed (server-side admin bypass), posting is not — hide the
-  // composer and card actions for anyone who isn't a participant.
-  const canPost = participants.some((p) => p.id === me);
 
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border-outer bg-chat-body">
@@ -1223,6 +1402,11 @@ export function GroupChatPanel() {
                     ? bodyById.get(row.meta.in_reply_to)
                     : undefined
                 }
+                triggerFrom={
+                  row.meta?.in_reply_to
+                    ? fromById.get(row.meta.in_reply_to)
+                    : undefined
+                }
                 replyQuote={
                   row.meta?.in_reply_to
                     ? cardQuoteById.get(row.meta.in_reply_to)
@@ -1235,6 +1419,7 @@ export function GroupChatPanel() {
                 }
                 chatAnswered={chatAnswered}
                 readOnly={!canPost}
+                onMentionContextMenu={handleMentionContextMenu}
               />
             )}
           />
@@ -1350,8 +1535,8 @@ export function GroupChatPanel() {
                     ) : (
                       <UserAvatar
                         displayName={c.name}
-                        avatarUrl={null}
-                        builtinAvatarId={null}
+                        avatarUrl={c.avatarUrl}
+                        builtinAvatarId={c.builtinAvatarId}
                         size={20}
                         className="shrink-0"
                       />
@@ -1494,6 +1679,17 @@ export function GroupChatPanel() {
           resolveName={(id) => nameOf(id).name}
         />
       )}
+      {/* The "@name" menu — one for the whole panel, opened from any
+          participant's avatar / name in the transcript. */}
+      <ContextMenu
+        isOpen={mentionMenu.isOpen}
+        menuProps={mentionMenu.menuProps}
+        items={mentionMenuItems}
+        payload={mentionMenu.payload}
+        selectionAtOpen={mentionMenu.selectionAtOpen}
+        onClose={mentionMenu.close}
+        compact
+      />
     </div>
   );
 }

@@ -77,6 +77,12 @@ pub struct SessionInfo {
     pub participants: Vec<ParticipantRef>,
     #[serde(default)]
     pub repo: Option<String>,
+    /// A group session's `chat.md` chat-prompt override (ADR-099, extended),
+    /// forwarded to the Runtime so the per-chat prompt reaches the chat
+    /// router. Absent for 1:1 kinds and for a group that never had one
+    /// seeded.
+    #[serde(default)]
+    pub chat_prompt: Option<String>,
 }
 
 /// The subset of `SessionMessage` the Gateway writes (system append).
@@ -132,12 +138,16 @@ pub async fn ensure_pair(port: u16, a: &str, b: &str, kind: &str) -> Result<Sess
 
 /// `POST /internal/chat-sessions/group` — idempotently ensure the project
 /// group chat (design 27 Phase 2). Called by the Gateway when PM creates a
-/// project, and when a member joins (participant add).
+/// project, and when a member joins (participant add). `owner` is the
+/// project's current owner as PM reports it — the user service converges it
+/// onto the session row, because ADR-098 governance of the group's `chat.md`
+/// checks it (`None` = the caller does not know it; leave the row alone).
 pub async fn ensure_group(
     port: u16,
     project_id: &str,
     title: &str,
     participants: &[String],
+    owner: Option<&str>,
 ) -> Result<SessionInfo, String> {
     let resp = client()
         .post(format!("http://127.0.0.1:{port}/internal/chat-sessions/group"))
@@ -145,6 +155,7 @@ pub async fn ensure_group(
             "project_id": project_id,
             "title": title,
             "participants": participants,
+            "owner": owner,
         }))
         .send()
         .await
@@ -339,17 +350,25 @@ pub async fn remove_participant(
 
 /// `POST /internal/chat-sessions/group/sync` — set a project group's
 /// participant list to exactly `participants` (design 27 §8.3). The PM
-/// calls the Gateway on member add / remove; the Gateway mediates.
+/// calls the Gateway on member add / remove; the Gateway mediates. `owner`
+/// is the project's current owner as PM reports it, converged onto the
+/// session row for the same call (ADR-098 governance of the group prompt),
+/// and so is `title` — a project channel has no user-side rename, so PM's
+/// title is the only source for the group's name.
 pub async fn sync_group(
     port: u16,
     project_id: &str,
     participants: &[String],
+    title: &str,
+    owner: Option<&str>,
 ) -> Result<SessionInfo, String> {
     let resp = client()
         .post(format!("http://127.0.0.1:{port}/internal/chat-sessions/group/sync"))
         .json(&serde_json::json!({
             "project_id": project_id,
+            "title": title,
             "participants": participants,
+            "owner": owner,
         }))
         .send()
         .await

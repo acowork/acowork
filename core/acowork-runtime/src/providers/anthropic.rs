@@ -17,8 +17,8 @@ use tokio::sync::mpsc;
 const DEFAULT_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(45);
 
 use acowork_core::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, MessageRole, Provider,
-    StreamEvent, ToolCall, UsageInfo,
+    parse_data_uri, ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall,
+    MessageContent, MessageRole, Provider, StreamEvent, ToolCall, UsageInfo,
 };
 
 // ── Provider struct ──────────────────────────────────────────────────────
@@ -431,53 +431,52 @@ struct ContentBlockStart {
 ///
 /// When `content_parts` is None, falls back to a single text block from `content`.
 fn build_anthropic_content(msg: &ChatMessage) -> serde_json::Value {
-    if let Some(ref parts) = msg.content_parts {
-        let blocks: Vec<serde_json::Value> = parts
-            .iter()
-            .map(|p| match p {
-                ContentPart::Text { text } => {
-                    serde_json::json!({ "type": "text", "text": text })
+    let text_block = |text: &str| serde_json::json!({ "type": "text", "text": text });
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    // `message_content` decides whether the message's own text joins the part
+    // list; the previous "parts, or else content" branch dropped the text on
+    // every image turn, because the derived parts carry images only.
+    match msg.message_content() {
+        MessageContent::Text(text) => blocks.push(text_block(text)),
+        MessageContent::Parts { leading_text, parts } => {
+            if let Some(text) = leading_text {
+                blocks.push(text_block(text));
+            }
+            for p in parts {
+                match p {
+                    ContentPart::Text { text } => blocks.push(text_block(text)),
+                    ContentPart::ImageUrl { image_url } => {
+                        // Anthropic expects: {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
+                        // Parse the data URI to extract media_type and base64 data
+                        let (media_type, data) = image_source_fields(&image_url.url);
+                        blocks.push(serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data
+                            }
+                        }));
+                    }
                 }
-                ContentPart::ImageUrl { image_url } => {
-                    // Anthropic expects: {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
-                    // Parse the data URI to extract media_type and base64 data
-                    let (media_type, data) = parse_data_uri(&image_url.url);
-                    serde_json::json!({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": data
-                        }
-                    })
-                }
-            })
-            .collect();
-        serde_json::Value::Array(blocks)
-    } else {
-        serde_json::Value::Array(vec![serde_json::json!({
-            "type": "text",
-            "text": msg.content
-        })])
+            }
+        }
     }
+    serde_json::Value::Array(blocks)
 }
 
 /// Parse a data URI into (media_type, base64_data).
 /// E.g. "data:image/png;base64,iVBOR..." → ("image/png", "iVBOR...")
-fn parse_data_uri(uri: &str) -> (&str, &str) {
-    if let Some(rest) = uri.strip_prefix("data:")
-        && let Some(semi) = rest.find(';')
-    {
-        let media_type = &rest[..semi];
-        let after_semi = &rest[semi + 1..];
-        if let Some(comma) = after_semi.find(',')
-            && after_semi[..comma].contains("base64")
-        {
-            return (media_type, &after_semi[comma + 1..]);
-        }
+/// Anthropic's `(media_type, base64_data)` for an image URL.
+///
+/// The parsing is the shared [`parse_data_uri`]; what is Anthropic-specific is
+/// the tolerance: a payload that is already bare base64 is sent as `image/png`
+/// rather than failing the turn.
+fn image_source_fields(uri: &str) -> (&str, &str) {
+    match parse_data_uri(uri) {
+        Some(parts) => parts,
+        None => ("image/png", uri),
     }
-    // Fallback: treat as raw base64 with unknown media type
-    ("image/png", uri)
 }
 
 /// Convert our ChatMessage list to Anthropic format.
@@ -1303,6 +1302,35 @@ fn parse_anthropic_sse_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (chat image + text): the turn reached the model as the image
+    /// only. Since ADR-046 the image parts are derived server-side, so
+    /// `content_parts` carries no text block — and serialising the parts alone
+    /// dropped the user's own words.
+    #[test]
+    fn multimodal_content_keeps_the_text_beside_derived_images() {
+        use acowork_core::providers::traits::ImageUrlPart;
+        let msg = ChatMessage::user_multimodal(
+            "the delete button style is wrong",
+            vec![ContentPart::ImageUrl {
+                image_url: ImageUrlPart {
+                    url: "data:image/png;base64,iVBORw0KGgo=".into(),
+                    detail: None,
+                    width: None,
+                    height: None,
+                },
+            }],
+        );
+        let content = build_anthropic_content(&msg);
+        let blocks = content.as_array().unwrap_or_else(|| panic!("not an array: {content}"));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| b["type"] == "text" && b["text"] == "the delete button style is wrong"),
+            "user text missing from {blocks:?}"
+        );
+        assert!(blocks.iter().any(|b| b["type"] == "image"));
+    }
 
     #[test]
     fn test_provider_creation() {

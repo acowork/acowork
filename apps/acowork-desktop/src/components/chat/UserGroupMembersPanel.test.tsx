@@ -11,7 +11,9 @@
  *     `addMembers`, while an existing member (Bob) is not;
  *   - governance (ADR-098): the owner is a permanent member (badge, no remove,
  *     leave disabled until transfer), rename/transfer only render for
- *     owner/admin, and the actions ride `renameGroup` / `transferOwner`.
+ *     owner/admin, and the actions ride `renameGroup` / `transferOwner`;
+ *   - the group chat prompt card follows the same gate: owner/admin only, so
+ *     a plain member gets no card at all — not even a read of the prompt.
  *
  * `addMembers` / `removeMember` / `renameGroup` / `transferOwner` and
  * `fetchDirectory` are the seams; the group is passed straight in as a prop
@@ -50,6 +52,16 @@ const group = {
 
 beforeEach(() => {
   fetchDirectory.mockClear();
+  // The group chat prompt card reads `chat-md` on mount — stub the transport so
+  // the card resolves without a network.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ content: "Prompt.", is_default: true, editable: true }),
+    })),
+  );
   useAuthStore.setState({
     mode: "multi_user", status: "logged_in", accessToken: "token",
     account: { user_id: ME, username: "me", display_name: "Me", role: "user", language: "en", timezone: "UTC", created_at: "", updated_at: "" },
@@ -182,5 +194,31 @@ describe("UserGroupMembersPanel", () => {
     expect(screen.getByRole("button", { name: "Leave group" }).hasAttribute("disabled")).toBe(
       false,
     );
+  });
+
+  it("hides the group chat prompt card from a plain member", async () => {
+    // Bob owns the group; ME is a plain member. The prompt is the group's to
+    // read and change — a plain member gets neither, so no card at all.
+    await act(async () => {
+      render(<UserGroupMembersPanel group={{ ...group, owner: "u-bob" }} width={260} />);
+    });
+    expect(screen.queryByTestId("group-chat-prompt")).toBeNull();
+  });
+
+  it("shows the group chat prompt card to the owner", async () => {
+    await act(async () => {
+      render(<UserGroupMembersPanel group={{ ...group, owner: ME }} width={260} />);
+    });
+    expect(screen.getByTestId("group-chat-prompt")).toBeTruthy();
+  });
+
+  it("shows the group chat prompt card to an admin member", async () => {
+    useAuthStore.setState((s) => ({
+      account: { ...s.account!, role: "admin" },
+    }));
+    await act(async () => {
+      render(<UserGroupMembersPanel group={{ ...group, owner: "u-bob" }} width={260} />);
+    });
+    expect(screen.getByTestId("group-chat-prompt")).toBeTruthy();
   });
 });

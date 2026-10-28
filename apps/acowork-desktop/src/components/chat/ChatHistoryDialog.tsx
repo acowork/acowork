@@ -445,7 +445,7 @@ function SenderAvatar({
     <UserAvatar
       displayName={own ? profile.displayName : name}
       avatarUrl={own ? (profile.backendAvatarUrl ?? null) : null}
-      builtinAvatarId={own ? (profile.backendBuiltinAvatarId ?? null) : null}
+      builtinAvatarId={own ? (profile.backendBuiltinAvatarId ?? undefined) : null}
       size={size}
       className={className}
     />

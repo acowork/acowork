@@ -222,6 +222,48 @@ export function AppLayout() {
   const gatewayStatus = useGatewayStore((s) => s.status);
   const gatewayAlive = useGatewayStore((s) => s.gatewayAlive);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
+
+  // ── Shared model inventory ────────────────────────────────────────────
+  // `availableModels` / `providerAccounts` feed BOTH composer surfaces: the
+  // execution ChatPanel's model / effort / workspace menus and the Agent
+  // Chat-session's model / reasoning buttons (whose capability, and therefore
+  // whether the reasoning control exists at all, is resolved from this list —
+  // see lib/modelCapabilities.ts). Neither surface may own the load: AgentPage
+  // mounts only one of them at a time, and on a restart that reconnects to an
+  // already-running agent the exec composer never mounts — which is exactly
+  // how the Chat composer ended up with a model-less toolbar. Load it here,
+  // from the shell that is always up.
+  //
+  // Gated on `connected`: the vault read is local, but the per-provider
+  // capability fetch is HTTP through the Gateway, and an inventory fetched
+  // before the Gateway answers would cache models with no capability
+  // (reasoning control missing) until something else refreshed it.
+  useEffect(() => {
+    if (gatewayStatus === "connected") {
+      void useChatStore.getState().loadAvailableModels();
+    }
+  }, [gatewayStatus]);
+
+  // Vault keys changed elsewhere (Harness providers tab, the inline model
+  // picker) — `models-added` is the shared "keys saved" signal, dispatched
+  // on every vault write that affects the inventory (add AND remove
+  // provider, account edits). Refresh so newly added / removed providers
+  // and models show up without a remount.
+  //
+  // Same `connected` gate as the effect above: while the Gateway is down,
+  // the local vault read would succeed but every capability fetch fail,
+  // and a refresh built on that half-result is exactly the no-capability
+  // inventory we must not cache. When the signal arrives disconnected, the
+  // connect edge below reloads the inventory anyway.
+  useEffect(() => {
+    const handler = () => {
+      if (gatewayStatus === "connected") {
+        void useChatStore.getState().loadAvailableModels();
+      }
+    };
+    window.addEventListener("models-added", handler);
+    return () => window.removeEventListener("models-added", handler);
+  }, [gatewayStatus]);
   // ADR-101: the memory panel talks to the standalone memory service, so the
   // Gateway's `/api/status` projection is what decides whether the tab exists.
   // `null` (never read, or a Gateway older than ADR-101) means "not ready" —

@@ -176,8 +176,14 @@ impl PmService {
                 let mut failed = 0usize;
                 for p in projects {
                     let participants = crate::api::projects::group_participants(&p);
+                    // The owner travels too: `ensure_group` converges it onto
+                    // an existing row, so a project group created before the
+                    // chat domain carried an owner (or one whose ownership
+                    // moved while the Gateway was down) heals here — that id
+                    // is what governs the group's `chat.md` (ADR-098).
+                    let owner = p.owner().to_string();
                     if client
-                        .ensure_group(p.id.as_str(), &p.title, &participants)
+                        .ensure_group(p.id.as_str(), &p.title, &participants, &owner)
                         .await
                         .is_none()
                     {

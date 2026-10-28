@@ -78,8 +78,8 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
 
     let version: i64 = row.get("version")?;
     let corrupted: i64 = row.get("corrupted")?;
-    // ADR-076 §决策 4: `NULL` = ownerless / no explicit sharing decision.
-    let user_id: Option<String> = row.get("user_id")?;
+    // ADR-076 §决策 4: `NULL` = pre-accounts / local mode.
+    let initiator: Option<String> = row.get("initiator")?;
     let visibility_text: Option<String> = row.get("visibility")?;
     let visibility = visibility_text
         .as_deref()
@@ -176,7 +176,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         session_id: row.get("session_id")?,
         agent_id: row.get("agent_id")?,
         created_at,
-        user_id,
+        initiator,
         visibility,
         chat_session_id,
         title,
@@ -375,7 +375,7 @@ impl SessionMetaStore for SqliteSessionMetaStore {
             let tx = conn.transaction()?;
             // ADR-076 §决策 4: the cap is **per owner**, not global — one
             // account's busy week must not evict another account's history.
-            // `COALESCE(user_id, '')` puts every ownerless (pre-accounts /
+            // `COALESCE(initiator, '')` puts every ownerless (pre-accounts /
             // local-mode) row in a single bucket, which is exactly the
             // pre-ADR-076 behaviour for those rows.
             let mut stmt = tx.prepare(
@@ -384,7 +384,7 @@ impl SessionMetaStore for SqliteSessionMetaStore {
                        SELECT session_id FROM ( \
                          SELECT session_id, \
                                 ROW_NUMBER() OVER ( \
-                                  PARTITION BY COALESCE(user_id, '') \
+                                  PARTITION BY COALESCE(initiator, '') \
                                   ORDER BY last_active_at DESC \
                                 ) AS rn \
                          FROM sessions \
@@ -582,7 +582,7 @@ impl SessionMetaStore for SqliteSessionMetaStore {
 
 const SELECT_ALL_COLUMNS: &str = "SELECT \
     session_id, agent_id, created_at, last_active_at, \
-    version, corrupted, user_id, visibility, \
+    version, corrupted, initiator, visibility, \
     title, workspace_id, model, provider, account_id, reasoning_effort, \
     temperature, context_window, todos, message_count, \
     llm_call_counter, model_ratio, last_compaction_offset, \
@@ -593,7 +593,7 @@ FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     session_id, agent_id, created_at, last_active_at, \
-    version, corrupted, user_id, visibility, \
+    version, corrupted, initiator, visibility, \
     title, workspace_id, model, provider, account_id, reasoning_effort, \
     temperature, context_window, todos, message_count, \
     llm_call_counter, model_ratio, last_compaction_offset, \
@@ -631,7 +631,7 @@ fn upsert_row(
             token_last_input, token_last_output, token_total_input, token_total_output, \
             token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
             perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, \
-            version, corrupted, user_id, visibility, chat_session_id, model_usage \
+            version, corrupted, initiator, visibility, chat_session_id, model_usage \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
             ?5, ?6, ?7, ?8, ?9, ?10, \
@@ -673,7 +673,7 @@ fn upsert_row(
             perf_ttft_ms_samples = excluded.perf_ttft_ms_samples, \
             version = excluded.version, \
             corrupted = excluded.corrupted, \
-            user_id = excluded.user_id, \
+            initiator = excluded.initiator, \
             visibility = excluded.visibility, \
             chat_session_id = excluded.chat_session_id, \
             model_usage = excluded.model_usage",
@@ -712,7 +712,7 @@ fn upsert_row(
             meta.perf.as_ref().map(|p| p.ttft_ms_samples as i64),
             meta.version as i64,
             meta.corrupted as i64,
-            meta.user_id,
+            meta.initiator,
             meta.visibility.map(|v| v.as_str()),
             meta.chat_session_id,
             serialize_model_usage(meta.model_usage.as_ref()),

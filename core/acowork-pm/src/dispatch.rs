@@ -231,7 +231,6 @@ pub fn spawn_scanner(
                         task.id.as_str(),
                         assignee,
                         &task.created_by,
-                        &task.title,
                         &message,
                         &brief,
                         &identity,

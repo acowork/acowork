@@ -15,6 +15,7 @@ import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
 import { OutlineBrainIcon, FilledBrainIcon } from "../common/BrainIcon";
 import { OutlineChatHistoryIcon } from "../common/ChatHistoryIcon";
 import { StyledInput } from "../common/StyledInput";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ScrollableTabBar, type ScrollableTabBarHandle } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
 import { Tooltip } from "../common/Tooltip";
@@ -199,7 +200,7 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
         </div>
       </div>
 
-      <div className="max-h-80 overflow-y-auto py-1">
+      <OverlayScrollbar maxHeight={320} className="py-1">
         {filteredSessions.length === 0 && (
           <div className="px-3 py-4 text-center text-xs text-text-tertiary ">
             {t("sessionTabBar.sidebarNoSessionsYet")}
@@ -301,7 +302,7 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
             </div>
           );
         })}
-      </div>
+      </OverlayScrollbar>
 
       {/* Pagination */}
       {totalPages > 1 && (

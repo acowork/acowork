@@ -335,6 +335,13 @@ pub(crate) fn build_session_manager_config(
         per_session_budget: ctx.budget.clone(),
         history_max_tokens: config.history_max_tokens,
         chunk_tx: ctx.chunk_tx.clone(),
+        // ADR-034 §4: the one `sessions/created` announce point lives in
+        // `SessionManager::create_frontend_session`, so it must exist before
+        // any session can be created. `None` in standalone mode (no broker).
+        session_events: ctx
+            .mqtt_client
+            .as_ref()
+            .map(crate::mqtt::MqttChunkPublisher::from_runtime_client),
         full_tool_specs: ctx.full_tool_specs.clone(),
         identity_context: ctx.identity_context.clone(),
         protocol_type: ctx.protocol_type.clone(),

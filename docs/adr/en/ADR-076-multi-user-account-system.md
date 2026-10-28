@@ -56,7 +56,8 @@
 1. **Session isolation is the mandatory default in multi_user mode**: except for admin, all session-dimension reads and writes (list / messages / state / files) must go through user_id filtering; missing any single one is a data leak. Session filtering is not enabled in local mode (see § Decision 12). **(Current status: ✅ satisfied — the Runtime read-path filter + the write-path owner check + the HTTP-ization of the control plane have all landed, see the § Decision 4 Phase D implementation record.)**
 2. **admin cannot forge a user_id**: in the admin view, "see sessions as user A" is implemented through the `?as_user=<user_id>` query, but `as_user` is never usable by an ordinary user; the `role` field in the token is fixed at issuance time and in-request override is not accepted.
 3. **Account credential encryption does not depend on the Vault being unlocked**: the account read path degrades to 401 when the Vault is locked (cannot decrypt → cannot log in), but **account-list metadata (without passwords) is allowed to be displayed while the Vault is locked** (metadata only, such as username / role / created_at), so that account selection still works in a lock-screen scenario.
-4. **Writing `session.user_id` is immutable**: once a session is created and bound to a user_id, it is **never modified** (except in migration / import scenarios, which must be an admin operation); this guarantees the immutability of a session history's "owner".
+4. **Writing `session.initiator` is immutable**: once a session is created and bound to an initiator, it is **never modified** (except in migration / import scenarios, which must be an admin operation); this guarantees the immutability of a session history's "owner".
+4a. **An execution session has exactly one initiator and is never a multi-user chat**: it is the pair (bound chat session, initiator); every non-initiator is read-only (an admin **cannot write it either** — `as_user` inspection is read-only); two people mentioning the same agent in the same group chat are two pieces of work and two execution sessions (see § Decision 4 v2).
 5. **Both sides of a chat are peers**: a message from user A → user B is stored under the `min(a,b)/chats/max(a,b)/` directory; both sides' GET / POST are symmetric, with no per-user state machine maintained inside the Gateway.
 6. **Password changes require the old password**: the change-password API accepts `old_password + new_password`, preventing arbitrary password changes after a token leak; admin cannot change another person's password (must reset first and then go through the first-login password-change flow).
 
@@ -372,7 +373,7 @@ pub enum SessionVisibility { Public, Private }
 
 | scope \ session | public (including `visibility = None`) | private |
 |---|---|---|
-| admin (`x-user-id: *`) | readable and writable | readable and writable |
+| admin (`x-user-id: *` + `x-acowork-scope-admin`) | readable, **writable only where it is the initiator** | readable, **writable only where it is the initiator** (see § Decision 4 v2) |
 | owner | readable and writable | readable and writable |
 | another user | readable | **404** (neither readable nor writable) |
 | local (no header) | readable and writable | readable and writable |
@@ -505,6 +506,55 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 - **`GET /sessions/latest` costs one extra round trip for a non-owner**: see the security checkpoints above. The cached value is not scope-resolved. The original reason was "resolving the scope requires a full scan" — but that premise has been overturned by the in-memory `meta/` index (see §5.5 "settled: the full scan of the `meta/` directory"), so resolving the scope is now just an in-memory filter over already-sorted rows and needs no new cache. **The behaviour is not changed for now**: this round is a pure performance change, and changing the visibility semantics of `/latest` needs its own tests and documentation; the upgrade path is open — take the newest row visible to the caller via `with_meta_index`.
 - **The `visibility` switch already has UI (this item is settled)**: `SessionVisibilityToggle` hangs on the input box (composer) tool row, and only the owner can click it (when `can_write === false` it renders as disabled). **The default for new sessions is also settled (this round)**: an owned session is `Private` at creation, while unowned (local / pre-upgrade data) stays `None` = public — see § Decision 4 "The two meanings of the default value". The original sentence "per-agent default visibility is still not done and is deliberately left blank" is **resolved**: what is left blank is "whether admin can force a given agent's sessions to be visible", which is an admin-level policy ("this agent's conversations are a team-shared log") and not the same layer as "my new sessions default to private"; if it is ever needed, add an admin field to `accounts.json` / the configuration, and open a separate decision then.
 - **Decoupling session memory reclamation from session lifecycle (unresolved, an independent topic)**: `SessionManager::evict_idle_sessions` is defined but has **no caller in the whole repository** (dead code); actual reclamation only exists at the agent level via automatic sleep (`process::exit`), and its renewal contains a **global** `ActiveHeartbeat` (any Desktop that has selected that agent renews it, carrying no user identity). Therefore "a viewer should not activate a session" is a design constraint directly related to that gap: we do not add another participant to a system that has no per-session GC. See §5.5.
+
+#### § Decision 4 v2: an execution session has exactly one initiator
+
+**Trigger**: identity confusion observed in a real multi-user setup (t-9764c5fa). After switching to account B: A's chat bubble in the group chat rendered with B's avatar and name; "view execution" from a group-chat reply spun on "Loading session…" forever; opening that execution session from the agent's session history showed B instead of A. Dispatching a task as A showed the project owner as the sender in the group chat, while the execution session showed A.
+
+**Three root causes, all gaps in this decision**:
+
+1. **Wrong ownership recorded**: the execution session took its owner from the profile of the *last* `update_user_identity` push this Runtime received (`acowork/global/user_profile` is a retained single-value topic) — i.e. "whoever logged in last", not whoever started the work.
+2. **Wrong ownership rendered**: the execution surface and the group chat read user identity from the *logged-in account's* profile store, not from the session's owner.
+3. **Wrong routing**: the group-chat routing key was `chat:{chat_session_id}` — one group plus one agent had exactly **one** execution session, so A's and B's mentions landed in the same conversation. The execution session had in fact become a multi-user chat.
+
+**Invariants (new, non-negotiable)**:
+
+- An execution session is the execution record of one task as **(bound chat session, initiator)**. It has **exactly one initiator**, written once at creation and never changed.
+- An execution session **never carries a multi-user conversation**. Multi-user conversation is the chat session's job; the execution session is "the thing one person handed one agent in one chat".
+- The initiator may keep interacting in its own execution session; **every non-initiator is read-only**.
+- **An admin may not write someone else's execution session either.** A rule with an admin loophole is not a rule. The admin keeps `as_user` **read-only** inspection (read everything, write only what it initiated).
+- The initiator is either a human (account UUID) or an agent (instance UUID, for agent-to-agent hand-offs inside a group). An agent-initiated execution session is **writable by no human**.
+
+**Renames (landed with the invariants, so `user_id` stops meaning two different things)**:
+
+| before | after | note |
+|---|---|---|
+| `SessionMeta.user_id` | `SessionMeta.initiator` | JSON sidecars keep `#[serde(alias = "user_id")]`; no historical file migration |
+| `sessions.user_id` (SQLite column) | `sessions.initiator` | one `ALTER TABLE ... RENAME COLUMN` (memory schema v8) |
+| `ConversationSession::set_user_id` | `set_initiator` | |
+| `create_agent_owned_session` | `create_intent_session` | now takes the real initiator from the envelope instead of reading `last_user_profile` |
+
+`user_id` now belongs **only to the account system**: `DirectoryUser.user_id`, Chat participants, PM `created_by`, `SessionScope.uid`.
+
+**`SessionScope` splits into three** (`Unfiltered` used to mean both local mode and admin, which made every admin implicitly able to write everything):
+
+| scope | source | read | write |
+|---|---|---|---|
+| `Unfiltered` | local mode (no `x-user-id` header) | everything | everything (no accounts exist, so there is nobody to exclude) |
+| `Admin { uid }` | `x-user-id: *` + `x-acowork-scope-admin: <uid>` | everything (`as_user` included) | only where `initiator == uid` |
+| `User { uid, chats }` | `x-user-id: <uid>` (+ `x-acowork-chat-scope`) | own + `Public` + `Members` of joined chats | own only |
+
+Exactly one injection point each: the Gateway writes these two headers only in `auth_middleware` (real requests) and `runtime_scope_headers` (the Runtime reverse proxy); the Runtime only reads them through `SessionScope::from_headers`.
+
+**The execution surface's write path is the real gate**: a message composed in the execution view travels the intent pin channel (`for_execution_session`, ADR-100 D12) and **never passes through** `is_writable_by` — that predicate guards the HTTP control plane (open / close / delete / config). `deliver_pinned_turn` therefore carries the second gate for the same rule: a pin may only name a session that is **bound to the sender's own chat and whose initiator is the sender**. Otherwise the pin is dropped and the turn routes normally (the pin's existing "hint, not gate" contract): the sender still reaches the agent, in a session of its own. Without that gate the single-initiator rule would live only in the Desktop's disabled composer — every group member holds the chat rows and can read another member's `agent_session_id`.
+
+**The candidate list fails closed when the speaker is unknown**: `is_own` hides a session that has an initiator but no one to compare it against (local mode never reaches that arm — no accounts means no initiator), so another member's run cannot be handed to the router.
+
+**Routing**: the group-chat routing key becomes `chat:{chat_session_id}:{initiator}`, and the Chat Router's candidates filter on `initiator`. So "B also mentions the same agent in the same group" is a new piece of work and a new execution session, not a continuation of A's. The PM task chain `conv:task:{project}:{task}` is single-initiator by construction and unchanged.
+
+**Desktop**: the execution surface's identity comes from the session's `initiator` (humans via the account directory `GET /api/users/directory`, agents via `agentStore.agents`) and no longer from `userProfileStore`; only when `initiator == me` does it fall back to the local profile. Other people's avatars in a group chat come from the account directory, never from the current account's profile.
+
+**Implementation record**: `acowork-core` (three-state `SessionScope` + predicates), `acowork-memory` (schema v8), `acowork-sqlite`, `acowork-runtime` (rename + initiator stamping + routing key + candidate filtering), `acowork-gateway` (admin scope header), Desktop (identity / read-only tab / `setMode` / `resolveActiveSession`). Tests: a new "two initiators in one group → two execution sessions, mutually unwritable" case beside `chat_routed_sessions_carry_the_members_binding`, plus `apps/acowork-desktop/src/stores/execInitiator.test.ts`.
 
 ### Decision 5: the admin role — `role = "admin"` bypasses filtering + special privileges
 

@@ -1777,8 +1777,12 @@
       "deleteTaskCascadeDesc": "Delete this task? Its subtasks will also be deleted.",
       "taskNotFound": "Task not found",
       "taskDeleted": "Task deleted",
+      "deleteFailed": "Delete failed: {{error}}",
       "save": "Save",
       "taskSaved": "Task saved",
+      "discardChangesTitle": "Discard unsaved changes?",
+      "discardChangesDesc": "Closing now will discard your changes.",
+      "discardChangesConfirm": "Discard",
       "taskSaveFailed": "Save failed",
       "descriptionPlaceholder": "Support Markdown...",
       "unassigned": "Unassigned",
@@ -2008,8 +2012,10 @@
     "placeholderWithMentions": "Message the team — @Agent to assign work",
     "send": "Send",
     "mentionLabel": "Mention a member",
+    "mentionMenu": "@{{name}}",
     "emptyTurn": "(no output)",
     "taskChip": "Task {{id}}",
+    "toChip": "TO",
     "taskChipCopy": "Copy task id",
     "readOnly": "Read-only — you are not a member of this project."
   },
@@ -2034,6 +2040,24 @@
     "transferFailed": "Ownership transfer failed",
     "mustTransferBeforeLeave": "Transfer the owner role before leaving",
     "governForbidden": "Only the group owner or an admin can do this"
+  },
+  "groupChatPrompt": {
+    "title": "Group chat prompt (chat.md)",
+    "isDefault": "Default",
+    "unsaved": "Unsaved",
+    "hint": "The whole chat prompt for this group. Saving it replaces the app's built-in default for every agent that answers here. The mandatory `# Safety` guardrail is appended automatically and is not shown or editable here.",
+    "readOnlyHint": "The whole chat prompt for this group. Only the group owner or an admin can edit it. The mandatory `# Safety` guardrail is appended automatically and is not shown here.",
+    "save": "Save",
+    "restore": "Restore default",
+    "saved": "Group chat prompt saved",
+    "saveFailed": "Save failed",
+    "custom": "Custom",
+    "edit": "Edit",
+    "restored": "Group chat prompt restored to default",
+    "restoreFailed": "Restore failed"
+  },
+  "groupSettings": {
+    "title": "Group settings"
   },
   "newGroup": {
     "title": "New group",

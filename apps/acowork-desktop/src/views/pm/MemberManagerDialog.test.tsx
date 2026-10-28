@@ -14,7 +14,7 @@
  *   ("?" absent, display_name present, remove button enabled). If the wiring
  *   ever regresses to a per-callsite agentStore-only join, this goes red.
  *
- * Stub strategy mirrors `TaskDetailDialog.test.tsx`: `vi.mock` the leaf
+ * Stub strategy mirrors `TaskEditDialog.test.tsx`: `vi.mock` the leaf
  * stores (no network, no i18n), assert on the rendered DOM.
  */
 import { describe, it, expect, vi } from "vitest";
@@ -164,10 +164,11 @@ describe("MemberManagerDialog — user-member wiring", () => {
     expect(mocks.transferOwner).toHaveBeenCalledWith("p-test", MOCK_PEER_ID);
   });
 
-  it("hides the transfer affordance for a caller who is neither owner nor admin", () => {
-    // The backend gates transfer on `X-Actor == owner || admin`; the dialog
-    // mirrors it so a plain member cannot even see "Make owner". Here the
-    // signed-in account is a `user`-role non-creator.
+  it("gives a caller who is neither owner nor admin no mutation affordance", () => {
+    // The backend gates every project mutation (rename / delete / roster) on
+    // `x-actor == owner() || admin` — PM's `require_governance`. The dialog
+    // mirrors it: a plain member reads who is in the group and gets no button
+    // for an action the server would refuse with a 403.
     (globalThis as unknown as { __authAccount: unknown }).__authAccount = {
       user_id: "cccc0000-0000-0000-0000-000000000000",
       username: "bob",
@@ -187,12 +188,13 @@ describe("MemberManagerDialog — user-member wiring", () => {
       />,
     );
 
-    // Owner row still badges; the other member row is removable but NOT
-    // transferable for this caller.
+    // The roster is still readable, owner badge included…
     expect(within(rowFor(MOCK_USER_ID)).getByText("pm.owner")).toBeTruthy();
     const peerRow = rowFor(MOCK_PEER_ID);
-    expect(within(peerRow).getByText("pm.removeMember")).toBeTruthy();
+    // …but nothing that mutates: no remove, no make-owner, no invite list.
+    expect(within(peerRow).queryByText("pm.removeMember")).toBeNull();
     expect(within(peerRow).queryByText("pm.makeOwner")).toBeNull();
+    expect(screen.queryByText("pm.addMember")).toBeNull();
 
     // Restore the admin account so later tests (which rely on the default
     // `__authAccount` from the mock factory) stay independent of this one.

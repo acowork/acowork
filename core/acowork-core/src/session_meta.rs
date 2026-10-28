@@ -258,7 +258,7 @@ pub enum TodoStatus {
 /// byte-identical on disk to a pre-ADR-076 row. That is the whole point:
 /// upgrading must not retroactively hide every existing session from its
 /// user, and those sessions have no owner to restrict them to anyway
-/// (`is_readable_by` ignores the flag when `user_id` is absent).
+/// (`is_readable_by` ignores the flag when `initiator` is absent).
 ///
 /// A session created by an identified account is **not** left absent: the
 /// creation path stamps `Private` (ADR-076 §决策 4). `None` therefore
@@ -324,17 +324,28 @@ impl SessionVisibility {
 
 /// Who is asking for a session (ADR-076 §决策 4).
 ///
-/// Produced by the HTTP layer from the Gateway-injected `x-user-id`
-/// header (see `acowork-gateway`'s auth middleware) and consumed by the
-/// session read/write paths. Two variants, because "administrator" and
-/// "`AUTH_MODE=local`, no accounts at all" (ADR-076 §决策 12) have
-/// genuinely identical access — both are unfiltered — and splitting them
-/// would mean two code paths that can never diverge.
+/// Produced by the HTTP layer from the Gateway-injected `x-user-id` +
+/// `x-acowork-scope-admin` headers (see `acowork-gateway`'s auth
+/// middleware) and consumed by the session read/write paths.
+///
+/// **Read and write are not the same axis.** An administrator reads
+/// everything (support inspection, `as_user`), but an execution session has
+/// exactly one initiator and only that initiator may write it — an admin
+/// overriding that would defeat the rule the field exists to enforce
+/// (ADR-076 §决策 4). Local mode has no accounts at all, so there is nobody
+/// to exclude: it stays fully unfiltered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionScope {
-    /// No restriction: an administrator, or a local-mode Runtime where
-    /// the account system is off.
+    /// No restriction at all: a local-mode Runtime (`AUTH_MODE=local`,
+    /// ADR-076 §决策 12), where the account system is off and one implicit
+    /// human owns everything.
     Unfiltered,
+    /// An administrator: may **read** every session (`as_user` inspection
+    /// included), may **write** only what it initiated itself.
+    Admin {
+        uid: String,
+        chats: Vec<String>,
+    },
     /// A signed-in account, plus the ids of the Chat sessions it currently
     /// participates in (design 27 §8.2). `chats` is empty unless the
     /// Gateway injected the `x-acowork-chat-scope` header; an empty set
@@ -355,46 +366,72 @@ impl SessionScope {
         }
     }
 
-    /// Parse the `x-user-id` + `x-acowork-chat-scope` headers.
+    /// Construct an administrator scope with no Chat membership.
+    pub fn admin(uid: impl Into<String>) -> Self {
+        Self::Admin {
+            uid: uid.into(),
+            chats: Vec::new(),
+        }
+    }
+
+    /// Parse the `x-user-id` + `x-acowork-scope-admin` +
+    /// `x-acowork-chat-scope` headers.
     ///
     /// `user` absent (header missing) means local mode — the Gateway never
     /// strips or injects in that mode, so an absent header is the normal
     /// local case and must NOT be treated as "anonymous, deny everything".
-    /// The all-axes sentinel `*` is the administrator's unfiltered view.
+    /// The all-axes sentinel `*` in `user` is the administrator's unfiltered
+    /// view; `admin` then carries the administrator's own uid, because "may
+    /// read everything" no longer implies "may write everything". An
+    /// `as_user` request is a plain [`Self::User`] (the impersonated
+    /// identity is the whole point).
     /// `chats` is the comma-separated Chat session id list; empty/absent
     /// yields an empty membership set.
-    pub fn from_headers(user: Option<&str>, chats: Option<&str>) -> Self {
-        let scope = Self::from_header_value(user);
-        match scope {
-            Self::User { uid, .. } => Self::User {
-                uid,
-                chats: chats
-                    .map(|v| {
-                        v.split(',')
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            },
-            other => other,
+    pub fn from_headers(user: Option<&str>, admin: Option<&str>, chats: Option<&str>) -> Self {
+        let chats: Vec<String> = chats
+            .map(|v| {
+                v.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let admin_uid = admin.map(str::trim).filter(|s| !s.is_empty());
+        match Self::from_header_value_with_admin(user, admin_uid) {
+            Self::Unfiltered => Self::Unfiltered,
+            Self::Admin { uid, .. } => Self::Admin { uid, chats },
+            Self::User { uid, .. } => Self::User { uid, chats },
         }
     }
 
     /// Parse the `x-user-id` header value alone (no Chat membership).
     pub fn from_header_value(value: Option<&str>) -> Self {
-        match value.map(str::trim) {
-            None | Some("") | Some("*") => Self::Unfiltered,
-            Some(uid) => Self::user(uid),
+        Self::from_header_value_with_admin(value, None)
+    }
+
+    fn from_header_value_with_admin(value: Option<&str>, admin: Option<&str>) -> Self {
+        match (value.map(str::trim), admin) {
+            (Some("*"), Some(uid)) => Self::admin(uid),
+            (None | Some("") | Some("*"), _) => Self::Unfiltered,
+            (Some(uid), _) => Self::user(uid),
         }
     }
 
-    /// The account id, or `None` for an unfiltered scope.
-    pub fn user_id(&self) -> Option<&str> {
+    /// The caller's own account id, or `None` for a local-mode scope (no
+    /// accounts exist to attribute anything to).
+    pub fn caller_uid(&self) -> Option<&str> {
         match self {
             Self::Unfiltered => None,
-            Self::User { uid, .. } => Some(uid.as_str()),
+            Self::Admin { uid, .. } | Self::User { uid, .. } => Some(uid.as_str()),
+        }
+    }
+
+    /// The Chat-session membership set (empty for local mode).
+    pub fn chats(&self) -> &[String] {
+        match self {
+            Self::Unfiltered => &[],
+            Self::Admin { chats, .. } | Self::User { chats, .. } => chats,
         }
     }
 }
@@ -412,15 +449,22 @@ pub struct SessionMeta {
     pub agent_id: String,
     pub created_at: String,
 
-    /// ADR-076 §决策 4: the account that owns this session.
+    /// ADR-076 §决策 4: **who initiated this session** — an account UUID, or
+    /// an agent instance UUID when the session came from an agent-initiated
+    /// intent. One initiator, written once, never re-assigned.
+    ///
+    /// This is the single identity the session has, and it is also the
+    /// permission: only the initiator may write (see [`SessionMeta::is_writable_by`]).
+    /// Deliberately **not** called `user_id` — that name belongs to the
+    /// account system (directory rows, Chat participants, PM `created_by`),
+    /// and reusing it here is what made "the session owner", "the logged-in
+    /// user" and "the message sender" look interchangeable.
     ///
     /// `None` = created before the account system existed, or under
     /// `AUTH_MODE=local` (no accounts at all) — only an unfiltered
-    /// (administrator) reader sees those. Immutable after creation: the
-    /// metadata builder never invents one, and the only writer is the
-    /// creation path (see `ConversationSession::set_user_id`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_id: Option<String>,
+    /// (local-mode) reader sees those.
+    #[serde(default, alias = "user_id", skip_serializing_if = "Option::is_none")]
+    pub initiator: Option<String>,
     /// ADR-076 §决策 4: who may read this session. **Absent = public**
     /// (see [`SessionVisibility`]). Mutable — the owner can flip it at
     /// any time via `ConversationSession::set_visibility`.
@@ -494,7 +538,10 @@ impl SessionMeta {
     /// `Private` on anything it can attribute to an account.
     pub fn is_readable_by(&self, scope: &SessionScope) -> bool {
         match scope {
-            SessionScope::Unfiltered => true,
+            // An administrator reads everything: support inspection and
+            // `as_user` are the whole point of the role. Reading is not
+            // writing — see `is_writable_by`.
+            SessionScope::Unfiltered | SessionScope::Admin { .. } => true,
             SessionScope::User { uid, chats } => {
                 if self.visibility == Some(SessionVisibility::Members) {
                     // Design 27 §8.2: a group execution session is readable
@@ -506,9 +553,9 @@ impl SessionMeta {
                         .chat_session_id
                         .as_deref()
                         .is_some_and(|c| chats.iter().any(|x| x == c));
-                    return member || self.user_id.as_deref() == Some(uid.as_str());
+                    return member || self.initiator.as_deref() == Some(uid.as_str());
                 }
-                match self.user_id.as_deref() {
+                match self.initiator.as_deref() {
                 // Ownerless sessions are a two-way split, and the split is
                 // the whole reason `None` and `Some(Private)` must not be
                 // collapsed:
@@ -556,10 +603,19 @@ impl SessionMeta {
     /// unclaimed session nobody may read is also one nobody may write, or
     /// the first user to touch it could flip the flag back and re-share
     /// it with everyone.
+    ///
+    /// An **administrator is held to the same rule as anyone else**: an
+    /// execution session has exactly one initiator, so letting an admin type
+    /// into someone else's would put a second person into a conversation
+    /// that is defined as single-initiator (ADR-076 §决策 4). Reading is
+    /// what the role buys, and `as_user` covers the "look at it as them"
+    /// case without a write. Local mode keeps full access — there is no
+    /// second account to protect a session from.
     pub fn is_writable_by(&self, scope: &SessionScope) -> bool {
         match scope {
             SessionScope::Unfiltered => true,
-            SessionScope::User { uid, .. } => match self.user_id.as_deref() {
+            SessionScope::Admin { uid, .. } | SessionScope::User { uid, .. } => {
+                match self.initiator.as_deref() {
                 // `Members` behaves like `Private` for writes: chat
                 // participants read the group execution history, they do
                 // not own or mutate the session itself — their messages
@@ -568,8 +624,9 @@ impl SessionMeta {
                 None => !self
                     .visibility
                     .is_some_and(|v| v.is_private() || v == SessionVisibility::Members),
-                Some(owner) => owner == uid.as_str(),
-            },
+                Some(initiator) => initiator == uid.as_str(),
+                }
+            }
         }
     }
 }

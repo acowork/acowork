@@ -116,11 +116,12 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.providerAccountId ?? null;
   });
-  // Shared across the desktop — `loadModels` in ChatPanel populates
-  // this map from `invoke('list_keys')`. Reading here avoids a second
-  // IPC roundtrip; the list is refreshed whenever the input-box menu
-  // opens, which is the same trigger that affects what the session-
-  // status card should display.
+  // Shared across the desktop — `chatStore.loadAvailableModels` populates
+  // this map from `invoke('list_keys')`, triggered by the resident shell
+  // (AppLayout: on the Gateway connect edge and the `models-added` signal).
+  // Reading here avoids a second IPC roundtrip; the same inventory that
+  // feeds the input-box model menu drives what the session-status card
+  // displays.
   const providerAccounts = useChatStore((s) => s.providerAccounts);
   // Multi-account alias resolution for the right-panel session-status
   // card. Mirrors the gating the input-box model menu uses

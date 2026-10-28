@@ -4,14 +4,14 @@
  * 对齐 UX 设计 §2.1/§3.1：左侧 ProjectSidebar（可拖动宽度，默认 240px）+ 右侧 ProjectBoard。
  * 职责：
  * - 进入视图时加载项目列表 + 健康检查
- * - 组合 Sidebar / Board / TaskDetailDialog / TaskEditDialog
+ * - 组合 Sidebar / Board / TaskEditDialog（任务的唯一表面：edit / create 两态）
  * - 三态：加载骨架 / 空状态（创建第一个项目）/ 错误 banner + 重试
  *
  * 注意：Desktop 无 react-router，路由由 AppLayout 的 NavView state 驱动；
  * 本项目内选中项由 usePmProjectStore.selected 维护。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useDragResize } from "../hooks/useDragResize";
 import { SplitHandle } from "../components/common/SplitHandle";
 import { CAPSULE_PANE_CN } from "../components/common/capsule";
@@ -22,21 +22,12 @@ import { usePmTaskDetailStore } from "../stores/pm/taskDetailStore";
 import { usePmHealthStore } from "../stores/pm/healthStore";
 import { ProjectSidebar } from "./pm/ProjectSidebar";
 import { ProjectBoard } from "./pm/ProjectBoard";
-import { TaskDetailDialog } from "./pm/TaskDetailDialog";
 import { TaskEditDialog } from "./pm/TaskEditDialog";
 import { ServiceOfflineBanner } from "./pm/ServiceOfflineBanner";
 import { useTranslation } from "../i18n/useTranslation";
-import type { PmTaskResponse } from "../lib/pm-types";
-
-/** 编辑对话框状态：创建（项目级/子任务级）或 编辑（某任务） */
-type EditDialogState =
-  | { mode: "create"; projectId: string; parentId: string | null }
-  | { mode: "edit"; task: PmTaskResponse }
-  | null;
 
 export function ProjectsView() {
   const { t } = useTranslation();
-  const [editDialog, setEditDialog] = useState<EditDialogState>(null);
   // 与聊天 AgentList 一致的左侧分栏宽度（可拖动 + localStorage 持久化）
   const sidebar = useDragResize({
     storageKey: "acowork-pm-list-width",
@@ -54,8 +45,12 @@ export function ProjectsView() {
   const loadTasks = usePmBoardStore((s) => s.loadTasks);
   const clearBoard = usePmBoardStore((s) => s.clear);
 
-  const detailTaskId = usePmTaskDetailStore((s) => s.taskId);
+  // The dialog's open/closed state IS the store's mode — one source of truth,
+  // so the board, the search deep link and the "add subtask" entry can never
+  // disagree about what is on screen.
+  const dialogMode = usePmTaskDetailStore((s) => s.mode);
   const openTask = usePmTaskDetailStore((s) => s.openTask);
+  const openCreate = usePmTaskDetailStore((s) => s.openCreate);
   const clearDetail = usePmTaskDetailStore((s) => s.clear);
 
   // T2-14：记录打开 Drawer 的触发元素，关闭后恢复焦点
@@ -195,46 +190,15 @@ export function ProjectsView() {
           onRetry={handleRetry}
           onOpenTask={handleOpenTask}
           onNewTask={() => {
-            if (selected) setEditDialog({ mode: "create", projectId: selected.id, parentId: null });
+            if (selected) openCreate({ projectId: selected.id });
           }}
         />
       </div>
-      {/* 任务详情对话框（含编辑/添加子任务）——居中 dialog，与全局 dialog 风格统一；
-          pm 右侧 40px 轨归项目设置面板（PmSettingsPanel） */}
-      {detailTaskId && (
-        <TaskDetailDialog
-          taskId={detailTaskId}
-          onClose={handleCloseDetail}
-          onEdit={(task) => setEditDialog({ mode: "edit", task })}
-          onAddSubtask={(parentId) => {
-            if (selected) setEditDialog({ mode: "create", projectId: selected.id, parentId });
-          }}
-        />
-      )}
-      {/* 创建/编辑任务对话框 */}
-      {editDialog && editDialog.mode === "create" && (
-        <TaskEditDialog
-          mode="create"
-          projectId={editDialog.projectId}
-          defaultParentId={editDialog.parentId}
-          onClose={() => setEditDialog(null)}
-          onSaved={() => {
-            if (detailTaskId) usePmTaskDetailStore.getState().refresh();
-          }}
-        />
-      )}
-      {editDialog && editDialog.mode === "edit" && (
-        <TaskEditDialog
-          mode="edit"
-          projectId={editDialog.task.project_id}
-          initial={editDialog.task}
-          onClose={() => setEditDialog(null)}
-          onSaved={() => {
-            usePmBoardStore.getState().reload();
-            if (detailTaskId) usePmTaskDetailStore.getState().refresh();
-          }}
-        />
-      )}
+      {/* The one task surface: the create/edit box, now also holding
+          attachments / subtasks / delete. Centered dialog like the rest of the
+          app; pm's 40px right rail belongs to the project settings panel
+          (PmSettingsPanel), not to tasks. */}
+      {dialogMode && <TaskEditDialog onClose={handleCloseDetail} />}
     </div>
   );
 }

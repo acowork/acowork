@@ -75,6 +75,17 @@ pub const USER_SCOPE_HEADER: &str = "x-user-id";
 /// so a client-supplied copy is stripped before authentication.
 pub const CHAT_SCOPE_HEADER: &str = "x-acowork-chat-scope";
 
+/// The administrator's own uid, injected beside [`USER_SCOPE_HEADER`]
+/// (ADR-076 §决策 4).
+///
+/// `x-user-id: *` says "unfiltered read", which is all the Runtime needs to
+/// know for reading. It cannot say *who* the admin is, and since an
+/// execution session may only be written by its initiator, an admin needs an
+/// identity on the wire too. Present exactly when the caller is an
+/// administrator acting as itself — an `as_user` request is a plain user and
+/// carries the impersonated id in `x-user-id` only.
+pub const ADMIN_SCOPE_HEADER: &str = "x-acowork-scope-admin";
+
 /// Scope value meaning "no filtering" — the administrator view.
 pub const SCOPE_ALL: &str = "*";
 
@@ -113,10 +124,19 @@ fn scope_value(ctx: &AuthContext) -> String {
 /// beside the constants so the derivation stays single-sourced: a route
 /// importing `USER_SCOPE_HEADER` directly is a lint failure; a route
 /// calling this keeps the "derived from the verified token" property.
-pub fn runtime_scope_headers(scope: &str, chats: &[String]) -> HeaderMap {
+pub fn runtime_scope_headers(scope: &str, admin_uid: Option<&str>, chats: &[String]) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if let Ok(v) = HeaderValue::from_str(scope) {
         headers.insert(HeaderName::from_static(USER_SCOPE_HEADER), v);
+    }
+    // An unfiltered scope without its admin identity would read as a
+    // local-mode caller, which is writable everywhere — so the pair travels
+    // together or not at all.
+    if scope == SCOPE_ALL
+        && let Some(uid) = admin_uid
+        && let Ok(v) = HeaderValue::from_str(uid)
+    {
+        headers.insert(HeaderName::from_static(ADMIN_SCOPE_HEADER), v);
     }
     // Mirror the proxy's membership injection: the Runtime authorizes
     // `Members`-visible sessions (card answers resolve the bound
@@ -195,6 +215,7 @@ pub async fn auth_middleware(
         // any client-supplied scope header rather than letting it reach
         // the Runtime unvetted (ADR-076 §决策 4).
         req.headers_mut().remove(USER_SCOPE_HEADER);
+        req.headers_mut().remove(ADMIN_SCOPE_HEADER);
         req.headers_mut().remove(CHAT_SCOPE_HEADER);
         return next.run(req).await;
     }
@@ -202,6 +223,7 @@ pub async fn auth_middleware(
     // Never forward a client-asserted identity: the header is re-derived
     // from the verified token below, and only for authenticated callers.
     req.headers_mut().remove(USER_SCOPE_HEADER);
+    req.headers_mut().remove(ADMIN_SCOPE_HEADER);
     req.headers_mut().remove(CHAT_SCOPE_HEADER);
 
     // CORS preflight must never be gated — the browser sends no
@@ -395,6 +417,16 @@ pub async fn auth_middleware(
         return unauthorized("invalid session scope");
     };
     req.headers_mut().insert(USER_SCOPE_HEADER, scope_header);
+    // `x-user-id: *` is a read capability, not an identity: the Runtime also
+    // needs to know whose sessions this administrator may *write*, and
+    // `*` cannot say. An `as_user` request is a plain user (its `x-user-id`
+    // is the impersonated account) and gets no admin header.
+    if ctx.is_admin()
+        && ctx.as_user.is_none()
+        && let Ok(v) = HeaderValue::from_str(&ctx.user_id)
+    {
+        req.headers_mut().insert(HeaderName::from_static(ADMIN_SCOPE_HEADER), v);
+    }
 
     // Design 27 §8.2: `Members`-visible execution sessions resolve against
     // the caller's Chat membership on the Runtime side. Only the agent
@@ -406,11 +438,11 @@ pub async fn auth_middleware(
     // lose access on the very next request. Upgrade path if this shows up
     // in a profile: per-user TTL cache invalidated on participant writes
     // (the Gateway is already the only writer of those).
+    let membership_uid = ctx.effective_user_id();
     if req.uri().path().starts_with("/api/agents/")
-        && scope != SCOPE_ALL
         && let Some(port) = crate::intent::chat_client::service_port(&state.gateway_state).await
     {
-        match crate::intent::chat_client::list_session_ids(port, &scope).await {
+        match crate::intent::chat_client::list_session_ids(port, membership_uid).await {
             Ok(ids) => {
                 if let Ok(v) = HeaderValue::from_str(&ids.join(",")) {
                     req.headers_mut().insert(CHAT_SCOPE_HEADER, v);

@@ -19,8 +19,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use acowork_core::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, MessageRole, Provider,
-    ReasoningEffort, StreamEvent, ToolCall, UsageInfo,
+    ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, MessageContent,
+    MessageRole, Provider, ReasoningEffort, StreamEvent, ToolCall, UsageInfo,
 };
 use acowork_core::tools::schema::sanitize_tool_schema;
 
@@ -376,25 +376,30 @@ struct StreamFunctionDelta {
 /// (e.g. `[{"type":"text","text":"..."}, {"type":"image_url","image_url":{...}}]`).
 /// Otherwise falls back to a plain String value from `content`.
 fn build_content_value(m: &ChatMessage) -> serde_json::Value {
-    if let Some(ref parts) = m.content_parts {
-        let arr: Vec<serde_json::Value> = parts
-            .iter()
-            .map(|p| match p {
-                ContentPart::Text { text } => {
-                    serde_json::json!({ "type": "text", "text": text })
-                }
-                ContentPart::ImageUrl { image_url } => {
-                    let mut img = serde_json::json!({ "url": image_url.url });
-                    if let Some(ref detail) = image_url.detail {
-                        img["detail"] = serde_json::json!(detail);
+    let text_block = |text: &str| serde_json::json!({ "type": "text", "text": text });
+    // See the Anthropic counterpart: the message's text and its parts are not
+    // alternatives, and `message_content` is what says so.
+    match m.message_content() {
+        MessageContent::Text(text) => serde_json::Value::String(text.to_string()),
+        MessageContent::Parts { leading_text, parts } => {
+            let mut arr: Vec<serde_json::Value> = Vec::with_capacity(parts.len() + 1);
+            if let Some(text) = leading_text {
+                arr.push(text_block(text));
+            }
+            for p in parts {
+                match p {
+                    ContentPart::Text { text } => arr.push(text_block(text)),
+                    ContentPart::ImageUrl { image_url } => {
+                        let mut img = serde_json::json!({ "url": image_url.url });
+                        if let Some(ref detail) = image_url.detail {
+                            img["detail"] = serde_json::json!(detail);
+                        }
+                        arr.push(serde_json::json!({ "type": "image_url", "image_url": img }));
                     }
-                    serde_json::json!({ "type": "image_url", "image_url": img })
                 }
-            })
-            .collect();
-        serde_json::Value::Array(arr)
-    } else {
-        serde_json::Value::String(m.content.clone())
+            }
+            serde_json::Value::Array(arr)
+        }
     }
 }
 
@@ -1405,6 +1410,33 @@ fn parse_sse_line(line: &str) -> (Vec<StreamEvent>, Option<UsageInfo>, Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression (chat image + text): see the Anthropic counterpart. The
+    /// multimodal content array must not be the only thing on the wire when the
+    /// message also carries text.
+    #[test]
+    fn multimodal_content_keeps_the_text_beside_derived_images() {
+        use acowork_core::providers::traits::ImageUrlPart;
+        let msg = ChatMessage::user_multimodal(
+            "the delete button style is wrong",
+            vec![ContentPart::ImageUrl {
+                image_url: ImageUrlPart {
+                    url: "data:image/png;base64,iVBORw0KGgo=".into(),
+                    detail: None,
+                    width: None,
+                    height: None,
+                },
+            }],
+        );
+        let content = build_content_value(&msg);
+        let arr = content.as_array().unwrap_or_else(|| panic!("not an array: {content}"));
+        assert!(
+            arr.iter()
+                .any(|p| p["type"] == "text" && p["text"] == "the delete button style is wrong"),
+            "user text missing from {arr:?}"
+        );
+        assert!(arr.iter().any(|p| p["type"] == "image_url"));
+    }
 
     #[test]
     fn test_convert_messages_basic() {

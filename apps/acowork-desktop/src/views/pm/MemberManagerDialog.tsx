@@ -32,6 +32,8 @@ import { PmApiError } from "../../lib/pm-api";
 import type { PmMemberKind, PmProject } from "../../lib/pm-types";
 import {
   MemberAvatar,
+  canGovernProject,
+  projectOwnerId,
   usePmDirectoryUsers,
   useResolvedMembers,
   useSelfAccount,
@@ -62,12 +64,13 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
   // dialog agrees with the members panel / chat header on who is in the
   // group. The owner (`owner_id ?? created_by`) is a permanent member: it is
   // listed but not removable, and never offered as a candidate.
-  const ownerId = project.owner_id ?? project.created_by;
-  // Ownership transfer is gated by the backend on `X-Actor == owner` OR admin.
-  // Mirror that here so the "Make owner" affordance only shows for callers who
-  // can actually perform it (the backend still enforces it on the request).
-  const isAdmin = self?.role === "admin";
-  const canTransfer = isAdmin || (!!self && self.user_id === ownerId);
+  const ownerId = projectOwnerId(project);
+  // The backend gates every project mutation — rename / description / status,
+  // delete, the member roster, and the ownership transfer — on
+  // `x-actor == Project::owner() || admin` (PM's `require_governance`). Mirror
+  // it here: a plain member reads the roster but gets no invite list and no
+  // remove / make-owner button for an action the server would refuse (403).
+  const canGovern = canGovernProject(project, self, mode === "local");
   const displayMembers = useMemo(() => withOwner(project), [project]);
   const memberIds = useMemo(
     () => new Set(displayMembers.map((m) => m.instance_id)),
@@ -216,7 +219,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                 // Only a human member can own the group (the backend rejects
                 // agents and non-members), and only the owner/admin can start
                 // a transfer.
-                const canSetOwner = canTransfer && !isOwner && m.kind === "user";
+                const canSetOwner = canGovern && !isOwner && m.kind === "user";
                 return (
                   <li
                     key={m.instance_id}
@@ -250,14 +253,16 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                             {t("pm.makeOwner")}
                           </button>
                         )}
-                        <button
-                          type="button"
-                          disabled={busyId === m.instance_id}
-                          onClick={() => handleRemove(m.instance_id)}
-                          className="rounded-md px-2 py-1 text-11 text-red-600 hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
-                        >
-                          {t("pm.removeMember")}
-                        </button>
+                        {canGovern && (
+                          <button
+                            type="button"
+                            disabled={busyId === m.instance_id}
+                            onClick={() => handleRemove(m.instance_id)}
+                            className="rounded-md px-2 py-1 text-11 text-red-600 hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
+                          >
+                            {t("pm.removeMember")}
+                          </button>
+                        )}
                       </div>
                     )}
                   </li>
@@ -266,79 +271,83 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
             </ul>
           )}
 
-          {/* 可添加的 Agent 候选 */}
-          <div className="mb-1 text-11 font-medium text-text-tertiary ">
-            {t("pm.agentMembers")}
-          </div>
-          {candidates.length === 0 ? (
-            <p className="mb-4 text-xs italic text-text-tertiary">{t("pm.noMembers")}</p>
-          ) : (
-            <ul className="mb-4 space-y-1">
-              {candidates.map((a) => (
-                <li
-                  key={a.meta.instance_id}
-                  className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
-                >
-                  <AgentAvatar
-                    agentId={a.meta.instance_id}
-                    displayName={a.meta.display_name ?? a.meta.name}
-                    avatarUrl={a.meta.avatar ?? null}
-                    builtinAvatarId={a.meta.builtin_avatar ?? null}
-                    size={24}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs text-text ">
-                      {a.meta.display_name ?? a.meta.name ?? a.meta.agent_id}
+          {canGovern && (
+            <>
+            {/* 可添加的 Agent 候选 */}
+            <div className="mb-1 text-11 font-medium text-text-tertiary ">
+              {t("pm.agentMembers")}
+            </div>
+            {candidates.length === 0 ? (
+              <p className="mb-4 text-xs italic text-text-tertiary">{t("pm.noMembers")}</p>
+            ) : (
+              <ul className="mb-4 space-y-1">
+                {candidates.map((a) => (
+                  <li
+                    key={a.meta.instance_id}
+                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+                  >
+                    <AgentAvatar
+                      agentId={a.meta.instance_id}
+                      displayName={a.meta.display_name ?? a.meta.name}
+                      avatarUrl={a.meta.avatar ?? null}
+                      builtinAvatarId={a.meta.builtin_avatar ?? null}
+                      size={24}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-xs text-text ">
+                        {a.meta.display_name ?? a.meta.name ?? a.meta.agent_id}
+                      </div>
+                      <div className="truncate text-10 text-text-tertiary">{a.meta.instance_id}</div>
                     </div>
-                    <div className="truncate text-10 text-text-tertiary">{a.meta.instance_id}</div>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={busyId === a.meta.instance_id}
-                    onClick={() => handleAdd(a.meta.instance_id, "agent")}
-                    className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40  dark:hover:bg-zinc-700"
+                    <button
+                      type="button"
+                      disabled={busyId === a.meta.instance_id}
+                      onClick={() => handleAdd(a.meta.instance_id, "agent")}
+                      className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40  dark:hover:bg-zinc-700"
+                    >
+                      {t("pm.addMember")}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+  
+            {/* 可添加的用户候选（仅多用户模式有目录数据） */}
+            <div className="mb-1 text-11 font-medium text-text-tertiary ">
+              {t("pm.userMembers")}
+            </div>
+            {userCandidates.length === 0 ? (
+              <p className="text-xs italic text-text-tertiary">{t("pm.noMembers")}</p>
+            ) : (
+              <ul className="space-y-1">
+                {userCandidates.map((u) => (
+                  <li
+                    key={u.user_id}
+                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
                   >
-                    {t("pm.addMember")}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {/* 可添加的用户候选（仅多用户模式有目录数据） */}
-          <div className="mb-1 text-11 font-medium text-text-tertiary ">
-            {t("pm.userMembers")}
-          </div>
-          {userCandidates.length === 0 ? (
-            <p className="text-xs italic text-text-tertiary">{t("pm.noMembers")}</p>
-          ) : (
-            <ul className="space-y-1">
-              {userCandidates.map((u) => (
-                <li
-                  key={u.user_id}
-                  className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
-                >
-                  <UserAvatar
-                    displayName={u.displayName}
-                    avatarUrl={u.avatarUrl}
-                    builtinAvatarId={u.builtinAvatarId}
-                    size={24}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs text-text ">{u.displayName}</div>
-                    <div className="truncate text-10 text-text-tertiary">{u.user_id}</div>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={busyId === u.user_id}
-                    onClick={() => handleAdd(u.user_id, "user")}
-                    className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40  dark:hover:bg-zinc-700"
-                  >
-                    {t("pm.addMember")}
-                  </button>
-                </li>
-              ))}
-            </ul>
+                    <UserAvatar
+                      displayName={u.displayName}
+                      avatarUrl={u.avatarUrl}
+                      builtinAvatarId={u.builtinAvatarId}
+                      size={24}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-xs text-text ">{u.displayName}</div>
+                      <div className="truncate text-10 text-text-tertiary">{u.user_id}</div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={busyId === u.user_id}
+                      onClick={() => handleAdd(u.user_id, "user")}
+                      className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40  dark:hover:bg-zinc-700"
+                    >
+                      {t("pm.addMember")}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            </>
           )}
     </>
   );
