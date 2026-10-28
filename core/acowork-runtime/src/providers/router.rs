@@ -246,30 +246,42 @@ pub fn effective_protocol_and_base(
     provider: &acowork_core::protocol::ProviderListItem,
     model_id: Option<&str>,
 ) -> (ProtocolType, String) {
-    match model_id.and_then(|mid| provider.models.iter().find(|m| m.id == mid)) {
-        Some(m) => {
-            let proto = m
-                .protocol_type
-                .clone()
-                .unwrap_or_else(|| provider.protocol_type.clone());
-            let base = m
-                .base_url
-                .clone()
-                .filter(|u| !u.is_empty())
-                .unwrap_or_else(|| provider.base_url.clone());
-            (proto, base)
-        }
-        None => {
-            if let Some(mid) = model_id {
-                tracing::warn!(
-                    provider_id = %provider.id,
-                    model_id = %mid,
-                    "model entry not found in provider list; falling back to provider-level protocol/base_url"
-                );
-            }
-            (provider.protocol_type.clone(), provider.base_url.clone())
-        }
+    let model = model_id.and_then(|mid| provider.models.iter().find(|m| m.id == mid));
+
+    if model.is_none()
+        && let Some(mid) = model_id
+    {
+        tracing::warn!(
+            provider_id = %provider.id,
+            model_id = %mid,
+            "model entry not found in provider list; falling back to provider-level protocol/base_url"
+        );
     }
+
+    let protocol = model
+        .and_then(|m| m.protocol_type.clone())
+        .unwrap_or_else(|| provider.protocol_type.clone());
+
+    // ADR-103 D7: one resolution order for every layer — explicit user
+    // override > model-level override > provider-level `api` > built-in
+    // default (owned by the provider constructor). An unexpanded `${VAR}`
+    // disqualifies its layer instead of being expanded (Q6).
+    let resolved = acowork_core::providers::url_resolve::resolve_base_url(
+        None,
+        model.and_then(|m| m.base_url.as_deref()),
+        Some(provider.base_url.as_str()),
+    );
+    if let Some(layer) = resolved.layer {
+        tracing::debug!(
+            provider_id = %provider.id,
+            model_id = model_id.unwrap_or(""),
+            layer = layer.as_str(),
+            base_url = resolved.url.as_deref().unwrap_or(""),
+            "base URL resolved (ADR-103 D7)"
+        );
+    }
+
+    (protocol, resolved.url.unwrap_or_default())
 }
 
 fn install_wiring(provider: &mut OpenAIProvider, wiring: &ProviderWiring) {
@@ -494,6 +506,31 @@ mod adr103_router_tests {
         // No model id at all -> provider level, silent.
         let (proto, _) = effective_protocol_and_base(&p, None);
         assert_eq!(proto, ProtocolType::OpenAI);
+    }
+
+    #[test]
+    fn unexpanded_placeholder_base_url_falls_back_to_the_provider_level() {
+        // ADR-103 D7.2: `${VAR}` is never expanded at runtime; the layer is
+        // dropped and the next one applies. Silent inheritance would hide a
+        // mis-configured catalog entry.
+        let p = provider(
+            ProtocolType::OpenAI,
+            vec![model(
+                "m1",
+                Some(ProtocolType::Responses),
+                Some("${NEON_AI_GATEWAY_BASE_URL}/v1"),
+            )],
+        );
+        let (proto, base) = effective_protocol_and_base(&p, Some("m1"));
+        assert_eq!(proto, ProtocolType::Responses);
+        assert_eq!(base, "https://provider/v1");
+    }
+
+    #[test]
+    fn empty_model_base_url_is_skipped_not_used() {
+        let p = provider(ProtocolType::OpenAI, vec![model("m1", None, Some(""))]);
+        let (_, base) = effective_protocol_and_base(&p, Some("m1"));
+        assert_eq!(base, "https://provider/v1");
     }
 
     #[test]

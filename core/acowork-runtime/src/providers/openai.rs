@@ -114,23 +114,25 @@ impl OpenAIProvider {
     }
 
     /// Compute the cache key for this request.
-    /// Falls back to the base_url host when no `provider_id` was set
-    /// (preserves old behavior in tests / standalone use).
+    ///
+    /// ADR-103 D7.3: the key carries the wire shape, so a learned
+    /// completions profile can never be read back by the Responses chain
+    /// (which shares neither parameters nor fallback steps). Falls back to the
+    /// base_url host as the namespace when no `provider_id` was set
+    /// (standalone use / tests).
     fn cache_key(&self, model: &str) -> String {
-        match &self.provider_id {
-            Some(id) => format!("{id}::{model}"),
-            None => {
-                // Extract host from base_url as a fallback namespace.
-                let host = self
-                    .base_url
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://")
-                    .split('/')
-                    .next()
-                    .unwrap_or("unknown");
-                format!("{host}::{model}")
-            }
-        }
+        let namespace = match &self.provider_id {
+            Some(id) => id.clone(),
+            None => self
+                .base_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or("unknown")
+                .to_string(),
+        };
+        crate::providers::compat::cache_key(&namespace, crate::providers::compat::SHAPE_COMPLETIONS, model)
     }
 }
 

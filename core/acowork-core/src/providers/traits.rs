@@ -29,6 +29,29 @@ pub enum ProviderErrorType {
     /// Stream silence — no data received within per-chunk read timeout.
     /// Retryable — the provider may have been temporarily overloaded.
     StreamTimeout,
+    /// The endpoint does not exist for this provider/model (ADR-103 D8).
+    /// Responses-shaped example: `POST /responses` answers 404 naming
+    /// `responses`/unknown endpoint. NOT retryable: re-issuing the same
+    /// request cannot succeed, the protocol choice itself is wrong.
+    EndpointUnavailable,
+    /// The provider rejects a request field it does not implement
+    /// (ADR-103 D8). Carries the field name as a machine-readable prefix in
+    /// [`ProviderError::message`], see [`ProviderError::unsupported_field`].
+    /// NOT retryable as-is; only a trim-then-retry may succeed (ADR-103 S7).
+    UnsupportedField,
+    /// The request is internally inconsistent (image placement, empty
+    /// `input`, illegal tool name, over-window). NOT retryable and MUST NOT
+    /// trigger field trimming — the caller has to change the content
+    /// (ADR-103 D8).
+    ContentIntegrity,
+    /// The server reported a terminal failure inside the stream
+    /// (`response.failed`). Partial output may already have been delivered,
+    /// so this is never retried blindly (ADR-103 D8).
+    InBandFailure,
+    /// The stream ended without the protocol's terminal event. Partial
+    /// output may already have reached the caller — never retried blindly
+    /// (ADR-103 D8).
+    TruncatedStream,
     /// Unclassified error.
     Unknown,
 }
@@ -91,6 +114,24 @@ impl ProviderError {
             ProviderErrorType::StreamTimeout => {
                 "Response timeout.".to_string()
             }
+            ProviderErrorType::EndpointUnavailable => {
+                "This provider does not support the selected protocol. Switch the model                  protocol back to Chat Completions in model settings."
+                    .to_string()
+            }
+            ProviderErrorType::UnsupportedField => {
+                "This provider rejects a request field the model settings enable.                  Adjust the model settings."
+                    .to_string()
+            }
+            ProviderErrorType::ContentIntegrity => {
+                "The request content was rejected by the provider. Check the message and                  attachments."
+                    .to_string()
+            }
+            ProviderErrorType::InBandFailure => {
+                "The model reported a failure while answering.".to_string()
+            }
+            ProviderErrorType::TruncatedStream => {
+                "The answer was cut off before it finished.".to_string()
+            }
             ProviderErrorType::ClientError => {
                 "Invalid request. Check model/tool config.".to_string()
             }
@@ -119,6 +160,44 @@ impl ProviderError {
             retryable,
             retry_after_ms: None,
         }
+    }
+
+    /// Machine-readable prefix used to carry the offending field name inside
+    /// [`ProviderError::message`] (ADR-103 D8 `UnsupportedField{field}`).
+    ///
+    /// `ProviderError` has a deliberately narrow shape shared by every
+    /// provider, so the field travels in the message behind this marker
+    /// instead of widening the struct. [`ProviderError::unsupported_field`]
+    /// is the only allowed reader.
+    pub const UNSUPPORTED_FIELD_MARKER: &'static str = "unsupported field `";
+
+    /// Build the `UnsupportedField` classification for a provider that
+    /// rejected a specific request field (ADR-103 D8).
+    ///
+    /// `field` is the wire name the provider complained about (`reasoning`,
+    /// `tool_choice`, `text.format`, `temperature`, `top_p`), `detail` is the
+    /// provider's own wording, kept for the details panel.
+    pub fn unsupported_field_error(field: &str, detail: String) -> Self {
+        Self {
+            message: format!("{}{}`, {}", Self::UNSUPPORTED_FIELD_MARKER, field, detail),
+            user_message: Self::compute_user_message(&ProviderErrorType::UnsupportedField, None),
+            status_code: Some(400),
+            error_type: ProviderErrorType::UnsupportedField,
+            // A retry with the field trimmed may succeed; the untrimmed
+            // request never will (ADR-103 D8/S7).
+            retryable: false,
+            retry_after_ms: None,
+        }
+    }
+
+    /// The field name this error rejected, if it was classified as
+    /// `UnsupportedField` (ADR-103 D8, consumed by the S7 trim whitelist).
+    pub fn unsupported_field(&self) -> Option<&str> {
+        if self.error_type != ProviderErrorType::UnsupportedField {
+            return None;
+        }
+        let rest = self.message.strip_prefix(Self::UNSUPPORTED_FIELD_MARKER)?;
+        rest.split('`').next().filter(|field| !field.is_empty())
     }
 
     /// Convenience constructor for network-level errors.

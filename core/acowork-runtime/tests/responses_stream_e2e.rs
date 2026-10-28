@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use acowork_core::providers::traits::{
-    ChatMessage, ChatRequest, Provider, StreamEvent,
+    ChatMessage, ChatRequest, Provider, ProviderErrorType, StreamEvent,
 };
 use acowork_runtime::providers::responses::ResponsesProvider;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -52,14 +52,38 @@ async fn serve_json(body: &'static str) -> String {
         let mut head = [0u8; 8192];
         let _ = socket.read(&mut head).await;
         let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\
-             content-length: {}\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
             body.len(),
             body
         );
         socket.write_all(response.as_bytes()).await.expect("write");
         socket.flush().await.expect("flush");
         let _ = socket.shutdown().await;
+    });
+    format!("http://{addr}/v1")
+}
+
+/// Serve one HTTP error response (status line + body) over a real socket.
+///
+/// Handles two connections: the harness asserts the non-streaming and the
+/// streaming entry point against the same base URL.
+async fn serve_http_error(status_line: &'static str, body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut head = [0u8; 8192];
+            let _ = socket.read(&mut head).await;
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.expect("write");
+            socket.flush().await.expect("flush");
+            let _ = socket.shutdown().await;
+        }
     });
     format!("http://{addr}/v1")
 }
@@ -232,4 +256,49 @@ async fn non_streaming_chat_over_a_real_socket() {
     assert_eq!(response.content, "pong");
     assert_eq!(response.finish_reason.as_deref(), Some("stop"));
     assert_eq!(response.usage.expect("usage").total_tokens, 6);
+}
+
+#[tokio::test]
+async fn missing_responses_endpoint_over_tcp_is_endpoint_unavailable() {
+    let base_url = serve_http_error(
+        "404 Not Found",
+        r#"{"error":{"message":"Invalid URL (POST /v1/responses)"}}"#,
+    )
+    .await;
+    let provider = provider_for(base_url);
+
+    let error = provider.chat(request()).await.expect_err("404 must fail");
+    let acowork_core::AcoworkError::Provider(err) = error else {
+        panic!("expected a provider error, got {error:?}");
+    };
+    assert_eq!(err.error_type, ProviderErrorType::EndpointUnavailable);
+    assert!(!err.retryable);
+
+    // The streaming entry point classifies identically.
+    let error = provider
+        .chat_stream(request())
+        .await
+        .err()
+        .expect("404 must fail before a stream opens");
+    let acowork_core::AcoworkError::Provider(err) = error else {
+        panic!("expected a provider error, got {error:?}");
+    };
+    assert_eq!(err.error_type, ProviderErrorType::EndpointUnavailable);
+}
+
+#[tokio::test]
+async fn unsupported_field_over_tcp_keeps_the_field_name() {
+    let base_url = serve_http_error(
+        "400 Bad Request",
+        r#"{"error":{"message":"Unsupported parameter: 'reasoning'"}}"#,
+    )
+    .await;
+    let provider = provider_for(base_url);
+
+    let error = provider.chat(request()).await.expect_err("400 must fail");
+    let acowork_core::AcoworkError::Provider(err) = error else {
+        panic!("expected a provider error, got {error:?}");
+    };
+    assert_eq!(err.error_type, ProviderErrorType::UnsupportedField);
+    assert_eq!(err.unsupported_field(), Some("reasoning"));
 }

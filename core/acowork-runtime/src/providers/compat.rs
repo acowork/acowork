@@ -49,7 +49,7 @@
 //!
 //! Path: `{work_dir}/config/provider_compat.json`
 //!
-//! v2 file shape: `{ "version": 2, "entries": { key: PersistedEntry } }`.
+//! v3 file shape: `{ "version": 3, "entries": { key: PersistedEntry } }`.
 //! Only *durable* (confirmed) entries are persisted. Atomic write via
 //! `*.tmp` → rename; throttled to at most one write per
 //! [`COMPAT_PERSIST_MIN_INTERVAL_SECS`], except promotions and invalidations
@@ -57,9 +57,11 @@
 //!
 //! ## Key format
 //!
-//! `"{provider_id}::{model_id}"` — keeps different vendors with the same
-//! underlying model (e.g. `glm-5.2` on volcano-engine vs. a self-hosted
-//! OpenAI-compatible wrapper) isolated.
+//! `"{namespace}::{shape}::{model_id}"` (see [`cache_key`]) — keeps different
+//! vendors with the same underlying model (e.g. `glm-5.2` on volcano-engine
+//! vs. a self-hosted OpenAI-compatible wrapper) isolated, **and** keeps two
+//! wire shapes of the same vendor+model apart (ADR-103 D7.3: `/chat/completions`
+//! and `/responses` only look alike, their parameter surfaces are not).
 
 use std::collections::HashMap;
 use std::fs;
@@ -73,9 +75,28 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-/// Version of the on-disk v2 file format. v1 (bare map) is intentionally not
-/// readable — see module docs rule 5.
-const CACHE_FILE_VERSION: u8 = 2;
+/// Version of the on-disk file format. v1 (bare map) is intentionally not
+/// readable — see module docs rule 5. v2 keys carried no wire shape, so v3
+/// (shape-qualified keys, ADR-103 D7.3) discards them instead of keeping rows
+/// that can never be read again.
+const CACHE_FILE_VERSION: u8 = 3;
+
+/// Wire shape of the Chat-Completions family (`/chat/completions`).
+pub const SHAPE_COMPLETIONS: &str = "completions";
+
+/// Wire shape of the Responses family (`/responses`, ADR-103).
+pub const SHAPE_RESPONSES: &str = "responses";
+
+/// Build a compat-cache key (ADR-103 D7.3).
+///
+/// The shape is part of the namespace on purpose: a vendor that serves both
+/// `/chat/completions` and `/responses` may resolve to the same host, and a
+/// learned profile from one shape MUST NOT leak into the other.
+///
+/// `namespace` is the provider id when known, otherwise the base-url host.
+pub fn cache_key(namespace: &str, shape: &str, model: &str) -> String {
+    format!("{namespace}::{shape}::{model}")
+}
 
 /// Distinct successful requests required before a candidate becomes durable.
 pub const COMPAT_CONFIRM_REQUIRED: u32 = 3;
@@ -287,7 +308,7 @@ struct DiskFileV2 {
 }
 
 /// In-memory + on-disk cache of durable `StripProfile`s keyed by
-/// `"provider_id::model_id"`, plus non-persisted confirmation candidates.
+/// `"namespace::shape::model_id"`, plus non-persisted confirmation candidates.
 ///
 /// Thread-safe via `parking_lot::RwLock`. Hot-path reads (`get`) never block
 /// long — one `HashMap` lookup plus a TTL check.
@@ -697,6 +718,25 @@ mod tests {
     use std::env;
     use std::time::Duration;
 
+    #[test]
+    fn cache_keys_are_shape_qualified() {
+        // ADR-103 D7.3: same namespace + model, different wire shape, MUST
+        // yield different keys — otherwise a completed profile learned on
+        // `/chat/completions` would be trusted by the `/responses` chain.
+        assert_eq!(
+            cache_key("openai", SHAPE_COMPLETIONS, "gpt-5"),
+            "openai::completions::gpt-5"
+        );
+        assert_eq!(
+            cache_key("openai", SHAPE_RESPONSES, "gpt-5"),
+            "openai::responses::gpt-5"
+        );
+        assert_ne!(
+            cache_key("openai", SHAPE_COMPLETIONS, "gpt-5"),
+            cache_key("openai", SHAPE_RESPONSES, "gpt-5")
+        );
+    }
+
     fn tmp_path(name: &str) -> PathBuf {
         let mut p = env::temp_dir();
         p.push(format!(
@@ -860,7 +900,7 @@ mod tests {
         // File must be v2, holding only the durable entry.
         let raw = fs::read_to_string(&path).unwrap();
         let file: DiskFileV2 = serde_json::from_str(&raw).expect("file is v2 shape");
-        assert_eq!(file.version, 2);
+        assert_eq!(file.version, 3);
         assert_eq!(file.entries.len(), 1);
         assert_eq!(file.entries[key].class, "request_schema");
         let _ = fs::remove_file(&path);
@@ -1009,7 +1049,7 @@ mod tests {
         // Legacy file was proactively replaced by an empty v2 file.
         let raw = fs::read_to_string(&path).unwrap();
         let file: DiskFileV2 = serde_json::from_str(&raw).expect("rewritten file is v2");
-        assert_eq!(file.version, 2);
+        assert_eq!(file.version, 3);
         assert!(file.entries.is_empty());
         let _ = fs::remove_file(&path);
     }

@@ -10,12 +10,19 @@
 //!
 //! - S1: routing chain complete (Gateway resolves → MQTT delivers →
 //!   Runtime constructs → this provider is reached).
-//! - S2 (this slice): D5 request mapping + non-streaming `chat()` + usage
-//!   mapping (D6 non-stream half + D6.5).
-//! - S3 (this slice): streaming SSE (`D6` streaming half) — a pure,
-//!   I/O-free state machine (`SseState`) consumes `data:` payloads and the
-//!   driver closes the stream on the terminal event, never on `[DONE]`.
-//! - S4: URL resolution refinement (`D7`) + full error classification (`D8`).
+//! - S2: D5 request mapping + non-streaming `chat()` + usage mapping
+//!   (D6 non-stream half + D6.5).
+//! - S3: streaming SSE (`D6` streaming half) — a pure, I/O-free state
+//!   machine (`SseState`) consumes `data:` payloads and the driver closes the
+//!   stream on the terminal event, never on `[DONE]`.
+//! - S4 (this slice): D8 error classification — HTTP failures go through
+//!   [`acowork_core::providers::classify_http_error`] (404 endpoint /
+//!   400 field / 400 content integrity), in-band and truncated streams use
+//!   the shared `InBandFailure` / `TruncatedStream` classes. Nothing here
+//!   re-sends a request to `/chat/completions`.
+//! - D7 base-URL resolution and the shape-qualified compat-cache namespace
+//!   live in `acowork_core::providers::url_resolve` / `providers::compat` and
+//!   are consumed by `router.rs` and `openai.rs` respectively.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -848,12 +855,9 @@ impl SseState {
                     .and_then(|e| e.get("code"))
                     .and_then(|c| c.as_str())
                     .unwrap_or("");
-                let mut stream_err =
-                    acowork_core::providers::classify_stream_error(&format!("{code} {message}"));
-                stream_err.message = message.to_string();
                 // D8: deltas may already have reached the loop, so an in-band
-                // failure is never retried blindly (class table refined in S4).
-                stream_err.retryable = false;
+                // failure is never retried blindly.
+                let stream_err = acowork_core::providers::in_band_failure(code, message);
                 tracing::warn!(code = %code, message = %message, "Responses stream failed in-band");
                 self.terminated = true;
                 Ok(SseAction::Finish(vec![StreamEvent::Error(stream_err)]))
@@ -975,6 +979,41 @@ impl Stream for ChannelStream {
 }
 
 impl ResponsesProvider {
+    /// ADR-103 D8 — classify a failed HTTP response through the shared
+    /// Responses table (core owns the classes), keeping the platform-wide
+    /// `Retry-After` handling.
+    ///
+    /// Nothing here may re-send the request to `/chat/completions` (D8/D9).
+    fn classify_failure(
+        &self,
+        status: u16,
+        body: String,
+        headers: &reqwest::header::HeaderMap,
+        model: &str,
+    ) -> ProviderError {
+        let mut error = acowork_core::providers::classify_http_error(status, &body);
+        if let Some(retry_after_ms) = crate::providers::parse_retry_after_header(headers) {
+            error.retry_after_ms = Some(retry_after_ms);
+            error.refresh_user_message();
+        }
+        match &error.error_type {
+            ProviderErrorType::EndpointUnavailable => tracing::warn!(
+                base_url = %self.base_url,
+                model,
+                status,
+                "provider does not serve POST /responses — the model protocol must be switched back to Chat Completions (ADR-103 D8)"
+            ),
+            ProviderErrorType::UnsupportedField => tracing::warn!(
+                base_url = %self.base_url,
+                model,
+                field = error.unsupported_field().unwrap_or(""),
+                "provider rejected a Responses request field (ADR-103 D8; trimming is the S7 whitelist)"
+            ),
+            _ => {}
+        }
+        error
+    }
+
     /// Bridge a `text/event-stream` body into `StreamEvent`s.
     ///
     /// I/O shell only: line buffering, per-chunk read timeout, and the
@@ -1044,17 +1083,12 @@ impl ResponsesProvider {
                     "Responses SSE ended without a terminal event -- reporting a truncated stream"
                 );
                 let _ = tx
-                    .send(Some(StreamEvent::Error(StreamError {
-                        message: format!(
-                            "Responses SSE stream ended without a terminal event ({} content chars, {} tool calls already received); the answer is incomplete",
-                            counters.content_chars, counters.tool_calls
+                    .send(Some(StreamEvent::Error(
+                        acowork_core::providers::truncated_stream(
+                            counters.content_chars,
+                            counters.tool_calls,
                         ),
-                        error_type: ProviderErrorType::StreamDecodeError,
-                        // Partial output already reached the loop -- retrying
-                        // would duplicate it (D8 TruncatedStream: no retry).
-                        retryable: false,
-                        status_code: None,
-                    })))
+                    )))
                     .await;
             }
         });
@@ -1097,13 +1131,7 @@ impl Provider for ResponsesProvider {
         if !status.is_success() {
             let headers = response.headers().clone();
             let body = response.text().await.unwrap_or_default();
-            // S2 keeps the shared classification family; Responses-specific
-            // 404/400 refinement is S4 (D7/D8).
-            let err = crate::providers::from_http_parts(
-                status.as_u16(),
-                format!("Responses API error: {status} - {body}"),
-                &headers,
-            );
+            let err = self.classify_failure(status.as_u16(), body, &headers, &native.model);
             return Err(acowork_core::AcoworkError::Provider(err));
         }
 
@@ -1150,13 +1178,7 @@ impl Provider for ResponsesProvider {
         if !status.is_success() {
             let headers = response.headers().clone();
             let body = response.text().await.unwrap_or_default();
-            // Same shared classification family as the non-streaming path;
-            // Responses-specific refinement stays S4 (D8).
-            let err = crate::providers::from_http_parts(
-                status.as_u16(),
-                format!("Responses API stream error: {status} - {body}"),
-                &headers,
-            );
+            let err = self.classify_failure(status.as_u16(), body, &headers, &native.model);
             return Err(acowork_core::AcoworkError::Provider(err));
         }
 
@@ -1739,6 +1761,7 @@ mod tests {
         );
         match events.last().expect("non-empty stream") {
             StreamEvent::Error(err) => {
+                assert_eq!(err.error_type, ProviderErrorType::TruncatedStream);
                 assert!(
                     !err.retryable,
                     "a truncated stream is never retried blindly (output already reached the loop)"
@@ -1977,7 +2000,8 @@ mod tests {
 
         match emitted(action).as_slice() {
             [StreamEvent::Error(err)] => {
-                assert_eq!(err.message, "upstream exploded");
+                assert_eq!(err.error_type, ProviderErrorType::InBandFailure);
+                assert_eq!(err.message, "server_error: upstream exploded");
                 assert!(
                     !err.retryable,
                     "an in-band failure after deltas is never retried blindly"
@@ -2061,5 +2085,124 @@ mod tests {
 
         assert!(matches!(events.last(), Some(StreamEvent::Finished(_))));
         mock.assert();
+    }
+
+// ── D8 error classification (S4) ─────────────────────────────────
+
+    async fn chat_error_against(
+        status: usize,
+        body: &'static str,
+        retry_after: Option<&'static str>,
+    ) -> acowork_core::ProviderError {
+        use mockito::Server;
+        let mut server = Server::new_async().await;
+        let mut mock = server.mock("POST", "/responses").with_status(status);
+        if let Some(value) = retry_after {
+            mock = mock.with_header("retry-after", value);
+        }
+        let _m = mock.with_body(body).create_async().await;
+        // ADR-103 D8/D9 — a failed Responses request MUST NOT be re-sent to
+        // the completions endpoint. `expect(0)` makes any such retry a test
+        // failure instead of a silent second semantic.
+        let completions_guard = server
+            .mock("POST", "/chat/completions")
+            .expect(0)
+            .create_async()
+            .await;
+        let provider = provider(server.url().as_str());
+        let error = match provider
+            .chat(chat_request_with(vec![ChatMessage::user("hi")]))
+            .await
+        {
+            Err(acowork_core::AcoworkError::Provider(err)) => err,
+            other => panic!("expected a provider error, got {other:?}"),
+        };
+        completions_guard.assert();
+        error
+    }
+
+    #[tokio::test]
+    async fn endpoint_unavailable_404_is_classified_and_actionable() {
+        let err = chat_error_against(
+            404,
+            r#"{"error":{"message":"Invalid URL (POST /v1/responses)"}}"#,
+            None,
+        )
+        .await;
+
+        assert_eq!(err.error_type, ProviderErrorType::EndpointUnavailable);
+        assert!(!err.retryable, "a wrong protocol must never be retried");
+        assert_eq!(err.status_code, Some(404));
+        assert!(
+            err.user_message.contains("Chat Completions"),
+            "text must name the way back: {}",
+            err.user_message
+        );
+        assert!(
+            err.message.contains("/v1/responses"),
+            "the provider body stays in the details"
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_unavailable_is_classified_on_the_streaming_path_too() {
+        use mockito::Server;
+        let mut server = Server::new_async().await;
+        let _m = server
+            .mock("POST", "/responses")
+            .with_status(404)
+            .with_body(r#"{"error":{"message":"unknown endpoint"}}"#)
+            .create_async()
+            .await;
+        let provider = provider(server.url().as_str());
+
+        let error = provider
+            .chat_stream(chat_request_with(vec![ChatMessage::user("hi")]))
+            .await
+            .err()
+            .expect("a 404 must fail before any stream opens");
+        let acowork_core::AcoworkError::Provider(err) = error else {
+            panic!("expected a provider error, got {error:?}");
+        };
+        assert_eq!(err.error_type, ProviderErrorType::EndpointUnavailable);
+        assert!(!err.retryable);
+    }
+
+    #[tokio::test]
+    async fn unsupported_field_400_keeps_the_field_name_for_the_trim_whitelist() {
+        let err = chat_error_against(
+            400,
+            r#"{"error":{"message":"Unsupported parameter: 'reasoning'"}}"#,
+            None,
+        )
+        .await;
+
+        assert_eq!(err.error_type, ProviderErrorType::UnsupportedField);
+        assert_eq!(
+            err.unsupported_field(),
+            Some("reasoning"),
+            "S7 needs the field identity, not just the class"
+        );
+        assert!(!err.retryable, "the untrimmed request is never retried");
+    }
+
+    #[tokio::test]
+    async fn content_integrity_400_stays_visible_and_is_never_trimmable() {
+        let err = chat_error_against(400, "invalid image placement in input[1]", None).await;
+
+        assert_eq!(err.error_type, ProviderErrorType::ContentIntegrity);
+        assert_eq!(err.unsupported_field(), None);
+        assert!(!err.retryable);
+    }
+
+    #[tokio::test]
+    async fn retry_after_header_survives_the_responses_classification() {
+        let err = chat_error_against(429, "slow down", Some("7")).await;
+        assert_eq!(err.error_type, ProviderErrorType::RateLimited);
+        assert_eq!(
+            err.retry_after_ms,
+            Some(7000),
+            "S4 must not lose the platform-wide Retry-After handling"
+        );
     }
 }
