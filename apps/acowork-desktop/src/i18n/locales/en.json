@@ -2012,6 +2012,7 @@
     "placeholderWithMentions": "Message the team — @Agent to assign work",
     "send": "Send",
     "mentionLabel": "Mention a member",
+    "mentionMenu": "@{{name}}",
     "emptyTurn": "(no output)",
     "taskChip": "Task {{id}}",
     "toChip": "TO",

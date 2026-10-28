@@ -31,6 +31,7 @@ import {
   useRef,
   useState,
   type UIEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -96,6 +97,11 @@ import { showToast } from "../common/ToastProvider";
 import { ChatHistoryDialog } from "./ChatHistoryDialog";
 import { OutlineChatHistoryIcon } from "../common/ChatHistoryIcon";
 import { useLocateMessage } from "../../lib/useLocateMessage";
+import {
+  ContextMenu,
+  useContextMenu,
+  type ContextMenuItem,
+} from "../common/ContextMenu";
 
 // Same markdown shell as AgentChatView's bubbles (kept local on purpose:
 // extracting a shared component would touch two surfaces for one class
@@ -239,6 +245,9 @@ interface RowProps {
   /** Cards answered on THIS surface — lets the notice row suppress its
    *  duplicate resolution receipt. */
   chatAnswered: Set<string>;
+  /** Right-click on a participant's avatar / name → the panel's "@name"
+   *  menu. Undefined when the panel has no mention target for that row. */
+  onMentionContextMenu?: (e: ReactMouseEvent, id: string) => void;
 }
 
 /**
@@ -352,6 +361,7 @@ const GroupRowView = memo(function GroupRowView({
   replyQuote,
   answeredCardKind,
   chatAnswered,
+  onMentionContextMenu,
 }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
@@ -421,6 +431,13 @@ const GroupRowView = memo(function GroupRowView({
   const who: ParticipantWho = own
     ? { name: profile.displayName, isAgent: false, avatarUrl: null, builtinAvatarId: null }
     : nameOf(row.from);
+  // Right-click on a participant's avatar / name → the panel's "@name" menu.
+  // Everyone but me: @-ing an agent wakes it, @-ing a person is a plain
+  // mention — but the picker lists both (§5.3.1), so the menu must too.
+  const openMentionMenu =
+    row.from !== me
+      ? (e: ReactMouseEvent) => onMentionContextMenu?.(e, row.from)
+      : undefined;
   const failed = isFailureStatus(row.meta?.status);
   const agentMeta = who.isAgent ? agentsMap[row.from]?.meta : undefined;
   // Who this row is addressed to (see `rowToTargets`). Resolved outside the
@@ -483,15 +500,17 @@ const GroupRowView = memo(function GroupRowView({
   // name above the bubble, bubble beside the avatar, timestamp below the
   // bubble revealed on hover.
   const avatar = who.isAgent ? (
-    <AgentAvatar
-      agentId={row.from}
-      displayName={who.name}
-      avatarUrl={agentMeta?.avatar}
-      version={agentMeta?.version}
-      builtinAvatarId={agentMeta?.builtin_avatar ?? null}
-      size={40}
-      className="mt-1 shrink-0"
-    />
+    <span onContextMenu={openMentionMenu} className="shrink-0">
+      <AgentAvatar
+        agentId={row.from}
+        displayName={who.name}
+        avatarUrl={agentMeta?.avatar}
+        version={agentMeta?.version}
+        builtinAvatarId={agentMeta?.builtin_avatar ?? null}
+        size={40}
+        className="mt-1 shrink-0"
+      />
+    </span>
   ) : own ? (
     <UserAvatar
       displayName={profile.displayName}
@@ -501,13 +520,15 @@ const GroupRowView = memo(function GroupRowView({
       className="mt-1 shrink-0"
     />
   ) : (
-    <UserAvatar
-      displayName={who.name}
-      avatarUrl={who.avatarUrl}
-      builtinAvatarId={who.builtinAvatarId}
-      size={40}
-      className="mt-1 shrink-0"
-    />
+    <span onContextMenu={openMentionMenu} className="shrink-0">
+      <UserAvatar
+        displayName={who.name}
+        avatarUrl={who.avatarUrl}
+        builtinAvatarId={who.builtinAvatarId}
+        size={40}
+        className="mt-1 shrink-0"
+      />
+    </span>
   );
 
   return (
@@ -526,7 +547,12 @@ const GroupRowView = memo(function GroupRowView({
       >
         {who.name && (
           <div className="mt-[2px] flex flex-col">
-            <span className="text-xs text-text-tertiary">{who.name}</span>
+            <span
+              className="text-xs text-text-tertiary"
+              onContextMenu={openMentionMenu}
+            >
+              {who.name}
+            </span>
             {/* Agent role line — mirrors the user↔agent thread
                 (`AgentChatView`), which pairs the name with the agent's
                 role so a group reader can tell which specialist spoke. */}
@@ -778,6 +804,9 @@ export function GroupChatPanel() {
   const nameOf = useParticipantNamer(directory);
   const agentsMap = useAgentStore((s) => s.agents);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Right-click on an agent's avatar / name → the "@name" menu. One menu for
+  // the whole panel: the payload carries the right-clicked participant.
+  const mentionMenu = useContextMenu<{ id: string }>();
   // Composer attachments — uploaded into the group's `files/` dir (§4.2.1)
   // before send; the send carries their ids so the durable row and each
   // mentioned agent's execution turn both see them (mirrors AgentChatView).
@@ -1236,9 +1265,44 @@ export function GroupChatPanel() {
     [jumpToExec],
   );
 
+  const participants = group?.participants ?? [];
+  // Admin cross-account view: the panel lists groups the admin never joined.
+  // Reading is allowed (server-side admin bypass), posting is not — hide the
+  // composer and card actions for anyone who isn't a participant.
+  const canPost = participants.some((p) => p.id === me);
+
+  // Right-click on an agent's avatar / name → the "@name" menu. No menu
+  // without a composer: a read-only viewer has nowhere to put the mention.
+  // `mentionMenu.openAt` is the hook's stable callback (deps `[]`), so this
+  // handler keeps its identity across renders — the memoized rows take it
+  // as a prop and must not re-render on every composer keystroke.
+  const handleMentionContextMenu = useCallback(
+    (e: ReactMouseEvent, id: string) => {
+      if (!canPost) return;
+      mentionMenu.openAt(e, { id });
+    },
+    [canPost, mentionMenu.openAt],
+  );
+
+  // The menu's one item: drop `@<name> ` into the composer at the caret —
+  // the same text the picker inserts, so the fan-out resolves it (see
+  // `resolveMentions`). No icon: the label already reads `@<name>`, and an
+  // @-icon next to it doubles the glyph.
+  const mentionMenuItems = useMemo<ContextMenuItem<{ id: string }>[]>(() => {
+    const id = mentionMenu.payload?.id;
+    if (!id) return [];
+    const name = nameOf(id).name;
+    return [
+      {
+        key: "mention",
+        label: t("groupChat.mentionMenu", { name }),
+        onClick: () => insertTextAtCaret(`@${name} `),
+      },
+    ];
+  }, [insertTextAtCaret, mentionMenu.payload, nameOf, t]);
+
   if (!activeGroupId) return null;
 
-  const participants = group?.participants ?? [];
   // A `user_user` pair is the smallest group — two people. Render it as a DM:
   // the header shows the peer's name (not the empty session title) and drops
   // the "N members" chip, which is noise for a conversation of exactly two.
@@ -1249,10 +1313,6 @@ export function GroupChatPanel() {
       ? nameOf(peerId).name
       : activeGroupId.slice(0, 8)
     : group?.title || activeGroupId.slice(0, 8);
-  // Admin cross-account view: the panel lists groups the admin never joined.
-  // Reading is allowed (server-side admin bypass), posting is not — hide the
-  // composer and card actions for anyone who isn't a participant.
-  const canPost = participants.some((p) => p.id === me);
 
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border-outer bg-chat-body">
@@ -1359,6 +1419,7 @@ export function GroupChatPanel() {
                 }
                 chatAnswered={chatAnswered}
                 readOnly={!canPost}
+                onMentionContextMenu={handleMentionContextMenu}
               />
             )}
           />
@@ -1618,6 +1679,17 @@ export function GroupChatPanel() {
           resolveName={(id) => nameOf(id).name}
         />
       )}
+      {/* The "@name" menu — one for the whole panel, opened from any
+          participant's avatar / name in the transcript. */}
+      <ContextMenu
+        isOpen={mentionMenu.isOpen}
+        menuProps={mentionMenu.menuProps}
+        items={mentionMenuItems}
+        payload={mentionMenu.payload}
+        selectionAtOpen={mentionMenu.selectionAtOpen}
+        onClose={mentionMenu.close}
+        compact
+      />
     </div>
   );
 }

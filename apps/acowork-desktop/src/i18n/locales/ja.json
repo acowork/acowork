@@ -1871,6 +1871,7 @@
     "taskChip": "タスク {{id}}",
     "toChip": "TO",
     "taskChipCopy": "タスクIDをコピー",
-    "readOnly": "読み取り専用 — このプロジェクトのメンバーではありません。"
+    "readOnly": "読み取り専用 — このプロジェクトのメンバーではありません。",
+    "mentionMenu": "@{{name}}"
   }
 }

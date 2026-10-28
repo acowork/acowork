@@ -2029,6 +2029,7 @@
     "placeholderWithMentions": "发消息，@Agent 让其处理",
     "send": "发送",
     "mentionLabel": "提及成员",
+    "mentionMenu": "@{{name}}",
     "emptyTurn": "（无输出）",
     "taskChip": "任务 {{id}}",
     "toChip": "TO",

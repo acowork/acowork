@@ -1862,6 +1862,7 @@
     "taskChip": "任務 {{id}}",
     "toChip": "TO",
     "taskChipCopy": "複製任務 ID",
-    "readOnly": "唯讀 — 您不是該專案的成員。"
+    "readOnly": "唯讀 — 您不是該專案的成員。",
+    "mentionMenu": "@{{name}}"
   }
 }
