@@ -3,6 +3,10 @@
 > 目标：`relay.acowork.ai`（控制面）+ `*.relay.acowork.ai`（设备域）部署到一台 Aliyun ECS。
 > 依据：[设计文档 24 §5.3](../design/zh/24-cloud-relay-remote-access.md)（SNI 路由）与 [ADR-055 §6.13](../adr/zh/ADR-055-remote-runtime-node-topology.md)。
 >
+> **⚠️ 先确认 ECS 地域**：本文假设 ECS 在**境外**或不涉及 ICP 备案。若 ECS 在**中国大陆**且域名未完成
+> ICP 备案，云厂商的周期性扫描会在部署数日后开始拦截 80/443（表现为「先能用、过几天挂掉」）。
+> 境内场景请改用 [relay-selfhost-cn-deploy.md](./relay-selfhost-cn-deploy.md)。
+>
 > **本文按顺序执行，每步自带验证命令。验证不通过就别往下走** —— 后面的步骤都建立在前一步已通过的前提上。
 
 ---
