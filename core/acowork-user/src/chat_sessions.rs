@@ -46,7 +46,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
@@ -584,6 +584,34 @@ fn carries_chat_md(kind: SessionKind) -> bool {
     matches!(kind, SessionKind::UserGroup | SessionKind::ProjectGroup)
 }
 
+/// Load a group session's `chat.md` from disk, reading at most
+/// [`MAX_CHAT_MD_BYTES`] + 1 so the ceiling holds even for a file written
+/// out of band. `Ok(None)` when the file does not exist.
+///
+/// This is a whole-file read and stays one **by design**: `chat.md` is a
+/// user-authored prompt document, not a session log. ADR-096's red line
+/// forbids full reads of `messages.jsonl` — a file that grows with the
+/// conversation, where every row count / seq / span must come from write-time
+/// derived state. `chat.md` is capped on write ([`write_chat_md`]) and capped
+/// again here, so the request path never allocates more than the cap.
+fn load_chat_md_bounded(path: &Path) -> Result<Option<String>, String> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let mut text = String::new();
+    file.take(MAX_CHAT_MD_BYTES as u64 + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if text.len() > MAX_CHAT_MD_BYTES {
+        return Err(format!(
+            "chat.md exceeds the {MAX_CHAT_MD_BYTES}-byte cap"
+        ));
+    }
+    Ok(Some(text))
+}
+
 /// Read a group session's `chat.md`, seeding [`default_group_chat_md`] on the
 /// first touch. `Ok(None)` for kinds without a prompt file; an unreadable file
 /// is surfaced as `Err` (the caller answers 5xx) rather than masked by the
@@ -595,14 +623,13 @@ pub fn read_chat_md(data_dir: &Path, session: &ChatSession) -> Result<Option<Str
         return Ok(None);
     }
     let path = chat_md_path(&session_dir(data_dir, &session.session_id));
-    match fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    match load_chat_md_bounded(&path)? {
+        Some(text) => Ok(Some(text)),
+        None => {
             let seed = default_group_chat_md();
             let _ = fs::write(&path, &seed);
             Ok(Some(seed))
         }
-        Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
 
@@ -2817,6 +2844,25 @@ mod tests {
             fs::read_to_string(session_dir(&dir, &group.session_id).join("chat.md")).unwrap(),
             default_group_chat_md()
         );
+    }
+
+    /// A `chat.md` written out of band (not through `write_chat_md`) must not
+    /// turn the request path into an unbounded read: the loader reads at most
+    /// cap + 1 bytes and refuses the result.
+    #[test]
+    fn chat_md_over_the_cap_is_refused_on_read() {
+        let dir = temp_dir();
+        let group = group_session(&dir);
+        let path = session_dir(&dir, &group.session_id).join("chat.md");
+        fs::write(&path, "a".repeat(MAX_CHAT_MD_BYTES + 1)).unwrap();
+        let err = read_chat_md(&dir, &group).expect_err("over the cap must be refused");
+        assert!(err.contains("cap"), "unexpected error: {err}");
+
+        // At the cap the file is served as-is (the tail reserve is a write-side
+        // budget, not a read-side truncation).
+        fs::write(&path, "a".repeat(MAX_CHAT_MD_BYTES)).unwrap();
+        let text = read_chat_md(&dir, &group).unwrap().unwrap();
+        assert_eq!(text.len(), MAX_CHAT_MD_BYTES);
     }
 
     #[test]
