@@ -1561,21 +1561,21 @@ fn derive_protocol_type(npm: Option<&str>) -> acowork_core::protocol::ProtocolTy
 ///
 /// | `choice` | `probe` | result |
 /// |---|---|---|
-/// | `Responses` | `verified` / `degraded` | `Responses` (if the global switch is on) |
+/// | `Responses` | `verified` / `degraded` | `Responses` |
 /// | `Responses` | `failed` / `stale` / `unverified` / absent | `npm_default` |
 /// | `None` | any | `npm_default` |
 /// | other known value | any | the chosen value (no gate needed) |
 /// | `Unknown` (unrecognized wire value) | any | `npm_default` + warn (never guess) |
 ///
-/// Global switch (`llm.responses_api_enabled`, default `false`): when off,
-/// a `Responses` selection is forced to `npm_default` — the fallback MUST be
-/// visible (warn), otherwise the switch itself would be a silent protocol
-/// change (§4.4).
+/// There is deliberately **no global switch** in front of this gate: the
+/// selection is the user's own explicit act, and the probe is what confirms
+/// it, so the two together are already a per-model, opt-in gate. A blanket
+/// kill switch would only add a second, invisible way for a selection to
+/// silently not take effect (ADR-103 §4.4, revised).
 pub fn resolve_effective_protocol(
     choice: Option<&acowork_core::protocol::ProtocolType>,
     probe: Option<&acowork_core::protocol::ProtocolProbe>,
     npm_default: acowork_core::protocol::ProtocolType,
-    responses_api_enabled: bool,
 ) -> acowork_core::protocol::ProtocolType {
     use acowork_core::protocol::ProtocolType;
 
@@ -1585,15 +1585,6 @@ pub fn resolve_effective_protocol(
 
     match chosen {
         ProtocolType::Responses => {
-            if !responses_api_enabled {
-                tracing::warn!(
-                    "resolve_protocol: model selected 'responses' but llm.responses_api_enabled=false; \
-                     forcing fallback to the npm-derived default '{}'. Restart the Gateway with the \
-                     switch enabled to honour the selection.",
-                    npm_default
-                );
-                return npm_default;
-            }
             match probe {
                 // Probe verdict written by the save/probe path (D12) and
                 // still fresh: enable Responses.
@@ -1635,8 +1626,7 @@ pub fn resolve_effective_protocol(
 /// `npm_default` is the provider-level `protocol_type` already derived from
 /// offline models.dev data when the provider entry was built. The
 /// per-model `protocol_type` / `protocol_probe` fields carry the user's
-/// selection and the Gateway probe verdict; `responses_api_enabled` is the
-/// global kill switch (§4.3/§4.4).
+/// selection and the Gateway probe verdict.
 ///
 /// Returns `(effective_protocol, model_base_url_override)`; the override is
 /// `Some` only when the effective protocol is `Responses` AND the model
@@ -1644,7 +1634,6 @@ pub fn resolve_effective_protocol(
 pub fn resolve_protocol(
     provider: &acowork_core::protocol::ProviderListItem,
     model_id: &str,
-    responses_api_enabled: bool,
 ) -> (
     acowork_core::protocol::ProtocolType,
     Option<String>,
@@ -1666,7 +1655,6 @@ pub fn resolve_protocol(
         model.protocol_type.as_ref(),
         model.protocol_probe.as_ref(),
         npm_default,
-        responses_api_enabled,
     );
     let base_url = if effective == ProtocolType::Responses {
         model
@@ -1696,7 +1684,6 @@ pub fn resolve_protocol(
 pub fn project_model_protocol(
     model: &mut ModelInfo,
     provider: Option<&acowork_core::protocol::ProviderListItem>,
-    responses_api_enabled: bool,
 ) {
     let Some(provider) = provider else {
         return;
@@ -1706,34 +1693,27 @@ pub fn project_model_protocol(
     };
     model.protocol_selected = entry.protocol_type.as_ref().map(|p| p.to_string());
     model.protocol_probe = entry.protocol_probe.clone();
-    let (effective, _) = resolve_protocol(provider, &model.id, responses_api_enabled);
+    let (effective, _) = resolve_protocol(provider, &model.id);
     model.protocol_active = Some(effective.to_string());
 }
 
-/// Snapshot the two inputs [`project_model_protocol`] needs, without holding
-/// the Gateway lock across the handler's work.
+/// Snapshot the input [`project_model_protocol`] needs, without holding the
+/// Gateway lock across the handler's work.
 ///
-/// Returns `(provider entry, responses_api_enabled)`; the entry is `None` when
-/// the provider is not configured yet (e.g. browsing the catalog before the
-/// first save), in which case no protocol field is projected.
+/// Returns the provider entry; it is `None` when the provider is not
+/// configured yet (e.g. browsing the catalog before the first save), in which
+/// case no protocol field is projected.
 async fn protocol_projection_inputs(
     state: &AppState,
     provider_id: &str,
-) -> (Option<acowork_core::protocol::ProviderListItem>, bool) {
+) -> Option<acowork_core::protocol::ProviderListItem> {
     let gw = state.gateway_state.read().await;
-    let entry = gw
-        .resource_cache
+    gw.resource_cache
         .provider_list
         .providers
         .iter()
         .find(|p| p.id == provider_id)
-        .cloned();
-    let enabled = gw
-        .config
-        .as_ref()
-        .map(|c| c.llm.responses_api_enabled)
-        .unwrap_or(false);
-    (entry, enabled)
+        .cloned()
 }
 
 /// Project the ADR-103 D11 protocol fields onto a whole model list.
@@ -1742,9 +1722,9 @@ pub(crate) async fn annotate_protocol_fields(
     provider_id: &str,
     models: &mut [ModelInfo],
 ) {
-    let (entry, enabled) = protocol_projection_inputs(state, provider_id).await;
+    let entry = protocol_projection_inputs(state, provider_id).await;
     for model in models.iter_mut() {
-        project_model_protocol(model, entry.as_ref(), enabled);
+        project_model_protocol(model, entry.as_ref());
     }
 }
 
@@ -2334,14 +2314,11 @@ mod adr103_resolve_tests {
         }
     }
 
-    const ON: bool = true;
-    const OFF: bool = false;
-
     #[test]
     fn no_choice_always_npm_default() {
         for probe in [None, Some(probe(ProbeState::Verified))] {
             assert_eq!(
-                resolve_effective_protocol(None, probe.as_ref(), ProtocolType::Anthropic, ON),
+                resolve_effective_protocol(None, probe.as_ref(), ProtocolType::Anthropic),
                 ProtocolType::Anthropic
             );
         }
@@ -2362,27 +2339,12 @@ mod adr103_resolve_tests {
                 Some(&ProtocolType::Responses),
                 Some(&probe(st.clone())),
                 ProtocolType::OpenAI,
-                ON,
             );
             assert_eq!(got, want, "probe state {st:?}");
         }
         // Absent probe = unverified = off.
         assert_eq!(
-            resolve_effective_protocol(Some(&ProtocolType::Responses), None, ProtocolType::OpenAI, ON),
-            ProtocolType::OpenAI
-        );
-    }
-
-    #[test]
-    fn kill_switch_forces_verified_responses_back_to_default() {
-        // §4.4: switch off = pre-ADR-103 behavior even with a fresh verified probe.
-        assert_eq!(
-            resolve_effective_protocol(
-                Some(&ProtocolType::Responses),
-                Some(&probe(ProbeState::Verified)),
-                ProtocolType::OpenAI,
-                OFF,
-            ),
+            resolve_effective_protocol(Some(&ProtocolType::Responses), None, ProtocolType::OpenAI),
             ProtocolType::OpenAI
         );
     }
@@ -2394,7 +2356,6 @@ mod adr103_resolve_tests {
                 Some(&ProtocolType::Unknown),
                 Some(&probe(ProbeState::Verified)),
                 ProtocolType::Google,
-                ON,
             ),
             ProtocolType::Google
         );
@@ -2405,7 +2366,7 @@ mod adr103_resolve_tests {
         // Non-Responses selections are not gated (D1 table row 4).
         for p in [ProtocolType::Anthropic, ProtocolType::Google, ProtocolType::Ollama, ProtocolType::OpenAI] {
             assert_eq!(
-                resolve_effective_protocol(Some(&p), None, ProtocolType::OpenAI, OFF),
+                resolve_effective_protocol(Some(&p), None, ProtocolType::OpenAI),
                 p.clone(),
                 "choice {p}"
             );
@@ -2415,7 +2376,7 @@ mod adr103_resolve_tests {
     #[test]
     fn resolve_protocol_model_entry_missing_inherits_provider_level() {
         let p = cached(entry(None, None, None), ProtocolType::Ollama);
-        let (proto, base) = resolve_protocol(&p, "not-in-list", ON);
+        let (proto, base) = resolve_protocol(&p, "not-in-list");
         assert_eq!(proto, ProtocolType::Ollama);
         assert_eq!(base, None);
     }
@@ -2428,11 +2389,15 @@ mod adr103_resolve_tests {
             entry(Some(ProtocolType::Responses), Some(probe(ProbeState::Verified)), Some(url)),
             ProtocolType::Anthropic,
         );
-        let (proto, base) = resolve_protocol(&p, "gpt-5", ON);
+        let (proto, base) = resolve_protocol(&p, "gpt-5");
         assert_eq!(proto, ProtocolType::Responses);
         assert_eq!(base.as_deref(), Some(url));
-        // Gate closed (switch off) → override is NOT carried.
-        let (proto, base) = resolve_protocol(&p, "gpt-5", OFF);
+        // A failed probe → the default protocol → override is NOT carried.
+        let failed = cached(
+            entry(Some(ProtocolType::Responses), Some(probe(ProbeState::Failed)), Some(url)),
+            ProtocolType::Anthropic,
+        );
+        let (proto, base) = resolve_protocol(&failed, "gpt-5");
         assert_eq!(proto, ProtocolType::Anthropic);
         assert_eq!(base, None);
         // Empty-string override → None (inherit provider base).
@@ -2440,7 +2405,7 @@ mod adr103_resolve_tests {
             entry(Some(ProtocolType::Responses), Some(probe(ProbeState::Degraded)), Some("")),
             ProtocolType::OpenAI,
         );
-        let (proto, base) = resolve_protocol(&p2, "gpt-5", ON);
+        let (proto, base) = resolve_protocol(&p2, "gpt-5");
         assert_eq!(proto, ProtocolType::Responses);
         assert_eq!(base, None);
     }
@@ -2449,13 +2414,11 @@ mod adr103_resolve_tests {
     fn resolve_protocol_status_quo_unchanged() {
         // S1 zero-traffic-change invariant: an entry with no model-level
         // fields resolves to exactly the provider-level protocol, with no
-        // base_url override — regardless of the switch.
+        // base_url override.
         let p = cached(entry(None, None, None), ProtocolType::Anthropic);
-        for enabled in [ON, OFF] {
-            let (proto, base) = resolve_protocol(&p, "gpt-5", enabled);
-            assert_eq!(proto, ProtocolType::Anthropic);
-            assert_eq!(base, None);
-        }
+        let (proto, base) = resolve_protocol(&p, "gpt-5");
+        assert_eq!(proto, ProtocolType::Anthropic);
+        assert_eq!(base, None);
     }
 
     #[test]
@@ -2523,9 +2486,6 @@ mod adr103_projection_tests {
         }
     }
 
-    const ON: bool = true;
-    const OFF: bool = false;
-
     #[test]
     fn verified_selection_projects_responses_as_active() {
         let p = provider(entry(
@@ -2533,7 +2493,7 @@ mod adr103_projection_tests {
             Some(probe(ProbeState::Verified, None)),
         ));
         let mut m = model("gpt-5");
-        project_model_protocol(&mut m, Some(&p), ON);
+        project_model_protocol(&mut m, Some(&p));
 
         assert_eq!(m.protocol_selected.as_deref(), Some("responses"));
         assert_eq!(m.protocol_active.as_deref(), Some("responses"));
@@ -2553,7 +2513,7 @@ mod adr103_projection_tests {
             Some(probe(ProbeState::Failed, Some("endpoint unavailable"))),
         ));
         let mut m = model("gpt-5");
-        project_model_protocol(&mut m, Some(&p), ON);
+        project_model_protocol(&mut m, Some(&p));
 
         assert_eq!(m.protocol_selected.as_deref(), Some("responses"));
         assert_eq!(m.protocol_active.as_deref(), Some("openai"));
@@ -2563,28 +2523,13 @@ mod adr103_projection_tests {
     }
 
     #[test]
-    fn global_switch_off_projects_the_default_while_showing_the_selection() {
-        // §4.4: the switch forces the fallback, but the fallback must be
-        // visible — otherwise the switch itself is a silent protocol change.
-        let p = provider(entry(
-            Some(ProtocolType::Responses),
-            Some(probe(ProbeState::Verified, None)),
-        ));
-        let mut m = model("gpt-5");
-        project_model_protocol(&mut m, Some(&p), OFF);
-
-        assert_eq!(m.protocol_selected.as_deref(), Some("responses"));
-        assert_eq!(m.protocol_active.as_deref(), Some("openai"));
-    }
-
-    #[test]
     fn stale_verdict_activates_the_default() {
         let p = provider(entry(
             Some(ProtocolType::Responses),
             Some(probe(ProbeState::Stale, None)),
         ));
         let mut m = model("gpt-5");
-        project_model_protocol(&mut m, Some(&p), ON);
+        project_model_protocol(&mut m, Some(&p));
 
         assert_eq!(m.protocol_active.as_deref(), Some("openai"));
     }
@@ -2597,7 +2542,7 @@ mod adr103_projection_tests {
         let p = provider(entry(Some(ProtocolType::Responses), None));
         let mut m = model("some-other-model");
         m.shape = Some("responses".into());
-        project_model_protocol(&mut m, Some(&p), ON);
+        project_model_protocol(&mut m, Some(&p));
 
         assert_eq!(m.shape.as_deref(), Some("responses"));
         assert!(m.protocol_selected.is_none());
@@ -2608,7 +2553,7 @@ mod adr103_projection_tests {
     #[test]
     fn no_provider_entry_projects_nothing() {
         let mut m = model("gpt-5");
-        project_model_protocol(&mut m, None, ON);
+        project_model_protocol(&mut m, None);
 
         assert!(m.protocol_selected.is_none());
         assert!(m.protocol_active.is_none());

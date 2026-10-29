@@ -1,9 +1,10 @@
 # ADR-103：支持 OpenAI Responses API 作为 provider shape
 
 - **编号**：ADR-103
-- **状态**：✅ 已接受（v0.3，2026-11-XX 拍板；S1–S7 已实施，分支 `feature/response_api`）
+- **状态**：✅ 已接受（v0.3 拍板 / v0.4 修正，2026-11-XX；S1–S8 已实施，分支 `feature/response_api`）
 - **日期**：2026-11-XX
 - **修订**：
+  - **v0.4（2026-11-XX，实施后修正）**——**删除全局开关 `llm.responses_api_enabled`**（§4.4、R6 已同步）。理由：默认 `false` + 无 UI 入口 = 功能对绝大多数用户静默不可用（用户手选 Responses、点保存、探测被整体跳过、dialog 静默关闭，再次打开仍显示未启用）；而灰度本来就不需要它——D1 的 gate 已经是灰度（未手选 / 未探测 / 探测失败一律回落默认）。同时保留一条实施事实：保存响应里的探测结论（`probes`）必须传到 UI，否则「探测失败」与「什么都没发生」对用户不可区分。
   - **v0.3（2026-11-XX，拍板）**——**探测从「advisory 可信度标记」升级为「配置期启用门控（gate）」**：Responses 在且仅在「用户手选 ∧ 探测通过」时启用，其余任何情况一律回落默认（npm 推导）。连带修改：D1 改为两级输入 + gate、`shape` 降级为纯 UI 提示（不参与裁决、不写盘）、删除手动 re-resolve 流程（改为保存 / 切换协议时自动重测，见新增 D12）、G2「数据驱动默认」取消、§4.2 简化、修正 v0.2 关于 `#[serde(default)]` 的跨版本兼容错误结论、§3/§5/§7/§8/§9/§10 同步。
   - **v0.2（2026-11-XX）**——删除 v0.1 的 D10「本地 shape 覆盖表」，改为「用户显式选协议 + Gateway 侧探测验证」。动因：人工维护的数据文件会腐烂，探测 + 手选能以零维护成本覆盖 models.dev 尚未标注 `shape` 的厂商（DeepSeek / MiniMax）。
   - **v0.1**——初稿。
@@ -562,7 +563,7 @@ sequenceDiagram
 ### 4.4 回滚
 
 - **单 provider 级**：模型协议下拉切回 `Chat Completions` → 立即生效，无需发版。**这是主回滚路径**，比设计 23 §5.5 的「改配置即回滚」更真实——它需要 D1 第 1 级的手动覆盖入口（D11 位置 3）存在才成立。
-- **全局级**：Gateway 配置开关 `llm.responses_api_enabled: bool`（默认 `false`）。**落点**：`core/acowork-gateway/src/config.rs` 的 `GatewayConfig` 新增 `llm: LlmConfig { responses_api_enabled: bool }` 段（现状无 `llm` 段，属新增配置项，默认值即现状行为，无需迁移）；启动时读取，**v1 不做热加载**（改动需重启 Gateway，避免运行中开关切换造成协议瞬变）。关闭时 D1 解析结果强制回落 npm 推导，`Responses` 分支不可达，且**探测端点一并禁用**（避免关功能却还能发出真实计费请求）。强制回落 **MUST** 可见（`warn!` + UI 提示），否则开关本身会制造一次静默协议切换。比逐个改 provider 快，且能一键止血。
+- **全局级：不设全局开关**（v0.4 删除）。v0.2 曾设计 `llm.responses_api_enabled: bool`（默认 `false`，关闭时强制回落 npm 推导并连探测端点一起禁用），实施后判定为**设计错误**，三条事实：① 默认 `false` 且**没有任何 UI 入口**，等于功能对绝大多数用户静默不可用——用户手选 Responses、点保存、探测被整体跳过、dialog 静默关闭，再次打开仍显示未启用，且**没有任何提示说明原因**；② 灰度不需要它：D1 的 gate 本身就是灰度（未手选 / 未探测 / 探测失败 / 配置变更后未重测，一律回落默认），§4.3 的注已说明 G1 阶段没有任何自动路径，开关只是叠在同一道门上的第二道门，唯一效果是把「可见的回落」变成「静默的未生效」；③ 它是启动期配置、无热加载，止血能力也不如上面那条即时生效的主回滚路径。**灰度由 D1 gate 本身承担：手选 + 探测通过才生效。** 配套红线：保存与手选探测的结论（`probes`、`protocol_probe`）**MUST** 到达 UI——「探测失败」与「什么都没发生」对用户不可区分，本身就是一次静默失败。
 - **版本级**：读方（Runtime / Node / `ProtocolType` 的 `Unknown` 变体）先于写方（Gateway 落盘 `"responses"`）发布，因此回滚 Gateway 不需要回滚 Runtime。
 
 **Gateway 降级 runbook（强制）**：`provider_list.json` 里若已存在 `"protocol_type": "responses"`，降级到不认识该值的旧 Gateway 会**反序列化硬失败**（`#[serde(default)]` 不救未知枚举值）。因此降级前 **MUST** 先在新版本上把所有 model 级协议复位为「跟随默认」（`protocol_type` 置空）/ 删除该字段，或由发布流程提供 `provider_list.json` 的兼容化迁移。该步骤 MUST 同时写进 `docs/runbooks/` 与发布说明。
@@ -667,10 +668,11 @@ sequenceDiagram
 | S5 | **D10 探测端点（L1+L2+L3）+ D12 保存时自动探测 + 结果缓存与限流 + 用量排除** | 对 fake 服务能区分 `verified` / `failed(EndpointUnavailable)` / `failed(L3 no function_call)`；保存只测变更行、失败不阻塞；探测用量不进 usage 通道 |
 | S6 | D11 前端协议下拉（**始终可选**、切换触发探测）+「重新验证」按钮与状态区 + R 标签三态 + 黄标「已选择但未启用」+ 保存前请求数提示 | G1 灰度就绪；回归用例「shape 缺失仍能选 Responses」「failed 时保存可用且不启用」通过 |
 | S7（Q4 已定案，纳入主线，仍独立可回滚） | `reasoning` 单字段裁剪 + `degraded` 状态 | 两次确认门控 + 可见告警 + debug panel 可查 |
+| S8（v0.4 修正） | 删除全局开关 `llm.responses_api_enabled`（配置段 / 解析分支 / 探测跳过 / 前端 `gate_off` 原因一并删除）+ 保存响应里的 `probes` 送达 UI | 无开关配置段；手选 + 探测通过即生效；保存后用户必能看到每个模型的探测结论（成功 / 降级 / 失败） |
 
 > S5 与 S6 有依赖（下拉需要探测状态才能显示三态），但 S5 可独立交付为「后端可用、前端未接」，中途停下来的系统是自洽的。
 
-**实施状态（S1–S7 全部完成）**：S1 `67bccd0c`、S2 `4c1c47b8`、S3 `6b8ffc6a`、S4 `4869559a`、S5 `d0bdaaab`、S6 `c7cb345e` + `3504055b` + `11ec6153`、S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`。S7 的 `degraded` 由 `ProbeOutcome::stripped_fields` 驱动（Gateway 探测）与 `ResponsesCompatCache`（Runtime 运行期）各自独立产出，两处都不重探、不跨 shape 复用缓存。端到端验证：`dev/smoke/smoke_s7_degraded.py`（真实 Gateway + 拒绝 `reasoning` 的 fake provider）。
+**实施状态（S1–S8 全部完成）**：S1 `67bccd0c`、S2 `4c1c47b8`、S3 `6b8ffc6a`、S4 `4869559a`、S5 `d0bdaaab`、S6 `c7cb345e` + `3504055b` + `11ec6153`、S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`。S7 的 `degraded` 由 `ProbeOutcome::stripped_fields` 驱动（Gateway 探测）与 `ResponsesCompatCache`（Runtime 运行期）各自独立产出，两处都不重探、不跨 shape 复用缓存。端到端验证：`dev/smoke/smoke_s7_degraded.py`（真实 Gateway + 拒绝 `reasoning` 的 fake provider）。
 
 ---
 
@@ -683,7 +685,7 @@ sequenceDiagram
 | R3 | 第三方 Responses 实现是「Responses 形状的方言」：事件名、必填项、能力子集都不同（§1.4） | 高（每接一家都要重查） | §1.4 差异表进文档 + D8 显式分类 + 裁剪白名单收窄到 1 字段 + L3 工具往返探测 | **高**：这是长期成本，不是能一次解决的 |
 | **R4** | **虚假绿灯**：L1 通过但能力子集不全（MiniMax `text.format` 只有 `text`），或网关返回 200 但不是 response 对象；用户看到 R 标签就信了 | **高**（v0.2 特有，因为可信度由探测而非数据背书） | D10.2 强制 **L1+L2+L3**；L1 断言 `object=="response"` 而非仅 2xx；UI 文案禁写「已验证兼容」；`degraded` 单列一档 | 中：探测覆盖不到的能力（如 `json_schema`）仍可能缺失，R5 承接 |
 | **R5** | 把 Responses 当成「有 structured outputs」，在 MiniMax 上静默退化 | 中（记忆提取/蒸馏质量下降且无感） | §1.4 差异表；**MUST NOT** 在 provider 层伪造 `json_schema`；能力缺失显式报错；不写进探测承诺范围 | 低 |
-| **R6** | **探测成本失控**：用户反复点、批量 provider 一起测、或探测用量混进 ADR-027/066 累计导致预算与成本核算失真 | 中 | D10.4：结果缓存 TTL + `?force` + rate limiter 复用 + **用量走独立不上报路径**（§3 红线 3）；`llm.responses_api_enabled=false` 时连探测一起禁 | 低 |
+| **R6** | **探测成本失控**：用户反复点、批量 provider 一起测、或探测用量混进 ADR-027/066 累计导致预算与成本核算失真 | 中 | D10.4：结果缓存 TTL + `?force` + rate limiter 复用 + **用量走独立不上报路径**（§3 红线 3）；探测范围由 D12.2 限定为「本次保存变更的 `responses` 行」，未变更行不重探、单次保存上限 10 行（`MAX_PROBES_PER_SAVE`）+ 20s 批次预算（`PROBE_BATCH_BUDGET`），超限行不予探测（gate 保持关闭，方向安全） | 低 |
 | R7 | `max_output_tokens` 含思维链 → 预算被 CoT 吃满，`incomplete` 且无正文，用户看到空回答 | 中 | D6 `finish_reason=length` + 前端可见截断提示；`estimate` 侧沿用 `token/counter.rs` | 中 |
 | R8 | 前端把 R 标签当「能力」而 Gateway 当「接入方式」，语义漂移；或 probe 失败回落默认时**不可见**（那就成了 silent fallback） | 中 | D11 规则 + §3 红线 2 + §5 的 gate 锁定测试 + **回落必须黄标可见**（D1 / D10.3） | 低 |
 | R9 | 一次性改 `create_provider_with_wiring` 签名牵动 3 个调用点 + 测试 | 低 | S1 保留旧签名做 wrapper，分片迁移 | 低 |

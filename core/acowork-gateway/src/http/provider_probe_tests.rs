@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::config::{GatewayConfig, LlmConfig};
+use crate::config::GatewayConfig;
 use crate::http::auth::HttpAuth;
 use crate::http::provider_api::{
     AddProviderRequest, ProbeProviderRequest, ProbeQuery, UpdateProviderRequest, add_provider,
@@ -45,9 +45,8 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Gateway state whose `config.data_dir` is a temp dir and whose platform gate
-/// is set explicitly — the gate is what decides whether save-time probing runs.
-async fn state_with(dir: &std::path::Path, responses_enabled: bool) -> AppState {
+/// Gateway state whose `config.data_dir` is a temp dir.
+async fn state_with(dir: &std::path::Path) -> AppState {
     let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
     // Provider writes store API keys, which needs an unlocked vault.
     gw.vault.unlock("probe-test-password").expect("vault unlock");
@@ -57,9 +56,6 @@ async fn state_with(dir: &std::path::Path, responses_enabled: bool) -> AppState 
         let config = GatewayConfig {
             data_dir: dir.to_string_lossy().to_string(),
             vault_dir: dir.join("vault").to_string_lossy().to_string(),
-            llm: LlmConfig {
-                responses_api_enabled: responses_enabled,
-            },
             ..GatewayConfig::default()
         };
         guard.config = Some(config);
@@ -167,7 +163,7 @@ fn persisted_provider(dir: &std::path::Path) -> acowork_core::protocol::Provider
 #[tokio::test]
 async fn save_probes_changed_responses_rows_and_persists_the_verdict() {
     let dir = temp_dir("verified");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
     mount_healthy(&mut server);
 
@@ -200,7 +196,7 @@ async fn save_probes_changed_responses_rows_and_persists_the_verdict() {
 #[tokio::test]
 async fn failed_probe_does_not_block_the_save() {
     let dir = temp_dir("failed");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
     // A Chat-Completions-only host: `/responses` is 404 unknown endpoint.
     server
@@ -238,7 +234,7 @@ async fn failed_probe_does_not_block_the_save() {
 #[tokio::test]
 async fn l3_without_a_tool_call_is_failed_not_verified() {
     let dir = temp_dir("degraded");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
     mount_no_tool_call(&mut server);
 
@@ -262,15 +258,14 @@ async fn l3_without_a_tool_call_is_failed_not_verified() {
 }
 
 #[tokio::test]
-async fn platform_gate_off_skips_save_time_probing() {
-    let dir = temp_dir("gate-off");
-    let state = state_with(&dir, false).await;
+async fn a_selected_responses_row_is_probed_on_save() {
+    // ADR-103 §4.4 (revised): there is no global gate. The only rows that
+    // get probed are the ones the user explicitly selected as `Responses`,
+    // and the probe is what lets the D1 gate enable them.
+    let dir = temp_dir("save-probe");
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
-    // Guard: no probe request may reach the provider.
-    let no_probe = server
-        .mock("POST", "/responses")
-        .expect(0)
-        .create();
+    mount_healthy(&mut server);
 
     let (status, Json(response)) = add_provider(
         State(state.clone()),
@@ -280,23 +275,24 @@ async fn platform_gate_off_skips_save_time_probing() {
     .expect("save succeeds");
 
     assert_eq!(status, StatusCode::CREATED);
-    assert!(response.probes.is_empty(), "gate off = no billed probe calls");
-    no_probe.assert();
+    assert_eq!(response.probes.len(), 1, "the selected row is probed");
+    assert_eq!(response.probes[0].outcome.state(), ProbeState::Verified);
 
-    // Intent is still recorded (harmless: the gate forces the fallback), but no
-    // verdict exists, so nothing can gate `Responses` on.
+    // The verdict is persisted, so the D1 gate can enable `Responses`.
     let row = persisted_provider(&dir);
     let model = row.models.iter().find(|m| m.id == MODEL).expect("model row");
     assert_eq!(model.protocol_type, Some(ProtocolType::Responses));
-    assert!(model.protocol_probe.is_none());
+    let probe = model.protocol_probe.as_ref().expect("verdict");
+    assert_eq!(probe.state, ProbeState::Verified);
+    assert!(probe.state.gates_responses());
 }
 
 #[tokio::test]
-async fn gate_off_still_records_staleness_without_probing() {
+async fn a_moved_probe_target_is_reprobed_and_the_old_verdict_dies() {
     let dir = temp_dir("gate-off-stale");
     let mut server1 = mockito::Server::new_async().await;
     mount_healthy(&mut server1);
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
 
     let _ = add_provider(
         State(state.clone()),
@@ -313,16 +309,11 @@ async fn gate_off_still_records_staleness_without_probing() {
         ProbeState::Verified
     );
 
-    // Operator turns the platform gate off, then changes the base URL. No
-    // probe may run, but the stale verdict must not survive as "trusted".
-    {
-        let mut gw = state.gateway_state.write().await;
-        if let Some(config) = gw.config.as_mut() {
-            config.llm.responses_api_enabled = false;
-        }
-    }
-    let mut server2 = mockito::Server::new_async().await;
-    let no_probe = server2.mock("POST", "/responses").expect(0).create();
+    // The base URL moves: the old verdict describes a host that no longer
+    // answers, so it must not survive as "trusted" (D12.4/D12.6). The new
+    // endpoint is unreachable, so the re-probe fails and the row stays
+    // gated off.
+    let server2 = mockito::Server::new_async().await;
     let update: UpdateProviderRequest =
         serde_json::from_value(json!({ "base_url": server2.url() })).expect("valid update");
     let Json(response) = update_provider(
@@ -333,23 +324,25 @@ async fn gate_off_still_records_staleness_without_probing() {
     .await
     .expect("second save");
 
-    assert!(response.probes.is_empty());
-    no_probe.assert();
+    assert!(
+        !response.probes.is_empty(),
+        "a moved probe target must be re-probed, not left stale"
+    );
     assert_eq!(
         persisted_provider(&dir).models[0]
             .protocol_probe
             .as_ref()
             .unwrap()
             .state,
-        ProbeState::Stale,
-        "D12.6 is a MUST even while the platform gate is off"
+        ProbeState::Failed,
+        "a verdict about the old host must not survive"
     );
 }
 
 #[tokio::test]
 async fn a_no_op_save_does_not_reprobe_anything() {
     let dir = temp_dir("noop");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
     mount_healthy(&mut server);
 
@@ -393,7 +386,7 @@ async fn a_no_op_save_does_not_reprobe_anything() {
 #[tokio::test]
 async fn model_list_change_reprobes_the_responses_rows() {
     let dir = temp_dir("model-list");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
     mount_healthy(&mut server);
 
@@ -437,7 +430,7 @@ async fn model_list_change_reprobes_the_responses_rows() {
 #[tokio::test]
 async fn base_url_change_marks_existing_verdicts_stale() {
     let dir = temp_dir("stale");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
     mount_healthy(&mut server);
 
@@ -475,9 +468,9 @@ async fn base_url_change_marks_existing_verdicts_stale() {
 #[tokio::test]
 async fn explicit_probe_endpoint_reuses_the_cached_verdict_unless_forced() {
     let dir = temp_dir("force");
-    let state = state_with(&dir, false).await; // gate off: implicit probing is off...
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
-    // ...but the explicit endpoint probes anyway (D10.1/D11) — and only once:
+    // The explicit endpoint probes — and only once:
     // even a `standard` request is upgraded to deep, and the second request
     // below must be served from the 24 h cache.
     let baseline = server
@@ -503,7 +496,9 @@ async fn explicit_probe_endpoint_reuses_the_cached_verdict_unless_forced() {
         .with_body(baseline_body().to_string())
         .create();
 
-    // Seed the provider row without probing (gate off).
+    // Seed the provider row (the save probes it too, but the cache is
+    // keyed per (provider, model, protocol) and the explicit call below
+    // must still be served from that cache).
     let _ = add_provider(
         State(state.clone()),
         Json(add_body(&server.url(), &[MODEL], &[MODEL])),
@@ -549,7 +544,7 @@ async fn explicit_probe_endpoint_reuses_the_cached_verdict_unless_forced() {
 #[tokio::test]
 async fn explicit_probe_rejects_a_protocol_without_an_implementation() {
     let dir = temp_dir("protocol");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let server = mockito::Server::new_async().await;
     let _ = add_provider(
         State(state.clone()),
@@ -576,7 +571,7 @@ async fn explicit_probe_rejects_a_protocol_without_an_implementation() {
 #[tokio::test]
 async fn explicit_probe_reports_unknown_models_as_not_found() {
     let dir = temp_dir("unknown-model");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let server = mockito::Server::new_async().await;
     let _ = add_provider(
         State(state.clone()),
@@ -603,7 +598,7 @@ async fn explicit_probe_reports_unknown_models_as_not_found() {
 #[tokio::test]
 async fn clearing_the_selection_drops_the_verdict_without_probing() {
     let dir = temp_dir("clear-selection");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
     mount_healthy(&mut server);
 
@@ -654,7 +649,7 @@ async fn clearing_the_selection_drops_the_verdict_without_probing() {
 #[tokio::test]
 async fn model_list_projects_selection_verdict_and_active_protocol() {
     let dir = temp_dir("projection");
-    let state = state_with(&dir, true).await;
+    let state = state_with(&dir).await;
     let mut server = mockito::Server::new_async().await;
     mount_healthy(&mut server);
 

@@ -11,12 +11,15 @@ badge, the yellow "selected but not enabled" mark) from four fields that
     protocol_probe     the D10 verdict
 
 This runs a real Gateway against `dev/smoke/fake_responses_provider.py` and
-asserts the four fields in the four states the UI has to distinguish:
+asserts the four fields in the three states the UI has to distinguish:
 
     declared   offline says Responses, never probed, not enabled -> gray `R`
     verified   probe passes            -> selected==active==responses, verified
     failed     endpoint 404s           -> selected kept, active falls back (yellow)
-    gate off   responses_api_enabled=false -> selection survives, active==openai
+
+There is no fourth "platform switch off" state: ADR-103 §4.3 removed the
+global `llm.responses_api_enabled` switch, so a hand-picked `responses` row is
+gated by its own probe verdict and nothing else.
 
 `shape` is absent from the shipped catalog today (the dataset work that fills
 it is separate), so the script seeds a small synthetic catalog into the
@@ -120,8 +123,8 @@ def home_path(*parts):
     return os.path.join(HOME, *parts).replace("\\", "/")
 
 
-def write_llm_gate(enabled):
-    """D1's global switch is boot-time config, so each gate state is a boot.
+def write_config():
+    """Write the isolated boot config.
 
     The TOML is written in full (vault_dir / packages_dir / data_dir are
     required, not defaulted), pointed at the isolated HOME.
@@ -135,15 +138,13 @@ def write_llm_gate(enabled):
             # first provider save is a 500 "Vault is locked".
             "dev_mode = true\n\n"
             '[http]\nhost = "127.0.0.1"\nport = %d\n\n'
-            '[mqtt]\nhost = "127.0.0.1"\nport = %d\n\n'
-            "[llm]\nresponses_api_enabled = %s\n"
+            '[mqtt]\nhost = "127.0.0.1"\nport = %d\n'
             % (
                 home_path("config", "vault"),
                 home_path("packages"),
                 home_path("data"),
                 HTTP_PORT,
                 MQTT_PORT,
-                "true" if enabled else "false",
             )
         )
 
@@ -262,7 +263,7 @@ def main():
 
     if os.path.isdir(HOME):
         shutil.rmtree(HOME)
-    write_llm_gate(True)
+    write_config()
     seed_offline_catalog()
 
     healthy = start_fake("healthy", FAKE_PORTS["healthy"])
@@ -295,25 +296,12 @@ def main():
         check("protocol_active falls back", four["protocol_active"], "openai")
         check("protocol_probe.state", four["probe.state"], "failed")
 
-        print("\n[3] gate off: llm.responses_api_enabled=false")
-        stop(gateway)
-        gateway = None
-        write_llm_gate(False)
-        gateway = start_gateway()
-        # A model nobody selected and nothing probed: gray `R` territory.
+        print("\n[3] declared: offline hint only, never selected, never probed")
+        # A second model the user never selected — the gray `R` tier. It rides
+        # along in the same write; nothing about it is probed.
         status, _ = update_provider("http://127.0.0.1:%d" % FAKE_PORTS["healthy"],
                                     [MODEL, DECLARED_ONLY])
         check("PUT /api/providers status", status, 200)
-        four = projection(rows()[MODEL])
-        # D1 hard gate: the selection is remembered, never acted on.
-        check("shape", four["shape"], "responses")
-        check("protocol_selected survives", four["protocol_selected"], "responses")
-        check("protocol_active is openai", four["protocol_active"], "openai")
-        # Nothing was probed under the gate, and the model-list change marks
-        # the old verdict stale rather than re-running it.
-        check("verdict marked stale, not re-probed", four["probe.state"], "stale")
-
-        print("\n[4] declared: offline hint only, never selected, never probed")
         declared = projection(rows()[DECLARED_ONLY])
         check("shape", declared["shape"], "responses")
         check("protocol_selected is null", declared["protocol_selected"], None)

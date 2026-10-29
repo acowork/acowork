@@ -120,7 +120,7 @@ def config_path():
 
 
 def write_config():
-    """Isolated boot with the Responses gate ON (D1 needs it to enable)."""
+    """Isolated boot config (ADR-103 S8: no `[llm]` switch — the verdict gates)."""
     path = config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -128,8 +128,7 @@ def write_config():
             'vault_dir = "%s"\npackages_dir = "%s"\ndata_dir = "%s"\n'
             "dev_mode = true\n\n"
             '[http]\nhost = "127.0.0.1"\nport = %d\n\n'
-            '[mqtt]\nhost = "127.0.0.1"\nport = %d\n\n'
-            "[llm]\nresponses_api_enabled = true\n"
+            '[mqtt]\nhost = "127.0.0.1"\nport = %d\n'
             % (
                 home_path("config", "vault"),
                 home_path("packages"),

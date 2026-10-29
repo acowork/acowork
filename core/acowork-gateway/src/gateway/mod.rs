@@ -1840,7 +1840,6 @@ mod tests {
             max_iterations: 20,
             dev_mode: true,
             http: crate::config::HttpConfig::default(),
-            llm: crate::config::LlmConfig::default(),
             intent: crate::config::IntentConfig::default(),
             default_provider: None,
             default_model: None,

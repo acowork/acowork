@@ -3,10 +3,10 @@
 //!
 //! Responsibilities, in the order a save runs them:
 //!
-//! 1. **Snapshot** the provider row, its vault key and the platform gate
-//!    (`llm.responses_api_enabled`) while holding the Gateway lock, then
-//!    release it — probing is network I/O and MUST NOT run under the state
-//!    write lock (it would stall every other handler for up to 20 s).
+//! 1. **Snapshot** the provider row and its vault key while holding the
+//!    Gateway lock, then release it — probing is network I/O and MUST NOT
+//!    run under the state write lock (it would stall every other handler for
+//!    up to 20 s).
 //! 2. **Plan** the rows to probe ([`super::store::plan_probes`]) and run them
 //!    under a total budget, honouring the 24 h cache unless forced.
 //! 3. **Write back** the verdicts (plus D12.4 staleness) and re-publish, so the
@@ -16,14 +16,13 @@
 //! persisted before this module runs, and every failure here is recorded as a
 //! failed verdict instead of an error, so a probe can never block a save.
 //!
-//! ## Gate asymmetry (deliberate)
+//! ## No platform gate
 //!
-//! - **Save-time probing is skipped when the gate is off.** The platform kill
-//!   switch means `Responses` can never take effect, so billing API calls to
-//!   write verdicts nobody can use would be wrong.
-//! - **The explicit endpoint always probes.** It is a user-initiated diagnostic
-//!   (D10.1/D11 "探测再保存"), and it is the only way a user can find out
-//!   whether a provider supports Responses *before* enabling the gate.
+//! Probing is not gated by any global switch. The rows that get probed are
+//! exactly the rows the user explicitly selected as `Responses` (D12.2), and
+//! each probe is a single real request the user was told about before the
+//! save. A global kill switch would only make a selection silently fail to
+//! take effect — the exact failure mode ADR-103 §4.4 (revised) removes.
 
 use std::time::{Duration, Instant};
 
@@ -71,10 +70,9 @@ pub struct ProbeReport {
 struct ProbeContext {
     provider: ProviderListItem,
     api_key: Option<String>,
-    responses_api_enabled: bool,
 }
 
-/// Read the provider row, its key and the platform gate.
+/// Read the provider row and its key.
 async fn probe_context(state: &AppState, provider_id: &str) -> Result<ProbeContext, ApiError> {
     let gw = state.gateway_state.read().await;
 
@@ -91,17 +89,7 @@ async fn probe_context(state: &AppState, provider_id: &str) -> Result<ProbeConte
     // legitimately probeable — the header is simply omitted.
     let api_key = gw.vault.get_key(provider_id).ok();
 
-    let responses_api_enabled = gw
-        .config
-        .as_ref()
-        .map(|c| c.llm.responses_api_enabled)
-        .unwrap_or(false);
-
-    Ok(ProbeContext {
-        provider,
-        api_key,
-        responses_api_enabled,
-    })
+    Ok(ProbeContext { provider, api_key })
 }
 
 /// Charge one token from the provider's rate-limit bucket (D10.4).
@@ -176,21 +164,6 @@ pub async fn run_save_time_probes(
             cache_entries_dropped = dropped,
             "probe inputs changed: cached verdicts invalidated (D12.6)"
         );
-    }
-
-    if !ctx.responses_api_enabled {
-        // The platform gate means `Responses` cannot take effect, so no billed
-        // probe runs. Staleness still has to be recorded (D12.6 is a `MUST`
-        // regardless of the gate): when the gate is turned back on, a verdict
-        // about superseded configuration must not be trusted.
-        if probe_inputs_changed {
-            write_back(state, provider_id, &[], true).await;
-        }
-        tracing::debug!(
-            provider_id = %provider_id,
-            "save-time probe skipped: llm.responses_api_enabled is false"
-        );
-        return Vec::new();
     }
 
     let mut plan = plan_probes(&ctx.provider, previous.as_ref(), probe_inputs_changed);
@@ -533,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_failures_gate_off() {
+    fn synthetic_failures_stay_failed_not_verified() {
         for class in ["ProbeBudgetExceeded", "NoBaseUrl"] {
             let outcome = failure_outcome(class, "detail");
             assert_eq!(outcome.state(), ProbeState::Failed, "{class}");

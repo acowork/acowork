@@ -1153,10 +1153,9 @@ fn merge_user_capabilities(
 /// `POST /api/providers/:provider/probe` — ADR-103 D10.1 explicit probe.
 ///
 /// Probes one configured model and writes the verdict back, so the D1 gate and
-/// the D11 badge both reflect it. Deliberately independent of the platform gate
-/// `llm.responses_api_enabled`: a user must be able to find out whether a
-/// provider supports Responses *before* the platform enables the feature (see
-/// [`crate::probe::service`]).
+/// the D11 badge both reflect it. Independent of any platform switch — there is
+/// none (ADR-103 §4.3): the probe is the only thing that turns a hand-picked
+/// `responses` row into live traffic (see [`crate::probe::service`]).
 ///
 /// Probing a failing endpoint is a **200 with `success: false`**, not an HTTP
 /// error: "this endpoint does not speak Responses" is the answer the caller

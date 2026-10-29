@@ -90,14 +90,6 @@ fn gateway_hosted_mcp_ref(name: &str, url: String) -> McpRef {
 /// performed here so both MQTT and HTTP channels see the same key.
 pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders {
     let cache = &gw.resource_cache.provider_list;
-    // ADR-103 §4.3/§4.4: global kill switch for the Responses shape. When
-    // off, `resolve_protocol` forces every model back to the npm-derived
-    // default (visibly, via warn), so the `Responses` branch is unreachable.
-    let responses_api_enabled = gw
-        .config
-        .as_ref()
-        .map(|c| c.llm.responses_api_enabled)
-        .unwrap_or(false);
     let mut providers: Vec<ProviderRef> = Vec::new();
     for p in &cache.providers {
         // Decrypt every account key for this provider; one ProviderRef
@@ -219,11 +211,7 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
                         // byte-identical to the status quo (zero traffic
                         // change). Probe verdicts are NOT delivered (§3).
                         let (effective, base_url_override) =
-                            crate::http::models_api::resolve_protocol(
-                                p,
-                                &m.id,
-                                responses_api_enabled,
-                            );
+                            crate::http::models_api::resolve_protocol(p, &m.id);
                         let proto_protocol = (effective != p.protocol_type)
                             .then(|| i32::from(map_protocol_type(&effective)));
                         ProviderModelRef {
@@ -780,7 +768,7 @@ mod adr103_builder_tests {
         .unwrap()
     }
 
-    fn gw_with(model: ProviderModelEntry, switch_on: bool) -> GatewayState {
+    fn gw_with(model: ProviderModelEntry) -> GatewayState {
         let mut gw = GatewayState::new("/tmp/test-vault");
         // Use a local provider id: keyless publish is allowed only for
         // local providers, and the test vault is locked.
@@ -793,9 +781,7 @@ mod adr103_builder_tests {
             compact_model: None,
             custom: false,
         }];
-        let mut config = crate::config::GatewayConfig::default();
-        config.llm.responses_api_enabled = switch_on;
-        gw.config = Some(config);
+        gw.config = Some(crate::config::GatewayConfig::default());
         gw
     }
 
@@ -823,7 +809,7 @@ mod adr103_builder_tests {
         // Zero-traffic-change invariant: with no model-level selection, the
         // published ProviderModelRef is byte-identical to pre-ADR-103 (all
         // new optional fields absent).
-        let gw = gw_with(model(serde_json::json!({})), false);
+        let gw = gw_with(model(serde_json::json!({})));
         let payload = build_available_providers(&gw);
         let m = &payload.providers[0].models[0];
         assert_eq!(m.protocol_type, None);
@@ -837,7 +823,7 @@ mod adr103_builder_tests {
             "protocol_probe": { "state": "verified" },
             "base_url": "https://api.openai.com/v1",
         }));
-        let gw = gw_with(m, true);
+        let gw = gw_with(m);
         let payload = build_available_providers(&gw);
         let pm = &payload.providers[0].models[0];
         // Effective Responses != provider OpenAI -> model-level field present.
@@ -846,16 +832,17 @@ mod adr103_builder_tests {
     }
 
     #[test]
-    fn kill_switch_off_suppresses_model_level_emission_entirely() {
-        // Same persisted selection, switch off -> resolves to provider level
-        // -> model-level fields absent -> Runtime inherits -> wire identical
-        // to status quo. §4.4 rollback property.
+    fn an_unverified_responses_selection_emits_nothing_model_level() {
+        // A selection without a passing verdict resolves to the provider
+        // level -> model-level fields absent -> the Runtime inherits, so
+        // the wire stays identical to the status quo. This is what keeps
+        // "selected but not verified" from reaching live traffic.
         let m = model(serde_json::json!({
             "protocol_type": "responses",
-            "protocol_probe": { "state": "verified" },
+            "protocol_probe": { "state": "failed" },
             "base_url": "https://api.openai.com/v1",
         }));
-        let gw = gw_with(m, false);
+        let gw = gw_with(m);
         let payload = build_available_providers(&gw);
         let pm = &payload.providers[0].models[0];
         assert_eq!(pm.protocol_type, None);
