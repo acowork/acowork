@@ -1,7 +1,7 @@
 # ADR-103: Supporting the OpenAI Responses API as a Provider Shape
 
 - **Number**: ADR-103
-- **Status**: Accepted (v0.3, decided 2026-11-XX; not yet implemented)
+- **Status**: Accepted (v0.3, decided 2026-11-XX; S1-S7 implemented on `feature/response_api`)
 - **Date**: 2026-11-XX
 - **Revisions**:
   - **v0.3 (2026-11-XX, decided)** — **Probing is upgraded from an "advisory confidence marker" to a "configuration-time enablement gate"**: Responses is enabled if and only if "the user explicitly selected it AND the probe passed"; in every other case the effective protocol falls back to the default (npm derivation). Consequential changes: D1 becomes two-level input + gate, `shape` is demoted to a pure UI hint (never adjudicates, never persisted), the manual re-resolve flow is removed (replaced by probing on save / protocol switch, see new D12), G2 "data-driven default" is cancelled, §4.2 is simplified, the v0.2 conclusion about `#[serde(default)]` cross-version compatibility is corrected, §3/§5/§7/§8/§9/§10 synchronized.
@@ -669,6 +669,8 @@ sequenceDiagram
 | S7 (Q4 settled; in the main line, still independently revertible) | `reasoning` single-field trimming + `degraded` state | two-confirmation gate + visible warning + inspectable in the debug panel |
 
 > S5 and S6 are dependent (the dropdown needs probe state to render three states), but S5 can ship as "backend ready, frontend not wired" — stopping there leaves a self-consistent system.
+
+**Implementation status (S1-S7 all complete)**: S1 `67bccd0c`, S2 `4c1c47b8`, S3 `6b8ffc6a`, S4 `4869559a`, S5 `d0bdaaab`, S6 `c7cb345e` + `3504055b` + `11ec6153`, S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`. S7's `degraded` is produced independently by `ProbeOutcome::stripped_fields` (Gateway probe) and `ResponsesCompatCache` (Runtime at request time); neither re-probes, and neither shares cache entries across shapes. End-to-end check: `dev/smoke/smoke_s7_degraded.py` (real Gateway + a fake provider that rejects `reasoning`).
 
 ---
 

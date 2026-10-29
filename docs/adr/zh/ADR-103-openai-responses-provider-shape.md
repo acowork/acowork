@@ -1,7 +1,7 @@
 # ADR-103：支持 OpenAI Responses API 作为 provider shape
 
 - **编号**：ADR-103
-- **状态**：✅ 已接受（v0.3，2026-11-XX 拍板；未实施）
+- **状态**：✅ 已接受（v0.3，2026-11-XX 拍板；S1–S7 已实施，分支 `feature/response_api`）
 - **日期**：2026-11-XX
 - **修订**：
   - **v0.3（2026-11-XX，拍板）**——**探测从「advisory 可信度标记」升级为「配置期启用门控（gate）」**：Responses 在且仅在「用户手选 ∧ 探测通过」时启用，其余任何情况一律回落默认（npm 推导）。连带修改：D1 改为两级输入 + gate、`shape` 降级为纯 UI 提示（不参与裁决、不写盘）、删除手动 re-resolve 流程（改为保存 / 切换协议时自动重测，见新增 D12）、G2「数据驱动默认」取消、§4.2 简化、修正 v0.2 关于 `#[serde(default)]` 的跨版本兼容错误结论、§3/§5/§7/§8/§9/§10 同步。
@@ -669,6 +669,8 @@ sequenceDiagram
 | S7（Q4 已定案，纳入主线，仍独立可回滚） | `reasoning` 单字段裁剪 + `degraded` 状态 | 两次确认门控 + 可见告警 + debug panel 可查 |
 
 > S5 与 S6 有依赖（下拉需要探测状态才能显示三态），但 S5 可独立交付为「后端可用、前端未接」，中途停下来的系统是自洽的。
+
+**实施状态（S1–S7 全部完成）**：S1 `67bccd0c`、S2 `4c1c47b8`、S3 `6b8ffc6a`、S4 `4869559a`、S5 `d0bdaaab`、S6 `c7cb345e` + `3504055b` + `11ec6153`、S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`。S7 的 `degraded` 由 `ProbeOutcome::stripped_fields` 驱动（Gateway 探测）与 `ResponsesCompatCache`（Runtime 运行期）各自独立产出，两处都不重探、不跨 shape 复用缓存。端到端验证：`dev/smoke/smoke_s7_degraded.py`（真实 Gateway + 拒绝 `reasoning` 的 fake provider）。
 
 ---
 
