@@ -297,24 +297,17 @@ pub struct IntentMeta {
     /// `user_message` with genuine chat attachments (those are
     /// [`SessionMessage::attachments`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exec_attachments: Vec<ExecAttachmentLabel>,
+    pub exec_attachments: Vec<AttachmentLabel>,
 }
 
-/// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12): what the item
-/// was called on the surface that sent it, plus which arm of the ADR-046
-/// `AttachedItem` union it came from. Pure display data — the chat renders it
-/// and never resolves it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecAttachmentLabel {
-    /// Upload arms send `filename`, workspace arms send `name` (a repo-relative
-    /// path is display text there, not a location); an item that sent only a
-    /// path is reduced to its last segment by the Gateway.
-    pub filename: String,
-    /// The ADR-046 item type, quoted from the wire. Empty = the sender did not
-    /// say which arm it was.
-    #[serde(default)]
-    pub kind: String,
-}
+/// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12).
+///
+/// The type lives in `acowork-core` because it is not the user service's
+/// shape to own: the Gateway produces it from the ADR-046 union, this store
+/// persists it, the Chat Router reads it into a prompt and the desktop reads
+/// it into a chip. Naming it once is what keeps the transcript, the prompt and
+/// the UI from describing the same attachment three different ways.
+pub use acowork_core::protocol::AttachmentLabel;
 
 /// The decision an `interaction_request` card asks a human to make
 /// (design 27 §5.5.4). The card carries the summary needed to decide —
@@ -4068,13 +4061,15 @@ mod tests {
         let s = ua_session(&dir);
         let mut m = msg("u1", KIND_USER_MESSAGE, "take a look", "pinned-1");
         m.meta.exec_attachments = vec![
-            ExecAttachmentLabel {
+            AttachmentLabel {
                 filename: "src/main.rs".into(),
                 kind: "attached_file".into(),
+                ..Default::default()
             },
-            ExecAttachmentLabel {
+            AttachmentLabel {
                 filename: "notes.md".into(),
                 kind: "upload".into(),
+                ..Default::default()
             },
         ];
         let (stored, _) = append_message(&dir, &s.session_id, &m, 2).unwrap();
@@ -4113,9 +4108,10 @@ mod tests {
         let s = ua_session(&dir);
         // No body, no chat-side attachment ids — only the execution labels.
         let mut labels_only = msg("u1", KIND_USER_MESSAGE, "", "pinned-2");
-        labels_only.meta.exec_attachments = vec![ExecAttachmentLabel {
+        labels_only.meta.exec_attachments = vec![AttachmentLabel {
             filename: "diff.patch".into(),
             kind: "upload".into(),
+            ..Default::default()
         }];
         assert!(append_message(&dir, &s.session_id, &labels_only, 2).is_ok());
         // With no content of any kind the row is still refused: an empty,

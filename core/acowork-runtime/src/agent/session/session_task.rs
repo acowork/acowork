@@ -2437,9 +2437,19 @@ fn build_attachment_hint(
     let hint_lines: Vec<String> = items
         .iter()
         .filter_map(|item| match item {
-            acowork_core::protocol::AttachedItem::AttachedFile { abs_path, .. } => {
-                Some(format!("- file: `{}`", abs_path))
-            }
+            acowork_core::protocol::AttachedItem::AttachedFile {
+                abs_path, name, ..
+            } => Some(format!(
+                "- file: `{}`{}",
+                abs_path,
+                if name.is_empty() || name == abs_path {
+                    String::new()
+                } else {
+                    // The name the user saw is usually repo-relative; it tells
+                    // the Agent which project the file matters in.
+                    format!(" ({name})")
+                }
+            )),
             acowork_core::protocol::AttachedItem::AttachedSelection {
                 abs_path,
                 start_line,
@@ -2478,9 +2488,22 @@ fn build_attachment_hint(
             }
             // Image upload flows through the multimodal
             // ContentPart::ImageUrl path above — no prompt hint needed.
-            // Folder has no single-tool enumeration in our toolchain.
-            acowork_core::protocol::AttachedItem::ImageUpload { .. }
-            | acowork_core::protocol::AttachedItem::AttachedFolder { .. } => None,
+            acowork_core::protocol::AttachedItem::ImageUpload { .. } => None,
+            // A folder reference used to produce no line at all, so adding a
+            // directory to the conversation was invisible to the Agent that
+            // was asked about it. It cannot be read as a file, but the path is
+            // actionable with the tools the Agent already has.
+            acowork_core::protocol::AttachedItem::AttachedFolder {
+                abs_path, name, ..
+            } => Some(format!(
+                "- folder: `{}`{} — list it before answering",
+                abs_path,
+                if name.is_empty() || name == abs_path {
+                    String::new()
+                } else {
+                    format!(" ({name})")
+                }
+            )),
         })
         .collect();
 
@@ -2491,7 +2514,10 @@ fn build_attachment_hint(
             format!("{}\n\n", enriched)
         };
         enriched = format!(
-            "{}[Attached workspace files & uploads — use `read_file` / `doc_reader` on demand]\n{}",
+            "{}[Attached workspace files & uploads — the user pointed at these \
+             to make the request. Open them (`read_file` / `doc_reader`, list a \
+             folder with `bash`) before answering; do not describe contents you \
+             have not read.]\n{}",
             sep,
             hint_lines.join("\n")
         );
@@ -2788,20 +2814,45 @@ mod tests {
         );
     }
 
-    /// `AttachedFolder` (Add to Chat directory attach) gets no hint
-    /// — there is no single tool call the LLM can make to enumerate
-    /// a folder. The JSONL record still shows the user attached it.
+    /// A folder reference is named in the hint. It used to be silent on the
+    /// reasoning that no single tool enumerates a directory — but the Agent has
+    /// `bash`, and silence was indistinguishable from "the attachment never
+    /// arrived", which is the complaint this closes.
     #[test]
-    fn test_build_attachment_hint_folder_is_silent() {
+    fn test_build_attachment_hint_folder_is_named_and_actionable() {
         let items = vec![acowork_core::protocol::AttachedItem::AttachedFolder {
             abs_path: "/work/src".to_string(),
             name: "src".to_string(),
             client_id: None,
         }];
         let s = build_attachment_hint("x", Some(&items), Some("/work"));
-        // With only a folder (no hintable items) we return verbatim
-        // — the user text must NOT be polluted with an empty hint block.
-        assert_eq!(s, "x");
+        assert!(s.contains("- folder: `/work/src` (src)"), "got: {s}");
+        assert!(s.contains("list it before answering"), "got: {s}");
+    }
+
+    /// A file reference carries the display name the user saw, not only the
+    /// node path — which project the file matters in is part of the ask.
+    #[test]
+    fn test_build_attachment_hint_file_names_the_reference() {
+        let items = vec![acowork_core::protocol::AttachedItem::AttachedFile {
+            abs_path: "E:/p/core/src/chat_prompt.rs".to_string(),
+            name: "core/src/chat_prompt.rs".to_string(),
+            client_id: None,
+        }];
+        let s = build_attachment_hint("你先看看这个", Some(&items), None);
+        assert!(
+            s.contains("- file: `E:/p/core/src/chat_prompt.rs` (core/src/chat_prompt.rs)"),
+            "got: {s}"
+        );
+        // A reference whose name repeats the path adds no parenthetical.
+        let bare = vec![acowork_core::protocol::AttachedItem::AttachedFile {
+            abs_path: "/work/a.rs".to_string(),
+            name: "/work/a.rs".to_string(),
+            client_id: None,
+        }];
+        let s = build_attachment_hint("x", Some(&bare), None);
+        assert!(s.contains("- file: `/work/a.rs`"), "got: {s}");
+        assert!(!s.contains("(/work/a.rs)"), "got: {s}");
     }
 
     // ── Design 27 §4.2.1 chat-attachment forwarding ──────────────────

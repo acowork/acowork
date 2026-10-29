@@ -211,7 +211,19 @@ fn chat_turn_text(envelope: &IntentEnvelope) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    if text.trim().is_empty() && envelope.chat_attachment_ids.is_empty() {
+    // A turn with nothing typed still has to be routed when it carries
+    // something, and the question has one owner ([`super::context::
+    // turn_has_content`]) — the same one Block C answers, so the gate cannot
+    // wave through a turn the prompt then renders as an empty message.
+    // `chat_attachment_ids` keeps one extra vote on top: an older or
+    // half-deployed Gateway sends ids without the `chat_attachments` metadata
+    // param (see [`turn_attachments`]), and dropping a turn for want of a name
+    // is a lost message.
+    let uploads = turn_attachments(envelope);
+    let refs = turn_refs(envelope);
+    if !super::context::turn_has_content(&text, &uploads, &refs)
+        && envelope.chat_attachment_ids.is_empty()
+    {
         return None;
     }
     Some(text)
@@ -246,6 +258,27 @@ pub(crate) fn turn_attachments(
         .filter(|a: &acowork_core::protocol::ChatAttachmentMeta| {
             !a.filename.is_empty() || !a.mime.is_empty()
         })
+        .collect()
+}
+
+/// Workspace references this turn carries — the ADR-046 `attached_items` arm
+/// the composer stamped into `params_json`.
+///
+/// This is the second of the two lists a Chat turn can arrive with, and the
+/// router used to read only the first. A "add to chat" reference rides on
+/// `attached_items` and never on `chat_attachments` (the Gateway cannot read a
+/// node path to describe it), so a message whose whole content was a reference
+/// was routed as an empty one and answered with "you attached nothing" while
+/// the UI showed the file. Same blindness, one missing reader.
+///
+/// Projected through [`AttachmentLabel`], the identical type the Chat row
+/// stores and the desktop renders, so the model, the transcript and the chip
+/// cannot drift apart.
+pub(crate) fn turn_refs(envelope: &IntentEnvelope) -> Vec<acowork_core::protocol::AttachmentLabel> {
+    crate::agent::intent_turn::attached_items_from_params(&envelope.params)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(acowork_core::protocol::AttachmentLabel::from_item)
         .collect()
 }
 
@@ -425,6 +458,7 @@ async fn run_turn(
     let draft = draft_label(&envelope.session_config_json);
     let task = task_label(&envelope.conversation_id);
     let attachments = turn_attachments(envelope);
+    let refs = turn_refs(envelope);
     let turn_view = TurnContext {
         surface: surface_label(&chat_kind),
         speaker: &envelope.from,
@@ -435,6 +469,7 @@ async fn run_turn(
         history_available,
         user_message: text,
         attachments: &attachments,
+        refs: &refs,
     }
     .render();
 
@@ -480,7 +515,8 @@ async fn run_turn(
         anchor_seq: block_b.anchor_seq as usize,
         history_len: block_b.messages.len(),
         attachments: attachments.len(),
-        attachment_only: super::context::is_attachment_only(text, &attachments),
+        refs: refs.len(),
+        attachment_only: super::context::is_attachment_only(text, &attachments, &refs),
         started,
         info_rounds: 0,
     };
@@ -1132,6 +1168,8 @@ struct TurnTrace<'a> {
     /// state: a turn carrying a file routed exactly like the same text with
     /// nothing attached, and no line in the log could show which had happened.
     attachments: usize,
+    /// Workspace references on the turn — see [`DecisionRecord::refs`].
+    refs: usize,
     /// The turn had attachments and no text (see
     /// [`context::is_attachment_only`]), i.e. Block C rendered the placeholder.
     attachment_only: bool,
@@ -1167,6 +1205,7 @@ impl TurnTrace<'_> {
             anchor_seq: self.anchor_seq,
             history_len: self.history_len,
             attachments: self.attachments,
+            refs: self.refs,
             attachment_only: self.attachment_only,
             info_rounds: (self.info_rounds > 0).then_some(self.info_rounds),
             prompt_tokens: usage.map(|u| u.0),
@@ -1193,15 +1232,29 @@ impl TurnTrace<'_> {
 /// re-inject context the session already holds; anything it genuinely lacks it
 /// pulls with `chat_history_read`.
 ///
+/// A **new** session gets both, in that order. The brief alone was the
+/// original design, and it silently discarded the human's words: the router's
+/// summary became the whole of the message the Agent read and the transcript
+/// recorded, so nuance the router did not consider load-bearing ("只改测试，别动
+/// 实现") vanished at the one hop where it stopped being recoverable. The brief
+/// is a framing the router adds, not a replacement for what was said — so it
+/// introduces the turn and the verbatim text follows it.
+///
 /// `opened_new` is the routing-time authority for "this turn landed in a
 /// physically new session", which is why the choice is made here rather than
 /// from `Target`: `Target::Existing` against a session that is gone from disk
 /// also creates one, and that one still needs the brief.
 fn dispatch_content(opened_new: bool, brief: Option<&str>, user_text: &str) -> String {
-    match (opened_new, brief) {
-        (true, Some(brief)) => brief.to_string(),
-        _ => user_text.to_string(),
+    let brief = match (opened_new, brief.map(str::trim)) {
+        (true, Some(brief)) if !brief.is_empty() => brief,
+        // Continued session, or nothing to add: the human's words are the turn.
+        _ => return user_text.to_string(),
+    };
+    let words = user_text.trim();
+    if words.is_empty() || words == brief {
+        return brief.to_string();
     }
+    format!("{brief}\n\n[user message]\n{words}")
 }
 
 // The `SessionStatus` → `CandidateStatus` vocabulary table lives in
@@ -1325,6 +1378,7 @@ mod tests {
             history_available: true,
             user_message: "look at this",
             attachments: &attachments,
+            refs: &[],
         }
         .render();
         assert!(
@@ -1332,6 +1386,163 @@ mod tests {
 [attachments] report.pdf (application/pdf, 12KB)"),
             "block C must carry the attachment line the Gateway delivered: {rendered}"
         );
+    }
+
+    /// Regression (2026-11-06): a workspace reference added with "add to chat"
+    /// rides on `attached_items`, never on `chat_attachments` — the Gateway
+    /// cannot read a node-local path to describe it. The router read only the
+    /// latter, so a turn whose whole content was a reference was routed as an
+    /// empty one and answered in the chat with "you sent no content or
+    /// attachment" while the UI showed the file. The reference was invisible at
+    /// the one layer that decides whether to involve an Agent that could read it.
+    #[test]
+    fn a_workspace_reference_is_a_turn_the_router_can_see() {
+        let turn = envelope(
+            "user_message",
+            "cs-1",
+            serde_json::json!({
+                "message": "",
+                "attached_items": [{
+                    "type": "attached_file",
+                    "absPath": "E:/projects/tranxon/core/src/chat_prompt.rs",
+                    "name": "chat_prompt.rs",
+                }],
+            }),
+        );
+        // No words, no uploaded files, one reference: still a router turn.
+        assert_eq!(
+            chat_turn_text(&turn).as_deref(),
+            Some(""),
+            "a reference-only message must reach the router at all"
+        );
+
+        let refs = turn_refs(&turn);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].filename, "chat_prompt.rs");
+        assert_eq!(refs[0].kind, "attached_file");
+
+        let rendered = super::super::context::TurnContext {
+            surface: "dm",
+            speaker: "user-1",
+            now: "2026-11-06T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "",
+            attachments: &[],
+            refs: &refs,
+        }
+        .render();
+        assert!(
+            rendered.contains("[attached refs] chat_prompt.rs"),
+            "Block C must name the file the human pointed at: {rendered}"
+        );
+        assert!(
+            rendered.contains(super::super::context::ATTACHMENT_ONLY_PLACEHOLDER),
+            "a reference-only turn is a normal turn, not a blank one: {rendered}"
+        );
+        // The path is the part that must NOT cross: it is node-local layout the
+        // chat cannot read, and the prompt is written into a durable transcript.
+        assert!(
+            !rendered.contains("E:/projects") && !rendered.contains("tranxon"),
+            "a node path leaked into the router prompt: {rendered}"
+        );
+    }
+
+    /// The blank-name rule has ONE owner (`AttachmentLabel::from_item`), so the
+    /// turn list the router counts is the same set the Gateway wrote into the
+    /// row. Two rules would mean a turn whose Block C names an item its own
+    /// history row dropped — the "reads identically" invariant, broken by the
+    /// projection rather than by the reader.
+    #[test]
+    fn an_unnamable_reference_is_dropped_from_the_turn_like_it_is_from_the_row() {
+        let turn = envelope(
+            "user_message",
+            "cs-1",
+            serde_json::json!({
+                "message": "",
+                "attached_items": [
+                    { "type": "attached_file", "absPath": "", "name": "" },
+                    { "type": "file_upload", "documentId": "ab12-1", "filename": "", "format": "pdf", "sizeBytes": 1 },
+                    { "type": "attached_file", "absPath": "E:/p/a.rs", "name": "a.rs" },
+                ],
+            }),
+        );
+        let refs = turn_refs(&turn);
+        assert_eq!(
+            refs.len(),
+            1,
+            "only the named item survives, as it does in the row label"
+        );
+        assert_eq!(refs[0].filename, "a.rs");
+    }
+
+    /// A selection reference keeps its line range — it is the one part of the
+    /// reference a chat may show without being able to open anything, and it
+    /// changes what the router should infer about the ask.
+    #[test]
+    fn a_selection_reference_is_named_with_its_range() {
+        let turn = envelope(
+            "user_message",
+            "cs-1",
+            serde_json::json!({
+                "message": "这段还在用吗",
+                "attached_items": [{
+                    "type": "attached_selection",
+                    "absPath": "/srv/app/src/lib.rs",
+                    "name": "src/lib.rs",
+                    "startLine": 12,
+                    "endLine": 25,
+                }],
+            }),
+        );
+        let refs = turn_refs(&turn);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].filename, "src/lib.rs");
+        assert_eq!(refs[0].start_line, Some(12));
+        assert_eq!(refs[0].end_line, Some(25));
+    }
+
+    /// Uploads and references are two arms of one turn and both belong in the
+    /// prompt — the line the human sees at the head of a round is the line the
+    /// router reasons over.
+    #[test]
+    fn uploads_and_references_render_together() {
+        let turn = envelope(
+            "user_message",
+            "cs-1",
+            serde_json::json!({
+                "message": "对比一下",
+                acowork_core::protocol::CHAT_ATTACHMENTS_PARAM: [
+                    {"filename": "spec.pdf", "mime": "application/pdf", "size": 12345}
+                ],
+                "attached_items": [{
+                    "type": "attached_file",
+                    "absPath": "/srv/app/docs/old-spec.pdf",
+                    "name": "old-spec.pdf",
+                }],
+            }),
+        );
+        let uploads = turn_attachments(&turn);
+        let refs = turn_refs(&turn);
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(refs.len(), 1);
+        let rendered = super::super::context::TurnContext {
+            surface: "dm",
+            speaker: "user-1",
+            now: "2026-11-06T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "对比一下",
+            attachments: &uploads,
+            refs: &refs,
+        }
+        .render();
+        assert!(rendered.contains("[attachments] spec.pdf (application/pdf, 12KB)"));
+        assert!(rendered.contains("[attached refs] old-spec.pdf"));
     }
 
     /// The Gateway only started writing `chat_attachments` in this change, so
@@ -1507,6 +1718,7 @@ mod tests {
             history_available: true,
             user_message: "continue",
             attachments: &[],
+            refs: &[],
         }
         .render();
         assert!(rendered.contains("S1"));
@@ -1528,16 +1740,26 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_session_keeps_the_routers_brief() {
+    fn a_fresh_session_gets_the_brief_and_the_users_own_words() {
         // A session that starts empty has nothing else to work from. This
         // covers `dispatch(new)` and a `target=S3` whose session has vanished
         // from disk — `chat_dispatch` reports `opened_new` for both.
+        //
+        // The brief frames the turn; it does not replace it. Dropping the
+        // human's words here is what made "只改测试" disappear between the chat
+        // and the Agent that had to honour it.
         assert_eq!(
             dispatch_content(true, Some("Commit the batch described below: …"), "raw"),
-            "Commit the batch described below: …"
+            "Commit the batch described below: …\n\n[user message]\nraw"
         );
         // Without a brief (e.g. an attachment-only turn) the text still lands.
         assert_eq!(dispatch_content(true, None, "raw"), "raw");
+        assert_eq!(dispatch_content(true, Some("   "), "raw"), "raw");
+        // A router that echoed the message verbatim must not print it twice.
+        assert_eq!(
+            dispatch_content(true, Some("提交一下"), "  提交一下 \n"),
+            "提交一下"
+        );
     }
 
     fn info_call(name: &str, arguments: &str) -> ToolCall {

@@ -111,50 +111,16 @@ fn is_valid_row_id(id: &str) -> bool {
 }
 
 /// Project the ADR-046 `AttachedItem` union of a pinned turn onto the labels
-/// the Chat row may carry (ADR-100 D12): a display name plus which arm of the
-/// union it came from, and nothing else.
-///
-/// This is deliberately not an attachment reference. An uploaded blob lives
-/// under a content hash in one Agent's `files/` dir and a workspace reference
-/// at a node-local path; the Chat store belongs to the user service, the
-/// Gateway never buffers attachment bytes (`/api/intents/chat-attachments/…`
-/// exists precisely so the Runtime streams them instead), and reading a node
-/// path from the Gateway fails the moment Gateway and Node sit on different
-/// hosts. So the chat shows that the human handed something to the task — the
-/// execution view remains the only place it can actually be opened.
+/// the Chat row may carry (ADR-100 D12). See
+/// [`acowork_core::protocol::AttachmentLabel`] for what that projection is and
+/// why a path can never be part of it.
 ///
 /// An item with no displayable name is dropped rather than rendered as a
 /// blank chip: an unlabelled "attachment" is noise the reader cannot act on.
-fn exec_attachment_labels(items: &[serde_json::Value]) -> Vec<serde_json::Value> {
+fn exec_attachment_labels(items: &[serde_json::Value]) -> Vec<acowork_core::protocol::AttachmentLabel> {
     items
         .iter()
-        .filter_map(|item| {
-            // `filename` on the upload arms, `name` on the workspace ones —
-            // both are what the execution view already showed the user, so
-            // they are quoted as-is (the wire shape is camelCase per each
-            // variant's `rename_all`).
-            let label = item
-                .get("filename")
-                .and_then(|v| v.as_str())
-                .or_else(|| item.get("name").and_then(|v| v.as_str()))
-                .filter(|s| !s.is_empty())
-                // Last resort: an item that sent only its path. The directory
-                // part is a node-local layout the chat cannot read, so this
-                // arm alone is trimmed to its last component — and a Windows
-                // path is the case a `/`-only split would silently miss.
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    let raw = item
-                        .get("absPath")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())?;
-                    Some(raw.rsplit(['/', '\\']).next().unwrap_or(raw).to_string())
-                })?;
-            Some(serde_json::json!({
-                "filename": label,
-                "kind": item.get("type").and_then(|v| v.as_str()).unwrap_or(""),
-            }))
-        })
+        .filter_map(acowork_core::protocol::AttachmentLabel::from_value)
         .collect()
 }
 
@@ -2621,15 +2587,16 @@ mod card_answer_tests {
         // it, and a Windows path is the case a `/`-only split would silently
         // miss.
         let items = vec![
-            serde_json::json!({"type": "file_upload", "filename": "report.pdf", "documentId": "ab12cd34ef56-1"}),
-            serde_json::json!({"type": "attached_file", "absPath": "C:\\work\\src\\main.rs"}),
+            serde_json::json!({"type": "file_upload", "filename": "report.pdf", "documentId": "ab12cd34ef56-1", "format": "pdf", "sizeBytes": 12345}),
+            serde_json::json!({"type": "attached_file", "absPath": "C:\\work\\src\\main.rs", "name": ""}),
         ];
         let labels = exec_attachment_labels(&items);
         assert_eq!(labels.len(), 2);
-        assert_eq!(labels[0]["filename"], "report.pdf");
-        assert_eq!(labels[0]["kind"], "file_upload");
-        assert_eq!(labels[1]["filename"], "main.rs");
-        assert_eq!(labels[1]["kind"], "attached_file");
+        assert_eq!(labels[0].filename, "report.pdf");
+        assert_eq!(labels[0].kind, "file_upload");
+        assert_eq!(labels[0].size_bytes, Some(12345));
+        assert_eq!(labels[1].filename, "main.rs");
+        assert_eq!(labels[1].kind, "attached_file");
         // Neither the blob id nor the path survived, which is the whole point.
         let rendered = serde_json::to_string(&labels).unwrap();
         assert!(!rendered.contains("ab12cd34ef56-1"));
@@ -2645,11 +2612,17 @@ mod card_answer_tests {
             "type": "attached_selection",
             "name": "src/lib.rs",
             "absPath": "C:\\work\\project\\src\\lib.rs",
+            "startLine": 12,
+            "endLine": 25,
         })];
         let labels = exec_attachment_labels(&items);
         assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0]["filename"], "src/lib.rs");
-        assert_eq!(labels[0]["kind"], "attached_selection");
+        assert_eq!(labels[0].filename, "src/lib.rs");
+        assert_eq!(labels[0].kind, "attached_selection");
+        // The line range rides along: it is the one part of a selection a chip
+        // can show without being able to open anything.
+        assert_eq!(labels[0].start_line, Some(12));
+        assert_eq!(labels[0].end_line, Some(25));
         let rendered = serde_json::to_string(&labels).unwrap();
         assert!(!rendered.contains("work"));
     }
@@ -2660,12 +2633,12 @@ mod card_answer_tests {
         // empty name would otherwise occupy a slot the human counts on.
         let items = vec![
             serde_json::json!({"type": "file_upload", "filename": ""}),
-            serde_json::json!({"type": "attached_folder", "absPath": "/srv/project"}),
+            serde_json::json!({"type": "attached_folder", "absPath": "/srv/project", "name": ""}),
             serde_json::json!({"type": "image_upload"}),
         ];
         let labels = exec_attachment_labels(&items);
         assert_eq!(labels.len(), 1);
-        assert_eq!(labels[0]["filename"], "project");
+        assert_eq!(labels[0].filename, "project");
     }
 
     #[test]

@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 
-use acowork_core::protocol::ChatAttachmentMeta;
+use acowork_core::protocol::{AttachmentLabel, ChatAttachmentMeta};
 use acowork_core::providers::traits::{CacheControl, ChatMessage};
 use serde::Deserialize;
 use serde_json::Value;
@@ -90,6 +90,12 @@ pub struct RowMeta {
     pub notice_type: String,
     #[serde(default)]
     pub interaction: Option<RowInteraction>,
+    /// Workspace references and execution-side uploads the human handed to
+    /// this turn (ADR-100 D12). The current turn arrives the same way, through
+    /// the intent's `attached_items` param, so a turn and its own history row
+    /// describe their attachments with one shape and one renderer.
+    #[serde(default)]
+    pub exec_attachments: Vec<AttachmentLabel>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -274,11 +280,13 @@ pub fn project_row(row: &ChatRow, agent_instance: &str) -> Option<ChatMessage> {
             &format!("[user:{}]", row.from),
             &row.body,
             &row.attachments,
+            &row.meta.exec_attachments,
         ))),
         "agent_message" => Some(ChatMessage::assistant(prefix_body(
             &format!("[agent:{}]", row.from),
             &row.body,
             &row.attachments,
+            &row.meta.exec_attachments,
         ))),
         "interaction_request" => {
             let mut text = String::from("[card] ");
@@ -305,7 +313,12 @@ pub fn project_row(row: &ChatRow, agent_instance: &str) -> Option<ChatMessage> {
         "text" | "" => {
             let role_is_agent = !agent_instance.is_empty() && row.from == agent_instance;
             let tag = if role_is_agent { "[agent" } else { "[user" };
-            let content = prefix_body(&format!("{tag}:{}]", row.from), &row.body, &row.attachments);
+            let content = prefix_body(
+                &format!("{tag}:{}]", row.from),
+                &row.body,
+                &row.attachments,
+                &row.meta.exec_attachments,
+            );
             Some(if role_is_agent {
                 ChatMessage::assistant(content)
             } else {
@@ -351,57 +364,122 @@ fn notice_text(row: &ChatRow) -> String {
     }
 }
 
-/// `<tag> <body>` with the attachment metadata appended, both bounded.
-fn prefix_body(tag: &str, body: &str, attachments: &[ChatAttachmentMeta]) -> String {
+/// `<tag> <body>` with the attachment lines appended, all bounded.
+fn prefix_body(
+    tag: &str,
+    body: &str,
+    uploads: &[ChatAttachmentMeta],
+    refs: &[AttachmentLabel],
+) -> String {
     let mut out = String::with_capacity(tag.len() + body.len() + 8);
     out.push_str(tag);
     out.push(' ');
     out.push_str(&truncate_body(body, DEFAULT_MAX_MESSAGE_BYTES));
-    if let Some(meta) = attachments_line(attachments) {
-        out.push_str("\n[attachments] ");
-        out.push_str(&meta);
-    }
+    out.push_str(&attachment_lines(uploads, refs));
     out
 }
 
-/// `true` when the turn carries files and no words.
+/// The one answer to "does this turn carry anything at all?".
+///
+/// Words, an uploaded file, or a named reference. Two consumers ask it — the
+/// routing gate (a turn with no content is not worth a router call) and Block C
+/// (a turn with content and no words is a normal turn, not a blank one) — and
+/// they must not answer separately, or the gate can wave through a turn the
+/// prompt then renders as an empty message.
+pub(crate) fn turn_has_content(
+    user_message: &str,
+    uploads: &[ChatAttachmentMeta],
+    refs: &[AttachmentLabel],
+) -> bool {
+    !user_message.trim().is_empty() || !uploads.is_empty() || !refs.is_empty()
+}
+
+/// `true` when the turn carries files or references and no words.
 ///
 /// One predicate for two surfaces — the Block C body and the decision log —
 /// so the prompt and the log can never disagree about what a turn was. A
 /// whitespace-only body counts as no words: the human attached and did not type.
 pub(crate) fn is_attachment_only(
     user_message: &str,
-    attachments: &[ChatAttachmentMeta],
+    uploads: &[ChatAttachmentMeta],
+    refs: &[AttachmentLabel],
 ) -> bool {
-    user_message.trim().is_empty() && !attachments.is_empty()
+    user_message.trim().is_empty() && turn_has_content(user_message, uploads, refs)
 }
 
-/// `report.pdf (application/pdf, 12KB), screenshot.png (image/png, 340KB)`,
-/// capped at [`ATTACHMENT_META_MAX_BYTES`]. Entries that do not fit are
-/// dropped whole so the line never ends mid-entry.
-fn attachments_line(attachments: &[ChatAttachmentMeta]) -> Option<String> {
-    if attachments.is_empty() {
-        return None;
-    }
+/// Entries joined by `, ` and capped at [`ATTACHMENT_META_MAX_BYTES`]. An
+/// entry that does not fit is dropped whole, so a line never ends mid-entry.
+///
+/// One loop for both attachment lists: the cap is a prompt-budget rule, not a
+/// property of either arm, and two copies of it start disagreeing the moment
+/// one of them is retuned.
+fn join_capped(entries: impl Iterator<Item = String>) -> Option<String> {
     let mut out = String::new();
-    for att in attachments {
-        let entry = format!(
-            "{}{} ({}, {})",
-            if out.is_empty() { "" } else { ", " },
-            sanitize_inline(&att.filename),
-            sanitize_inline(&att.mime),
-            human_size(att.size)
-        );
+    for entry in entries {
+        let entry = if out.is_empty() {
+            entry
+        } else {
+            format!(", {entry}")
+        };
         if out.len() + entry.len() > ATTACHMENT_META_MAX_BYTES {
             break;
         }
         out.push_str(&entry);
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
+    (!out.is_empty()).then_some(out)
+}
+
+/// `report.pdf (application/pdf, 12KB), screenshot.png (image/png, 340KB)` —
+/// the files this turn's human uploaded into the conversation.
+fn attachments_line(attachments: &[ChatAttachmentMeta]) -> Option<String> {
+    join_capped(attachments.iter().map(|att| {
+        format!(
+            "{} ({}, {})",
+            sanitize_inline(&att.filename),
+            sanitize_inline(&att.mime),
+            human_size(att.size)
+        )
+    }))
+}
+
+/// `chat_prompt.rs, src/lib.rs (L12-L25)` — what the turn names without
+/// holding. A reference is not a copy (ADR-046): the Agent that receives it
+/// reads the path with its own tools, and the router only ever learns that the
+/// human pointed at something. The names are still decisive for routing —
+/// "look at this" plus a filename is a work order, and the incident this
+/// function exists for was a router that read it as small talk.
+///
+/// The `L{start}-L{end}` spelling is the same one every chip uses
+/// (`attachmentGlyph.selectionRange`), so the prompt and the transcript
+/// describe one selection with one string.
+fn refs_line(refs: &[AttachmentLabel]) -> Option<String> {
+    join_capped(refs.iter().map(|reference| {
+        let range = match (reference.start_line, reference.end_line) {
+            (Some(start), Some(end)) if start != end => format!(" (L{start}-L{end})"),
+            (Some(start), _) => format!(" (L{start})"),
+            _ => String::new(),
+        };
+        format!("{}{}", sanitize_inline(&reference.filename), range)
+    }))
+}
+
+/// The two attachment lines of a row or a turn, already prefixed. Empty when
+/// the turn carries neither.
+///
+/// Block B and Block C both go through here. That is the point: a message the
+/// router decided on must read identically once it is history, or every later
+/// turn reasons about a transcript that never looked like the live one.
+fn attachment_lines(uploads: &[ChatAttachmentMeta], refs: &[AttachmentLabel]) -> String {
+    let mut out = String::new();
+    if let Some(meta) = attachments_line(uploads) {
+        out.push_str("\n[attachments] ");
+        out.push_str(&meta);
     }
+    if let Some(meta) = refs_line(refs) {
+        out.push_str("\n[attached refs] ");
+        out.push_str(&meta);
+    }
+    out
 }
 
 /// `900B` / `12KB` / `3.4MB` — deterministic, no locale.
@@ -506,6 +584,10 @@ pub struct TurnContext<'a> {
     /// row. Rendered with the *same* line function Block B uses, so the turn
     /// being routed looks exactly like the same turn once it becomes history.
     pub attachments: &'a [ChatAttachmentMeta],
+    /// Workspace references this turn names (the `attached_items` arm the
+    /// composer sent). Rendered through the same function Block B uses, so the
+    /// turn being routed and the same turn once it is history cannot disagree.
+    pub refs: &'a [AttachmentLabel],
 }
 
 impl TurnContext<'_> {
@@ -544,15 +626,12 @@ impl TurnContext<'_> {
         // An attachment-only turn is a normal turn, not an empty one: the human
         // sent something, they just did not type. Without this the model reads a
         // blank message and treats it as small talk instead of work.
-        if is_attachment_only(self.user_message, self.attachments) {
+        if is_attachment_only(self.user_message, self.attachments, self.refs) {
             out.push_str(ATTACHMENT_ONLY_PLACEHOLDER);
         } else {
             out.push_str(self.user_message);
         }
-        if let Some(meta) = attachments_line(self.attachments) {
-            out.push_str("\n[attachments] ");
-            out.push_str(&meta);
-        }
+        out.push_str(&attachment_lines(self.attachments, self.refs));
         out
     }
 }
@@ -811,11 +890,50 @@ mod tests {
             history_available: true,
             user_message: "look at this",
             attachments: &row.attachments,
+            refs: &[],
         };
         let rendered = ctx.render();
         let turn_line = rendered.lines().last().expect("block c renders");
         assert_eq!(turn_line, history_line);
         assert!(turn_line.starts_with("[attachments] report.pdf (application/pdf, 12KB)"));
+    }
+
+    /// A reference the human added from the workspace panel must read the same
+    /// in the history window as it did when it was the live turn — otherwise
+    /// every later turn reasons over a transcript that never looked like the
+    /// one the router actually decided on.
+    #[test]
+    fn a_reference_reads_identically_as_a_turn_and_as_history() {
+        let mut row = row(1, "user_message", "u1", "你先看看这个");
+        row.meta.exec_attachments = vec![AttachmentLabel {
+            filename: "chat_prompt.rs".into(),
+            kind: "attached_file".into(),
+            ..Default::default()
+        }];
+        let history_line = project_row(&row, "agent-1")
+            .expect("row projects")
+            .content
+            .lines()
+            .last()
+            .expect("attachment line")
+            .to_string();
+
+        let turn_line = TurnContext {
+            surface: "dm",
+            speaker: "u1",
+            now: "2026-11-06T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "你先看看这个",
+            attachments: &row.attachments,
+            refs: &row.meta.exec_attachments,
+        }
+        .render();
+        let turn_line = turn_line.lines().last().expect("block c renders");
+        assert_eq!(turn_line, history_line);
+        assert!(turn_line.starts_with("[attached refs] chat_prompt.rs"));
     }
 
     #[test]
@@ -835,6 +953,7 @@ mod tests {
             history_available: true,
             user_message: "   ",
             attachments: &attachments,
+            refs: &[],
         }
         .render();
 
@@ -856,6 +975,7 @@ mod tests {
             history_available: true,
             user_message: "hello",
             attachments: &[],
+            refs: &[],
         }
         .render();
         assert!(rendered.ends_with("\n[user message]\nhello"));
@@ -914,6 +1034,7 @@ mod tests {
             history_available: true,
             user_message: "继续弄一下登录",
             attachments: &[],
+            refs: &[],
         };
         let text = ctx.render();
         assert!(text.starts_with("[runtime context]\nsurface: group\nspeaker: alice\n"));
@@ -949,6 +1070,7 @@ mod tests {
             history_available: false,
             user_message: "hi",
             attachments: &[],
+            refs: &[],
         };
         let text = ctx.render();
         assert!(text.contains("draft: model=claude-sonnet, workspace=ws-1"));
