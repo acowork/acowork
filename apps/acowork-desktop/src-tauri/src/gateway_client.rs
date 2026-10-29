@@ -957,6 +957,8 @@ impl GatewayClient {
         model_capabilities: &HashMap<String, ModelCapabilities>,
         compact_model: Option<&str>,
         custom: bool,
+        model_protocols: &ModelProtocolIntent,
+        model_base_urls: &HashMap<String, String>,
     ) -> Result<OperationAck> {
         let keys_json: Vec<serde_json::Value> = keys
             .iter()
@@ -1007,6 +1009,17 @@ impl GatewayClient {
         // Send compact_model if provided
         if let Some(cm) = compact_model {
             body["compact_model"] = serde_json::Value::String(cm.to_string());
+        }
+        // ADR-103 D1/D10.3: per-model protocol intent + base URL override.
+        // A `null` value is meaningful (clear the selection), so only an empty
+        // map is skipped.
+        if !model_protocols.is_empty() {
+            body["model_protocols"] = serde_json::to_value(model_protocols)
+                .expect("model_protocols serialization cannot fail");
+        }
+        if !model_base_urls.is_empty() {
+            body["model_base_urls"] = serde_json::to_value(model_base_urls)
+                .expect("model_base_urls serialization cannot fail");
         }
         let resp = self
             .send(|| {
@@ -1079,6 +1092,8 @@ impl GatewayClient {
         models: Option<&[String]>,
         model_capabilities: &HashMap<String, ModelCapabilities>,
         compact_model: Option<&str>,
+        model_protocols: &ModelProtocolIntent,
+        model_base_urls: &HashMap<String, String>,
     ) -> Result<GenericMessageResponse> {
         let mut body = serde_json::Map::new();
         // Multi-account entries. The Gateway appends each non-empty
@@ -1137,6 +1152,23 @@ impl GatewayClient {
             body.insert(
                 "compact_model".to_string(),
                 serde_json::Value::String(cm.to_string()),
+            );
+        }
+        // ADR-103 D1/D10.3: per-model protocol intent + base URL override.
+        // An empty map means "leave every selection untouched"; an explicit
+        // `null` value clears one model's selection.
+        if !model_protocols.is_empty() {
+            body.insert(
+                "model_protocols".to_string(),
+                serde_json::to_value(model_protocols)
+                    .expect("model_protocols serialization cannot fail"),
+            );
+        }
+        if !model_base_urls.is_empty() {
+            body.insert(
+                "model_base_urls".to_string(),
+                serde_json::to_value(model_base_urls)
+                    .expect("model_base_urls serialization cannot fail"),
             );
         }
         let resp = self
@@ -1375,6 +1407,15 @@ pub struct VaultKeyEntry {
     #[serde(default)]
     pub custom: bool,
 }
+
+/// ADR-103 D1: per-model protocol intent (`model id -> protocol`).
+///
+/// The value is the wire protocol name (`"responses"` / `"openai"` /
+/// `"anthropic"` / `"google"` / `"ollama"`); `None` clears the selection for
+/// that model ("follow the data"), which restores the npm-derived default and
+/// drops the stored probe verdict. The shell is a transport here — the Gateway
+/// owns validation and the D1 gate, so the value stays a plain wire string.
+pub type ModelProtocolIntent = HashMap<String, Option<String>>;
 
 /// Model capabilities info
 #[derive(Debug, Clone, Serialize, Deserialize)]
