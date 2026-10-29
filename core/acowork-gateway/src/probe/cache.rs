@@ -126,8 +126,10 @@ mod tests {
                     class: "EndpointUnavailable".into(),
                     message: "404".into(),
                     http_status: Some(404),
+                    unsupported_field: None,
                 })
             },
+            stripped_fields: Vec::new(),
         }
     }
 

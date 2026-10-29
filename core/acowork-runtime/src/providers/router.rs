@@ -574,6 +574,7 @@ mod adr103_router_tests {
             reason: None,
             observed_base_url: None,
             probed_at: None,
+            stripped_fields: vec![],
         });
         let p = provider(ProtocolType::OpenAI, vec![m]);
         let (proto, _) = effective_protocol_and_base(&p, Some("m1"));

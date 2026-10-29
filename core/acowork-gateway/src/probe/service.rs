@@ -504,7 +504,9 @@ fn failure_outcome(class: &str, detail: &str) -> ProbeOutcome {
             class: class.to_string(),
             message: detail.to_string(),
             http_status: None,
+            unsupported_field: None,
         }),
+        stripped_fields: Vec::new(),
     }
 }
 
@@ -556,6 +558,7 @@ mod tests {
             observed_base_url: None,
             usage: None,
             error,
+            stripped_fields: Vec::new(),
         }
     }
 
@@ -609,6 +612,7 @@ mod tests {
             class: "RoundTripFailed".to_string(),
             message: "no function_call item".to_string(),
             http_status: None,
+            unsupported_field: None,
         };
         let mut verdicts = vec![
             ("a".to_string(), outcome(&["L1", "L2"], Some(failure.clone()))),
@@ -643,6 +647,7 @@ mod tests {
                         class: "EndpointUnavailable".to_string(),
                         message: "404".to_string(),
                         http_status: Some(404),
+                        unsupported_field: None,
                     }),
                 ),
             ),

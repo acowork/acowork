@@ -62,23 +62,47 @@ impl ProbeFunctionCall {
     }
 }
 
+/// The `reasoning` block every probe body carries unless it had to be trimmed.
+///
+/// `effort: "none"` is exactly what the Runtime sends for
+/// `ReasoningEffort::Off`, and it is the value MiniMax M3.1-Flash rejects with a
+/// 400 (ADR-103 D8). Carrying it is what lets a probe run *observe* the trim
+/// instead of assuming it away (D10.3 `Degraded`).
+fn probe_reasoning() -> Value {
+    json!({ "effort": "none" })
+}
+
+/// Add the `reasoning` block unless the endpoint already rejected it.
+fn with_reasoning(mut body: Value, trimmed: bool) -> Value {
+    if !trimmed {
+        body["reasoning"] = probe_reasoning();
+    }
+    body
+}
+
 /// L1/L2 baseline request: smallest possible Responses call.
 ///
 /// `store: false` keeps the probe out of provider-side conversation storage —
 /// a probe MUST NOT leave state behind on the user's account (D10.4).
-pub fn baseline_request(model: &str) -> Value {
-    json!({
-        "model": model,
-        "input": "ping",
-        "max_output_tokens": BASELINE_MAX_OUTPUT_TOKENS,
-        "stream": false,
-        "store": false,
-    })
+///
+/// `trimmed` drops the `reasoning` block: the caller passes `true` only after
+/// the endpoint answered 400 naming that field (D8/S7).
+pub fn baseline_request(model: &str, trimmed: bool) -> Value {
+    with_reasoning(
+        json!({
+            "model": model,
+            "input": "ping",
+            "max_output_tokens": BASELINE_MAX_OUTPUT_TOKENS,
+            "stream": false,
+            "store": false,
+        }),
+        trimmed,
+    )
 }
 
 /// L3 request: ask for one call to the synthetic no-op tool.
-pub fn round_trip_request(model: &str) -> Value {
-    json!({
+pub fn round_trip_request(model: &str, trimmed: bool) -> Value {
+    with_reasoning(json!({
         "model": model,
         "instructions": "You are a protocol probe. Call the provided tool exactly \
                          once with the requested arguments, then stop.",
@@ -110,7 +134,7 @@ pub fn round_trip_request(model: &str) -> Value {
         "max_output_tokens": ROUND_TRIP_MAX_OUTPUT_TOKENS,
         "stream": false,
         "store": false,
-    })
+    }), trimmed)
 }
 
 /// L3 replay request: hand the produced `function_call` back with its output.
@@ -118,8 +142,8 @@ pub fn round_trip_request(model: &str) -> Value {
 /// This is the "call_id 可回环" half of the tier — a provider that emits a
 /// `function_call` but rejects the matching `function_call_output` cannot run
 /// a tool loop, and therefore cannot serve the Runtime (D5).
-pub fn round_trip_replay_request(model: &str, call: &ProbeFunctionCall) -> Value {
-    json!({
+pub fn round_trip_replay_request(model: &str, call: &ProbeFunctionCall, trimmed: bool) -> Value {
+    with_reasoning(json!({
         "model": model,
         "input": [
             {
@@ -137,7 +161,7 @@ pub fn round_trip_replay_request(model: &str, call: &ProbeFunctionCall) -> Value
         "max_output_tokens": BASELINE_MAX_OUTPUT_TOKENS,
         "stream": false,
         "store": false,
-    })
+    }), trimmed)
 }
 
 /// L1 — the response envelope must be a Responses object.
@@ -262,7 +286,7 @@ mod tests {
 
     #[test]
     fn baseline_request_is_minimal_and_stateless() {
-        let req = baseline_request("gpt-5");
+        let req = baseline_request("gpt-5", false);
         assert_eq!(req["model"], "gpt-5");
         assert_eq!(req["input"], "ping");
         assert_eq!(req["max_output_tokens"], 1);
@@ -272,11 +296,17 @@ mod tests {
         assert!(req.get("previous_response_id").is_none());
         assert!(req.get("conversation").is_none());
         assert!(req.get("background").is_none());
+        // D8/S7: the baseline carries the one field the Runtime may have to
+        // drop, so the probe can observe the trim instead of assuming it away.
+        assert_eq!(req["reasoning"]["effort"], "none");
+        // ... and the trimmed form is byte-identical minus that block.
+        let trimmed = baseline_request("gpt-5", true);
+        assert!(trimmed.get("reasoning").is_none());
     }
 
     #[test]
     fn round_trip_request_declares_flat_tool_and_auto_choice() {
-        let req = round_trip_request("gpt-5");
+        let req = round_trip_request("gpt-5", false);
         let tool = &req["tools"][0];
         // Responses tools are flat — no nested `function` wrapper (D5).
         assert_eq!(tool["type"], "function");
@@ -294,7 +324,7 @@ mod tests {
             name: PROBE_TOOL_NAME.into(),
             arguments: r#"{"value":1}"#.into(),
         };
-        let req = round_trip_replay_request("gpt-5", &call);
+        let req = round_trip_replay_request("gpt-5", &call, false);
         assert_eq!(req["input"][0]["type"], "function_call");
         assert_eq!(req["input"][0]["call_id"], "call_1");
         assert_eq!(req["input"][1]["type"], "function_call_output");

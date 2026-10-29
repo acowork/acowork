@@ -2302,6 +2302,7 @@ mod adr103_resolve_tests {
             tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
             reason: None,
             observed_base_url: None,
+            stripped_fields: Vec::new(),
             probed_at: None,
         }
     }
@@ -2484,6 +2485,7 @@ mod adr103_projection_tests {
             tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
             reason: reason.map(|r| r.to_string()),
             observed_base_url: None,
+            stripped_fields: Vec::new(),
             probed_at: Some("2026-01-01T00:00:00Z".into()),
         }
     }

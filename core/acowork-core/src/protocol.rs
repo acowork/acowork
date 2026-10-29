@@ -332,6 +332,14 @@ pub struct ProtocolProbe {
     /// provider default (D10.1 `observed_base_url`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_base_url: Option<String>,
+    /// Request fields the probe had to drop to get a 2xx (D8 trim).
+    ///
+    /// Non-empty is what makes `state == Degraded` meaningful: the endpoint
+    /// works, but only without a field the Runtime would otherwise send. The UI
+    /// spells these out ("reasoning 参数被省略") so the degradation is visible
+    /// rather than inferred from the state alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stripped_fields: Vec<String>,
     /// RFC 3339 timestamp of the probe (cache TTL / staleness display).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probed_at: Option<String>,

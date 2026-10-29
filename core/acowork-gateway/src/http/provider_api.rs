@@ -287,15 +287,12 @@ pub struct ProbeResponse {
     pub tier: crate::probe::ProbeTier,
     /// D10.6 verdict: `verified` / `degraded` / `failed`.
     pub state: acowork_core::protocol::ProbeState,
+    /// The full probe outcome, flattened into this response — including
+    /// `stripped_fields` (the D8 trim evidence that turns `verified` into
+    /// `degraded`). Deliberately not duplicated as its own field: one source of
+    /// truth, no chance of the two disagreeing on the wire.
     #[serde(flatten)]
     pub outcome: crate::probe::ProbeOutcome,
-    /// Fields the probe had to strip to get a 2xx (D8 `UnsupportedField` trim).
-    ///
-    /// Always empty in this slice: the trim itself is S7. It is part of the
-    /// D10.1 response contract from the start so the UI can render "degraded:
-    /// reasoning omitted" without a response-shape change later.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stripped_fields: Vec<String>,
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────
@@ -1206,7 +1203,6 @@ pub async fn probe_provider(
         tier,
         state: outcome.state(),
         outcome,
-        stripped_fields: Vec::new(),
     }))
 }
 

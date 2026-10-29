@@ -150,6 +150,7 @@ pub fn apply_probe_outcome(
         tier_passed: outcome.tier_passed.clone(),
         reason: outcome.error.as_ref().map(|e| e.message.clone()),
         observed_base_url: outcome.observed_base_url.clone(),
+        stripped_fields: outcome.stripped_fields.clone(),
         probed_at: Some(probed_at),
     });
     true
@@ -284,6 +285,7 @@ mod tests {
                 tier_passed: vec!["L1".into()],
                 reason: None,
                 observed_base_url: None,
+                stripped_fields: Vec::new(),
                 probed_at: Some("2025-01-01T00:00:00Z".into()),
             });
         }
@@ -311,6 +313,7 @@ mod tests {
             observed_base_url: None,
             usage: None,
             error: None,
+            stripped_fields: Vec::new(),
         };
         assert!(apply_probe_outcome(
             &mut p,
@@ -338,7 +341,9 @@ mod tests {
                 class: "EndpointUnavailable".into(),
                 message: "provider does not serve /responses".into(),
                 http_status: Some(404),
+                unsupported_field: None,
             }),
+            stripped_fields: Vec::new(),
         };
         assert!(apply_probe_outcome(&mut p, "a", &outcome, "t".into()));
         let probe = p.models[0].protocol_probe.as_ref().unwrap();
@@ -363,7 +368,9 @@ mod tests {
                 class: "RoundTripFailed".into(),
                 message: "no function_call item".into(),
                 http_status: None,
+                unsupported_field: None,
             }),
+            stripped_fields: Vec::new(),
         };
         apply_probe_outcome(&mut p, "a", &outcome, "t".into());
         let probe = p.models[0].protocol_probe.as_ref().unwrap();
@@ -377,8 +384,9 @@ mod tests {
 
     #[test]
     fn degraded_verdict_from_a_field_trim_still_gates_on() {
-        // S7 (field trim) produces this state; the store must keep persisting it
-        // as gate-passing even though S5's runner cannot emit it.
+        // D10.3: a run that only succeeded after the D8 trim is `Degraded` —
+        // gate-passing, but it must carry *why* so the R badge can say
+        // "reasoning 参数被省略" instead of a bare pass.
         let mut p = provider(vec![model("a", Some(ProtocolType::Responses), None)]);
         let outcome = ProbeOutcome {
             success: true,
@@ -387,12 +395,14 @@ mod tests {
             observed_base_url: None,
             usage: None,
             error: None,
+            stripped_fields: vec!["reasoning".into()],
         };
         apply_probe_outcome(&mut p, "a", &outcome, "t".into());
-        p.models[0].protocol_probe.as_mut().unwrap().state = ProbeState::Degraded;
         let probe = p.models[0].protocol_probe.as_ref().unwrap();
         assert_eq!(probe.state, ProbeState::Degraded);
         assert!(probe.state.gates_responses(), "D10.3: degraded is still usable");
+        assert_eq!(probe.stripped_fields, vec!["reasoning".to_string()]);
+        assert!(probe.reason.is_none(), "a degraded run has no failure reason");
     }
 
     #[test]
@@ -405,6 +415,7 @@ mod tests {
             observed_base_url: None,
             usage: None,
             error: None,
+            stripped_fields: Vec::new(),
         };
         assert!(!apply_probe_outcome(&mut p, "gone", &outcome, "t".into()));
         assert!(p.models[0].protocol_probe.is_none());

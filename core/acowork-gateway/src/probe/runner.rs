@@ -22,7 +22,7 @@
 use std::time::{Duration, Instant};
 
 use acowork_core::protocol::ProbeState;
-use acowork_core::providers::responses_errors::classify_http_error;
+use acowork_core::providers::responses_errors::{TRIMMABLE_FIELDS, classify_http_error};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -69,6 +69,11 @@ pub struct ProbeFailure {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
+    /// The request field a 400 blamed (`UnsupportedField` only). The D8 trim
+    /// path needs it: the error class alone cannot say whether the field is
+    /// trimable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_field: Option<String>,
 }
 
 impl ProbeFailure {
@@ -77,6 +82,7 @@ impl ProbeFailure {
             class: class.to_string(),
             message: message.into(),
             http_status: None,
+            unsupported_field: None,
         }
     }
 
@@ -85,7 +91,16 @@ impl ProbeFailure {
             class: class.to_string(),
             message: message.into(),
             http_status: Some(status),
+            unsupported_field: None,
         }
+    }
+
+    /// Is this failure the D8 trigger for `field`? Only then may the probe
+    /// re-send the request with that field omitted.
+    fn blames_trimmable_field(&self, field: &str) -> bool {
+        self.class == "UnsupportedField"
+            && self.unsupported_field.as_deref() == Some(field)
+            && TRIMMABLE_FIELDS.contains(&field)
     }
 }
 
@@ -107,6 +122,13 @@ pub struct ProbeOutcome {
     pub usage: Option<ProbeUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ProbeFailure>,
+    /// Request fields the probe had to drop to get a 2xx (D8 trim).
+    ///
+    /// Empty means the endpoint accepted the full probe body. Non-empty is the
+    /// evidence for [`ProbeState::Degraded`]: the endpoint works, but only
+    /// without a field the Runtime would otherwise send.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stripped_fields: Vec<String>,
 }
 
 impl ProbeOutcome {
@@ -114,21 +136,22 @@ impl ProbeOutcome {
     /// gate input.
     ///
     /// - **L1+L2+L3** → `Verified`.
+    /// - **L1+L2+L3 after a D8 trim** → `Degraded` (D10.3: works, but only
+    ///   without a field), so the R badge can say so instead of claiming a
+    ///   clean verify.
     /// - anything else → `Failed`. L3 (tool round-trip) is the minimum for a
     ///   positive verdict on purpose: "ACowork 的 provider 存在的唯一目的是跑
     ///   agent 工具循环", so a provider that answers the shape but cannot
     ///   complete a tool call would be a green light that fails in production
     ///   (D10.2). L1/L2 results stay on the outcome for diagnosis.
-    ///
-    /// `Degraded` is deliberately **not** produced here: D10.3 defines it as
-    /// "passed, but only after a D8 field trim (`reasoning` dropped)", which is
-    /// S7's job. Until then no probe run can legitimately claim it.
     pub fn state(&self) -> ProbeState {
         let passed = |tier: &str| self.tier_passed.iter().any(|t| t == tier);
-        if passed("L3") {
+        if !passed("L3") {
+            ProbeState::Failed
+        } else if self.stripped_fields.is_empty() {
             ProbeState::Verified
         } else {
-            ProbeState::Failed
+            ProbeState::Degraded
         }
     }
 
@@ -221,20 +244,49 @@ impl ProbeRunner {
             observed_base_url: None,
             usage: None,
             error: None,
+            stripped_fields: Vec::new(),
         };
 
         // ── L1 + L2: one request, two verdicts ──────────────────────────
-        let baseline = match self
-            .post(&format!("{base}/responses"), api_key, baseline_request(model))
-            .await
-        {
+        //
+        // The baseline body carries `reasoning.effort: none` on purpose: that
+        // is the only field D8 may trim, and MiniMax M3.1-Flash answers 400 for
+        // exactly this value. Probing with it is what lets a probe run report
+        // "works, but the field had to go" (D10.3) instead of only ever
+        // claiming a clean verify.
+        let url = format!("{base}/responses");
+        let baseline = match self.post(&url, api_key, baseline_request(model, false)).await {
             Ok(body) => body,
+            Err(failure) if failure.blames_trimmable_field("reasoning") => {
+                // D8: re-send **once** with the field omitted. No chain and no
+                // "retry until 200" — the ADR forbids both.
+                tracing::warn!(
+                    model,
+                    base_url = base,
+                    class = %failure.class,
+                    "probe hit the D8 trim: provider rejects `reasoning` - retrying the baseline once without it"
+                );
+                match self.post(&url, api_key, baseline_request(model, true)).await {
+                    Ok(body) => {
+                        outcome.stripped_fields = vec!["reasoning".to_string()];
+                        body
+                    }
+                    Err(retry_failure) => {
+                        outcome.error = Some(retry_failure);
+                        outcome.latency_ms = started.elapsed().as_millis() as u64;
+                        return outcome;
+                    }
+                }
+            }
             Err(failure) => {
                 outcome.error = Some(failure);
                 outcome.latency_ms = started.elapsed().as_millis() as u64;
                 return outcome;
             }
         };
+        // Once a field is known to be unsupported, every later tier uses the
+        // body the Runtime would send (i.e. without it).
+        let trimmed = !outcome.stripped_fields.is_empty();
 
         if let Err(msg) = assert_envelope(&baseline) {
             outcome.error = Some(ProbeFailure::new("ShapeMismatch", msg));
@@ -262,7 +314,7 @@ impl ProbeRunner {
         }
 
         // ── L3: tool round-trip ─────────────────────────────────────────
-        if let Err(failure) = self.round_trip(base, model, api_key).await {
+        if let Err(failure) = self.round_trip(base, model, api_key, trimmed).await {
             outcome.error = Some(failure);
             outcome.latency_ms = started.elapsed().as_millis() as u64;
             return outcome;
@@ -284,9 +336,12 @@ impl ProbeRunner {
         base: &str,
         model: &str,
         api_key: Option<&str>,
+        trimmed: bool,
     ) -> Result<ProbeFunctionCall, ProbeFailure> {
         let url = format!("{base}/responses");
-        let body = self.post(&url, api_key, round_trip_request(model)).await?;
+        let body = self
+            .post(&url, api_key, round_trip_request(model, trimmed))
+            .await?;
         assert_envelope(&body)
             .map_err(|msg| ProbeFailure::new("ShapeMismatch", msg))?;
         let call = find_function_call(&body).map_err(|msg| {
@@ -297,7 +352,7 @@ impl ProbeRunner {
         })?;
 
         let replay = self
-            .post(&url, api_key, round_trip_replay_request(model, &call))
+            .post(&url, api_key, round_trip_replay_request(model, &call, trimmed))
             .await?;
         assert_envelope(&replay).map_err(|msg| {
             ProbeFailure::new("RoundTripFailed", format!("replay response: {msg}"))
@@ -336,11 +391,13 @@ impl ProbeRunner {
         if !status.is_success() {
             // `classify_http_error` is the single D8 http-status arbiter.
             let classified = classify_http_error(status.as_u16(), &text);
-            return Err(ProbeFailure::with_status(
+            let mut failure = ProbeFailure::with_status(
                 &format!("{:?}", classified.error_type),
                 error_reason(&text),
                 status.as_u16(),
-            ));
+            );
+            failure.unsupported_field = classified.unsupported_field().map(str::to_string);
+            return Err(failure);
         }
 
         serde_json::from_str::<Value>(&text).map_err(|e| {
@@ -645,6 +702,150 @@ mod tests {
             err.class == "TransportError" || err.class == "TransportTimeout",
             "unexpected class: {}",
             err.class
+        );
+    }
+
+// ── D8/S7: the trim path and the `Degraded` verdict ────────────────
+
+    /// MiniMax M3.1-Flash wording: 400 that blames the `reasoning` parameter.
+    const REASONING_400: &str = r#"{"error":{"code":"invalid_parameter","message":"invalid parameter: `reasoning`","param":"reasoning","type":"invalid_request_error"}}"#;
+
+    /// A provider that rejects `reasoning` but works without it: the untrimmed
+    /// baseline is matched by including the block in the matcher, so the
+    /// trimmed retry can never hit the 400 mock by accident.
+    fn mount_reasoning_intolerant_provider(server: &mut mockito::ServerGuard) {
+        server
+            .mock("POST", "/responses")
+            .match_body(Matcher::PartialJson(json!({
+                "input": "ping",
+                "reasoning": {"effort": "none"},
+            })))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(REASONING_400)
+            .expect(1)
+            .create();
+        server
+            .mock("POST", "/responses")
+            .match_body(Matcher::PartialJson(json!({"input": "ping"})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(baseline_body().to_string())
+            .expect(1)
+            .create();
+        server
+            .mock("POST", "/responses")
+            .match_body(Matcher::PartialJson(json!({"tool_choice": "auto"})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(round_trip_body().to_string())
+            .create();
+        server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Regex("function_call_output".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(baseline_body().to_string())
+            .create();
+    }
+
+    #[tokio::test]
+    async fn a_rejected_reasoning_field_makes_the_verdict_degraded() {
+        let mut server = mockito::Server::new_async().await;
+        mount_reasoning_intolerant_provider(&mut server);
+
+        let outcome = ProbeRunner::new()
+            .run("m3.1-flash", &server.url(), Some("sk-test"), ProbeTier::Deep)
+            .await;
+
+        // The probe proves the endpoint works — after dropping one field.
+        assert!(outcome.success, "{:?}", outcome.error);
+        assert_eq!(outcome.tier_passed, vec!["L1", "L2", "L3"]);
+        assert_eq!(outcome.stripped_fields, vec!["reasoning".to_string()]);
+        assert_eq!(
+            outcome.state(),
+            ProbeState::Degraded,
+            "works, but only without `reasoning` — D10.3 calls that degraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trim_that_does_not_help_stays_failed() {
+        let mut server = mockito::Server::new_async().await;
+        // Every baseline 400s, trimmed or not: one retry, no chain.
+        server
+            .mock("POST", "/responses")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(REASONING_400)
+            .expect(2)
+            .create();
+
+        let outcome = ProbeRunner::new()
+            .run("m3.1-flash", &server.url(), None, ProbeTier::Standard)
+            .await;
+
+        assert!(!outcome.success);
+        assert!(outcome.stripped_fields.is_empty());
+        assert_eq!(outcome.state(), ProbeState::Failed);
+        assert_eq!(outcome.error.unwrap().class, "UnsupportedField");
+    }
+
+    #[tokio::test]
+    async fn a_non_whitelisted_field_is_reported_not_trimmed() {
+        let mut server = mockito::Server::new_async().await;
+        // `temperature` sits outside the D8 whitelist: exactly one request.
+        server
+            .mock("POST", "/responses")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"message":"unsupported parameter: temperature"}}"#)
+            .expect(1)
+            .create();
+
+        let outcome = ProbeRunner::new()
+            .run("gpt-5", &server.url(), None, ProbeTier::Standard)
+            .await;
+
+        assert_eq!(outcome.state(), ProbeState::Failed);
+        assert!(outcome.stripped_fields.is_empty());
+        let err = outcome.error.unwrap();
+        assert_eq!(err.class, "UnsupportedField");
+        assert_eq!(
+            err.unsupported_field.as_deref(),
+            Some("temperature"),
+            "the blamed field must survive into the verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_and_degraded_both_gate_the_selection_but_stay_distinct() {
+        // D1: both pass the gate. D10/D11: only `Degraded` carries the reason.
+        let mut server = mockito::Server::new_async().await;
+        mount_healthy_provider(&mut server);
+        let clean = ProbeRunner::new()
+            .run("gpt-5", &server.url(), None, ProbeTier::Deep)
+            .await;
+        assert!(clean.stripped_fields.is_empty());
+        assert_eq!(clean.state(), ProbeState::Verified);
+        assert!(clean.state().gates_responses());
+
+        let mut tolerant = mockito::Server::new_async().await;
+        mount_reasoning_intolerant_provider(&mut tolerant);
+        let degraded = ProbeRunner::new()
+            .run("m3.1-flash", &tolerant.url(), None, ProbeTier::Deep)
+            .await;
+        assert_eq!(degraded.state(), ProbeState::Degraded);
+        assert!(degraded.state().gates_responses());
+        assert_ne!(
+            degraded.state(),
+            clean.state(),
+            "the R badge needs the two states to be distinguishable"
+        );
+        assert!(
+            degraded.summary().contains("Degraded"),
+            "{}",
+            degraded.summary()
         );
     }
 }
