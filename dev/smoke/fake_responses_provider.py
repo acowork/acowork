@@ -12,8 +12,9 @@ Serves the three shapes the probe distinguishes:
   healthy           (default) every tier passes
   no_tool           baseline passes, L3 returns no function_call
   missing           /v1/responses is 404 "unknown endpoint" (Chat-Completions host)
-  reject_reasoning  any body with `reasoning.effort` is 400 (MiniMax M3.1-Flash
-                    behaviour); the trimmed retry passes — ADR-103 D8/S7
+  reject_reasoning  any body with a `reasoning` block is 400 (an endpoint that
+                    does not implement the field at all); the trimmed retry
+                    passes — ADR-103 D8/S7
 """
 
 import json

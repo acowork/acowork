@@ -1,9 +1,10 @@
 # ADR-103：支持 OpenAI Responses API 作为 provider shape
 
 - **编号**：ADR-103
-- **状态**：✅ 已接受（v0.3 拍板 / v0.4 修正，2026-11-XX；S1–S8 已实施，分支 `feature/response_api`）
+- **状态**：✅ 已接受（v0.3 拍板 / v0.4–v0.5 修正，2026-11-XX；S1–S9 已实施，分支 `feature/response_api`）
 - **日期**：2026-11-XX
 - **修订**：
+  - **v0.5（2026-11-XX，实施后修正）**——**探测基线的 `reasoning.effort` 改用跨厂商合法值 `low`**（原为 `none`）。`none` 是 MiniMax M3.1-Flash 唯一拒绝的**值**（该模型**支持** `reasoning`，effort 可取 `low`/`medium`/`high`/`xhigh`/`max`），而 400 点名 `reasoning` 字段会被判成「字段不支持」→ 裁剪 → 对一个完全支持推理的模型谎报 `degraded` + 「reasoning 被省略」。§4.4 D8 裁剪规则与 `degraded` 语义不变，只是基线不再用「某厂商恰好拒绝的值」。用户主动选 `Off` → `none` 的路径不变。
   - **v0.4（2026-11-XX，实施后修正）**——**删除全局开关 `llm.responses_api_enabled`**（§4.4、R6 已同步）。理由：默认 `false` + 无 UI 入口 = 功能对绝大多数用户静默不可用（用户手选 Responses、点保存、探测被整体跳过、dialog 静默关闭，再次打开仍显示未启用）；而灰度本来就不需要它——D1 的 gate 已经是灰度（未手选 / 未探测 / 探测失败一律回落默认）。同时保留一条实施事实：保存响应里的探测结论（`probes`）必须传到 UI，否则「探测失败」与「什么都没发生」对用户不可区分。
   - **v0.3（2026-11-XX，拍板）**——**探测从「advisory 可信度标记」升级为「配置期启用门控（gate）」**：Responses 在且仅在「用户手选 ∧ 探测通过」时启用，其余任何情况一律回落默认（npm 推导）。连带修改：D1 改为两级输入 + gate、`shape` 降级为纯 UI 提示（不参与裁决、不写盘）、删除手动 re-resolve 流程（改为保存 / 切换协议时自动重测，见新增 D12）、G2「数据驱动默认」取消、§4.2 简化、修正 v0.2 关于 `#[serde(default)]` 的跨版本兼容错误结论、§3/§5/§7/§8/§9/§10 同步。
   - **v0.2（2026-11-XX）**——删除 v0.1 的 D10「本地 shape 覆盖表」，改为「用户显式选协议 + Gateway 侧探测验证」。动因：人工维护的数据文件会腐烂，探测 + 手选能以零维护成本覆盖 models.dev 尚未标注 `shape` 的厂商（DeepSeek / MiniMax）。
@@ -328,7 +329,11 @@ flowchart LR
 
 **裁剪白名单（ResponsesCompat，v0.2 收窄到 1 个字段）**：与 `CompatCache` 同纪律（**两次确认才固化**、TTL 租约、plain success 重置、错误分类门控、级别必须可见告警），但 v1 **只允许裁剪 `reasoning` 一个字段**，且**不复用 `openai.rs` 的 `StripProfile` 结构**（它是 completions 形状）：
 
-- `reasoning.effort: none` 触发 400 → 省略 `reasoning` 整块重试一次。选它的理由：这是唯一「不裁就完全不可用」的场景（MiniMax M3.1-Flash 明文 400），且裁剪后**语义损失可判定**——用户选的 effort 档位被降级，必须可见告警 + 记入探测状态。
+- 端点对 `reasoning` **字段本身**返 400（body 指名该字段）→ 省略 `reasoning` 整块重试一次。裁剪后**语义损失可判定**——用户选的 effort 档位被降级，必须可见告警 + 记入探测状态。
+
+- **v0.5 修正（实施后）**：这条规则原先写的是「`reasoning.effort: none` 触发 400 → 裁剪」，并把「值被拒」当成了「字段不被支持」。这产生了一个**假结论**：MiniMax M3.1-Flash **支持** `reasoning`（`effort` 可取 `low`/`medium`/`high`/`xhigh`/`max`，MiniMax 官方文档明文），它只是**不接受 `effort: none` 这个值**（返 400）。而 400 里点名了 `reasoning` 字段 → 错误分类判成 `UnsupportedField{reasoning}` → 裁剪 → 结论落成 `degraded` + `stripped_fields: ["reasoning"]`，于是在一个完全支持推理的模型上对用户宣称「该端点省略了 reasoning 参数」。**被拒的是值，不是字段。**
+  - **约束（新增，v0.5）**：探测基线里的 `reasoning.effort` **MUST 取跨厂商合法值**（v1 取 `low`），MUST NOT 用「某个厂商恰好拒绝的值」当基线——否则探测会把「值非法」误判成「字段不支持」，产出假 `degraded`。端点若真的不实现 `reasoning` 字段，仍会 400 点名它，裁剪路径与 `degraded` 语义不变。
+  - **用户主动选 `Off` → `none` 的路径不变**（§D5 表）：那是「用户要求关闭推理」，Runtime 裁掉整块并可见告警，语义正确，与探测基线是两件事。
 
 **v1 明确不裁**（改为分类上抛，让用户在 UI 里看到并调整）：
 
@@ -668,11 +673,12 @@ sequenceDiagram
 | S5 | **D10 探测端点（L1+L2+L3）+ D12 保存时自动探测 + 结果缓存与限流 + 用量排除** | 对 fake 服务能区分 `verified` / `failed(EndpointUnavailable)` / `failed(L3 no function_call)`；保存只测变更行、失败不阻塞；探测用量不进 usage 通道 |
 | S6 | D11 前端协议下拉（**始终可选**、切换触发探测）+「重新验证」按钮与状态区 + R 标签三态 + 黄标「已选择但未启用」+ 保存前请求数提示 | G1 灰度就绪；回归用例「shape 缺失仍能选 Responses」「failed 时保存可用且不启用」通过 |
 | S7（Q4 已定案，纳入主线，仍独立可回滚） | `reasoning` 单字段裁剪 + `degraded` 状态 | 两次确认门控 + 可见告警 + debug panel 可查 |
+| S9（v0.5 修正） | 探测基线的 `reasoning.effort` 由 `none` 改为跨厂商合法值 `low`；D8 裁剪规则本身不变 | 对 MiniMax M3.1-Flash（支持 reasoning、只拒 `none`）探测结论为 `verified` 而非假 `degraded`；端点真不支持该字段时仍走裁剪 → `degraded` |
 | S8（v0.4 修正） | 删除全局开关 `llm.responses_api_enabled`（配置段 / 解析分支 / 探测跳过 / 前端 `gate_off` 原因一并删除）+ 保存响应里的 `probes` 送达 UI | 无开关配置段；手选 + 探测通过即生效；保存后用户必能看到每个模型的探测结论（成功 / 降级 / 失败） |
 
 > S5 与 S6 有依赖（下拉需要探测状态才能显示三态），但 S5 可独立交付为「后端可用、前端未接」，中途停下来的系统是自洽的。
 
-**实施状态（S1–S8 全部完成）**：S1 `67bccd0c`、S2 `4c1c47b8`、S3 `6b8ffc6a`、S4 `4869559a`、S5 `d0bdaaab`、S6 `c7cb345e` + `3504055b` + `11ec6153`、S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`。S7 的 `degraded` 由 `ProbeOutcome::stripped_fields` 驱动（Gateway 探测）与 `ResponsesCompatCache`（Runtime 运行期）各自独立产出，两处都不重探、不跨 shape 复用缓存。端到端验证：`dev/smoke/smoke_s7_degraded.py`（真实 Gateway + 拒绝 `reasoning` 的 fake provider）。
+**实施状态（S1–S9 全部完成）**：S1 `67bccd0c`、S2 `4c1c47b8`、S3 `6b8ffc6a`、S4 `4869559a`、S5 `d0bdaaab`、S6 `c7cb345e` + `3504055b` + `11ec6153`、S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`。S7 的 `degraded` 由 `ProbeOutcome::stripped_fields` 驱动（Gateway 探测）与 `ResponsesCompatCache`（Runtime 运行期）各自独立产出，两处都不重探、不跨 shape 复用缓存。端到端验证：`dev/smoke/smoke_s7_degraded.py`（真实 Gateway + 拒绝 `reasoning` 的 fake provider）。
 
 ---
 

@@ -64,12 +64,27 @@ impl ProbeFunctionCall {
 
 /// The `reasoning` block every probe body carries unless it had to be trimmed.
 ///
-/// `effort: "none"` is exactly what the Runtime sends for
-/// `ReasoningEffort::Off`, and it is the value MiniMax M3.1-Flash rejects with a
-/// 400 (ADR-103 D8). Carrying it is what lets a probe run *observe* the trim
-/// instead of assuming it away (D10.3 `Degraded`).
+/// The value is `effort: "low"` — the lowest **cross-vendor legal** effort.
+/// It has to be a value every major vendor accepts, because the probe's job
+/// is to answer "does this endpoint speak Responses?", not "does it like this
+/// particular effort?".
+///
+/// It used to be `effort: "none"`, on the theory that `none` is what the
+/// Runtime sends for `ReasoningEffort::Off`. That was wrong in a way that
+/// produced a **false verdict**: MiniMax M3.1-Flash supports `reasoning`
+/// (effort `low`/`medium`/`high`/`xhigh`/`max`) and rejects only the *value*
+/// `none` with a 400 (MiniMax's own docs). A 400 that names the field is
+/// indistinguishable from "the endpoint does not implement `reasoning`", so
+/// the probe classified it as `UnsupportedField{reasoning}`, trimmed it, and
+/// recorded `degraded` + `stripped_fields: ["reasoning"]` — telling the user
+/// that a fully reasoning-capable model had its reasoning dropped.
+///
+/// A rejected **value** is not a rejected **field**. The trim path stays
+/// exactly as strict as before: an endpoint that rejects the `reasoning`
+/// field itself still answers 400 naming it, and that still yields
+/// `degraded` (ADR-103 D8/D10.3).
 fn probe_reasoning() -> Value {
-    json!({ "effort": "none" })
+    json!({ "effort": "low" })
 }
 
 /// Add the `reasoning` block unless the endpoint already rejected it.
@@ -298,7 +313,13 @@ mod tests {
         assert!(req.get("background").is_none());
         // D8/S7: the baseline carries the one field the Runtime may have to
         // drop, so the probe can observe the trim instead of assuming it away.
-        assert_eq!(req["reasoning"]["effort"], "none");
+        //
+        // The value must be one every major vendor accepts: `none` is NOT
+        // (MiniMax M3.1-Flash 400s on it while supporting `reasoning`
+        // otherwise), and a 400 naming the field is indistinguishable from
+        // "the endpoint does not implement it" — that mis-classification is
+        // what made the probe report a false `degraded`.
+        assert_eq!(req["reasoning"]["effort"], "low");
         // ... and the trimmed form is byte-identical minus that block.
         let trimmed = baseline_request("gpt-5", true);
         assert!(trimmed.get("reasoning").is_none());

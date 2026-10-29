@@ -249,11 +249,16 @@ impl ProbeRunner {
 
         // ── L1 + L2: one request, two verdicts ──────────────────────────
         //
-        // The baseline body carries `reasoning.effort: none` on purpose: that
-        // is the only field D8 may trim, and MiniMax M3.1-Flash answers 400 for
-        // exactly this value. Probing with it is what lets a probe run report
-        // "works, but the field had to go" (D10.3) instead of only ever
-        // claiming a clean verify.
+        // The baseline body carries a `reasoning` block on purpose: that is
+        // the only field D8 may trim, and probing with it is what lets a probe
+        // run report "works, but the field had to go" (D10.3) instead of only
+        // ever claiming a clean verify.
+        //
+        // The **value** inside must be one every vendor accepts
+        // (`reasoning.effort: low` — see [`crate::probe::wire`]): a 400 that
+        // names the field is indistinguishable from "the endpoint does not
+        // implement `reasoning`", so an illegal value would be mis-read as an
+        // unsupported field and would report a false `degraded`.
         let url = format!("{base}/responses");
         let baseline = match self.post(&url, api_key, baseline_request(model, false)).await {
             Ok(body) => body,
@@ -721,7 +726,7 @@ mod tests {
             .mock("POST", "/responses")
             .match_body(Matcher::PartialJson(json!({
                 "input": "ping",
-                "reasoning": {"effort": "none"},
+                "reasoning": {"effort": "low"},
             })))
             .with_status(400)
             .with_header("content-type", "application/json")
@@ -770,6 +775,75 @@ mod tests {
             ProbeState::Degraded,
             "works, but only without `reasoning` — D10.3 calls that degraded"
         );
+    }
+
+    /// A provider that rejects the *value* `effort: none` but supports the
+    /// `reasoning` field — MiniMax M3.1-Flash, per MiniMax's own docs.
+    ///
+    /// This is the regression test for a false `degraded`: the probe used to
+    /// send `effort: none` as its baseline, MiniMax answered 400 naming the
+    /// `reasoning` field, and the classifier read "this value is illegal" as
+    /// "this field is not implemented" → trim → `degraded` +
+    /// `stripped_fields: ["reasoning"]`. The user was told a fully
+    /// reasoning-capable model had its reasoning dropped.
+    ///
+    /// The correct outcome is `verified`, with the field intact.
+    #[tokio::test]
+    async fn a_provider_rejecting_only_the_none_value_still_verifies() {
+        let mut server = mockito::Server::new_async().await;
+
+        // `effort: none` is the value MiniMax rejects — and the probe must
+        // never send it, so this mock must stay untouched.
+        server
+            .mock("POST", "/responses")
+            .match_body(Matcher::PartialJson(json!({
+                "reasoning": {"effort": "none"},
+            })))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(REASONING_400)
+            .expect(0)
+            .create();
+
+        // The probe's actual baseline (`effort: low`) is accepted outright.
+        server
+            .mock("POST", "/responses")
+            .match_body(Matcher::PartialJson(json!({
+                "input": "ping",
+                "reasoning": {"effort": "low"},
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(baseline_body().to_string())
+            .expect(1)
+            .create();
+
+        server
+            .mock("POST", "/responses")
+            .match_body(Matcher::PartialJson(json!({"tool_choice": "auto"})))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(round_trip_body().to_string())
+            .create();
+        server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Regex("function_call_output".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(baseline_body().to_string())
+            .create();
+
+        let outcome = ProbeRunner::new()
+            .run("m3.1-flash", &server.url(), Some("sk-test"), ProbeTier::Deep)
+            .await;
+
+        assert!(outcome.success, "{:?}", outcome.error);
+        assert_eq!(outcome.tier_passed, vec!["L1", "L2", "L3"]);
+        assert!(
+            outcome.stripped_fields.is_empty(),
+            "a rejected value is not a rejected field — nothing may be stripped"
+        );
+        assert_eq!(outcome.state(), ProbeState::Verified);
     }
 
     #[tokio::test]
