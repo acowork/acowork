@@ -398,6 +398,15 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/mcp-ensure/{name}",
             get(proxy_get_mcp_ensure),
         )
+        // ADR-104: dismiss / restore one manifest-declared MCP
+        // recommendation. Pure reverse-proxy — the recommendation list is
+        // projected from the package manifest inside the Runtime and the
+        // five-state lifecycle is derived there, so the Gateway has nothing
+        // to add.
+        .route(
+            "/api/agents/{id}/mcp-recommendations/{key}",
+            put(proxy_put_mcp_recommendation),
+        )
         // ADR-069: per-MCP-server tool-level opt-in. `GET/PUT
         // /api/agents/{id}/mcp-tools` is a pure reverse-proxy to the
         // Runtime's `GET/PUT /agents/{id}/mcp-tools` (added in
@@ -2143,6 +2152,32 @@ async fn proxy_get_mcp_servers(
 ) -> Response {
     let path = format!("/agents/{}/mcp-servers", id);
     proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/mcp-recommendations/{key}` (ADR-104)
+/// to the Runtime's `PUT /agents/{id}/mcp-recommendations/{key}`.
+async fn proxy_put_mcp_recommendation(
+    State(state): State<AppState>,
+    Path((id, key)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/agents/{}/mcp-recommendations/{}", id, key);
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/mcp-ensure/{name}` (ADR-090).

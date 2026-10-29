@@ -156,6 +156,12 @@ pub struct AgentListResponse {
     /// validates this against its bundled icon set.
     pub builtin_avatar: Option<String>,
     pub version: String,
+    /// ADR-104: package-declared labels (`manifest.toml` `labels`), lowercase
+    /// kebab slugs. Retrieval/filtering metadata only — the client renders
+    /// them as chips and may filter on them; nothing in the runtime keys off
+    /// them. Empty for packages that declare none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     /// Distributed liveness verdict: whether the Runtime's MQTT session is
     /// reachable at the broker level (payload `online`). Topology
     /// independent — the same answer for local, remote and node-hosted
@@ -238,6 +244,10 @@ pub struct AgentDetailResponse {
     pub description: String,
     pub author: String,
     pub install_path: String,
+    /// ADR-104: package-declared labels — same semantics as
+    /// [`AgentListResponse::labels`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     /// Distributed liveness verdict — same semantics as
     /// [`AgentListResponse::alive`]: the Runtime's MQTT session is
     /// reachable. Never a process/PID probe (see `alive` doc above).
@@ -437,6 +447,7 @@ pub async fn list_agents(
                 avatar: eff_avatar,
                 builtin_avatar: eff_builtin,
                 version: info.version.clone(),
+                labels: info.manifest.labels.clone(),
                 alive,
                 lifecycle: lifecycle.to_string(),
                 lifecycle_detail,
@@ -591,6 +602,7 @@ pub async fn get_agent_detail(
         description: info.manifest.description.clone(),
         author: info.manifest.author.clone(),
         install_path: info.install_path.clone(),
+        labels: info.manifest.labels.clone(),
         alive,
         lifecycle: lifecycle.to_string(),
         lifecycle_detail: if lifecycle == "failed" {
@@ -2754,6 +2766,9 @@ mod tests {
     const INSTANCE_WEATHER: &str = "5e6f7a8b-9c0d-4e1f-a02b-4c5d6e7f8a9b";
 
     fn test_manifest(agent_id: &str) -> acowork_core::AgentManifest {        acowork_core::AgentManifest {
+            config: Default::default(),
+            labels: Vec::new(),
+            mcp_servers: Vec::new(),
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Test Agent".to_string(),
@@ -3576,6 +3591,7 @@ mod tests {
             avatar: None,
             builtin_avatar: Some("icon-05".to_string()),
             version: "1.0.0".to_string(),
+            labels: vec!["weather".to_string()],
             alive: false,
             lifecycle: "offline".to_string(),
             lifecycle_detail: String::new(),
@@ -3611,6 +3627,13 @@ mod tests {
         assert!(!json.contains("sleeping_at"));
         // sleeping was also removed — must not appear either.
         assert!(!json.contains("\"sleeping\""));
+        // ADR-104: package labels ride along on the list entry so the client
+        // can render chips / filter without a per-agent detail fetch.
+        assert!(
+            json.contains("\"labels\":[\"weather\"]"),
+            "labels must serialise on the list entry; got: {}",
+            json
+        );
         // ADR-048 follow-up: debug_state serialises as lowercase string.
         assert!(
             json.contains("\"debug_state\":\"disabled\""),
@@ -3644,6 +3667,20 @@ mod tests {
         assert!(json.contains("Agent started"));
     }
 
+    /// An agent that declares no labels must not serialise an empty array —
+    /// the client distinguishes "no labels" from "labels: []" only by
+    /// presence, and an empty array in every payload is pure noise.
+    #[test]
+    fn test_agent_list_response_omits_empty_labels() {
+        let resp = entry("i-1", "No Labels", false, None);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !json.contains("labels"),
+            "empty labels must be omitted; got: {}",
+            json
+        );
+    }
+
     fn entry(id: &str, name: &str, alive: bool, ts: Option<&str>) -> AgentListResponse {
         AgentListResponse {
             // ADR-073: legacy identity shape (instance == package) — the
@@ -3657,6 +3694,7 @@ mod tests {
             avatar: None,
             builtin_avatar: None,
             version: "1.0.0".to_string(),
+            labels: Vec::new(),
             alive,
             lifecycle: "offline".to_string(),
             lifecycle_detail: String::new(),

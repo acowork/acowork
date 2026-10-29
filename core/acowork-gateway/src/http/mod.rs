@@ -23,6 +23,7 @@ pub mod fs_browse;
 pub mod global_resources_api;
 pub mod intent_api;
 pub mod mcp_catalog_api;
+pub mod mcp_presets;
 pub mod lsp_admin_proxy;
 pub mod lsp_proxy;
 pub mod memory_api;

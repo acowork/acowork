@@ -301,6 +301,11 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::workspaces::workspace_routes())
         .merge(crate::http::publish_api::publish_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
+        // ADR-104: the curated MCP preset registry moved out of the Desktop
+        // (TypeScript) into the Gateway, because a package manifest references
+        // a preset by id and an id whose definition lives in one client is not
+        // a platform fact.
+        .merge(crate::http::mcp_presets::mcp_preset_routes())
         .merge(crate::http::nodes_api::nodes_routes())
         // ADR-089 D2: LSP relay reverse proxy (HTTP + WebSocket).
         .merge(crate::http::lsp_proxy::lsp_proxy_routes())

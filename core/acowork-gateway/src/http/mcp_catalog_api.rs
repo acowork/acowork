@@ -7,6 +7,9 @@
 //! - GET    /api/mcp-catalog         — list all catalog entries (env values masked)
 //! - PUT    /api/mcp-catalog         — replace the entire catalog
 //! - POST   /api/mcp-catalog         — add a single server entry
+//! - POST   /api/mcp-catalog/from-declaration — materialize a package
+//!   `[[mcp_servers]]` declaration (or a user-picked preset) into the
+//!   catalog, ADR-104
 //! - DELETE /api/mcp-catalog/{name}   — remove a server entry
 //!
 //! ADR-090: install execution moved to the Agent (Runtime) process —
@@ -20,7 +23,7 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, get},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,10 @@ pub fn mcp_catalog_routes() -> Router<AppState> {
             get(list_catalog)
                 .put(replace_catalog)
                 .post(add_catalog_entry),
+        )
+        .route(
+            "/api/mcp-catalog/from-declaration",
+            post(materialize_declaration),
         )
         .route(
             "/api/mcp-catalog/{name}",
@@ -141,6 +148,9 @@ fn mask_sensitive_env(config: &McpServerConfigDef) -> McpServerConfigDef {
         tool_timeout_secs: config.tool_timeout_secs,
         install: config.install.clone(),
         required_secrets: config.required_secrets.clone(),
+        // Masking hides secret *values*; provenance is not a secret and
+        // dropping it would make the masked read-back look hand-added.
+        origin: config.origin.clone(),
     }
 }
 
@@ -172,6 +182,112 @@ pub struct AddCatalogEntryRequest {
     /// precondition.
     #[serde(default)]
     pub expected_version: Option<u64>,
+}
+
+/// Body of `POST /api/mcp-catalog/from-declaration` (ADR-104).
+///
+/// Mirrors exactly what a `[[mcp_servers]]` declaration can express — no more,
+/// so a client cannot smuggle in a field the manifest cannot state. Exactly one
+/// of `preset_id` / `inline` must be present, mirroring the manifest's
+/// three-form mutual exclusion (`hosted` declarations need no materialization:
+/// the platform already publishes those servers into every agent's catalog).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MaterializeDeclarationRequest {
+    /// Catalog key — `McpServerDecl::key()`, the join key between the
+    /// manifest, `agent_mcp.json`, and the catalog.
+    pub key: String,
+    /// Preset form: `[[mcp_servers]] preset = "<id>"`.
+    #[serde(default)]
+    pub preset_id: Option<String>,
+    /// Inline form: `[[mcp_servers]] transport = "http"` + `url`.
+    #[serde(default)]
+    pub inline: Option<InlineDeclaration>,
+    /// Package that recommended this server. Selects the `origin` value so the
+    /// catalog can answer "why is this entry here?".
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// Credentials typed by the user **before** the entry existed (the preset
+    /// picker asks for API keys up front). Only honored on the creating call:
+    /// once the entry exists this field is ignored, because overwriting a
+    /// stored secret on a re-run would be data loss.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    /// ADR-059 §7.3 optimistic-concurrency precondition.
+    #[serde(default)]
+    pub expected_version: Option<u64>,
+}
+
+/// The inline (self-contained remote) half of a declaration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InlineDeclaration {
+    pub transport: acowork_core::protocol::McpTransportDef,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub required_secrets: Vec<String>,
+}
+
+impl MaterializeDeclarationRequest {
+    /// Resolve the declaration into the catalog entry it denotes.
+    fn to_catalog_entry(&self) -> Result<McpServerConfigDef, String> {
+        if self.key.is_empty() {
+            return Err("declaration key must not be empty".to_string());
+        }
+        let origin = match self.agent_id.as_deref() {
+            Some(agent_id) if !agent_id.is_empty() => {
+                crate::http::mcp_presets::package_origin(agent_id, &self.key)
+            }
+            _ => match self.preset_id.as_deref() {
+                Some(id) => crate::http::mcp_presets::preset_origin(id),
+                None => "user".to_string(),
+            },
+        };
+
+        match (&self.preset_id, &self.inline) {
+            (Some(_), Some(_)) => {
+                Err("a declaration is either a preset or inline, not both".to_string())
+            }
+            (None, None) => Err(
+                "a declaration must name a preset or carry an inline remote definition".to_string(),
+            ),
+            (Some(id), None) => {
+                if id != &self.key {
+                    return Err(format!(
+                        "declaration key '{}' must equal the preset id '{id}' — the key is how                          the manifest, agent_mcp.json and the catalog join",
+                        self.key
+                    ));
+                }
+                let preset = crate::http::mcp_presets::preset(id)
+                    .ok_or_else(|| format!("unknown MCP preset '{id}'"))?;
+                let mut entry = preset.to_catalog_entry(&origin);
+                entry.env = self.env.clone();
+                Ok(entry)
+            }
+            (None, Some(inline)) => {
+                let url = inline
+                    .url
+                    .clone()
+                    .filter(|u| !u.is_empty())
+                    .ok_or_else(|| "an inline declaration needs a url".to_string())?;
+                Ok(McpServerConfigDef {
+                    name: self.key.clone(),
+                    display_name: None,
+                    transport: inline.transport.clone(),
+                    url: Some(url),
+                    command: String::new(),
+                    args: Vec::new(),
+                    env: Default::default(),
+                    headers: inline.headers.clone(),
+                    tool_timeout_secs: None,
+                    install: None,
+                    required_secrets: inline.required_secrets.clone(),
+                    origin: Some(origin),
+                })
+            }
+        }
+    }
 }
 
 /// Request to update a single MCP server entry
@@ -282,12 +398,30 @@ pub async fn add_catalog_entry(
     }
 
     catalog.push(body.config);
-    save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
+    let ack = commit_catalog_push(&state, &data_dir, &catalog, body.expected_version).await?;
+
+    Ok((StatusCode::CREATED, Json(ack)))
+}
+
+/// Persist the already-mutated catalog and run the mutation fan-out.
+///
+/// Factored out of [`add_catalog_entry`] so the preset-recommendation path
+/// (ADR-104) performs *exactly* the same side effects: save to disk, rebuild
+/// the `mcp_list` cache the AgentHello diff sync reads, trigger the MQTT
+/// global-resource republish, and open the ADR-059 operation record. A second
+/// hand-rolled copy would drift the first time one of those steps changes.
+async fn commit_catalog_push(
+    state: &AppState,
+    data_dir: &std::path::Path,
+    catalog: &[McpServerConfigDef],
+    expected_version: Option<u64>,
+) -> Result<OperationAck, ApiError> {
+    save_mcp_catalog(data_dir, catalog).map_err(|e| ApiError::internal(&e))?;
 
     // Rebuild mcp_list cache for AgentHello diff sync.
     {
         let mut gw = state.gateway_state.write().await;
-        resource_cache::rebuild_and_save_mcp_cache(&mut gw, &data_dir, &catalog);
+        resource_cache::rebuild_and_save_mcp_cache(&mut gw, data_dir, catalog);
     }
 
     // Hot-push MCP config to all running agents — handled by MQTT publisher trigger below.
@@ -304,15 +438,79 @@ pub async fn add_catalog_entry(
         let gw = state.gateway_state.read().await;
         gw.resource_cache.mcp_list.version
     };
-    let mut record = OperationRecord::new(body.expected_version.unwrap_or(0));
+    let mut record = OperationRecord::new(expected_version.unwrap_or(0));
     record.state = OperationState::Committed;
     record.resource_version = Some(resource_version);
     let ack = OperationAck::from_record(&record);
     if let Some(store) = state.operation_store.as_ref() {
         store.insert(record);
     }
+    Ok(ack)
+}
 
+/// `POST /api/mcp-catalog/from-declaration` — turn a package's
+/// `[[mcp_servers]]` declaration (or a user-picked preset) into a catalog
+/// entry (ADR-104).
+///
+/// ## Why the Gateway materializes instead of the client
+///
+/// Two things the client must not own:
+///
+/// 1. **The preset recipe.** `preset = "brave-search"` is an identifier whose
+///    meaning lives in the server-side registry ([`super::mcp_presets`]). A
+///    Desktop-side materializer would have to restate the spawn command and
+///    args, and a second client (mobile) would restate them again.
+/// 2. **The `origin` string.** "Where did this catalog entry come from?" is a
+///    catalog fact; if each client formatted it, they would diverge and the
+///    diagnosis would eventually be untrustworthy.
+///
+/// ## Idempotency and the one thing that is never overwritten
+///
+/// Re-materializing a name that already exists returns `200` and leaves the
+/// entry **untouched** — in particular its `env`. The user's API key is the
+/// one field a package update must not reset, and a package's recommendation
+/// is re-projected on every start, so this path runs often.
+pub async fn materialize_declaration(
+    State(state): State<AppState>,
+    Json(body): Json<MaterializeDeclarationRequest>,
+) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
+    crate::http::routes::check_expected_version(&state, body.expected_version).await?;
+
+    let entry = body
+        .to_catalog_entry()
+        .map_err(|e| ApiError::bad_request(&e))?;
+    let name = entry.name.clone();
+
+    let data_dir = get_data_dir(&state).await?;
+    let mut catalog = load_mcp_catalog(&data_dir).map_err(|e| ApiError::internal(&e))?;
+
+    if catalog.iter().any(|c| c.name == name) {
+        // Already present — report success without touching the entry.
+        return Ok((
+            StatusCode::OK,
+            Json(committed_ack(&state, body.expected_version).await),
+        ));
+    }
+
+    catalog.push(entry);
+    let ack = commit_catalog_push(&state, &data_dir, &catalog, body.expected_version).await?;
     Ok((StatusCode::CREATED, Json(ack)))
+}
+
+/// Build a committed (no-op) ACK without mutating the catalog.
+async fn committed_ack(state: &AppState, expected_version: Option<u64>) -> OperationAck {
+    let resource_version = {
+        let gw = state.gateway_state.read().await;
+        gw.resource_cache.mcp_list.version
+    };
+    let mut record = OperationRecord::new(expected_version.unwrap_or(0));
+    record.state = OperationState::Committed;
+    record.resource_version = Some(resource_version);
+    let ack = OperationAck::from_record(&record);
+    if let Some(store) = state.operation_store.as_ref() {
+        store.insert(record);
+    }
+    ack
 }
 
 /// `PUT /api/mcp-catalog/{name}` — update a single server entry
@@ -336,6 +534,10 @@ pub async fn update_catalog_entry(
     let idx = catalog.iter().position(|c| c.name == name).ok_or_else(|| {
         ApiError::not_found(&format!("MCP server '{}' not found in catalog", name))
     })?;
+
+    // ADR-104: provenance is server-owned — captured before the entry is
+    // rebuilt so an edit cannot launder "added by package X" into "manual".
+    let old_origin = catalog[idx].origin.clone();
 
     // Preserve sensitive env values that were sent as "••••" (masked)
     // If the user didn't change a secret field, keep the old value
@@ -386,6 +588,10 @@ pub async fn update_catalog_entry(
         tool_timeout_secs: body.config.tool_timeout_secs,
         install: body.config.install,
         required_secrets: body.config.required_secrets,
+        // Provenance is server-owned (ADR-104): an update keeps whatever the
+        // entry was created with, so "added by package X" cannot be laundered
+        // into "added by hand" by a later edit.
+        origin: old_origin,
     };
 
     save_mcp_catalog(&data_dir, &catalog).map_err(|e| ApiError::internal(&e))?;
@@ -458,6 +664,7 @@ async fn get_data_dir(state: &AppState) -> Result<PathBuf, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_mask_sensitive_env() {
@@ -516,6 +723,236 @@ mod tests {
         assert_eq!(loaded[0].name, "filesystem");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+// ADR-104: materializing a declaration into the catalog.
+
+    fn state_with_data_dir(dir: &std::path::Path) -> AppState {
+        let gw = Arc::new(tokio::sync::RwLock::new(
+            crate::gateway::state::GatewayState::new(&dir.join("vault").to_string_lossy()),
+        ));
+        {
+            let mut g = gw.try_write().expect("fresh state");
+            g.config = Some(crate::config::GatewayConfig {
+                data_dir: dir.to_string_lossy().to_string(),
+                ..Default::default()
+            });
+        }
+        AppState::new(gw, Arc::new(crate::http::auth::HttpAuth::new(false)))
+    }
+
+    fn preset_decl(key: &str, agent_id: Option<&str>) -> MaterializeDeclarationRequest {
+        MaterializeDeclarationRequest {
+            key: key.to_string(),
+            preset_id: Some(key.to_string()),
+            inline: None,
+            agent_id: agent_id.map(str::to_string),
+            env: Default::default(),
+            expected_version: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn declaration_materializes_preset_with_package_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_data_dir(dir.path());
+
+        let (status, _ack) = materialize_declaration(
+            State(state.clone()),
+            Json(preset_decl("brave-search", Some("com.acme.researcher"))),
+        )
+        .await
+        .expect("preset should materialize");
+        assert_eq!(status, StatusCode::CREATED);
+
+        let catalog = load_mcp_catalog(dir.path()).unwrap();
+        assert_eq!(catalog.len(), 1);
+        let entry = &catalog[0];
+        assert_eq!(entry.name, "brave-search");
+        assert_eq!(
+            entry.origin.as_deref(),
+            Some("agent-package:com.acme.researcher#brave-search"),
+            "the catalog must be able to say which package put this entry here"
+        );
+        assert_eq!(entry.required_secrets, vec!["BRAVE_API_KEY".to_string()]);
+        assert!(entry.env.is_empty(), "a preset never pre-fills a secret");
+        assert!(entry.install.is_some());
+    }
+
+    #[tokio::test]
+    async fn declaration_without_agent_uses_preset_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_data_dir(dir.path());
+
+        // The status code is asserted by the sibling test; here only the
+        // persisted `origin` matters, so the response tuple is discarded.
+        let _ = materialize_declaration(State(state), Json(preset_decl("figma", None)))
+            .await
+            .unwrap();
+
+        let catalog = load_mcp_catalog(dir.path()).unwrap();
+        assert_eq!(catalog[0].origin.as_deref(), Some("preset:figma"));
+    }
+
+    #[tokio::test]
+    async fn declaration_twice_keeps_the_first_entry_and_its_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_data_dir(dir.path());
+
+        let _ = materialize_declaration(State(state.clone()), Json(preset_decl("brave-search", None)))
+            .await
+            .unwrap();
+
+        // Simulate the user typing their key afterwards.
+        let mut catalog = load_mcp_catalog(dir.path()).unwrap();
+        catalog[0]
+            .env
+            .insert("BRAVE_API_KEY".to_string(), "sk-user-typed".to_string());
+        save_mcp_catalog(dir.path(), &catalog).unwrap();
+
+        // Re-materializing (a package update re-runs its recommendation on
+        // every start) must not reset the user's credential.
+        let (status, _ack) = materialize_declaration(
+            State(state),
+            Json(preset_decl("brave-search", Some("com.acme.researcher"))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::OK, "idempotent, not an error");
+
+        let catalog = load_mcp_catalog(dir.path()).unwrap();
+        assert_eq!(catalog.len(), 1, "no duplicate entry");
+        assert_eq!(
+            catalog[0].env.get("BRAVE_API_KEY").map(String::as_str),
+            Some("sk-user-typed"),
+            "the user's credential survives a re-install"
+        );
+    }
+
+    #[tokio::test]
+    async fn declaration_accepts_a_secret_typed_before_the_entry_existed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_data_dir(dir.path());
+
+        let mut body = preset_decl("brave-search", None);
+        body.env
+            .insert("BRAVE_API_KEY".to_string(), "sk-typed-up-front".to_string());
+        let _ = materialize_declaration(State(state), Json(body)).await.unwrap();
+
+        let catalog = load_mcp_catalog(dir.path()).unwrap();
+        assert_eq!(
+            catalog[0].env.get("BRAVE_API_KEY").map(String::as_str),
+            Some("sk-typed-up-front"),
+            "the preset picker collects the key before the entry exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn declaration_rejects_unknown_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_data_dir(dir.path());
+
+        let err = materialize_declaration(State(state), Json(preset_decl("no-such-preset", None)))
+            .await
+            .expect_err("unknown preset must be refused");
+        assert!(format!("{err:?}").contains("no-such-preset"));
+        assert!(load_mcp_catalog(dir.path()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn declaration_rejects_preset_key_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_data_dir(dir.path());
+
+        let mut body = preset_decl("brave-search", None);
+        body.key = "renamed-in-manifest".to_string();
+        let err = materialize_declaration(State(state), Json(body))
+            .await
+            .expect_err("key/preset mismatch must be refused");
+        assert!(format!("{err:?}").contains("must equal the preset id"));
+        assert!(load_mcp_catalog(dir.path()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn declaration_materializes_an_inline_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_data_dir(dir.path());
+
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("X-Tenant".to_string(), "acme".to_string());
+        let (status, _ack) = materialize_declaration(
+            State(state),
+            Json(MaterializeDeclarationRequest {
+                key: "acme-internal".to_string(),
+                preset_id: None,
+                inline: Some(InlineDeclaration {
+                    transport: acowork_core::protocol::McpTransportDef::Http,
+                    url: Some("https://mcp.acme.internal/rpc".to_string()),
+                    headers,
+                    required_secrets: vec!["ACME_MCP_TOKEN".to_string()],
+                }),
+                agent_id: Some("com.acme.researcher".to_string()),
+                env: Default::default(),
+                expected_version: None,
+            }),
+        )
+        .await
+        .expect("inline declaration should materialize");
+        assert_eq!(status, StatusCode::CREATED);
+
+        let catalog = load_mcp_catalog(dir.path()).unwrap();
+        assert_eq!(catalog[0].name, "acme-internal");
+        assert_eq!(
+            catalog[0].url.as_deref(),
+            Some("https://mcp.acme.internal/rpc")
+        );
+        assert_eq!(
+            catalog[0].origin.as_deref(),
+            Some("agent-package:com.acme.researcher#acme-internal")
+        );
+        assert!(
+            catalog[0].command.is_empty(),
+            "an http entry has no command"
+        );
+    }
+
+    #[tokio::test]
+    async fn declaration_rejects_both_forms_and_neither_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_data_dir(dir.path());
+
+        let both = MaterializeDeclarationRequest {
+            key: "x".to_string(),
+            preset_id: Some("brave-search".to_string()),
+            inline: Some(InlineDeclaration {
+                transport: acowork_core::protocol::McpTransportDef::Http,
+                url: Some("https://example.test/mcp".to_string()),
+                headers: Default::default(),
+                required_secrets: vec![],
+            }),
+            agent_id: None,
+            env: Default::default(),
+            expected_version: None,
+        };
+        let err = materialize_declaration(State(state.clone()), Json(both))
+            .await
+            .expect_err("both forms must be refused");
+        assert!(format!("{err:?}").contains("not both"));
+
+        let neither = MaterializeDeclarationRequest {
+            key: "x".to_string(),
+            preset_id: None,
+            inline: None,
+            agent_id: None,
+            env: Default::default(),
+            expected_version: None,
+        };
+        let err = materialize_declaration(State(state), Json(neither))
+            .await
+            .expect_err("neither form must be refused");
+        assert!(format!("{err:?}").contains("must name a preset"));
+
+        assert!(load_mcp_catalog(dir.path()).unwrap().is_empty());
     }
 
     #[test]
