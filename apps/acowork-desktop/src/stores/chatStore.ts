@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, SessionInfo, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, SessionInfo, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState, ModelInfo } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
@@ -704,6 +704,31 @@ export function __resetModelInventoryFlightForTests(): void {
   vaultMutationSeq = 0;
 }
 
+/**
+ * ADR-103 D11 protocol fields for one inventory row.
+ *
+ * The keys are **omitted** rather than set to `undefined` when the Gateway
+ * projected nothing: a provider that never opted in must produce exactly the
+ * pre-ADR-103 `ModelEntry` shape. That keeps the "no protocol, no change"
+ * property on both sides of the wire (the Gateway's own test asserts the same
+ * for the MQTT payload), and it keeps `toStrictEqual` on the inventory honest.
+ */
+function protocolFieldsOf(
+  info: ModelInfo | undefined,
+  fallback: ModelEntry | undefined,
+): Partial<ModelEntry> {
+  const fields: Partial<ModelEntry> = {};
+  const shape = info?.shape ?? fallback?.shape;
+  const selected = info?.protocol_selected ?? fallback?.protocol_selected;
+  const active = info?.protocol_active ?? fallback?.protocol_active;
+  const probe = info?.protocol_probe ?? fallback?.protocol_probe;
+  if (shape !== undefined) fields.shape = shape;
+  if (selected !== undefined) fields.protocol_selected = selected;
+  if (active !== undefined) fields.protocol_active = active;
+  if (probe !== undefined) fields.protocol_probe = probe;
+  return fields;
+}
+
 /** Field-wise equality for a model inventory row — every field the
  *  builders below produce is compared. */
 function sameModelEntry(a: ModelEntry, b: ModelEntry): boolean {
@@ -714,7 +739,14 @@ function sameModelEntry(a: ModelEntry, b: ModelEntry): boolean {
     a.reasoning === b.reasoning &&
     a.default_reasoning_effort === b.default_reasoning_effort &&
     ((a.input_modalities === undefined && b.input_modalities === undefined) ||
-      a.input_modalities?.join(",") === b.input_modalities?.join(","))
+      a.input_modalities?.join(",") === b.input_modalities?.join(",")) &&
+    // ADR-103 D11: the protocol surfaces drive the `R` badge, so a verdict
+    // change (or a newly enabled protocol) must count as a real change —
+    // otherwise the memoized collectors would keep rendering a stale badge.
+    a.shape === b.shape &&
+    a.protocol_selected === b.protocol_selected &&
+    a.protocol_active === b.protocol_active &&
+    a.protocol_probe?.state === b.protocol_probe?.state
   );
 }
 
@@ -2926,6 +2958,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 entry.modelCapabilities?.[modelId]?.default_reasoning_effort ??
                 fallback?.default_reasoning_effort ??
                 undefined,
+              // ADR-103 D11: the Gateway projects these onto `/api/models`;
+              // carrying them here is what lets the chat dropdown render the
+              // `R` badge without a second fetch.
+              ...protocolFieldsOf(info, fallback),
             });
           }
         });

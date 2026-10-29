@@ -6,6 +6,7 @@ import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { needsApiKey, keyPlaceholder, isLocalProvider } from "../../lib/providers";
 import { fetchProviderModels, discoverModels, fetchProviders } from "../../lib/gateway-api";
 import { ModelMultiSelect } from "./ModelMultiSelect";
+import { useModelProtocolState } from "./useModelProtocolState";
 import { ProviderPicker } from "./ProviderPicker";
 import { parseOfflineJson, OFFLINE_JSON_EXAMPLE } from "./offlineJson";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -25,6 +26,31 @@ interface AddProviderFlowProps {
 }
 
 type Step = "picker" | "add" | "custom";
+
+/**
+ * ADR-103 D1 wire fields for the next `add_key` call.
+ *
+ * A brand-new provider has no stored selection, so every Responses row counts
+ * as "changed" — which is exactly what makes the first save probe them (D12).
+ * Empty maps are omitted so the Gateway keeps its "untouched" semantics.
+ */
+function protocolPayload(
+  protocols: ReturnType<typeof useModelProtocolState>,
+  models: ModelInfo[],
+): { modelProtocols?: Record<string, string | null>; modelBaseUrls?: Record<string, string> } {
+  const intent = protocols.buildIntent(models);
+  const payload: {
+    modelProtocols?: Record<string, string | null>;
+    modelBaseUrls?: Record<string, string>;
+  } = {};
+  if (Object.keys(intent.model_protocols).length > 0) {
+    payload.modelProtocols = intent.model_protocols;
+  }
+  if (Object.keys(intent.model_base_urls).length > 0) {
+    payload.modelBaseUrls = intent.model_base_urls;
+  }
+  return payload;
+}
 
 /** Self-contained dialog that encapsulates the entire provider-add flow:
  *  picker → add dialog (local/remote) or custom-provider dialog. */
@@ -58,6 +84,10 @@ export function AddProviderFlow({
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [newModelCaps, setNewModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
+  // ADR-103 D11: protocol selection state for the "add provider" step and the
+  // custom-provider step (two independent lists, so two independent states).
+  const newProtocols = useModelProtocolState();
+  const customProtocols = useModelProtocolState();
   const [newExpandedModels, setNewExpandedModels] = useState<Set<string>>(new Set());
   const [newCompactModel, setNewCompactModel] = useState("");
   const [testing, setTesting] = useState(false);
@@ -199,6 +229,7 @@ export function AddProviderFlow({
     setModelsLoading(true);
     fetchModels(providerId).then((models) => {
       setAvailableModels(models);
+      newProtocols.hydrate(models);
       setModelsLoading(false);
     });
   };
@@ -246,6 +277,7 @@ export function AddProviderFlow({
           models: newModels.length > 0 ? newModels : undefined,
           modelCapabilities: newModels.length > 0 ? newModelCaps : undefined,
           compactModel: newCompactModel || undefined,
+          ...protocolPayload(newProtocols, availableModels),
         });
         window.dispatchEvent(new CustomEvent('models-added'));
         onSuccess();
@@ -312,6 +344,7 @@ export function AddProviderFlow({
         models: newModels.length > 0 ? newModels : undefined,
         compactModel: newCompactModel || undefined,
         custom: selectedProviderIsCustom || undefined,
+        ...protocolPayload(newProtocols, availableModels),
       });
       window.dispatchEvent(new CustomEvent('models-added'));
       onSuccess();
@@ -333,6 +366,7 @@ export function AddProviderFlow({
     try {
       const models = await discoverModels(url, probeKey);
       setCustomAvailableModels(models);
+      customProtocols.hydrate(models);
     } catch (e: any) {
       setCustomDiscoverError(e?.message || String(e));
     } finally {
@@ -390,6 +424,7 @@ export function AddProviderFlow({
         modelCapabilities: customModels.length > 0 ? customModelCaps : undefined,
         compactModel: customCompactModel || undefined,
         custom: true,
+        ...protocolPayload(customProtocols, customAvailableModels),
       });
       window.dispatchEvent(new CustomEvent('models-added'));
       onSuccess();
@@ -547,6 +582,14 @@ export function AddProviderFlow({
                   })
                 }
                 showModelCapEditor={selectedProviderIsLocal}
+                protocols={newProtocols}
+                // "Re-verify" needs a saved provider; when this provider
+                // already has keys it can be probed from here too.
+                protocolProviderId={
+                  keys.some((k) => k.provider === selectedProvider)
+                    ? selectedProvider
+                    : undefined
+                }
                 compactModel={newCompactModel}
                 onCompactModelChange={setNewCompactModel}
                 showCompactModel={true}
@@ -748,6 +791,7 @@ export function AddProviderFlow({
                     })
                   }
                   showModelCapEditor={true}
+                  protocols={customProtocols}
                   showCapabilityFilter={false}
                   compactModel={customCompactModel}
                   onCompactModelChange={setCustomCompactModel}

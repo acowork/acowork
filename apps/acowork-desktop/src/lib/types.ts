@@ -1,4 +1,5 @@
 import type { ContextUsageSection } from "./contextUsageBreakdown";
+import type { ProtocolProbe } from "./modelProtocol";
 /**
  * Gateway deployment mode (design doc 24 §8.0 — three-topology model):
  * - "local"  — Desktop spawns/adopts a Gateway on this machine
@@ -1063,6 +1064,16 @@ export interface ModelInfo {
   input_modalities?: string[];
   /** Output modalities */
   output_modalities?: string[];
+
+  // ── ADR-103 D11: protocol surfaces (Gateway-projected, never derived here) ──
+  /** Offline data declaration for this model (`"responses"` / `"completions"`). */
+  shape?: string;
+  /** The protocol the user hand-picked (`undefined` = follow the data). */
+  protocol_selected?: string;
+  /** The protocol actually in effect (D1 gate result). */
+  protocol_active?: string;
+  /** Probe verdict (D10). */
+  protocol_probe?: ProtocolProbe;
 }
 
 /** Provider models response from Gateway API */
@@ -1084,7 +1095,19 @@ export interface ModelEntry {
   default_reasoning_effort?: string;
   /** Input modalities (e.g. "text", "image") */
   input_modalities?: string[];
+  /** ADR-103 D11 protocol surfaces, carried through from `ModelInfo` so the
+   *  chat model dropdown can render the `R` badge without a second fetch. */
+  shape?: string;
+  protocol_selected?: string;
+  protocol_active?: string;
+  protocol_probe?: ProtocolProbe;
 }
+
+/**
+ * ADR-103 D1: per-model protocol intent sent on provider save
+ * (`model id -> protocol`, `null` = clear the selection).
+ */
+export type ModelProtocolsMap = Record<string, string | null>;
 
 /** Provider list entry from Gateway API */
 export interface ProviderListEntry {

@@ -281,6 +281,7 @@
     "readOnlyBanner": "이 리소스는 읽기 전용 권한이므로 변경 사항이 저장되지 않습니다. 권한이 필요하면 소유자에게 요청하세요."
   },
   "chatPanel": {
+    "modelTagResponses": "Responses",
     "sessionLoadFailed": "세션 로드 실패",
     "agentStopped": "{{name}} 중지됨",
     "retry": "재시도",
@@ -759,7 +760,34 @@
       "title": "귀첨 기본 결정 모델",
       "description": "provider 간 요약/증류 후보 모델 순서 목록. 위에서부터 순서대로 시도하며, 모두 사용 불가하면 세션 provider의 compact_model, 이어서 현재 채팅 모델로 대체됩니다.",
       "saveFailed": "저장 실패：{{error}}"
-    }
+    },
+      "protocolSection": "프로토콜",
+      "protocol": "와이어 프로토콜",
+      "protocolFollowData": "데이터 따르기(기본)",
+      "protocolChatCompletions": "Chat Completions",
+      "protocolBaseUrl": "Responses 기본 URL(선택)",
+      "protocolBaseUrlHint": "비워 두면 공급자 URL을 사용합니다. Responses 사용 시에만 적용됩니다.",
+      "shapeResponses": "Responses",
+      "probeButton": "다시 검증",
+      "probeRunning": "검증 중…",
+      "probeVerified": "검증되어 활성화됨(텍스트 + 도구 호출).",
+      "probeDegraded": "활성화되었지만 이 엔드포인트에서는 필드 하나를 생략했습니다.",
+      "probeDeclared": "카탈로그가 Responses 지원을 선언 —— 미검증, 미활성.",
+      "probeNone": "기본 프로토콜을 사용합니다.",
+      "probeBlocked": "선택되었지만 활성화되지 않음",
+      "probeBlockedShort": "⚠ 선택됨·미활성",
+      "probeBlockedReason_unverified": "아직 검증되지 않음 —— '다시 검증'을 누르거나 저장하면 자동 검증됩니다",
+      "probeBlockedReason_failed": "검증 요청이 실패했습니다",
+      "probeBlockedReason_stale": "마지막 검증 이후 공급자 설정이 변경되었습니다",
+      "probeBlockedReason_gate_off": "플랫폼 스위치 llm.responses_api_enabled 가 꺼져 있습니다",
+      "probeBlockedReason_unknown": "저장된 검증 결과를 해석할 수 없습니다",
+      "probeVerifiedTip": "Responses 검증됨: 텍스트와 도구 호출 사용 가능",
+      "probeDegradedTip": "Responses 검증됨(이 엔드포인트에서는 필드 하나 생략)",
+      "probeDeclaredTip": "카탈로그가 Responses 지원을 선언. 미검증, 미활성",
+      "probeLastVerified": "마지막 검증",
+      "probeSendsOneRequest": "이 공급자로 실제 요청 1건을 보냅니다",
+      "probeNeedsSaveFirst": "먼저 공급자를 저장한 뒤 검증하세요",
+      "probeSaveCost": "저장 시 모델 {{models}}개를 검증합니다: 실제 요청 {{requests}}건."
   },
   "harnessMcp": {
     "mcpServers": "MCP 서버",

@@ -190,6 +190,7 @@
     "readOnlyBanner": "You have view-only access to this resource; changes cannot be saved. Contact the owner to request permission."
   },
   "chatPanel": {
+    "modelTagResponses": "Responses",
     "sessionLoadFailed": "Session failed to load",
     "agentStopped": "{{name}} is stopped",
     "retry": "Retry",
@@ -1109,7 +1110,34 @@
       "title": "Global Default Compact Model",
       "description": "Ordered cross-provider candidate list for summarization / distillation. Entries are tried top to bottom; when all are unavailable the runtime falls back to the session provider’s compact_model, then the current chat model.",
       "saveFailed": "Save failed: {{error}}"
-    }
+    },
+      "protocolSection": "Protocol",
+      "protocol": "Wire protocol",
+      "protocolFollowData": "Follow the data (default)",
+      "protocolChatCompletions": "Chat Completions",
+      "protocolBaseUrl": "Responses base URL (optional)",
+      "protocolBaseUrlHint": "Leave empty to use the provider base URL. Only used when Responses is enabled.",
+      "shapeResponses": "Responses",
+      "probeButton": "Re-verify",
+      "probeRunning": "Verifying…",
+      "probeVerified": "Verified and enabled (text + tool calls).",
+      "probeDegraded": "Enabled, but one field had to be dropped for this endpoint.",
+      "probeDeclared": "The catalogue says this model speaks Responses — unverified, not enabled.",
+      "probeNone": "Uses the default protocol.",
+      "probeBlocked": "Selected but not enabled",
+      "probeBlockedShort": "⚠ selected, not enabled",
+      "probeBlockedReason_unverified": "not verified yet — re-verify, or just save to probe automatically",
+      "probeBlockedReason_failed": "the verification request failed",
+      "probeBlockedReason_stale": "the provider configuration changed after the last verification",
+      "probeBlockedReason_gate_off": "the platform switch llm.responses_api_enabled is off",
+      "probeBlockedReason_unknown": "the stored verdict is not readable",
+      "probeVerifiedTip": "Responses verified: text and tool calls work",
+      "probeDegradedTip": "Responses verified, but a field was dropped for this endpoint",
+      "probeDeclaredTip": "Catalogue says Responses; unverified, not enabled",
+      "probeLastVerified": "Last verified",
+      "probeSendsOneRequest": "Sends one real request to this provider",
+      "probeNeedsSaveFirst": "Save the provider first, then verify",
+      "probeSaveCost": "Saving will probe {{models}} model(s): {{requests}} real request(s)."
   },
   "harnessMcp": {
     "mcpServers": "MCP Servers",

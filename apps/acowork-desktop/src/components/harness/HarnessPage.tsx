@@ -17,6 +17,7 @@ import { normalizeMcpConfigInput } from "../../lib/mcpConfigNormalizer";
 import { EmbeddingModelTab } from "./EmbeddingModelTab";
 import { LspTab } from "./LspTab";
 import { ModelMultiSelect, defaultMakeCaps } from "./ModelMultiSelect";
+import { useModelProtocolState } from "./useModelProtocolState";
 import { ProviderPicker } from "./ProviderPicker";
 import { AddProviderFlow } from "./AddProviderFlow";
 import { GlobalCompactModelCard } from "./GlobalCompactModelCard";
@@ -98,6 +99,8 @@ function ProvidersTab() {
 
   // Edit dialog — per-model capabilities state
   const [editModelCaps, setEditModelCaps] = useState<Record<string, ModelCapabilitiesInfo>>({});
+  // ADR-103 D11: per-model protocol selection / base_url / verify state.
+  const editProtocols = useModelProtocolState();
   const [editExpandedModels, setEditExpandedModels] = useState<Set<string>>(new Set());
   const [editCompactModel, setEditCompactModel] = useState("");
 
@@ -251,6 +254,7 @@ function ProvidersTab() {
     // Initialize per-model caps: prefer stored caps from vault (preserves
     // default_reasoning_effort, supports_reasoning, etc.), fall back to
     // live model data or sensible defaults.
+    editProtocols.hydrate(models);
     const storedCaps = keyEntry?.model_capabilities ?? {};
     const caps: Record<string, ModelCapabilitiesInfo> = {};
     for (const modelId of configuredModels) {
@@ -321,6 +325,16 @@ function ProvidersTab() {
       };
       if ((isLocal || isCustom) && editModels.length > 0 && Object.keys(editModelCaps).length > 0) {
         updatePayload.modelCapabilities = editModelCaps;
+      }
+      // ADR-103 D1: per-model protocol intent. Only rows whose selection the
+      // user actually changed are sent, so an untouched model is neither
+      // rewritten nor re-probed (D12.2).
+      const protocolIntent = editProtocols.buildIntent(editAvailableModels);
+      if (Object.keys(protocolIntent.model_protocols).length > 0) {
+        updatePayload.modelProtocols = protocolIntent.model_protocols;
+      }
+      if (Object.keys(protocolIntent.model_base_urls).length > 0) {
+        updatePayload.modelBaseUrls = protocolIntent.model_base_urls;
       }
       // Include compact_model if set; explicitly null otherwise so the
       // Gateway clears the field when the user empties it.
@@ -652,6 +666,8 @@ function ProvidersTab() {
                       })
                     }
                     showModelCapEditor={editIsLocal || editIsCustom}
+                    protocols={editProtocols}
+                    protocolProviderId={showEditDialog}
                     compactModel={editCompactModel}
                     onCompactModelChange={setEditCompactModel}
                     showCompactModel={true}

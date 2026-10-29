@@ -281,6 +281,7 @@
     "readOnlyBanner": "你目前只有檢視權限,修改不會被儲存。如需權限請聯絡資源擁有者。"
   },
   "chatPanel": {
+    "modelTagResponses": "Responses",
     "sessionLoadFailed": "工作階段載入失敗",
     "agentStopped": "{{name}} 已停止",
     "retry": "重試",
@@ -757,7 +758,34 @@
       "title": "全域預設精簡模型",
       "description": "跨 provider 的蒸餾/摘要候選模型有序清單。依序逐一嘗試；全部不可用時回退到目前工作階段 provider 的 compact_model，再回退到目前的對話模型。",
       "saveFailed": "儲存失敗：{{error}}"
-    }
+    },
+      "protocolSection": "協定",
+      "protocol": "線協定",
+      "protocolFollowData": "跟隨資料（預設）",
+      "protocolChatCompletions": "Chat Completions",
+      "protocolBaseUrl": "Responses 端點位址（選填）",
+      "protocolBaseUrlHint": "留空則使用 provider 的位址；僅在啟用 Responses 時生效。",
+      "shapeResponses": "Responses",
+      "probeButton": "重新驗證",
+      "probeRunning": "驗證中…",
+      "probeVerified": "已驗證並啟用（文字 + 工具呼叫）。",
+      "probeDegraded": "已啟用，但此端點需要丟棄一個欄位。",
+      "probeDeclared": "資料宣告此模型支援 Responses —— 未驗證，未啟用。",
+      "probeNone": "使用預設協定。",
+      "probeBlocked": "已選擇但未啟用",
+      "probeBlockedShort": "⚠ 已選未啟用",
+      "probeBlockedReason_unverified": "尚未驗證 —— 可點「重新驗證」，或直接儲存以自動探測",
+      "probeBlockedReason_failed": "驗證請求失敗",
+      "probeBlockedReason_stale": "上次驗證之後 provider 設定已變更",
+      "probeBlockedReason_gate_off": "平台開關 llm.responses_api_enabled 未開啟",
+      "probeBlockedReason_unknown": "已存的驗證結果無法辨識",
+      "probeVerifiedTip": "Responses 已驗證：文字與工具呼叫皆可用",
+      "probeDegradedTip": "Responses 已驗證，但此端點丟棄了一個欄位",
+      "probeDeclaredTip": "資料宣告支援 Responses；未驗證，未啟用",
+      "probeLastVerified": "上次驗證",
+      "probeSendsOneRequest": "將對此 provider 送出 1 次真實請求",
+      "probeNeedsSaveFirst": "請先儲存 provider，再驗證",
+      "probeSaveCost": "儲存將探測 {{models}} 個模型：共 {{requests}} 次真實請求。"
   },
   "harnessMcp": {
     "mcpServers": "MCP 伺服器",

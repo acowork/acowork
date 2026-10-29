@@ -86,6 +86,7 @@ import { AttachedContextChips } from "./AttachedContextChips";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
+import { deriveProtocolBadge, showsResponsesMark } from "../../lib/modelProtocol";
 
 // CHAT_BOTTOM_THRESHOLD_PX removed - pinned-to-bottom detection is now
 // owned by useScrollController's state machine (PIN_THRESHOLD_PX).
@@ -3251,6 +3252,51 @@ export function ModelMenu({
                             {m.tool_call && <Wrench size={10} className="text-text-tertiary" />}
                             {m.reasoning && <Brain size={10} className="text-purple-400" />}
                             {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
+                            {/* ADR-103 D11 position 2 — the `R` letter badge.
+                                A letter has no meaning for a screen reader, so
+                                it always carries title + aria-label. The badge
+                                is read-only: switching protocol goes through
+                                the per-model dropdown (D11 MUST NOT). */}
+                            {(() => {
+                              // `m` is structurally typed by
+                              // `groupModelsByProvider`; hand the four protocol
+                              // fields over explicitly.
+                              const badge = deriveProtocolBadge({
+                                shape: (m as Partial<ModelEntry>).shape,
+                                protocol_selected: (m as Partial<ModelEntry>).protocol_selected,
+                                protocol_active: (m as Partial<ModelEntry>).protocol_active,
+                                protocol_probe: (m as Partial<ModelEntry>).protocol_probe,
+                              });
+                              if (!showsResponsesMark(badge)) return null;
+                              const label =
+                                badge.kind === "verified"
+                                  ? t("harness.probeVerifiedTip")
+                                  : badge.kind === "degraded"
+                                    ? t("harness.probeDegradedTip")
+                                    : t("harness.probeDeclaredTip");
+                              return (
+                                <span
+                                  role="img"
+                                  // A bare letter is meaningless to a screen
+                                  // reader (D11 accessibility rule).
+                                  aria-label={t("chatPanel.modelTagResponses")}
+                                  title={label}
+                                  className={
+                                    badge.kind === "declared"
+                                      ? "pl-0.5 text-9 font-semibold text-text-tertiary"
+                                      : "pl-0.5 text-9 font-semibold text-text-secondary"
+                                  }
+                                >
+                                  R
+                                  {badge.kind === "degraded" && (
+                                    <span
+                                      aria-hidden="true"
+                                      className="ml-0.5 inline-block h-1 w-1 rounded-full bg-amber-500 align-middle"
+                                    />
+                                  )}
+                                </span>
+                              );
+                            })()}
                           </span>
                         </span>
                         {/* Trailing cluster. The check box is a fixed w-3 slot

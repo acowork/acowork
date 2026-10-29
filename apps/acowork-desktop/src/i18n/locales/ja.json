@@ -281,6 +281,7 @@
     "readOnlyBanner": "このリソースは閲覧権限のみのため、変更は保存されません。必要な場合は所有者に権限を依頼してください。"
   },
   "chatPanel": {
+    "modelTagResponses": "Responses",
     "sessionLoadFailed": "セッションの読み込みに失敗しました",
     "agentStopped": "{{name}} は停止しています",
     "retry": "再試行",
@@ -758,7 +759,34 @@
       "title": "グローバルデフォルト精简モデル",
       "description": "プロバイダ横断の蒸留/要約候補モデルの順序付きリスト。上から順に試行し、すべて利用できない場合はセッションのプロバイダの compact_model、次に現在のチャットモデルにフォールバックします。",
       "saveFailed": "保存に失敗しました：{{error}}"
-    }
+    },
+      "protocolSection": "プロトコル",
+      "protocol": "ワイヤプロトコル",
+      "protocolFollowData": "データに従う（既定）",
+      "protocolChatCompletions": "Chat Completions",
+      "protocolBaseUrl": "Responses のベース URL（任意）",
+      "protocolBaseUrlHint": "空欄ならプロバイダーの URL を使用。Responses 有効時のみ使われます。",
+      "shapeResponses": "Responses",
+      "probeButton": "再検証",
+      "probeRunning": "検証中…",
+      "probeVerified": "検証済みで有効（テキスト + ツール呼び出し）。",
+      "probeDegraded": "有効ですが、このエンドポイントでは 1 つのフィールドを省いています。",
+      "probeDeclared": "カタログは Responses 対応を宣言 —— 未検証・未有効。",
+      "probeNone": "既定のプロトコルを使用。",
+      "probeBlocked": "選択済みだが未有効",
+      "probeBlockedShort": "⚠ 選択済み・未有効",
+      "probeBlockedReason_unverified": "未検証 —— 「再検証」を押すか、保存で自動検証されます",
+      "probeBlockedReason_failed": "検証リクエストが失敗しました",
+      "probeBlockedReason_stale": "前回の検証後にプロバイダー設定が変更されました",
+      "probeBlockedReason_gate_off": "プラットフォームスイッチ llm.responses_api_enabled が無効です",
+      "probeBlockedReason_unknown": "保存された検証結果を解釈できません",
+      "probeVerifiedTip": "Responses 検証済み：テキストとツール呼び出しが利用可能",
+      "probeDegradedTip": "Responses 検証済み（このエンドポイントでは 1 フィールドを省略）",
+      "probeDeclaredTip": "カタログは Responses 対応を宣言。未検証・未有効",
+      "probeLastVerified": "前回の検証",
+      "probeSendsOneRequest": "このプロバイダーへ実際のリクエストを 1 件送信します",
+      "probeNeedsSaveFirst": "先にプロバイダーを保存してから検証してください",
+      "probeSaveCost": "保存すると {{models}} 件のモデルを検証します：実際のリクエスト {{requests}} 件。"
   },
   "harnessMcp": {
     "mcpServers": "MCP サーバー",

@@ -206,6 +206,39 @@ describe("chatStore.loadAvailableModels", () => {
     expect(useChatStore.getState().providerAccounts).toBe(firstAccounts);
   });
 
+  it("carries the ADR-103 protocol fields only for models that have them", async () => {
+    // The chat model dropdown renders the `R` badge from these fields, so a
+    // Responses model must carry them — and a plain model must keep exactly
+    // the pre-ADR-103 shape (absent keys, not `undefined` values), which is
+    // what the toStrictEqual assertions above pin.
+    mockInvoke.mockResolvedValue([
+      { provider: "acme", account_id: "acct-1", models: ["acme-large", "acme-small"] },
+    ]);
+    mockFetchProviderModels.mockResolvedValue({
+      models: [
+        {
+          id: "acme-large",
+          shape: "responses",
+          protocol_selected: "responses",
+          protocol_active: "responses",
+          protocol_probe: { state: "verified" },
+        },
+        { id: "acme-small" },
+      ],
+    });
+
+    await useChatStore.getState().loadAvailableModels();
+
+    const byName = new Map(useChatStore.getState().availableModels.map((m) => [m.name, m]));
+    expect(byName.get("acme-large")).toMatchObject({
+      shape: "responses",
+      protocol_selected: "responses",
+      protocol_active: "responses",
+      protocol_probe: { state: "verified" },
+    });
+    expect("protocol_active" in (byName.get("acme-small") as ModelEntry)).toBe(false);
+  });
+
   it("keeps the previous inventory when the vault read fails", async () => {
     const previous: ModelEntry[] = [{ name: "gpt-4o", provider: "openai" }];
     useChatStore.setState({ availableModels: previous });

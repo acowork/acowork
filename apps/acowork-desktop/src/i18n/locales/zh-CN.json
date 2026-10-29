@@ -284,6 +284,7 @@
     "readOnlyBanner": "你当前只有查看权限,修改不会被保存。如需权限请联系资源所有者。"
   },
   "chatPanel": {
+    "modelTagResponses": "Responses",
     "sessionLoadFailed": "Session 加载失败",
     "agentStopped": "{{name}} 已停止",
     "retry": "重试",
@@ -835,7 +836,34 @@
       "title": "全局默认精简模型",
       "description": "跨 provider 的蒸馏/摘要候选模型有序列表。按顺序逐个尝试；全部不可用时回退到当前会话 provider 的 compact_model，再回退到当前聊天模型。",
       "saveFailed": "保存失败：{{error}}"
-    }
+    },
+      "protocolSection": "协议",
+      "protocol": "线协议",
+      "protocolFollowData": "跟随数据（默认）",
+      "protocolChatCompletions": "Chat Completions",
+      "protocolBaseUrl": "Responses 端点地址（可选）",
+      "protocolBaseUrlHint": "留空则使用 provider 的地址；仅在启用 Responses 时生效。",
+      "shapeResponses": "Responses",
+      "probeButton": "重新验证",
+      "probeRunning": "验证中…",
+      "probeVerified": "已验证并启用（文本 + 工具调用）。",
+      "probeDegraded": "已启用，但此端点需要丢弃一个字段。",
+      "probeDeclared": "数据声明该模型支持 Responses —— 未验证，未启用。",
+      "probeNone": "使用默认协议。",
+      "probeBlocked": "已选择但未启用",
+      "probeBlockedShort": "⚠ 已选未启用",
+      "probeBlockedReason_unverified": "尚未验证 —— 可点「重新验证」，或直接保存以自动探测",
+      "probeBlockedReason_failed": "验证请求失败",
+      "probeBlockedReason_stale": "上次验证之后 provider 配置已变更",
+      "probeBlockedReason_gate_off": "平台开关 llm.responses_api_enabled 未开启",
+      "probeBlockedReason_unknown": "已存的验证结果无法识别",
+      "probeVerifiedTip": "Responses 已验证：文本与工具调用均可用",
+      "probeDegradedTip": "Responses 已验证，但此端点丢弃了一个字段",
+      "probeDeclaredTip": "数据声明支持 Responses；未验证，未启用",
+      "probeLastVerified": "上次验证",
+      "probeSendsOneRequest": "将向该 provider 发送 1 次真实请求",
+      "probeNeedsSaveFirst": "请先保存 provider，再验证",
+      "probeSaveCost": "保存将探测 {{models}} 个模型：共 {{requests}} 次真实请求。"
   },
   "harnessMcp": {
     "mcpServers": "MCP 服务器",
