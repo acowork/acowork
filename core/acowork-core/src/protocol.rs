@@ -1887,6 +1887,17 @@ pub struct McpServerConfigDef {
     /// Empty vec => usable without any secret.
     #[serde(default)]
     pub required_secrets: Vec<String>,
+    /// Where this catalog entry came from (ADR-104).
+    ///
+    /// Provenance, not behaviour: nothing reads it to decide what to run.
+    /// It exists so a user staring at a surprise entry in the catalog can
+    /// tell "I added this" from "a package suggested it"
+    /// (`agent-package:<agent_id>`) from "a preset scan created it"
+    /// (`preset:<preset_id>`), and so the Tools panel can label a
+    /// package-suggested install without keeping its own side table.
+    /// Format: `<kind>:<id>`, `None` = added by hand / pre-ADR-104 entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// MCP transport type (wire format).
