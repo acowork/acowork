@@ -15,6 +15,7 @@ import { Tooltip } from "../common/Tooltip";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
+import { COUNT_BADGE_NEUTRAL_CN } from "../common/sidebarCountBadge";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor, MessagesSquare } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -906,7 +907,7 @@ export function AgentList({ width }: AgentListProps) {
                 />
                 <MessagesSquare className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
                 <span className="truncate">{t("agentList.projectGroupsBanner")}</span>
-                <span className="ml-auto text-xs font-normal opacity-60">{visibleGroupsChats.length}</span>
+                <span className={cn("ml-auto", COUNT_BADGE_NEUTRAL_CN)}>{visibleGroupsChats.length}</span>
               </button>
             </div>
             {!groupsCollapsed && visibleGroupsChats.map((g, index) => {

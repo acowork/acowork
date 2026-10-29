@@ -45,6 +45,7 @@ import {
 import type { DirectoryUser, UserAccount } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
+import { COUNT_BADGE_NEUTRAL_CN } from "../common/sidebarCountBadge";
 import { UserAvatar } from "../common/UserAvatar";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import {
@@ -321,7 +322,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
               the label beside it already names the group. */}
           <Users className="h-3 w-3 shrink-0 opacity-70" aria-hidden />
           <span className="truncate">{t("userList.title")}</span>
-          <span className="ml-auto text-xs font-normal opacity-60">{rows.length}</span>
+          <span className={cn("ml-auto", COUNT_BADGE_NEUTRAL_CN)}>{rows.length}</span>
         </button>
       </div>
 
