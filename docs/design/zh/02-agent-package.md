@@ -253,6 +253,9 @@ runtime_version = "0.1.0"
 system = false
 dev = false
 
+# ADR-104：属性标签（小写 kebab，2-32 字符，≤12 个）
+labels = ["weather", "daily-life"]
+
 # 头像: 优先使用包内图片(assets/avatar.png), 否则用内置图标("icon-05" / "5")
 # 都不设置则首次安装时随机一个内置图标
 # avatar = "assets/avatar.png"
@@ -298,6 +301,15 @@ fallback_order = ["openai", "claude"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+# ADR-104：agent_config.json 的行为默认值。全空则不写本段（= 作者没有意见）。
+# 只允许行为旋钮，安全阈值 / 宿主配额 / 用户偏好不在白名单内。
+[config]
+temperature = 0.7
+context_window = 128000
+max_output_tokens = 8192
+max_iterations = 40
+compression_ratio_threshold = 0.9
+
 [memory]
 enabled = true
 retention_days = 90
@@ -325,9 +337,26 @@ auth_type = "bearer"
 max_results = 5
 score_threshold = 0.7
 
+# ADR-104：推荐 MCP 服务器。推荐 ≠ 安装 —— 落地到 agent_mcp.json 的
+# recommended 列表，由用户在工具面板确认安装与启用（ADR-090）。
+# 三种形态互斥：preset / hosted / transport+url；禁止内联 stdio。
+
+[[mcp_servers]]
+preset = "brave-search"                 # 平台预设 id（Gateway 注册表）
+why = "联网检索最新天气资料"              # 展示给用户看，原样渲染
+required_secrets = ["BRAVE_API_KEY"]     # 缺密钥时该卡片点名提示
+tools = ["brave_web_search"]             # 工具子集；启用后成为初始勾选集
+required = false                         # 软必需：未满足只提示"能力受限"
+
+[[mcp_servers]]
+hosted = "memory"                        # Gateway 托管服务（pm / doc / memory）
+why = "记住用户所在城市"
+
 # capabilities 用映射语法
 [capabilities.query_weather]
 description = "查询天气信息"
+# ADR-104：本能力由哪些技能实现（多对多）。引用不存在的技能是 error。
+skills = ["weather-query"]
 
 [capabilities.query_weather.input_schema]
 type = "object"
@@ -490,6 +519,29 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | intent | `intent:send:com.example.calendar` | intent_send |
 | shell | （shell 工具无需声明 permission，由 Approval Gate 控制） | shell |
 | identity | （identity_store 仅系统 Agent 可用，通过 platform.system 声明授权） | identity_store |
+
+### 3.3 能力声明面（ADR-104）
+
+manifest 是**能力声明面**，四类声明各有明确语义与落地路径（详见 [ADR-104](../adr/zh/ADR-104-agent-manifest-declaration-surface.md)）：
+
+| 声明 | 语义 | 落地 |
+|---|---|---|
+| `[[tools]]` | 内置工具 | 该 Agent 的内置工具开关（`builtin_tools`） |
+| `[[mcp_servers]]` | **推荐** 的 MCP 服务器 | `agent_mcp.json.recommended`，由用户确认安装/启用 |
+| `[capabilities.<action>].skills` | 该能力由哪些技能实现 | intent 寻址 + 声明图校验 |
+| `[config]` | `agent_config.json` 的行为默认值 | 只回填 `None` 字段，永不覆盖用户值 |
+
+**推荐 ≠ 安装。** `[[mcp_servers]]` 只写 `recommended` / `dismissed`，从不写 `catalog` / `local` / `active_names`。用户确认后，服务器进入**本机共享的 MCP 目录**（带 `origin`：`preset:<id>` / `agent-package:<agent_id>#<key>` / `user`），其他 Agent 看得到但不会自动激活。
+
+**能力 ≠ 技能。** 技能是内部流程，不对外暴露；能力是对外契约，其他 Agent 通过 intent 寻址。一个能力可由多个技能实现，一个技能可服务多个能力。
+
+**声明图校验**（`AgentManifest::validate_graph`）：
+
+1. `capabilities.*.skills` 必须能在包内解析 → **error**，打包（`acowork-sign`）与安装（`acowork-node`）都拒绝。
+2. 技能的 `tool_deps` 必须可从 `[[tools]]` ∪ `[[mcp_servers]].tools` 到达，或属于平台托管 MCP（`mcp_<server>__<tool>`，server ∈ {memory, pm, doc}）→ 否则 **warning**，不阻断。
+
+**默认值 ≠ 覆盖。** `[config]` 的投影点是 `AgentManifest::config_defaults()`（`[config]` 优先、缺省回退 `[llm].temperature` / `[llm].context_window`），由 `fill_if_empty()` 只填 `None` 字段且幂等。`[config].max_output_tokens` 是**配置级上限**，与 `[llm].max_tokens` 的**请求级覆盖**语义是两条独立通道。
+
 
 ## 4. 设计决策记录
 
