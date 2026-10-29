@@ -154,8 +154,13 @@ pub struct AddProviderRequest {
     /// the only field that can make `responses` effective, and only after the
     /// probe verdict gates it in (D1) — writing it here records *intent*, not
     /// an effective change.
+    ///
+    /// A `null` value means "clear the selection for this model" (the UI's
+    /// "follow the data" option), which restores the npm-derived default and
+    /// drops the now-meaningless probe verdict. An absent key leaves the
+    /// stored value untouched.
     #[serde(default)]
-    pub model_protocols: Option<HashMap<String, ProtocolType>>,
+    pub model_protocols: Option<HashMap<String, Option<ProtocolType>>>,
     /// ADR-103 D10.3: per-model base URL override (`model id -> url`), for
     /// providers whose Responses endpoint differs from the provider default.
     #[serde(default)]
@@ -212,9 +217,10 @@ pub struct UpdateProviderRequest {
     /// ADR-103 D1: provider-level protocol intent (see `AddProviderRequest`).
     #[serde(default)]
     pub protocol: Option<ProtocolType>,
-    /// ADR-103 D1: per-model protocol intent (`model id -> protocol`).
+    /// ADR-103 D1: per-model protocol intent (`model id -> protocol`);
+    /// `null` clears the selection for that model (see `AddProviderRequest`).
     #[serde(default)]
-    pub model_protocols: Option<HashMap<String, ProtocolType>>,
+    pub model_protocols: Option<HashMap<String, Option<ProtocolType>>>,
     /// ADR-103 D10.3: per-model base URL override (`model id -> url`).
     #[serde(default)]
     pub model_base_urls: Option<HashMap<String, String>>,
@@ -1061,7 +1067,7 @@ fn carry_over_protocol_state(
 fn apply_protocol_intent(
     item: &mut acowork_core::protocol::ProviderListItem,
     protocol: Option<ProtocolType>,
-    model_protocols: Option<&HashMap<String, ProtocolType>>,
+    model_protocols: Option<&HashMap<String, Option<ProtocolType>>>,
     model_base_urls: Option<&HashMap<String, String>>,
 ) {
     if let Some(protocol) = protocol {
@@ -1070,7 +1076,16 @@ fn apply_protocol_intent(
 
     for model in &mut item.models {
         if let Some(protocol) = model_protocols.and_then(|m| m.get(&model.id)) {
-            model.protocol_type = Some(protocol.clone());
+            match protocol {
+                Some(protocol) => model.protocol_type = Some(protocol.clone()),
+                // "Follow the data": the user withdrew the selection, so the
+                // probe verdict that gated it is meaningless — drop it rather
+                // than leaving a stale yellow badge behind (D11).
+                None => {
+                    model.protocol_type = None;
+                    model.protocol_probe = None;
+                }
+            }
         }
         if let Some(url) = model_base_urls.and_then(|m| m.get(&model.id)) {
             let trimmed = url.trim();

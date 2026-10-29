@@ -598,6 +598,92 @@ async fn explicit_probe_reports_unknown_models_as_not_found() {
     assert_eq!(err.code, 404);
 }
 
+/// D11 "follow the data": clearing a model's protocol selection must restore
+/// the inherited default AND drop the now-meaningless verdict, without probing.
+#[tokio::test]
+async fn clearing_the_selection_drops_the_verdict_without_probing() {
+    let dir = temp_dir("clear-selection");
+    let state = state_with(&dir, true).await;
+    let mut server = mockito::Server::new_async().await;
+    mount_healthy(&mut server);
+
+    let _ = add_provider(
+        State(state.clone()),
+        Json(add_body(&server.url(), &[MODEL], &[MODEL])),
+    )
+    .await
+    .expect("first save");
+    assert!(
+        persisted_provider(&dir).models[0].protocol_probe.is_some(),
+        "precondition: the first save left a verdict behind"
+    );
+
+    // From here the selection is withdrawn: nothing is selected, so nothing may
+    // be probed.
+    server.reset();
+    let no_probe = server.mock("POST", "/responses").expect(0).create();
+
+    let update: UpdateProviderRequest = serde_json::from_value(json!({
+        "models": [MODEL],
+        "model_protocols": { MODEL: null },
+    }))
+    .expect("a null selection must deserialize (clear request)");
+    let Json(response) = update_provider(
+        State(state.clone()),
+        Path(PROVIDER.to_string()),
+        Json(update),
+    )
+    .await
+    .expect("clearing the selection saves");
+
+    assert!(response.probes.is_empty(), "clearing probes nothing");
+    no_probe.assert();
+
+    let row = persisted_provider(&dir);
+    let model = &row.models[0];
+    assert_eq!(model.protocol_type, None, "selection withdrawn");
+    assert_eq!(
+        model.protocol_probe, None,
+        "the verdict gated a selection that no longer exists — it must not linger"
+    );
+}
+
+/// D11 data contract: `GET /api/models/{provider}` must carry all four protocol
+/// fields, with `protocol_active` following the D1 verdict rather than the
+/// selection.
+#[tokio::test]
+async fn model_list_projects_selection_verdict_and_active_protocol() {
+    let dir = temp_dir("projection");
+    let state = state_with(&dir, true).await;
+    let mut server = mockito::Server::new_async().await;
+    mount_healthy(&mut server);
+
+    let _ = add_provider(
+        State(state.clone()),
+        Json(add_body(&server.url(), &[MODEL], &[MODEL])),
+    )
+    .await
+    .expect("save");
+
+    let mut models = crate::http::models_api::resolve_provider_models(&state, PROVIDER)
+        .await
+        .expect("model list resolves")
+        .models;
+    crate::http::models_api::annotate_protocol_fields(&state, PROVIDER, &mut models).await;
+
+    let row = models.iter().find(|m| m.id == MODEL).expect("model row");
+    assert_eq!(row.protocol_selected.as_deref(), Some("responses"));
+    assert_eq!(
+        row.protocol_active.as_deref(),
+        Some("responses"),
+        "a verified verdict activates the selection"
+    );
+    assert_eq!(
+        row.protocol_probe.as_ref().map(|p| p.state.clone()),
+        Some(ProbeState::Verified)
+    );
+}
+
 /// D10.4: probe usage must not reach ADR-027/066 budget accounting.
 ///
 /// Structural assertion — the probe modules never touch a usage channel. If a

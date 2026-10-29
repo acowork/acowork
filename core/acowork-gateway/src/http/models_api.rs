@@ -64,7 +64,12 @@ const CN_VARIANT_PROVIDERS: &[&str] = &["minimax", "zhipuai", "moonshotai", "ali
 // ── Response types ────────────────────────────────────────────────────
 
 /// A single model from models.dev
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Default` exists so the many "discovery placeholder" construction sites
+/// (which fill only `id` / `name`) do not have to enumerate every optional
+/// field — new capability/protocol fields can then be added without touching
+/// them all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
@@ -104,6 +109,36 @@ pub struct ModelInfo {
     /// Output modalities (e.g. ["text"])
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_modalities: Option<Vec<String>>,
+
+    // ── ADR-103 D11: the three protocol surfaces the UI consumes ──────────
+    //
+    // These three (plus `protocol_selected`, see below) are filled in by
+    // [`project_model_protocol`] — the single boundary between the Gateway's
+    // protocol decision and the frontend. The frontend MUST NOT derive any of
+    // them from offline data itself (D11 red line).
+
+    /// Offline declaration for this (provider, model): `"responses"` /
+    /// `"completions"` / `None` (not tagged). A pure UI hint — it never
+    /// participates in the D1 gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// The protocol the user hand-picked for this model (`provider_list.json`
+    /// `models[].protocol_type`). `None` = "follow the data" (no selection).
+    ///
+    /// Not part of D11's original three fields, but required by it: without
+    /// the raw selection the dropdown cannot show "Responses" when the choice
+    /// failed the gate, and the yellow "selected but not enabled" badge (D11)
+    /// cannot be derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_selected: Option<String>,
+    /// The protocol that is actually in effect right now (D1 result: the
+    /// selection gated by the probe verdict and the global switch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_active: Option<String>,
+    /// Probe verdict for this model (D10). `None` when the model was never
+    /// probed or is not configured on the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_probe: Option<acowork_core::protocol::ProtocolProbe>,
 }
 
 /// Provider info with its models
@@ -190,20 +225,7 @@ async fn discover_models_from_url(
             Some(ModelInfo {
                 id: id.to_string(),
                 name: id.to_string(),
-                family: None,
-                reasoning: None,
-                tool_call: None,
-                attachment: None,
-                temperature: None,
-                release_date: None,
-                context_window: None,
-                max_tokens: None,
-                max_input_tokens: None,
-                knowledge: None,
-                input_cost: None,
-                output_cost: None,
-                input_modalities: None,
-                output_modalities: None,
+                ..Default::default()
             })
         })
         .collect();
@@ -863,6 +885,12 @@ fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect()
                 }),
+            // ADR-103 D11: offline shape declaration (pure UI hint).
+            shape: model_data
+                .get("shape")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            ..Default::default()
         };
         models.push(model);
     }
@@ -1046,23 +1074,39 @@ async fn list_all_providers(
 /// stored in provider_list.json so the edit dialog can still show configured models.
 ///
 /// For remote providers, returns offline data only.
+///
+/// The ADR-103 D11 protocol fields (`shape` / `protocol_selected` /
+/// `protocol_active` / `protocol_probe`) are projected onto every row here —
+/// after resolution, before responding — so no resolution path can forget them.
 async fn get_provider_models(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let mut resp = resolve_provider_models(&state, &provider_id).await?;
+    annotate_protocol_fields(&state, &provider_id, &mut resp.models).await;
+    Ok(Json(resp))
+}
+
+/// Resolve the model list for one provider (see [`get_provider_models`] for the
+/// resolution order). Returns the row set before the ADR-103 protocol
+/// projection.
+pub(crate) async fn resolve_provider_models(
+    state: &AppState,
+    provider_id: &str,
+) -> Result<ProviderModels, (StatusCode, Json<serde_json::Value>)> {
     // 0. For local providers, try querying the running server first
-    if is_local_provider(&provider_id) {
-        if let Some(models) = fetch_local_server_models(&provider_id).await {
+    if is_local_provider(provider_id) {
+        if let Some(models) = fetch_local_server_models(provider_id).await {
             let name = LOCAL_PROVIDERS
                 .iter()
                 .find(|(pid, _, _)| *pid == provider_id)
                 .map(|(_, n, _)| n.to_string())
-                .unwrap_or_else(|| provider_id.clone());
-            return Ok(Json(ProviderModels {
-                id: provider_id,
+                .unwrap_or_else(|| provider_id.to_string());
+            return Ok(ProviderModels {
+                id: provider_id.to_string(),
                 name,
                 models,
-            }));
+            });
         }
         // Server unreachable — offline data is meaningless for local
         // providers (user didn't download those models), return empty.
@@ -1074,12 +1118,12 @@ async fn get_provider_models(
             .iter()
             .find(|(pid, _, _)| *pid == provider_id)
             .map(|(_, n, _)| n.to_string())
-            .unwrap_or_else(|| provider_id.clone());
-        return Ok(Json(ProviderModels {
-            id: provider_id,
+            .unwrap_or_else(|| provider_id.to_string());
+        return Ok(ProviderModels {
+            id: provider_id.to_string(),
             name,
             models: vec![],
-        }));
+        });
     }
 
     // 1. For custom providers, discover models live from the stored base_url.
@@ -1114,7 +1158,7 @@ async fn get_provider_models(
                 cfg.models.iter().map(|m| m.id.clone()).collect();
 
             // Retrieve the decrypted API key from Vault.
-            let api_key = gw.vault.get_key(&provider_id).ok();
+            let api_key = gw.vault.get_key(provider_id).ok();
 
             // Drop the read lock before making the outbound HTTP request
             // to avoid holding it during the 5-second discovery timeout.
@@ -1158,11 +1202,11 @@ async fn get_provider_models(
                             }
                         }
                     }
-                    return Ok(Json(ProviderModels {
-                        id: provider_id,
+                    return Ok(ProviderModels {
+                        id: provider_id.to_string(),
                         name: provider_name,
                         models,
-                    }));
+                    });
                 }
                 Err(e) => {
                     // Discovery failed (server down, auth error, etc.).
@@ -1195,34 +1239,35 @@ async fn get_provider_models(
                                 output_cost: None,
                                 input_modalities: caps.and_then(|c| c.modalities.as_ref()).map(|m| m.input.clone()),
                                 output_modalities: caps.and_then(|c| c.modalities.as_ref()).map(|m| m.output.clone()),
+                                ..Default::default()
                             }
                         })
                         .collect();
-                    return Ok(Json(ProviderModels {
-                        id: provider_id,
+                    return Ok(ProviderModels {
+                        id: provider_id.to_string(),
                         name: provider_name,
                         models: fallback_models,
-                    }));
+                    });
                 }
             }
         }
     }
 
     // 2. Try offline data (instant, no network)
-    if let Some((name, models)) = resolve_provider(&offline_providers(), &provider_id) {
-        return Ok(Json(ProviderModels {
-            id: provider_id,
+    if let Some((name, models)) = resolve_provider(&offline_providers(), provider_id) {
+        return Ok(ProviderModels {
+            id: provider_id.to_string(),
             name,
             models,
-        }));
+        });
     }
 
     // 3. Provider not found — return empty model list
-    Ok(Json(ProviderModels {
-        id: provider_id.clone(),
-        name: provider_id,
+    Ok(ProviderModels {
+        id: provider_id.to_string(),
+        name: provider_id.to_string(),
         models: vec![],
-    }))
+    })
 }
 
 /// Try to discover models from a running local provider server.
@@ -1276,20 +1321,7 @@ async fn fetch_lmstudio_models(client: &reqwest::Client, base_url: &str) -> Opti
                 Some(ModelInfo {
                     id: id.to_string(),
                     name: id.to_string(),
-                    family: None,
-                    reasoning: None,
-                    tool_call: None,
-                    attachment: None,
-                    temperature: None,
-                    release_date: None,
-                    context_window: None,
-                    max_tokens: None,
-                    max_input_tokens: None,
-                    knowledge: None,
-                    input_cost: None,
-                    output_cost: None,
-                    input_modalities: None,
-                    output_modalities: None,
+                    ..Default::default()
                 })
             })
             .collect(),
@@ -1316,20 +1348,7 @@ async fn fetch_ollama_models(client: &reqwest::Client, base_url: &str) -> Option
                 Some(ModelInfo {
                     id: id.clone(),
                     name: id,
-                    family: None,
-                    reasoning: None,
-                    tool_call: None,
-                    attachment: None,
-                    temperature: None,
-                    release_date: None,
-                    context_window: None,
-                    max_tokens: None,
-                    max_input_tokens: None,
-                    knowledge: None,
-                    input_cost: None,
-                    output_cost: None,
-                    input_modalities: None,
-                    output_modalities: None,
+                    ..Default::default()
                 })
             })
             .collect(),
@@ -1432,6 +1451,15 @@ fn enrich_model_from_offline(model: &mut ModelInfo) {
                             .filter_map(|v| v.as_str().map(|s| s.to_string()))
                             .collect()
                     });
+            }
+            // ADR-103 D11: offline shape declaration is a model property, so it
+            // travels with the capability enrichment (pure UI hint; never
+            // participates in the D1 gate).
+            if model.shape.is_none() {
+                model.shape = model_data
+                    .get("shape")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
             }
             return; // Found the best match, stop searching
         }
@@ -1650,6 +1678,74 @@ pub fn resolve_protocol(
         None
     };
     (effective, base_url)
+}
+
+// ── ADR-103 D11: the protocol projection consumed by the frontend ─────
+
+/// Fill the four ADR-103 protocol fields on one model row (D11).
+///
+/// Single boundary between the Gateway's protocol decision and the UI:
+/// `shape` comes from the offline catalog (filled during enrichment), the
+/// selection / probe verdict come from `provider_list.json`, and
+/// `protocol_active` is [`resolve_protocol`]'s D1 verdict — never re-derived
+/// by the caller (D11 red line: the frontend MUST NOT compute protocol).
+///
+/// A model that is not configured on the provider keeps every protocol field
+/// `None`: it has no selection and no verdict, so the UI shows only the
+/// offline `shape` hint (D11 gray `R`).
+pub fn project_model_protocol(
+    model: &mut ModelInfo,
+    provider: Option<&acowork_core::protocol::ProviderListItem>,
+    responses_api_enabled: bool,
+) {
+    let Some(provider) = provider else {
+        return;
+    };
+    let Some(entry) = provider.models.iter().find(|m| m.id == model.id) else {
+        return;
+    };
+    model.protocol_selected = entry.protocol_type.as_ref().map(|p| p.to_string());
+    model.protocol_probe = entry.protocol_probe.clone();
+    let (effective, _) = resolve_protocol(provider, &model.id, responses_api_enabled);
+    model.protocol_active = Some(effective.to_string());
+}
+
+/// Snapshot the two inputs [`project_model_protocol`] needs, without holding
+/// the Gateway lock across the handler's work.
+///
+/// Returns `(provider entry, responses_api_enabled)`; the entry is `None` when
+/// the provider is not configured yet (e.g. browsing the catalog before the
+/// first save), in which case no protocol field is projected.
+async fn protocol_projection_inputs(
+    state: &AppState,
+    provider_id: &str,
+) -> (Option<acowork_core::protocol::ProviderListItem>, bool) {
+    let gw = state.gateway_state.read().await;
+    let entry = gw
+        .resource_cache
+        .provider_list
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .cloned();
+    let enabled = gw
+        .config
+        .as_ref()
+        .map(|c| c.llm.responses_api_enabled)
+        .unwrap_or(false);
+    (entry, enabled)
+}
+
+/// Project the ADR-103 D11 protocol fields onto a whole model list.
+pub(crate) async fn annotate_protocol_fields(
+    state: &AppState,
+    provider_id: &str,
+    models: &mut [ModelInfo],
+) {
+    let (entry, enabled) = protocol_projection_inputs(state, provider_id).await;
+    for model in models.iter_mut() {
+        project_model_protocol(model, entry.as_ref(), enabled);
+    }
 }
 
 /// Look up protocol info for a provider+model combination using offline data.
@@ -2369,5 +2465,171 @@ mod adr103_resolve_tests {
             "context_window": 1u64, "max_output_tokens": 1u64
         }))
         .unwrap();
+    }
+}
+
+// ── ADR-103 S6: D11 protocol projection tests ─────────────────────────
+
+#[cfg(test)]
+mod adr103_projection_tests {
+    use super::project_model_protocol;
+    use super::ModelInfo;
+    use acowork_core::protocol::{
+        ProbeState, ProtocolProbe, ProtocolType, ProviderListItem, ProviderModelEntry,
+    };
+
+    fn probe(state: ProbeState, reason: Option<&str>) -> ProtocolProbe {
+        ProtocolProbe {
+            state,
+            tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
+            reason: reason.map(|r| r.to_string()),
+            observed_base_url: None,
+            probed_at: Some("2026-01-01T00:00:00Z".into()),
+        }
+    }
+
+    fn entry(
+        choice: Option<ProtocolType>,
+        pr: Option<ProtocolProbe>,
+    ) -> ProviderModelEntry {
+        serde_json::from_value::<ProviderModelEntry>(serde_json::json!({
+            "id": "gpt-5",
+            "capabilities": { "context_window": 1000u64, "max_output_tokens": 100u64 },
+            "max_output_tokens_limit": 4096u64,
+            "protocol_type": choice,
+            "protocol_probe": pr,
+        }))
+        .unwrap()
+    }
+
+    fn provider(m: ProviderModelEntry) -> ProviderListItem {
+        ProviderListItem {
+            id: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            protocol_type: ProtocolType::OpenAI,
+            models: vec![m],
+            compact_model: None,
+            custom: false,
+        }
+    }
+
+    fn model(id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    const ON: bool = true;
+    const OFF: bool = false;
+
+    #[test]
+    fn verified_selection_projects_responses_as_active() {
+        let p = provider(entry(
+            Some(ProtocolType::Responses),
+            Some(probe(ProbeState::Verified, None)),
+        ));
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, Some(&p), ON);
+
+        assert_eq!(m.protocol_selected.as_deref(), Some("responses"));
+        assert_eq!(m.protocol_active.as_deref(), Some("responses"));
+        assert_eq!(
+            m.protocol_probe.as_ref().map(|p| &p.state),
+            Some(&ProbeState::Verified)
+        );
+    }
+
+    #[test]
+    fn failed_probe_keeps_the_selection_but_activates_the_default() {
+        // D11 yellow badge source: the UI must still be able to render "you
+        // picked Responses, it is NOT enabled, here is why" — so the raw
+        // selection and the failure reason must both survive the projection.
+        let p = provider(entry(
+            Some(ProtocolType::Responses),
+            Some(probe(ProbeState::Failed, Some("endpoint unavailable"))),
+        ));
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, Some(&p), ON);
+
+        assert_eq!(m.protocol_selected.as_deref(), Some("responses"));
+        assert_eq!(m.protocol_active.as_deref(), Some("openai"));
+        let pr = m.protocol_probe.expect("probe verdict must reach the UI");
+        assert_eq!(pr.state, ProbeState::Failed);
+        assert_eq!(pr.reason.as_deref(), Some("endpoint unavailable"));
+    }
+
+    #[test]
+    fn global_switch_off_projects_the_default_while_showing_the_selection() {
+        // §4.4: the switch forces the fallback, but the fallback must be
+        // visible — otherwise the switch itself is a silent protocol change.
+        let p = provider(entry(
+            Some(ProtocolType::Responses),
+            Some(probe(ProbeState::Verified, None)),
+        ));
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, Some(&p), OFF);
+
+        assert_eq!(m.protocol_selected.as_deref(), Some("responses"));
+        assert_eq!(m.protocol_active.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn stale_verdict_activates_the_default() {
+        let p = provider(entry(
+            Some(ProtocolType::Responses),
+            Some(probe(ProbeState::Stale, None)),
+        ));
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, Some(&p), ON);
+
+        assert_eq!(m.protocol_active.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn unconfigured_model_gets_no_protocol_projection() {
+        // Browsing the catalog before the first save: no selection, no
+        // verdict, no active protocol — the row keeps only its offline
+        // `shape` hint.
+        let p = provider(entry(Some(ProtocolType::Responses), None));
+        let mut m = model("some-other-model");
+        m.shape = Some("responses".into());
+        project_model_protocol(&mut m, Some(&p), ON);
+
+        assert_eq!(m.shape.as_deref(), Some("responses"));
+        assert!(m.protocol_selected.is_none());
+        assert!(m.protocol_active.is_none());
+        assert!(m.protocol_probe.is_none());
+    }
+
+    #[test]
+    fn no_provider_entry_projects_nothing() {
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, None, ON);
+
+        assert!(m.protocol_selected.is_none());
+        assert!(m.protocol_active.is_none());
+        assert!(m.protocol_probe.is_none());
+    }
+
+    #[test]
+    fn untouched_rows_keep_the_pre_adr103_wire_shape() {
+        // Zero-traffic-change invariant for the HTTP surface: a model with no
+        // protocol data must serialize exactly as before (new fields absent,
+        // not `null`).
+        let m = model("gpt-5");
+        let v = serde_json::to_value(&m).unwrap();
+        for absent in [
+            "shape",
+            "protocol_selected",
+            "protocol_active",
+            "protocol_probe",
+        ] {
+            assert!(
+                v.get(absent).is_none(),
+                "field {absent} must be skipped when absent, got {v}"
+            );
+        }
     }
 }
