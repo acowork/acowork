@@ -210,6 +210,7 @@ impl Tool for McpInstallTool {
             tool_timeout_secs: None,
             install: None,
             required_secrets: vec![],
+            origin: None,
         };
 
         let mut updated_config = current_config;

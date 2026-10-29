@@ -1535,9 +1535,11 @@ impl AgentLoop {
             .or(self.core.manifest_temperature)
             .unwrap_or(crate::config::DEFAULT_TEMPERATURE);
         context_builder.set_temperature(Some(temperature));
+        // ADR-104: the agent-level output ceiling (agent_config.json,
+        // manifest-seeded). `None` = the Gateway capability decides below.
+        context_builder.set_max_output_tokens(self.core.max_output_tokens_override);
 
         let mut chat_request = context_builder.build(
-            &self.core.manifest,
             &self.session.history,
             // ADR-060 §5.5 erratum: no Block D arg — the current user
             // message is carried by Block B's tail (history).

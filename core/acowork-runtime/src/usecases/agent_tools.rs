@@ -71,6 +71,12 @@ pub enum AgentToolsError {
     #[error("unknown MCP server names (not in catalog+local): {0:?}")]
     UnknownServers(Vec<String>),
 
+    /// The requested recommendation key is not declared by the package
+    /// (stale client from a previous package version). Maps to HTTP 404 —
+    /// the client refetches, it does not retry.
+    #[error("unknown MCP recommendation key: {0}")]
+    UnknownRecommendation(String),
+
     /// Failed to load, parse, or persist an `agent_mcp.json`
     /// file. Maps to HTTP 500.
     #[error("failed to persist agent tools config: {0}")]
@@ -114,6 +120,73 @@ pub struct McpServersResponse {
     /// `AgentMcpConfig`; falls back to the merged catalog list when the
     /// user has never explicitly chosen).
     pub active_servers: Vec<String>,
+    /// ADR-104: the package's `[[mcp_servers]]` recommendations, each with
+    /// the state the Tools panel renders. Derived from `agent_mcp.json`'s
+    /// `recommended` + `dismissed`, cross-referenced against the merged
+    /// install list — the Runtime owns the derivation so every client sees
+    /// the same five states.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended: Vec<McpRecommendationView>,
+}
+
+/// Lifecycle state of one manifest recommendation, as seen by the client.
+///
+/// Exactly one of these is true at a time, and the client renders one row
+/// per recommendation with a single primary action — that is the whole
+/// point of having states instead of a boolean (`installed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRecommendationState {
+    /// Not in `catalog` / `local` yet: the primary action is "install"
+    /// (a preset scan) or, for a hosted server, nothing to install.
+    NotInstalled,
+    /// Installed but not ticked for this agent: the primary action is
+    /// "activate".
+    InstalledInactive,
+    /// Installed **and** ticked: the agent already has these tools.
+    Active,
+    /// The user pressed "ignore": hidden from the suggestion group until
+    /// restored, never re-surfaced by a restart.
+    Dismissed,
+}
+
+/// One manifest-declared MCP server, projected for the Tools panel.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpRecommendationView {
+    /// Identity key (`McpServerDecl::key`) — the join key against the
+    /// catalog / `agent_mcp.json`.
+    pub key: String,
+    /// How the declaration resolves: `preset` | `hosted` | `inline`.
+    pub source: String,
+    /// Preset id, when `source == "preset"`.
+    pub preset: Option<String>,
+    /// Hosted server id, when `source == "hosted"`.
+    pub hosted: Option<String>,
+    /// Endpoint URL, when `source == "inline"`.
+    pub url: Option<String>,
+    /// Transport, when `source == "inline"`.
+    pub transport: Option<acowork_core::protocol::McpTransportDef>,
+    /// Tool whitelist the package wants enabled by default.
+    pub tools: Vec<String>,
+    /// Secrets the server needs before it is usable.
+    pub required_secrets: Vec<String>,
+    /// Soft requirement — unmet means "capability limited", never a block.
+    pub required: bool,
+    /// Author's justification, shown verbatim.
+    pub why: Option<String>,
+    /// Current lifecycle state.
+    pub state: McpRecommendationState,
+}
+
+/// Request body for `PUT /agents/{id}/mcp-recommendations/{key}`.
+///
+/// Only the dismissal flag is user-writable: everything else in the
+/// recommendation belongs to the package (rewritten from the manifest on
+/// every start), so accepting it from the client would be a lie.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PutMcpRecommendationBody {
+    /// `true` = "ignore this suggestion", `false` = "show it again".
+    pub dismissed: bool,
 }
 
 /// Response for `GET /agents/{id}/builtin-tools` (and the `PUT`
@@ -159,6 +232,12 @@ pub struct MergedToolsResponse {
     pub tools: Vec<crate::agent_config::AgentToolEntry>,
     pub mcp_servers: Vec<String>,
     pub mcp_servers_defs: Vec<McpServerView>,
+    /// ADR-104: same derivation as [`McpServersResponse::recommended`],
+    /// carried here as well so the Desktop Tools panel renders the whole
+    /// panel — builtin tools, MCP toggles, and the recommendation group —
+    /// from the single `/tools` round-trip it already makes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended: Vec<McpRecommendationView>,
 }
 
 // ── Trait ──────────────────────────────────────────────────────────────
@@ -176,6 +255,20 @@ pub struct MergedToolsResponse {
 pub trait AgentToolsService: Send + Sync {
     /// `GET /agents/{id}/mcp-servers` — list active MCP server names.
     async fn get_mcp_servers(&self, agent_id: &str) -> McpServersResponse;
+
+    /// `PUT /agents/{id}/mcp-recommendations/{key}` — dismiss or restore
+    /// one manifest recommendation (ADR-104).
+    ///
+    /// Only the dismissal flag is persistable here; the recommendation
+    /// itself is manifest-derived and rewritten on every start. Returns
+    /// the full `McpServersResponse` so the client re-renders from a single
+    /// authoritative payload instead of patching its own copy.
+    async fn put_mcp_recommendation(
+        &self,
+        agent_id: &str,
+        key: &str,
+        body: PutMcpRecommendationBody,
+    ) -> Result<McpServersResponse, AgentToolsError>;
 
     /// `PUT /agents/{id}/mcp-servers` — persist the active MCP server
     /// selection. Each name in `body.servers` must resolve in

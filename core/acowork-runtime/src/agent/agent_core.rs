@@ -140,6 +140,15 @@ pub struct AgentCore {
     /// Seeded at agent startup in cli.rs; independent of temperature_override
     /// so the resolution chain is self-contained in AgentCore.
     pub(crate) manifest_temperature: Option<f32>,
+    /// Per-agent output-token ceiling (from `agent_config.json`, seeded from
+    /// the manifest's `[config].max_output_tokens`, ADR-104).
+    ///
+    /// Consumed by the request builder as a *ceiling* over the Gateway's
+    /// per-model capability. `None` = "no agent-level opinion" and the model
+    /// capability decides. This replaced the old
+    /// `manifest.llm.max_tokens` request-level hard override, which was the
+    /// second landing path for one declaration.
+    pub(crate) max_output_tokens_override: Option<u32>,
     /// Per-agent context window cap (from agent_config.json, set via Agent Setup panel).
     /// Layer 1 in the resolution chain. `0` is invalid (ADR-074 §6 — the old
     /// "no limit" sentinel is abolished) and the chain skips this layer.
@@ -399,12 +408,16 @@ impl AgentCore {
         let shell_approval_threshold =
             ShellApprovalThreshold::from_str_loose(&config.shell_approval_threshold)
                 .unwrap_or_default();
-        let manifest_temperature = manifest.llm.temperature;
-        let manifest_context_window = manifest.llm.context_window;
+        // ADR-104: the manifest layer of every per-agent chain is the single
+        // `config_defaults()` projection (which still reads the deprecated
+        // `[llm]` keys), so `[config]` and `[llm]` cannot disagree.
+        let manifest_defaults = manifest.config_defaults();
+        let manifest_temperature = manifest_defaults.temperature;
+        let manifest_context_window = manifest_defaults.context_window;
         tracing::debug!(
             ?manifest_temperature,
             ?manifest_context_window,
-            "AgentCore: seeding manifest_temperature and manifest_context_window from manifest [llm]"
+            "AgentCore: seeding manifest layer from manifest [config] / [llm]"
         );
 
         // Compute initial `all_tools` now (enabled builtin + MCP later).
@@ -430,6 +443,7 @@ impl AgentCore {
             compat_cache: None,
             provider_compact_models: Arc::new(RwLock::new(HashMap::new())),
             default_compact_models: Arc::new(RwLock::new(Vec::new())),
+            max_output_tokens_override: None,
             temperature_override: None,
             manifest_temperature,
             context_window_override: None,
@@ -1384,6 +1398,7 @@ impl Clone for AgentCore {
             compat_cache: self.compat_cache.clone(),
             provider_compact_models: Arc::clone(&self.provider_compact_models),
             default_compact_models: Arc::clone(&self.default_compact_models),
+            max_output_tokens_override: self.max_output_tokens_override,
             temperature_override: self.temperature_override,
             manifest_temperature: self.manifest_temperature,
             context_window_override: self.context_window_override,

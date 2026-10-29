@@ -810,6 +810,13 @@ impl RuntimeHttpServer {
             // usable / failed + reason). The Desktop Tools panel polls this
             // after opening a preset server's toggle.
             .route("/agents/{id}/mcp-ensure/{name}", get(get_agent_mcp_ensure))
+            // ADR-104: dismiss / restore one manifest recommendation. The
+            // recommendation itself is package-owned (rewritten every boot);
+            // this endpoint persists only the user's dismissal flag.
+            .route(
+                "/agents/{id}/mcp-recommendations/{key}",
+                put(put_agent_mcp_recommendation),
+            )
             // ADR-069: per-tool MCP opt-in. GET returns the **full**
             // per-server tool list (name + enabled + description) that
             // the Desktop Tools panel renders directly — the frontend
@@ -3066,11 +3073,86 @@ async fn put_agent_mcp_servers(
                 "unknown": unknown,
             })),
         )),
+        Err(crate::usecases::AgentToolsError::UnknownRecommendation(key)) => Err((
+            // Stale client from a previous package version; it refetches.
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "unknown MCP recommendation key",
+                "key": key,
+            })),
+        )),
         Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "error": format!("failed to persist agent_mcp.json: {}", msg),
             })),
+        )),
+    }
+}
+
+/// `PUT /agents/{id}/mcp-recommendations/{key}` — dismiss or restore a
+/// manifest-declared MCP recommendation (ADR-104).
+///
+/// Body: `{"dismissed": true|false}`. Nothing else is writable: the
+/// recommendation list is projected from `manifest.toml` on every start, so
+/// accepting package fields from the client would create a second, editable
+/// copy of a package-owned declaration.
+///
+/// Returns the same payload as `GET /mcp-servers` (including the derived
+/// recommendation views) so the client re-renders from one authoritative
+/// snapshot instead of patching its local copy — the five-state lifecycle
+/// stays owned by the Runtime.
+async fn put_agent_mcp_recommendation(
+    State(state): State<HttpState>,
+    Path((id, key)): Path<(String, String)>,
+    Json(body): Json<crate::usecases::agent_tools::PutMcpRecommendationBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !state.instance_matches(&id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
+                ),
+            })),
+        ));
+    }
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+
+    match svc.put_mcp_recommendation(&id, &key, body).await {
+        Ok(resp) => Ok(Json(serde_json::json!({
+            "agent_id": resp.agent_id,
+            "active_servers": resp.active_servers,
+            "recommended": resp.recommended,
+        }))),
+        Err(crate::usecases::AgentToolsError::UnknownRecommendation(key)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "unknown MCP recommendation key",
+                "key": key,
+            })),
+        )),
+        Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to persist agent_mcp.json: {}", msg),
+            })),
+        )),
+        Err(other) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": other.to_string() })),
         )),
     }
 }
@@ -3201,6 +3283,14 @@ async fn put_agent_mcp_tools(
             Json(serde_json::json!({
                 "error": "unknown MCP server names",
                 "unknown": unknown,
+            })),
+        )),
+        Err(crate::usecases::AgentToolsError::UnknownRecommendation(key)) => Err((
+            // Stale client from a previous package version; it refetches.
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "unknown MCP recommendation key",
+                "key": key,
             })),
         )),
         Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
@@ -3363,6 +3453,14 @@ async fn put_agent_builtin_tools(
                 "tools": resp.tools,
             })))
         }
+        Err(crate::usecases::AgentToolsError::UnknownRecommendation(key)) => Err((
+            // Stale client from a previous package version; it refetches.
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "unknown MCP recommendation key",
+                "key": key,
+            })),
+        )),
         Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -4808,6 +4906,8 @@ mod tests {
             ],
             local: vec![],
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         crate::agent_config::save_agent_mcp_config(std::path::Path::new(&temp_dir), &initial_mcp)
             .unwrap();

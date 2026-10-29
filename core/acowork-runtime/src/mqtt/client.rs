@@ -723,6 +723,7 @@ impl MqttClientHandler for RuntimeHandler {
                         } else {
                             Some(s.tool_timeout_secs)
                         },
+                        origin: None,
                     })
                     .collect();
                 // Hot-reload only when the catalog actually changed:
