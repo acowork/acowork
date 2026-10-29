@@ -68,7 +68,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
     ...actual,
     useChatSessionStore: Object.assign(
       (selector: (state: unknown) => unknown) =>
-        selector({ windows, sending: {}, draft: {} }),
+        selector({ windows, sending: {}, draft: {}, attachedContext: {} }),
       { getState: () => state },
     ),
   };

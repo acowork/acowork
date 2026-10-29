@@ -634,7 +634,7 @@ const GroupRowView = memo(function GroupRowView({
               also count as content, which is what keeps a file-with-no-words
               head row from painting the empty-turn placeholder. */}
           <ExecAttachmentLabels
-            labels={row.meta?.exec_attachments ?? []}
+            labels={row.meta?.exec_attachments}
             align={own ? "end" : "start"}
           />
           {/* What this answer answers. The answered card no longer paints a

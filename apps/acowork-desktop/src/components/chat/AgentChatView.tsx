@@ -107,6 +107,7 @@ import {
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
+import type { WorkspaceRef } from "../../lib/types";
 import { useAgentStore } from "../../stores/agentStore";
 import { sessionExists } from "../../lib/session-control";
 import { showToast } from "../common/ToastProvider";
@@ -457,7 +458,7 @@ const RowView = memo(function RowView({
                 above the text like the chat's own chips, which is also what
                 keeps a file-with-no-words turn from collapsing to a blank
                 row. */}
-            <ExecAttachmentLabels labels={row.meta?.exec_attachments ?? []} />
+            <ExecAttachmentLabels labels={row.meta?.exec_attachments} />
             {/* What this answer answers. The card itself is gone once answered
                 (§5.5.4 records the answer here, not on a receipt). */}
             <ReplyQuote quote={replyQuote} />
@@ -497,6 +498,9 @@ interface AgentChatViewProps {
 /** Stable empty-draft reference for the selector (zustand would re-render
  *  on every store tick with a fresh literal). */
 const EMPTY_DRAFT: ChatSessionConfig = {};
+/** Stable empty list for the pending-refs selector — a fresh `[]` per render
+ *  would re-trigger every Zustand subscriber. */
+const EMPTY_REFS: WorkspaceRef[] = [];
 
 /** How close to the top (px) trips auto-pagination. The "load earlier" status
  *  band sits here; scrolling into it fires the next older page. */
@@ -547,6 +551,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     ChatAttachmentMeta[]
   >([]);
   const [uploading, setUploading] = useState(false);
+  // Workspace references added with "Add to Chat" (rendered by
+  // `AttachedContextChips`). They are content: a human who points at a file and
+  // types nothing has said something. The send gate used to count only typed
+  // text and uploaded blobs, so the reference-only send — the exact gesture
+  // this whole path exists for — could not leave the composer.
+  const pendingRefs = useChatSessionStore((s) => s.attachedContext[sessionId] ?? EMPTY_REFS);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastCompositionEndRef = useRef(0);
@@ -791,7 +801,17 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const handleSend = () => {
     const text = input.trim();
     const attachmentIds = pendingAttachments.map((a) => a.id);
-    if ((!text && attachmentIds.length === 0) || sending || uploading) return;
+    // Three proofs a turn carries something: words, an uploaded file, a
+    // workspace reference. The Gateway's own gate accepts all three, so a
+    // composer that refused the third could not send what the backend would
+    // have delivered.
+    if (
+      (!text && attachmentIds.length === 0 && pendingRefs.length === 0) ||
+      sending ||
+      uploading
+    ) {
+      return;
+    }
     const replyTo = answerTarget?.meta?.message_id;
     // A card answer continues the ORIGINAL turn deterministically (it does
     // not go through the Chat Router), so no seed is applied — carrying a

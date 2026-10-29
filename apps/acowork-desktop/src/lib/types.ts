@@ -693,23 +693,41 @@ export interface WorkspaceRef {
 }
 
 /**
+ * The ADR-046 wire arm a pending reference ships as — and therefore the key
+ * every attachment glyph is looked up by.
+ *
+ * This is the ONLY place the composer's own vocabulary (`file` / `directory` /
+ * `selection`) meets the wire's (`attached_file` / `attached_folder` /
+ * `attached_selection`). A tray chip that mapped it a second time would draw
+ * one arm's glyph for another arm's item the moment either side gained an arm —
+ * the same "two lists, one reader" shape as the routing bug this family of
+ * changes exists to close.
+ */
+export function attachedItemArmOf(ref: Pick<WorkspaceRef, "type">): AttachedItem["type"] {
+  if (ref.type === "selection") return "attached_selection";
+  return ref.type === "directory" ? "attached_folder" : "attached_file";
+}
+
+/**
  * The ADR-046 wire arm a pending reference ships as. One mapping for both
  * surfaces, so a file attached from the Chat surface cannot arrive as a
  * different item than the same file attached from the execution view.
  */
 export function workspaceRefToAttachedItem(ref: WorkspaceRef): AttachedItem {
-  if (ref.type === "selection") {
-    return {
-      type: "attached_selection",
-      absPath: ref.absPath,
-      name: ref.name,
-      startLine: ref.startLine ?? 1,
-      endLine: ref.endLine ?? ref.startLine ?? 1,
-    };
+  const base = { absPath: ref.absPath, name: ref.name };
+  switch (attachedItemArmOf(ref)) {
+    case "attached_selection":
+      return {
+        ...base,
+        type: "attached_selection",
+        startLine: ref.startLine ?? 1,
+        endLine: ref.endLine ?? ref.startLine ?? 1,
+      };
+    case "attached_folder":
+      return { ...base, type: "attached_folder" };
+    default:
+      return { ...base, type: "attached_file" };
   }
-  return ref.type === "directory"
-    ? { type: "attached_folder", absPath: ref.absPath, name: ref.name }
-    : { type: "attached_file", absPath: ref.absPath, name: ref.name };
 }
 
 /**

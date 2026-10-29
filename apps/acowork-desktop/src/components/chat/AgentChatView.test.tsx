@@ -28,7 +28,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
     ...actual,
     useChatSessionStore: Object.assign(
       (selector: (state: unknown) => unknown) =>
-        selector({ windows, sending: sendingMap, draft: drafts }),
+        selector({ windows, sending: sendingMap, draft: drafts, attachedContext: {} }),
       {
         getState: () => ({
           sendText: (...a: unknown[]) => sendTextMock(...(a as [])),
