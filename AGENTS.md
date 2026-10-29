@@ -136,5 +136,5 @@ Deployment topology (single-machine remote, accounts, relay): [docs/runbooks/](d
 
 - Do NOT act before the user confirms your plan.
 - Do NOT kill gateway or runtime process when testing — you are running inside it.
-- Do NOT commit in Chinese.
+- Do NOT just read the code and guess to provide possible conclusions; you must confirm the root cause through logs and debugging before giving a definitive conclusion.
 - Do NOT wrap file paths in quotes — use Markdown links relative to the working directory: `[src/lib/foo.ts](src/lib/foo.ts)`.
