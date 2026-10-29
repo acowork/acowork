@@ -2194,9 +2194,13 @@ export interface McpServerConfigDef {
   tool_timeout_secs?: number;
   /** ADR-072: optional install context (preset-added servers only) */
   install?: McpInstallSpec;
-  /** ADR-090 D4: secret names this server requires (from preset.requiredEnv).
+  /** ADR-090 D4: secret names this server requires (from preset.required_env).
    *  Gateway filters the push when any of these is unset in env ∪ headers. */
   required_secrets?: string[];
+  /** ADR-104: where this catalog entry came from — `preset:<id>`,
+   *  `agent-package:<agent_id>#<key>`, or `user`. Written by the Gateway
+   *  only (see `POST /api/mcp-catalog/from-declaration`), never by the UI. */
+  origin?: string;
 }
 
 /** MCP catalog entry response (env values with sensitive fields masked) */
@@ -2214,6 +2218,60 @@ export interface McpCatalogResponse {
 export interface AgentMcpServersResponse {
   agent_id: string;
   active_servers: string[];
+  /** ADR-104: the package's `[[mcp_servers]]` recommendations with their
+   *  lifecycle state. Absent when the package declares none. */
+  recommended?: McpRecommendationView[];
+}
+
+/**
+ * Lifecycle state of one manifest-declared MCP server (ADR-104).
+ *
+ * The Runtime derives this and every client renders it — the Desktop does
+ * not compute states locally, otherwise two clients could disagree about the
+ * same agent. Exactly one state is true at a time, and each maps to exactly
+ * one primary action:
+ *
+ * | state                | primary action                    |
+ * |----------------------|-----------------------------------|
+ * | `not_installed`      | install (materialize into catalog)|
+ * | `installed_inactive` | activate for this agent           |
+ * | `active`             | none — the tools are already there |
+ * | `dismissed`          | restore (behind a disclosure)      |
+ */
+export type McpRecommendationState =
+  | "not_installed"
+  | "installed_inactive"
+  | "active"
+  | "dismissed";
+
+/**
+ * One `[[mcp_servers]]` declaration as the Tools panel renders it (ADR-104).
+ *
+ * Everything except `state` is the package's, re-projected from the manifest
+ * on every agent start; `state` is derived from `agent_mcp.json` × the merged
+ * install list.
+ */
+export interface McpRecommendationView {
+  /** Identity key — joins the manifest, `agent_mcp.json`, and the catalog. */
+  key: string;
+  /** Declaration form: `preset` | `hosted` | `inline`. */
+  source: "preset" | "hosted" | "inline" | "unknown";
+  /** Preset id, when `source === "preset"`. */
+  preset?: string;
+  /** Hosted service id (`pm` / `doc` / `memory`), when `source === "hosted"`. */
+  hosted?: string;
+  /** Remote URL, when `source === "inline"`. */
+  url?: string;
+  transport?: McpTransportDef;
+  /** Tool-name allowlist the declaration names, shown verbatim. */
+  tools: string[];
+  /** Secrets needed before the server is usable. */
+  required_secrets: string[];
+  /** Soft requirement — unmet means "capability limited", never a block. */
+  required: boolean;
+  /** Author's justification, shown verbatim (their words, not ours). */
+  why?: string;
+  state: McpRecommendationState;
 }
 
 /** Per-agent MCP server view (catalog ∪ local) for the Tools panel toggle */
@@ -2259,6 +2317,87 @@ export interface AgentMcpToolsConfig {
 export interface UpdateMcpServersRequest {
   servers: string[];
 }
+
+// ── ADR-104: manifest authoring (Create Agent wizard) ──────────────────
+
+/**
+ * `[config]` defaults a package may declare.
+ *
+ * Mirrors `acowork_core::manifest::ManifestConfigDefaults`. Every field is
+ * optional and `null`/absent means "no default" — not zero. The set is
+ * deliberately narrow: safety, budget and identity knobs are NOT authorable
+ * by a package (a package must not be able to lower an approval threshold).
+ */
+export interface ManifestConfigDefaults {
+  /** Sampling temperature, 0.0–2.0. */
+  temperature?: number | null;
+  /** Per-agent context window cap in tokens; 0 is invalid. */
+  context_window?: number | null;
+  /** Per-model output ceiling in tokens; 0 is invalid. */
+  max_output_tokens?: number | null;
+  /** Max LLM iterations per run; 0 is invalid. */
+  max_iterations?: number | null;
+  /** ADR-061 compaction target as the *saved* share, 0.05–0.95. */
+  compression_ratio_threshold?: number | null;
+}
+
+/** One `[[mcp_servers]]` declaration, in wire form (`McpServerDecl`). */
+export interface McpServerDeclPayload {
+  /** Catalog key; defaults to the preset/hosted id when omitted. */
+  name?: string;
+  preset?: string;
+  hosted?: string;
+  tools?: string[];
+  required_secrets?: string[];
+  required?: boolean;
+  why?: string;
+}
+
+/** One `[capabilities.<action>]` row, in draft form. */
+export interface DraftCapabilityPayload {
+  action: string;
+  description: string;
+  skills: string[];
+  input_schema?: unknown;
+  output_schema?: unknown;
+}
+
+/**
+ * Payload of `create_agent` / `preview_manifest` (ADR-104).
+ *
+ * Field names are snake_case because this object is deserialized straight into
+ * `acowork_core::manifest::ManifestDraft` (Tauri only renames *top-level*
+ * command arguments, never nested struct fields).
+ */
+export interface CreateAgentDraftPayload {
+  agent_id: string;
+  name: string;
+  display_name?: string | null;
+  role?: string | null;
+  version?: string | null;
+  author?: string | null;
+  description?: string | null;
+  labels: string[];
+  config?: ManifestConfigDefaults | null;
+  tools: string[];
+  mcp_servers: McpServerDeclPayload[];
+  capabilities: DraftCapabilityPayload[];
+  /** Marks the package as locally authored. */
+  dev: boolean;
+  /** Raw skill ZIP bytes, one entry per uploaded skill. */
+  skill_files: number[][];
+}
+
+/** Result of `preview_manifest` — the real TOML plus the graph verdict. */
+export interface ManifestPreview {
+  toml: string;
+  /** Dangling references; these block creation. */
+  errors: string[];
+  /** Advisory reachability hints. */
+  warnings: string[];
+}
+
+/** One curated preset as served by `GET /api/mcp-presets` (see lib/mcpPresets). */
 
 /** MCP preset category */
 export type McpPresetCategory =
@@ -2499,36 +2638,6 @@ export interface LspServerWithStatus {
   status: LspHealthStatus;
   /** Error message if status is "error" */
   error?: string;
-}
-
-/** MCP preset definition (frontend-only, not persisted) */
-export interface McpPresetDef {
-  id: string;
-  name: string;
-  description: string;
-  category: McpPresetCategory;
-  transport: McpTransportDef;
-  /** For stdio: executable command */
-  command?: string;
-  /** For stdio: command arguments */
-  args?: string[];
-  /** For http/sse: server URL */
-  url?: string;
-  /** Required env vars (user must provide, e.g. API keys) */
-  requiredEnv: string[];
-  /** Optional env vars with defaults */
-  optionalEnv: Record<string, string>;
-  /** Install hint / instructions */
-  installHint?: string;
-  /** Icon name from lucide-react */
-  icon?: string;
-  /**
-   * ADR-072: declarative install spec for package-based presets.
-   * When present, adding the preset runs the install pipeline
-   * (runtime check → install → health check → write catalog) instead of
-   * a raw catalog write. Spawn config is derived from `package`.
-   */
-  install?: McpInstallSpec;
 }
 
 // ── Embedding Model types ─────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useMcpStore, mcpEnsureKey, type McpEnsureStatus } from "../../stores/mcpStore";
@@ -8,7 +8,12 @@ import { log } from "../../lib/logger";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Switch } from "../common/Switch";
 import { ListBox, ListRow, ExpandableRow, Badge, EmptyState } from "../common/list";
-import type { McpServerView, AgentMcpToolItem } from "../../lib/types";
+import type {
+  McpServerView,
+  AgentMcpToolItem,
+  McpRecommendationView,
+} from "../../lib/types";
+import { McpRecommendationGroup } from "./McpRecommendationGroup";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 const EMPTY_ARRAY: string[] = [];
@@ -262,6 +267,14 @@ export function ToolsTab() {
   const [builtinOpen, setBuiltinOpen] = useState(true);
   const [mcpOpen, setMcpOpen] = useState(true);
 
+  // ADR-104: the package's `[[mcp_servers]]` recommendations, with the
+  // lifecycle state the Runtime derived. Rendered in its own group above the
+  // MCP switch list; `reloadToken` lets that group force the authoritative
+  // re-read after its own mutation instead of patching local state.
+  const [recommendations, setRecommendations] = useState<McpRecommendationView[]>([]);
+  const [reloadToken, setReloadToken] = useState(0);
+  const reloadTools = useCallback(() => setReloadToken((n) => n + 1), []);
+
   useEffect(() => {
     if (!selectedAgentId) return;
     let cancelled = false;
@@ -298,6 +311,13 @@ export function ToolsTab() {
           if (data.mcp_servers_defs && Array.isArray(data.mcp_servers_defs)) {
             setMcpServerDefs(data.mcp_servers_defs as McpServerView[]);
           }
+          // ADR-104: manifest-declared recommendations (absent when the
+          // package declares none — `skip_serializing_if` on the wire).
+          setRecommendations(
+            Array.isArray(data.recommended)
+              ? (data.recommended as McpRecommendationView[])
+              : [],
+          );
         }
 
         // ADR-069: per-tool opt-in list — separate endpoint from the
@@ -322,7 +342,7 @@ export function ToolsTab() {
     })();
 
     return () => { cancelled = true; };
-  }, [selectedAgentId]);
+  }, [selectedAgentId, reloadToken]);
 
   // Refresh on global events (e.g. after MCP toggle)
   useEffect(() => {
@@ -347,6 +367,11 @@ export function ToolsTab() {
         if (data.mcp_servers_defs && Array.isArray(data.mcp_servers_defs)) {
           setMcpServerDefs(data.mcp_servers_defs as McpServerView[]);
         }
+        setRecommendations(
+          Array.isArray(data.recommended)
+            ? (data.recommended as McpRecommendationView[])
+            : [],
+        );
         // ADR-069: refresh the per-tool opt-in list from its dedicated
         // endpoint (the merged /tools view has no `mcp_tools` field).
         try {
@@ -538,6 +563,20 @@ export function ToolsTab() {
           blocks (Builtin Tools / MCP). Matches the
           workspace/memory panel divider style. */}
       <div className="-mx-3 my-2 border-t border-border-divider" />
+
+      {/* ADR-104: the package's MCP recommendations. Sits directly above the
+          MCP switch list because installing one moves a row *into* that list —
+          cause and effect have to be on screen together. Renders nothing when
+          the package declares none (see the component). */}
+      <McpRecommendationGroup
+        agentId={selectedAgentId}
+        recommendations={recommendations}
+        onReload={reloadTools}
+      />
+
+      {recommendations.length > 0 && (
+        <div className="-mx-3 my-2 border-t border-border-divider" />
+      )}
 
       {/* MCP Servers card — the group is a level-1 collapsible card
           like the Debug-panel snapshot list; each server renders as a

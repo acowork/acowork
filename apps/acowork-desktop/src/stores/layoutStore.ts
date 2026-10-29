@@ -5,6 +5,9 @@ import type { NavView } from "../lib/types";
 /** Right panel tabs — keep in sync with AppLayout.PanelTab. */
 export type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
 
+/** Harness page tabs — keep in sync with HarnessPage's tab list. */
+export type HarnessTabId = "providers" | "mcp" | "embedding" | "lsp";
+
 /**
  * Live bounding rect of the file editor panel, reported by
  * `useReportFilePanelBounds` from inside `FileEditorPanel`.
@@ -89,6 +92,17 @@ interface LayoutState {
     navViewRequestSeq: number;
     navViewRequest: NavView | null;
     requestNavView: (view: NavView) => void;
+
+    /**
+     * Monotonically-increasing counter for "open the harness page on this
+     * tab" requests (ADR-104: the Tools panel's recommendation card sends the
+     * user to the MCP tab to enter an API key). `HarnessPage` owns its active
+     * tab, so the request travels through the same consume-once seq contract
+     * as `navViewRequestSeq`; callers request the view *and* the tab.
+     */
+    harnessTabRequestSeq: number;
+    harnessTabRequest: HarnessTabId | null;
+    requestHarnessTab: (tab: HarnessTabId) => void;
 }
 
 export const useLayoutStore = create<LayoutState>((set) => ({
@@ -139,5 +153,13 @@ export const useLayoutStore = create<LayoutState>((set) => ({
         set((state) => ({
             navViewRequest: view,
             navViewRequestSeq: state.navViewRequestSeq + 1,
+        })),
+
+    harnessTabRequestSeq: 0,
+    harnessTabRequest: null,
+    requestHarnessTab: (tab) =>
+        set((state) => ({
+            harnessTabRequest: tab,
+            harnessTabRequestSeq: state.harnessTabRequestSeq + 1,
         })),
 }));

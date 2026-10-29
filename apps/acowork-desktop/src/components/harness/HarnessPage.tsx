@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useMemo, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
-import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, McpServerConfigDef, McpCatalogEntryResponse, McpTransportDef, McpPresetDef } from "../../lib/types";
+import type { VaultKeyEntry, ModelInfo, ModelCapabilitiesInfo, ProviderListEntry, McpServerConfigDef, McpCatalogEntryResponse, McpTransportDef } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { inputBase } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
@@ -12,7 +12,9 @@ import { fetchProviderModels } from "../../lib/gateway-api";
 import { getGatewayUrl } from "../../lib/config";
 import { Monitor, MousePointer, Package, Search, Globe, BookOpen, FileText, PenTool, Star, Plus, Minus, Check, Pencil, Cpu, Plug, Database, Braces, Puzzle } from "lucide-react";
 import { useMcpStore } from "../../stores/mcpStore";
-import { MCP_PRESETS, presetToServerConfig } from "../../lib/mcp-presets";
+import { useLayoutStore, type HarnessTabId } from "../../stores/layoutStore";
+import { fetchMcpPresets, materializeDeclaration, type McpPreset } from "../../lib/mcpPresets";
+import { emitAgentConfigRefresh } from "../../lib/refresh";
 import { normalizeMcpConfigInput } from "../../lib/mcpConfigNormalizer";
 import { EmbeddingModelTab } from "./EmbeddingModelTab";
 import { LspTab } from "./LspTab";
@@ -27,13 +29,23 @@ import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { SectionPane } from "../common/SectionPane";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
-type HarnessTab = "providers" | "mcp" | "embedding" | "lsp";
-
 export function HarnessPage() {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<HarnessTab>("providers");
+  const [activeTab, setActiveTab] = useState<HarnessTabId>("providers");
 
-  const tabs: { id: HarnessTab; label: string; icon: ReactNode }[] = [
+  // ADR-104: another surface (the Tools panel's MCP recommendation card) may
+  // ask for a specific tab — "enter your BRAVE_API_KEY here". Consumed
+  // exactly once, same contract as layoutStore's other request seqs.
+  const harnessTabRequestSeq = useLayoutStore((s) => s.harnessTabRequestSeq);
+  const consumedHarnessTabRef = useRef(0);
+  useEffect(() => {
+    if (harnessTabRequestSeq <= consumedHarnessTabRef.current) return;
+    consumedHarnessTabRef.current = harnessTabRequestSeq;
+    const target = useLayoutStore.getState().harnessTabRequest;
+    if (target) setActiveTab(target);
+  }, [harnessTabRequestSeq]);
+
+  const tabs: { id: HarnessTabId; label: string; icon: ReactNode }[] = [
     { id: "providers", label: t("harness.tabProviders"), icon: <Cpu className="h-3.5 w-3.5" /> },
     { id: "mcp", label: t("harness.tabMcp"), icon: <Plug className="h-3.5 w-3.5" /> },
     { id: "embedding", label: t("harness.tabEmbedding"), icon: <Database className="h-3.5 w-3.5" /> },
@@ -46,7 +58,7 @@ export function HarnessPage() {
       icon={<Puzzle className="h-3.5 w-3.5" />}
       items={tabs}
       selected={activeTab}
-      onSelect={(id) => setActiveTab(id as HarnessTab)}
+      onSelect={(id) => setActiveTab(id as HarnessTabId)}
       storageKey="acowork-harness-list-width"
     >
       {/* Tab content — CSS visibility preserves component state across tab switches */}
@@ -751,7 +763,22 @@ export function McpTab() {
 
   // Preset env var form (for servers requiring API keys)
   const [presetEnvForm, setPresetEnvForm] = useState<Record<string, string>>({});
-  const [activePreset, setActivePreset] = useState<McpPresetDef | null>(null);
+  const [activePreset, setActivePreset] = useState<McpPreset | null>(null);
+
+  // ADR-104: the preset registry is Gateway data now (a preset id is a
+  // package-visible identifier, so its meaning cannot live in this bundle).
+  // Loaded once per mount through the session-cached client.
+  const [presets, setPresets] = useState<McpPreset[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    void fetchMcpPresets().then((list) => {
+      if (cancelled) return;
+      setPresets(list);
+      setPresetsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     loadCatalog();
@@ -766,7 +793,7 @@ export function McpTab() {
   //  - Custom rows are catalog entries that match no preset; these carry
   //    Remove. Runtime verification (Test) lives on the Node machine — the
   //    Tools panel's enable switch drives ensure — so no row here probes.
-  const presetIds = useMemo(() => new Set(MCP_PRESETS.map((p) => p.id)), []);
+  const presetIds = useMemo(() => new Set(presets.map((p) => p.id)), [presets]);
   const customServers = useMemo(
     () => catalog.filter((c) => !presetIds.has(c.name)),
     [catalog, presetIds],
@@ -776,25 +803,49 @@ export function McpTab() {
   // probe would spawn the server on the Gateway machine, which says nothing
   // about the Node where an Agent will actually run it. Usability is verified
   // by the Agent when the user enables the server in the Tools panel.
-  const handleAddFromPreset = (preset: McpPresetDef) => {
-    if (preset.requiredEnv.length > 0) {
+  /**
+   * ADR-104: adding a preset is a *declaration materialization*, not a
+   * client-side config build. The Gateway owns the spawn recipe and stamps
+   * `origin: preset:<id>`; the Desktop only says which preset the user
+   * picked (and, if the picker collected one, the secret).
+   */
+  const materializePreset = async (
+    preset: McpPreset,
+    env?: Record<string, string>,
+  ) => {
+    try {
+      await materializeDeclaration({
+        key: preset.id,
+        preset_id: preset.id,
+        ...(env && Object.keys(env).length > 0 ? { env } : {}),
+      });
+      await loadCatalog();
+      emitAgentConfigRefresh();
+    } catch (e: unknown) {
+      useMcpStore.setState({
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
+  const handleAddFromPreset = (preset: McpPreset) => {
+    if (preset.required_env.length > 0) {
       // Show env form for API keys
       setActivePreset(preset);
       setPresetEnvForm(
-        preset.requiredEnv.reduce((acc, key) => ({ ...acc, [key]: "" }), {})
+        preset.required_env.reduce((acc, key) => ({ ...acc, [key]: "" }), {})
       );
       return;
     }
-    addServer(presetToServerConfig(preset));
+    void materializePreset(preset);
   };
 
   const handlePresetEnvSubmit = () => {
     if (!activePreset) return;
-    const env = { ...activePreset.optionalEnv, ...presetEnvForm };
-    const config = presetToServerConfig(activePreset, env);
+    const preset = activePreset;
     setActivePreset(null);
     setPresetEnvForm({});
-    addServer(config);
+    void materializePreset(preset, presetEnvForm);
   };
 
   const handleAddManual = () => {
@@ -894,8 +945,8 @@ export function McpTab() {
         <ExpandableRow
           open={listOpen}
           onToggle={() => setListOpen((v) => !v)}
-          title={t("harnessMcp.mcpServers", { count: MCP_PRESETS.length + customServers.length })}
-          ariaLabel={t("harnessMcp.mcpServers", { count: MCP_PRESETS.length + customServers.length })}
+          title={t("harnessMcp.mcpServers", { count: presets.length + customServers.length })}
+          ariaLabel={t("harnessMcp.mcpServers", { count: presets.length + customServers.length })}
           trailing={
             <span onClick={(e) => e.stopPropagation()}>
               <button
@@ -915,7 +966,7 @@ export function McpTab() {
             </div>
           )}
 
-          {loading && catalog.length === 0 && (
+          {(loading || presetsLoading) && catalog.length === 0 && (
             <p className="px-3 py-3 text-xs text-text-tertiary">{t("harnessMcp.loadingCatalog")}</p>
           )}
 
@@ -924,7 +975,7 @@ export function McpTab() {
               No Test anywhere: usability is probed on the Node machine by
               the Agent at first enable, not by the Gateway. */}
           <ListBox variant="plain">
-            {MCP_PRESETS.map((preset) => {
+            {presets.map((preset) => {
               const isAdded = catalogNames.has(preset.id);
               return (
                 <ListRow
@@ -967,9 +1018,9 @@ export function McpTab() {
                     </span>
                   </div>
                   <p className="mt-0.5 line-clamp-1 text-10 text-text-tertiary">{preset.description}</p>
-                  {preset.requiredEnv.length > 0 && (
+                  {preset.required_env.length > 0 && (
                     <p className="mt-0.5 text-10 text-amber-500">
-                      {t("harnessMcp.requires")}{preset.requiredEnv.join(", ")}
+                      {t("harnessMcp.requires")}{preset.required_env.join(", ")}
                     </p>
                   )}
                 </ListRow>
@@ -1228,9 +1279,9 @@ export function McpTab() {
       {activePreset && (
         <div className="rounded-md border border-[var(--color-accent)]/40 bg-modal-surface p-4">
           <h2 className="text-xs font-medium mb-1">{t("harnessMcp.configure")}{activePreset.name}</h2>
-          <p className="text-10 text-text-tertiary mb-3">{activePreset.installHint}</p>
+          <p className="text-10 text-text-tertiary mb-3">{activePreset.install_hint}</p>
           <div className="space-y-2">
-            {activePreset.requiredEnv.map((envKey) => (
+            {activePreset.required_env.map((envKey) => (
               <div key={envKey}>
                 <label className="mb-1 block text-10 text-text-tertiary">{envKey}</label>
                 <input

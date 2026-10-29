@@ -1,18 +1,24 @@
 //! Agent creation commands — create new agent skeleton and install it
 //!
-//! The wizard is a 4-step flow: Basic info → Tools → Skills → Preview.
-//! `create_agent` is the single backend entry point: it builds the
-//! skeleton directory on disk, expands any user-supplied skill ZIPs
-//! into `skills/{skill_name}/`, writes the manifest (including
-//! `[[tools]]` and `[capabilities.*]` from the wizard selections),
-//! zips the skeleton into a `.agent` package, and hands it off to the
-//! Gateway for installation. The wizard never talks to the skill
-//! import API — that would race with `create_agent` and require the
-//! agent to already exist.
+//! The wizard is a 5-step flow (ADR-104): Basic → Model & params → Tools &
+//! MCP → Skills & capabilities → Preview.
+//!
+//! Three entry points, one manifest:
+//!   - `preview_manifest(draft)` renders the exact TOML `create_agent` would
+//!     write. Both call `ManifestDraft::build` in `acowork-core`, so the
+//!     preview cannot drift from the result — the old TypeScript preview began
+//!     with a `[package]` table the manifest schema does not even have.
+//!   - `create_agent(draft)` builds the skeleton directory, expands the
+//!     uploaded skill ZIPs into `skills/{name}/`, writes the manifest, zips the
+//!     skeleton into a `.agent` package and hands it to the Gateway.
+//!   - `parse_skill_zip_preview` reads one ZIP's frontmatter for the wizard's
+//!     per-row preview.
+//!
+//! The wizard never talks to the skill import API — that would race with
+//! `create_agent` and require the agent to already exist.
 
 use std::io::{Read, Write};
 
-use acowork_core::manifest::{AgentManifest, CapabilityDef, ToolDeclaration};
 use acowork_core::tools::BuiltinToolInfo;
 use serde::Serialize;
 use tauri::State;
@@ -40,6 +46,23 @@ pub struct ParsedSkillPreview {
     pub name: String,
     /// Skill description from `SKILL.md` frontmatter (`description`).
     pub description: String,
+    /// Tools the skill needs (`SKILL.md` `tool_deps`).
+    ///
+    /// Read here (not only at install time) so the wizard can show "this
+    /// skill needs `pm_create_task`, which step 3 does not declare" *while*
+    /// the user is still editing, instead of surfacing it as an advisory log
+    /// line after the package is already installed.
+    pub tool_deps: Vec<String>,
+}
+
+impl ParsedSkillPreview {
+    /// Project into the graph-validator input.
+    pub fn to_skill_decl(&self) -> acowork_core::manifest::SkillDecl {
+        acowork_core::manifest::SkillDecl {
+            name: self.name.clone(),
+            tool_deps: self.tool_deps.clone(),
+        }
+    }
 }
 
 /// Parse a skill ZIP in isolation — used by the wizard's Skills
@@ -99,7 +122,11 @@ fn parse_skill_zip(zip_bytes: &[u8]) -> Result<ParsedSkillPreview, String> {
     let frontmatter = parse_frontmatter(&content)
         .map_err(|e| format!("SKILL.md frontmatter: {}", e))?;
 
-    Ok(ParsedSkillPreview { name: frontmatter.name, description: frontmatter.description })
+    Ok(ParsedSkillPreview {
+        name: frontmatter.name,
+        description: frontmatter.description,
+        tool_deps: frontmatter.tool_deps,
+    })
 }
 
 /// Minimal `SKILL.md` frontmatter projection — only the two fields
@@ -110,6 +137,7 @@ fn parse_skill_zip(zip_bytes: &[u8]) -> Result<ParsedSkillPreview, String> {
 struct SkillFrontmatterSlim {
     name: String,
     description: String,
+    tool_deps: Vec<String>,
 }
 
 /// Hand-rolled frontmatter reader. Only handles the two keys we care
@@ -148,11 +176,40 @@ fn parse_frontmatter(content: &str) -> Result<SkillFrontmatterSlim, String> {
 
     let mut name: Option<String> = None;
     let mut description: Option<String> = None;
+    let mut tool_deps: Vec<String> = Vec::new();
+    // Key of the most recent `key:` line, so a following block list
+    // (`- item`) can be attributed. Only `tool_deps` keeps its items;
+    // other keys' lists are parsed and dropped.
+    let mut last_key: Option<String> = None;
     for (idx, raw_line) in yaml.lines().enumerate() {
         let line = raw_line.trim_end();
         if line.trim().is_empty() {
             continue;
         }
+
+        // Block-list item: `  - value` / `- value`.
+        if let Some(item) = line.trim().strip_prefix("- ") {
+            match last_key.as_deref() {
+                Some("tool_deps") => {
+                    let value = strip_yaml_scalar_quotes(item.trim());
+                    if !value.is_empty() {
+                        tool_deps.push(value.to_string());
+                    }
+                }
+                // Unknown key's list — tolerated (the Runtime's full parser
+                // reads it), same policy as unknown scalar keys.
+                Some(_) => {}
+                None => {
+                    return Err(format!(
+                        "Frontmatter line {} is a list item with no preceding key: {:?}",
+                        idx + 1,
+                        line
+                    ));
+                }
+            }
+            continue;
+        }
+
         let (key, value) = line.split_once(':').ok_or_else(|| {
             format!(
                 "Frontmatter line {} is not a `key: value` pair: {:?}",
@@ -162,6 +219,7 @@ fn parse_frontmatter(content: &str) -> Result<SkillFrontmatterSlim, String> {
         })?;
         let key = key.trim();
         let value = value.trim();
+        last_key = Some(key.to_string());
 
         match key {
             "name" => name = Some(strip_yaml_scalar_quotes(value).to_string()),
@@ -178,6 +236,27 @@ fn parse_frontmatter(content: &str) -> Result<SkillFrontmatterSlim, String> {
                 }
                 description = Some(strip_yaml_scalar_quotes(value).to_string());
             }
+            "tool_deps" => {
+                // Two accepted spellings: inline flow list
+                // (`tool_deps: [a, b]`) and block list (handled above).
+                if !value.is_empty() {
+                    let inner = value
+                        .strip_prefix('[')
+                        .and_then(|v| v.strip_suffix(']'))
+                        .ok_or_else(|| {
+                            format!(
+                                "Frontmatter `tool_deps` must be a flow list ([a, b]) or a                                  block list (- a); got {:?}",
+                                value
+                            )
+                        })?;
+                    for part in inner.split(',') {
+                        let dep = strip_yaml_scalar_quotes(part.trim());
+                        if !dep.is_empty() {
+                            tool_deps.push(dep.to_string());
+                        }
+                    }
+                }
+            }
             _ => {
                 // Unknown keys are tolerated — we ignore them, the
                 // Runtime's full parser will pick them up. We only
@@ -190,6 +269,7 @@ fn parse_frontmatter(content: &str) -> Result<SkillFrontmatterSlim, String> {
         name: name.ok_or_else(|| "Frontmatter is missing required `name` field".to_string())?,
         description: description
             .ok_or_else(|| "Frontmatter is missing required `description` field".to_string())?,
+        tool_deps,
     })
 }
 
@@ -205,57 +285,111 @@ fn strip_yaml_scalar_quotes(s: &str) -> &str {
     s
 }
 
-/// Create a new agent skeleton, zip it, and install via Gateway.
+/// Everything the Create Agent wizard collected.
 ///
-/// Returns the agent_id of the newly installed agent on success.
+/// The manifest-shaped half lives in `acowork_core::manifest::ManifestDraft`:
+/// building a manifest from partial author input is a domain operation with
+/// rules (defaults, refused combinations, graph checks) that any authoring
+/// surface — this wizard today, a CLI or the mobile app later — must answer
+/// identically. Keeping it in `core` also means its mapping matrix is tested
+/// where `cargo test` actually runs it, instead of inside a Tauri binary.
 ///
-/// `tools` — names of builtin tools the user opted into. Each entry
-/// becomes one `[[tools]] name = "..."` row in the manifest.
-///
-/// `skill_files` — raw ZIP bytes for each user-supplied skill. For
-/// each one we parse `SKILL.md`, write
-/// `[capabilities.{name}]\ndescription = "..."` into the manifest,
-/// and extract the whole ZIP into the skeleton's `skills/{name}/`
-/// directory.
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-pub async fn create_agent(
-    state: State<'_, AppState>,
-    agent_id: String,
-    name: String,
-    version: Option<String>,
-    description: Option<String>,
-    author: Option<String>,
-    tools: Option<Vec<String>>,
-    skill_files: Option<Vec<Vec<u8>>>,
-) -> Result<String, String> {
-    let version = version.unwrap_or_else(|| "0.1.0".to_string());
-    let description = description.unwrap_or_else(|| format!("{} agent", name));
-    let author = author.unwrap_or_else(|| "ACowork User".to_string());
-    let tools = tools.unwrap_or_default();
-    let skill_files = skill_files.unwrap_or_default();
+/// This wrapper adds the one thing a draft cannot carry: the raw skill ZIP
+/// bytes, which are filesystem content rather than declaration.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CreateAgentDraft {
+    #[serde(flatten)]
+    pub manifest: acowork_core::manifest::ManifestDraft,
+    /// Raw ZIP bytes for each uploaded skill.
+    #[serde(default)]
+    pub skill_files: Vec<Vec<u8>>,
+}
 
-    // Pre-parse every skill ZIP up front so a bad upload fails loudly
-    // *before* we start touching the filesystem. This also means we
-    // don't carry the raw bytes into the second pass (extraction).
-    let parsed_skills: Vec<ParsedSkillPreview> = skill_files
+/// Result of `preview_manifest` — the real TOML plus the graph verdict.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManifestPreview {
+    /// Exact text that `create_agent` would write (`AgentManifest::to_toml`).
+    pub toml: String,
+    /// Dangling references — these block creation.
+    pub errors: Vec<String>,
+    /// Reachability warnings — advisory only.
+    pub warnings: Vec<String>,
+}
+
+/// Parse every uploaded skill ZIP up front, so a bad upload fails loudly
+/// before anything touches the filesystem, and so the graph check has the
+/// directory names the capabilities must resolve against.
+fn parse_skill_files(skill_files: &[Vec<u8>]) -> Result<Vec<ParsedSkillPreview>, String> {
+    let parsed: Vec<ParsedSkillPreview> = skill_files
         .iter()
         .map(|bytes| parse_skill_zip(bytes))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Detect duplicate skill names — silent overwrites would mask a
-    // real user error (two zips for the same skill).
-    {
-        let mut seen = std::collections::HashSet::new();
-        for s in &parsed_skills {
-            if !seen.insert(s.name.as_str()) {
-                return Err(format!(
-                    "Duplicate skill name '{}' in uploaded skills",
-                    s.name
-                ));
-            }
+    let mut seen = std::collections::HashSet::new();
+    for s in &parsed {
+        if !seen.insert(s.name.as_str()) {
+            return Err(format!("Duplicate skill name '{}' in uploaded skills", s.name));
         }
     }
+    Ok(parsed)
+}
+
+/// `preview_manifest` — render the exact manifest the wizard would create.
+///
+/// The wizard used to assemble this TOML text in TypeScript, which drifted:
+/// its first table was `[package]`, a section `AgentManifest` does not have
+/// (serde silently drops unknown fields, so the real manifest would have been
+/// missing everything the preview appeared to promise). Rendering it in Rust
+/// from the same builder that creates it removes that class of bug entirely.
+#[tauri::command]
+pub async fn preview_manifest(draft: CreateAgentDraft) -> Result<ManifestPreview, String> {
+    let parsed = parse_skill_files(&draft.skill_files)?;
+    let decls: Vec<acowork_core::manifest::SkillDecl> =
+        parsed.iter().map(|s| s.to_skill_decl()).collect();
+    let manifest = draft.manifest.build(&decls)?;
+    let toml = manifest
+        .to_toml()
+        .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
+
+    // The manifest above already passed the graph check (build returns Err on
+    // dangling references), so only the advisory half can still be non-empty.
+    let report = manifest.validate_graph(&decls);
+
+    Ok(ManifestPreview {
+        toml,
+        errors: report.errors,
+        warnings: report.warnings,
+    })
+}
+
+/// Create a new agent skeleton, zip it, and install via Gateway.
+///
+/// Returns the agent_id of the newly installed agent on success.
+#[tauri::command]
+pub async fn create_agent(
+    state: State<'_, AppState>,
+    draft: CreateAgentDraft,
+) -> Result<String, String> {
+    let agent_id = draft.manifest.agent_id.trim().to_string();
+    let name = draft.manifest.name.trim().to_string();
+
+    // Pre-parse every skill ZIP up front so a bad upload fails loudly
+    // *before* we start touching the filesystem. This also means we
+    // don't carry the raw bytes into the second pass (extraction).
+    let parsed_skills = parse_skill_files(&draft.skill_files)?;
+    let decls: Vec<acowork_core::manifest::SkillDecl> =
+        parsed_skills.iter().map(|s| s.to_skill_decl()).collect();
+
+    // Build the manifest through the shared domain builder + `AgentManifest`,
+    // so the wire schema is identical to what the Gateway parses. `build`
+    // runs `validate()` (reverse-domain agent_id, non-empty version/name/
+    // runtime_version, label format, mcp declaration forms) and the ADR-104
+    // capability→skill graph check, so bad input surfaces here rather than as
+    // a confusing Gateway 400.
+    let manifest = draft.manifest.build(&decls)?;
+    let manifest_toml = manifest
+        .to_toml()
+        .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
 
     // Create a temp directory for the skeleton (use monotonic timestamp to avoid
     // collisions when concurrent Tauri commands run in the same process).
@@ -270,83 +404,29 @@ pub async fn create_agent(
     ));
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
-    // Create prompts/ directory
+    // prompts/
     let prompts_dir = temp_dir.join("prompts");
     std::fs::create_dir_all(&prompts_dir)
         .map_err(|e| format!("Failed to create prompts dir: {}", e))?;
 
-    // Extract each skill ZIP into `skills/{name}/` under the
-    // skeleton. Done before the manifest write so we can verify the
-    // files-on-disk shape matches what we advertise in the
-    // capabilities section.
+    // Extract each skill ZIP into `skills/{name}/` under the skeleton. Done
+    // before the manifest write so the files-on-disk shape matches what the
+    // capabilities section advertises (and what `validate_capability_skills`
+    // was checked against).
     if !parsed_skills.is_empty() {
         let skills_root = temp_dir.join("skills");
         std::fs::create_dir_all(&skills_root)
             .map_err(|e| format!("Failed to create skills dir: {}", e))?;
-        for (bytes, skill) in skill_files.iter().zip(parsed_skills.iter()) {
+        for (bytes, skill) in draft.skill_files.iter().zip(parsed_skills.iter()) {
             extract_skill_zip(bytes, &skills_root.join(&skill.name))?;
         }
     }
-
-    // Build the manifest via the shared `AgentManifest` type so the
-    // wire schema is identical to what the Gateway parses. Using
-    // `to_toml` also runs `validate()` (reverse-domain agent_id,
-    // non-empty version/name/runtime_version) so bad input from the
-    // wizard surfaces here, not as a confusing Gateway 400.
-    let mut capabilities = std::collections::HashMap::new();
-    for skill in &parsed_skills {
-        capabilities.insert(
-            skill.name.clone(),
-            CapabilityDef {
-                description: skill.description.clone(),
-                input_schema: None,
-                output_schema: None,
-            },
-        );
-    }
-
-    let tool_decls: Vec<ToolDeclaration> = tools
-        .into_iter()
-        .map(|n| ToolDeclaration {
-            tool_type: "builtin".to_string(),
-            name: n,
-            config: None,
-            rag: None,
-        })
-        .collect();
-
-    let manifest = AgentManifest {
-        agent_id: agent_id.clone(),
-        version,
-        name: name.clone(),
-        display_name: None,
-        role: None,
-        avatar: None,
-        builtin_avatar: None,
-        description: description.clone(),
-        author: author.clone(),
-        runtime_version: "0.1.0".to_string(),
-        permissions: Vec::new(),
-        triggers: Vec::new(),
-        llm: Default::default(),
-        memory: Default::default(),
-        identity_deps: Vec::new(),
-        tools: tool_decls,
-        capabilities,
-        resources: Default::default(),
-        sandbox: Default::default(),
-        dev: true,
-        skills: Default::default(),
-    };
-
-    let manifest_toml = manifest
-        .to_toml()
-        .map_err(|e| format!("Failed to serialize manifest: {}", e))?;
 
     std::fs::write(temp_dir.join("manifest.toml"), &manifest_toml)
         .map_err(|e| format!("Failed to write manifest: {}", e))?;
 
     // Generate default system prompt
+    let description = manifest.description.clone();
     let system_prompt = format!(
         "You are {}, an AI assistant.\n\n\
         Role: {}\n\n\
@@ -379,7 +459,6 @@ pub async fn create_agent(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    // Recursively add files from temp_dir to the zip
     add_dir_to_zip(&mut zip_writer, &temp_dir, &temp_dir, options)
         .map_err(|e| format!("Failed to zip skeleton: {}", e))?;
 
@@ -387,7 +466,6 @@ pub async fn create_agent(
         .finish()
         .map_err(|e| format!("Failed to finalize zip: {}", e))?;
 
-    // Read the zip bytes
     let package_bytes =
         std::fs::read(&zip_path).map_err(|e| format!("Failed to read zip: {}", e))?;
 
@@ -404,7 +482,6 @@ pub async fn create_agent(
 
     Ok(agent_id)
 }
-
 /// Extract every entry of `zip_bytes` into `dest_dir`. The packager
 /// may wrap the skill in a single top-level directory; we strip that
 /// prefix so the result is `skills/{name}/SKILL.md` etc., never
