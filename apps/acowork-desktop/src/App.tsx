@@ -7,6 +7,7 @@ import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { LoginView } from "./components/account/LoginView";
 import { SetupRequiredView } from "./components/account/SetupRequiredView";
 import { ToastProvider } from "./components/common/ToastProvider";
+import { ImageLightboxHost } from "./components/common/ImageLightbox";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { useAuthStore } from "./stores/authStore";
 import { initMqttListener } from "./stores/chatStore";
@@ -163,6 +164,10 @@ function App() {
   return (
     <ErrorBoundary>
       <ToastProvider>
+        {/* Chat-attachment image previews open from a plain module
+            (`lib/openChatAttachment.ts`), so the overlay is hosted once above
+            the shell instead of inside a virtualized chat row. */}
+        <ImageLightboxHost />
         {authStatus === "logged_out" ? (
           <LoginView />
         ) : authStatus === "setup_required" ? (

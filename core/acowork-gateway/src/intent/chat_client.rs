@@ -15,6 +15,7 @@
 //! failures as "deliver without a chat binding" (one-off cross-agent
 //! messages keep working when the user service is down).
 
+use acowork_core::protocol::ChatAttachmentMeta;
 use serde::{Deserialize, Serialize};
 
 /// A session participant as the user service returns it: a bare id
@@ -166,11 +167,22 @@ pub async fn ensure_group(
 /// `POST /internal/chat-sessions/messages` — append one system row.
 /// The store dedups on `meta.message_id` (§8), so a retried delivery
 /// never double-writes the chat log.
+///
+/// Returns the **stored** attachment metadata, which is the only trustworthy
+/// description of what the user attached: the store re-reads name / mime /
+/// size from the session's `files/` dir, so the values do not come from a
+/// client body. The caller forwards them to the Runtime so its Chat Router can
+/// see this turn's attachments (a row already in the transcript gets the same
+/// metadata from the history projection).
+///
+/// An unparseable response body yields an empty list rather than an error: a
+/// delivery that carries the message without attachment *labels* is a worse
+/// route, not a lost message.
 pub async fn append_message(
     port: u16,
     session_id: &str,
     msg: &AppendMessage,
-) -> Result<(), String> {
+) -> Result<Vec<ChatAttachmentMeta>, String> {
     let resp = client()
         .post(format!(
             "http://127.0.0.1:{port}/internal/chat-sessions/messages"
@@ -192,12 +204,35 @@ pub async fn append_message(
         .await
         .map_err(|e| e.to_string())?;
     let status = resp.status();
-    if status.is_success() {
-        Ok(())
-    } else {
+    if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        Err(format!("chat append {status}: {body}"))
+        return Err(format!("chat append {status}: {body}"));
     }
+    let stored: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "chat append returned an unreadable body — delivering without attachment metadata");
+            return Ok(Vec::new());
+        }
+    };
+    Ok(attachment_meta_from_row(&stored))
+}
+
+/// Project a stored row's `attachments` onto the shared router-side shape.
+/// Unknown fields (`id`, `thumb`) are ignored; a missing array means no
+/// attachments, which is also the answer for every non-speech row.
+fn attachment_meta_from_row(row: &serde_json::Value) -> Vec<ChatAttachmentMeta> {
+    row.get("attachments")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    serde_json::from_value::<ChatAttachmentMeta>(item.clone()).ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `GET /internal/chat-sessions/{id}` — session metadata (repo binding,
@@ -374,4 +409,73 @@ pub async fn sync_group(
         .await
         .map_err(|e| e.to_string())?;
     read_json(resp).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Both delivery entries (`chat-message`, `chat-mention`) forward whatever
+    // `append_message` returned, so this projection is the single producer of
+    // `params.chat_attachments` — and the Runtime's history projection reads
+    // the same row through the same shape. Keeping the projection faithful is
+    // what makes the current turn and the transcript read identically.
+
+    #[test]
+    fn the_stored_row_projects_name_mime_and_size_in_order() {
+        // A real store row: it also carries `id` and `thumb`, which the router
+        // neither needs nor may see (ADR-096 — metadata only, no payloads).
+        let row = json!({
+            "id": "m-1",
+            "kind": "user_message",
+            "body": "look at this",
+            "attachments": [
+                {"id": "att-1", "filename": "report.pdf", "mime": "application/pdf", "size": 12288, "thumb": "data:image/png;base64,AAAA"},
+                {"id": "att-2", "filename": "shot.png", "mime": "image/png", "size": 348160},
+            ],
+        });
+
+        assert_eq!(
+            attachment_meta_from_row(&row),
+            vec![
+                ChatAttachmentMeta {
+                    filename: "report.pdf".into(),
+                    mime: "application/pdf".into(),
+                    size: 12_288,
+                },
+                ChatAttachmentMeta {
+                    filename: "shot.png".into(),
+                    mime: "image/png".into(),
+                    size: 348_160,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_without_attachments_projects_nothing() {
+        // Every non-speech row, and every turn from before attachments existed.
+        assert!(attachment_meta_from_row(&json!({"id": "m-1", "body": "hi"})).is_empty());
+        assert!(attachment_meta_from_row(&json!({"attachments": null})).is_empty());
+        assert!(attachment_meta_from_row(&json!({"attachments": []})).is_empty());
+        // Wrong container type: the store never writes this, but a degraded
+        // store must cost the metadata, not the delivery.
+        assert!(attachment_meta_from_row(&json!({"attachments": "att-1"})).is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_element_is_skipped_and_the_rest_survive() {
+        let row = json!({
+            "attachments": [
+                {"filename": "good.png", "mime": "image/png", "size": 10},
+                "not-an-object",
+                {"filename": "also-good.pdf", "mime": "application/pdf", "size": 20},
+            ],
+        });
+        let meta = attachment_meta_from_row(&row);
+        assert_eq!(meta.len(), 2);
+        assert_eq!(meta[0].filename, "good.png");
+        assert_eq!(meta[1].filename, "also-good.pdf");
+    }
 }

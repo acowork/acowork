@@ -35,6 +35,9 @@ import { daySeparator, timeGapSeparator } from '../../lib/time'
 import { useStickToBottom } from '../../lib/stickToBottom'
 import { Banner, Sheet } from '../../components/ui'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
+import { AttachmentViewer } from '../../components/AttachmentViewer'
+import { ChatAttachmentCapsule } from '../../components/ChatAttachmentCapsule'
+import type { ChatAttachment } from '../../lib/chatAttachment'
 import { renderMarkdown } from '../../lib/markdown'
 import type { ChatMessageRow } from '../../lib/types'
 
@@ -273,6 +276,9 @@ export function AgentChatScreen() {
   const [draft, setDraft] = useState('')
   /** The decision card currently open in the bottom sheet (§6.5). */
   const [answering, setAnswering] = useState<ChatMessageRow | null>(null)
+  /** The uploaded file whose viewer is open. Held here, above the list, so a
+   *  poll tick that re-renders (or re-keys) a row cannot close the overlay. */
+  const [viewing, setViewing] = useState<ChatAttachment | null>(null)
 
   useEffect(() => {
     if (agentId) void useChatSessionStore.getState().openAgent(agentId)
@@ -437,6 +443,7 @@ export function AgentChatScreen() {
                   chatAnswered={answeredHere}
                   onOpenExec={openExec}
                   onAnswerCard={(card) => setAnswering(card)}
+                  onOpenAttachment={setViewing}
                   triggerBody={r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined}
                 />
               </Fragment>
@@ -500,6 +507,18 @@ export function AgentChatScreen() {
             onAnswer={(text) => send(text, answering.meta?.message_id)}
           />
         ) : null}
+
+        {/* An uploaded file's viewer. Desktop parity: the same attachment the
+            chat received is tappable on both surfaces. Only rendered with a
+            session id, because the bytes are fetched through the session route
+            (a group chat has no single account to scope them by). */}
+        {viewing && sessionId ? (
+          <AttachmentViewer
+            chatSessionId={sessionId}
+            attachment={viewing}
+            onClose={() => setViewing(null)}
+          />
+        ) : null}
       </div>
     </EdgeSwipe>
   )
@@ -522,6 +541,9 @@ export interface RowProps {
   answered: boolean
   onOpenExec: (execSid: string) => void
   onAnswerCard: (card: ChatMessageRow) => void
+  /** A tap on an uploaded file's capsule. The parent owns the viewer so one
+   *  overlay serves every row in the list (and outlives re-renders of it). */
+  onOpenAttachment: (attachment: ChatAttachment) => void
   /** Body of the message that triggered this row's turn (`meta.in_reply_to`).
    *  Names the task in the routing reaction bubble (ADR-100 D11), the mobile
    *  twin of the desktop `triggerBody` — mobile has no session-title store
@@ -596,7 +618,7 @@ export function ReplyQuote({ quote }: { quote?: string }) {
 }
 
 export function RowView(props: RowProps) {
-  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, onOpenExec, onAnswerCard, triggerBody, answeredCardKind, replyQuote, answeredCards, chatAnswered } = props
+  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, onOpenExec, onAnswerCard, onOpenAttachment, triggerBody, answeredCardKind, replyQuote, answeredCards, chatAnswered } = props
   const routed = isTurnRoutedNotice(row)
   const execSid =
     row.kind === 'agent_message' || routed
@@ -703,7 +725,7 @@ export function RowView(props: RowProps) {
             {row.attachments && row.attachments.length > 0 ? (
               <div className="chat-attachments">
                 {row.attachments.map((a) => (
-                  <span key={a.id} className="chat-attachment-chip">📎 {a.name}</span>
+                  <ChatAttachmentCapsule key={a.id} attachment={a} onOpen={onOpenAttachment} />
                 ))}
               </div>
             ) : null}

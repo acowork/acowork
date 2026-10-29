@@ -70,6 +70,7 @@ import { ViewRunButton } from "./ViewRunButton";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote, truncateQuote } from "./ReplyQuote";
 import { ChatEventText } from "./ChatEventText";
@@ -319,6 +320,7 @@ const RowView = memo(function RowView({
                       key={a.id}
                       chatSessionId={chatSessionId}
                       attachment={a}
+                      onClick={() => void openChatAttachment(chatSessionId, a)}
                     />
                   ))}
                 </div>
@@ -444,6 +446,7 @@ const RowView = memo(function RowView({
                     key={a.id}
                     chatSessionId={chatSessionId}
                     attachment={a}
+                    onClick={() => void openChatAttachment(chatSessionId, a)}
                   />
                 ))}
               </div>

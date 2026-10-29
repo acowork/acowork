@@ -240,11 +240,11 @@ interface FileEditorState {
      *  Content is supplied by the caller (already fetched from the chat
      *  blob route) — no workspace, no Gateway file fetch, never dirty,
      *  never saved. Tabs are addressed as
-     *  `attachment:${userId}:${chatId}:${attachmentId}`, so opening the
-     *  same attachment again activates the existing tab instead of
-     *  stacking duplicates. */
+     *  `attachment:${chatId}:${attachmentId}`, so opening the same
+     *  attachment again activates the existing tab instead of stacking
+     *  duplicates. Keyed on the chat, not the account: the group surface
+     *  never holds an owning `userId`, and a chat id is already unique. */
     openAttachmentPreview: (opts: {
-        userId: string;
         chatId: string;
         attachmentId: string;
         fileName: string;
@@ -611,8 +611,8 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         );
     },
 
-    openAttachmentPreview: ({ userId, chatId, attachmentId, fileName, content, language }) => {
-        const fileId = `attachment:${userId}:${chatId}:${attachmentId}`;
+    openAttachmentPreview: ({ chatId, attachmentId, fileName, content, language }) => {
+        const fileId = `attachment:${chatId}:${attachmentId}`;
         if (get().openFiles.some((f) => f.id === fileId)) {
             // Already open, just activate — mirrors openFileWithContent.
             set({ activeFileId: fileId });

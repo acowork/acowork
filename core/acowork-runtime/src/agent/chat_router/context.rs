@@ -19,6 +19,7 @@
 
 use std::collections::HashSet;
 
+use acowork_core::protocol::ChatAttachmentMeta;
 use acowork_core::providers::traits::{CacheControl, ChatMessage};
 use serde::Deserialize;
 use serde_json::Value;
@@ -42,6 +43,11 @@ pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 2048;
 pub const ATTACHMENT_META_MAX_BYTES: usize = 512;
 /// Fixed truncation marker.
 pub const TRUNCATION_SUFFIX: &str = "…[truncated]";
+
+/// Stands in for an empty body when the turn carried files instead of words.
+/// Fixed bytes on purpose: the decision log and the tests must be able to name
+/// the exact shape a degenerate turn was routed with.
+pub const ATTACHMENT_ONLY_PLACEHOLDER: &str = "(no text — the message is its attachments)";
 
 // ── Wire rows ─────────────────────────────────────────────────────────
 
@@ -69,7 +75,7 @@ pub struct ChatRow {
     #[serde(default)]
     pub meta: RowMeta,
     #[serde(default)]
-    pub attachments: Vec<RowAttachment>,
+    pub attachments: Vec<ChatAttachmentMeta>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -92,16 +98,6 @@ pub struct RowInteraction {
     pub question: String,
     #[serde(default)]
     pub options: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct RowAttachment {
-    #[serde(default)]
-    pub filename: String,
-    #[serde(default)]
-    pub mime: String,
-    #[serde(default)]
-    pub size: u64,
 }
 
 impl ChatRow {
@@ -356,7 +352,7 @@ fn notice_text(row: &ChatRow) -> String {
 }
 
 /// `<tag> <body>` with the attachment metadata appended, both bounded.
-fn prefix_body(tag: &str, body: &str, attachments: &[RowAttachment]) -> String {
+fn prefix_body(tag: &str, body: &str, attachments: &[ChatAttachmentMeta]) -> String {
     let mut out = String::with_capacity(tag.len() + body.len() + 8);
     out.push_str(tag);
     out.push(' ');
@@ -368,10 +364,22 @@ fn prefix_body(tag: &str, body: &str, attachments: &[RowAttachment]) -> String {
     out
 }
 
+/// `true` when the turn carries files and no words.
+///
+/// One predicate for two surfaces — the Block C body and the decision log —
+/// so the prompt and the log can never disagree about what a turn was. A
+/// whitespace-only body counts as no words: the human attached and did not type.
+pub(crate) fn is_attachment_only(
+    user_message: &str,
+    attachments: &[ChatAttachmentMeta],
+) -> bool {
+    user_message.trim().is_empty() && !attachments.is_empty()
+}
+
 /// `report.pdf (application/pdf, 12KB), screenshot.png (image/png, 340KB)`,
 /// capped at [`ATTACHMENT_META_MAX_BYTES`]. Entries that do not fit are
 /// dropped whole so the line never ends mid-entry.
-fn attachments_line(attachments: &[RowAttachment]) -> Option<String> {
+fn attachments_line(attachments: &[ChatAttachmentMeta]) -> Option<String> {
     if attachments.is_empty() {
         return None;
     }
@@ -494,11 +502,17 @@ pub struct TurnContext<'a> {
     pub history_available: bool,
     /// The user's message, verbatim.
     pub user_message: &'a str,
+    /// Files this turn carries, as the Gateway read them back from the stored
+    /// row. Rendered with the *same* line function Block B uses, so the turn
+    /// being routed looks exactly like the same turn once it becomes history.
+    pub attachments: &'a [ChatAttachmentMeta],
 }
 
 impl TurnContext<'_> {
     /// Render the final `user` message: `[runtime context]` … blank line …
-    /// `[user message]`.
+    /// `[user message]`, then — when the turn carried files — the same
+    /// `[attachments] …` line Block B paints for that message once it is
+    /// history.
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(self.user_message.len() + 512);
         out.push_str("[runtime context]\n");
@@ -527,7 +541,18 @@ impl TurnContext<'_> {
             out.push('\n');
         }
         out.push_str("\n[user message]\n");
-        out.push_str(self.user_message);
+        // An attachment-only turn is a normal turn, not an empty one: the human
+        // sent something, they just did not type. Without this the model reads a
+        // blank message and treats it as small talk instead of work.
+        if is_attachment_only(self.user_message, self.attachments) {
+            out.push_str(ATTACHMENT_ONLY_PLACEHOLDER);
+        } else {
+            out.push_str(self.user_message);
+        }
+        if let Some(meta) = attachments_line(self.attachments) {
+            out.push_str("\n[attachments] ");
+            out.push_str(&meta);
+        }
         out
     }
 }
@@ -723,12 +748,12 @@ mod tests {
     fn attachment_metadata_is_bounded_and_single_line() {
         let mut row = row(1, "user_message", "u1", "see files");
         row.attachments = vec![
-            RowAttachment {
+            ChatAttachmentMeta {
                 filename: "report.pdf".into(),
                 mime: "application/pdf".into(),
                 size: 12 * 1024,
             },
-            RowAttachment {
+            ChatAttachmentMeta {
                 filename: "shot\n2.png".into(),
                 mime: "image/png".into(),
                 size: 340 * 1024,
@@ -738,6 +763,104 @@ mod tests {
         let content = &block.messages[0].content;
         assert!(content.contains("[attachments] report.pdf (application/pdf, 12KB), shot 2.png (image/png, 340KB)"));
         assert_eq!(content.lines().count(), 2, "attachment metadata must be one line");
+    }
+
+    // ── Block C (the turn being routed) ───────────────────────────────
+    // The router used to see the text alone: attachments reached only the
+    // history projection, so the one turn that carried a file was the one turn
+    // it could not see it on. These three pin the fix.
+
+    #[test]
+    fn block_c_attachment_line_matches_the_history_projection_byte_for_byte() {
+        let mut row = row(1, "user_message", "u1", "look at this");
+        row.attachments = vec![
+            ChatAttachmentMeta {
+                filename: "report.pdf".into(),
+                mime: "application/pdf".into(),
+                size: 12 * 1024,
+            },
+            ChatAttachmentMeta {
+                filename: "shot 2.png".into(),
+                mime: "image/png".into(),
+                size: 340 * 1024,
+            },
+        ];
+        let block = build_block_b(
+            std::slice::from_ref(&row),
+            0,
+            &ids(&[]),
+            "a1",
+            &WindowBudget::default(),
+        );
+        // One renderer, two call sites: the same message must read the same
+        // whether it is history or the turn being routed right now.
+        let history_line = block.messages[0]
+            .content
+            .lines()
+            .last()
+            .expect("history row renders")
+            .to_string();
+
+        let ctx = TurnContext {
+            surface: "dm",
+            speaker: "u1",
+            now: "2026-10-21T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "look at this",
+            attachments: &row.attachments,
+        };
+        let rendered = ctx.render();
+        let turn_line = rendered.lines().last().expect("block c renders");
+        assert_eq!(turn_line, history_line);
+        assert!(turn_line.starts_with("[attachments] report.pdf (application/pdf, 12KB)"));
+    }
+
+    #[test]
+    fn an_attachment_only_turn_says_so_instead_of_going_blank() {
+        let attachments = vec![ChatAttachmentMeta {
+            filename: "shot.png".into(),
+            mime: "image/png".into(),
+            size: 4096,
+        }];
+        let rendered = TurnContext {
+            surface: "dm",
+            speaker: "u1",
+            now: "2026-10-21T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "   ",
+            attachments: &attachments,
+        }
+        .render();
+
+        assert!(rendered.contains(ATTACHMENT_ONLY_PLACEHOLDER));
+        assert!(rendered.contains("[attachments] shot.png (image/png, 4KB)"));
+        // The placeholder IS the body — never an empty line followed by it.
+        assert!(!rendered.contains("[user message]\n\n"));
+    }
+
+    #[test]
+    fn a_text_only_turn_renders_no_attachment_line() {
+        let rendered = TurnContext {
+            surface: "dm",
+            speaker: "u1",
+            now: "2026-10-21T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "hello",
+            attachments: &[],
+        }
+        .render();
+        assert!(rendered.ends_with("\n[user message]\nhello"));
+        assert!(!rendered.contains("[attachments]"));
+        assert!(!rendered.contains(ATTACHMENT_ONLY_PLACEHOLDER));
     }
 
     #[test]
@@ -790,6 +913,7 @@ mod tests {
             task: None,
             history_available: true,
             user_message: "继续弄一下登录",
+            attachments: &[],
         };
         let text = ctx.render();
         assert!(text.starts_with("[runtime context]\nsurface: group\nspeaker: alice\n"));
@@ -824,6 +948,7 @@ mod tests {
             task: Some("project=proj task=T-12"),
             history_available: false,
             user_message: "hi",
+            attachments: &[],
         };
         let text = ctx.render();
         assert!(text.contains("draft: model=claude-sonnet, workspace=ws-1"));

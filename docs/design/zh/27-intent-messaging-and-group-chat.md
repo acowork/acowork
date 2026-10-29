@@ -349,6 +349,8 @@ Chat session 是用户聊天与 Agent 间消息的持久化会话，由 `acowork
 
 Agent 侧收到的仍是解析后的引用，Runtime 不读 Chat session 目录；附件的读取路径与消息正文一致，经唯一写入口所在的受信任服务。投递载体：**MQTT Intent 信封只携带附件 id，文件字节永不进 MQTT 消息**——Runtime 在回合开始时经 node 鉴权的 HTTP（Gateway 转发 user service 的内部流式端点）逐个拉取字节并物化进 agent home 的 `files/` 目录；user service 校验 durable `user_message` 行确实 addressed 给该 target 且 pin 了该 id，行即授权。单个拉取失败降级为"该附件本轮不可见"，回合照常运行。
 
+**元数据与字节分道。** 附件元数据（filename / mime / size，由 user service 在落库时从会话 `files/` 目录重读，不采信客户端）随投递 params 的 `chat_attachments` 键送达，供 Chat Router 看清本轮带的是哪些文件（design 29 §5.1）；信封字段 `chat_attachment_ids` 仍然只承载 id，字节仍然一次都不上 MQTT。两者是不同通道：id 走信封给执行侧拉字节，元数据走 params 给路由判断。params 里缺这个键（旧 Gateway）或形状不符时，Runtime 一律降级为"本轮没有附件"——代价是一轮判断质量，不是整条消息。
+
 #### 4.2.2 卡片与运行期状态行
 
 Chat session 里只有一类指向 execution session 内事件的 durable 行：

@@ -211,6 +211,9 @@ If matching fails (e.g. a pagination boundary), keep the history as-is — prefe
 | `draft` | `model=claude-sonnet, workspace=ws-1` | envelope `session_config_json`, empty if absent |
 | `candidates` | see §5.2 | at most 10 |
 | `task` | `project=proj, task=T-12` | only for PM task follow-ups |
+| `attachments` | `report.pdf (application/pdf, 12KB), shot.png (image/png, 340KB)` | this turn's attachment metadata; the line is **identical** to the history projection in §4.1, produced by the same render function |
+
+The attachment line appears only when the turn actually carried files, and always sits right after `[user message]`. It is **byte-for-byte** the line Block B paints for the same message once it becomes history — the turn being routed and the same turn viewed as history must look alike, otherwise the router quotes an old screenshot while being blind to the one just attached.
 
 ### 5.2 Candidate list format
 
@@ -241,7 +244,10 @@ S2           idle     3h  task  Review ADR-098
 
 [user message]
 Continuing the login redirect issue, and please check the review comments on ADR-098
+[attachments] login-error.png (image/png, 182KB)
 ```
+
+An attachment-only turn (empty or whitespace-only `text`, at least one attachment) is **not** an empty message: the `[user message]` slot carries the fixed placeholder `(no text — the message is its attachments)` followed by the attachment line. An empty body reads as "the human said nothing" and biases the model away from routing; the fixed placeholder says they sent something and simply did not type. The placeholder is byte-fixed (decision reproducibility) and shares one predicate with the decision log's `attachment_only`, so "the log says attachment-only while the prompt rendered text" cannot happen.
 
 The benefit: the final message carries the whole "this turn" view, while the system and history before it stay byte-stable.
 
@@ -288,12 +294,16 @@ Each `chat-router-decisions.jsonl` line adds:
   "prefix_hash": "9f2c1a7b",
   "anchor_seq": 42,
   "history_len": 18,
+  "attachments": 1,
+  "attachment_only": false,
   "prompt_tokens": 3120,
   "cache_read_tokens": 2816,
   "cache_write_tokens": 0,
   "hit_rate": 0.90
 }
 ```
+
+`attachments` is a **count** of this turn's files; `attachment_only` marks the placeholder branch of §5.3. Neither records filenames, mime or size — the decision log is routing metadata, not message content (ADR-096). They exist for observability: before them, a turn carrying a file and the same text carrying nothing produced identical log lines, which is why the router's blindness to attachments stayed invisible. Older lines read as `attachments: 0` / `attachment_only: false`, so the format stays backward compatible.
 
 Acceptance targets (v1):
 

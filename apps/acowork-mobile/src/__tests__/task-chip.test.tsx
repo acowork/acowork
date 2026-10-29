@@ -32,6 +32,7 @@ function renderRow(row: ChatMessageRow): string {
     chatAnswered: new Set<string>(),
     onOpenExec: () => {},
     onAnswerCard: () => {},
+    onOpenAttachment: () => {},
   }
   return renderToStaticMarkup(<RowView {...props} />)
 }

@@ -704,13 +704,14 @@ const MCP_ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> 
 };
 const MCP_FALLBACK_ICON = Package;
 
-/** Public MCP server directory surfaced in the add-server dialog. Opened
+/** Public MCP server directories surfaced in the add-server dialog. Opened
  *  through plugin-shell `open` (already registered + `shell:allow-open`
  *  granted) rather than a plain `<a target="_blank">`: a bare anchor click
  *  routes through the webview's new-window path, which is the one under
  *  suspicion for the link-click webview crash (see the temporary probe in
- *  main.tsx). The URL itself is a constant — only the label is translated. */
-const MCP_DIR_URL = "https://mcpdir.dev";
+ *  main.tsx). The URLs themselves are constants — only the label is
+ *  translated. Both are shown so the user picks where to look. */
+const MCP_DIR_URLS = ["https://mcpdir.dev", "https://github.com/mcp"];
 
 // Parse the free-text `KEY=VALUE, ...` (env, sep "=") and `Name: value, ...`
 // (headers, sep ":") fields into a map. Splits on the FIRST separator only so
@@ -1062,14 +1063,19 @@ export function McpTab() {
                 only place a server can come from. */}
             <p className="mb-3 text-10 text-text-tertiary">
               {t("harnessMcp.findServers")}{" "}
-              <button
-                type="button"
-                onClick={() => { void open(MCP_DIR_URL).catch(() => {}); }}
-                data-testid="mcp-find-servers-link"
-                className="text-[var(--color-accent)] hover:underline"
-              >
-                {MCP_DIR_URL}
-              </button>
+              {MCP_DIR_URLS.map((url, idx) => (
+                <span key={url}>
+                  {idx > 0 && " · "}
+                  <button
+                    type="button"
+                    onClick={() => { void open(url).catch(() => {}); }}
+                    data-testid="mcp-find-servers-link"
+                    className="text-[var(--color-accent)] hover:underline"
+                  >
+                    {url}
+                  </button>
+                </span>
+              ))}
             </p>
             <div className="space-y-2">
               {/* Paste-to-normalize: drop in a vendor `mcpServers` JSON block

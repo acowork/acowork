@@ -217,6 +217,38 @@ fn chat_turn_text(envelope: &IntentEnvelope) -> Option<String> {
     Some(text)
 }
 
+/// This turn's own attachment metadata — what the human actually attached.
+///
+/// Deliberately tolerant: the Gateway only started sending `chat_attachments`
+/// alongside `chat_attachment_ids`, so an older (or half-deployed) Gateway
+/// yields an empty list. A turn routed without the file list is a worse
+/// decision; a turn that fails to run because of it is a lost message.
+///
+/// The single reader of the param: the Block C renderer, the decision log and
+/// the degraded route's brief all go through here, so "does this turn have
+/// files?" has exactly one answer.
+pub(crate) fn turn_attachments(
+    envelope: &IntentEnvelope,
+) -> Vec<acowork_core::protocol::ChatAttachmentMeta> {
+    envelope
+        .params
+        .get(acowork_core::protocol::CHAT_ATTACHMENTS_PARAM)
+        .and_then(|v| {
+            serde_json::from_value::<Vec<acowork_core::protocol::ChatAttachmentMeta>>(v.clone())
+                .ok()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        // Per-field serde defaults mean a wrong-shaped element parses into an
+        // entry describing nothing. Drop those: Block C must never claim "there
+        // is a file" with no name to name it by, and the decision log's count
+        // must mean files, not array slots.
+        .filter(|a: &acowork_core::protocol::ChatAttachmentMeta| {
+            !a.filename.is_empty() || !a.mime.is_empty()
+        })
+        .collect()
+}
+
 /// Chat surface from the envelope. Absent (older Gateway) reads as a group —
 /// the privacy-safe default (design 29 §3.2).
 fn chat_kind_of(envelope: &IntentEnvelope) -> String {
@@ -392,6 +424,7 @@ async fn run_turn(
     }
     let draft = draft_label(&envelope.session_config_json);
     let task = task_label(&envelope.conversation_id);
+    let attachments = turn_attachments(envelope);
     let turn_view = TurnContext {
         surface: surface_label(&chat_kind),
         speaker: &envelope.from,
@@ -401,6 +434,7 @@ async fn run_turn(
         task: task.as_deref(),
         history_available,
         user_message: text,
+        attachments: &attachments,
     }
     .render();
 
@@ -445,6 +479,8 @@ async fn run_turn(
         prefix_hash: prefix_hash(&prepared.block_a, &tools_json, &block_b.messages),
         anchor_seq: block_b.anchor_seq as usize,
         history_len: block_b.messages.len(),
+        attachments: attachments.len(),
+        attachment_only: super::context::is_attachment_only(text, &attachments),
         started,
         info_rounds: 0,
     };
@@ -1091,6 +1127,14 @@ struct TurnTrace<'a> {
     prefix_hash: String,
     anchor_seq: usize,
     history_len: usize,
+    /// Attachments on the turn being routed — the count, not the metadata:
+    /// the log holds routing metadata only (ADR-096). Zero was the invisible
+    /// state: a turn carrying a file routed exactly like the same text with
+    /// nothing attached, and no line in the log could show which had happened.
+    attachments: usize,
+    /// The turn had attachments and no text (see
+    /// [`context::is_attachment_only`]), i.e. Block C rendered the placeholder.
+    attachment_only: bool,
     started: Instant,
     /// Information-tool rounds this turn ran before deciding (audit
     /// surface for "the router looked things up instead of routing").
@@ -1122,6 +1166,8 @@ impl TurnTrace<'_> {
             prefix_hash: self.prefix_hash.clone(),
             anchor_seq: self.anchor_seq,
             history_len: self.history_len,
+            attachments: self.attachments,
+            attachment_only: self.attachment_only,
             info_rounds: (self.info_rounds > 0).then_some(self.info_rounds),
             prompt_tokens: usage.map(|u| u.0),
             cache_read_tokens: usage.map(|u| u.1),
@@ -1235,6 +1281,123 @@ mod tests {
         assert_eq!(chat_turn_text(&with_file).as_deref(), Some(""));
     }
 
+    /// End to end across the wire, in one test: the params object the Gateway
+    /// writes, read by the router, rendered into Block C.
+    ///
+    /// The two halves are tested separately (`intent::chat_client` pins the
+    /// projection, the context tests pin the rendering), which still leaves one
+    /// thing unguarded — the KEY. A Gateway writing `chatAttachments` and a
+    /// Runtime reading `chat_attachments` would pass both suites and lose every
+    /// attachment in production. So the literal below is the Gateway's params
+    /// object as `intent_api` writes it (same key, same nesting, same field
+    /// names from the user service), and the assertion is the line the model
+    /// would see.
+    #[test]
+    fn the_gateways_delivery_params_reach_the_router_prompt() {
+        // Same keys the Gateway's `chat_delivery_params` writes. The
+        // attachment key is inserted through the shared constant rather than
+        // spelled out here: `json!` needs a literal key, and a second literal
+        // is exactly the drift this test is supposed to catch (the Gateway
+        // half of the contract is pinned by
+        // `http::intent_api::chat_params_tests`).
+        let mut params = serde_json::json!({
+            "message": "look at this",
+            "chat_attachment_ids": ["att-1"],
+            "chat_kind": "user_agent",
+            "chat_prompt": "",
+        });
+        params[acowork_core::protocol::CHAT_ATTACHMENTS_PARAM] = serde_json::json!([
+            {"filename": "report.pdf", "mime": "application/pdf", "size": 12288}
+        ]);
+        let turn = envelope("user_message", "cs-1", params);
+
+        assert_eq!(chat_turn_text(&turn).as_deref(), Some("look at this"));
+        let attachments = turn_attachments(&turn);
+        assert_eq!(attachments.len(), 1);
+
+        let rendered = super::super::context::TurnContext {
+            surface: surface_label(&chat_kind_of(&turn)),
+            speaker: &turn.from,
+            now: "2026-10-21T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "look at this",
+            attachments: &attachments,
+        }
+        .render();
+        assert!(
+            rendered.contains("look at this
+[attachments] report.pdf (application/pdf, 12KB)"),
+            "block C must carry the attachment line the Gateway delivered: {rendered}"
+        );
+    }
+
+    /// The Gateway only started writing `chat_attachments` in this change, so
+    /// a half-deployed Gateway meets a new Runtime. The reader gives up the
+    /// files before it gives up the turn: every malformed shape reads as "no
+    /// attachments", never as an error and never as a skipped message.
+    #[test]
+    fn a_malformed_attachment_payload_costs_the_files_not_the_turn() {
+        let turn = |params: Value| envelope("user_message", "cs-1", params);
+
+        // Absent (older Gateway) and explicit null.
+        assert!(turn_attachments(&turn(serde_json::json!({"message": "x"}))).is_empty());
+        assert!(
+            turn_attachments(&turn(
+                serde_json::json!({"message": "x", "chat_attachments": null})
+            ))
+            .is_empty()
+        );
+        // Wrong JSON type, wrong container, wrong element shape.
+        assert!(
+            turn_attachments(&turn(serde_json::json!({"chat_attachments": "att-1"}))).is_empty()
+        );
+        assert!(
+            turn_attachments(&turn(
+                serde_json::json!({"chat_attachments": {"filename": "a.pdf"}})
+            ))
+            .is_empty()
+        );
+        // Wrong element shape: per-field defaults would otherwise parse this
+        // into a nameless entry — nothing worth telling the model.
+        assert!(
+            turn_attachments(&turn(
+                serde_json::json!({"chat_attachments": [{"name": "a.pdf"}]})
+            ))
+            .is_empty()
+        );
+        // A partially-described file is still a file.
+        assert_eq!(
+            turn_attachments(&turn(
+                serde_json::json!({"chat_attachments": [{"filename": "a.pdf"}, {"name": "b.pdf"}]})
+            ))
+            .len(),
+            1
+        );
+        // Present but empty is the ordinary text-only turn.
+        assert!(turn_attachments(&turn(serde_json::json!({"chat_attachments": []}))).is_empty());
+        // A list of empty objects is "no files" here even though the raw array
+        // is non-empty. Everything that asks "did this turn carry files?" —
+        // Block C, the decision log, the degraded route's brief — goes through
+        // this reader, so there is exactly one answer.
+        assert!(
+            turn_attachments(&turn(serde_json::json!({"chat_attachments": [{}, {"size": 5}]})))
+                .is_empty()
+        );
+
+        // Well-formed: order preserved, nothing dropped.
+        let got = turn_attachments(&turn(serde_json::json!({"chat_attachments": [
+            {"filename": "report.pdf", "mime": "application/pdf", "size": 12288},
+            {"filename": "shot.png", "mime": "image/png", "size": 348160},
+        ]})));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].filename, "report.pdf");
+        assert_eq!(got[0].size, 12_288);
+        assert_eq!(got[1].mime, "image/png");
+    }
+
     #[test]
     fn absent_chat_kind_reads_as_a_group() {
         let missing = envelope("user_message", "cs-1", serde_json::json!({}));
@@ -1343,6 +1506,7 @@ mod tests {
             task: None,
             history_available: true,
             user_message: "continue",
+            attachments: &[],
         }
         .render();
         assert!(rendered.contains("S1"));

@@ -18,6 +18,7 @@ import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { TaskCard } from "./TaskCard";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { cn } from "../../lib/utils";
+import { COUNT_BADGE_BASE_CN } from "../../components/common/sidebarCountBadge";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
 interface KanbanColumnProps {
@@ -93,7 +94,7 @@ export function KanbanColumn({ status, i18nKey, tasks, onOpenTask, isOver }: Kan
         </h3>
         <span
           className={cn(
-            "rounded-full px-1.5 py-px text-10 font-medium tabular-nums",
+            COUNT_BADGE_BASE_CN,
             status === "submitted"
               ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
               : "bg-zinc-200 text-text-secondary dark:bg-zinc-700 ",

@@ -110,7 +110,16 @@ export interface ChatMessageRow {
     exec_attachments?: ExecAttachmentLabel[];
   };
   attachment_ids?: string[];
-  attachments?: Array<{ id: string; filename: string; mime: string; size: number }>;
+  /** Files attached to this row. `thumb` is the upload-time sidecar token
+   *  (`"jpg"` / `"txt"`); absent when the service produced no preview, so the
+   *  row falls back to the plain filename capsule. */
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mime: string;
+    size: number;
+    thumb?: string;
+  }>;
 }
 
 /** `GET /api/chat-sessions/...` session envelope. */
@@ -392,12 +401,48 @@ async function uploadChatAttachment(
   return resp.json();
 }
 
+/** Cache of resolved object URLs, keyed by session/attachment (+thumb). */
+const objectUrlCache = new Map<string, string>();
+
+/** One authenticated GET against the session's blob route. Shared by the
+ *  object-URL path (`<img>`) and the text path (read-only preview), because
+ *  both need the same bearer header and the same URL shape. */
+async function fetchChatAttachmentBlob(
+  chatSessionId: string,
+  attachmentId: string,
+  opts?: { thumb?: boolean },
+): Promise<Blob> {
+  const thumb = opts?.thumb === true;
+  const token = useAuthStore.getState().accessToken;
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/files/${encodeURIComponent(attachmentId)}${thumb ? "?thumb=1" : ""}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (!resp.ok) throw new Error(`attachment → ${resp.status}`);
+  return resp.blob();
+}
+
+/**
+ * Read one attachment as text, for the read-only preview tab.
+ *
+ * Session-scoped on purpose: the group surface has no owning `userId` in
+ * scope, and the blob route is participation-checked server-side, so the
+ * session is the only address this surface legitimately holds. Callers gate
+ * on `canPreviewAttachment` — the size cap is a main-thread concern and this
+ * function does not enforce it.
+ */
+export async function fetchChatAttachmentText(
+  chatSessionId: string,
+  attachmentId: string,
+): Promise<string> {
+  return (await fetchChatAttachmentBlob(chatSessionId, attachmentId)).text();
+}
+
 /** Attachment download needs the bearer token, so `<img src>` cannot work
  *  — hand out object URLs the same way `user-chat-api.ts` does. `thumb`
  *  serves the upload-time thumbnail sidecar (a 4K screenshot costs a few
  *  KB instead of the full blob) — 404 when the attachment has no sidecar,
  *  callers fall back to the full download. */
-const objectUrlCache = new Map<string, string>();
 export async function chatAttachmentObjectUrl(
   chatSessionId: string,
   attachmentId: string,
@@ -407,16 +452,28 @@ export async function chatAttachmentObjectUrl(
   const key = `${chatSessionId}/${attachmentId}${thumb ? "/thumb" : ""}`;
   const hit = objectUrlCache.get(key);
   if (hit) return hit;
-  const token = useAuthStore.getState().accessToken;
-  const resp = await fetch(
-    `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/files/${encodeURIComponent(attachmentId)}${thumb ? "?thumb=1" : ""}`,
-    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
-  );
-  if (!resp.ok) throw new Error(`attachment → ${resp.status}`);
-  const blob = await resp.blob();
+  const blob = await fetchChatAttachmentBlob(chatSessionId, attachmentId, opts);
   const url = URL.createObjectURL(blob);
   objectUrlCache.set(key, url);
   return url;
+}
+
+/**
+ * An object URL this caller owns and must revoke.
+ *
+ * Why not the cache above: `objectUrlCache` lives for the process and never
+ * revokes (a correct trade for thumbnails, which are small and recur), but a
+ * full-size blob handed to the image lightbox is neither — one per image
+ * viewed, and nothing in the cache would ever give the bytes back. Same
+ * fetch, no entry: pair it with `ImageLightboxRequest.onClose`.
+ */
+export async function createChatAttachmentObjectUrl(
+  chatSessionId: string,
+  attachmentId: string,
+  opts?: { thumb?: boolean },
+): Promise<string> {
+  const blob = await fetchChatAttachmentBlob(chatSessionId, attachmentId, opts);
+  return URL.createObjectURL(blob);
 }
 
 // ── Durable card projections (design 27 §5.5.4) ──────────────────────
