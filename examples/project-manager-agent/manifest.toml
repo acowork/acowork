@@ -10,6 +10,7 @@ description = "A professional project manager skilled in requirements analysis, 
 author = "ACowork Team"
 runtime_version = "0.1.0"
 dev = false
+labels = ["project-management", "planning"]
 avatar = "assets/avatar.jpg"
 
 identity_deps = ["display_name", "language", "timezone"]
@@ -85,6 +86,15 @@ fallback_order = ["openai", "claude"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+
+# ADR-104: behaviour defaults for agent_config.json. Seeded only into
+# fields the user has not set; never overwrites a user value.
+[config]
+temperature = 0.5
+context_window = 200000
+max_output_tokens = 8192
+max_iterations = 40
+
 [memory]
 enabled = true
 retention_days = 365
@@ -96,12 +106,26 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
+# ADR-104: recommended MCP servers. Recommendation, not installation —
+# the user confirms install/activation in the Tools panel (ADR-090).
+
+[[mcp_servers]]
+hosted = "pm"
+why = "Create and track tasks, dependencies and milestones in the project service"
+
+[[mcp_servers]]
+hosted = "memory"
+why = "Keep meeting decisions and commitments across sessions"
+
 [capabilities.requirements_analysis]
 description = "Analyze and document project requirements into a structured PRD"
+skills = ["requirements-analysis"]
 
 [capabilities.task_decomposition]
 description = "Break down project goals into actionable tasks with estimates and dependencies"
+skills = ["task-decomposition"]
 
 [capabilities.risk_assessment]
 description = "Identify, evaluate, and create mitigation plans for project risks"
+skills = ["risk-assessment"]
 
