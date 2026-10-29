@@ -2406,27 +2406,27 @@ impl SessionManager {
             "SessionManager: MCP servers applied (async background connect)"
         );
 
-        // Inject system notification for connection failures
+        // Connection failures are logged, never injected into the model's context.
+        //
+        // ponytail: a failure notice appended to the session history is a
+        // permanent, cache-breaking assertion about a *live* fact. The first
+        // network blip left "MCP server connection failed: pm, doc, memory" in
+        // the history forever; the agent then told the user those tools were
+        // down while they were fully connected (2026-10-29). The live truth
+        // already reaches the agent without touching the cached prefix:
+        //   - the tool list (a down server's tools are simply not in the
+        //     schema), and
+        //   - an in-band `[transient] MCP server ... is disconnected` error
+        //     on a failed call (the registry auto-reconnects once first).
         if !failures.is_empty() {
-            let failure_lines: Vec<String> = failures
-                .iter()
-                .map(|f| format!("- Server \"{}\": {}", f.server_name, f.error_message))
-                .collect();
-            let notification = format!(
-                "MCP server connection failed:\n{}\n\n\
-You are an AI agent. If any of the above MCP servers require dependencies \
-that need to be installed, use your shell tools to install them. \
-After installation, ask the user to re-enable the MCP server.",
-                failure_lines.join("\n")
-            );
             tracing::warn!(
                 failure_count = failures.len(),
-                notification_len = notification.len(),
-                "SessionManager: broadcasting MCP connection failure notification"
+                failures = ?failures
+                    .iter()
+                    .map(|f| format!("{}: {}", f.server_name, f.error_message))
+                    .collect::<Vec<_>>(),
+                "SessionManager: MCP servers failed to connect (logged only, not injected into context)"
             );
-            self.broadcast(SessionMessage::SystemNotification {
-                content: notification,
-            });
         }
     }
 
@@ -6330,5 +6330,76 @@ mod tests {
             "no-op republish paths must not emit any chunk event"
         );
     }
-}
 
+    /// A failed MCP connect must never reach the model's context.
+    ///
+    /// Regression (2026-10-29): the failure notice used to be broadcast as a
+    /// `SystemNotification` and appended verbatim to the session history. One
+    /// network blip left "MCP server connection failed: pm, doc, memory" in
+    /// the history forever, and the agent then told the user those tools were
+    /// down while they were fully connected. The live status already reaches
+    /// the agent through the tool list and in-band tool errors, so this path
+    /// must broadcast nothing but the (rebuilt) tool list.
+    #[tokio::test]
+    async fn mcp_connection_failure_broadcasts_only_the_tool_list() {
+        use crate::agent::session::session_handle::SessionHandle;
+        use crate::agent::session::session_task::SessionMessage;
+        use crate::agent::session_state::{SessionRuntimeSnapshot, SessionStatus};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut manager, _chunk_rx) = republish_test_manager(&dir);
+
+        let sid = "mcp_failure_session".to_string();
+        let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel::<SessionMessage>(8);
+        let (agent_inbound_tx, _agent_inbound_rx) =
+            tokio::sync::mpsc::channel::<crate::agent::inbound::InboundMessage>(1);
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        manager.sessions.insert(
+            sid.clone(),
+            SessionHandle {
+                session_id: sid.clone(),
+                inbound_tx,
+                agent_inbound_tx,
+                join_handle: tokio::spawn(async {}),
+                status_rx,
+                last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
+                pending_debug_handles: Arc::new(tokio::sync::Mutex::new(None)),
+                snapshot: Arc::new(std::sync::RwLock::new(SessionRuntimeSnapshot {
+                    session_id: sid.clone(),
+                    status: r#""idle""#.to_string(),
+                    model: None,
+                    provider: None,
+                    account_id: None,
+                    ratio: None,
+                    todos_json: None,
+                    context_usage: None,
+                })),
+                workspace_id: Arc::new(std::sync::RwLock::new("__agent_home__".to_string())),
+                current_work_dir: Arc::new(std::sync::RwLock::new(None)),
+                conversation: None,
+            },
+        );
+
+        let (registry, _no_failures) = McpRegistry::connect_all(&[]).await.expect("empty registry");
+        manager.apply_mcp_connection_result(
+            Arc::new(registry),
+            Vec::new(),
+            Vec::new(),
+            vec![McpConnectionFailure {
+                server_name: "pm".to_string(),
+                error_message: "connection refused".to_string(),
+            }],
+        );
+
+        let mut received = Vec::new();
+        while let Ok(msg) = inbound_rx.try_recv() {
+            received.push(msg);
+        }
+        assert_eq!(received.len(), 1, "expected only the tool-list broadcast");
+        assert!(
+            matches!(received[0], SessionMessage::UpdateMcpTools { .. }),
+            "MCP connect failure must not push anything into the session context, got: {:?}",
+            received[0]
+        );
+    }
+}
