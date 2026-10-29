@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use acowork_core::providers::traits::ChatMessage;
 use acowork_core::tools::traits::Tool;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -208,10 +207,6 @@ pub enum SessionMessage {
     /// its ONNX embedding provider so embedding-dependent operations
     /// degrade gracefully until the sidecar comes back (ADR-030 ISSUE-2).
     DisableEmbedConfig,
-    /// Inject a system notification into the conversation history.
-    /// Used to surface MCP connection failures and other async events
-    /// to the LLM context so the Agent can self-heal.
-    SystemNotification { content: String },
     /// Design 27 §6/§7: an Intent envelope delivered to this execution
     /// session as a *turn trigger* (the session was idle, or the turn must
     /// run with responder-role semantics). The turn's role and write-back
@@ -382,10 +377,6 @@ impl std::fmt::Debug for SessionMessage {
                 )
                 .finish(),
             SessionMessage::DisableEmbedConfig => f.debug_tuple("DisableEmbedConfig").finish(),
-            SessionMessage::SystemNotification { content } => f
-                .debug_struct("SystemNotification")
-                .field("len", &content.len())
-                .finish(),
             SessionMessage::Intent {
                 message_id,
                 kind,
@@ -630,6 +621,7 @@ impl SessionTask {
                     global_provider_list: &core_mut.global_provider_list,
                     provider_key_vault: &core_mut.provider_key_vault,
                     compat_cache: core_mut.compat_cache.as_ref(),
+                    responses_compat_cache: core_mut.responses_compat_cache.as_ref(),
                 },
             )
         {
@@ -2105,29 +2097,6 @@ impl SessionTask {
                         "SessionTask: disabling embedding provider (embed sidecar unavailable)"
                     );
                     agent_loop.core.clear_embedding_provider();
-                }
-                Some(SessionMessage::SystemNotification { content }) => {
-                    // Only inject into sessions that have already started a conversation.
-                    // Prevents MCP connection failure notifications from appearing before
-                    // the user has sent their first message.
-                    if agent_loop.session.history_mut().is_empty() {
-                        tracing::debug!(
-                            session_id = %session_id,
-                            "SessionTask: skipping system notification — no conversation history yet"
-                        );
-                        continue;
-                    }
-                    tracing::info!(
-                        session_id = %session_id,
-                        content_len = content.len(),
-                        "SessionTask: injecting system notification into history"
-                    );
-                    agent_loop
-                        .session
-                        .history_mut()
-                        .append(ChatMessage::user(format!(
-                            "[System Notification] {content}"
-                        )));
                 }
                 // ADR-035 Phase 3: EnableNotify/DisableNotify removed.
                 None => {

@@ -631,6 +631,7 @@ impl AgentLoop {
                 global_provider_list: &self.core.global_provider_list,
                 provider_key_vault: &self.core.provider_key_vault,
                 compat_cache: self.core.compat_cache.as_ref(),
+                    responses_compat_cache: self.core.responses_compat_cache.as_ref(),
             },
         ) {
             Some(p) => {

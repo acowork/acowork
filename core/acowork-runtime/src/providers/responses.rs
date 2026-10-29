@@ -41,7 +41,12 @@ use acowork_core::providers::traits::{
     MessageRole, Provider, ProviderError, ProviderErrorType, ReasoningEffort, StreamError,
     StreamEvent, ToolCall, UsageInfo, parse_data_uri,
 };
+use acowork_core::providers::responses_errors::TRIMMABLE_FIELDS;
 use acowork_core::tools::schema::sanitize_tool_schema;
+use std::sync::Arc;
+
+use crate::providers::compat::ErrorClass;
+use crate::providers::responses_compat::{ResponsesCompatCache, ResponsesTrim, trim_key};
 
 /// Responses-API-shaped provider. S2 delivered non-streaming `chat()`; S3
 /// delivers `chat_stream()` (D6 SSE state machine, terminal-event driven).
@@ -51,6 +56,12 @@ pub struct ResponsesProvider {
     api_key: Option<String>,
     http_client: Client,
     stream_read_timeout: Duration,
+    /// Provider id used as the cache-key namespace. `None` (standalone mode,
+    /// unit tests) disables the D8 trim cache entirely — a trim learned under
+    /// no namespace could be read back by the wrong provider.
+    cache_namespace: Option<String>,
+    /// ADR-103 D8/S7 trim evidence for this provider's `/responses` traffic.
+    compat_cache: Option<Arc<ResponsesCompatCache>>,
 }
 
 impl ResponsesProvider {
@@ -76,7 +87,18 @@ impl ResponsesProvider {
             api_key: api_key.map(ToString::to_string),
             http_client,
             stream_read_timeout,
+            cache_namespace: None,
+            compat_cache: None,
         }
+    }
+
+    /// Install the D8 trim cache. Called once from
+    /// `create_provider_with_wiring` with the same provider id the Gateway
+    /// uses, so a `(provider, model)` entry learned here is addressed the same
+    /// way as the probe verdict (ADR-103 D10).
+    pub fn set_compat_wiring(&mut self, provider_id: String, cache: Arc<ResponsesCompatCache>) {
+        self.cache_namespace = Some(provider_id);
+        self.compat_cache = Some(cache);
     }
 }
 
@@ -1097,6 +1119,191 @@ impl ResponsesProvider {
     }
 }
 
+// ── D8 / S7: the `reasoning` trim (single-field, evidence-gated) ──────
+
+/// One HTTP send that already accounts for the D8 trim.
+struct TrimmedSend {
+    response: reqwest::Response,
+    /// What was actually dropped from the body (`omit[]` for a verbatim send).
+    applied: ResponsesTrim,
+}
+
+impl ResponsesProvider {
+    /// Cache address for one model, or `None` when no cache/namespace is
+    /// installed (standalone mode + unit tests stay cache-free by design).
+    fn compat_key(&self, model: &str) -> Option<String> {
+        let namespace = self.cache_namespace.as_deref()?;
+        self.compat_cache.as_ref()?;
+        Some(trim_key(namespace, model))
+    }
+
+    /// One POST to `{base}/responses`. No trim logic here — this is the I/O
+    /// primitive [`Self::send_with_trim`] re-runs at most twice.
+    async fn post_native(
+        &self,
+        native: &NativeResponsesRequest,
+        stream: bool,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let url = format!("{}/responses", self.base_url);
+        let mut req_builder = self.http_client.post(&url);
+        if let Some(ref api_key) = self.api_key {
+            req_builder = req_builder.bearer_auth(api_key);
+        }
+        if stream {
+            req_builder = req_builder.header("Accept", "text/event-stream");
+        }
+        req_builder.json(native).send().await.map_err(|e| {
+            ProviderError::network(if stream {
+                format!("Responses API streaming request failed: {e}")
+            } else {
+                format!("Responses API request failed: {e}")
+            })
+        })
+    }
+
+    /// Send `request` with the D8 trim discipline.
+    ///
+    /// Deliberately **not** a fallback chain (D8 "明确不做"): at most two
+    /// requests are ever sent, and only the single whitelisted field
+    /// ([`TRIMMABLE_FIELDS`]) may be dropped. The decision to drop it is
+    /// evidence-gated through the shared [`CompatCache`](super::compat::CompatCache)
+    /// policy — three confirmations promote a candidate to durable, a plain
+    /// success resets pending evidence, and a fast-path failure invalidates.
+    ///
+    /// Returns the response plus the trim that was applied, so callers can log
+    /// `stripped_fields` without re-deriving what happened.
+    async fn send_with_trim(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> Result<TrimmedSend, ProviderError> {
+        let mut native = map_request(request)?;
+        native.stream = stream;
+
+        tracing::debug!(
+            url = %format!("{}/responses", self.base_url),
+            model = %native.model,
+            input_items = native.input.len(),
+            has_tools = native.tools.is_some(),
+            stream,
+            "Responses request mapped (ADR-103 D5)"
+        );
+
+        // Nothing to learn when the caller asked for no reasoning at all:
+        // `Auto` omits the block, so a 400 cannot be about it.
+        if native.reasoning.is_none() {
+            let response = self.post_native(&native, stream).await?;
+            if response.status().is_success() {
+                return Ok(TrimmedSend {
+                    response,
+                    applied: ResponsesTrim::none(),
+                });
+            }
+            return Err(self.reject(response, &native.model).await);
+        }
+
+        let key = self.compat_key(&native.model);
+        let mut applied = ResponsesTrim::none();
+
+        // ── Fast path: a durable trim says this provider rejects the field ──
+        let mut cached_hit = false;
+        if let Some(key) = key.as_deref()
+            && let Some(cache) = self.compat_cache.as_ref()
+            && let Some(learned) = cache.get(key)
+            && learned.omit_reasoning
+        {
+            native.reasoning = None;
+            applied = learned;
+            cached_hit = true;
+            tracing::warn!(
+                key,
+                model = %native.model,
+                stripped = ?applied.stripped_fields(),
+                "Responses fast path applied a learned trim (ADR-103 D8) - the request carries no reasoning block"
+            );
+        }
+
+        let response = self.post_native(&native, stream).await?;
+        let model = native.model.clone();
+        if response.status().is_success() {
+            if let Some(key) = key.as_deref()
+                && let Some(cache) = self.compat_cache.as_ref()
+            {
+                if applied.omit_reasoning {
+                    cache.record_fallback_success(key, applied.clone(), ErrorClass::RequestSchema);
+                } else {
+                    // Verbatim success: contradicting evidence, the accident
+                    // window (if any) is over.
+                    cache.record_plain_success(key);
+                }
+            }
+            return Ok(TrimmedSend { response, applied });
+        }
+
+        let error = self.reject(response, &model).await;
+
+        // A rejected cached trim means the provider changed under us: drop the
+        // evidence and report. Re-sending the *fuller* body would only repeat
+        // the same 400.
+        if cached_hit {
+            if let Some(key) = key.as_deref()
+                && let Some(cache) = self.compat_cache.as_ref()
+            {
+                cache.invalidate(key, "learned Responses trim rejected on fast path");
+            }
+            tracing::warn!(
+                model = %model,
+                status = error.status_code,
+                "Responses fast-path trim no longer works - cache invalidated (ADR-103 D8)"
+            );
+            return Err(error);
+        }
+
+        // ── Retry: only the whitelisted field, only once (D8) ──────────────
+        let trimmable = error
+            .unsupported_field()
+            .filter(|field| TRIMMABLE_FIELDS.contains(field));
+        let Some(field) = trimmable else {
+            return Err(error);
+        };
+        tracing::warn!(
+            model = %model,
+            field,
+            status = error.status_code,
+            "provider rejected `{field}` - retrying once with the field omitted (ADR-103 D8 trim)"
+        );
+
+        native.reasoning = None;
+        applied = ResponsesTrim::omit_reasoning();
+        let retry = self.post_native(&native, stream).await?;
+        if retry.status().is_success() {
+            if let Some(key) = key.as_deref()
+                && let Some(cache) = self.compat_cache.as_ref()
+            {
+                cache.record_fallback_success(key, applied.clone(), ErrorClass::RequestSchema);
+            }
+            tracing::warn!(
+                model = %model,
+                stripped = ?applied.stripped_fields(),
+                "Responses request succeeded only after the D8 trim - this (provider, model) is DEGRADED: the selected reasoning effort is not applied"
+            );
+            return Ok(TrimmedSend {
+                response: retry,
+                applied,
+            });
+        }
+        Err(self.reject(retry, &model).await)
+    }
+
+    /// Consume a non-2xx response into a classified error.
+    async fn reject(&self, response: reqwest::Response, model: &str) -> ProviderError {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.text().await.unwrap_or_default();
+        self.classify_failure(status.as_u16(), body, &headers, model)
+    }
+}
+
 // ── Provider trait ────────────────────────────────────────────────────
 
 #[async_trait]
@@ -1106,33 +1313,14 @@ impl Provider for ResponsesProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
-        let native = map_request(&request).map_err(acowork_core::AcoworkError::Provider)?;
-
-        tracing::debug!(
-            url = %format!("{}/responses", self.base_url),
-            model = %native.model,
-            input_items = native.input.len(),
-            has_tools = native.tools.is_some(),
-            "Responses chat request mapped (ADR-103 D5)"
-        );
-
-        let url = format!("{}/responses", self.base_url);
-        let mut req_builder = self.http_client.post(&url);
-        if let Some(ref api_key) = self.api_key {
-            req_builder = req_builder.bearer_auth(api_key);
-        }
-        let response = req_builder.json(&native).send().await.map_err(|e| {
-            acowork_core::AcoworkError::Provider(ProviderError::network(format!(
-                "Responses API request failed: {e}"
-            )))
-        })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let headers = response.headers().clone();
-            let body = response.text().await.unwrap_or_default();
-            let err = self.classify_failure(status.as_u16(), body, &headers, &native.model);
-            return Err(acowork_core::AcoworkError::Provider(err));
+        // D8 trim (at most one retry) lives in `send_with_trim`; this method
+        // only parses the winning response.
+        let TrimmedSend { response, applied } = self
+            .send_with_trim(&request, false)
+            .await
+            .map_err(acowork_core::AcoworkError::Provider)?;
+        if applied.omit_reasoning {
+            tracing::debug!(stripped = ?applied.stripped_fields(), "Responses chat parsed a trimmed response");
         }
 
         let body: serde_json::Value = response.json().await.map_err(|e| {
@@ -1147,39 +1335,15 @@ impl Provider for ResponsesProvider {
         &self,
         request: ChatRequest,
     ) -> acowork_core::error::Result<Box<dyn Stream<Item = StreamEvent> + Send>> {
-        let mut native = map_request(&request).map_err(acowork_core::AcoworkError::Provider)?;
-        native.stream = true;
-
-        tracing::debug!(
-            url = %format!("{}/responses", self.base_url),
-            model = %native.model,
-            input_items = native.input.len(),
-            has_tools = native.tools.is_some(),
-            "Responses chat_stream request mapped (ADR-103 D5/D6)"
-        );
-
-        let url = format!("{}/responses", self.base_url);
-        let mut req_builder = self.http_client.post(&url);
-        if let Some(ref api_key) = self.api_key {
-            req_builder = req_builder.bearer_auth(api_key);
-        }
-        let response = req_builder
-            .header("Accept", "text/event-stream")
-            .json(&native)
-            .send()
+        // The trim decision happens before the stream is handed over: a 400
+        // listing `reasoning` is a plain HTTP error, so it is resolved (or
+        // surfaced) here rather than mid-stream (D6: no in-band retry).
+        let TrimmedSend { response, applied } = self
+            .send_with_trim(&request, true)
             .await
-            .map_err(|e| {
-                acowork_core::AcoworkError::Provider(ProviderError::network(format!(
-                    "Responses API streaming request failed: {e}"
-                )))
-            })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let headers = response.headers().clone();
-            let body = response.text().await.unwrap_or_default();
-            let err = self.classify_failure(status.as_u16(), body, &headers, &native.model);
-            return Err(acowork_core::AcoworkError::Provider(err));
+            .map_err(acowork_core::AcoworkError::Provider)?;
+        if applied.omit_reasoning {
+            tracing::debug!(stripped = ?applied.stripped_fields(), "Responses stream opened on a trimmed request");
         }
 
         Ok(Self::sse_to_stream(response, self.stream_read_timeout))
@@ -2203,6 +2367,311 @@ mod tests {
             err.retry_after_ms,
             Some(7000),
             "S4 must not lose the platform-wide Retry-After handling"
+        );
+    }
+}
+/// ADR-103 D8/S7 — provider-level behaviour of the single-field trim.
+///
+/// These exercise the whole path (HTTP → classify → trim → cache), which is
+/// the only place the "no silent behaviour change" rules can actually be
+/// checked: the cache policy itself is covered in
+/// [`super::responses_compat`].
+#[cfg(test)]
+mod d8_trim_tests {
+    use super::*;
+    use crate::providers::compat::COMPAT_CONFIRM_REQUIRED;
+    use crate::providers::responses_compat::{ResponsesTrim, load, trim_key};
+    use mockito::{Matcher, Server};
+    use std::path::PathBuf;
+
+    const PROVIDER: &str = "minimax";
+    const MODEL: &str = "m3.1-flash";
+
+    fn work_dir(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "acowork_resp_trim_{}_{}_{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        p
+    }
+
+    fn trimmed_provider(base: &str, work: &std::path::Path) -> ResponsesProvider {
+        let mut provider = ResponsesProvider::with_base_url_and_timeouts(
+            Some(base),
+            Some("sk-test"),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
+        provider.set_compat_wiring(PROVIDER.to_string(), load(work));
+        provider
+    }
+
+    fn key() -> String {
+        trim_key(PROVIDER, MODEL)
+    }
+
+    fn request(effort: ReasoningEffort) -> ChatRequest {
+        ChatRequest {
+            model: MODEL.to_string(),
+            messages: vec![ChatMessage::user("hi")],
+            temperature: None,
+            max_tokens: Some(16),
+            tools: None,
+            reasoning_effort: Some(effort),
+            thinking_mode: None,
+        }
+    }
+
+    fn ok_body() -> String {
+        serde_json::json!({
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]
+        })
+        .to_string()
+    }
+
+    /// MiniMax M3.1-Flash wording: a 400 that blames the `reasoning` parameter.
+    const REASONING_400: &str = r#"{"error":{"code":"invalid_parameter","message":"invalid parameter: `reasoning` for model m3.1-flash","param":"reasoning","type":"invalid_request_error"}}"#;
+
+    /// The exact body the retry must carry: the original mapping minus
+    /// `reasoning`. Comparing whole JSON bodies (not a substring) is what pins
+    /// "only that one field is dropped".
+    fn body_without_reasoning() -> serde_json::Value {
+        let mut native = map_request(&request(ReasoningEffort::Off)).unwrap();
+        native.reasoning = None;
+        serde_json::to_value(&native).unwrap()
+    }
+
+    fn provider_error(err: acowork_core::AcoworkError) -> ProviderError {
+        match err {
+            acowork_core::AcoworkError::Provider(e) => e,
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_400_retries_once_without_the_field() {
+        let mut server = Server::new_async().await;
+        let rejected = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Regex("\"reasoning\"".to_string()))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(REASONING_400)
+            .expect(1)
+            .create_async()
+            .await;
+        let accepted = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Json(body_without_reasoning()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ok_body())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let work = work_dir("once");
+        let provider = trimmed_provider(server.url().as_str(), &work);
+        let response = provider
+            .chat(request(ReasoningEffort::Off))
+            .await
+            .expect("the trimmed retry must succeed");
+
+        assert_eq!(response.content, "ok");
+        rejected.assert();
+        accepted.assert();
+
+        // One success is evidence, not policy (the 2026-09-05 rule).
+        let cache = provider.compat_cache.as_ref().unwrap();
+        assert!(
+            cache.get(&key()).is_none(),
+            "a single trim success must stay a candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_trims_promote_to_a_fast_path_that_sends_one_request() {
+        let mut server = Server::new_async().await;
+        let confirmations = COMPAT_CONFIRM_REQUIRED as usize;
+        let rejected = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Regex("\"reasoning\"".to_string()))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(REASONING_400)
+            .expect(confirmations)
+            .create_async()
+            .await;
+        let accepted = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Json(body_without_reasoning()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ok_body())
+            .expect(confirmations + 1)
+            .create_async()
+            .await;
+
+        let work = work_dir("promote");
+        let provider = trimmed_provider(server.url().as_str(), &work);
+        for _ in 0..confirmations {
+            provider
+                .chat(request(ReasoningEffort::Off))
+                .await
+                .expect("trimmed retry succeeds");
+        }
+        let cache = provider.compat_cache.as_ref().unwrap();
+        assert_eq!(cache.get(&key()), Some(ResponsesTrim::omit_reasoning()));
+
+        // The promoted trim must skip the rejected request entirely: one send.
+        provider
+            .chat(request(ReasoningEffort::Off))
+            .await
+            .expect("fast path succeeds");
+        rejected.assert();
+        accepted.assert();
+    }
+
+    #[tokio::test]
+    async fn non_whitelisted_field_400_is_never_trimmed() {
+        // `temperature` is a recognized field but NOT trimmable (D8: dropping
+        // it silently changes model behaviour).
+        let mut server = Server::new_async().await;
+        let only = server
+            .mock("POST", "/responses")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"message":"unsupported parameter: temperature"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let work = work_dir("notrim");
+        let provider = trimmed_provider(server.url().as_str(), &work);
+        let err = provider_error(
+            provider
+                .chat(request(ReasoningEffort::Off))
+                .await
+                .expect_err("must surface, not trim"),
+        );
+
+        assert_eq!(err.error_type, ProviderErrorType::UnsupportedField);
+        assert_eq!(err.unsupported_field(), Some("temperature"));
+        only.assert();
+        assert!(provider.compat_cache.as_ref().unwrap().get(&key()).is_none());
+    }
+
+    #[tokio::test]
+    async fn content_integrity_400_is_never_trimmed() {
+        // DeepSeek's "reasoning_content must be passed back" is a content
+        // defect; trimming would mask it (2026-09-05 regression).
+        let mut server = Server::new_async().await;
+        let only = server
+            .mock("POST", "/responses")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API"}}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let work = work_dir("content");
+        let provider = trimmed_provider(server.url().as_str(), &work);
+        let err = provider_error(
+            provider
+                .chat(request(ReasoningEffort::Off))
+                .await
+                .expect_err("content defects are not trim candidates"),
+        );
+        assert_eq!(err.error_type, ProviderErrorType::ContentIntegrity);
+        only.assert();
+        assert!(provider.compat_cache.as_ref().unwrap().get(&key()).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failing_fast_path_invalidates_the_learned_trim() {
+        let mut server = Server::new_async().await;
+        // Even with the trim applied the provider rejects: the evidence is
+        // stale, so the cache must be dropped (and no third request sent).
+        let rejected = server
+            .mock("POST", "/responses")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(REASONING_400)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let work = work_dir("invalidate");
+        let provider = trimmed_provider(server.url().as_str(), &work);
+        let cache = provider.compat_cache.as_ref().unwrap().clone();
+        for _ in 0..COMPAT_CONFIRM_REQUIRED {
+            cache.record_fallback_success(
+                key().as_str(),
+                ResponsesTrim::omit_reasoning(),
+                crate::providers::compat::ErrorClass::RequestSchema,
+            );
+        }
+        assert!(cache.get(&key()).is_some(), "seeded durable trim");
+
+        provider
+            .chat(request(ReasoningEffort::Off))
+            .await
+            .expect_err("the fast path fails");
+        rejected.assert();
+        assert!(
+            cache.get(&key()).is_none(),
+            "a rejected learned trim must be invalidated, not silently kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_without_a_reasoning_block_never_touches_the_cache() {
+        // `Auto` omits the field, so there is nothing to trim and nothing to
+        // learn: the cache keeps its evidence and only one request is sent.
+        let mut server = Server::new_async().await;
+        let native = map_request(&request(ReasoningEffort::Auto)).unwrap();
+        assert!(native.reasoning.is_none(), "Auto omits the block (D5)");
+        let body = serde_json::to_value(&native).unwrap();
+        let accepted = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Json(body))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ok_body())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let work = work_dir("auto");
+        let provider = trimmed_provider(server.url().as_str(), &work);
+        let cache = provider.compat_cache.as_ref().unwrap().clone();
+        for _ in 0..COMPAT_CONFIRM_REQUIRED {
+            cache.record_fallback_success(
+                key().as_str(),
+                ResponsesTrim::omit_reasoning(),
+                crate::providers::compat::ErrorClass::RequestSchema,
+            );
+        }
+
+        provider
+            .chat(request(ReasoningEffort::Auto))
+            .await
+            .expect("verbatim send");
+        accepted.assert();
+        assert!(
+            cache.get(&key()).is_some(),
+            "an Auto request carries no reasoning block, so it is not contradicting evidence"
         );
     }
 }

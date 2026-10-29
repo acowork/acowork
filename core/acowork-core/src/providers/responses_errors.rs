@@ -54,6 +54,11 @@ fn looks_like_missing_endpoint(body_lower: &str) -> bool {
 }
 
 /// Body hints that a 400 is "the content itself is inconsistent".
+///
+/// `must be passed back` / `reasoning_content` cover the DeepSeek family:
+/// "The reasoning_content in the thinking mode must be passed back to the API"
+/// is a *content* defect. Trimming `reasoning` would have masked it — that is
+/// the 2026-09-05 incident this list exists to prevent (ADR-103 D8).
 fn looks_like_content_integrity(body_lower: &str) -> bool {
     const HINTS: &[&str] = &[
         "image",
@@ -65,6 +70,8 @@ fn looks_like_content_integrity(body_lower: &str) -> bool {
         "tool_call_id",
         "unsupported content",
         "content type",
+        "must be passed back",
+        "reasoning_content",
     ];
     HINTS.iter().any(|hint| body_lower.contains(hint))
 }
@@ -86,13 +93,35 @@ fn looks_like_overflow(body_lower: &str) -> bool {
 /// The recognized request field a provider body blames, if any.
 ///
 /// Matching is a case-insensitive substring search over [`RECOGNIZED_FIELDS`],
-/// longest name first so `text.format` wins over a bare `text` mention.
+/// longest name first so `text.format` wins over a bare `text` mention — but
+/// only **whole-identifier** mentions count (`[a-z0-9_]` boundaries).
+///
+/// The boundary rule is what keeps `reasoning_content must be passed back`
+/// (a content defect) from being read as "the `reasoning` parameter is
+/// unsupported", which would put a real defect on the D8 trim path.
 pub fn field_named_in_body(body: &str) -> Option<&'static str> {
     let body_lower = body.to_lowercase();
     RECOGNIZED_FIELDS
         .iter()
         .copied()
-        .find(|field| body_lower.contains(&field.to_lowercase()))
+        .find(|field| mentions_identifier(&body_lower, &field.to_lowercase()))
+}
+
+/// Does `haystack` contain `needle` as a whole identifier?
+fn mentions_identifier(haystack: &str, needle: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(pos) = haystack[from..].find(needle) {
+        let start = from + pos;
+        let end = start + needle.len();
+        let before_ok = haystack[..start].chars().next_back().is_none_or(|c| !is_ident(c));
+        let after_ok = haystack[end..].chars().next().is_none_or(|c| !is_ident(c));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + needle.len();
+    }
+    false
 }
 
 /// Classify a non-2xx Responses HTTP response (ADR-103 D8).
@@ -270,6 +299,40 @@ mod tests {
             );
             assert!(!err.retryable);
             assert_eq!(err.unsupported_field(), None);
+        }
+    }
+
+    #[test]
+    fn reasoning_content_bodies_are_content_defects_not_trim_targets() {
+        // The 2026-09-05 lesson, applied to the word "reasoning": a body that
+        // complains about reasoning *content* must never be read as "the
+        // `reasoning` parameter is unsupported" — otherwise the D8 trim would
+        // mask a real defect by dropping the field.
+        for body in [
+            "The reasoning_content in the thinking mode must be passed back to the API",
+            "request error: the message history must be passed back in order",
+        ] {
+            let err = classify_http_error(400, body);
+            assert_eq!(
+                err.error_type,
+                ProviderErrorType::ContentIntegrity,
+                "body: {body}"
+            );
+            assert_eq!(err.unsupported_field(), None, "body: {body}");
+        }
+        // A whole-identifier mention is still the parameter itself.
+        for body in [
+            "invalid parameter: `reasoning`",
+            "reasoning.effort 'none' not supported",
+            "{\"error\":{\"param\":\"reasoning\"}}",
+        ] {
+            let err = classify_http_error(400, body);
+            assert_eq!(
+                err.error_type,
+                ProviderErrorType::UnsupportedField,
+                "body: {body}"
+            );
+            assert_eq!(err.unsupported_field(), Some("reasoning"), "body: {body}");
         }
     }
 

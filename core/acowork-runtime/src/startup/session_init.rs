@@ -362,6 +362,8 @@ pub(crate) async fn phase_b_init_session(
         // Inject the per-agent compatibility cache so `build_provider_for`
         // can wire it into rebuilt providers (429-retry / session-resume).
         c.compat_cache = ctx.compat_cache.take();
+        // ADR-103 D8/S7: the Responses trim cache travels with it.
+        c.responses_compat_cache = ctx.responses_compat_cache.take();
 
         // Agent-specific compaction prompt (prompts/summary.md, optional).
         // Loaded once in Phase A (see `AgentBootContext::compaction_prompt`)

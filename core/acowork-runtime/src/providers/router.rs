@@ -63,10 +63,18 @@ impl ProviderTimeouts {
 /// `compat_cache` is the optional compatibility cache.  When `Some`, it
 /// is installed on the resulting `OpenAIProvider` so fallback
 /// successes are persisted across processes.
+///
+/// `responses_compat_cache` is the same idea for the `/responses` shape
+/// (ADR-103 D8/S7). It is a **separate** cache holding a separate payload
+/// type: a completions `StripProfile` and a Responses `ResponsesTrim` are not
+/// interchangeable, and silently reading one as the other is exactly the kind
+/// of cross-shape leak D7.3 forbids.
 #[derive(Default, Clone)]
 pub struct ProviderWiring {
     pub provider_id: Option<String>,
     pub compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
+    pub responses_compat_cache:
+        Option<Arc<crate::providers::responses_compat::ResponsesCompatCache>>,
 }
 
 /// Create a provider based on protocol type.
@@ -214,20 +222,23 @@ pub fn create_provider_with_wiring(
         }
 
         ProtocolType::Responses => {
-            // ADR-103 D4: standalone Responses provider. Wiring (CompatCache)
-            // is NOT installed — the completions-shaped cache keys and
-            // fallback chain do not apply to this wire format.
+            // ADR-103 D4/D8: standalone Responses provider. The
+            // completions-shaped `CompatCache` is NOT installed (its profile
+            // type and fallback chain do not apply here); the Responses cache
+            // carries the single-field D8 trim instead (S7).
             tracing::info!(
                 provider = provider_name,
                 "Using OpenAI Responses protocol provider"
             );
-            let provider = crate::providers::responses::ResponsesProvider::with_base_url_and_timeouts(
-                base_url,
-                api_key,
-                t.request_timeout,
-                t.connect_timeout,
-                t.stream_read_timeout,
-            );
+            let mut provider =
+                crate::providers::responses::ResponsesProvider::with_base_url_and_timeouts(
+                    base_url,
+                    api_key,
+                    t.request_timeout,
+                    t.connect_timeout,
+                    t.stream_read_timeout,
+                );
+            install_responses_wiring(&mut provider, &wiring);
             Arc::new(provider)
         }
     }
@@ -282,6 +293,22 @@ pub fn effective_protocol_and_base(
     }
 
     (protocol, resolved.url.unwrap_or_default())
+}
+
+/// Install the D8 trim cache on the Responses provider.
+///
+/// Both halves are required: without a provider id the cache key would have no
+/// namespace, so the cache stays off rather than being shared across providers.
+fn install_responses_wiring(
+    provider: &mut crate::providers::responses::ResponsesProvider,
+    wiring: &ProviderWiring,
+) {
+    if let (Some(id), Some(cache)) = (
+        wiring.provider_id.clone(),
+        wiring.responses_compat_cache.clone(),
+    ) {
+        provider.set_compat_wiring(id, cache);
+    }
 }
 
 fn install_wiring(provider: &mut OpenAIProvider, wiring: &ProviderWiring) {
@@ -459,6 +486,7 @@ mod adr103_router_tests {
         let wiring = ProviderWiring {
             provider_id: Some("p".into()),
             compat_cache: None,
+            responses_compat_cache: None,
         };
         let p = create_provider_with_wiring(
             "openai",

@@ -673,6 +673,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     }
 
     let mut compat_cache: Option<Arc<crate::providers::compat::CompatCache>> = None;
+    let mut responses_compat_cache: Option<
+        Arc<crate::providers::responses_compat::ResponsesCompatCache>,
+    > = None;
 
     let (provider, resolved_model, available_models, protocol_type) = {
         // ADR-033: MQTT available_cache is the only provider source (gRPC path removed per ADR-040).
@@ -740,9 +743,19 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     let compat_cache_arc =
                         crate::providers::compat::CompatCache::load(compat_cache_path);
                     compat_cache = Some(compat_cache_arc.clone());
+
+                    // ADR-103 D8/S7: the Responses trim cache lives in its own
+                    // file — same directory, different payload type.
+                    let responses_cache_arc =
+                        crate::providers::responses_compat::load(std::path::Path::new(
+                            &config.work_dir,
+                        ));
+                    responses_compat_cache = Some(responses_cache_arc.clone());
+
                     let wiring = crate::providers::router::ProviderWiring {
                         provider_id: Some(prov.id.clone()),
                         compat_cache: Some(compat_cache_arc),
+                        responses_compat_cache: Some(responses_cache_arc),
                     };
 
                     let provider = crate::providers::router::create_provider_with_wiring(
@@ -1300,6 +1313,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         protocol_type,
         gateway_current_provider_id,
         compat_cache,
+        responses_compat_cache,
         emb_provider,
         active_tools,
         full_tool_specs,

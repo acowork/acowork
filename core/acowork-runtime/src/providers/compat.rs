@@ -87,6 +87,9 @@ pub const SHAPE_COMPLETIONS: &str = "completions";
 /// Wire shape of the Responses family (`/responses`, ADR-103).
 pub const SHAPE_RESPONSES: &str = "responses";
 
+/// File name (inside `{work_dir}/config/`) of the completions-shaped cache.
+pub const COMPLETIONS_COMPAT_FILE: &str = "provider_compat.json";
+
 /// Build a compat-cache key (ADR-103 D7.3).
 ///
 /// The shape is part of the namespace on purpose: a vendor that serves both

@@ -111,6 +111,12 @@ pub struct AgentCore {
     /// provider was available at startup (noop fallback).
     pub(crate) compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
 
+    /// ADR-103 D8/S7 — `reasoning` trim evidence for `/responses` providers,
+    /// shared with every rebuilt provider instance exactly like
+    /// `compat_cache`. Separate cache, separate file, separate payload type.
+    pub(crate) responses_compat_cache:
+        Option<Arc<crate::providers::responses_compat::ResponsesCompatCache>>,
+
     /// Provider→compact_model mapping from provider_list at AgentHello.
     ///
     /// Shared across sessions via `Arc<RwLock<...>>` (ADR-063 §3.7.5
@@ -428,6 +434,7 @@ impl AgentCore {
             provider_list_version: Arc::new(RwLock::new(0)),
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
             compat_cache: None,
+            responses_compat_cache: None,
             provider_compact_models: Arc::new(RwLock::new(HashMap::new())),
             default_compact_models: Arc::new(RwLock::new(Vec::new())),
             temperature_override: None,
@@ -1100,6 +1107,7 @@ impl AgentCore {
         let wiring = crate::providers::router::ProviderWiring {
             provider_id: Some(provider_meta.id.clone()),
             compat_cache: self.compat_cache.clone(),
+            responses_compat_cache: self.responses_compat_cache.clone(),
         };
         // ADR-103 D2: the compact provider is built for the provider's
         // compact model — consume the model-level protocol/base_url the
@@ -1390,6 +1398,7 @@ impl Clone for AgentCore {
             provider_list_version: Arc::clone(&self.provider_list_version),
             provider_key_vault: self.provider_key_vault.clone(),
             compat_cache: self.compat_cache.clone(),
+            responses_compat_cache: self.responses_compat_cache.clone(),
             provider_compact_models: Arc::clone(&self.provider_compact_models),
             default_compact_models: Arc::clone(&self.default_compact_models),
             temperature_override: self.temperature_override,
