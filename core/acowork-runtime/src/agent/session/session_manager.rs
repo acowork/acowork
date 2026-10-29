@@ -1547,7 +1547,7 @@ impl SessionManager {
                             None
                         }
                     });
-                session_state.set_reasoning_effort(effort.clone());
+                session_state.set_reasoning_effort(effort);
                 // Write back to ConversationSession so future resumes have a value.
                 if let Some(conv) = session_state.conversation() {
                     let effort_str = effort.as_ref().map(|e| e.to_string());

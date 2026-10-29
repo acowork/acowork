@@ -438,6 +438,7 @@ pub(crate) fn build_provider_list_item(
                     knowledge_cutoff: None,
                     default_reasoning_effort: None,
                     thinking_mode: None,
+                    reasoning_efforts: None,
                 }
             } else {
                 crate::http::models_api::lookup_model_capabilities(name, model_id)
@@ -456,6 +457,7 @@ pub(crate) fn build_provider_list_item(
                         knowledge_cutoff: None,
                         default_reasoning_effort: None,
                         thinking_mode: None,
+                        reasoning_efforts: None,
                     })
             };
             ProviderModelEntry {
@@ -664,6 +666,7 @@ mod tests {
                         knowledge_cutoff: Some("2025-04".to_string()),
                         default_reasoning_effort: None,
                         thinking_mode: None,
+                        reasoning_efforts: None,
                     },
                     max_output_tokens_limit: 32768,
                     protocol_type: None,
@@ -850,6 +853,7 @@ mod tests {
             knowledge_cutoff: None,
             default_reasoning_effort: None,
             thinking_mode: None,
+            reasoning_efforts: None,
         }
     }
 

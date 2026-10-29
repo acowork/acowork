@@ -393,8 +393,12 @@ export interface ModelCapabilitiesInfo {
   supports_tool_calling?: boolean;
   /** Whether the model supports reasoning/thinking */
   supports_reasoning?: boolean;
-  /** Default reasoning effort level from model capabilities (auto/off/low/medium/high) */
+  /** Default reasoning effort level from model capabilities (auto/off/minimal/low/medium/high/xhigh/max) */
   default_reasoning_effort?: string;
+  /** Reasoning effort levels this model actually supports (models.dev
+   *  `reasoning_options[].values`). Undefined = unknown (custom model) — the
+   *  UI then offers the generic level set. */
+  reasoning_efforts?: string[];
   /** Whether the model supports file attachments */
   supports_attachment?: boolean;
   /** Whether the model supports temperature parameter */
@@ -1064,6 +1068,10 @@ export interface ModelInfo {
   input_modalities?: string[];
   /** Output modalities */
   output_modalities?: string[];
+  /** Reasoning effort levels this model actually supports (models.dev
+   *  `reasoning_options[].values`). Undefined = unknown (custom model) —
+   *  the UI then offers the generic level set. */
+  reasoning_efforts?: string[];
 
   // ── ADR-103 D11: protocol surfaces (Gateway-projected, never derived here) ──
   /** Offline data declaration for this model (`"responses"` / `"completions"`). */
@@ -1093,6 +1101,10 @@ export interface ModelEntry {
   reasoning?: boolean;
   /** Default reasoning effort level from model capabilities (auto/off/low/medium/high) */
   default_reasoning_effort?: string;
+  /** Reasoning effort levels this model actually supports (models.dev
+   *  `reasoning_options[].values`). Undefined = unknown (custom model) — the
+   *  UI then offers the generic level set. */
+  reasoning_efforts?: string[];
   /** Input modalities (e.g. "text", "image") */
   input_modalities?: string[];
   /** ADR-103 D11 protocol surfaces, carried through from `ModelInfo` so the

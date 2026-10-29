@@ -121,6 +121,16 @@ pub struct ModelCapabilitiesInfo {
     /// When `None`, the provider auto-detects based on model capabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_mode: Option<String>,
+    /// Reasoning effort levels this model supports (models.dev
+    /// `reasoning_options[].values` for the `effort` option), e.g.
+    /// `["low", "medium", "high", "xhigh", "max"]`.
+    ///
+    /// `None` = unknown (custom model without a catalog entry) — the UI then
+    /// shows the generic level set and the Runtime sends the chosen level
+    /// unchanged. When present, the Runtime clamps a chosen level into this
+    /// set so the request never carries an unsupported value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 impl ModelCapabilitiesInfo {

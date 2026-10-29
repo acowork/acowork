@@ -400,6 +400,7 @@ async fn spawn_harness(
                     knowledge_cutoff: None,
                     default_reasoning_effort: None,
                     thinking_mode: None,
+                    reasoning_efforts: None,
                 },
                 max_output_tokens_limit: 4096,
                 protocol_type: None,

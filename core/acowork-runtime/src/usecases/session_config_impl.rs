@@ -215,6 +215,7 @@ mod tests {
             knowledge_cutoff: None,
             default_reasoning_effort: None,
             thinking_mode: None,
+            reasoning_efforts: None,
         }
     }
 

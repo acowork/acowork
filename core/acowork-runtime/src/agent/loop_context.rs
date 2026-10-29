@@ -1517,7 +1517,29 @@ impl AgentLoop {
                 .and_then(|c| c.default_reasoning_effort.as_deref())
                 .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
         });
-        context_builder.set_reasoning_effort(reasoning_effort.clone());
+        // Clamp the level into the set the model actually declares
+        // (models.dev `reasoning_options`). A level the model does not
+        // support is answered with HTTP 400 by some vendors and silently
+        // ignored by others; clamping keeps the request inside the
+        // declared support set. The *persisted* session value keeps the
+        // user's choice -- only the wire value is clamped.
+        let reasoning_effort = reasoning_effort.map(|effort| {
+            let supported = caps
+                .as_ref()
+                .and_then(|c| c.reasoning_efforts.as_deref())
+                .unwrap_or_default();
+            let clamped = effort.clamp_to_supported(supported);
+            if clamped != effort {
+                tracing::info!(
+                    model = %current_model,
+                    requested = %effort,
+                    clamped = %clamped,
+                    "reasoning effort clamped into the model's declared support set"
+                );
+            }
+            clamped
+        });
+        context_builder.set_reasoning_effort(reasoning_effort);
         // Cache for emergency trim retry in call_llm_streaming_inner()
         // where context_builder is immutable.
         self.last_reasoning_effort = reasoning_effort;
@@ -2334,7 +2356,69 @@ mod tests {
             knowledge_cutoff: None,
             default_reasoning_effort: None,
             thinking_mode: None,
+            reasoning_efforts: None,
         }
+    }
+
+    /// A model whose declared support set is `low`/`high`/`max` (the
+    /// DeepSeek-style shape) must never receive `medium`: the level is
+    /// clamped down to `low` on the wire.
+    #[test]
+    fn build_chat_request_clamps_the_effort_into_the_declared_support_set() {
+        let mut loop_ = build_loop();
+        {
+            let mut list = loop_.core.global_provider_list.write().unwrap();
+            *list = vec![ProviderListItem {
+                id: "deepseek".to_string(),
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+                compact_model: None,
+                custom: false,
+                models: vec![ProviderModelEntry {
+                    id: "deepseek-v4-flash".to_string(),
+                    capabilities: ModelCapabilitiesInfo {
+                        reasoning_efforts: Some(vec![
+                            "low".to_string(),
+                            "high".to_string(),
+                            "max".to_string(),
+                        ]),
+                        ..caps(128_000)
+                    },
+                    max_output_tokens_limit: 32_768,
+                    protocol_type: None,
+                    base_url: None,
+                    protocol_probe: None,
+                }],
+            }];
+        }
+        loop_.session.set_reasoning_effort(Some(
+            acowork_core::providers::traits::ReasoningEffort::Medium,
+        ));
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        let request = loop_.build_chat_request(&mut builder, "deepseek-v4-flash");
+        assert_eq!(
+            request.reasoning_effort,
+            Some(acowork_core::providers::traits::ReasoningEffort::Low),
+            "an unsupported level must be clamped down, not sent as-is"
+        );
+    }
+
+    /// A model without a declared support set (custom provider) gets the
+    /// chosen level unchanged.
+    #[test]
+    fn build_chat_request_keeps_the_effort_when_the_support_set_is_unknown() {
+        let mut loop_ = build_loop();
+        loop_.session.set_reasoning_effort(Some(
+            acowork_core::providers::traits::ReasoningEffort::Medium,
+        ));
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        let request = loop_.build_chat_request(&mut builder, "test-model");
+        assert_eq!(
+            request.reasoning_effort,
+            Some(acowork_core::providers::traits::ReasoningEffort::Medium)
+        );
     }
 
     fn build_loop() -> AgentLoop {

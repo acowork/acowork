@@ -140,20 +140,27 @@ impl OpenAIProvider {
 ///
 /// OpenAI's `reasoning_effort` parameter only accepts "low" | "medium" | "high"
 /// (some models also accept "minimal"). It has **no explicit "disable"** value —
-/// omitting the field lets the model use its own default, which is typically
-/// "medium" for o-series models. To honor the user's intent of "minimum
-/// reasoning", we map `Off` to `"low"` (the lowest universally-supported value).
-/// `Auto` means the user wants the model to decide; the field is also omitted.
+/// and the "none" spelling is rejected outright by some vendors (MiniMax
+/// M3.1-Flash answers HTTP 400) while being silently ignored by others.
+/// `Off` therefore means "do not control reasoning": the field is omitted,
+/// exactly like `Auto` (the model then uses its own default). `Auto` means the
+/// user wants the model to decide; the field is also omitted.
 fn openai_reasoning_str(effort: &ReasoningEffort) -> Option<&'static str> {
     match effort {
         // Auto: let the model decide, do not send the field.
         ReasoningEffort::Auto => None,
-        // No disable protocol — collapse to the lowest available effort.
-        ReasoningEffort::Off => Some("low"),
+        // Off: no disable protocol in the completions shape -- "not
+        // controlling" means omitting the field (same as Auto). The
+        // "none" spelling is rejected by some vendors (MiniMax M3.1-Flash
+        // answers HTTP 400) and silently ignored by others.
+        ReasoningEffort::Off => None,
+        // The completions endpoint has no "minimal"; fold it up to "low".
+        ReasoningEffort::Minimal => Some("low"),
         ReasoningEffort::Low => Some("low"),
         ReasoningEffort::Medium => Some("medium"),
         ReasoningEffort::High => Some("high"),
-        // Most OpenAI-compatible APIs cap at "high".
+        // Most OpenAI-compatible completions APIs cap at "high".
+        ReasoningEffort::XHigh => Some("high"),
         ReasoningEffort::Max => Some("high"),
     }
 }
@@ -1412,6 +1419,27 @@ fn parse_sse_line(line: &str) -> (Vec<StreamEvent>, Option<UsageInfo>, Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Off` must NOT collapse to `"low"`: the user asked for "do not
+    /// control reasoning", and `low` is a control instruction. The field is
+    /// omitted (same as `Auto`).
+    #[test]
+    fn off_omits_the_reasoning_field() {
+        assert_eq!(openai_reasoning_str(&ReasoningEffort::Off), None);
+        assert_eq!(openai_reasoning_str(&ReasoningEffort::Auto), None);
+    }
+
+    /// The completions shape only accepts low/medium/high — `minimal` folds
+    /// up, `xhigh`/`max` fold down.
+    #[test]
+    fn reasoning_levels_fold_into_the_completions_range() {
+        assert_eq!(openai_reasoning_str(&ReasoningEffort::Minimal), Some("low"));
+        assert_eq!(openai_reasoning_str(&ReasoningEffort::Low), Some("low"));
+        assert_eq!(openai_reasoning_str(&ReasoningEffort::Medium), Some("medium"));
+        assert_eq!(openai_reasoning_str(&ReasoningEffort::High), Some("high"));
+        assert_eq!(openai_reasoning_str(&ReasoningEffort::XHigh), Some("high"));
+        assert_eq!(openai_reasoning_str(&ReasoningEffort::Max), Some("high"));
+    }
 
     /// Regression (chat image + text): see the Anthropic counterpart. The
     /// multimodal content array must not be the only thing on the wire when the

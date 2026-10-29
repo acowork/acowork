@@ -146,15 +146,22 @@ export function ModelCapEditor({
           {caps.supports_reasoning && (
             <div className="mt-1.5">
               <label className="mb-0.5 block text-xs text-text-tertiary">{t("harness.defaultReasoningEffort")}</label>
+              {/* Every backend level is offered here on purpose: this card is
+                  the override surface, so a stale or wrong catalog entry must
+                  stay correctable. The chat effort dropdown is the place that
+                  narrows itself to the model's declared levels. */}
               <Dropdown
                 value={caps.default_reasoning_effort ?? "auto"}
                 onChange={(v) => update("default_reasoning_effort", v)}
                 options={[
                   { value: "auto", label: "Auto" },
                   { value: "off", label: "Off" },
+                  { value: "minimal", label: "Minimal" },
                   { value: "low", label: "Low" },
                   { value: "medium", label: "Medium" },
                   { value: "high", label: "High" },
+                  { value: "xhigh", label: "XHigh" },
+                  { value: "max", label: "Max" },
                 ]}
               />
             </div>

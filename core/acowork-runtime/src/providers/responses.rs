@@ -199,15 +199,22 @@ struct NativeResponsesRequest {
 }
 
 /// Map `reasoning_effort` to the Responses `reasoning.effort` string.
-/// `Auto` → `None` (field omitted entirely); `Off` → `"none"` (MiniMax
-/// may 400 on that — D8/S7 trim territory, not compensated client-side).
+///
+/// `Auto` and `Off` both → `None` (field omitted entirely): "not controlling"
+/// must not send `effort: "none"`, because MiniMax M3.1-Flash answers HTTP
+/// 400 for that value (the D8 trim path would then silently drop the whole
+/// `reasoning` block, which is not what the user asked for). The Responses
+/// shape accepts the full level range: minimal / low / medium / high / xhigh /
+/// max.
 fn reasoning_effort_str(effort: &ReasoningEffort) -> Option<&'static str> {
     match effort {
         ReasoningEffort::Auto => None,
-        ReasoningEffort::Off => Some("none"),
+        ReasoningEffort::Off => None,
+        ReasoningEffort::Minimal => Some("minimal"),
         ReasoningEffort::Low => Some("low"),
         ReasoningEffort::Medium => Some("medium"),
         ReasoningEffort::High => Some("high"),
+        ReasoningEffort::XHigh => Some("xhigh"),
         ReasoningEffort::Max => Some("max"),
     }
 }
@@ -1499,6 +1506,10 @@ mod tests {
         assert!(json.contains("\"name\":\"n1\""), "flat name at top level: {json}");
     }
 
+    /// `Auto` and `Off` both omit the `reasoning` block: `Off` means "do not
+    /// control reasoning". Sending `effort: "none"` would be wrong — MiniMax
+    /// M3.1-Flash answers HTTP 400 for it, and the D8 trim would then drop
+    /// the whole block (which is not what "off" asked for either).
     #[test]
     fn reasoning_effort_mapping() {
         let base = req(vec![ChatMessage::user("hi")]);
@@ -1511,12 +1522,36 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::Off),
             ..base.clone()
         };
-        assert_eq!(map_request(&off).unwrap().reasoning.unwrap().effort, "none");
+        assert!(
+            map_request(&off).unwrap().reasoning.is_none(),
+            "Off omits the field (never sends `none`)"
+        );
         let high = ChatRequest {
             reasoning_effort: Some(ReasoningEffort::High),
-            ..base
+            ..base.clone()
         };
         assert_eq!(map_request(&high).unwrap().reasoning.unwrap().effort, "high");
+    }
+
+    /// The Responses shape accepts the full level range (minimal / xhigh
+    /// included) — unlike the completions shape.
+    #[test]
+    fn reasoning_effort_mapping_covers_the_full_level_range() {
+        let base = req(vec![ChatMessage::user("hi")]);
+        for (effort, wire) in [
+            (ReasoningEffort::Minimal, "minimal"),
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ] {
+            let req = ChatRequest {
+                reasoning_effort: Some(effort),
+                ..base.clone()
+            };
+            assert_eq!(map_request(&req).unwrap().reasoning.unwrap().effort, wire);
+        }
     }
 
     #[test]
@@ -2444,7 +2479,7 @@ mod d8_trim_tests {
     /// `reasoning`. Comparing whole JSON bodies (not a substring) is what pins
     /// "only that one field is dropped".
     fn body_without_reasoning() -> serde_json::Value {
-        let mut native = map_request(&request(ReasoningEffort::Off)).unwrap();
+        let mut native = map_request(&request(ReasoningEffort::Low)).unwrap();
         native.reasoning = None;
         serde_json::to_value(&native).unwrap()
     }
@@ -2481,7 +2516,7 @@ mod d8_trim_tests {
         let work = work_dir("once");
         let provider = trimmed_provider(server.url().as_str(), &work);
         let response = provider
-            .chat(request(ReasoningEffort::Off))
+            .chat(request(ReasoningEffort::Low))
             .await
             .expect("the trimmed retry must succeed");
 
@@ -2524,7 +2559,7 @@ mod d8_trim_tests {
         let provider = trimmed_provider(server.url().as_str(), &work);
         for _ in 0..confirmations {
             provider
-                .chat(request(ReasoningEffort::Off))
+                .chat(request(ReasoningEffort::Low))
                 .await
                 .expect("trimmed retry succeeds");
         }
@@ -2533,7 +2568,7 @@ mod d8_trim_tests {
 
         // The promoted trim must skip the rejected request entirely: one send.
         provider
-            .chat(request(ReasoningEffort::Off))
+            .chat(request(ReasoningEffort::Low))
             .await
             .expect("fast path succeeds");
         rejected.assert();
@@ -2558,7 +2593,7 @@ mod d8_trim_tests {
         let provider = trimmed_provider(server.url().as_str(), &work);
         let err = provider_error(
             provider
-                .chat(request(ReasoningEffort::Off))
+                .chat(request(ReasoningEffort::Low))
                 .await
                 .expect_err("must surface, not trim"),
         );
@@ -2589,7 +2624,7 @@ mod d8_trim_tests {
         let provider = trimmed_provider(server.url().as_str(), &work);
         let err = provider_error(
             provider
-                .chat(request(ReasoningEffort::Off))
+                .chat(request(ReasoningEffort::Low))
                 .await
                 .expect_err("content defects are not trim candidates"),
         );
@@ -2625,7 +2660,7 @@ mod d8_trim_tests {
         assert!(cache.get(&key()).is_some(), "seeded durable trim");
 
         provider
-            .chat(request(ReasoningEffort::Off))
+            .chat(request(ReasoningEffort::Low))
             .await
             .expect_err("the fast path fails");
         rejected.assert();

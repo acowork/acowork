@@ -968,6 +968,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     null;
   const reasoningEffort =
     draft.reasoning_effort ?? defaultEffortOf(currentModelEntry);
+  // The depth levels the current model declares (models.dev
+  // `reasoning_options`). Undefined = unknown (custom model) -> the generic
+  // level set.
+  const reasoningLevels = currentModelEntry?.reasoning_efforts;
   // Toolbar responsive collapse — same engine the execution-session
   // composer uses (shared `useToolbarCollapse`); folds model → reasoning →
   // workspace labels left-to-right when the pane narrows.
@@ -1240,6 +1244,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                   void saveDraft(agentId, { ...draft, reasoning_effort: e })
                 }
                 btnId="effort"
+                supportedLevels={reasoningLevels}
               />
             )}
             <div className="min-w-0">

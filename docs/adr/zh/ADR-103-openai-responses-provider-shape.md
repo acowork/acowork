@@ -1,10 +1,11 @@
 # ADR-103：支持 OpenAI Responses API 作为 provider shape
 
 - **编号**：ADR-103
-- **状态**：✅ 已接受（v0.3 拍板 / v0.4–v0.5 修正，2026-11-XX；S1–S9 已实施，分支 `feature/response_api`）
+- **状态**：✅ 已接受（v0.3 拍板 / v0.4–v0.6 修正，2026-11-XX；S1–S10 已实施，分支 `feature/response_api`）
 - **日期**：2026-11-XX
 - **修订**：
-  - **v0.5（2026-11-XX，实施后修正）**——**探测基线的 `reasoning.effort` 改用跨厂商合法值 `low`**（原为 `none`）。`none` 是 MiniMax M3.1-Flash 唯一拒绝的**值**（该模型**支持** `reasoning`，effort 可取 `low`/`medium`/`high`/`xhigh`/`max`），而 400 点名 `reasoning` 字段会被判成「字段不支持」→ 裁剪 → 对一个完全支持推理的模型谎报 `degraded` + 「reasoning 被省略」。§4.4 D8 裁剪规则与 `degraded` 语义不变，只是基线不再用「某厂商恰好拒绝的值」。用户主动选 `Off` → `none` 的路径不变。
+  - **v0.6（2026-11-XX，实施后修正）**——**reasoning effort 全链路收口**（新增 D13，D5 映射表、§3、§5、§7 同步）。三件事：① **`Off` 改为「不控制推理」= 省略 reasoning 参数**，两条线格式路径都不再发 `none`、也不发 `low`（旧的 completions `Off → "low"` 是缺陷：用户选「关闭」反而收到低档推理；`none` 则被 MiniMax M3.1-Flash 400）；② `ReasoningEffort` 补 `Minimal` / `XHigh`，`from_str_loose` 接受 catalog 的 `minimal`/`xhigh`/`x_high`/`default`/`none`（手改配置不再静默回落 `Auto`）；③ 档位集合改为**由模型自己声明**：`offline_providers.json` 的 `reasoning_options[].values` → `ModelInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts` → 前端档位菜单 + Runtime 裁剪，`None` = 未知（自定义模型）时前端给通用五档 `low/medium/high/xhigh/max`、Runtime 不裁剪。附带删掉 core 侧死代码 `ReasoningEffort::to_openai_str`（与 `openai_reasoning_str` 语义相反，是映射漂移的温床）。
+  - **v0.5（2026-11-XX，实施后修正）**——**探测基线的 `reasoning.effort` 改用跨厂商合法值 `low`**（原为 `none`）。`none` 是 MiniMax M3.1-Flash 唯一拒绝的**值**（该模型**支持** `reasoning`，effort 可取 `low`/`medium`/`high`/`xhigh`/`max`），而 400 点名 `reasoning` 字段会被判成「字段不支持」→ 裁剪 → 对一个完全支持推理的模型谎报 `degraded` + 「reasoning 被省略」。§4.4 D8 裁剪规则与 `degraded` 语义不变，只是基线不再用「某厂商恰好拒绝的值」。（v0.6 起用户主动选 `Off` 也改为省略该字段，见 v0.6 / D13。）
   - **v0.4（2026-11-XX，实施后修正）**——**删除全局开关 `llm.responses_api_enabled`**（§4.4、R6 已同步）。理由：默认 `false` + 无 UI 入口 = 功能对绝大多数用户静默不可用（用户手选 Responses、点保存、探测被整体跳过、dialog 静默关闭，再次打开仍显示未启用）；而灰度本来就不需要它——D1 的 gate 已经是灰度（未手选 / 未探测 / 探测失败一律回落默认）。同时保留一条实施事实：保存响应里的探测结论（`probes`）必须传到 UI，否则「探测失败」与「什么都没发生」对用户不可区分。
   - **v0.3（2026-11-XX，拍板）**——**探测从「advisory 可信度标记」升级为「配置期启用门控（gate）」**：Responses 在且仅在「用户手选 ∧ 探测通过」时启用，其余任何情况一律回落默认（npm 推导）。连带修改：D1 改为两级输入 + gate、`shape` 降级为纯 UI 提示（不参与裁决、不写盘）、删除手动 re-resolve 流程（改为保存 / 切换协议时自动重测，见新增 D12）、G2「数据驱动默认」取消、§4.2 简化、修正 v0.2 关于 `#[serde(default)]` 的跨版本兼容错误结论、§3/§5/§7/§8/§9/§10 同步。
   - **v0.2（2026-11-XX）**——删除 v0.1 的 D10「本地 shape 覆盖表」，改为「用户显式选协议 + Gateway 侧探测验证」。动因：人工维护的数据文件会腐烂，探测 + 手选能以零维护成本覆盖 models.dev 尚未标注 `shape` 的厂商（DeepSeek / MiniMax）。
@@ -250,7 +251,7 @@ Runtime 侧：`build_provider_for(provider_id, model_id, account_id)` 增加 `mo
 | `role=tool` + `tool_call_id` | `function_call_output{call_id, output}` | `output` 用字符串；工具产图时用内容块数组（DeepSeek/MiniMax 均支持在 `*_output` 里放 `input_image`） |
 | `tools`（嵌套 function） | **扁平** `{type:"function", name, description, parameters}` | 必须做嵌套→扁平转换（`context.rs:1592` 产出的是嵌套格式） |
 | `max_tokens` | `max_output_tokens` | **语义差异**：Responses 的该字段**含思维链 token**（MiniMax 明文）。过小 → `status=incomplete` 且 `output` 无 `message`，MUST 映射为可见截断错误而非空回答 |
-| `reasoning_effort` | `reasoning.effort` | `Auto` → **不发该字段**；`Off` → `none`（**注意 MiniMax M3.1-Flash 会 400**，见 D8）；`Low/Medium/High/Max` → 同名，由 provider 侧按各自枚举裁剪（DeepSeek 把 `medium`→`high`） |
+| `reasoning_effort` | `reasoning.effort` | `Auto` / `Off` → **不发该字段**（`Off` = 不控制推理，**MUST NOT** 发 `none`：MiniMax M3.1-Flash 直接 400，也 **MUST NOT** 发 `low`，见 v0.6 / D13）；`Minimal/Low/Medium/High/XHigh/Max` → 同名；发送前先按模型声明的支持集裁剪（D13） |
 | `temperature` | `temperature` | 透传；MiniMax 接受但不生效，不做客户端补偿 |
 | `thinking_mode` | **不发** | Anthropic 专属，Responses 无对应概念 |
 | — | `stream` | 由 `chat` / `chat_stream` 决定 |
@@ -333,7 +334,7 @@ flowchart LR
 
 - **v0.5 修正（实施后）**：这条规则原先写的是「`reasoning.effort: none` 触发 400 → 裁剪」，并把「值被拒」当成了「字段不被支持」。这产生了一个**假结论**：MiniMax M3.1-Flash **支持** `reasoning`（`effort` 可取 `low`/`medium`/`high`/`xhigh`/`max`，MiniMax 官方文档明文），它只是**不接受 `effort: none` 这个值**（返 400）。而 400 里点名了 `reasoning` 字段 → 错误分类判成 `UnsupportedField{reasoning}` → 裁剪 → 结论落成 `degraded` + `stripped_fields: ["reasoning"]`，于是在一个完全支持推理的模型上对用户宣称「该端点省略了 reasoning 参数」。**被拒的是值，不是字段。**
   - **约束（新增，v0.5）**：探测基线里的 `reasoning.effort` **MUST 取跨厂商合法值**（v1 取 `low`），MUST NOT 用「某个厂商恰好拒绝的值」当基线——否则探测会把「值非法」误判成「字段不支持」，产出假 `degraded`。端点若真的不实现 `reasoning` 字段，仍会 400 点名它，裁剪路径与 `degraded` 语义不变。
-  - **用户主动选 `Off` → `none` 的路径不变**（§D5 表）：那是「用户要求关闭推理」，Runtime 裁掉整块并可见告警，语义正确，与探测基线是两件事。
+  - **用户主动选 `Off` 不再发 `none`**（v0.6 / D13）：`Off` = 不控制推理，两条线格式路径都省略该字段，因此不再依赖 D8 裁剪来兜住「某厂商拒绝 `none`」这件事。
 
 **v1 明确不裁**（改为分类上抛，让用户在 UI 里看到并调整）：
 
@@ -494,6 +495,26 @@ flowchart LR
 
 **MUST NOT**：异步后台探测后**静默**启用协议（用户没看到结果就生效 = 不可复现）；在会话期探测；把探测失败当「稍后自动重试」的触发器。
 
+### D13 — reasoning effort：单一事实源 + 档位裁剪（v0.6）
+
+**问题事实**：档位从前端菜单到线格式之间有三处独立假设——前端硬编码 5 档、`ReasoningEffort` 枚举 6 个变体、每个 provider 自己再折一次（completions 把 `max` 折成 `high`）。而模型真正接受的档位集合写在 catalog 的 `reasoning_options` 里（`type == "effort"` 那一项的 `values`，例如 MiniMax M3.1-Flash 是 `low/medium/high/xhigh/max`，DeepSeek 部分模型只有 `low/high`），此前**这条数据在 Gateway 就被丢掉了**（只取了 `reasoning: bool`）。于是「用户能选什么」与「模型接受什么」无关，被拒只能靠 D8 事后裁剪。
+
+**决策**：
+
+1. **`Off` = 不控制推理 = 省略参数。** 不发 `none`（部分厂商 400），不发 `low`（与「关闭」语义相反）。completions / Responses 两条路径统一省略；Anthropic 例外，协议本身有 `thinking: {type: "disabled"}` 的关闭表达，仍发它。`Auto` 与 `Off` 在 Protocol 层因此等价，区别只在 UI 语义（`Auto` = 让模型决定，`Off` = 不要推理）。
+2. **档位集合由模型声明，链路单向。** `offline_providers.json.reasoning_options`（只取 `effort` 项的 `values`）→ `ModelInfo.reasoning_efforts` → `ModelCapabilitiesInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts`（`repeated string`，proto 字段 7）。前端与 Runtime 都只消费这一份，**MUST NOT** 各自再硬编码档位表。
+3. **`None` = 未知（自定义模型 / catalog 未收录）**：前端给通用五档 `low/medium/high/xhigh/max`（不含 `minimal`——它是少数厂商的私有档，通用集里给它会诱导选择），Runtime 不做裁剪。
+4. **裁剪口径两侧一致**：用户选的档位不在支持集内时，取「**不超过**请求档位的最深支持档」；若支持集里没有不超过请求的档位，取支持集最浅档。`Auto`/`Off` 不参与裁剪。Runtime 在构造请求前裁（`ReasoningEffort::clamp_to_supported`），前端只在显示与回写时裁（`clampReasoningLevel`），**用户持久化的选择不被改写**——catalog 是可能过期的，不能因为它的过期而毁掉用户的选择。
+5. **枚举补齐 catalog 的拼写**：`Minimal` / `XHigh` 入枚举，`from_str_loose` 接受 `minimal` / `xhigh` / `x_high` / `default` / `none`，无法解析时仍回落 `Auto` 但 **MUST** `warn!`（静默回落是上一版手改配置「设置没生效」的成因）。
+
+**工程约束**：
+
+- 线格式映射 **MUST** 由各 provider 实现自己持有（completions 的 `openai_reasoning_str`、Responses 的 `reasoning_effort_str`、Anthropic 的 `map_anthropic_thinking`）。**MUST NOT** 在 core 上再挂一份「通用映射」——v0.6 删掉的 `ReasoningEffort::to_openai_str` 正是这种东西：零调用点，且 `Off` 一处省略、一处发 `low`，与 `openai_reasoning_str` 语义相反。同一语义有两个实现时，漂移只是时间问题。
+- 档位深浅顺序 **MUST** 由单一来源定义（Rust `ReasoningEffort::rank()` / 前端 `REASONING_DEPTH_LEVELS`），裁剪算法依赖它严格单调（有单测锁）。
+- `ModelCapEditor` 的 `default_reasoning_effort` 刻意保留**全量**档位：那是 override 面板，catalog 写错时要能纠正。只有聊天里的档位菜单按模型裁剪。
+
+**为什么不在 Gateway 侧把非法档位改写成合法值**：Gateway 是通信与资源边界，不是请求语义的持有者；真正构造线上请求的是 Runtime，它必须在**同一个地方**（`build_chat_request`，与 `default_reasoning_effort` 解析同处）看到用户选择 + 模型支持集 + 最终裁剪结果，才能被一条单测完整覆盖。
+
 ---
 
 ## 3. 接口契约与数据模型变更汇总
@@ -514,7 +535,10 @@ flowchart LR
 | Runtime | `providers/responses.rs`（新） | `ResponsesProvider` | 新文件 |
 | Runtime | `providers/router.rs:103` | + Responses 分支；`create_provider_with_wiring` 增 `model_id` 参数（或新增 `..._for_model`） | 保留旧签名做兼容 wrapper，避免一次性改所有调用点 |
 | Runtime | `token/counter.rs:34` `estimate_image_tokens` | Responses 分支（公式同 OpenAI：`85 + 170*tiles`，`low`=85） | 纯新增 |
-| Desktop | `lib/types.ts:1043` `ModelInfo` | + `shape?: string` + `protocol_active?: string` + `protocol_probe?: ProbeState` | 可选字段 |
+| 域结构 | `protocol.rs` `ModelCapabilitiesInfo` | + `reasoning_efforts: Option<Vec\<String\>>`（v0.6） | `#[serde(default, skip_serializing_if)]`；`None` = 未知，旧 Runtime 忽略 |
+| MQTT | `proto/mqtt_payload.proto` `ModelCapabilities` | + `repeated string reasoning_efforts = 7`（v0.6） | 纯新增字段；旧 Runtime 读不到即 `None`（不裁剪） |
+| Gateway | `models_api.rs` `ModelInfo` / `enrich_model_from_offline` | + `reasoning_efforts`，从 catalog 的 `reasoning_options`（`type=="effort"`）提取（v0.6） | 可选字段；catalog 无该字段时保持 `None` |
+| Desktop | `lib/types.ts:1043` `ModelInfo` | + `shape?: string` + `protocol_active?: string` + `protocol_probe?: ProbeState` + `reasoning_efforts?: string[]` | 可选字段 |
 | Desktop | `cacheHitRate.ts` | Responses 归入 `"openai"` 缓存族 | 设计 23 §5.4 结论沿用 |
 
 **契约红线**：
@@ -601,7 +625,8 @@ sequenceDiagram
 - system 多条 → `instructions` 合并；`input` 为空时**报错**（D5 红线）。
 - tools 嵌套 → 扁平转换的字节级 golden test（`context.rs:1592` 的真实产物做 fixture）。
 - `assistant` 消息带图 → 图片被丢弃 + warn，MUST NOT 进 payload。
-- `reasoning_effort: Auto` → 不发 `reasoning` 字段；`Off` → 发 `none`。
+ - `reasoning_effort: Auto` / `Off` → 都不发 `reasoning` 字段（v0.6）。
+- 全档位映射覆盖 `minimal/low/medium/high/xhigh/max` 六个值各一例（v0.6）。
 
 **单元 — 错误分类与裁剪（D8）**
 - `reasoning` 触发 400 → 省略 `reasoning` 重试一次成功 → 记 `degraded` + `warn!`；**两次确认才固化**（抄 `CompatCache` 纪律的回归用例）。
@@ -674,11 +699,12 @@ sequenceDiagram
 | S6 | D11 前端协议下拉（**始终可选**、切换触发探测）+「重新验证」按钮与状态区 + R 标签三态 + 黄标「已选择但未启用」+ 保存前请求数提示 | G1 灰度就绪；回归用例「shape 缺失仍能选 Responses」「failed 时保存可用且不启用」通过 |
 | S7（Q4 已定案，纳入主线，仍独立可回滚） | `reasoning` 单字段裁剪 + `degraded` 状态 | 两次确认门控 + 可见告警 + debug panel 可查 |
 | S9（v0.5 修正） | 探测基线的 `reasoning.effort` 由 `none` 改为跨厂商合法值 `low`；D8 裁剪规则本身不变 | 对 MiniMax M3.1-Flash（支持 reasoning、只拒 `none`）探测结论为 `verified` 而非假 `degraded`；端点真不支持该字段时仍走裁剪 → `degraded` |
+| S10（v0.6 修正） | D13：`Off` → 省略 + 枚举补 `Minimal`/`XHigh` + `reasoning_options` 全链路透传 + 两侧裁剪 | `Off` 请求体里无 `reasoning` 字段；MiniMax M3.1-Flash 的档位菜单恰为 `low/medium/high/xhigh/max`；自定义模型菜单为通用五档；`deepseek` 只支持 `low/high` 时选 `max` 被裁成 `high` 且日志可查 |
 | S8（v0.4 修正） | 删除全局开关 `llm.responses_api_enabled`（配置段 / 解析分支 / 探测跳过 / 前端 `gate_off` 原因一并删除）+ 保存响应里的 `probes` 送达 UI | 无开关配置段；手选 + 探测通过即生效；保存后用户必能看到每个模型的探测结论（成功 / 降级 / 失败） |
 
 > S5 与 S6 有依赖（下拉需要探测状态才能显示三态），但 S5 可独立交付为「后端可用、前端未接」，中途停下来的系统是自洽的。
 
-**实施状态（S1–S9 全部完成）**：S1 `67bccd0c`、S2 `4c1c47b8`、S3 `6b8ffc6a`、S4 `4869559a`、S5 `d0bdaaab`、S6 `c7cb345e` + `3504055b` + `11ec6153`、S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`。S7 的 `degraded` 由 `ProbeOutcome::stripped_fields` 驱动（Gateway 探测）与 `ResponsesCompatCache`（Runtime 运行期）各自独立产出，两处都不重探、不跨 shape 复用缓存。端到端验证：`dev/smoke/smoke_s7_degraded.py`（真实 Gateway + 拒绝 `reasoning` 的 fake provider）。
+**实施状态（S1–S10 全部完成）**：S1 `67bccd0c`、S2 `4c1c47b8`、S3 `6b8ffc6a`、S4 `4869559a`、S5 `d0bdaaab`、S6 `c7cb345e` + `3504055b` + `11ec6153`、S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`。S7 的 `degraded` 由 `ProbeOutcome::stripped_fields` 驱动（Gateway 探测）与 `ResponsesCompatCache`（Runtime 运行期）各自独立产出，两处都不重探、不跨 shape 复用缓存。端到端验证：`dev/smoke/smoke_s7_degraded.py`（真实 Gateway + 拒绝 `reasoning` 的 fake provider）。
 
 ---
 

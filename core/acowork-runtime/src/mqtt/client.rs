@@ -296,6 +296,21 @@ fn map_provider_refs_to_list_items(
                             .as_ref()
                             .and_then(|c| c.default_reasoning_effort.clone()),
                         thinking_mode: None,
+                        // Reasoning effort levels the model supports. Empty =
+                        // unknown (custom model) -> the chosen level is sent
+                        // unchanged.
+                        reasoning_efforts: {
+                            let levels = m
+                                .capabilities
+                                .as_ref()
+                                .map(|c| c.reasoning_efforts.clone())
+                                .unwrap_or_default();
+                            if levels.is_empty() {
+                                None
+                            } else {
+                                Some(levels)
+                            }
+                        },
                     },
                     max_output_tokens_limit: m.max_output_tokens_limit,
                     // ADR-103 D2: model-level effective protocol / base_url

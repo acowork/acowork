@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, SessionInfo, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState, ModelInfo } from "../lib/types";
+import type { ChatMessage, ContextUsageInfo, TokenUsage, ToolApprovalNeededEvent, PaginatedMessages, ConversationEntry, SessionStatus, SessionInfo, AskQuestionEvent, EventClearedEvent, ModelEntry, TodoItem, AttachedItem, ProviderAccount, VaultKeyEntry, AgentLifecycleState, ModelInfo, ModelCapabilitiesInfo } from "../lib/types";
 import { toWireAttachedItems } from "../lib/types";
 import { isAtTail } from "../lib/paginationUtils";
 import { useAgentStore } from "./agentStore";
@@ -729,6 +729,23 @@ function protocolFieldsOf(
   return fields;
 }
 
+/** The reasoning effort levels a model declares, from the first source
+ *  that knows them: the user's per-model capability override, the previous
+ *  inventory row (when the current fetch failed), then the Gateway's model
+ *  info. `undefined` = unknown. */
+function reasoningEffortsOf(
+  entry: { modelCapabilities?: Record<string, ModelCapabilitiesInfo> },
+  modelId: string,
+  info: ModelInfo | undefined,
+  fallback: ModelEntry | undefined,
+): string[] | undefined {
+  return (
+    entry.modelCapabilities?.[modelId]?.reasoning_efforts ??
+    fallback?.reasoning_efforts ??
+    info?.reasoning_efforts
+  );
+}
+
 /** Field-wise equality for a model inventory row — every field the
  *  builders below produce is compared. */
 function sameModelEntry(a: ModelEntry, b: ModelEntry): boolean {
@@ -738,6 +755,8 @@ function sameModelEntry(a: ModelEntry, b: ModelEntry): boolean {
     a.tool_call === b.tool_call &&
     a.reasoning === b.reasoning &&
     a.default_reasoning_effort === b.default_reasoning_effort &&
+    ((a.reasoning_efforts === undefined && b.reasoning_efforts === undefined) ||
+      a.reasoning_efforts?.join(",") === b.reasoning_efforts?.join(",")) &&
     ((a.input_modalities === undefined && b.input_modalities === undefined) ||
       a.input_modalities?.join(",") === b.input_modalities?.join(",")) &&
     // ADR-103 D11: the protocol surfaces drive the `R` badge, so a verdict
@@ -2947,6 +2966,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const info = apiModels?.find((m) => m.id === modelId);
             const prevEntry = prev?.get(modelId);
             const fallback = apiModels === null ? prevEntry : undefined;
+            const reasoningEfforts = reasoningEffortsOf(entry, modelId, info, fallback);
             allModels.push({
               name: modelId,
               provider: entry.provider,
@@ -2958,6 +2978,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 entry.modelCapabilities?.[modelId]?.default_reasoning_effort ??
                 fallback?.default_reasoning_effort ??
                 undefined,
+              // Reasoning effort levels the model declares (models.dev
+              // `reasoning_options`). Drives the levels offered in the
+              // effort dropdown; undefined = unknown (custom model) ->
+              // the generic level set. The key is omitted entirely when
+              // unknown so the row keeps its previous shape.
+              ...(reasoningEfforts ? { reasoning_efforts: reasoningEfforts } : {}),
               // ADR-103 D11: the Gateway projects these onto `/api/models`;
               // carrying them here is what lets the chat dropdown render the
               // `R` badge without a second fetch.

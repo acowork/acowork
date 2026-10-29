@@ -493,8 +493,7 @@ impl AgentLoop {
                             );
                             // Preserve reasoning_effort from the original request
                             // (already resolved in build_chat_request()).
-                            chat_request.reasoning_effort =
-                                self.last_reasoning_effort.clone();
+                            chat_request.reasoning_effort = self.last_reasoning_effort;
                             chat_request.thinking_mode =
                                 self.last_thinking_mode.clone();
                             return self

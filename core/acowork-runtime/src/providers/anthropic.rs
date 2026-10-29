@@ -259,9 +259,11 @@ fn map_anthropic_thinking(
     if is_adaptive {
         // Adaptive thinking: map effort to output_config.effort string
         let effort_str = match effort {
+            ReasoningEffort::Minimal => "minimal",
             ReasoningEffort::Low => "low",
             ReasoningEffort::Medium => "medium",
             ReasoningEffort::High => "high",
+            ReasoningEffort::XHigh => "xhigh",
             ReasoningEffort::Max => "max",
             _ => "medium",
         };
@@ -276,9 +278,11 @@ fn map_anthropic_thinking(
 
     // Extended thinking: compute budget_tokens
     let budget = match effort {
+        ReasoningEffort::Minimal => 1024,
         ReasoningEffort::Low => 2048,
         ReasoningEffort::Medium => 8000,
         ReasoningEffort::High => std::cmp::min(16000, max_output.saturating_div(2)),
+        ReasoningEffort::XHigh => std::cmp::min(24000, max_output.saturating_mul(3).div_ceil(4)),
         ReasoningEffort::Max => std::cmp::min(31999, max_output.saturating_sub(1)),
         _ => unreachable!(),
     };
@@ -1302,6 +1306,50 @@ fn parse_anthropic_sse_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acowork_core::providers::ReasoningEffort;
+
+    /// The extended-thinking budget grows with the level, and the two new
+    /// levels (minimal / xhigh) get their own budgets instead of falling
+    /// into the catch-all arm.
+    #[test]
+    fn extended_thinking_budget_covers_every_level() {
+        let budget_of = |effort: ReasoningEffort| match map_anthropic_thinking(
+            Some(&effort),
+            None,
+            32_000,
+            None,
+        ) {
+            (Some(AnthropicThinking::Enabled { budget_tokens }), _, _) => budget_tokens,
+            (other, _, _) => panic!("expected enabled thinking, got {other:?}"),
+        };
+        assert_eq!(budget_of(ReasoningEffort::Minimal), 1024);
+        assert_eq!(budget_of(ReasoningEffort::Low), 2048);
+        assert_eq!(budget_of(ReasoningEffort::Medium), 8000);
+        assert_eq!(budget_of(ReasoningEffort::High), 16_000);
+        assert_eq!(budget_of(ReasoningEffort::XHigh), 24_000);
+        assert_eq!(budget_of(ReasoningEffort::Max), 31_999);
+    }
+
+    /// The adaptive shape carries a level string, not a budget — every level
+    /// must have a wire spelling.
+    #[test]
+    fn adaptive_effort_covers_every_level() {
+        let effort_of = |effort: ReasoningEffort| match map_anthropic_thinking(
+            Some(&effort),
+            Some("adaptive"),
+            32_000,
+            None,
+        ) {
+            (_, Some(cfg), _) => cfg.effort,
+            (_, None, _) => panic!("expected an output_config"),
+        };
+        assert_eq!(effort_of(ReasoningEffort::Minimal), "minimal");
+        assert_eq!(effort_of(ReasoningEffort::Low), "low");
+        assert_eq!(effort_of(ReasoningEffort::Medium), "medium");
+        assert_eq!(effort_of(ReasoningEffort::High), "high");
+        assert_eq!(effort_of(ReasoningEffort::XHigh), "xhigh");
+        assert_eq!(effort_of(ReasoningEffort::Max), "max");
+    }
 
     /// Regression (chat image + text): the turn reached the model as the image
     /// only. Since ADR-046 the image parts are derived server-side, so

@@ -379,6 +379,12 @@ message ModelCapabilities {
   // Option<T> directly — the Runtime treats absent as "unknown".
   optional bool supports_reasoning = 5;
   optional string default_reasoning_effort = 6;
+  // Reasoning effort levels the model supports (models.dev
+  // `reasoning_options[].values` for the `effort` option). ABSENT = unknown
+  // (custom model without a catalog entry) -- the Runtime then sends the
+  // chosen level unchanged. When present, the Runtime clamps a chosen level
+  // into this set so the request never carries an unsupported value.
+  repeated string reasoning_efforts = 7;
 }
 
 // ── MCP reference (mirrors McpListItem; carries auth token inline) ────

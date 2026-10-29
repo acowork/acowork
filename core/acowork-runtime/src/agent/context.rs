@@ -825,7 +825,7 @@ impl ContextBuilder {
             )),
             max_tokens,
             tools: self.tool_definitions.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
+            reasoning_effort: self.reasoning_effort,
             thinking_mode: self.thinking_mode.clone(),
         }
     }
@@ -1369,6 +1369,7 @@ mod tests {
             knowledge_cutoff: None,
             default_reasoning_effort: None,
             thinking_mode: None,
+            reasoning_efforts: None,
         }
     }
 

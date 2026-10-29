@@ -223,6 +223,11 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
                                 output_modalities,
                                 supports_reasoning: m.capabilities.supports_reasoning,
                                 default_reasoning_effort: m.capabilities.default_reasoning_effort.clone(),
+                                reasoning_efforts: m
+                                    .capabilities
+                                    .reasoning_efforts
+                                    .clone()
+                                    .unwrap_or_default(),
                             }),
                             max_output_tokens_limit: m.max_output_tokens_limit,
                             protocol_type: proto_protocol,

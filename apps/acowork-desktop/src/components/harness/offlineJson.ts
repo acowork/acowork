@@ -19,6 +19,14 @@ export function offlineSpecToModel(
   const modalities = spec?.modalities;
   const limit = spec?.limit;
   const cost = spec?.cost;
+  // Reasoning effort levels the model declares (models.dev
+  // `reasoning_options`). Only the `effort` option contributes levels.
+  const effortLevels = Array.isArray(spec?.reasoning_options)
+    ? spec.reasoning_options
+        .filter((o: any) => o?.type === "effort")
+        .flatMap((o: any) => (Array.isArray(o?.values) ? o.values : []))
+        .filter((v: unknown): v is string => typeof v === "string")
+    : [];
   const info: ModelInfo = {
     id,
     name,
@@ -35,6 +43,7 @@ export function offlineSpecToModel(
     output_cost: cost?.output,
     input_modalities: Array.isArray(modalities?.input) ? modalities.input : undefined,
     output_modalities: Array.isArray(modalities?.output) ? modalities.output : undefined,
+    reasoning_efforts: effortLevels.length > 0 ? effortLevels : undefined,
   };
   const cap: ModelCapabilitiesInfo = {
     context_window: limit?.context ?? 128000,
@@ -53,6 +62,7 @@ export function offlineSpecToModel(
     name,
     family: spec?.family,
     knowledge_cutoff: spec?.knowledge,
+    reasoning_efforts: effortLevels.length > 0 ? effortLevels : undefined,
   };
   return { info, cap };
 }

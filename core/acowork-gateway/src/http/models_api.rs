@@ -109,6 +109,16 @@ pub struct ModelInfo {
     /// Output modalities (e.g. ["text"])
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_modalities: Option<Vec<String>>,
+    /// Reasoning effort levels this model actually supports (models.dev
+    /// `reasoning_options[].values` for the `effort` option), e.g.
+    /// `["low", "medium", "high", "xhigh", "max"]`.
+    ///
+    /// `None` = unknown (custom model / no catalog entry) — the frontend
+    /// then shows the generic level set. The list drives two things: the
+    /// levels offered in the effort dropdown, and the Runtime-side clamping
+    /// of a chosen level into the model's supported set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 
     // ── ADR-103 D11: the three protocol surfaces the UI consumes ──────────
     //
@@ -810,6 +820,32 @@ fn provider_ids_to_query(provider_id: &str) -> Vec<String> {
 
 /// Extract models from a provider JSON object.
 /// Works with both models.dev API response and offline_providers.json format.
+/// Extract the reasoning effort levels a catalog model declares.
+///
+/// The catalog stores them as `reasoning_options: [{ type: "effort",
+/// values: [...] }]` (plus `toggle` / `budget_tokens` entries that carry no
+/// level list). Only the `effort` option contributes levels.
+fn reasoning_effort_levels(model_data: &serde_json::Value) -> Option<Vec<String>> {
+    let values = model_data
+        .get("reasoning_options")
+        .and_then(|v| v.as_array())
+        .and_then(|opts| {
+            opts.iter()
+                .find(|o| o.get("type").and_then(|t| t.as_str()) == Some("effort"))
+                .and_then(|o| o.get("values"))
+                .and_then(|v| v.as_array())
+        })?;
+    let levels: Vec<String> = values
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    if levels.is_empty() {
+        None
+    } else {
+        Some(levels)
+    }
+}
+
 fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
     let models_obj = match provider_data.get("models") {
         Some(serde_json::Value::Object(m)) => m,
@@ -890,6 +926,9 @@ fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
                 .get("shape")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            // Reasoning effort levels the model declares (the `effort` entry
+            // of `reasoning_options`).
+            reasoning_efforts: reasoning_effort_levels(model_data),
             ..Default::default()
         };
         models.push(model);
@@ -1420,6 +1459,11 @@ fn enrich_model_from_offline(model: &mut ModelInfo) {
             if let Some(r) = model_data.get("reasoning").and_then(|v| v.as_bool()) {
                 model.reasoning = Some(r);
             }
+            // Reasoning effort levels the model declares (the `effort` entry
+            // of `reasoning_options`).
+            if model.reasoning_efforts.is_none() {
+                model.reasoning_efforts = reasoning_effort_levels(model_data);
+            }
             if let Some(a) = model_data.get("attachment").and_then(|v| v.as_bool()) {
                 model.attachment = Some(a);
             }
@@ -1853,6 +1897,7 @@ fn model_to_capabilities(
         knowledge_cutoff: model.knowledge.clone(),
         default_reasoning_effort: None,
         thinking_mode: None,
+        reasoning_efforts: model.reasoning_efforts.clone(),
     })
 }
 

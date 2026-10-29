@@ -1,10 +1,11 @@
 # ADR-103: Supporting the OpenAI Responses API as a Provider Shape
 
 - **Number**: ADR-103
-- **Status**: Accepted (v0.3 decided / v0.4-v0.5 corrected, 2026-11-XX; S1-S9 implemented on `feature/response_api`)
+- **Status**: Accepted (v0.3 decided / v0.4-v0.6 corrected, 2026-11-XX; S1-S10 implemented on `feature/response_api`)
 - **Date**: 2026-11-XX
 - **Revisions**:
-  - **v0.5 (2026-11-XX, corrected after implementation)** — **The probe baseline's `reasoning.effort` now uses a cross-vendor legal value (`low`)** (it used `none`). `none` is the only *value* MiniMax M3.1-Flash rejects (that model *does* support `reasoning`, with `effort` in `low`/`medium`/`high`/`xhigh`/`max`), and a 400 naming the `reasoning` field gets classified as "the field is not implemented" → trimmed → a false `degraded` plus "reasoning was omitted" on a fully reasoning-capable model. The D8 trim rule and the `degraded` semantics are unchanged; the baseline simply no longer uses "a value one vendor happens to reject". The user-initiated `Off` → `none` path is unchanged.
+  - **v0.6 (2026-11-XX, corrected after implementation)** — **Reasoning effort closed end to end** (new D13; the D5 mapping table, §3, §5 and §7 updated). Three things: ① **`Off` now means "do not control reasoning" = omit the reasoning parameter** — neither wire path sends `none` any more, and neither sends `low` (the old completions `Off → "low"` was a defect: the user asked to switch reasoning *off* and still got low-depth reasoning; `none` is rejected by MiniMax M3.1-Flash with HTTP 400); ② `ReasoningEffort` gains `Minimal` / `XHigh`, and `from_str_loose` accepts the catalog spellings `minimal`/`xhigh`/`x_high`/`default`/`none` (a hand-edited config no longer falls back to `Auto` silently); ③ the level set is now **declared by the model itself**: `offline_providers.json`'s `reasoning_options[].values` → `ModelInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts` → the frontend level menu and Runtime clamping. `None` = unknown (custom model), in which case the frontend offers the generic five `low/medium/high/xhigh/max` and the Runtime does not clamp. Also removed the dead `ReasoningEffort::to_openai_str` in core (zero call sites, and semantically the opposite of `openai_reasoning_str`: one omits on `Off`, the other sent `low` — exactly the kind of duplicate that drifts).
+  - **v0.5 (2026-11-XX, corrected after implementation)** — **The probe baseline's `reasoning.effort` now uses a cross-vendor legal value (`low`)** (it used `none`). `none` is the only *value* MiniMax M3.1-Flash rejects (that model *does* support `reasoning`, with `effort` in `low`/`medium`/`high`/`xhigh`/`max`), and a 400 naming the `reasoning` field gets classified as "the field is not implemented" → trimmed → a false `degraded` plus "reasoning was omitted" on a fully reasoning-capable model. The D8 trim rule and the `degraded` semantics are unchanged; the baseline simply no longer uses "a value one vendor happens to reject". (As of v0.6, a user-initiated `Off` also omits the field — see v0.6 / D13.)
   - **v0.4 (2026-11-XX, corrected after implementation)** — **Removed the global `llm.responses_api_enabled` switch** (§4.4 and R6 updated). Why: defaulting to `false` with no UI entry point made the feature silently dead for almost every user (they hand-pick Responses, click save, probing is skipped wholesale, the dialog closes with no message, and reopening it still shows the selection as not enabled). Grayscale never needed it — the D1 gate already is the grayscale (no manual selection / no probe / a failed probe all fall back to the npm default). One implementation fact is kept as a rule: the save response's probe verdicts (`probes`) MUST reach the UI, otherwise "the probe failed" and "nothing happened" are indistinguishable to the user.
   - **v0.3 (2026-11-XX, decided)** — **Probing is upgraded from an "advisory confidence marker" to a "configuration-time enablement gate"**: Responses is enabled if and only if "the user explicitly selected it AND the probe passed"; in every other case the effective protocol falls back to the default (npm derivation). Consequential changes: D1 becomes two-level input + gate, `shape` is demoted to a pure UI hint (never adjudicates, never persisted), the manual re-resolve flow is removed (replaced by probing on save / protocol switch, see new D12), G2 "data-driven default" is cancelled, §4.2 is simplified, the v0.2 conclusion about `#[serde(default)]` cross-version compatibility is corrected, §3/§5/§7/§8/§9/§10 synchronized.
   - **v0.2 (2026-11-XX)** — Removed v0.1's D10 "local shape override table"; replaced with "user explicitly selects the protocol + Gateway-side probe verification", because a hand-maintained data file rots while probe + manual selection covers vendors that models.dev has not tagged with `shape` (DeepSeek / MiniMax) at zero maintenance cost.
@@ -251,7 +252,7 @@ New `core/acowork-runtime/src/providers/responses.rs`, implementing the three `P
 | `role=tool` + `tool_call_id` | `function_call_output{call_id, output}` | `output` as a string; when a tool emits an image, use a content-block array (both DeepSeek and MiniMax allow `input_image` inside `*_output`) |
 | `tools` (nested function) | **flat** `{type:"function", name, description, parameters}` | must convert nested → flat (`context.rs:1592` emits the nested format) |
 | `max_tokens` | `max_output_tokens` | **semantic difference**: this field **includes chain-of-thought tokens** (MiniMax states so explicitly). Too small → `status=incomplete` and no `message` in `output`; **MUST** be mapped to a visible truncation error, never an empty answer |
-| `reasoning_effort` | `reasoning.effort` | `Auto` → **omit the field**; `Off` → `none` (**note: MiniMax M3.1-Flash returns 400**, see D8); `Low/Medium/High/Max` → same name, each provider trims to its own enum (DeepSeek maps `medium`→`high`) |
+| `reasoning_effort` | `reasoning.effort` | `Auto` / `Off` → **omit the field** (`Off` = do not control reasoning; **MUST NOT** send `none` — MiniMax M3.1-Flash answers 400 — and **MUST NOT** send `low`, see v0.6 / D13); `Minimal/Low/Medium/High/XHigh/Max` → same name, clamped into the model's declared support set before it is sent (D13) |
 | `temperature` | `temperature` | pass through; MiniMax accepts without effect — no client-side compensation |
 | `thinking_mode` | **not sent** | Anthropic-specific; Responses has no such concept |
 | — | `stream` | decided by `chat` / `chat_stream` |
@@ -334,7 +335,7 @@ Three realities that must be handled:
 
 - **v0.5 correction (after implementation)**: this rule used to read "`reasoning.effort: none` triggering 400 → trim", i.e. it treated a rejected **value** as an unsupported **field**. That produced a **false verdict**: MiniMax M3.1-Flash *does* support `reasoning` (`effort` may be `low`/`medium`/`high`/`xhigh`/`max`, per MiniMax's own docs); it merely rejects the *value* `effort: none` with a 400. Because that 400 names the `reasoning` field, the error classifier judged it `UnsupportedField{reasoning}`, trimmed it, and the verdict landed on `degraded` + `stripped_fields: ["reasoning"]` — telling the user that a fully reasoning-capable model had its reasoning dropped. **The value was rejected; the field was not.**
   - **Constraint (new, v0.5)**: the probe baseline's `reasoning.effort` **MUST** be a value every major vendor accepts (v1 uses `low`), and **MUST NOT** use "a value one vendor happens to reject" as the baseline — otherwise the probe reads "illegal value" as "unsupported field" and reports a false `degraded`. An endpoint that genuinely does not implement the `reasoning` field still answers 400 naming it, and the trim path plus the `degraded` semantics are unchanged.
-  - **The user-initiated `Off` → `none` path is unchanged** (the D5 table): that is "the user asked for reasoning to be off", the Runtime omits the whole block and raises a visible warning, which is semantically correct and a separate concern from the probe baseline.
+  - **A user-initiated `Off` no longer sends `none`** (v0.6 / D13): `Off` means "do not control reasoning", both wire paths omit the field, so nothing depends on the D8 trim to absorb "one vendor rejects `none`" any more.
 
 **v1 explicitly does not trim** (classified and propagated instead, so users see it and adjust):
 
@@ -496,6 +497,26 @@ The three may all differ (e.g. MiniMax-M3: `shape=null`, user selected `protocol
 
 **MUST NOT**: probe asynchronously and then **silently** enable the protocol (taking effect without the user seeing the result = irreproducible); probe during a session; treat a failed probe as a "retry later" trigger.
 
+### D13 — Reasoning effort: one source of truth plus clamping (v0.6)
+
+**The factual problem**: between the frontend menu and the wire encoding there were three independent assumptions — the frontend hard-coded five levels, the `ReasoningEffort` enum had six variants, and each provider folded them again (completions folds `max` into `high`). The set of levels a model actually accepts is declared in the catalog's `reasoning_options` (the `values` of the `type == "effort"` entry — e.g. MiniMax M3.1-Flash declares `low/medium/high/xhigh/max`, some DeepSeek models only `low/high`), and **the Gateway used to drop that data** (it read only `reasoning: bool`). What the user could pick was therefore unrelated to what the model accepts; a rejected level could only be absorbed afterwards by the D8 trim.
+
+**Decisions**:
+
+1. **`Off` = do not control reasoning = omit the parameter.** Send neither `none` (some vendors answer 400) nor `low` (the opposite of "off"). Both the completions and the Responses paths omit it; Anthropic is the exception — the protocol has a native "off" (`thinking: {type: "disabled"}`), so that is still sent. At the protocol layer `Auto` and `Off` are therefore equivalent; they differ only in UI meaning (`Auto` = let the model decide, `Off` = do not reason).
+2. **The level set is declared by the model, and the path is one-directional.** `offline_providers.json.reasoning_options` (only the `values` of the `effort` entry) → `ModelInfo.reasoning_efforts` → `ModelCapabilitiesInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts` (`repeated string`, proto field 7). The frontend and the Runtime both consume that single list and **MUST NOT** hard-code a level table of their own.
+3. **`None` = unknown (custom model / no catalog entry)**: the frontend offers the generic five `low/medium/high/xhigh/max` (`minimal` is excluded — it is a vendor-private level, and offering it in the generic set invites a bad pick), and the Runtime does not clamp.
+4. **Both sides clamp the same way**: when the chosen level is outside the support set, the **deepest** supported level that is **not deeper** than the request wins; when the support set has nothing at or below the request, its shallowest level wins. `Auto`/`Off` are never clamped. The Runtime clamps before building the request (`ReasoningEffort::clamp_to_supported`); the frontend clamps only for display and write-back (`clampReasoningLevel`). **The user's persisted choice is never rewritten** — the catalog can be stale, and its staleness must not destroy the user's selection.
+5. **The enum covers the catalog's spellings**: `Minimal` / `XHigh` join the enum, `from_str_loose` accepts `minimal` / `xhigh` / `x_high` / `default` / `none`; an unparsable value still falls back to `Auto` but **MUST** `warn!` (the silent fallback is what made hand-edited configs look like "the setting does not stick").
+
+**Engineering constraints**:
+
+- The wire encoding **MUST** live in each provider implementation (completions' `openai_reasoning_str`, Responses' `reasoning_effort_str`, Anthropic's `map_anthropic_thinking`). **MUST NOT** add another "generic mapping" to core — the `ReasoningEffort::to_openai_str` that v0.6 deleted was exactly that: zero call sites, and the opposite of `openai_reasoning_str` on `Off` (one omitted, the other sent `low`). Two implementations of one meaning drift, it is only a question of when.
+- The depth order **MUST** be defined once (Rust `ReasoningEffort::rank()` / frontend `REASONING_DEPTH_LEVELS`); the clamping algorithm depends on it being strictly monotonic (locked by a unit test).
+- `ModelCapEditor`'s `default_reasoning_effort` deliberately keeps **all** levels: it is the override surface, so a wrong catalog entry stays correctable. Only the in-chat level menu narrows itself to the model.
+
+**Why not rewrite an unsupported level into a supported one in the Gateway**: the Gateway is the communication and resource boundary, not the owner of request semantics. The Runtime builds the actual request, so the user's choice, the model's support set and the final clamped value must be visible **in one place** (`build_chat_request`, next to the `default_reasoning_effort` resolution) for a single unit test to cover the whole rule.
+
 ---
 
 ## 3. Contract and data-model changes
@@ -516,7 +537,10 @@ The three may all differ (e.g. MiniMax-M3: `shape=null`, user selected `protocol
 | Runtime | `providers/responses.rs` (new) | `ResponsesProvider` | new file |
 | Runtime | `providers/router.rs:103` | + Responses branch; `create_provider_with_wiring` gains `model_id` (or add a `..._for_model` variant) | keep the old signature as a compatibility wrapper, migrate call sites incrementally |
 | Runtime | `token/counter.rs:34` `estimate_image_tokens` | Responses branch (same formula as OpenAI: `85 + 170*tiles`, `low`=85) | pure addition |
-| Desktop | `lib/types.ts:1043` `ModelInfo` | + `shape?: string` + `protocol_active?: string` + `protocol_probe?: ProbeState` | optional fields |
+| Domain | `protocol.rs` `ModelCapabilitiesInfo` | + `reasoning_efforts: Option<Vec\<String\>>` (v0.6) | `#[serde(default, skip_serializing_if)]`; `None` = unknown and old Runtimes ignore it |
+| MQTT | `proto/mqtt_payload.proto` `ModelCapabilities` | + `repeated string reasoning_efforts = 7` (v0.6) | purely additive; an old Runtime decodes nothing and therefore clamps nothing |
+| Gateway | `models_api.rs` `ModelInfo` / `enrich_model_from_offline` | + `reasoning_efforts`, extracted from the catalog's `reasoning_options` (`type=="effort"`) (v0.6) | optional; stays `None` when the catalog does not declare it |
+| Desktop | `lib/types.ts:1043` `ModelInfo` | + `shape?: string` + `protocol_active?: string` + `protocol_probe?: ProbeState` | optional fields | + `reasoning_efforts?: string[]` | optional fields |
 | Desktop | `cacheHitRate.ts` | Responses joins the `"openai"` cache family | Design 23 §5.4 conclusion stands |
 
 **Contract redlines**:
@@ -602,7 +626,8 @@ sequenceDiagram
 - Multiple system messages → `instructions` merged; empty `input` → **error** (D5 redline).
 - Nested → flat tools conversion golden test (fixture from the real `context.rs:1592` output).
 - An image in an `assistant` message → dropped + warn, **MUST NOT** enter the payload.
-- `reasoning_effort: Auto` → no `reasoning` field; `Off` → `none`.
+- `reasoning_effort: Auto` / `Off` → neither emits a `reasoning` field (v0.6).
+- Full-range mapping: one case per level `minimal/low/medium/high/xhigh/max` (v0.6).
 
 **Unit — error classification and trimming (D8)**
 - `reasoning` triggering 400 → omit `reasoning`, retry once, succeed → record `degraded` + `warn!`; **two confirmations before persisting** (regression on CompatCache discipline).
@@ -674,11 +699,12 @@ sequenceDiagram
 | S6 | D11 frontend protocol dropdown (always selectable, switching triggers probing) + "Re-verify" button and status area + R badge three states + yellow "selected but not enabled" + before-save request-count notice | G1 rollout ready; regression cases "shape missing still allows selecting Responses" and "failed: save still works and is not enabled" pass |
 | S7 (Q4 settled; in the main line, still independently revertible) | `reasoning` single-field trimming + `degraded` state | two-confirmation gate + visible warning + inspectable in the debug panel |
 | S9 (v0.5 correction) | The probe baseline's `reasoning.effort` moves from `none` to the cross-vendor legal value `low`; the D8 trim rule itself is unchanged | MiniMax M3.1-Flash (which supports reasoning and rejects only `none`) probes as `verified` instead of a false `degraded`; an endpoint that genuinely lacks the field still trims → `degraded` |
+| S10 (v0.6 correction) | D13: `Off` → omit + enum gains `Minimal`/`XHigh` + `reasoning_options` propagated end to end + clamping on both sides | an `Off` request body carries no `reasoning` field; MiniMax M3.1-Flash's menu is exactly `low/medium/high/xhigh/max`; a custom model gets the generic five; choosing `max` on a `deepseek` model that declares only `low/high` clamps to `high` with a log line |
 | S8 (v0.4 correction) | Remove the global `llm.responses_api_enabled` switch (the config section, the resolution branch, the probe skip and the frontend `gate_off` reason all go with it) + deliver the save response's `probes` to the UI | no switch section anywhere; hand-picked + probe passed is what enables Responses; after a save the user always sees each model's verdict (verified / degraded / failed) |
 
 > S5 and S6 are dependent (the dropdown needs probe state to render three states), but S5 can ship as "backend ready, frontend not wired" — stopping there leaves a self-consistent system.
 
-**Implementation status (S1-S9 all complete)**: S1 `67bccd0c`, S2 `4c1c47b8`, S3 `6b8ffc6a`, S4 `4869559a`, S5 `d0bdaaab`, S6 `c7cb345e` + `3504055b` + `11ec6153`, S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`. S7's `degraded` is produced independently by `ProbeOutcome::stripped_fields` (Gateway probe) and `ResponsesCompatCache` (Runtime at request time); neither re-probes, and neither shares cache entries across shapes. End-to-end check: `dev/smoke/smoke_s7_degraded.py` (real Gateway + a fake provider that rejects `reasoning`).
+**Implementation status (S1-S10 all complete)**: S1 `67bccd0c`, S2 `4c1c47b8`, S3 `6b8ffc6a`, S4 `4869559a`, S5 `d0bdaaab`, S6 `c7cb345e` + `3504055b` + `11ec6153`, S7 `caf6c3f7` + `e772f200` + `29fc28f1` + `fc9b8d1f`. S7's `degraded` is produced independently by `ProbeOutcome::stripped_fields` (Gateway probe) and `ResponsesCompatCache` (Runtime at request time); neither re-probes, and neither shares cache entries across shapes. End-to-end check: `dev/smoke/smoke_s7_degraded.py` (real Gateway + a fake provider that rejects `reasoning`).
 
 ---
 

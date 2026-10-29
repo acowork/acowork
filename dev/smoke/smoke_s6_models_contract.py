@@ -164,7 +164,17 @@ def seed_offline_catalog():
                 "name": "DeepSeek (synthetic catalog entry)",
                 "api": "https://api.deepseek.com",
                 "models": {
-                    MODEL: {"id": MODEL, "shape": "responses"},
+                    # `reasoning_options` is what `enrich_model_from_offline`
+                    # lifts into the `reasoning_efforts` projection; the
+                    # `toggle` entry must be ignored (it carries no levels).
+                    MODEL: {
+                        "id": MODEL,
+                        "shape": "responses",
+                        "reasoning_options": [
+                            {"type": "toggle"},
+                            {"type": "effort", "values": ["low", "medium", "high", "xhigh", "max"]},
+                        ],
+                    },
                     DECLARED_ONLY: {"id": DECLARED_ONLY, "shape": "responses"},
                 },
             }
@@ -307,6 +317,15 @@ def main():
         check("protocol_selected is null", declared["protocol_selected"], None)
         check("protocol_active is openai", declared["protocol_active"], "openai")
         check("no probe verdict", declared["probe.state"], None)
+
+        print("\n[4] reasoning_efforts: the catalog's declared levels reach the API")
+        # The frontend shows exactly these levels in the effort dropdown and
+        # the Runtime clamps a chosen level into them, so the projection has
+        # to survive to `/api/models` untouched.
+        proj = rows()
+        check("declared levels", proj[MODEL].get("reasoning_efforts"),
+              ["low", "medium", "high", "xhigh", "max"])
+        check("undeclared model stays unknown", proj[DECLARED_ONLY].get("reasoning_efforts"), None)
     finally:
         stop(gateway)
         stop(healthy)
