@@ -151,15 +151,16 @@ describe("deriveProtocolBadge", () => {
     expect(deriveProtocolBadge(base)).toEqual({ kind: "blocked", reason: "unverified" });
   });
 
-  it("treats a passing verdict with a fallback as the platform switch being off", () => {
-    // §4.4: `llm.responses_api_enabled=false` forces the fallback, and the
-    // fallback MUST be visible — never a silent protocol change.
+  it("refuses to invent a cause when the verdict and the projection disagree", () => {
+    // ADR-103 has no platform switch (S8): a passing verdict always becomes
+    // the active protocol. If the two ever disagree the UI must not claim the
+    // probe failed or passed — it reports that no usable verdict applies.
     const badge = deriveProtocolBadge({
       protocol_selected: "responses",
       protocol_active: "openai",
       protocol_probe: { state: "verified", tier_passed: ["L1", "L2", "L3"] },
     });
-    expect(badge).toEqual({ kind: "blocked", reason: "gate_off" });
+    expect(badge).toEqual({ kind: "blocked", reason: "unknown" });
   });
 
   it("keeps the declaration visible when the user chose the default protocol", () => {

@@ -68,7 +68,6 @@ export type ProtocolBlockedReason =
   | "unverified"
   | "failed"
   | "stale"
-  | "gate_off"
   | "unknown";
 
 export type ProtocolBadge =
@@ -134,8 +133,7 @@ export function showsResponsesMark(badge: ProtocolBadge): boolean {
  * `protocol_active` is the D1 verdict and therefore the only trustworthy
  * statement about what the model is doing right now: when it says `responses`
  * the selection passed the gate, and when it says anything else while the
- * selection is `responses`, the selection is blocked — the probe verdict (or
- * the global switch) is why.
+ * selection is `responses`, the stored probe verdict is why.
  */
 export function deriveProtocolBadge(m: ModelProtocolFields): ProtocolBadge {
   const selected = m.protocol_selected === RESPONSES_PROTOCOL;
@@ -155,9 +153,10 @@ export function deriveProtocolBadge(m: ModelProtocolFields): ProtocolBadge {
           }
         : { kind: "verified" };
     }
-    // Selected but not enabled. The reason comes from the verdict; a passing
-    // verdict with a non-`responses` active protocol means the platform switch
-    // is off (§4.4 — the fallback must stay visible).
+    // Selected but not enabled. The reason comes from the verdict. A passing
+    // verdict that still did not become active means the projection and the
+    // verdict disagree, which is not something the UI can explain — fall back
+    // to "no usable verdict" rather than inventing a cause.
     switch (probe?.state) {
       case "failed":
         return {
@@ -169,7 +168,6 @@ export function deriveProtocolBadge(m: ModelProtocolFields): ProtocolBadge {
         return { kind: "blocked", reason: "stale" };
       case "verified":
       case "degraded":
-        return { kind: "blocked", reason: "gate_off" };
       case "unknown":
         return { kind: "blocked", reason: "unknown" };
       default:

@@ -57,9 +57,9 @@ describe("ModelProtocolEditor", () => {
   });
 
   it("explains a blocked selection with its reason and detail", () => {
-    renderEditor({ badge: { kind: "blocked", reason: "gate_off", detail: "responses_api_enabled=false" } });
-    expect(screen.getByText(new RegExp(i18n.t("harness.probeBlockedReason_gate_off")))).toBeTruthy();
-    expect(screen.getByText(/responses_api_enabled=false/)).toBeTruthy();
+    renderEditor({ badge: { kind: "blocked", reason: "failed", detail: "HTTP 401" } });
+    expect(screen.getByText(new RegExp(i18n.t("harness.probeBlockedReason_failed")))).toBeTruthy();
+    expect(screen.getByText(/HTTP 401/)).toBeTruthy();
   });
 
   it("distinguishes degraded from verified in the status area", () => {

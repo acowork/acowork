@@ -12,6 +12,11 @@ import { parseOfflineJson, OFFLINE_JSON_EXAMPLE } from "./offlineJson";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ChevronLeft, Minus, Plus, Plug } from "lucide-react";
 import { ErrorBox } from "../common/ErrorBox";
+import { useToast } from "../common/ToastProvider";
+import {
+  summarizeSaveProbes,
+  type ProviderSaveResultLike,
+} from "../../lib/saveProbeFeedback";
 
 interface AddProviderFlowProps {
   open: boolean;
@@ -63,6 +68,7 @@ export function AddProviderFlow({
   initialProviderEntry,
 }: AddProviderFlowProps) {
   const { t } = useTranslation();
+  const { addToast } = useToast();
 
   // ── Dialog-level state ──
   const [step, setStep] = useState<Step>(initialStep);
@@ -252,6 +258,18 @@ export function AddProviderFlow({
   };
 
   // ── Save handlers ──
+  /**
+   * ADR-103 D12.1 — report the save's probe verdicts.
+   *
+   * The save is the moment the Gateway actually probes the rows this write
+   * changed, and it already returns the verdicts. Surfacing them here is the
+   * difference between "the selection is now live" and "nothing happened".
+   */
+  const reportSaveProbes = (saved: ProviderSaveResultLike | undefined) => {
+    const feedback = summarizeSaveProbes(saved?.probes, t);
+    if (feedback) addToast({ type: feedback.type, message: feedback.message });
+  };
+
   const handleAdd = async () => {
     // Strip empty trailing rows; require at least one non-empty key.
     const validEntries = newKeyEntries
@@ -269,7 +287,7 @@ export function AddProviderFlow({
     if (selectedProviderIsLocal) {
       setTesting(true);
       try {
-        await invoke("add_key", {
+        const saved = await invoke<ProviderSaveResultLike>("add_key", {
           provider: selectedProvider,
           keys: keysPayload,
           baseUrl: newBaseUrl || undefined,
@@ -282,6 +300,7 @@ export function AddProviderFlow({
         window.dispatchEvent(new CustomEvent('models-added'));
         onSuccess();
         onClose();
+        reportSaveProbes(saved);
       } catch (e) {
         alert(`${t("harness.failedConnectLocal")}: ${e}`);
       }
@@ -336,7 +355,7 @@ export function AddProviderFlow({
 
     // Save
     try {
-      await invoke("add_key", {
+      const saved = await invoke<ProviderSaveResultLike>("add_key", {
         provider: selectedProvider,
         keys: keysPayload,
         baseUrl: newBaseUrl || undefined,
@@ -349,6 +368,7 @@ export function AddProviderFlow({
       window.dispatchEvent(new CustomEvent('models-added'));
       onSuccess();
       onClose();
+      reportSaveProbes(saved);
     } catch (e) {
       alert(`${t("harness.failedAddKey")}: ${e}`);
     }
@@ -416,7 +436,7 @@ export function AddProviderFlow({
       ? customValidEntries
       : [{ alias: "", key: "" }];
     try {
-      await invoke("add_key", {
+      const saved = await invoke<ProviderSaveResultLike>("add_key", {
         provider: id,
         keys: customKeysPayload,
         baseUrl: url,
@@ -429,6 +449,7 @@ export function AddProviderFlow({
       window.dispatchEvent(new CustomEvent('models-added'));
       onSuccess();
       onClose();
+      reportSaveProbes(saved);
     } catch (e) {
       alert(`${t("harness.failedAddKey")}: ${e}`);
     } finally {

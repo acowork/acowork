@@ -27,6 +27,11 @@ import { ErrorBox } from "../common/ErrorBox";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { SectionPane } from "../common/SectionPane";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { useToast } from "../common/ToastProvider";
+import {
+  summarizeSaveProbes,
+  type ProviderSaveResultLike,
+} from "../../lib/saveProbeFeedback";
 
 type HarnessTab = "providers" | "mcp" | "embedding" | "lsp";
 
@@ -62,6 +67,7 @@ export function HarnessPage() {
 /** Provider configuration */
 function ProvidersTab() {
   const { t } = useTranslation();
+  const { addToast } = useToast();
   const [keys, setKeys] = useState<VaultKeyEntry[]>([]);
   const [keysLoading, setKeysLoading] = useState(true);
   const [showEditDialog, setShowEditDialog] = useState<string | null>(null);
@@ -343,12 +349,17 @@ function ProvidersTab() {
       } else {
         updatePayload.compactModel = null;
       }
-      await invoke("update_key", updatePayload);
+      const saved = await invoke<ProviderSaveResultLike>("update_key", updatePayload);
 
       setShowEditDialog(null);
       await fetchKeys();
       await fetchConfig();
       window.dispatchEvent(new CustomEvent('models-added'));
+      // ADR-103 D12.1: the save is where the probe actually ran. Tell the user
+      // what it found before the dialog goes away — a silent close after
+      // "click save to verify" is indistinguishable from a silent no-op.
+      const feedback = summarizeSaveProbes(saved?.probes, t);
+      if (feedback) addToast({ type: feedback.type, message: feedback.message });
     } catch (e) {
       alert(`${t("harness.failedUpdateKey")}: ${e}`);
     }

@@ -5,7 +5,8 @@ use serde::Deserialize;
 use tauri::State;
 
 use crate::gateway_client::{
-    GenericMessageResponse, ModelCapabilities, ModelProtocolIntent, OperationAck, VaultKeyEntry,
+    GenericMessageResponse, ModelCapabilities, ModelProtocolIntent, ProviderAddResult,
+    ProviderUpdateResult, VaultKeyEntry,
 };
 use crate::state::AppState;
 
@@ -44,7 +45,7 @@ pub async fn add_key(
     custom: Option<bool>,
     model_protocols: Option<ModelProtocolIntent>,
     model_base_urls: Option<HashMap<String, String>>,
-) -> Result<OperationAck, String> {
+) -> Result<ProviderAddResult, String> {
     let client = state.gateway.read().await;
     let caps = model_capabilities.unwrap_or_default();
     client
@@ -102,7 +103,7 @@ pub async fn update_key(
     compact_model: Option<String>,
     model_protocols: Option<ModelProtocolIntent>,
     model_base_urls: Option<HashMap<String, String>>,
-) -> Result<GenericMessageResponse, String> {
+) -> Result<ProviderUpdateResult, String> {
     let client = state.gateway.read().await;
     let caps = model_capabilities.unwrap_or_default();
     client
