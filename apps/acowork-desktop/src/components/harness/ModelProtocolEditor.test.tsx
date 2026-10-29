@@ -63,11 +63,22 @@ describe("ModelProtocolEditor", () => {
   });
 
   it("distinguishes degraded from verified in the status area", () => {
-    const { unmount } = renderEditor({ badge: { kind: "degraded", tiers: ["L1", "L2"] } });
+    const { unmount } = renderEditor({
+      badge: { kind: "degraded", tiers: ["L1", "L2"], stripped: [] },
+    });
     expect(screen.getByText(/L1 \/ L2/)).toBeTruthy();
     unmount();
     renderEditor({ badge: { kind: "verified" } });
     expect(screen.getByText(i18n.t("harness.probeVerified"))).toBeTruthy();
+  });
+
+  it("spells out the dropped field when the verdict is degraded", () => {
+    renderEditor({ badge: { kind: "degraded", stripped: ["reasoning"] } });
+    expect(
+      screen.getByText(
+        i18n.t("harness.probeDegradedFields", { fields: "reasoning" }),
+      ),
+    ).toBeTruthy();
   });
 
   it("fires the re-verify action", () => {

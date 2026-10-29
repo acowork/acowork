@@ -11,7 +11,11 @@
 
 import { cn } from "../../lib/utils";
 import { useTranslation } from "../../i18n/useTranslation";
-import { showsResponsesMark, type ProtocolBadge } from "../../lib/modelProtocol";
+import {
+  showsResponsesMark,
+  strippedFieldsText,
+  type ProtocolBadge,
+} from "../../lib/modelProtocol";
 
 export function ProtocolChip({ badge }: { badge: ProtocolBadge }) {
   const { t } = useTranslation();
@@ -24,6 +28,8 @@ export function ProtocolChip({ badge }: { badge: ProtocolBadge }) {
     );
   }
   const solid = showsResponsesMark(badge) && badge.kind !== "declared";
+  // "degraded" must say *what* was dropped — a bare warning is not actionable.
+  const stripped = strippedFieldsText(badge);
   return (
     <span
       className={cn(
@@ -34,7 +40,9 @@ export function ProtocolChip({ badge }: { badge: ProtocolBadge }) {
         badge.kind === "verified"
           ? t("harness.probeVerifiedTip")
           : badge.kind === "degraded"
-            ? t("harness.probeDegradedTip")
+            ? stripped
+              ? t("harness.probeDegradedTipFields", { fields: stripped })
+              : t("harness.probeDegradedTip")
             : t("harness.probeDeclaredTip")
       }
     >

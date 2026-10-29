@@ -9,9 +9,11 @@ Serves the three shapes the probe distinguishes:
     - body contains function_call_output  -> replay accepted
 
 `FAKE_MODE` env var:
-  healthy   (default) every tier passes
-  no_tool   baseline passes, L3 returns no function_call
-  missing   /v1/responses is 404 "unknown endpoint" (Chat-Completions host)
+  healthy           (default) every tier passes
+  no_tool           baseline passes, L3 returns no function_call
+  missing           /v1/responses is 404 "unknown endpoint" (Chat-Completions host)
+  reject_reasoning  any body with `reasoning.effort` is 400 (MiniMax M3.1-Flash
+                    behaviour); the trimmed retry passes — ADR-103 D8/S7
 """
 
 import json
@@ -20,7 +22,24 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODE = os.environ.get("FAKE_MODE", "healthy")
-HITS = {"baseline": 0, "round_trip": 0, "replay": 0}
+HITS = {"baseline": 0, "round_trip": 0, "replay": 0, "rejected": 0}
+
+
+def rejects_reasoning(body):
+    """Does this body carry the one field D8 is allowed to trim?"""
+    reasoning = body.get("reasoning")
+    return isinstance(reasoning, dict) and "effort" in reasoning
+
+
+def reasoning_400():
+    return {
+        "error": {
+            "code": "invalid_parameter",
+            "message": "invalid parameter: `reasoning`",
+            "param": "reasoning",
+            "type": "invalid_request_error",
+        }
+    }
 
 
 def baseline():
@@ -95,6 +114,11 @@ class Handler(BaseHTTPRequestHandler):
                 404,
                 {"error": {"message": f"Unknown endpoint: {self.path}", "type": "invalid_request_error"}},
             )
+            return
+
+        if MODE == "reject_reasoning" and rejects_reasoning(body):
+            HITS["rejected"] += 1
+            self._json(400, reasoning_400())
             return
 
         if "function_call_output" in raw:

@@ -30,11 +30,20 @@ describe("ProtocolChip", () => {
   });
 
   it("adds the yellow dot for a degraded model but keeps the glyph", () => {
-    const chip = renderBadge({ kind: "degraded" });
+    const chip = renderBadge({ kind: "degraded", stripped: [] });
     expect(chip.textContent).toContain("Ⓡ");
     // The dot is the only visual difference from `verified`.
     expect(chip.querySelector(".bg-amber-500")).not.toBeNull();
     expect(chip.getAttribute("title")).toBe(i18n.t("harness.probeDegradedTip"));
+  });
+
+  it("names the dropped field in the degraded tooltip", () => {
+    // S7: "能通，但被裁过" must be specific — which parameter was omitted.
+    const chip = renderBadge({ kind: "degraded", stripped: ["reasoning"] });
+    expect(chip.getAttribute("title")).toBe(
+      i18n.t("harness.probeDegradedTipFields", { fields: "reasoning" }),
+    );
+    expect(chip.getAttribute("title")).toContain("reasoning");
   });
 
   it("mutes a merely-declared model", () => {

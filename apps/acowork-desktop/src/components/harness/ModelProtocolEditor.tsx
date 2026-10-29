@@ -122,7 +122,9 @@ export function ModelProtocolEditor({
         )}
         {badge.kind === "degraded" && (
           <span className="text-amber-500">
-            {t("harness.probeDegraded")}
+            {badge.stripped.length
+              ? t("harness.probeDegradedFields", { fields: badge.stripped.join(" / ") })
+              : t("harness.probeDegraded")}
             {badge.tiers?.length ? ` (${badge.tiers.join(" / ")})` : ""}
           </span>
         )}

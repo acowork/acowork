@@ -138,10 +138,16 @@ describe("useModelProtocolState.verify", () => {
   });
 
   it("forces a re-probe and folds the result into the badge", async () => {
+    // `ProbeResponse` flattens `ProbeOutcome`: state, tier list and
+    // `stripped_fields` are all at the top level (D10.1).
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ state: "degraded", outcome: { tier_passed: ["L1", "L2"] } }),
+      json: async () => ({
+        state: "degraded",
+        tier_passed: ["L1", "L2"],
+        stripped_fields: ["reasoning"],
+      }),
     });
     const { result } = renderHook(() => useModelProtocolState());
     const m = model("a", { protocol_selected: RESPONSES_PROTOCOL });
@@ -155,8 +161,17 @@ describe("useModelProtocolState.verify", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/providers/acme/probe?force=true");
     expect(JSON.parse(init.body)).toEqual({ model: "a", protocol: RESPONSES_PROTOCOL });
-    expect(summary).toMatchObject({ ok: true, state: "degraded" });
-    expect(result.current.badgeFor(m)).toEqual({ kind: "degraded" });
+    expect(summary).toMatchObject({
+      ok: true,
+      state: "degraded",
+      strippedFields: ["reasoning"],
+    });
+    // The field names must reach the badge, or the tooltip cannot say what was
+    // dropped (S7: "degraded" alone is not actionable).
+    expect(result.current.badgeFor(m)).toEqual({
+      kind: "degraded",
+      stripped: ["reasoning"],
+    });
   });
 
   it("reports a failed probe as blocked with its reason", async () => {
@@ -165,7 +180,7 @@ describe("useModelProtocolState.verify", () => {
       status: 200,
       json: async () => ({
         state: "failed",
-        outcome: { error: { class: "endpoint_unavailable", message: "404 on /responses" } },
+        error: { class: "EndpointUnavailable", message: "404 on /responses" },
       }),
     });
     const { result } = renderHook(() => useModelProtocolState());

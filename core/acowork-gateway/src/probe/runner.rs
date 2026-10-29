@@ -422,6 +422,9 @@ pub fn log_probe_audit(provider: &str, model: &str, outcome: &ProbeOutcome) {
         state = ?outcome.state(),
         tiers = ?outcome.tier_passed,
         latency_ms = outcome.latency_ms,
+        // D8: an empty list is the normal case; a non-empty one is the only
+        // evidence that a verdict was degraded rather than clean.
+        stripped_fields = ?outcome.stripped_fields,
         input_tokens = outcome.usage.map(|u| u.input_tokens),
         output_tokens = outcome.usage.map(|u| u.output_tokens),
         "protocol probe finished (usage is NOT counted against ADR-027/066 budgets)"

@@ -37,6 +37,8 @@ export type ProbeOutcomeSummary = {
   errorClass?: string;
   /** Human-readable detail (failure reason / HTTP error). */
   detail?: string;
+  /** Fields the probe had to drop (D8 trim) — names the `degraded` badge. */
+  strippedFields: string[];
 };
 
 export interface ModelProtocolState {
@@ -84,23 +86,32 @@ function initialSelections(models: ModelInfo[]): Record<string, ProtocolOption> 
   return next;
 }
 
-/** Read the Gateway probe response into a flat summary (D10 response shape). */
+/**
+ * Read the Gateway probe response into a flat summary.
+ *
+ * `ProbeResponse` flattens `ProbeOutcome` into the top level (D10.1), so
+ * `error` / `stripped_fields` sit next to `state` — not under an `outcome`
+ * object. Reading them one level too deep silently degraded every failure
+ * reason to "HTTP 400".
+ */
 function summarizeProbeResponse(body: unknown, httpStatus: number): ProbeOutcomeSummary {
   const obj = (body ?? {}) as Record<string, unknown>;
   const state = typeof obj.state === "string" ? obj.state : "error";
-  const outcome = (obj.outcome ?? {}) as Record<string, unknown>;
-  const error = (outcome.error ?? undefined) as
+  const error = (obj.error ?? undefined) as
     | { class?: string; message?: string }
     | undefined;
-  const failure =
-    state === "verified" || state === "degraded"
-      ? undefined
-      : error?.message ?? `HTTP ${httpStatus}`;
+  const ok = state === "verified" || state === "degraded";
+  const strippedFields = Array.isArray(obj.stripped_fields)
+    ? (obj.stripped_fields as unknown[]).filter(
+        (f): f is string => typeof f === "string",
+      )
+    : [];
   return {
-    ok: state === "verified" || state === "degraded",
+    ok,
     state,
     errorClass: error?.class,
-    detail: failure,
+    detail: ok ? undefined : error?.message ?? `HTTP ${httpStatus}`,
+    strippedFields,
   };
 }
 
@@ -161,9 +172,12 @@ export function useModelProtocolState(): ModelProtocolState {
         protocol_probe: model.protocol_probe,
       };
       if (selectedWire === RESPONSES_PROTOCOL && outcome) {
-        return outcome.ok
-          ? { kind: outcome.state === "degraded" ? "degraded" : "verified" }
-          : { kind: "blocked", reason: "failed", detail: outcome.detail };
+        if (!outcome.ok) {
+          return { kind: "blocked", reason: "failed", detail: outcome.detail };
+        }
+        return outcome.state === "degraded"
+          ? { kind: "degraded", stripped: outcome.strippedFields }
+          : { kind: "verified" };
       }
       return deriveProtocolBadge(fields);
     },
@@ -229,6 +243,7 @@ export function useModelProtocolState(): ModelProtocolState {
           ok: false,
           state: "error",
           detail: e instanceof Error ? e.message : String(e),
+          strippedFields: [],
         };
         setOutcomes((prev) => ({ ...prev, [modelId]: summary }));
         return summary;

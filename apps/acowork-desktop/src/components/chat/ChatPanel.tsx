@@ -86,7 +86,11 @@ import { AttachedContextChips } from "./AttachedContextChips";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
-import { deriveProtocolBadge, showsResponsesMark } from "../../lib/modelProtocol";
+import {
+    deriveProtocolBadge,
+    showsResponsesMark,
+    strippedFieldsText,
+} from "../../lib/modelProtocol";
 
 // CHAT_BOTTOM_THRESHOLD_PX removed - pinned-to-bottom detection is now
 // owned by useScrollController's state machine (PIN_THRESHOLD_PX).
@@ -3268,11 +3272,16 @@ export function ModelMenu({
                                 protocol_probe: (m as Partial<ModelEntry>).protocol_probe,
                               });
                               if (!showsResponsesMark(badge)) return null;
+                              const stripped = strippedFieldsText(badge);
                               const label =
                                 badge.kind === "verified"
                                   ? t("harness.probeVerifiedTip")
                                   : badge.kind === "degraded"
-                                    ? t("harness.probeDegradedTip")
+                                    ? stripped
+                                      ? t("harness.probeDegradedTipFields", {
+                                          fields: stripped,
+                                        })
+                                      : t("harness.probeDegradedTip")
                                     : t("harness.probeDeclaredTip");
                               return (
                                 <span

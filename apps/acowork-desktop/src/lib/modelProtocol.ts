@@ -41,6 +41,12 @@ export interface ProtocolProbe {
   reason?: string;
   /** Base URL the probe actually hit, when it differs from the default. */
   observed_base_url?: string;
+  /**
+   * Request fields the probe had to drop (D8 trim). Non-empty is what makes a
+   * `degraded` verdict concrete: the user is told *which* parameter is being
+   * dropped instead of a vague "degraded".
+   */
+  stripped_fields?: string[];
   /** RFC 3339 probe timestamp (cache TTL / staleness display). */
   probed_at?: string;
 }
@@ -67,7 +73,8 @@ export type ProtocolBlockedReason =
 
 export type ProtocolBadge =
   | { kind: "verified" }
-  | { kind: "degraded"; tiers?: string[] }
+  /** Works, but only without `stripped` (ADR-103 D8/D10.3). */
+  | { kind: "degraded"; tiers?: string[]; stripped: string[] }
   | { kind: "declared" }
   | { kind: "blocked"; reason: ProtocolBlockedReason; detail?: string }
   | { kind: "none" };
@@ -101,6 +108,17 @@ export function protocolOfOption(option: ProtocolOption): string | null {
   return option === "follow" ? null : option;
 }
 
+/**
+ * The trimmed field names of a degraded badge as one display string.
+ *
+ * Empty for every other badge kind, so a caller can branch on the string
+ * instead of re-deriving the badge shape (`degraded` without fields — e.g. an
+ * older stored verdict — renders the generic wording).
+ */
+export function strippedFieldsText(badge: ProtocolBadge): string {
+  return badge.kind === "degraded" ? badge.stripped.join(" / ") : "";
+}
+
 /** Whether a badge kind renders the `R` glyph (the yellow one does not, D11). */
 export function showsResponsesMark(badge: ProtocolBadge): boolean {
   return (
@@ -130,7 +148,11 @@ export function deriveProtocolBadge(m: ModelProtocolFields): ProtocolBadge {
       // Gate passed. `degraded` means it passed only after a D8 field trim —
       // usable, but the user deserves to know (S7 renders the stripped list).
       return probe?.state === "degraded"
-        ? { kind: "degraded", tiers: probe.tier_passed }
+        ? {
+            kind: "degraded",
+            tiers: probe.tier_passed,
+            stripped: probe.stripped_fields ?? [],
+          }
         : { kind: "verified" };
     }
     // Selected but not enabled. The reason comes from the verdict; a passing

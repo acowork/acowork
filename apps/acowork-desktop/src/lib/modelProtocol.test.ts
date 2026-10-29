@@ -77,8 +77,40 @@ describe("deriveProtocolBadge", () => {
       protocol_active: "responses",
       protocol_probe: { state: "degraded", tier_passed: ["L1", "L2"] },
     });
-    expect(badge).toEqual({ kind: "degraded", tiers: ["L1", "L2"] });
+    expect(badge).toEqual({ kind: "degraded", tiers: ["L1", "L2"], stripped: [] });
     expect(showsResponsesMark(badge)).toBe(true);
+  });
+
+  it("carries the trimmed field names into the degraded badge", () => {
+    // S7: "works, but `reasoning` was dropped" must reach the tooltip — a
+    // degraded badge without the field list is a fact the user cannot act on.
+    const badge = deriveProtocolBadge({
+      protocol_selected: "responses",
+      protocol_active: "responses",
+      protocol_probe: {
+        state: "degraded",
+        tier_passed: ["L1", "L2", "L3"],
+        stripped_fields: ["reasoning"],
+      },
+    });
+    expect(badge).toEqual({
+      kind: "degraded",
+      tiers: ["L1", "L2", "L3"],
+      stripped: ["reasoning"],
+    });
+  });
+
+  it("a verified verdict has no stripped fields to report", () => {
+    const badge = deriveProtocolBadge({
+      protocol_selected: "responses",
+      protocol_active: "responses",
+      protocol_probe: {
+        state: "verified",
+        tier_passed: ["L1", "L2", "L3"],
+        stripped_fields: [],
+      },
+    });
+    expect(badge.kind).toBe("verified");
   });
 
   it("shows the yellow badge with the reason when the probe failed", () => {
