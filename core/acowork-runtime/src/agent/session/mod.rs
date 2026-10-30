@@ -12,6 +12,7 @@ pub mod session_manager;
 pub mod session_task;
 
 pub use session_manager::{
-    SessionLifecycleState, SessionManager, SessionManagerConfig, SessionOpenOutcome,
+    PinnedTargetFacts, SessionLifecycleState, SessionManager, SessionManagerConfig,
+    SessionOpenOutcome,
 };
 pub use session_task::{PulledAttachment, SessionMessage};

@@ -32,6 +32,14 @@
 //! fallback route. One chat is therefore serialized — arrival order plus the
 //! anchor — while different chats, and every other message of this agent,
 //! proceed independently (design 27 §5.4.4).
+//!
+//! The queue carries two kinds of job, and [`PendingTurn::pinned_session_id`]
+//! is what distinguishes them: a **routed** turn (the router decides) and a
+//! **pinned** turn (ADR-100 D12 — the human typed it in one execution
+//! session's own view, so it is delivered there). A pinned turn needs the same
+//! off-loop treatment for the same reason: it may have to reopen a closed
+//! session, which is disk work, and it must stay behind whatever this chat is
+//! already running.
 
 pub mod context;
 pub mod decision;
@@ -69,8 +77,9 @@ pub struct ChatSlot {
     pub anchor_seq: u64,
 }
 
-/// One Chat message handed to the router, plus what the fallback route needs
-/// in case the router ends up not owning the turn.
+/// One turn handed to a Chat session's drain task, plus what the fallback
+/// route needs in case the turn ends up not being owned by whatever was
+/// supposed to run it.
 #[derive(Debug)]
 pub struct PendingTurn {
     pub envelope: Box<IntentEnvelope>,
@@ -79,6 +88,17 @@ pub struct PendingTurn {
     pub designated_session_id: String,
     /// Node token for the router's own Gateway HTTP calls.
     pub node_token: String,
+    /// ADR-100 D12: the execution session the human composed this turn in —
+    /// they typed it while looking at that session's own transcript.
+    ///
+    /// `Some` makes this a *delivery* job, not a routing one: the drain hands
+    /// the turn to that session and never consults the router. Opening an
+    /// execution session is a Chat session's authority (router `dispatch(new)`
+    /// / the human's own `+`), so a message written inside an execution
+    /// session may reopen its own session and must never start another one;
+    /// when the pin cannot be honored the turn is finished by the
+    /// deterministic route instead.
+    pub pinned_session_id: Option<String>,
 }
 
 /// A chat's dispatch queue. `draining` is the claim: exactly one drain task
@@ -306,6 +326,7 @@ mod tests {
             }),
             designated_session_id: String::new(),
             node_token: String::new(),
+            pinned_session_id: None,
         }
     }
 

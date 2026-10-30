@@ -60,6 +60,22 @@ pub enum SessionOpenOutcome {
     ResumedFromDisk,
 }
 
+/// What a pinned turn (ADR-100 D12) is authorized against, whichever
+/// lifecycle state the target is in.
+///
+/// A closed session answers exactly like a live one — the facts come from the
+/// session-meta store instead of the in-memory conversation, so the pin's
+/// ownership rules do not depend on whether the runtime happens to still hold
+/// the session. See [`SessionManager::pinned_target_facts`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PinnedTargetFacts {
+    /// The Chat session this execution session is bound to (design 27 §8.2).
+    pub chat_session_id: Option<String>,
+    /// The account / agent instance that started it (ADR-076 §决策 4) — the
+    /// one identity allowed to write it.
+    pub initiator: Option<String>,
+}
+
 /// Configuration for SessionManager.
 // (no `Debug`: the session-event publisher below wraps an MQTT handle that
 // has no `Debug` impl, and nothing formats this config.)
@@ -817,6 +833,86 @@ impl SessionManager {
             .insert(key, new_sid.clone())
             .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
         Ok((new_sid, true))
+    }
+
+    /// ADR-100 D12: the two facts a pinned turn is authorized against.
+    ///
+    /// Read from the live conversation when the session is loaded, and from
+    /// the session-meta store when it is only on disk. Both cases must answer
+    /// the same question with the same rules: ADR-038's `Closed` means "on
+    /// disk", not "gone", and after a runtime restart **every** session is
+    /// `Closed` — the ordinary state of the session the human is looking at,
+    /// not an edge case.
+    ///
+    /// Deliberately free of the open state machine: authorization is decided
+    /// on these facts, and only an authorized pin pays for reopening a closed
+    /// session (see [`Self::open_pinned_target`]).
+    ///
+    /// `None` = this agent has no such session (neither live nor on disk);
+    /// the caller drops the pin.
+    pub fn pinned_target_facts(&self, session_id: &str) -> Option<PinnedTargetFacts> {
+        if let Some(handle) = self.get_session(session_id) {
+            let (chat_session_id, initiator) = handle
+                .conversation
+                .as_ref()
+                .map(|conv| (conv.chat_session_id(), conv.initiator()))
+                .unwrap_or((None, None));
+            return Some(PinnedTargetFacts {
+                chat_session_id,
+                initiator,
+            });
+        }
+        let conversations_dir =
+            std::path::Path::new(&self.core.config.work_dir).join("conversations");
+        let meta = crate::conversation::read_session_meta(&conversations_dir, session_id).ok()?;
+        Some(PinnedTargetFacts {
+            chat_session_id: meta.chat_session_id,
+            initiator: meta.initiator,
+        })
+    }
+
+    /// ADR-100 D12: bring a pinned target up so a turn can be delivered to it.
+    ///
+    /// A `Closed` session (on disk, not in memory — what every session is
+    /// right after a restart, or after idle eviction) is reopened through the
+    /// ADR-038 state machine instead of being treated as a stale id. That is
+    /// the whole point of a pin: the human is continuing the conversation on
+    /// their screen, and the session it belongs to is on disk, so "not loaded
+    /// this second" is not an answer.
+    ///
+    /// `false` = the session no longer exists (deleted while the client still
+    /// held the id) or could not be reopened; the caller drops the pin.
+    pub async fn open_pinned_target(&mut self, session_id: &str) -> bool {
+        if self.get_session(session_id).is_some() {
+            return true;
+        }
+        match self.resume_session(session_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::info!(
+                    session_id,
+                    "pinned execution session is gone — no row on disk to reopen"
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    session_id,
+                    error = %e,
+                    "pinned execution session could not be reopened"
+                );
+                return false;
+            }
+        }
+        // The human has explicitly come back to this session, so it is
+        // routable again — the same rule `chat_dispatch(Target::Existing)`
+        // applies to a reopened task: the terminal mirror is a hint, the live
+        // session is the truth. Without this the Chat would keep refusing to
+        // route here and open yet another session on the next message.
+        if let Err(e) = self.terminal_sessions.forget(session_id) {
+            tracing::warn!(session_id, error = %e, "terminal-session mirror rewrite failed");
+        }
+        true
     }
 
     /// Design 27 §6.2: a PM task reaching a terminal state ends its
@@ -5881,6 +5977,84 @@ mod tests {
             .expect("route conv session");
         let plain_meta = read_session_meta(&conversations, &plain).expect("read conv meta");
         assert_eq!(plain_meta.chat_session_id, None);
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    /// ADR-100 D12 revision: a pin to a **closed** session is a pin to a
+    /// session, not to a memory slot. After a restart every session is closed,
+    /// so the facts must come off disk and the target must be reopened — the
+    /// alternative is the defect this pins down: the pin is dropped, the turn
+    /// falls back to routing, and the human gets a brand-new execution session
+    /// instead of the conversation they were reading.
+    ///
+    /// A reopened task also leaves the terminal mirror, so the Chat Router can
+    /// see it again (the mirror is a hint, the live session is the truth).
+    #[tokio::test]
+    async fn a_closed_pin_target_reads_its_facts_off_disk_and_reopens() {
+        let work_dir =
+            std::env::temp_dir().join(format!("acowork-pinned-{}", Uuid::new_v4()));
+        let config = crate::config::RuntimeConfig {
+            work_dir: work_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.pinned_target"
+            version = "1.0.0"
+            name = "Test pinned target"
+            description = "A closed pin target is reopened, never replaced"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+
+        let key = "conv:task:proj-1:T-8:com.test.pinned_target";
+        let (sid, _) = manager
+            .route_intent_session(key, None, Some("cs-project-group"), None)
+            .await
+            .expect("route task session");
+        manager.close_intent_context(key).await.expect("terminal close");
+        assert!(manager.get_session(&sid).is_none(), "closed: on disk only");
+
+        // The facts survive the transition, so the pin's ownership rules are
+        // the same before and after a restart.
+        let facts = manager.pinned_target_facts(&sid).expect("facts from disk");
+        assert_eq!(facts.chat_session_id.as_deref(), Some("cs-project-group"));
+        assert_eq!(facts.initiator, None);
+
+        assert!(manager.open_pinned_target(&sid).await, "reopened");
+        assert!(manager.get_session(&sid).is_some());
+        assert!(
+            !manager.terminal_sessions.contains(&sid),
+            "a session the human came back to is routable again"
+        );
+        assert!(
+            !crate::agent::session::intent_routing::TerminalSessions::load(&work_dir)
+                .contains(&sid),
+            "and the mirror is rewritten, not just the in-memory copy"
+        );
+
+        // A session this agent never had is refused; the caller then finishes
+        // the turn deterministically instead of opening a replacement.
+        assert!(manager.pinned_target_facts("no-such-session").is_none());
+        assert!(!manager.open_pinned_target("no-such-session").await);
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }
