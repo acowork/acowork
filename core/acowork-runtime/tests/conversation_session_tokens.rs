@@ -72,6 +72,7 @@ fn caps(context_window: u64, max_output_tokens: u64) -> ModelCapabilitiesInfo {
         knowledge_cutoff: None,
         default_reasoning_effort: None,
         thinking_mode: None,
+        reasoning_efforts: None,
     }
 }
 

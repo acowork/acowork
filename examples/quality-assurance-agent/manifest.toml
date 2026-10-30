@@ -10,6 +10,7 @@ description = "A quality assurance and quality management agent skilled in quali
 author = "ACowork Team"
 runtime_version = "0.1.0"
 dev = false
+labels = ["quality", "testing"]
 avatar = "assets/avatar.jpg"
 
 identity_deps = ["display_name", "language", "timezone"]
@@ -86,6 +87,15 @@ fallback_order = ["claude", "openai"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+
+# ADR-104: behaviour defaults for agent_config.json. Seeded only into
+# fields the user has not set; never overwrites a user value.
+[config]
+temperature = 0.3
+context_window = 200000
+max_output_tokens = 8192
+max_iterations = 40
+
 [memory]
 enabled = true
 retention_days = 365
@@ -97,21 +107,37 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
+# ADR-104: recommended MCP servers. Recommendation, not installation —
+# the user confirms install/activation in the Tools panel (ADR-090).
+
+[[mcp_servers]]
+hosted = "pm"
+why = "File defects as tasks with reproduction steps attached"
+
+[[mcp_servers]]
+preset = "playwright"
+why = "Drive the web UI to reproduce defects and verify acceptance criteria"
+
 [capabilities.quality_strategy]
 description = "Define quality objectives, risk-based quality gates, metrics, and continuous improvement plans"
+skills = ["quality-strategy"]
 
 [capabilities.test_planning]
 description = "Create test plans with scope, levels, environments, responsibilities, risks, and schedules"
 
 [capabilities.test_case_design]
 description = "Design behavior-focused test cases covering functional, non-functional, boundary, negative, and regression scenarios"
+skills = ["test-case-design"]
 
 [capabilities.defect_management]
 description = "Triage, classify, prioritize, track, and report defects through resolution and verification"
+skills = ["defect-management"]
 
 [capabilities.release_acceptance]
 description = "Assess release readiness using quality gates, known issues, risk acceptance, and go/no-go criteria"
+skills = ["release-acceptance"]
 
 [capabilities.regression_management]
 description = "Plan and maintain regression suites based on risk, change impact, defect history, and automation value"
+skills = ["regression-management"]
 

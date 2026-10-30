@@ -18,7 +18,7 @@
 //!    needs the same strip action renews the lease.
 //! 4. Fast-path failure (provider behavior changed) invalidates the entry
 //!    and the cold path surfaces content errors instead of masking them.
-//! 5. A legacy v1 (bare-map) file is discarded and rewritten as empty v2,
+//! 5. A legacy v1 (bare-map) file is discarded and rewritten empty,
 //!    so a poisoned `strip_tools` entry cannot survive a restart.
 //!
 //! Crate-internal because it needs `OpenAIProvider` internals + `CompatCache`
@@ -197,7 +197,13 @@ fn provider(server: &MockLlm, cache: Arc<CompatCache>) -> OpenAIProvider {
 }
 
 fn cache_key() -> String {
-    format!("e2e-provider::{MODEL}")
+    // ADR-103 D7.3: keys are shape-qualified; these e2e cases drive the
+    // Chat-Completions provider, so they use that shape.
+    crate::providers::compat::cache_key(
+        "e2e-provider",
+        crate::providers::compat::SHAPE_COMPLETIONS,
+        MODEL,
+    )
 }
 
 fn tmp_cache_path(tag: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -212,13 +218,14 @@ fn disk_entries(path: &std::path::Path) -> serde_json::Value {
     serde_json::from_str(&raw).unwrap_or_else(|_| json!({}))
 }
 
-/// Seed a v2 file with one durable entry (used by TTL / invalidation tests).
+/// Seed a current-version file with one durable entry (used by TTL /
+/// invalidation tests).
 fn seed_durable_file(path: &std::path::Path, promoted_at_unix_ts: u64, class: &str) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
     let file = json!({
-        "version": 2,
+        "version": 3,
         "entries": {
             cache_key(): {
                 "profile": {
@@ -363,7 +370,7 @@ async fn tools_schema_single_success_not_durable_then_confirmed_and_fast_path_wi
     tokio::time::sleep(Duration::from_millis(120)).await;
     let entries = disk_entries(&path);
     assert_eq!(
-        entries["entries"]["e2e-provider::test-model"]["class"],
+        entries["entries"][cache_key().as_str()]["class"],
         "tools_schema"
     );
     assert_eq!(server.bodies().len(), 15);
@@ -479,7 +486,7 @@ async fn fast_path_failure_invalidates_and_content_errors_surface_not_masked() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// E2E 5 — legacy v1 bare-map file is discarded, rewritten empty v2
+// E2E 5 — legacy v1 bare-map file is discarded, rewritten empty
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -506,9 +513,9 @@ async fn legacy_v1_file_is_discarded_and_next_request_stays_healthy() {
         "v1 single-sample entries are not trusted"
     );
 
-    // File was proactively rewritten as empty v2.
+    // File was proactively rewritten as an empty current-version file.
     let entries = disk_entries(&path);
-    assert_eq!(entries["version"], 2);
+    assert_eq!(entries["version"], 3);
     assert_eq!(
         entries["entries"].as_object().map(|m| m.len()).unwrap_or(0),
         0

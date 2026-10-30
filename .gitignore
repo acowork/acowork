@@ -58,6 +58,9 @@ ref-repo/
 # Rust test build artifacts
 core/target-*/
 core/target_*/
+
+# Smoke-run home dirs (dev/smoke/*.py bootstrap an isolated HOME under the repo)
+.smoke-*/
 target-*/
 target_*/
 

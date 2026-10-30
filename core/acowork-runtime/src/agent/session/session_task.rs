@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use acowork_core::providers::traits::ChatMessage;
 use acowork_core::tools::traits::Tool;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -208,10 +207,6 @@ pub enum SessionMessage {
     /// its ONNX embedding provider so embedding-dependent operations
     /// degrade gracefully until the sidecar comes back (ADR-030 ISSUE-2).
     DisableEmbedConfig,
-    /// Inject a system notification into the conversation history.
-    /// Used to surface MCP connection failures and other async events
-    /// to the LLM context so the Agent can self-heal.
-    SystemNotification { content: String },
     /// Design 27 §6/§7: an Intent envelope delivered to this execution
     /// session as a *turn trigger* (the session was idle, or the turn must
     /// run with responder-role semantics). The turn's role and write-back
@@ -382,10 +377,6 @@ impl std::fmt::Debug for SessionMessage {
                 )
                 .finish(),
             SessionMessage::DisableEmbedConfig => f.debug_tuple("DisableEmbedConfig").finish(),
-            SessionMessage::SystemNotification { content } => f
-                .debug_struct("SystemNotification")
-                .field("len", &content.len())
-                .finish(),
             SessionMessage::Intent {
                 message_id,
                 kind,
@@ -623,11 +614,15 @@ impl SessionTask {
         if let Some(ref provider_id) = session.provider
             && let Some(new_provider) = session_core.build_provider_for(
                 provider_id,
+                session.model.as_deref(),
                 session.account_id.as_deref(),
-                &core_mut.config,
-                &core_mut.global_provider_list,
-                &core_mut.provider_key_vault,
-                core_mut.compat_cache.as_ref(),
+                &crate::agent::session_core::ProviderBuildContext {
+                    config: &core_mut.config,
+                    global_provider_list: &core_mut.global_provider_list,
+                    provider_key_vault: &core_mut.provider_key_vault,
+                    compat_cache: core_mut.compat_cache.as_ref(),
+                    responses_compat_cache: core_mut.responses_compat_cache.as_ref(),
+                },
             )
         {
             let model = session.model.clone().unwrap_or_default();
@@ -2103,29 +2098,6 @@ impl SessionTask {
                     );
                     agent_loop.core.clear_embedding_provider();
                 }
-                Some(SessionMessage::SystemNotification { content }) => {
-                    // Only inject into sessions that have already started a conversation.
-                    // Prevents MCP connection failure notifications from appearing before
-                    // the user has sent their first message.
-                    if agent_loop.session.history_mut().is_empty() {
-                        tracing::debug!(
-                            session_id = %session_id,
-                            "SessionTask: skipping system notification — no conversation history yet"
-                        );
-                        continue;
-                    }
-                    tracing::info!(
-                        session_id = %session_id,
-                        content_len = content.len(),
-                        "SessionTask: injecting system notification into history"
-                    );
-                    agent_loop
-                        .session
-                        .history_mut()
-                        .append(ChatMessage::user(format!(
-                            "[System Notification] {content}"
-                        )));
-                }
                 // ADR-035 Phase 3: EnableNotify/DisableNotify removed.
                 None => {
                     tracing::info!(
@@ -2437,9 +2409,19 @@ fn build_attachment_hint(
     let hint_lines: Vec<String> = items
         .iter()
         .filter_map(|item| match item {
-            acowork_core::protocol::AttachedItem::AttachedFile { abs_path, .. } => {
-                Some(format!("- file: `{}`", abs_path))
-            }
+            acowork_core::protocol::AttachedItem::AttachedFile {
+                abs_path, name, ..
+            } => Some(format!(
+                "- file: `{}`{}",
+                abs_path,
+                if name.is_empty() || name == abs_path {
+                    String::new()
+                } else {
+                    // The name the user saw is usually repo-relative; it tells
+                    // the Agent which project the file matters in.
+                    format!(" ({name})")
+                }
+            )),
             acowork_core::protocol::AttachedItem::AttachedSelection {
                 abs_path,
                 start_line,
@@ -2478,9 +2460,22 @@ fn build_attachment_hint(
             }
             // Image upload flows through the multimodal
             // ContentPart::ImageUrl path above — no prompt hint needed.
-            // Folder has no single-tool enumeration in our toolchain.
-            acowork_core::protocol::AttachedItem::ImageUpload { .. }
-            | acowork_core::protocol::AttachedItem::AttachedFolder { .. } => None,
+            acowork_core::protocol::AttachedItem::ImageUpload { .. } => None,
+            // A folder reference used to produce no line at all, so adding a
+            // directory to the conversation was invisible to the Agent that
+            // was asked about it. It cannot be read as a file, but the path is
+            // actionable with the tools the Agent already has.
+            acowork_core::protocol::AttachedItem::AttachedFolder {
+                abs_path, name, ..
+            } => Some(format!(
+                "- folder: `{}`{} — list it before answering",
+                abs_path,
+                if name.is_empty() || name == abs_path {
+                    String::new()
+                } else {
+                    format!(" ({name})")
+                }
+            )),
         })
         .collect();
 
@@ -2491,7 +2486,10 @@ fn build_attachment_hint(
             format!("{}\n\n", enriched)
         };
         enriched = format!(
-            "{}[Attached workspace files & uploads — use `read_file` / `doc_reader` on demand]\n{}",
+            "{}[Attached workspace files & uploads — the user pointed at these \
+             to make the request. Open them (`read_file` / `doc_reader`, list a \
+             folder with `bash`) before answering; do not describe contents you \
+             have not read.]\n{}",
             sep,
             hint_lines.join("\n")
         );
@@ -2788,20 +2786,45 @@ mod tests {
         );
     }
 
-    /// `AttachedFolder` (Add to Chat directory attach) gets no hint
-    /// — there is no single tool call the LLM can make to enumerate
-    /// a folder. The JSONL record still shows the user attached it.
+    /// A folder reference is named in the hint. It used to be silent on the
+    /// reasoning that no single tool enumerates a directory — but the Agent has
+    /// `bash`, and silence was indistinguishable from "the attachment never
+    /// arrived", which is the complaint this closes.
     #[test]
-    fn test_build_attachment_hint_folder_is_silent() {
+    fn test_build_attachment_hint_folder_is_named_and_actionable() {
         let items = vec![acowork_core::protocol::AttachedItem::AttachedFolder {
             abs_path: "/work/src".to_string(),
             name: "src".to_string(),
             client_id: None,
         }];
         let s = build_attachment_hint("x", Some(&items), Some("/work"));
-        // With only a folder (no hintable items) we return verbatim
-        // — the user text must NOT be polluted with an empty hint block.
-        assert_eq!(s, "x");
+        assert!(s.contains("- folder: `/work/src` (src)"), "got: {s}");
+        assert!(s.contains("list it before answering"), "got: {s}");
+    }
+
+    /// A file reference carries the display name the user saw, not only the
+    /// node path — which project the file matters in is part of the ask.
+    #[test]
+    fn test_build_attachment_hint_file_names_the_reference() {
+        let items = vec![acowork_core::protocol::AttachedItem::AttachedFile {
+            abs_path: "E:/p/core/src/chat_prompt.rs".to_string(),
+            name: "core/src/chat_prompt.rs".to_string(),
+            client_id: None,
+        }];
+        let s = build_attachment_hint("你先看看这个", Some(&items), None);
+        assert!(
+            s.contains("- file: `E:/p/core/src/chat_prompt.rs` (core/src/chat_prompt.rs)"),
+            "got: {s}"
+        );
+        // A reference whose name repeats the path adds no parenthetical.
+        let bare = vec![acowork_core::protocol::AttachedItem::AttachedFile {
+            abs_path: "/work/a.rs".to_string(),
+            name: "/work/a.rs".to_string(),
+            client_id: None,
+        }];
+        let s = build_attachment_hint("x", Some(&bare), None);
+        assert!(s.contains("- file: `/work/a.rs`"), "got: {s}");
+        assert!(!s.contains("(/work/a.rs)"), "got: {s}");
     }
 
     // ── Design 27 §4.2.1 chat-attachment forwarding ──────────────────

@@ -64,7 +64,12 @@ const CN_VARIANT_PROVIDERS: &[&str] = &["minimax", "zhipuai", "moonshotai", "ali
 // ── Response types ────────────────────────────────────────────────────
 
 /// A single model from models.dev
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Default` exists so the many "discovery placeholder" construction sites
+/// (which fill only `id` / `name`) do not have to enumerate every optional
+/// field — new capability/protocol fields can then be added without touching
+/// them all.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
@@ -104,6 +109,46 @@ pub struct ModelInfo {
     /// Output modalities (e.g. ["text"])
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_modalities: Option<Vec<String>>,
+    /// Reasoning effort levels this model actually supports (models.dev
+    /// `reasoning_options[].values` for the `effort` option), e.g.
+    /// `["low", "medium", "high", "xhigh", "max"]`.
+    ///
+    /// `None` = unknown (custom model / no catalog entry) — the frontend
+    /// then shows the generic level set. The list drives two things: the
+    /// levels offered in the effort dropdown, and the Runtime-side clamping
+    /// of a chosen level into the model's supported set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
+
+    // ── ADR-103 D11: the three protocol surfaces the UI consumes ──────────
+    //
+    // These three (plus `protocol_selected`, see below) are filled in by
+    // [`project_model_protocol`] — the single boundary between the Gateway's
+    // protocol decision and the frontend. The frontend MUST NOT derive any of
+    // them from offline data itself (D11 red line).
+
+    /// Offline declaration for this (provider, model): `"responses"` /
+    /// `"completions"` / `None` (not tagged). A pure UI hint — it never
+    /// participates in the D1 gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// The protocol the user hand-picked for this model (`provider_list.json`
+    /// `models[].protocol_type`). `None` = "follow the data" (no selection).
+    ///
+    /// Not part of D11's original three fields, but required by it: without
+    /// the raw selection the dropdown cannot show "Responses" when the choice
+    /// failed the gate, and the yellow "selected but not enabled" badge (D11)
+    /// cannot be derived.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_selected: Option<String>,
+    /// The protocol that is actually in effect right now (D1 result: the
+    /// selection gated by the probe verdict and the global switch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_active: Option<String>,
+    /// Probe verdict for this model (D10). `None` when the model was never
+    /// probed or is not configured on the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_probe: Option<acowork_core::protocol::ProtocolProbe>,
 }
 
 /// Provider info with its models
@@ -190,27 +235,16 @@ async fn discover_models_from_url(
             Some(ModelInfo {
                 id: id.to_string(),
                 name: id.to_string(),
-                family: None,
-                reasoning: None,
-                tool_call: None,
-                attachment: None,
-                temperature: None,
-                release_date: None,
-                context_window: None,
-                max_tokens: None,
-                max_input_tokens: None,
-                knowledge: None,
-                input_cost: None,
-                output_cost: None,
-                input_modalities: None,
-                output_modalities: None,
+                ..Default::default()
             })
         })
         .collect();
 
-    // Enrich discovered models with offline capabilities when available.
+    // Enrich discovered models with offline capabilities when available. The
+    // provider id is unknown here (the user is still adding the provider), so
+    // the endpoint-scoped fields stay unset rather than guessed.
     for model in &mut models {
-        enrich_model_from_offline(model);
+        enrich_model_from_offline(model, None);
     }
 
     // Sort: reasoning models first, then alphabetically by id
@@ -788,84 +822,42 @@ fn provider_ids_to_query(provider_id: &str) -> Vec<String> {
 
 /// Extract models from a provider JSON object.
 /// Works with both models.dev API response and offline_providers.json format.
+/// Extract the reasoning effort levels a catalog model declares.
+///
+/// The catalog stores them as `reasoning_options: [{ type: "effort",
+/// values: [...] }]` (plus `toggle` / `budget_tokens` entries that carry no
+/// level list). Only the `effort` option contributes levels.
+fn reasoning_effort_levels(model_data: &serde_json::Value) -> Option<Vec<String>> {
+    let values = model_data
+        .get("reasoning_options")
+        .and_then(|v| v.as_array())
+        .and_then(|opts| {
+            opts.iter()
+                .find(|o| o.get("type").and_then(|t| t.as_str()) == Some("effort"))
+                .and_then(|o| o.get("values"))
+                .and_then(|v| v.as_array())
+        })?;
+    let levels: Vec<String> = values
+        .iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .collect();
+    if levels.is_empty() {
+        None
+    } else {
+        Some(levels)
+    }
+}
+
 fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
     let models_obj = match provider_data.get("models") {
         Some(serde_json::Value::Object(m)) => m,
         _ => return Vec::new(),
     };
 
-    let mut models = Vec::new();
-    for (id, model_data) in models_obj {
-        let context_window = model_data
-            .get("limit")
-            .and_then(|v| v.get("context"))
-            .and_then(|v| v.as_u64());
-
-        let max_tokens = model_data
-            .get("limit")
-            .and_then(|v| v.get("output"))
-            .and_then(|v| v.as_u64());
-
-        let max_input_tokens = model_data
-            .get("limit")
-            .and_then(|v| v.get("input"))
-            .and_then(|v| v.as_u64());
-
-        let model = ModelInfo {
-            id: id.clone(),
-            name: model_data
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or(id)
-                .to_string(),
-            family: model_data
-                .get("family")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            reasoning: model_data.get("reasoning").and_then(|v| v.as_bool()),
-            tool_call: model_data.get("tool_call").and_then(|v| v.as_bool()),
-            attachment: model_data.get("attachment").and_then(|v| v.as_bool()),
-            temperature: model_data.get("temperature").and_then(|v| v.as_bool()),
-            release_date: model_data
-                .get("release_date")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            context_window,
-            max_tokens,
-            max_input_tokens,
-            knowledge: model_data
-                .get("knowledge")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            input_cost: model_data
-                .get("cost")
-                .and_then(|v| v.get("input"))
-                .and_then(|v| v.as_f64()),
-            output_cost: model_data
-                .get("cost")
-                .and_then(|v| v.get("output"))
-                .and_then(|v| v.as_f64()),
-            input_modalities: model_data
-                .get("modalities")
-                .and_then(|v| v.get("input"))
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                }),
-            output_modalities: model_data
-                .get("modalities")
-                .and_then(|v| v.get("output"))
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                }),
-        };
-        models.push(model);
-    }
+    let mut models: Vec<ModelInfo> = models_obj
+        .iter()
+        .map(|(id, model_data)| model_info_from_catalog_entry(id, model_data))
+        .collect();
 
     // Sort: reasoning models first, then alphabetically by id
     models.sort_by(|a, b| {
@@ -875,6 +867,91 @@ fn extract_models(provider_data: &serde_json::Value) -> Vec<ModelInfo> {
     });
 
     models
+}
+
+/// Project one catalog `models.<id>` object into a `ModelInfo`.
+///
+/// `id` is the catalog key, which is the authoritative model id (the object's
+/// own `id` field is a duplicate and is not consulted).
+fn model_info_from_catalog_entry(id: &str, model_data: &serde_json::Value) -> ModelInfo {
+    let context_window = model_data
+        .get("limit")
+        .and_then(|v| v.get("context"))
+        .and_then(|v| v.as_u64());
+
+    let max_tokens = model_data
+        .get("limit")
+        .and_then(|v| v.get("output"))
+        .and_then(|v| v.as_u64());
+
+    let max_input_tokens = model_data
+        .get("limit")
+        .and_then(|v| v.get("input"))
+        .and_then(|v| v.as_u64());
+
+    ModelInfo {
+        id: id.to_string(),
+        name: model_data
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(id)
+            .to_string(),
+        family: model_data
+            .get("family")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        reasoning: model_data.get("reasoning").and_then(|v| v.as_bool()),
+        tool_call: model_data.get("tool_call").and_then(|v| v.as_bool()),
+        attachment: model_data.get("attachment").and_then(|v| v.as_bool()),
+        temperature: model_data.get("temperature").and_then(|v| v.as_bool()),
+        release_date: model_data
+            .get("release_date")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        context_window,
+        max_tokens,
+        max_input_tokens,
+        knowledge: model_data
+            .get("knowledge")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        input_cost: model_data
+            .get("cost")
+            .and_then(|v| v.get("input"))
+            .and_then(|v| v.as_f64()),
+        output_cost: model_data
+            .get("cost")
+            .and_then(|v| v.get("output"))
+            .and_then(|v| v.as_f64()),
+        input_modalities: model_data
+            .get("modalities")
+            .and_then(|v| v.get("input"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            }),
+        output_modalities: model_data
+            .get("modalities")
+            .and_then(|v| v.get("output"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            }),
+        // ADR-103 D11: offline shape declaration (pure UI hint).
+        shape: model_data
+            .get("shape")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        // Reasoning effort levels the model declares (the `effort` entry of
+        // `reasoning_options`). Endpoint-scoped: consumers that project this
+        // for another provider drop it (ADR-103 D13).
+        reasoning_efforts: reasoning_effort_levels(model_data),
+        ..Default::default()
+    }
 }
 
 /// Resolve provider data from the given JSON value, querying all variant IDs.
@@ -1046,23 +1123,39 @@ async fn list_all_providers(
 /// stored in provider_list.json so the edit dialog can still show configured models.
 ///
 /// For remote providers, returns offline data only.
+///
+/// The ADR-103 D11 protocol fields (`shape` / `protocol_selected` /
+/// `protocol_active` / `protocol_probe`) are projected onto every row here —
+/// after resolution, before responding — so no resolution path can forget them.
 async fn get_provider_models(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let mut resp = resolve_provider_models(&state, &provider_id).await?;
+    annotate_protocol_fields(&state, &provider_id, &mut resp.models).await;
+    Ok(Json(resp))
+}
+
+/// Resolve the model list for one provider (see [`get_provider_models`] for the
+/// resolution order). Returns the row set before the ADR-103 protocol
+/// projection.
+pub(crate) async fn resolve_provider_models(
+    state: &AppState,
+    provider_id: &str,
+) -> Result<ProviderModels, (StatusCode, Json<serde_json::Value>)> {
     // 0. For local providers, try querying the running server first
-    if is_local_provider(&provider_id) {
-        if let Some(models) = fetch_local_server_models(&provider_id).await {
+    if is_local_provider(provider_id) {
+        if let Some(models) = fetch_local_server_models(provider_id).await {
             let name = LOCAL_PROVIDERS
                 .iter()
                 .find(|(pid, _, _)| *pid == provider_id)
                 .map(|(_, n, _)| n.to_string())
-                .unwrap_or_else(|| provider_id.clone());
-            return Ok(Json(ProviderModels {
-                id: provider_id,
+                .unwrap_or_else(|| provider_id.to_string());
+            return Ok(ProviderModels {
+                id: provider_id.to_string(),
                 name,
                 models,
-            }));
+            });
         }
         // Server unreachable — offline data is meaningless for local
         // providers (user didn't download those models), return empty.
@@ -1074,12 +1167,12 @@ async fn get_provider_models(
             .iter()
             .find(|(pid, _, _)| *pid == provider_id)
             .map(|(_, n, _)| n.to_string())
-            .unwrap_or_else(|| provider_id.clone());
-        return Ok(Json(ProviderModels {
-            id: provider_id,
+            .unwrap_or_else(|| provider_id.to_string());
+        return Ok(ProviderModels {
+            id: provider_id.to_string(),
             name,
             models: vec![],
-        }));
+        });
     }
 
     // 1. For custom providers, discover models live from the stored base_url.
@@ -1114,7 +1207,7 @@ async fn get_provider_models(
                 cfg.models.iter().map(|m| m.id.clone()).collect();
 
             // Retrieve the decrypted API key from Vault.
-            let api_key = gw.vault.get_key(&provider_id).ok();
+            let api_key = gw.vault.get_key(provider_id).ok();
 
             // Drop the read lock before making the outbound HTTP request
             // to avoid holding it during the 5-second discovery timeout.
@@ -1147,6 +1240,12 @@ async fn get_provider_models(
                             if model.reasoning.is_none() {
                                 model.reasoning = caps.supports_reasoning;
                             }
+                            // Level sets are endpoint-scoped, and for a custom
+                            // provider the catalog has nothing to say (ADR-103
+                            // D13) — the saved capability is the only source.
+                            if model.reasoning_efforts.is_none() {
+                                model.reasoning_efforts = caps.reasoning_efforts.clone();
+                            }
                             if model.attachment.is_none() {
                                 model.attachment = caps.supports_attachment;
                             }
@@ -1158,11 +1257,11 @@ async fn get_provider_models(
                             }
                         }
                     }
-                    return Ok(Json(ProviderModels {
-                        id: provider_id,
+                    return Ok(ProviderModels {
+                        id: provider_id.to_string(),
                         name: provider_name,
                         models,
-                    }));
+                    });
                 }
                 Err(e) => {
                     // Discovery failed (server down, auth error, etc.).
@@ -1195,34 +1294,36 @@ async fn get_provider_models(
                                 output_cost: None,
                                 input_modalities: caps.and_then(|c| c.modalities.as_ref()).map(|m| m.input.clone()),
                                 output_modalities: caps.and_then(|c| c.modalities.as_ref()).map(|m| m.output.clone()),
+                                reasoning_efforts: caps.and_then(|c| c.reasoning_efforts.clone()),
+                                ..Default::default()
                             }
                         })
                         .collect();
-                    return Ok(Json(ProviderModels {
-                        id: provider_id,
+                    return Ok(ProviderModels {
+                        id: provider_id.to_string(),
                         name: provider_name,
                         models: fallback_models,
-                    }));
+                    });
                 }
             }
         }
     }
 
     // 2. Try offline data (instant, no network)
-    if let Some((name, models)) = resolve_provider(&offline_providers(), &provider_id) {
-        return Ok(Json(ProviderModels {
-            id: provider_id,
+    if let Some((name, models)) = resolve_provider(&offline_providers(), provider_id) {
+        return Ok(ProviderModels {
+            id: provider_id.to_string(),
             name,
             models,
-        }));
+        });
     }
 
     // 3. Provider not found — return empty model list
-    Ok(Json(ProviderModels {
-        id: provider_id.clone(),
-        name: provider_id,
+    Ok(ProviderModels {
+        id: provider_id.to_string(),
+        name: provider_id.to_string(),
         models: vec![],
-    }))
+    })
 }
 
 /// Try to discover models from a running local provider server.
@@ -1253,7 +1354,7 @@ async fn fetch_local_server_models(provider_id: &str) -> Option<Vec<ModelInfo>> 
     // LM Studio / Ollama only returns model IDs — context_window, max_tokens,
     // tool_call support etc. come from the offline data when available.
     for model in &mut models {
-        enrich_model_from_offline(model);
+        enrich_model_from_offline(model, Some(provider_id));
     }
 
     Some(models)
@@ -1276,20 +1377,7 @@ async fn fetch_lmstudio_models(client: &reqwest::Client, base_url: &str) -> Opti
                 Some(ModelInfo {
                     id: id.to_string(),
                     name: id.to_string(),
-                    family: None,
-                    reasoning: None,
-                    tool_call: None,
-                    attachment: None,
-                    temperature: None,
-                    release_date: None,
-                    context_window: None,
-                    max_tokens: None,
-                    max_input_tokens: None,
-                    knowledge: None,
-                    input_cost: None,
-                    output_cost: None,
-                    input_modalities: None,
-                    output_modalities: None,
+                    ..Default::default()
                 })
             })
             .collect(),
@@ -1316,125 +1404,234 @@ async fn fetch_ollama_models(client: &reqwest::Client, base_url: &str) -> Option
                 Some(ModelInfo {
                     id: id.clone(),
                     name: id,
-                    family: None,
-                    reasoning: None,
-                    tool_call: None,
-                    attachment: None,
-                    temperature: None,
-                    release_date: None,
-                    context_window: None,
-                    max_tokens: None,
-                    max_input_tokens: None,
-                    knowledge: None,
-                    input_cost: None,
-                    output_cost: None,
-                    input_modalities: None,
-                    output_modalities: None,
+                    ..Default::default()
                 })
             })
             .collect(),
     )
 }
 
+/// Which catalog entry speaks for a `(provider, model)` pair, and how far it is
+/// trusted.
+///
+/// Precedence is also the `Ord` order, so "the best available tier" is simply
+/// the smallest discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CatalogMatch {
+    /// The configured provider's own entry — the endpoint itself speaks.
+    SameProvider,
+    /// The first-party vendor's entry for the same model. The catalog names the
+    /// vendor in `canonical_model_id` (`"<vendor>/<canonical model id>"`,
+    /// declared by 85% of its 8848 entries), so this needs no brand guessing.
+    Vendor,
+    /// Some other provider that happens to list the same model id (a reseller).
+    /// Reproducible — ordered by provider id — but it only says what *that*
+    /// reseller ships.
+    ThirdParty,
+}
+
+/// The catalog model entry selected for a `(provider, model)` pair.
+struct CatalogHit<'a> {
+    /// Catalog provider the entry lives under.
+    provider_id: &'a str,
+    /// The entry itself: a `models.<model id>` object of the catalog.
+    model: &'a serde_json::Value,
+    /// Match quality — callers decide which tiers they trust.
+    quality: CatalogMatch,
+}
+
+/// Model ids to try for `model_id`, most specific first: the id as given, then
+/// its bare last path segment (`"google/gemma-4-26b-a4b"` → `"gemma-4-26b-a4b"`).
+///
+/// NOTE: suffix-based matching (adding `-it`, stripping `-instruct`) is
+/// deliberately NOT done — that is unreliable guessing.
+fn catalog_candidates(model_id: &str) -> Vec<&str> {
+    match model_id.rsplit('/').next() {
+        Some(bare) if bare != model_id => vec![model_id, bare],
+        _ => vec![model_id],
+    }
+}
+
+/// `providers.<provider>.models.<model_id>`, when the catalog has it.
+fn catalog_model<'a>(
+    providers: &'a serde_json::Map<String, serde_json::Value>,
+    provider: &str,
+    model_id: &str,
+) -> Option<&'a serde_json::Value> {
+    providers.get(provider)?.get("models")?.get(model_id)
+}
+
+/// Resolve the catalog entry that speaks for `(provider_id, model_id)`.
+///
+/// Precedence (ADR-103 D13): the configured provider itself, then the vendor
+/// named by `canonical_model_id`, then any other declaring provider — the last
+/// one picked by provider id, so the answer never depends on the catalog's key
+/// order.
+///
+/// `provider_id` is the provider being configured. `None` means "not known yet"
+/// (model discovery while a provider is still being added and has no id), in
+/// which case the same-provider tier cannot apply.
+fn resolve_catalog_entry<'a>(
+    data: &'a serde_json::Value,
+    provider_id: Option<&'a str>,
+    model_id: &str,
+) -> Option<CatalogHit<'a>> {
+    let providers = data.as_object()?;
+    catalog_candidates(model_id)
+        .into_iter()
+        .find_map(|candidate| resolve_catalog_candidate(providers, provider_id, candidate))
+}
+
+fn resolve_catalog_candidate<'a>(
+    providers: &'a serde_json::Map<String, serde_json::Value>,
+    provider_id: Option<&'a str>,
+    candidate: &str,
+) -> Option<CatalogHit<'a>> {
+    if let Some(provider_id) = provider_id
+        && let Some(model) = catalog_model(providers, provider_id, candidate)
+    {
+        return Some(CatalogHit {
+            provider_id,
+            model,
+            quality: CatalogMatch::SameProvider,
+        });
+    }
+
+    // Both remaining tiers come out of one pass: the vendor id named by the
+    // first entry that declares one, and the smallest declaring provider id.
+    let mut canonical: Option<&str> = None;
+    let mut third_party: Option<(&str, &serde_json::Value)> = None;
+    for pid in providers.keys() {
+        let Some(model) = catalog_model(providers, pid, candidate) else {
+            continue;
+        };
+        if canonical.is_none() {
+            canonical = model.get("canonical_model_id").and_then(|v| v.as_str());
+        }
+        // Insertion order is the catalog's own, which says nothing about
+        // relevance; the smallest provider id is at least reproducible.
+        match third_party {
+            Some((best, _)) if best <= pid.as_str() => {}
+            _ => third_party = Some((pid.as_str(), model)),
+        }
+    }
+
+    if let Some(canonical) = canonical
+        && let Some((vendor, canonical_model)) = canonical.split_once('/')
+        && let Some(model) = catalog_model(providers, vendor, canonical_model)
+            .or_else(|| catalog_model(providers, vendor, candidate))
+    {
+        return Some(CatalogHit {
+            provider_id: vendor,
+            model,
+            quality: CatalogMatch::Vendor,
+        });
+    }
+
+    third_party.map(|(provider_id, model)| CatalogHit {
+        provider_id,
+        model,
+        quality: CatalogMatch::ThirdParty,
+    })
+}
+
 /// Look up a model ID in `offline_providers.json` and copy known capabilities
-/// (context_window, max_tokens, tool_call, reasoning, modalities, etc.) into the model.
+/// (context_window, max_tokens, tool_call, reasoning, modalities, ...) into the
+/// model.
 ///
-/// Search strategy:
-///   1. Exact match — search all providers for the full model ID
-///   2. Bare ID — if the model ID contains a path (e.g. "google/gemma-4-26b-a4b"),
-///      try the last segment ("gemma-4-26b-a4b") as well
+/// Which entry is consulted is decided by [`resolve_catalog_entry`]. One field
+/// is *not* a property of the model but of the endpoint serving it:
+/// `reasoning_efforts`. The catalog declares it per provider because it is the
+/// subset that endpoint exposes, so it is copied only from the configured
+/// provider's own entry (ADR-103 D13) — a vendor's or a reseller's list is not
+/// evidence about the endpoint being configured, and a wrong set there would
+/// both hide legitimate levels in the UI and silently clamp real requests.
 ///
-/// NOTE: Suffix-based matching (e.g. adding "-it" or stripping "-instruct") is
-/// deliberately NOT done — it's unreliable guessing. The caller in the frontend
-/// must always fall back to safe defaults when enrichment finds no match.
-///
-/// This allows locally-discovered models (which only have an ID) to inherit
-/// capabilities from the offline data when available.
-fn enrich_model_from_offline(model: &mut ModelInfo) {
+/// This lets locally-discovered models (which only have an ID) inherit known
+/// capabilities.
+fn enrich_model_from_offline(model: &mut ModelInfo, provider_id: Option<&str>) {
     let data = offline_providers();
-    let providers = match data.as_object() {
-        Some(obj) => obj,
-        None => return,
+    enrich_model_from_catalog(model, provider_id, &data);
+}
+
+/// [`enrich_model_from_offline`] against an explicit catalog, so the resolution
+/// rules are testable without the process-wide cache.
+fn enrich_model_from_catalog(
+    model: &mut ModelInfo,
+    provider_id: Option<&str>,
+    catalog: &serde_json::Value,
+) {
+    let Some(hit) = resolve_catalog_entry(catalog, provider_id, &model.id) else {
+        return;
     };
+    let model_data = hit.model;
 
-    // Build list of candidate IDs to try (ordered by specificity)
-    let mut candidates: Vec<String> = Vec::new();
-
-    // 1. Exact match
-    candidates.push(model.id.clone());
-
-    // 2. Bare ID
-    if let Some(bare) = model.id.split('/').next_back()
-        && bare != model.id.as_str() {
-            candidates.push(bare.to_string());
-        }
-
-    for candidate in &candidates {
-        for provider_data in providers.values() {
-            let models_map = match provider_data.get("models").and_then(|m| m.as_object()) {
-                Some(m) => m,
-                None => continue,
-            };
-            let model_data = match models_map.get(candidate) {
-                Some(m) => m,
-                None => continue,
-            };
-
-            // Found a match — copy capabilities
-            if let Some(cw) = model_data
-                .get("limit")
-                .and_then(|l| l.get("context"))
-                .and_then(|v| v.as_u64())
-            {
-                model.context_window = Some(cw);
-            }
-            if let Some(mt) = model_data
-                .get("limit")
-                .and_then(|l| l.get("output"))
-                .and_then(|v| v.as_u64())
-            {
-                model.max_tokens = Some(mt);
-            }
-            if let Some(tc) = model_data.get("tool_call").and_then(|v| v.as_bool()) {
-                model.tool_call = Some(tc);
-            }
-            if let Some(r) = model_data.get("reasoning").and_then(|v| v.as_bool()) {
-                model.reasoning = Some(r);
-            }
-            if let Some(a) = model_data.get("attachment").and_then(|v| v.as_bool()) {
-                model.attachment = Some(a);
-            }
-            if let Some(name) = model_data.get("name").and_then(|v| v.as_str()) {
-                model.name = name.to_string();
-            }
-            if let Some(family) = model_data.get("family").and_then(|v| v.as_str()) {
-                model.family = Some(family.to_string());
-            }
-            // Copy modalities (input/output) when not already set
-            if model.input_modalities.is_none() {
-                model.input_modalities = model_data
-                    .get("modalities")
-                    .and_then(|v| v.get("input"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect()
-                    });
-            }
-            if model.output_modalities.is_none() {
-                model.output_modalities = model_data
-                    .get("modalities")
-                    .and_then(|v| v.get("output"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect()
-                    });
-            }
-            return; // Found the best match, stop searching
-        }
+    // Found a match — copy capabilities
+    if let Some(cw) = model_data
+        .get("limit")
+        .and_then(|l| l.get("context"))
+        .and_then(|v| v.as_u64())
+    {
+        model.context_window = Some(cw);
+    }
+    if let Some(mt) = model_data
+        .get("limit")
+        .and_then(|l| l.get("output"))
+        .and_then(|v| v.as_u64())
+    {
+        model.max_tokens = Some(mt);
+    }
+    if let Some(tc) = model_data.get("tool_call").and_then(|v| v.as_bool()) {
+        model.tool_call = Some(tc);
+    }
+    if let Some(r) = model_data.get("reasoning").and_then(|v| v.as_bool()) {
+        model.reasoning = Some(r);
+    }
+    // Reasoning effort levels: only the endpoint's own declaration counts
+    // (ADR-103 D13) — see the doc comment above.
+    if hit.quality == CatalogMatch::SameProvider && model.reasoning_efforts.is_none() {
+        model.reasoning_efforts = reasoning_effort_levels(model_data);
+    }
+    if let Some(a) = model_data.get("attachment").and_then(|v| v.as_bool()) {
+        model.attachment = Some(a);
+    }
+    if let Some(name) = model_data.get("name").and_then(|v| v.as_str()) {
+        model.name = name.to_string();
+    }
+    if let Some(family) = model_data.get("family").and_then(|v| v.as_str()) {
+        model.family = Some(family.to_string());
+    }
+    // Copy modalities (input/output) when not already set
+    if model.input_modalities.is_none() {
+        model.input_modalities = model_data
+            .get("modalities")
+            .and_then(|v| v.get("input"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
+    }
+    if model.output_modalities.is_none() {
+        model.output_modalities = model_data
+            .get("modalities")
+            .and_then(|v| v.get("output"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
+    }
+    // ADR-103 D11: offline shape declaration is a model property, so it travels
+    // with the capability enrichment (pure UI hint; never participates in the
+    // D1 gate).
+    if model.shape.is_none() {
+        model.shape = model_data
+            .get("shape")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
     }
 }
 
@@ -1467,36 +1664,36 @@ fn lookup_model_capabilities_from_data(
     }
     // 2. Fallback: cross-provider search by model ID
     //    This handles cases like alibaba-cn proxying moonshotai/kimi-k2.6
-    cross_provider_lookup(data, model_id)
+    cross_provider_lookup(data, provider, model_id)
 }
 
 /// Search all providers for a model matching the given model_id.
 /// Strips provider prefix if present (e.g. "moonshotai/kimi-k2.6" -> "kimi-k2.6").
 fn cross_provider_lookup(
     data: &serde_json::Value,
+    provider: &str,
     model_id: &str,
 ) -> Option<acowork_core::protocol::ModelCapabilitiesInfo> {
-    let bare_id = if model_id.contains('/') {
-        model_id.split('/').next_back().unwrap_or(model_id)
-    } else {
-        model_id
-    };
-
-    let providers = data.as_object()?;
-    for (pid, provider_data) in providers {
-        if let Some(models) = extract_models(provider_data)
-            .into_iter()
-            .find(|m| m.id == bare_id || m.id == model_id)
-        {
-            tracing::debug!(
-                model_id = model_id,
-                found_in_provider = %pid,
-                "Cross-provider model capabilities lookup succeeded"
-            );
-            return model_to_capabilities(&models);
-        }
+    let hit = resolve_catalog_entry(data, Some(provider), model_id)?;
+    tracing::debug!(
+        model_id = model_id,
+        requested_provider = %provider,
+        found_in_provider = %hit.provider_id,
+        quality = ?hit.quality,
+        "Cross-provider model capabilities lookup succeeded"
+    );
+    let entry_id = hit
+        .model
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(model_id);
+    let mut caps = model_to_capabilities(&model_info_from_catalog_entry(entry_id, hit.model))?;
+    // Endpoint-scoped: a projection taken from another provider's entry must
+    // not claim which levels *this* provider accepts (ADR-103 D13).
+    if hit.quality != CatalogMatch::SameProvider {
+        caps.reasoning_efforts = None;
     }
-    None
+    Some(caps)
 }
 
 // ── Protocol type lookup (used by gRPC to derive protocol from npm field) ──────
@@ -1515,6 +1712,188 @@ fn derive_protocol_type(npm: Option<&str>) -> acowork_core::protocol::ProtocolTy
         Some(s) if s.contains("google") => ProtocolType::Google,
         Some(s) if s.contains("ollama") => ProtocolType::Ollama,
         _ => ProtocolType::OpenAI,
+    }
+}
+
+// ── ADR-103 D1: effective-protocol resolution (the single decision point) ─────
+
+/// ADR-103 D1 — the gate: does the user's model-level choice actually take
+/// effect, or does the model fall back to the npm-derived default?
+///
+/// This is the ONLY arbitration function for the effective wire protocol.
+/// Runtime and frontend consume its result and MUST NOT re-derive it
+/// (§3 red line 1). The gate lives at *configuration time*: a session never
+/// re-probes, and network flapping cannot flip a model's protocol
+/// mid-conversation.
+///
+/// Decision table (D1):
+///
+/// | `choice` | `probe` | result |
+/// |---|---|---|
+/// | `Responses` | `verified` / `degraded` | `Responses` |
+/// | `Responses` | `failed` / `stale` / `unverified` / absent | `npm_default` |
+/// | `None` | any | `npm_default` |
+/// | other known value | any | the chosen value (no gate needed) |
+/// | `Unknown` (unrecognized wire value) | any | `npm_default` + warn (never guess) |
+///
+/// There is deliberately **no global switch** in front of this gate: the
+/// selection is the user's own explicit act, and the probe is what confirms
+/// it, so the two together are already a per-model, opt-in gate. A blanket
+/// kill switch would only add a second, invisible way for a selection to
+/// silently not take effect (ADR-103 §4.4, revised).
+pub fn resolve_effective_protocol(
+    choice: Option<&acowork_core::protocol::ProtocolType>,
+    probe: Option<&acowork_core::protocol::ProtocolProbe>,
+    npm_default: acowork_core::protocol::ProtocolType,
+) -> acowork_core::protocol::ProtocolType {
+    use acowork_core::protocol::ProtocolType;
+
+    let Some(chosen) = choice else {
+        return npm_default; // no explicit selection → npm derivation (status quo)
+    };
+
+    match chosen {
+        ProtocolType::Responses => {
+            match probe {
+                // Probe verdict written by the save/probe path (D12) and
+                // still fresh: enable Responses.
+                Some(p) if p.gates_responses() => ProtocolType::Responses,
+                // Failed / stale / unverified / absent / unrecognized →
+                // fall back to the default. The fallback itself is visible
+                // via the UI yellow badge (D11); it is NOT a silent fallback.
+                other => {
+                    tracing::info!(
+                        probe_state = ?other.map(|p| &p.state),
+                        "resolve_protocol: 'responses' selected but probe does not pass the gate; \
+                         falling back to the npm-derived default '{}'",
+                        npm_default
+                    );
+                    npm_default
+                }
+            }
+        }
+        // An unrecognized wire value: never guess a concrete protocol from
+        // it — fall back to the npm-derived default (D1 MUST).
+        ProtocolType::Unknown => {
+            tracing::warn!(
+                "resolve_protocol: model-level protocol_type is an unrecognized wire value \
+                 (deserialized to Unknown); falling back to the npm-derived default '{}'",
+                npm_default
+            );
+            npm_default
+        }
+        // Anthropic / Google / Ollama / OpenAI: explicit selections take
+        // effect directly (probe does not apply, no gate).
+        other => other.clone(),
+    }
+}
+
+/// ADR-103 D2 — resolve the effective protocol (and per-model base URL
+/// override, when the Responses shape is in effect) for one model of a
+/// cached provider entry.
+///
+/// `npm_default` is the provider-level `protocol_type` already derived from
+/// offline models.dev data when the provider entry was built. The
+/// per-model `protocol_type` / `protocol_probe` fields carry the user's
+/// selection and the Gateway probe verdict.
+///
+/// Returns `(effective_protocol, model_base_url_override)`; the override is
+/// `Some` only when the effective protocol is `Responses` AND the model
+/// entry carries a non-empty `base_url`.
+pub fn resolve_protocol(
+    provider: &acowork_core::protocol::ProviderListItem,
+    model_id: &str,
+) -> (
+    acowork_core::protocol::ProtocolType,
+    Option<String>,
+) {
+    use acowork_core::protocol::ProtocolType;
+
+    let npm_default = provider.protocol_type.clone();
+    let Some(model) = provider.models.iter().find(|m| m.id == model_id) else {
+        // Model entry not found: fall back to provider level, never guess (D2).
+        tracing::warn!(
+            provider_id = %provider.id,
+            model_id = %model_id,
+            "resolve_protocol: model entry not found in provider list; inheriting provider-level protocol"
+        );
+        return (npm_default, None);
+    };
+
+    let effective = resolve_effective_protocol(
+        model.protocol_type.as_ref(),
+        model.protocol_probe.as_ref(),
+        npm_default,
+    );
+    let base_url = if effective == ProtocolType::Responses {
+        model
+            .base_url
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .map(|u| u.to_string())
+    } else {
+        None
+    };
+    (effective, base_url)
+}
+
+// ── ADR-103 D11: the protocol projection consumed by the frontend ─────
+
+/// Fill the four ADR-103 protocol fields on one model row (D11).
+///
+/// Single boundary between the Gateway's protocol decision and the UI:
+/// `shape` comes from the offline catalog (filled during enrichment), the
+/// selection / probe verdict come from `provider_list.json`, and
+/// `protocol_active` is [`resolve_protocol`]'s D1 verdict — never re-derived
+/// by the caller (D11 red line: the frontend MUST NOT compute protocol).
+///
+/// A model that is not configured on the provider keeps every protocol field
+/// `None`: it has no selection and no verdict, so the UI shows only the
+/// offline `shape` hint (D11 gray `R`).
+pub fn project_model_protocol(
+    model: &mut ModelInfo,
+    provider: Option<&acowork_core::protocol::ProviderListItem>,
+) {
+    let Some(provider) = provider else {
+        return;
+    };
+    let Some(entry) = provider.models.iter().find(|m| m.id == model.id) else {
+        return;
+    };
+    model.protocol_selected = entry.protocol_type.as_ref().map(|p| p.to_string());
+    model.protocol_probe = entry.protocol_probe.clone();
+    let (effective, _) = resolve_protocol(provider, &model.id);
+    model.protocol_active = Some(effective.to_string());
+}
+
+/// Snapshot the input [`project_model_protocol`] needs, without holding the
+/// Gateway lock across the handler's work.
+///
+/// Returns the provider entry; it is `None` when the provider is not
+/// configured yet (e.g. browsing the catalog before the first save), in which
+/// case no protocol field is projected.
+async fn protocol_projection_inputs(
+    state: &AppState,
+    provider_id: &str,
+) -> Option<acowork_core::protocol::ProviderListItem> {
+    let gw = state.gateway_state.read().await;
+    gw.resource_cache
+        .provider_list
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .cloned()
+}
+
+/// Project the ADR-103 D11 protocol fields onto a whole model list.
+pub(crate) async fn annotate_protocol_fields(
+    state: &AppState,
+    provider_id: &str,
+    models: &mut [ModelInfo],
+) {
+    let entry = protocol_projection_inputs(state, provider_id).await;
+    for model in models.iter_mut() {
+        project_model_protocol(model, entry.as_ref());
     }
 }
 
@@ -1643,6 +2022,7 @@ fn model_to_capabilities(
         knowledge_cutoff: model.knowledge.clone(),
         default_reasoning_effort: None,
         thinking_mode: None,
+        reasoning_efforts: model.reasoning_efforts.clone(),
     })
 }
 
@@ -1674,6 +2054,9 @@ mod tests {
                     id: m.to_string(),
                     capabilities: caps(1000),
                     max_output_tokens_limit: 4096,
+                    protocol_type: None,
+                    base_url: None,
+                    protocol_probe: None,
                 })
                 .collect(),
             compact_model: None,
@@ -2049,5 +2432,469 @@ mod tests {
             "application/json, text/event-stream".parse().unwrap(),
         );
         assert!(wants_sse(&h));
+    }
+}
+
+// ── ADR-103 S1: D1 gate decision-table tests ──────────────────────────
+
+#[cfg(test)]
+mod adr103_resolve_tests {
+    use super::resolve_effective_protocol;
+    use super::resolve_protocol;
+    use acowork_core::protocol::{
+        ModelCapabilitiesInfo, ProbeState, ProtocolProbe, ProtocolType, ProviderListItem,
+        ProviderModelEntry,
+    };
+
+    fn probe(state: ProbeState) -> ProtocolProbe {
+        ProtocolProbe {
+            state,
+            tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
+            reason: None,
+            observed_base_url: None,
+            stripped_fields: Vec::new(),
+            probed_at: None,
+        }
+    }
+
+    fn entry(
+        choice: Option<ProtocolType>,
+        pr: Option<ProtocolProbe>,
+        base_url: Option<&str>,
+    ) -> ProviderModelEntry {
+        serde_json::from_value::<ProviderModelEntry>(serde_json::json!({
+            "id": "gpt-5",
+            "capabilities": { "context_window": 1000u64, "max_output_tokens": 100u64 },
+            "max_output_tokens_limit": 4096u64,
+            "protocol_type": choice,
+            "protocol_probe": pr,
+            "base_url": base_url,
+        }))
+        .unwrap()
+    }
+
+    fn cached(m: ProviderModelEntry, provider_proto: ProtocolType) -> ProviderListItem {
+        ProviderListItem {
+            id: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            protocol_type: provider_proto,
+            models: vec![m],
+            compact_model: None,
+            custom: false,
+        }
+    }
+
+    #[test]
+    fn no_choice_always_npm_default() {
+        for probe in [None, Some(probe(ProbeState::Verified))] {
+            assert_eq!(
+                resolve_effective_protocol(None, probe.as_ref(), ProtocolType::Anthropic),
+                ProtocolType::Anthropic
+            );
+        }
+    }
+
+    #[test]
+    fn responses_choice_gated_by_probe_state() {
+        // verified / degraded pass the gate; everything else falls back.
+        for (st, want) in [
+            (ProbeState::Verified, ProtocolType::Responses),
+            (ProbeState::Degraded, ProtocolType::Responses),
+            (ProbeState::Failed, ProtocolType::OpenAI),
+            (ProbeState::Stale, ProtocolType::OpenAI),
+            (ProbeState::Unverified, ProtocolType::OpenAI),
+            (ProbeState::Unknown, ProtocolType::OpenAI),
+        ] {
+            let got = resolve_effective_protocol(
+                Some(&ProtocolType::Responses),
+                Some(&probe(st.clone())),
+                ProtocolType::OpenAI,
+            );
+            assert_eq!(got, want, "probe state {st:?}");
+        }
+        // Absent probe = unverified = off.
+        assert_eq!(
+            resolve_effective_protocol(Some(&ProtocolType::Responses), None, ProtocolType::OpenAI),
+            ProtocolType::OpenAI
+        );
+    }
+
+    #[test]
+    fn unknown_choice_never_guesses() {
+        assert_eq!(
+            resolve_effective_protocol(
+                Some(&ProtocolType::Unknown),
+                Some(&probe(ProbeState::Verified)),
+                ProtocolType::Google,
+            ),
+            ProtocolType::Google
+        );
+    }
+
+    #[test]
+    fn other_known_choices_take_effect_directly() {
+        // Non-Responses selections are not gated (D1 table row 4).
+        for p in [ProtocolType::Anthropic, ProtocolType::Google, ProtocolType::Ollama, ProtocolType::OpenAI] {
+            assert_eq!(
+                resolve_effective_protocol(Some(&p), None, ProtocolType::OpenAI),
+                p.clone(),
+                "choice {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_protocol_model_entry_missing_inherits_provider_level() {
+        let p = cached(entry(None, None, None), ProtocolType::Ollama);
+        let (proto, base) = resolve_protocol(&p, "not-in-list");
+        assert_eq!(proto, ProtocolType::Ollama);
+        assert_eq!(base, None);
+    }
+
+    #[test]
+    fn resolve_protocol_base_override_only_for_effective_responses() {
+        let url = "https://api.minimax.io/v1";
+        // Effective Responses + non-empty override → Some.
+        let p = cached(
+            entry(Some(ProtocolType::Responses), Some(probe(ProbeState::Verified)), Some(url)),
+            ProtocolType::Anthropic,
+        );
+        let (proto, base) = resolve_protocol(&p, "gpt-5");
+        assert_eq!(proto, ProtocolType::Responses);
+        assert_eq!(base.as_deref(), Some(url));
+        // A failed probe → the default protocol → override is NOT carried.
+        let failed = cached(
+            entry(Some(ProtocolType::Responses), Some(probe(ProbeState::Failed)), Some(url)),
+            ProtocolType::Anthropic,
+        );
+        let (proto, base) = resolve_protocol(&failed, "gpt-5");
+        assert_eq!(proto, ProtocolType::Anthropic);
+        assert_eq!(base, None);
+        // Empty-string override → None (inherit provider base).
+        let p2 = cached(
+            entry(Some(ProtocolType::Responses), Some(probe(ProbeState::Degraded)), Some("")),
+            ProtocolType::OpenAI,
+        );
+        let (proto, base) = resolve_protocol(&p2, "gpt-5");
+        assert_eq!(proto, ProtocolType::Responses);
+        assert_eq!(base, None);
+    }
+
+    #[test]
+    fn resolve_protocol_status_quo_unchanged() {
+        // S1 zero-traffic-change invariant: an entry with no model-level
+        // fields resolves to exactly the provider-level protocol, with no
+        // base_url override.
+        let p = cached(entry(None, None, None), ProtocolType::Anthropic);
+        let (proto, base) = resolve_protocol(&p, "gpt-5");
+        assert_eq!(proto, ProtocolType::Anthropic);
+        assert_eq!(base, None);
+    }
+
+    #[test]
+    fn model_capabilities_info_field_shape() {
+        // Guard: `caps()`-style JSON construction keeps compiling if the
+        // struct grows required fields.
+        let _: ModelCapabilitiesInfo = serde_json::from_value(serde_json::json!({
+            "context_window": 1u64, "max_output_tokens": 1u64
+        }))
+        .unwrap();
+    }
+}
+
+// ── ADR-103 S6: D11 protocol projection tests ─────────────────────────
+
+#[cfg(test)]
+mod adr103_projection_tests {
+    use super::project_model_protocol;
+    use super::ModelInfo;
+    use acowork_core::protocol::{
+        ProbeState, ProtocolProbe, ProtocolType, ProviderListItem, ProviderModelEntry,
+    };
+
+    fn probe(state: ProbeState, reason: Option<&str>) -> ProtocolProbe {
+        ProtocolProbe {
+            state,
+            tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
+            reason: reason.map(|r| r.to_string()),
+            observed_base_url: None,
+            stripped_fields: Vec::new(),
+            probed_at: Some("2026-01-01T00:00:00Z".into()),
+        }
+    }
+
+    fn entry(
+        choice: Option<ProtocolType>,
+        pr: Option<ProtocolProbe>,
+    ) -> ProviderModelEntry {
+        serde_json::from_value::<ProviderModelEntry>(serde_json::json!({
+            "id": "gpt-5",
+            "capabilities": { "context_window": 1000u64, "max_output_tokens": 100u64 },
+            "max_output_tokens_limit": 4096u64,
+            "protocol_type": choice,
+            "protocol_probe": pr,
+        }))
+        .unwrap()
+    }
+
+    fn provider(m: ProviderModelEntry) -> ProviderListItem {
+        ProviderListItem {
+            id: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            protocol_type: ProtocolType::OpenAI,
+            models: vec![m],
+            compact_model: None,
+            custom: false,
+        }
+    }
+
+    fn model(id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn verified_selection_projects_responses_as_active() {
+        let p = provider(entry(
+            Some(ProtocolType::Responses),
+            Some(probe(ProbeState::Verified, None)),
+        ));
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, Some(&p));
+
+        assert_eq!(m.protocol_selected.as_deref(), Some("responses"));
+        assert_eq!(m.protocol_active.as_deref(), Some("responses"));
+        assert_eq!(
+            m.protocol_probe.as_ref().map(|p| &p.state),
+            Some(&ProbeState::Verified)
+        );
+    }
+
+    #[test]
+    fn failed_probe_keeps_the_selection_but_activates_the_default() {
+        // D11 yellow badge source: the UI must still be able to render "you
+        // picked Responses, it is NOT enabled, here is why" — so the raw
+        // selection and the failure reason must both survive the projection.
+        let p = provider(entry(
+            Some(ProtocolType::Responses),
+            Some(probe(ProbeState::Failed, Some("endpoint unavailable"))),
+        ));
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, Some(&p));
+
+        assert_eq!(m.protocol_selected.as_deref(), Some("responses"));
+        assert_eq!(m.protocol_active.as_deref(), Some("openai"));
+        let pr = m.protocol_probe.expect("probe verdict must reach the UI");
+        assert_eq!(pr.state, ProbeState::Failed);
+        assert_eq!(pr.reason.as_deref(), Some("endpoint unavailable"));
+    }
+
+    #[test]
+    fn stale_verdict_activates_the_default() {
+        let p = provider(entry(
+            Some(ProtocolType::Responses),
+            Some(probe(ProbeState::Stale, None)),
+        ));
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, Some(&p));
+
+        assert_eq!(m.protocol_active.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn unconfigured_model_gets_no_protocol_projection() {
+        // Browsing the catalog before the first save: no selection, no
+        // verdict, no active protocol — the row keeps only its offline
+        // `shape` hint.
+        let p = provider(entry(Some(ProtocolType::Responses), None));
+        let mut m = model("some-other-model");
+        m.shape = Some("responses".into());
+        project_model_protocol(&mut m, Some(&p));
+
+        assert_eq!(m.shape.as_deref(), Some("responses"));
+        assert!(m.protocol_selected.is_none());
+        assert!(m.protocol_active.is_none());
+        assert!(m.protocol_probe.is_none());
+    }
+
+    #[test]
+    fn no_provider_entry_projects_nothing() {
+        let mut m = model("gpt-5");
+        project_model_protocol(&mut m, None);
+
+        assert!(m.protocol_selected.is_none());
+        assert!(m.protocol_active.is_none());
+        assert!(m.protocol_probe.is_none());
+    }
+
+    #[test]
+    fn untouched_rows_keep_the_pre_adr103_wire_shape() {
+        // Zero-traffic-change invariant for the HTTP surface: a model with no
+        // protocol data must serialize exactly as before (new fields absent,
+        // not `null`).
+        let m = model("gpt-5");
+        let v = serde_json::to_value(&m).unwrap();
+        for absent in [
+            "shape",
+            "protocol_selected",
+            "protocol_active",
+            "protocol_probe",
+        ] {
+            assert!(
+                v.get(absent).is_none(),
+                "field {absent} must be skipped when absent, got {v}"
+            );
+        }
+    }
+}
+
+// ── ADR-103 D13: catalog resolution (same provider → vendor → third party) ──
+
+#[cfg(test)]
+mod catalog_resolution_tests {
+    use super::{
+        enrich_model_from_catalog, lookup_model_capabilities_from_data, ModelInfo,
+    };
+
+    // ── Catalog resolution (ADR-103 D13) ─────────────────────────────────
+
+    /// A catalog in the shipped shape: a flat map of providers, each with a
+    /// `models` object. Entries are inserted in the given order, so a test can
+    /// prove the result does not depend on it.
+    fn cat_catalog(providers: &[(&str, serde_json::Value)]) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        for (pid, models) in providers {
+            map.insert(
+                pid.to_string(),
+                serde_json::json!({ "id": pid, "models": models }),
+            );
+        }
+        serde_json::Value::Object(map)
+    }
+
+    fn cat_entry(ctx: u64, levels: Option<&[&str]>, canonical: Option<&str>) -> serde_json::Value {
+        let mut v = serde_json::json!({ "id": "m", "name": "M", "limit": { "context": ctx } });
+        if let Some(levels) = levels {
+            v["reasoning_options"] = serde_json::json!([
+                { "type": "toggle" },
+                { "type": "effort", "values": levels }
+            ]);
+        }
+        if let Some(canonical) = canonical {
+            v["canonical_model_id"] = serde_json::json!(canonical);
+        }
+        v
+    }
+
+    fn cat_unenriched(id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// The reported bug: a custom provider whose model id happens to exist in
+    /// the catalog must NOT inherit that catalog entry's effort levels — those
+    /// describe somebody else's endpoint. Everything else is still inherited.
+    #[test]
+    fn custom_provider_gets_capabilities_but_no_reasoning_levels() {
+        let cat = cat_catalog(&[(
+            "minimax",
+            serde_json::json!({ "MiniMax-M3.1-Flash": cat_entry(1_000_000, Some(&["low", "medium", "high", "xhigh", "max"]), Some("minimax/MiniMax-M3.1-Flash")) }),
+        )]);
+        let mut m = cat_unenriched("MiniMax-M3.1-Flash");
+        enrich_model_from_catalog(&mut m, Some("custom-minimax"), &cat);
+        assert_eq!(m.context_window, Some(1_000_000));
+        assert_eq!(
+            m.reasoning_efforts, None,
+            "an unknown endpoint must fall back to the generic level set"
+        );
+    }
+
+    /// When the configured provider *is* the catalog provider, its own
+    /// declaration is the authority — whatever other providers claim.
+    #[test]
+    fn the_providers_own_declaration_wins() {
+        let cat = cat_catalog(&[
+            (
+                "scx-ai",
+                serde_json::json!({ "MiniMax-M2.7": cat_entry(100, Some(&["low", "high"]), Some("minimax/MiniMax-M2.7")) }),
+            ),
+            (
+                "minimax",
+                serde_json::json!({ "MiniMax-M2.7": cat_entry(200, Some(&["low", "medium", "high"]), Some("minimax/MiniMax-M2.7")) }),
+            ),
+        ]);
+        let mut m = cat_unenriched("MiniMax-M2.7");
+        enrich_model_from_catalog(&mut m, Some("minimax"), &cat);
+        assert_eq!(m.context_window, Some(200));
+        assert_eq!(
+            m.reasoning_efforts,
+            Some(vec!["low".into(), "medium".into(), "high".into()])
+        );
+    }
+
+    /// No same-provider entry: the vendor named by `canonical_model_id` wins
+    /// over whichever reseller the catalog happens to list first. The level set
+    /// stays unset — a vendor's list is not evidence about a third-party
+    /// endpoint.
+    #[test]
+    fn the_vendor_named_by_canonical_model_id_beats_file_order() {
+        let cat = cat_catalog(&[
+            (
+                "vivgrid",
+                serde_json::json!({ "glm-5.3": cat_entry(10, Some(&["low", "high", "max"]), Some("zhipuai/glm-5.3")) }),
+            ),
+            (
+                "zhipuai",
+                serde_json::json!({ "glm-5.3": cat_entry(200, Some(&["low", "medium", "high"]), Some("zhipuai/glm-5.3")) }),
+            ),
+        ]);
+        let mut m = cat_unenriched("glm-5.3");
+        enrich_model_from_catalog(&mut m, Some("requesty"), &cat);
+        assert_eq!(m.context_window, Some(200), "the vendor's numbers win");
+        assert_eq!(m.reasoning_efforts, None);
+    }
+
+    /// Nothing declares a canonical id: the pick is by provider id, so two
+    /// identical catalogs written in different orders agree.
+    #[test]
+    fn the_last_resort_tier_is_ordered_by_provider_id() {
+        let ab = cat_catalog(&[
+            ("zeta", serde_json::json!({ "m1": cat_entry(10, None, None) })),
+            ("alpha", serde_json::json!({ "m1": cat_entry(20, None, None) })),
+        ]);
+        let ba = cat_catalog(&[
+            ("alpha", serde_json::json!({ "m1": cat_entry(20, None, None) })),
+            ("zeta", serde_json::json!({ "m1": cat_entry(10, None, None) })),
+        ]);
+        for cat in [&ab, &ba] {
+            let mut m = cat_unenriched("m1");
+            enrich_model_from_catalog(&mut m, Some("unknown-endpoint"), cat);
+            assert_eq!(m.context_window, Some(20), "always the `alpha` entry");
+        }
+    }
+
+    /// The capability projection used by the Runtime hot-push follows the same
+    /// rule: a body copied from another provider must not carry its levels.
+    #[test]
+    fn capabilities_lookup_drops_levels_it_did_not_witness() {
+        let cat = cat_catalog(&[(
+            "alibaba",
+            serde_json::json!({ "qwen3.8-max": cat_entry(1_000_000, Some(&["low", "medium", "xhigh"]), Some("alibaba/qwen3.8-max")) }),
+        )]);
+        let own = lookup_model_capabilities_from_data(&cat, "alibaba", "qwen3.8-max").unwrap();
+        assert_eq!(
+            own.reasoning_efforts,
+            Some(vec!["low".into(), "medium".into(), "xhigh".into()])
+        );
+
+        let proxied = lookup_model_capabilities_from_data(&cat, "custom-qwen", "qwen3.8-max").unwrap();
+        assert_eq!(proxied.context_window, 1_000_000, "model facts still travel");
+        assert_eq!(proxied.reasoning_efforts, None);
     }
 }

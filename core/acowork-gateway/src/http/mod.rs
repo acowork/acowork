@@ -23,6 +23,7 @@ pub mod fs_browse;
 pub mod global_resources_api;
 pub mod intent_api;
 pub mod mcp_catalog_api;
+pub mod mcp_presets;
 pub mod lsp_admin_proxy;
 pub mod lsp_proxy;
 pub mod memory_api;
@@ -32,6 +33,8 @@ pub mod nodes_api;
 pub mod pm_proxy;
 pub mod permission;
 pub mod provider_api;
+#[cfg(test)]
+mod provider_probe_tests;
 pub mod proxy;
 pub mod publish_api;
 pub mod relay_api;

@@ -49,7 +49,7 @@
 //!
 //! Path: `{work_dir}/config/provider_compat.json`
 //!
-//! v2 file shape: `{ "version": 2, "entries": { key: PersistedEntry } }`.
+//! v3 file shape: `{ "version": 3, "entries": { key: PersistedEntry } }`.
 //! Only *durable* (confirmed) entries are persisted. Atomic write via
 //! `*.tmp` → rename; throttled to at most one write per
 //! [`COMPAT_PERSIST_MIN_INTERVAL_SECS`], except promotions and invalidations
@@ -57,9 +57,11 @@
 //!
 //! ## Key format
 //!
-//! `"{provider_id}::{model_id}"` — keeps different vendors with the same
-//! underlying model (e.g. `glm-5.2` on volcano-engine vs. a self-hosted
-//! OpenAI-compatible wrapper) isolated.
+//! `"{namespace}::{shape}::{model_id}"` (see [`cache_key`]) — keeps different
+//! vendors with the same underlying model (e.g. `glm-5.2` on volcano-engine
+//! vs. a self-hosted OpenAI-compatible wrapper) isolated, **and** keeps two
+//! wire shapes of the same vendor+model apart (ADR-103 D7.3: `/chat/completions`
+//! and `/responses` only look alike, their parameter surfaces are not).
 
 use std::collections::HashMap;
 use std::fs;
@@ -73,9 +75,31 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-/// Version of the on-disk v2 file format. v1 (bare map) is intentionally not
-/// readable — see module docs rule 5.
-const CACHE_FILE_VERSION: u8 = 2;
+/// Version of the on-disk file format. v1 (bare map) is intentionally not
+/// readable — see module docs rule 5. v2 keys carried no wire shape, so v3
+/// (shape-qualified keys, ADR-103 D7.3) discards them instead of keeping rows
+/// that can never be read again.
+const CACHE_FILE_VERSION: u8 = 3;
+
+/// Wire shape of the Chat-Completions family (`/chat/completions`).
+pub const SHAPE_COMPLETIONS: &str = "completions";
+
+/// Wire shape of the Responses family (`/responses`, ADR-103).
+pub const SHAPE_RESPONSES: &str = "responses";
+
+/// File name (inside `{work_dir}/config/`) of the completions-shaped cache.
+pub const COMPLETIONS_COMPAT_FILE: &str = "provider_compat.json";
+
+/// Build a compat-cache key (ADR-103 D7.3).
+///
+/// The shape is part of the namespace on purpose: a vendor that serves both
+/// `/chat/completions` and `/responses` may resolve to the same host, and a
+/// learned profile from one shape MUST NOT leak into the other.
+///
+/// `namespace` is the provider id when known, otherwise the base-url host.
+pub fn cache_key(namespace: &str, shape: &str, model: &str) -> String {
+    format!("{namespace}::{shape}::{model}")
+}
 
 /// Distinct successful requests required before a candidate becomes durable.
 pub const COMPAT_CONFIRM_REQUIRED: u32 = 3;
@@ -89,6 +113,39 @@ pub const COMPAT_CONFIRM_WINDOW_SECS: u64 = 24 * 60 * 60;
 pub const COMPAT_PERSIST_MIN_INTERVAL_SECS: u64 = 60;
 /// Maximum in-memory candidates kept per key (oldest evicted).
 const MAX_CANDIDATES_PER_KEY: usize = 8;
+
+/// The learning outcome of one "trim something and retry" action, generic
+/// over the wire shape.
+///
+/// ADR-103 D8 requires the Responses trim to follow the *same evidence
+/// discipline* as the completions fallback ladder while explicitly NOT sharing
+/// [`StripProfile`] (a completions-shaped struct). So the policy below —
+/// confirmation gate, TTL lease, plain-success reset, invalidation cooldown —
+/// is generic over the action, and each wire shape supplies its own profile:
+///
+/// | shape | profile | file |
+/// |---|---|---|
+/// | `/chat/completions` | [`StripProfile`] | `provider_compat.json` |
+/// | `/responses` | `ResponsesTrim` (`responses_compat.rs`) | `provider_compat_responses.json` |
+///
+/// The files are separate on purpose: keys are already shape-qualified
+/// ([`cache_key`]), and keeping the payloads apart means an ADR-103 rollback
+/// cannot make the completions cache unreadable.
+pub trait TrimAction:
+    Clone + PartialEq + Send + Sync + 'static + Serialize + for<'de> Deserialize<'de>
+{
+    /// Whether two profiles prescribe the *same* trim (diagnostic bookkeeping
+    /// such as timestamps or fallback generations must be ignored).
+    fn same_action(&self, other: &Self) -> bool;
+
+    /// One-line description for the promotion / invalidation logs. Free-form:
+    /// the policy never interprets it.
+    fn describe(&self) -> String;
+
+    /// Refresh "last used" bookkeeping after a fast-path hit. Diagnostics only —
+    /// it must not change the trim action. Default: nothing to record.
+    fn touch_last_success(&mut self, _now_unix_ts: u64) {}
+}
 
 /// Describes which fields to strip from a request before sending it.
 ///
@@ -139,6 +196,40 @@ impl StripProfile {
             && self.strip_temperature == other.strip_temperature
             && self.strip_tools == other.strip_tools
             && self.max_tokens_cap == other.max_tokens_cap
+    }
+}
+
+impl TrimAction for StripProfile {
+    fn same_action(&self, other: &Self) -> bool {
+        self.same_strip_action(other)
+    }
+
+    fn touch_last_success(&mut self, now_unix_ts: u64) {
+        self.last_success_unix_ts = now_unix_ts;
+    }
+
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        for (flag, name) in [
+            (self.strip_stream_options, "stream_options"),
+            (self.strip_reasoning_effort, "reasoning_effort"),
+            (self.strip_thinking, "thinking"),
+            (self.strip_temperature, "temperature"),
+            (self.strip_tools, "tools"),
+        ] {
+            if flag {
+                parts.push(name);
+            }
+        }
+        if self.max_tokens_cap.is_some() {
+            parts.push("max_tokens_cap");
+        }
+        format!(
+            "strip[{}], max_tokens<={:?}, fb{}",
+            parts.join(","),
+            self.max_tokens_cap,
+            self.fallback_generation
+        )
     }
 }
 
@@ -238,15 +329,15 @@ impl ErrorClass {
 
 /// A durable, on-disk entry. `promoted_at_unix_ts` anchors the TTL lease.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedEntry {
-    pub profile: StripProfile,
+pub struct PersistedEntry<P> {
+    pub profile: P,
     /// The error class that the profile learned from.
     pub class: String,
     /// Unix ts when the entry was promoted to durable (TTL anchor).
     pub promoted_at_unix_ts: u64,
 }
 
-impl PersistedEntry {
+impl<P> PersistedEntry<P> {
     fn error_class(&self) -> ErrorClass {
         match self.class.as_str() {
             "request_schema" => ErrorClass::RequestSchema,
@@ -261,38 +352,50 @@ impl PersistedEntry {
     }
 }
 
-/// In-memory evidence that a strip action helped. Never persisted.
+/// In-memory evidence that a trim action helped. Never persisted.
 #[derive(Debug, Clone)]
-struct Candidate {
-    profile: StripProfile,
+struct Candidate<P> {
+    profile: P,
     class: ErrorClass,
     first_success_unix_ts: u64,
     last_success_unix_ts: u64,
     confirmations: u32,
 }
 
-#[derive(Debug, Default, Clone)]
-struct EntryState {
-    durable: Option<PersistedEntry>,
-    candidates: Vec<Candidate>,
+#[derive(Debug, Clone)]
+struct EntryState<P> {
+    durable: Option<PersistedEntry<P>>,
+    candidates: Vec<Candidate<P>>,
     /// Unix ts of the last `invalidate`; suppresses re-recording during cooldown.
     invalidated_at_unix_ts: Option<u64>,
 }
 
-/// On-disk v2 format.
-#[derive(Debug, Serialize, Deserialize)]
-struct DiskFileV2 {
-    version: u8,
-    entries: HashMap<String, PersistedEntry>,
+impl<P> Default for EntryState<P> {
+    fn default() -> Self {
+        Self {
+            durable: None,
+            candidates: Vec::new(),
+            invalidated_at_unix_ts: None,
+        }
+    }
 }
 
-/// In-memory + on-disk cache of durable `StripProfile`s keyed by
-/// `"provider_id::model_id"`, plus non-persisted confirmation candidates.
+/// On-disk v2 format.
+#[derive(Debug, Serialize, Deserialize)]
+struct DiskFileV2<P> {
+    version: u8,
+    entries: HashMap<String, PersistedEntry<P>>,
+}
+
+/// In-memory + on-disk cache of durable trim profiles keyed by
+/// `"namespace::shape::model_id"`, plus non-persisted confirmation candidates.
 ///
+/// Generic over the profile ([`TrimAction`]) so one implementation serves every
+/// wire shape; a bare `CompatCache` is the completions shape.
 /// Thread-safe via `parking_lot::RwLock`. Hot-path reads (`get`) never block
 /// long — one `HashMap` lookup plus a TTL check.
-pub struct CompatCache {
-    inner: RwLock<HashMap<String, EntryState>>,
+pub struct CompatCache<P = StripProfile> {
+    inner: RwLock<HashMap<String, EntryState<P>>>,
     persist_path: PathBuf,
     /// Serializes concurrent atomic writes so spawned persist tasks never race
     /// on the same `*.tmp` file.
@@ -301,15 +404,26 @@ pub struct CompatCache {
     last_persist_unix_ts: AtomicU64,
 }
 
-impl CompatCache {
-    /// Load cache from disk.
+impl CompatCache<StripProfile> {
+    /// Load the completions-shaped cache.
+    ///
+    /// Kept as an inherent method on the specialised type so the historical
+    /// call sites (`CompatCache::load(path)`) stay inference-free, while other
+    /// shapes go through [`CompatCache::open`] with an explicit profile.
+    pub fn load(persist_path: PathBuf) -> Arc<Self> {
+        Self::open(persist_path)
+    }
+}
+
+impl<P: TrimAction> CompatCache<P> {
+    /// Load a cache of `P` from disk.
     ///
     /// * Missing file → empty cache.
     /// * v2 file → durable entries loaded (TTL enforced lazily in `get`).
     /// * v1 bare-map file / malformed file → logged, treated as empty, and the
     ///   legacy file is rewritten as an empty v2 file so a poisoned
     ///   `strip_tools` entry cannot survive a restart.
-    pub fn load(persist_path: PathBuf) -> Arc<Self> {
+    pub fn open(persist_path: PathBuf) -> Arc<Self> {
         let cache = Arc::new(Self {
             inner: RwLock::new(HashMap::new()),
             persist_path,
@@ -336,9 +450,9 @@ impl CompatCache {
             }
         };
 
-        match serde_json::from_str::<DiskFileV2>(&raw) {
+        match serde_json::from_str::<DiskFileV2<P>>(&raw) {
             Ok(file) if file.version == CACHE_FILE_VERSION => {
-                let mut entries: HashMap<String, EntryState> = HashMap::new();
+                let mut entries: HashMap<String, EntryState<P>> = HashMap::new();
                 for (key, persisted) in file.entries {
                     entries.insert(
                         key,
@@ -386,7 +500,7 @@ impl CompatCache {
                 fs::create_dir_all(parent)?;
             }
             let tmp = path.with_extension("json.tmp");
-            let serialized = serde_json::to_string_pretty(&DiskFileV2 {
+            let serialized = serde_json::to_string_pretty(&DiskFileV2::<P> {
                 version: CACHE_FILE_VERSION,
                 entries: HashMap::new(),
             })
@@ -409,7 +523,7 @@ impl CompatCache {
     /// Returns `None` when there is no durable profile or when the durable
     /// entry has outlived its TTL lease (re-probe required). Cheap: one
     /// `RwLock::read` + `HashMap::get`, no await.
-    pub fn get(&self, key: &str) -> Option<StripProfile> {
+    pub fn get(&self, key: &str) -> Option<P> {
         let now = now_unix_ts();
         let guard = self.inner.read();
         let state = guard.get(key)?;
@@ -464,7 +578,7 @@ impl CompatCache {
             let mut guard = self.inner.write();
             let state = guard.entry(key.to_string()).or_default();
             if let Some(durable) = state.durable.as_mut() {
-                durable.profile.last_success_unix_ts = now;
+                durable.profile.touch_last_success(now);
             }
         }
         self.persist_throttled();
@@ -481,7 +595,7 @@ impl CompatCache {
     /// * Otherwise this is one more confirmation for a matching candidate;
     ///   `COMPAT_CONFIRM_REQUIRED` confirmations within the window promote the
     ///   candidate to durable (immediate persist).
-    pub fn record_fallback_success(&self, key: &str, profile: StripProfile, class: ErrorClass) {
+    pub fn record_fallback_success(&self, key: &str, profile: P, class: ErrorClass) {
         if !class.is_learnable() {
             debug!(
                 key,
@@ -492,7 +606,7 @@ impl CompatCache {
         }
 
         let now = now_unix_ts();
-        let mut promote: Option<PersistedEntry> = None;
+        let mut promote: Option<PersistedEntry<P>> = None;
         {
             let mut guard = self.inner.write();
             let state = guard.entry(key.to_string()).or_default();
@@ -513,7 +627,7 @@ impl CompatCache {
             // Fast path already covered by the same (class, action): refresh.
             if let Some(durable) = state.durable.as_mut()
                 && durable.error_class() == class
-                && durable.profile.same_strip_action(&profile)
+                && durable.profile.same_action(&profile)
             {
                 let lease_expired = durable.expired_at(now);
                 durable.profile = profile.clone();
@@ -533,7 +647,7 @@ impl CompatCache {
                 let idx = state
                     .candidates
                     .iter()
-                    .position(|c| c.class == class && c.profile.same_strip_action(&profile));
+                    .position(|c| c.class == class && c.profile.same_action(&profile));
                 if let Some(i) = idx {
                     let cand = &mut state.candidates[i];
                     cand.confirmations += 1;
@@ -573,8 +687,7 @@ impl CompatCache {
                 info!(
                     key,
                     class = class.as_str(),
-                    fallback_generation = p.profile.fallback_generation,
-                    strip_tools = p.profile.strip_tools,
+                    action = p.profile.describe(),
                     confirmations = COMPAT_CONFIRM_REQUIRED,
                     "CompatCache: candidate promoted to durable profile (confirmed across distinct requests)",
                 );
@@ -615,7 +728,7 @@ impl CompatCache {
     }
 
     /// Snapshot durable entries for persistence.
-    fn durable_snapshot(&self) -> HashMap<String, PersistedEntry> {
+    fn durable_snapshot(&self) -> HashMap<String, PersistedEntry<P>> {
         let guard = self.inner.read();
         guard
             .iter()
@@ -659,8 +772,11 @@ impl CompatCache {
 }
 
 /// Atomic write helper — write to `*.tmp`, then `rename` over target.
-async fn write_atomic(path: &Path, durable: &HashMap<String, PersistedEntry>) -> io::Result<()> {
-    let file = DiskFileV2 {
+async fn write_atomic<P: TrimAction>(
+    path: &Path,
+    durable: &HashMap<String, PersistedEntry<P>>,
+) -> io::Result<()> {
+    let file = DiskFileV2::<P> {
         version: CACHE_FILE_VERSION,
         entries: durable.clone(),
     };
@@ -696,6 +812,25 @@ mod tests {
     use super::*;
     use std::env;
     use std::time::Duration;
+
+    #[test]
+    fn cache_keys_are_shape_qualified() {
+        // ADR-103 D7.3: same namespace + model, different wire shape, MUST
+        // yield different keys — otherwise a completed profile learned on
+        // `/chat/completions` would be trusted by the `/responses` chain.
+        assert_eq!(
+            cache_key("openai", SHAPE_COMPLETIONS, "gpt-5"),
+            "openai::completions::gpt-5"
+        );
+        assert_eq!(
+            cache_key("openai", SHAPE_RESPONSES, "gpt-5"),
+            "openai::responses::gpt-5"
+        );
+        assert_ne!(
+            cache_key("openai", SHAPE_COMPLETIONS, "gpt-5"),
+            cache_key("openai", SHAPE_RESPONSES, "gpt-5")
+        );
+    }
 
     fn tmp_path(name: &str) -> PathBuf {
         let mut p = env::temp_dir();
@@ -854,13 +989,13 @@ mod tests {
         // Give the spawned persist task a moment to flush.
         tokio::time::sleep(Duration::from_millis(80)).await;
         let reloaded = CompatCache::load(path.clone());
-        let got = reloaded.get(key).expect("durable entry reloaded from disk");
+        let got: StripProfile = reloaded.get(key).expect("durable entry reloaded from disk");
         assert!(got.strip_thinking);
         assert_eq!(got.fallback_generation, 3);
         // File must be v2, holding only the durable entry.
         let raw = fs::read_to_string(&path).unwrap();
-        let file: DiskFileV2 = serde_json::from_str(&raw).expect("file is v2 shape");
-        assert_eq!(file.version, 2);
+        let file: DiskFileV2<StripProfile> = serde_json::from_str(&raw).expect("file is v2 shape");
+        assert_eq!(file.version, 3);
         assert_eq!(file.entries.len(), 1);
         assert_eq!(file.entries[key].class, "request_schema");
         let _ = fs::remove_file(&path);
@@ -1008,8 +1143,8 @@ mod tests {
         assert!(cache.get("deepseek::deepseek-v4-flash").is_none());
         // Legacy file was proactively replaced by an empty v2 file.
         let raw = fs::read_to_string(&path).unwrap();
-        let file: DiskFileV2 = serde_json::from_str(&raw).expect("rewritten file is v2");
-        assert_eq!(file.version, 2);
+        let file: DiskFileV2<StripProfile> = serde_json::from_str(&raw).expect("rewritten file is v2");
+        assert_eq!(file.version, 3);
         assert!(file.entries.is_empty());
         let _ = fs::remove_file(&path);
     }
@@ -1024,7 +1159,7 @@ mod tests {
         let cache = CompatCache::load(path.clone());
         assert!(cache.get("any::key").is_none());
         let raw = fs::read_to_string(&path).unwrap();
-        let file: DiskFileV2 = serde_json::from_str(&raw).expect("rewritten file is v2");
+        let file: DiskFileV2<StripProfile> = serde_json::from_str(&raw).expect("rewritten file is v2");
         assert!(file.entries.is_empty());
         let _ = fs::remove_file(&path);
     }

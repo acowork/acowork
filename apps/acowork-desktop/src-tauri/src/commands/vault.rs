@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use tauri::State;
 
-use crate::gateway_client::{GenericMessageResponse, ModelCapabilities, OperationAck, VaultKeyEntry};
+use crate::gateway_client::{
+    GenericMessageResponse, ModelCapabilities, ModelProtocolIntent, ProviderAddResult,
+    ProviderUpdateResult, VaultKeyEntry,
+};
 use crate::state::AppState;
 
 /// One API key entry inside an `add_key` invoke call.
@@ -40,7 +43,9 @@ pub async fn add_key(
     model_capabilities: Option<HashMap<String, ModelCapabilities>>,
     compact_model: Option<String>,
     custom: Option<bool>,
-) -> Result<OperationAck, String> {
+    model_protocols: Option<ModelProtocolIntent>,
+    model_base_urls: Option<HashMap<String, String>>,
+) -> Result<ProviderAddResult, String> {
     let client = state.gateway.read().await;
     let caps = model_capabilities.unwrap_or_default();
     client
@@ -53,6 +58,8 @@ pub async fn add_key(
             &caps,
             compact_model.as_deref(),
             custom.unwrap_or(false),
+            &model_protocols.unwrap_or_default(),
+            &model_base_urls.unwrap_or_default(),
         )
         .await
         .map_err(|e| e.to_string())
@@ -94,7 +101,9 @@ pub async fn update_key(
     models: Option<Vec<String>>,
     model_capabilities: Option<HashMap<String, ModelCapabilities>>,
     compact_model: Option<String>,
-) -> Result<GenericMessageResponse, String> {
+    model_protocols: Option<ModelProtocolIntent>,
+    model_base_urls: Option<HashMap<String, String>>,
+) -> Result<ProviderUpdateResult, String> {
     let client = state.gateway.read().await;
     let caps = model_capabilities.unwrap_or_default();
     client
@@ -106,6 +115,8 @@ pub async fn update_key(
             models.as_deref(),
             &caps,
             compact_model.as_deref(),
+            &model_protocols.unwrap_or_default(),
+            &model_base_urls.unwrap_or_default(),
         )
         .await
         .map_err(|e| e.to_string())

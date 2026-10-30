@@ -6,7 +6,11 @@ import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ModelCapEditor } from "./ModelCapEditor";
+import { ModelProtocolEditor } from "./ModelProtocolEditor";
+import { ProtocolChip } from "./ProtocolChip";
 import { useTranslation } from "../../i18n/useTranslation";
+import { protocolOptionOf } from "../../lib/modelProtocol";
+import type { ModelProtocolState } from "./useModelProtocolState";
 
 /** A capability filter chip toggle. */
 export type CapabilityFilter = "tool_call" | "reasoning" | "image";
@@ -37,6 +41,15 @@ export interface ModelMultiSelectProps {
   /** Render the per-model capability editors (needs `caps` + `onCapsChange`).
    *  Off by default — only meaningful for local or custom providers. */
   showModelCapEditor?: boolean;
+
+  // ── ADR-103 D11 per-model protocol (optional) ──
+  /** Protocol selection state from `useModelProtocolState`. When provided, the
+   *  per-model cards grow a protocol dropdown / verify button, and the list
+   *  rows grow the `Ⓡ Responses` chip. */
+  protocols?: ModelProtocolState;
+  /** Provider id used for the "re-verify" call; without it the button is
+   *  disabled (an unsaved provider has nothing to probe). */
+  protocolProviderId?: string;
 
   // ── Compact model selector (optional) ──
   compactModel?: string;
@@ -116,6 +129,8 @@ export function ModelMultiSelect({
   expandedModels,
   onExpandedToggle,
   showModelCapEditor = false,
+  protocols,
+  protocolProviderId,
   compactModel,
   onCompactModelChange,
   showCompactModel = false,
@@ -313,6 +328,9 @@ export function ModelMultiSelect({
                     {m.reasoning && <span>🧠 {t("harness.reasoning")}</span>}
                     {m.tool_call && <span>🔧 {t("harness.tools")}</span>}
                     {m.input_modalities?.includes("image") && <span>🖼️ {t("harness.image")}</span>}
+                    {protocols && (
+                      <ProtocolChip badge={protocols.badgeFor(m)} />
+                    )}
                   </div>
                 )}
               </div>
@@ -341,27 +359,73 @@ export function ModelMultiSelect({
         </div>
       )}
 
-      {/* Per-model capability editors (local/custom providers only) */}
-      {showModelCapEditor &&
-        caps &&
-        onCapsChange &&
+      {/* Per-model cards: capability editor (local/custom providers only) and
+          the ADR-103 D11 protocol editor (every provider — a built-in provider
+          can host a Responses-capable model too). */}
+      {(showModelCapEditor || protocols) &&
         expandedModels &&
         onExpandedToggle &&
         selected.length > 0 && (
         <div className="mt-2">
           <label className="mb-1 block text-xs text-text-tertiary">
-            {t("harness.modelCapabilities")}
-            <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>
+            {showModelCapEditor ? t("harness.modelCapabilities") : t("harness.protocolSection")}
+            {showModelCapEditor && (
+              <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>
+            )}
           </label>
+          {/* D11: the request count must be visible before saving. Rendered in
+              the section header so both provider dialogs get it for free;
+              `models`/`requests` (not `count`) keeps i18next out of its plural
+              key convention. */}
+          {protocols && (() => {
+            const est = protocols.estimate(models);
+            if (est.models === 0) return null;
+            return (
+              <p className="mb-1 text-xs text-amber-500">
+                {t("harness.probeSaveCost", {
+                  models: est.models,
+                  requests: est.requests,
+                })}
+              </p>
+            );
+          })()}
           <div className="space-y-1">
             {selected.map((modelId) => {
-              const modelCaps = caps[modelId];
-              if (!modelCaps) return null;
+              const modelCaps = caps?.[modelId];
+              const mi = models.find((m) => m.id === modelId);
+              // A caps-only card without capability data has nothing to show.
+              if (!modelCaps && !protocols) return null;
+              const badge = protocols && mi ? protocols.badgeFor(mi) : undefined;
               return (
                 <ModelCapEditor
                   key={modelId}
                   modelId={modelId}
                   caps={modelCaps}
+                  headerHint={badge ? <ProtocolChip badge={badge} /> : undefined}
+                  protocolSection={
+                    protocols ? (
+                      <ModelProtocolEditor
+                        modelId={modelId}
+                        selection={
+                          protocols.selections[modelId] ?? protocolOptionOf(mi?.protocol_selected)
+                        }
+                        onSelectionChange={(next) => protocols.setSelection(modelId, next)}
+                        baseUrl={protocols.baseUrls[modelId] ?? ""}
+                        onBaseUrlChange={(next) => protocols.setBaseUrl(modelId, next)}
+                        showBaseUrl={protocols.needsBaseUrl(modelId)}
+                        badge={badge ?? { kind: "none" }}
+                        probe={mi?.protocol_probe}
+                        outcome={protocols.outcomes[modelId]}
+                        verifying={protocols.verifying === modelId}
+                        canVerify={Boolean(protocolProviderId)}
+                        onVerify={() => {
+                          if (protocolProviderId) {
+                            void protocols.verify(protocolProviderId, modelId);
+                          }
+                        }}
+                      />
+                    ) : undefined
+                  }
                   expanded={expandedModels.has(modelId)}
                   onToggle={() => onExpandedToggle(modelId)}
                   onUpdate={(field, value) => updateModelCap(modelId, field, value)}

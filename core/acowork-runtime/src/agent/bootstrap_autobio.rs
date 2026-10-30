@@ -258,6 +258,7 @@ mod tests {
             "search".into(),
             acowork_core::manifest::CapabilityDef {
                 description: "searches things".into(),
+                skills: Vec::new(),
                 input_schema: None,
                 output_schema: None,
             },

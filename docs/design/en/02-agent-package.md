@@ -253,6 +253,9 @@ runtime_version = "0.1.0"
 system = false
 dev = false
 
+# ADR-104: attribute tags (lowercase kebab, 2-32 chars, at most 12)
+labels = ["weather", "daily-life"]
+
 # Avatar: prefer bundled image (assets/avatar.png), else use built-in icon ("icon-05" / "5")
 # If neither is set, a random built-in icon is assigned on first install
 # avatar = "assets/avatar.png"
@@ -299,6 +302,17 @@ fallback_order = ["openai", "claude"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+# ADR-104: behaviour defaults for agent_config.json. All-empty means the table
+# is not written at all (= the author has no opinion).
+# Only behaviour knobs are allowed; security thresholds, host quotas and user
+# preferences are not in the whitelist.
+[config]
+temperature = 0.7
+context_window = 128000
+max_output_tokens = 8192
+max_iterations = 40
+compression_ratio_threshold = 0.9
+
 [memory]
 enabled = true
 retention_days = 90
@@ -326,9 +340,29 @@ auth_type = "bearer"
 max_results = 5
 score_threshold = 0.7
 
+# ADR-104: recommended MCP servers. Recommendation != installation - these land
+# in agent_mcp.json's `recommended` list; the user confirms install/activation
+# in the Tools panel (ADR-090).
+# The three forms are mutually exclusive: preset / hosted / transport+url.
+# Inline stdio is banned.
+
+[[mcp_servers]]
+preset = "brave-search"                 # platform preset id (Gateway registry)
+why = "fresh weather data from the web" # shown to the user verbatim
+required_secrets = ["BRAVE_API_KEY"]    # named on the card when missing
+tools = ["brave_web_search"]            # subset; the initial enabled set
+required = false                        # soft: never blocks; the gap shows in the Tools panel (row badged "required", missing key named)
+
+[[mcp_servers]]
+hosted = "memory"                       # Gateway-hosted service (pm / doc / memory)
+why = "remember the user's city"
+
 # Capabilities use map syntax
 [capabilities.query_weather]
 description = "Query weather information"
+# ADR-104: which skills implement this capability (many-to-many). A reference
+# to a skill the package does not ship is an error.
+skills = ["weather-query"]
 
 [capabilities.query_weather.input_schema]
 type = "object"
@@ -492,6 +526,29 @@ fn matches_permission(declared: &str, requested: &str) -> bool {
 | intent | `intent:send:com.example.calendar` | intent_send |
 | shell | (shell tool requires no permission declaration; controlled by Approval Gate) | shell |
 | identity | (identity_store available to system Agents only; authorized via `platform.system` declaration) | identity_store |
+
+### 3.3 The Declaration Surface (ADR-104)
+
+The manifest is a **capability declaration surface**. Four declarations, each with a defined meaning and landing path (see [ADR-104](../adr/en/ADR-104-agent-manifest-declaration-surface.md)):
+
+| Declaration | Meaning | Lands in |
+|---|---|---|
+| `[[tools]]` | builtin tools | this agent's builtin tool switches (`builtin_tools`) |
+| `[[mcp_servers]]` | **recommended** MCP servers | `agent_mcp.json.recommended`; the user confirms install/activation |
+| `[capabilities.<action>].skills` | which skills implement the capability | intent addressing + declaration-graph validation |
+| `[config]` | behaviour defaults for `agent_config.json` | fills `None` fields only; never overwrites a user value |
+
+**Recommendation != installation.** `[[mcp_servers]]` writes only `recommended` / `dismissed`, never `catalog` / `local` / `active_names`. After the user confirms, the server enters the **machine-wide MCP catalog** carrying an `origin` (`preset:<id>` / `agent-package:<agent_id>#<key>` / `user`); other agents see it but never auto-activate it.
+
+**Capability != skill.** A skill is an internal workflow and is not exposed; a capability is an outward contract other agents address through an intent. One capability may be implemented by several skills, and one skill may serve several capabilities.
+
+**Declaration-graph validation** (`AgentManifest::validate_graph`):
+
+1. Every `capabilities.*.skills` entry must resolve inside the package -> **error**; packaging (`acowork-sign`) and install (`acowork-node`) both refuse.
+2. Every skill `tool_dep` must be reachable from `[[tools]]` union `[[mcp_servers]].tools`, or belong to a platform-hosted MCP (`mcp_<server>__<tool>`, server in {memory, pm, doc}) -> otherwise a **warning** that never blocks.
+
+**Default != override.** `[config]` projects through `AgentManifest::config_defaults()` (`[config]` first, falling back to `[llm].temperature` / `[llm].context_window`), and `fill_if_empty()` fills only `None` fields, idempotently. `[config].max_output_tokens` is a **config-level ceiling**; `[llm].max_tokens` remains a **request-level override** - two independent channels.
+
 
 ## 4. Design Decision Records
 

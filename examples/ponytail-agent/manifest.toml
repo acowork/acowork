@@ -10,6 +10,7 @@ description = "The best code is the code you never wrote."
 author = "DietrichGebert"
 runtime_version = "0.1.0"
 dev = false
+labels = ["code-review", "legacy-code"]
 avatar = "assets/avatar.png"
 
 identity_deps = ["language", "timezone"]
@@ -85,6 +86,15 @@ fallback_order = ["openai", "claude"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+
+# ADR-104: behaviour defaults for agent_config.json. Seeded only into
+# fields the user has not set; never overwrites a user value.
+[config]
+temperature = 0.3
+context_window = 200000
+max_output_tokens = 8192
+max_iterations = 40
+
 [memory]
 enabled = true
 retention_days = 180
@@ -95,6 +105,13 @@ idle_timeout_secs = 3600
 
 [sandbox]
 enabled = false
+
+# ADR-104: recommended MCP servers. Recommendation, not installation —
+# the user confirms install/activation in the Tools panel (ADR-090).
+
+[[mcp_servers]]
+preset = "context7"
+why = "Ground review comments in real, version-specific library docs"
 
 [capabilities.code_review]
 description = "Perform a thorough code review with actionable feedback"

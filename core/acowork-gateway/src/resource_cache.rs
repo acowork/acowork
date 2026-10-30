@@ -438,6 +438,7 @@ pub(crate) fn build_provider_list_item(
                     knowledge_cutoff: None,
                     default_reasoning_effort: None,
                     thinking_mode: None,
+                    reasoning_efforts: None,
                 }
             } else {
                 crate::http::models_api::lookup_model_capabilities(name, model_id)
@@ -456,12 +457,16 @@ pub(crate) fn build_provider_list_item(
                         knowledge_cutoff: None,
                         default_reasoning_effort: None,
                         thinking_mode: None,
+                        reasoning_efforts: None,
                     })
             };
             ProviderModelEntry {
                 id: model_id.clone(),
                 capabilities,
                 max_output_tokens_limit: max_output_tokens,
+                protocol_type: None,
+                base_url: None,
+                protocol_probe: None,
             }
         })
         .collect();
@@ -661,8 +666,12 @@ mod tests {
                         knowledge_cutoff: Some("2025-04".to_string()),
                         default_reasoning_effort: None,
                         thinking_mode: None,
+                        reasoning_efforts: None,
                     },
                     max_output_tokens_limit: 32768,
+                    protocol_type: None,
+                    base_url: None,
+                    protocol_probe: None,
                 }],
             }],
         };
@@ -789,6 +798,9 @@ mod tests {
                                 ..fixture_min_caps()
                             },
                             max_output_tokens_limit: 32_768,
+                            protocol_type: None,
+                            base_url: None,
+                            protocol_probe: None,
                         },
                         ProviderModelEntry {
                             id: "llama3:8b".to_string(),
@@ -797,6 +809,9 @@ mod tests {
                                 ..fixture_min_caps()
                             },
                             max_output_tokens_limit: 16_384,
+                            protocol_type: None,
+                            base_url: None,
+                            protocol_probe: None,
                         },
                     ],
                 },
@@ -813,6 +828,9 @@ mod tests {
                             ..fixture_min_caps()
                         },
                         max_output_tokens_limit: 32_768,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     }],
                 },
             ],
@@ -835,6 +853,7 @@ mod tests {
             knowledge_cutoff: None,
             default_reasoning_effort: None,
             thinking_mode: None,
+            reasoning_efforts: None,
         }
     }
 

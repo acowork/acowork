@@ -810,6 +810,13 @@ impl RuntimeHttpServer {
             // usable / failed + reason). The Desktop Tools panel polls this
             // after opening a preset server's toggle.
             .route("/agents/{id}/mcp-ensure/{name}", get(get_agent_mcp_ensure))
+            // ADR-104: dismiss / restore one manifest recommendation. The
+            // recommendation itself is package-owned (rewritten every boot);
+            // this endpoint persists only the user's dismissal flag.
+            .route(
+                "/agents/{id}/mcp-recommendations/{key}",
+                put(put_agent_mcp_recommendation),
+            )
             // ADR-069: per-tool MCP opt-in. GET returns the **full**
             // per-server tool list (name + enabled + description) that
             // the Desktop Tools panel renders directly — the frontend
@@ -944,6 +951,13 @@ struct ListSessionsQuery {
     /// Page size (default 20, capped at 200).
     #[serde(default)]
     size: Option<u32>,
+    /// ADR-038: `true` returns only sessions that are `Active` in this
+    /// Runtime right now (resident in the in-memory session map) — the
+    /// desktop tab strip's restore source after a client restart. The set of
+    /// open sessions is Runtime truth, so a client derives it from here
+    /// instead of persisting it. Default `false` = the ordinary history list.
+    #[serde(default)]
+    active: Option<bool>,
 }
 
 /// `GET /sessions` — full session list.
@@ -979,13 +993,14 @@ async fn list_sessions(
 ) -> Result<Json<serde_json::Value>, SessionHttpError> {
     let page = query.page.unwrap_or(1).max(1);
     let size = query.size.unwrap_or(20).clamp(1, 200);
+    let active_only = query.active.unwrap_or(false);
     let scope = crate::http::session_control::scope_from_headers(&headers);
 
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.session_metadata.lock().await;
     let svc = svc.as_ref().ok_or_else(session_not_ready)?;
     let resp = svc
-        .list_sessions(page, size, &scope)
+        .list_sessions(page, size, &scope, active_only)
         .await
         .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(
@@ -2872,6 +2887,7 @@ async fn get_agent_tools(
             "tools": [],
             "mcp_servers": [],
             "mcp_servers_defs": [],
+            "recommended": [],
         })));
     }
     let svc = state
@@ -2893,6 +2909,12 @@ async fn get_agent_tools(
         "tools": resp.tools,
         "mcp_servers": resp.mcp_servers,
         "mcp_servers_defs": resp.mcp_servers_defs,
+        // ADR-104: the package's `[[mcp_servers]]` recommendations. The
+        // Desktop Tools panel renders the recommendation group from THIS
+        // endpoint (one round-trip for the whole panel), so dropping the
+        // field here made the group invisible even though the use case
+        // had already derived the views.
+        "recommended": resp.recommended,
     })))
 }
 
@@ -2947,6 +2969,10 @@ async fn get_agent_mcp_servers(
     Ok(Json(serde_json::json!({
         "agent_id": resp.agent_id,
         "active_servers": resp.active_servers,
+        // ADR-104: same derivation as the `/tools` route — both routes must
+        // carry the recommendation views, or they disagree about what the
+        // package recommends.
+        "recommended": resp.recommended,
     })))
 }
 
@@ -3058,11 +3084,86 @@ async fn put_agent_mcp_servers(
                 "unknown": unknown,
             })),
         )),
+        Err(crate::usecases::AgentToolsError::UnknownRecommendation(key)) => Err((
+            // Stale client from a previous package version; it refetches.
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "unknown MCP recommendation key",
+                "key": key,
+            })),
+        )),
         Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "error": format!("failed to persist agent_mcp.json: {}", msg),
             })),
+        )),
+    }
+}
+
+/// `PUT /agents/{id}/mcp-recommendations/{key}` — dismiss or restore a
+/// manifest-declared MCP recommendation (ADR-104).
+///
+/// Body: `{"dismissed": true|false}`. Nothing else is writable: the
+/// recommendation list is projected from `manifest.toml` on every start, so
+/// accepting package fields from the client would create a second, editable
+/// copy of a package-owned declaration.
+///
+/// Returns the same payload as `GET /mcp-servers` (including the derived
+/// recommendation views) so the client re-renders from one authoritative
+/// snapshot instead of patching its local copy — the five-state lifecycle
+/// stays owned by the Runtime.
+async fn put_agent_mcp_recommendation(
+    State(state): State<HttpState>,
+    Path((id, key)): Path<(String, String)>,
+    Json(body): Json<crate::usecases::agent_tools::PutMcpRecommendationBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !state.instance_matches(&id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "instance_id mismatch: path '{}' does not address this runtime instance '{}'",
+                    id, state.instance_id
+                ),
+            })),
+        ));
+    }
+    let svc = state
+        .agent_tools
+        .lock()
+        .await
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "agent tools service not ready"
+            })),
+        ))?
+        .clone();
+
+    match svc.put_mcp_recommendation(&id, &key, body).await {
+        Ok(resp) => Ok(Json(serde_json::json!({
+            "agent_id": resp.agent_id,
+            "active_servers": resp.active_servers,
+            "recommended": resp.recommended,
+        }))),
+        Err(crate::usecases::AgentToolsError::UnknownRecommendation(key)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "unknown MCP recommendation key",
+                "key": key,
+            })),
+        )),
+        Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("failed to persist agent_mcp.json: {}", msg),
+            })),
+        )),
+        Err(other) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": other.to_string() })),
         )),
     }
 }
@@ -3193,6 +3294,14 @@ async fn put_agent_mcp_tools(
             Json(serde_json::json!({
                 "error": "unknown MCP server names",
                 "unknown": unknown,
+            })),
+        )),
+        Err(crate::usecases::AgentToolsError::UnknownRecommendation(key)) => Err((
+            // Stale client from a previous package version; it refetches.
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "unknown MCP recommendation key",
+                "key": key,
             })),
         )),
         Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
@@ -3355,6 +3464,14 @@ async fn put_agent_builtin_tools(
                 "tools": resp.tools,
             })))
         }
+        Err(crate::usecases::AgentToolsError::UnknownRecommendation(key)) => Err((
+            // Stale client from a previous package version; it refetches.
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "unknown MCP recommendation key",
+                "key": key,
+            })),
+        )),
         Err(crate::usecases::AgentToolsError::Persistence(msg)) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -4800,6 +4917,15 @@ mod tests {
             ],
             local: vec![],
             active_names: None,
+            // ADR-104: one package-declared recommendation, so the HTTP
+            // response can be checked for the field the Tools panel reads.
+            recommended: vec![acowork_core::manifest::McpServerDecl {
+                preset: Some("context7".to_string()),
+                required: true,
+                why: Some("docs".to_string()),
+                ..Default::default()
+            }],
+            dismissed: Vec::new(),
         };
         crate::agent_config::save_agent_mcp_config(std::path::Path::new(&temp_dir), &initial_mcp)
             .unwrap();
@@ -4924,6 +5050,32 @@ mod tests {
         assert_eq!(defs[0]["active"], true);
         assert_eq!(defs[1]["name"], "search");
         assert_eq!(defs[1]["active"], false);
+
+        // 3c) ADR-104: the response carries the package's `[[mcp_servers]]`
+        //     recommendations. The Desktop Tools panel renders the whole
+        //     panel — builtin tools, MCP toggles AND the recommendation
+        //     group — from THIS one round-trip, so the handler dropping
+        //     `recommended` made the group invisible even though the use
+        //     case had already derived the views.
+        let recommended = tools["recommended"].as_array().unwrap();
+        assert_eq!(recommended.len(), 1, "the declared recommendation listed");
+        assert_eq!(recommended[0]["key"], "context7");
+        assert_eq!(recommended[0]["source"], "preset");
+        assert_eq!(recommended[0]["required"], true);
+        assert_eq!(recommended[0]["why"], "docs");
+        // context7 was ticked in step 1 → the row is already active.
+        assert_eq!(recommended[0]["state"], "active");
+
+        // 3d) The dedicated route must agree with `/tools` — two routes
+        //     answering "what does this package recommend" with different
+        //     lists is how the two views drift apart.
+        let resp = client.get(&url).send().await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["recommended"].as_array().unwrap().len(),
+            1,
+            "GET /mcp-servers carries the same recommendation rows"
+        );
 
         // 5) PUT mcp-servers with an unknown name → 400 (not 200 with
         //    silent drop, which was the pre-fix symptom at the

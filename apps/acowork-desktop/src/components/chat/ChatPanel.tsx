@@ -10,6 +10,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import type { ToolApprovalNeededEvent, AttachedItem } from "../../lib/types";
 import { isProcessing, getProcessingPhase } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { reasoningLevelsFor } from "../../lib/reasoningEfforts";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { blobToBase64 } from "./clipboardImageExt";
@@ -86,6 +87,11 @@ import { AttachedContextChips } from "./AttachedContextChips";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
+import {
+    deriveProtocolBadge,
+    showsResponsesMark,
+    strippedFieldsText,
+} from "../../lib/modelProtocol";
 
 // CHAT_BOTTOM_THRESHOLD_PX removed - pinned-to-bottom detection is now
 // owned by useScrollController's state machine (PIN_THRESHOLD_PX).
@@ -669,6 +675,16 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // the "X seconds until auto-reconnect" countdown.
   const mqttStaleSince = useChatStore((s) => s.staleSince);
   const availableModels = useChatStore((s) => s.availableModels);
+  // The depth levels the current model declares (models.dev
+  // `reasoning_options`). Undefined = unknown (custom model) -> the generic
+  // level set.
+  const currentModelReasoningLevels = useMemo(() => {
+    if (!currentModel || !currentProvider) return undefined;
+    const entry = availableModels.find(
+      (m) => m.name === currentModel && m.provider === currentProvider,
+    );
+    return entry?.reasoning_efforts;
+  }, [availableModels, currentModel, currentProvider]);
   // Accounts per provider — feeds the model menu's account level.
   const providerAccounts = useChatStore((s) => s.providerAccounts);
   // Mirrored from this agent's `SessionConfig.llm_availability` retained
@@ -2702,6 +2718,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                   onChange={(e) => selectedAgentId && setReasoningEffort(e, selectedAgentId)}
                   btnId="effort"
                   readOnly={readOnlySession}
+                  supportedLevels={currentModelReasoningLevels}
                 />
               )}
               {/* Workspace button */}
@@ -3251,6 +3268,56 @@ export function ModelMenu({
                             {m.tool_call && <Wrench size={10} className="text-text-tertiary" />}
                             {m.reasoning && <Brain size={10} className="text-purple-400" />}
                             {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
+                            {/* ADR-103 D11 position 2 — the `R` letter badge.
+                                A letter has no meaning for a screen reader, so
+                                it always carries title + aria-label. The badge
+                                is read-only: switching protocol goes through
+                                the per-model dropdown (D11 MUST NOT). */}
+                            {(() => {
+                              // `m` is structurally typed by
+                              // `groupModelsByProvider`; hand the four protocol
+                              // fields over explicitly.
+                              const badge = deriveProtocolBadge({
+                                shape: (m as Partial<ModelEntry>).shape,
+                                protocol_selected: (m as Partial<ModelEntry>).protocol_selected,
+                                protocol_active: (m as Partial<ModelEntry>).protocol_active,
+                                protocol_probe: (m as Partial<ModelEntry>).protocol_probe,
+                              });
+                              if (!showsResponsesMark(badge)) return null;
+                              const stripped = strippedFieldsText(badge);
+                              const label =
+                                badge.kind === "verified"
+                                  ? t("harness.probeVerifiedTip")
+                                  : badge.kind === "degraded"
+                                    ? stripped
+                                      ? t("harness.probeDegradedTipFields", {
+                                          fields: stripped,
+                                        })
+                                      : t("harness.probeDegradedTip")
+                                    : t("harness.probeDeclaredTip");
+                              return (
+                                <span
+                                  role="img"
+                                  // A bare letter is meaningless to a screen
+                                  // reader (D11 accessibility rule).
+                                  aria-label={t("chatPanel.modelTagResponses")}
+                                  title={label}
+                                  className={
+                                    badge.kind === "declared"
+                                      ? "pl-0.5 text-9 font-semibold text-text-tertiary"
+                                      : "pl-0.5 text-9 font-semibold text-text-secondary"
+                                  }
+                                >
+                                  R
+                                  {badge.kind === "degraded" && (
+                                    <span
+                                      aria-hidden="true"
+                                      className="ml-0.5 inline-block h-1 w-1 rounded-full bg-amber-500 align-middle"
+                                    />
+                                  )}
+                                </span>
+                              );
+                            })()}
                           </span>
                         </span>
                         {/* Trailing cluster. The check box is a fixed w-3 slot
@@ -3369,7 +3436,17 @@ export function ModelMenu({
   );
 }
 
-/** Reasoning effort selector — popup with Auto/Off/Low/Medium/High */
+/** Reasoning effort selector.
+ *
+ * The depth levels offered are the ones the current model declares
+ * (models.dev `reasoning_options[].values`); a model without a declaration
+ * (custom provider) gets the generic set. `Auto` and `Off` are always
+ * offered — they carry no depth level, so they are valid for every model.
+ *
+ * `Off` means "do not control reasoning": the reasoning parameter is
+ * omitted from the request (the backend never sends `none`, which some
+ * vendors reject with HTTP 400).
+ */
 export function ReasoningEffortMenu({
   effort,
   onChange,
@@ -3377,6 +3454,7 @@ export function ReasoningEffortMenu({
   wrapperRef: externalRef,
   btnId,
   readOnly,
+  supportedLevels,
 }: {
   effort: string | null;
   onChange: (effort: string) => void;
@@ -3387,6 +3465,9 @@ export function ReasoningEffortMenu({
   btnId?: string;
   /** ADR-076 §决策 4: session is not writable by the signed-in account. */
   readOnly?: boolean;
+  /** The depth levels the current model supports (models.dev
+   *  `reasoning_options`). Undefined = unknown -> the generic level set. */
+  supportedLevels?: readonly string[];
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -3394,12 +3475,22 @@ export function ReasoningEffortMenu({
   const ref = useMergedRef(internalRef, externalRef);
 
   // Values are lowercase to match backend ReasoningEffort serde serialization.
+  const LEVEL_COLORS: Record<string, string> = {
+    minimal: "#0ea5e9",
+    low: "#3b82f6",
+    medium: "#8b5cf6",
+    high: "#ef4444",
+    xhigh: "#f97316",
+    max: "#dc2626",
+  };
   const OPTIONS: { value: string; label: string; color: string }[] = [
     { value: "auto", label: t("chatPanel.reasoningAuto"), color: "#22c55e" },
     { value: "off", label: t("chatPanel.reasoningOff"), color: "#9ca3af" },
-    { value: "low", label: t("chatPanel.reasoningLow"), color: "#3b82f6" },
-    { value: "medium", label: t("chatPanel.reasoningMedium"), color: "#8b5cf6" },
-    { value: "high", label: t("chatPanel.reasoningHigh"), color: "#ef4444" },
+    ...reasoningLevelsFor(supportedLevels).map((level) => ({
+      value: level,
+      label: t(`chatPanel.reasoning${level[0].toUpperCase()}${level.slice(1)}`),
+      color: LEVEL_COLORS[level] ?? "#3b82f6",
+    })),
   ];
 
   const currentOpt = OPTIONS.find((o) => o.value === effort);

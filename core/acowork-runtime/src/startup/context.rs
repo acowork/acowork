@@ -74,6 +74,13 @@ pub(crate) struct AgentBootContext {
     /// `build_provider_for` during 429-retry / session-resume.
     pub compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
 
+    /// ADR-103 D8/S7 trim cache for the `/responses` shape (persisted to
+    /// `{work_dir}/config/provider_compat_responses.json`). Threaded exactly
+    /// like `compat_cache`, but never mixed with it: the two files hold
+    /// different payload types.
+    pub responses_compat_cache:
+        Option<Arc<crate::providers::responses_compat::ResponsesCompatCache>>,
+
     // Embedding provider (None when Tier-1 ONNX provider construction failed —
     // memory then degrades to text-only search via memory::manager fallback)
     pub emb_provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>>,

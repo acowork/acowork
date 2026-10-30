@@ -58,6 +58,7 @@ function renderRow(r: ChatMessageRow, meta: Partial<RowProps> = {}): string {
     chatAnswered: new Set<string>(),
     onOpenExec: () => {},
     onAnswerCard: () => {},
+    onOpenAttachment: () => {},
     ...meta,
   }
   return renderToStaticMarkup(<RowView {...props} />)

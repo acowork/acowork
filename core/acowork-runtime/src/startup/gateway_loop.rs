@@ -1355,6 +1355,29 @@ fn spawn_chat_router_drain(
     });
 }
 
+/// The degraded route's one-shot brief for a fresh execution session.
+///
+/// `None` means "there is nothing to say": the router captured no excerpt, or
+/// the turn had neither words nor files — the caller then leaves
+/// `params.message` exactly as delivered. A turn that carried files but no
+/// text still gets the excerpt: the router failing to decide may not surface
+/// as an empty message in the execution session, because a human who attached
+/// something instead of typing still asked for work.
+fn degraded_brief(text: &str, has_attachments: bool, excerpt: Option<&str>) -> Option<String> {
+    const HEADER: &str =
+        "[recent chat — the routing assistant was unavailable; the conversation so far]";
+    let excerpt = excerpt?;
+    let text = text.trim();
+    if text.is_empty() && !has_attachments {
+        return None;
+    }
+    Some(if text.is_empty() {
+        format!("{HEADER}\n{excerpt}")
+    } else {
+        format!("{text}\n\n{HEADER}\n{excerpt}")
+    })
+}
+
 /// Deliver a queued turn according to what the router decided.
 ///
 /// The router owns a turn it `Handled` — it either answered it or dispatched it,
@@ -1399,23 +1422,30 @@ pub(crate) async fn finish_chat_turn(
             // new session without re-introducing another task's noise.
             // `envelope` is an owned Box and this arm is its only consumer
             // — an in-place edit is free.
-            if let (Some(excerpt), Some(text)) = (
-                chat_excerpt,
-                envelope
-                    .params
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string),
-            ) && !text.trim().is_empty()
+            //
+            // An attachment-only turn has no text to prefix, and it must
+            // still get the excerpt: "the router could not decide" may not
+            // degrade into "the execution session received an empty message"
+            // merely because the human attached instead of typing.
+            //
+            // Straight through the router's own reader rather than a second
+            // reading of the raw param: the raw array and "did this turn carry
+            // files?" disagree on a degenerate element (`[{}]`), and Block C,
+            // the decision log and this brief must never disagree about it.
+            let has_attachments =
+                !crate::agent::chat_router::runner::turn_attachments(&envelope).is_empty();
+            let text = envelope
+                .params
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .to_string();
+            if let Some(brief) = degraded_brief(&text, has_attachments, chat_excerpt.as_deref())
                 && let Some(map) = envelope.params.as_object_mut()
             {
-                map.insert(
-                    "message".to_string(),
-                    serde_json::json!(format!(
-                        "{text}\n\n[recent chat — the routing assistant was unavailable; the conversation so far]\n{excerpt}"
-                    )),
-                );
-            }            // ADR-099 revision: a chat-sourced human message degraded by the
+                map.insert("message".to_string(), serde_json::json!(brief));
+            }
+            // ADR-099 revision: a chat-sourced human message degraded by the
             // router gets a FRESH execution session, not the mapped one — the
             // mapping is not a semantic verdict and continuing an unrelated old
             // task on a guess is worse than starting a new one. PM tasks and
@@ -1729,6 +1759,29 @@ mod tests {
     use super::*;
     use crate::agent::inbound::InboundMessage;
     use crate::mqtt::control_handler::ControlAction;
+
+    /// A router that fell back still owes the fresh execution session a
+    /// brief. The turn that most needs it is the one with no text at all: the
+    /// human attached a file and typed nothing, so "excerpt only" is the
+    /// difference between a briefed session and an empty message.
+    #[test]
+    fn a_degraded_attachment_only_turn_still_carries_the_excerpt() {
+        let brief = degraded_brief("", true, Some("U: (nothing)\nA: hi")).unwrap();
+        assert!(brief.starts_with("[recent chat"));
+        assert!(brief.ends_with("A: hi"));
+        assert!(!brief.starts_with('\n'));
+
+        // Text on the turn prefixes the excerpt; whitespace is not text.
+        assert_eq!(
+            degraded_brief("fix the build", false, Some("tail")).unwrap(),
+            "fix the build\n\n[recent chat — the routing assistant was unavailable; the conversation so far]\ntail"
+        );
+        assert!(degraded_brief("  \n ", true, Some("tail")).is_some());
+
+        // Nothing to say: no excerpt captured, or no excerpt and no files.
+        assert!(degraded_brief("hello", false, None).is_none());
+        assert!(degraded_brief("   ", false, Some("tail")).is_none());
+    }
 
     /// ADR-076 §决策 4: after the second wave of the HTTP migration the MQTT
     /// control plane holds exactly one variant — `Intent` — and it is

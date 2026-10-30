@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 
+use acowork_core::manifest::McpServerDecl;
 use acowork_core::protocol::McpServerConfigDef;
 
 /// Per-agent MCP config with dual-list format.
@@ -38,6 +39,28 @@ pub struct AgentMcpConfig {
     /// (per-agent activation toggle in the Desktop Tools panel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_names: Option<Vec<String>>,
+    /// MCP servers the **package author** recommends (ADR-104), projected
+    /// verbatim from `manifest.toml`'s `[[mcp_servers]]` on every Runtime
+    /// start.
+    ///
+    /// This list is a *projection*, not state: it is rewritten from the
+    /// manifest each boot (so an upgraded package refreshes its own
+    /// recommendations) and it never grants anything. A server in here is
+    /// exactly as usable as one the user typed into the Tools panel — it
+    /// still has to be installed (preset scans) or activated per agent.
+    /// Keeping it out of `catalog` / `local` is what makes "recommended"
+    /// survive a user's delete of the catalog entry: the recommendation is
+    /// re-derived from the package, the installation is not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommended: Vec<McpServerDecl>,
+    /// Recommendation keys (`McpServerDecl::key`) the user dismissed with
+    /// "ignore" in the Tools panel. Purely a UI state with no runtime
+    /// effect: the entry stays in `recommended` (it is manifest-derived and
+    /// therefore not ours to delete) and the panel hides it. Kept so
+    /// dismissal survives a restart, which is the whole point of a
+    /// dismissal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed: Vec<String>,
 }
 
 impl AgentMcpConfig {
@@ -105,6 +128,39 @@ impl AgentMcpConfig {
             .into_iter()
             .filter(|s| active.contains(s.name.as_str()))
             .collect()
+    }
+
+    /// Manifest-declared tool whitelist per recommended server, as
+    /// `server_key -> [tool names]`.
+    ///
+    /// Consumed by `merge_mcp_tools_config` to seed `agent_mcp_tools.json`:
+    /// a server with a non-empty whitelist starts with exactly those tools
+    /// enabled (ADR-104 replaced the hardcoded `PM_DEFAULT_ENABLED_TOOLS`
+    /// with this package-declared list). A server with no entry, or an
+    /// empty whitelist, keeps the previous "everything enabled, user opts
+    /// out" baseline — an empty whitelist is "no opinion", not "no tools".
+    pub fn recommended_tools_map(&self) -> IndexMap<String, Vec<String>> {
+        let mut out: IndexMap<String, Vec<String>> = IndexMap::new();
+        for decl in &self.recommended {
+            let Some(key) = decl.key() else { continue };
+            if decl.tools.is_empty() {
+                continue;
+            }
+            out.insert(key.to_string(), decl.tools.clone());
+        }
+        out
+    }
+
+    /// True when the user dismissed the recommendation with this key.
+    pub fn is_dismissed(&self, key: &str) -> bool {
+        self.dismissed.iter().any(|d| d == key)
+    }
+
+    /// Recommendation with this key, if the package declares one.
+    pub fn recommendation(&self, key: &str) -> Option<&McpServerDecl> {
+        self.recommended
+            .iter()
+            .find(|d| d.key() == Some(key))
     }
 }
 
@@ -389,6 +445,132 @@ pub fn save_agent_config(work_dir: &Path, cfg: &AgentConfig) -> Result<(), Strin
     );
 
     Ok(())
+}
+
+// ── Manifest → agent_config.json seeding (ADR-104) ─────────────────────
+
+impl AgentConfig {
+    /// Apply a manifest's declared defaults to every field this file owns.
+    ///
+    /// **The only place a manifest value enters `agent_config.json`.** The
+    /// manifest is a *seed*, not a second source of truth: a field the file
+    /// already sets is never touched, so the user's choice always wins and
+    /// this function is idempotent (calling it twice changes nothing the
+    /// second time).
+    ///
+    /// Returns `true` when at least one field was filled, i.e. the caller
+    /// should persist.
+    pub fn seed_from_manifest(
+        &mut self,
+        defaults: &acowork_core::manifest::ManifestConfigDefaults,
+    ) -> bool {
+        let mut changed = false;
+        fill_if_empty(&mut self.temperature, defaults.temperature, &mut changed);
+        fill_if_empty(
+            &mut self.context_window,
+            defaults.context_window,
+            &mut changed,
+        );
+        fill_if_empty(
+            &mut self.max_output_tokens,
+            defaults.max_output_tokens,
+            &mut changed,
+        );
+        fill_if_empty(
+            &mut self.max_iterations,
+            defaults.max_iterations,
+            &mut changed,
+        );
+        fill_if_empty(
+            &mut self.compression_ratio_threshold,
+            defaults.compression_ratio_threshold,
+            &mut changed,
+        );
+        changed
+    }
+}
+
+/// The "manifest never overwrites a user value" invariant, in one place.
+fn fill_if_empty<T: Copy>(slot: &mut Option<T>, value: Option<T>, changed: &mut bool) {
+    if slot.is_none()
+        && let Some(v) = value
+    {
+        *slot = Some(v);
+        *changed = true;
+    }
+}
+
+/// Load `agent_config.json`, seed it from the manifest, persist when the
+/// seed changed anything. Mirrors `seed_agent_config_from_manifest` for
+/// call sites that do not already hold a loaded config (install, package
+/// upgrade). The startup path calls [`AgentConfig::seed_from_manifest`]
+/// directly because it also resolves the non-manifest fallbacks.
+pub fn seed_agent_config_from_manifest(
+    work_dir: &Path,
+    manifest: &acowork_core::manifest::AgentManifest,
+) -> Result<bool, String> {
+    let defaults = manifest.config_defaults();
+    if defaults.is_empty() {
+        return Ok(false);
+    }
+    let mut cfg = load_agent_config(work_dir)?.unwrap_or_default();
+    if !cfg.seed_from_manifest(&defaults) {
+        return Ok(false);
+    }
+    save_agent_config(work_dir, &cfg)?;
+    tracing::info!(
+        work_dir = %work_dir.display(),
+        "Seeded agent_config.json from manifest [config]"
+    );
+    Ok(true)
+}
+
+/// Project the manifest's `[[mcp_servers]]` into `agent_mcp.json`'s
+/// `recommended` list.
+///
+/// The list is *derived state*: it is rewritten on every call so a package
+/// upgrade refreshes its own recommendations, and entries the user dismissed
+/// are dropped from `dismissed` as soon as the package stops declaring them
+/// (otherwise a stale key would silence a future recommendation forever).
+/// Nothing else in the file is touched — `catalog` / `local` / `active_names`
+/// keep their own owners (ADR-090).
+///
+/// Returns `true` when the file changed and was persisted.
+pub fn project_recommended_mcp_servers(
+    work_dir: &Path,
+    manifest: &acowork_core::manifest::AgentManifest,
+) -> Result<bool, String> {
+    let mut cfg = load_agent_mcp_config(work_dir)?.unwrap_or_default();
+
+    let declared: Vec<McpServerDecl> = manifest
+        .mcp_servers
+        .iter()
+        .filter(|d| d.key().is_some())
+        .cloned()
+        .collect();
+    let declared_keys: std::collections::HashSet<&str> =
+        declared.iter().filter_map(|d| d.key()).collect();
+    let dismissed: Vec<String> = cfg
+        .dismissed
+        .iter()
+        .filter(|k| declared_keys.contains(k.as_str()))
+        .cloned()
+        .collect();
+
+    if cfg.recommended == declared && cfg.dismissed == dismissed {
+        return Ok(false);
+    }
+
+    cfg.recommended = declared;
+    cfg.dismissed = dismissed;
+    save_agent_mcp_config(work_dir, &cfg)?;
+    tracing::info!(
+        work_dir = %work_dir.display(),
+        recommended = cfg.recommended.len(),
+        dismissed = cfg.dismissed.len(),
+        "Projected manifest [[mcp_servers]] into agent_mcp.json"
+    );
+    Ok(true)
 }
 
 // ── Per-agent builtin-tools config (ADR-029) ───────────────────────────
@@ -849,6 +1031,8 @@ pub fn load_agent_mcp_config(work_dir: &Path) -> Result<Option<AgentMcpConfig>, 
             catalog: old_servers,
             local: Vec::new(),
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         // Auto-save in the new format so we don't need to migrate again
         let _ = save_agent_mcp_config(work_dir, &migrated);
@@ -977,6 +1161,10 @@ pub fn save_agent_mcp_config_catalog(
         catalog: catalog_servers.to_vec(),
         local: current.local,
         active_names,
+        // Manifest-derived projection: owned by
+        // `project_recommended_mcp_servers`, never by the catalog push.
+        recommended: current.recommended,
+        dismissed: current.dismissed,
     };
 
     save_agent_mcp_config(work_dir, &updated)
@@ -1059,28 +1247,6 @@ fn mcp_tools_config_path(work_dir: &Path) -> PathBuf {
     work_dir.join("config").join(AGENT_MCP_TOOLS_CONFIG_FILE)
 }
 
-/// Backend policy: which tools in a system-injected MCP server default
-/// to enabled for a freshly-installed agent. **The frontend never reads
-/// or references this constant** — it lives entirely on the backend
-/// side of the contract and is materialised into
-/// `agent_mcp_tools.json` by `merge_mcp_tools_config` at startup.
-pub const PM_DEFAULT_ENABLED_TOOLS: &[&str] = &[
-    "pm_list_my_tasks",
-    "pm_claim_task",
-    "pm_submit_task",
-    "pm_check_task",
-];
-
-/// Look up the default-enabled tool subset for a given server.
-/// Non-system-injected servers get `None` — for those the merge treats
-/// every discovered tool as `enabled = true` initially.
-pub fn default_enabled_tools_for(server_name: &str) -> Option<&'static [&'static str]> {
-    match server_name {
-        "pm" => Some(PM_DEFAULT_ENABLED_TOOLS),
-        _ => None,
-    }
-}
-
 /// Per-agent MCP tools config (flat per-server list).
 ///
 /// Wire shape matches the GET response and PUT request body — three-way
@@ -1157,16 +1323,24 @@ pub struct McpToolDescriptor {
 /// Reconcile persisted MCP tool choices with the live `tools/list`
 /// from each connected server. Servers absent from `server_tools` are
 /// dropped. The persisted row's `enabled` flag wins when present;
-/// otherwise the server default decides. `description` is always
-/// refreshed from the live `tools/list`.
+/// otherwise the package-declared whitelist (`recommended_tools`) decides;
+/// otherwise everything is enabled. `description` is always refreshed
+/// from the live `tools/list`.
 pub fn merge_mcp_tools_config(
     persisted: &AgentMcpToolsConfig,
     server_tools: &IndexMap<String, Vec<McpToolDescriptor>>,
+    recommended_tools: &IndexMap<String, Vec<String>>,
 ) -> AgentMcpToolsConfig {
     let mut merged: AgentMcpToolsConfig = AgentMcpToolsConfig::default();
 
     for (server_name, defs) in server_tools {
-        let defaults = default_enabled_tools_for(server_name);
+        // ADR-104: the default-enabled subset comes from the package's
+        // `[[mcp_servers]].tools` whitelist (via `agent_mcp.json`'s
+        // `recommended`). No whitelist => "everything on, user opts out",
+        // the pre-existing baseline for user-installed servers.
+        let defaults = recommended_tools
+            .get(server_name)
+            .filter(|list| !list.is_empty());
         let prior = persisted.servers.get(server_name);
 
         let mut items: Vec<AgentMcpToolItem> = Vec::with_capacity(defs.len());
@@ -1174,7 +1348,7 @@ pub fn merge_mcp_tools_config(
             let enabled = match prior.and_then(|rows| tool_enabled_in(rows, &def.name)) {
                 Some(user_choice) => user_choice,
                 None => match defaults {
-                    Some(list) => list.contains(&def.name.as_str()),
+                    Some(list) => list.contains(&def.name),
                     None => true,
                 },
             };
@@ -1452,6 +1626,7 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "local-b".into(),
@@ -1465,9 +1640,12 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
 
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
 
         let merged = cfg.merged();
@@ -1492,6 +1670,7 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "dup-name".into(),
@@ -1505,9 +1684,12 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
 
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
 
         let merged = cfg.merged();
@@ -1531,6 +1713,7 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "loc".into(),
@@ -1544,9 +1727,12 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
 
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
 
         assert!(cfg.contains_name("cat"));
@@ -1569,6 +1755,7 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "loc".into(),
@@ -1582,9 +1769,12 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
 
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
 
         assert!(cfg.is_catalog("cat"));
@@ -1622,6 +1812,7 @@ mod tests {
                 tool_timeout_secs: Some(30),
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "local1".into(),
@@ -1639,9 +1830,12 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
 
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
 
         let json = serde_json::to_string(&cfg).unwrap();
@@ -1703,6 +1897,7 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
             local: vec![McpServerConfigDef {
                 name: "orig-loc".into(),
@@ -1716,9 +1911,12 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
 
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         save_agent_mcp_config(dir.path(), &initial).unwrap();
 
@@ -1734,6 +1932,7 @@ mod tests {
             tool_timeout_secs: None,
             install: None,
             required_secrets: vec![],
+            origin: None,
         }];
         save_agent_mcp_config_catalog(dir.path(), &new_catalog).unwrap();
 
@@ -1774,9 +1973,12 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             }],
             local: vec![],
             active_names: Some(vec!["context7".into()]),
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         save_agent_mcp_config(dir.path(), &initial).unwrap();
 
@@ -1794,6 +1996,7 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             },
             McpServerConfigDef {
                 name: "new-mcp".into(),
@@ -1807,6 +2010,7 @@ mod tests {
                 tool_timeout_secs: None,
                 install: None,
                 required_secrets: vec![],
+                origin: None,
             },
         ];
         save_agent_mcp_config_catalog(dir.path(), &new_catalog).unwrap();
@@ -1873,6 +2077,8 @@ mod tests {
             catalog: vec![mcp_def("pm")],
             local: vec![],
             active_names: Some(vec![]),
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         save_agent_mcp_config(dir.path(), &initial).unwrap();
 
@@ -1942,6 +2148,7 @@ mod tests {
             tool_timeout_secs: None,
             install: None,
             required_secrets: vec![],
+            origin: None,
         }
     }
 
@@ -1952,6 +2159,8 @@ mod tests {
             catalog: vec![mcp_def("playwright"), mcp_def("context7")],
             local: vec![],
             active_names: Some(vec!["context7".into()]),
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         let active = cfg.active_merged();
         assert_eq!(active.len(), 1, "only context7 should be active");
@@ -1967,6 +2176,8 @@ mod tests {
             catalog: vec![mcp_def("playwright"), mcp_def("context7")],
             local: vec![],
             active_names: Some(vec![]),
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         assert!(cfg.active_merged().is_empty());
     }
@@ -1980,6 +2191,8 @@ mod tests {
             catalog: vec![mcp_def("playwright"), mcp_def("context7")],
             local: vec![],
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         assert!(
             cfg.active_merged().is_empty(),
@@ -2000,6 +2213,8 @@ mod tests {
                 d
             }],
             active_names: Some(vec!["context7".into()]),
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         let active = cfg.active_merged();
         assert_eq!(active.len(), 1);
@@ -2018,6 +2233,8 @@ mod tests {
             catalog: vec![mcp_def("context7")],
             local: vec![],
             active_names: Some(vec!["context7".into(), "ghost_mcp".into()]),
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         let active = cfg.active_merged();
         assert_eq!(active.len(), 1);
@@ -2035,6 +2252,8 @@ mod tests {
             catalog: vec![mcp_def("playwright"), mcp_def("context7")],
             local: vec![],
             active_names: Some(vec![]), // user unchecked all
+            recommended: Vec::new(),
+            dismissed: Vec::new(), // user unchecked all
         };
         save_agent_mcp_config(dir.path(), &cfg).unwrap();
 
@@ -2394,11 +2613,13 @@ mod tests {
         assert_eq!(tool_enabled_in(&items, "pm_list_projects"), None);
     }
 
-    /// `merge_mcp_tools_config` with empty persisted + 12 pm tools
-    /// yields 12 rows with `enabled` matching `PM_DEFAULT_ENABLED_TOOLS`
-    /// and `description` lifted from `tools/list`.
+    /// ADR-104: with an empty persisted config, the package-declared
+    /// `[[mcp_servers]].tools` whitelist decides which of the 12 tools a
+    /// server advertises start enabled; `description` comes from the live
+    /// `tools/list`. This replaces the old hardcoded
+    /// `PM_DEFAULT_ENABLED_TOOLS`.
     #[test]
-    fn merge_mcp_tools_config_seeds_defaults_for_pm_from_registry() {
+    fn merge_mcp_tools_config_seeds_from_declared_whitelist() {
         let persisted = AgentMcpToolsConfig::default();
         let names = [
             "pm_list_projects",
@@ -2424,7 +2645,16 @@ mod tests {
             .collect();
         server_tools.insert("pm".to_string(), defs);
 
-        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let mut recommended: IndexMap<String, Vec<String>> = IndexMap::new();
+        recommended.insert(
+            "pm".to_string(),
+            ["pm_list_my_tasks", "pm_claim_task", "pm_submit_task", "pm_check_task"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &recommended);
         let pm = merged.servers.get("pm").unwrap();
         assert_eq!(pm.len(), 12);
 
@@ -2472,7 +2702,7 @@ mod tests {
         let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         server_tools.insert("user-installed".to_string(), defs);
 
-        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &IndexMap::new());
         let rows = merged.servers.get("user-installed").unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|t| t.enabled));
@@ -2508,7 +2738,7 @@ mod tests {
             ],
         );
 
-        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &IndexMap::new());
         let pm = merged.servers.get("pm").unwrap();
         assert_eq!(pm.len(), 3);
         assert!(!tool_enabled_in(pm, "pm_claim_task").unwrap());
@@ -2537,7 +2767,7 @@ mod tests {
             }],
         );
 
-        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &IndexMap::new());
         let pm = merged.servers.get("pm").unwrap();
         assert_eq!(pm[0].description.as_deref(), Some("up-to-date description"));
     }
@@ -2563,7 +2793,7 @@ mod tests {
             }],
         );
 
-        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &IndexMap::new());
         let pm = merged.servers.get("pm").unwrap();
         assert_eq!(pm.len(), 1);
         assert_eq!(pm[0].name, "pm_claim_task");
@@ -2590,7 +2820,7 @@ mod tests {
             }],
         );
 
-        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &IndexMap::new());
         assert!(merged.servers.contains_key("pm"));
         assert!(!merged.servers.contains_key("docling"));
     }
@@ -2614,7 +2844,7 @@ mod tests {
                 },
             ],
         );
-        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &IndexMap::new());
         save_agent_mcp_tools_config(dir.path(), &merged).unwrap();
         let loaded = load_agent_mcp_tools_config(dir.path())
             .unwrap()
@@ -2670,7 +2900,7 @@ mod tests {
             }],
         );
 
-        let merged = merge_mcp_tools_config(&persisted, &server_tools);
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &IndexMap::new());
 
         // 1. Server order = insertion order (zeta, alpha, mu) — not
         //    alphabetical (alpha, mu, zeta).
@@ -2741,5 +2971,360 @@ mod tests {
             "v1-shape file must not silently load as v2"
         );
     }
-}
 
+    // ── ADR-104: manifest → agent_config.json seeding ──────────────────
+
+    fn decl_manifest(toml_body: &str) -> acowork_core::manifest::AgentManifest {
+        acowork_core::manifest::AgentManifest::from_toml(&format!(
+            r#"
+agent_id = "com.test.seed"
+version = "1.0.0"
+name = "Seed"
+description = "seed test"
+author = "test"
+runtime_version = "0.1.0"
+{toml_body}
+"#
+        ))
+        .expect("manifest should parse")
+    }
+
+    /// Empty file + manifest opinions => every declared knob lands.
+    #[test]
+    fn seed_from_manifest_fills_every_declared_field() {
+        let manifest = decl_manifest(
+            r#"[config]
+temperature = 0.6
+context_window = 128000
+max_output_tokens = 16000
+max_iterations = 80
+compression_ratio_threshold = 0.75"#,
+        );
+        let mut cfg = AgentConfig::default();
+        assert!(cfg.seed_from_manifest(&manifest.config_defaults()));
+
+        assert_eq!(cfg.temperature, Some(0.6));
+        assert_eq!(cfg.context_window, Some(128000));
+        assert_eq!(cfg.max_output_tokens, Some(16000));
+        assert_eq!(cfg.max_iterations, Some(80));
+        assert_eq!(cfg.compression_ratio_threshold, Some(0.75));
+    }
+
+    /// A user value always wins — the invariant that makes the file the
+    /// single source of truth.
+    #[test]
+    fn seed_from_manifest_never_overwrites_user_values() {
+        let manifest = decl_manifest(
+            r#"[config]
+temperature = 0.6
+context_window = 128000
+max_output_tokens = 16000
+max_iterations = 80"#,
+        );
+        let mut cfg = AgentConfig {
+            temperature: Some(0.1),
+            max_output_tokens: Some(999),
+            max_iterations: Some(5),
+            ..Default::default()
+        };
+        // context_window / compression_ratio_threshold are still empty.
+        assert!(cfg.seed_from_manifest(&manifest.config_defaults()));
+
+        assert_eq!(cfg.temperature, Some(0.1), "user temperature wins");
+        assert_eq!(cfg.max_output_tokens, Some(999), "user cap wins");
+        assert_eq!(cfg.max_iterations, Some(5), "user iteration cap wins");
+        assert_eq!(cfg.context_window, Some(128000), "empty field is filled");
+    }
+
+    /// Idempotent: the second application reports "nothing changed", which
+    /// is what keeps the startup path from re-writing the file every boot.
+    #[test]
+    fn seed_from_manifest_is_idempotent() {
+        let manifest = decl_manifest("[config]\ntemperature = 0.4");
+        let mut cfg = AgentConfig::default();
+        assert!(cfg.seed_from_manifest(&manifest.config_defaults()));
+        let snapshot = (
+            cfg.temperature,
+            cfg.context_window,
+            cfg.max_output_tokens,
+            cfg.max_iterations,
+            cfg.compression_ratio_threshold,
+        );
+        assert!(!cfg.seed_from_manifest(&manifest.config_defaults()));
+        assert_eq!(
+            snapshot,
+            (
+                cfg.temperature,
+                cfg.context_window,
+                cfg.max_output_tokens,
+                cfg.max_iterations,
+                cfg.compression_ratio_threshold
+            )
+        );
+    }
+
+    /// A manifest with no `[config]` and no `[llm]` knobs seeds nothing.
+    #[test]
+    fn seed_from_manifest_no_opinion_changes_nothing() {
+        let manifest = decl_manifest("");
+        let mut cfg = AgentConfig::default();
+        assert!(!cfg.seed_from_manifest(&manifest.config_defaults()));
+        assert_eq!(cfg.temperature, None);
+        assert_eq!(cfg.max_output_tokens, None);
+    }
+
+    /// Legacy `[llm]` keys still seed (migration path), and `[config]` wins
+    /// when both are present.
+    #[test]
+    fn seed_from_manifest_reads_deprecated_llm_keys() {
+        let manifest = decl_manifest(
+            r#"[llm]
+temperature = 0.2
+context_window = 64000
+max_tokens = 4096
+
+[config]
+temperature = 0.9"#,
+        );
+        let mut cfg = AgentConfig::default();
+        assert!(cfg.seed_from_manifest(&manifest.config_defaults()));
+        assert_eq!(cfg.temperature, Some(0.9));
+        assert_eq!(cfg.context_window, Some(64000));
+        assert_eq!(cfg.max_output_tokens, Some(4096));
+    }
+
+    #[test]
+    fn seed_agent_config_from_manifest_persists_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = decl_manifest("[config]\ntemperature = 0.55\nmax_iterations = 33");
+
+        assert!(seed_agent_config_from_manifest(dir.path(), &manifest).unwrap());
+        let loaded = load_agent_config(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.temperature, Some(0.55));
+        assert_eq!(loaded.max_iterations, Some(33));
+
+        // Second run: nothing to do, no write.
+        assert!(!seed_agent_config_from_manifest(dir.path(), &manifest).unwrap());
+    }
+
+    #[test]
+    fn seed_agent_config_from_manifest_skips_file_creation_without_opinion() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = decl_manifest("");
+        assert!(!seed_agent_config_from_manifest(dir.path(), &manifest).unwrap());
+        assert!(
+            load_agent_config(dir.path()).unwrap().is_none(),
+            "no manifest opinion => no file is created"
+        );
+    }
+
+    // ── ADR-104: manifest → agent_mcp.json `recommended` projection ────
+
+    #[test]
+    fn project_recommended_writes_declarations_and_keeps_other_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut initial = AgentMcpConfig {
+            catalog: vec![mcp_def("context7")],
+            local: vec![mcp_def("agent-installed")],
+            active_names: Some(vec!["context7".into()]),
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
+        };
+        save_agent_mcp_config(dir.path(), &initial).unwrap();
+
+        let manifest = decl_manifest(
+            r#"[[mcp_servers]]
+preset = "brave-search"
+tools = ["brave_web_search"]
+
+[[mcp_servers]]
+hosted = "pm"
+tools = ["pm_claim_task"]"#,
+        );
+        assert!(project_recommended_mcp_servers(dir.path(), &manifest).unwrap());
+
+        let cfg = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            cfg.recommended
+                .iter()
+                .filter_map(|d| d.key())
+                .collect::<Vec<_>>(),
+            vec!["brave-search", "pm"]
+        );
+        // The three other lists keep their owners.
+        assert_eq!(cfg.catalog.len(), 1);
+        assert_eq!(cfg.local.len(), 1);
+        assert_eq!(cfg.active_names, Some(vec!["context7".into()]));
+        let expected = cfg.recommended.clone();
+        initial.recommended = expected;
+        assert_eq!(cfg.recommended, initial.recommended);
+    }
+
+    #[test]
+    fn project_recommended_is_idempotent_and_refreshes_on_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = decl_manifest("[[mcp_servers]]\npreset = \"brave-search\"");
+        assert!(project_recommended_mcp_servers(dir.path(), &v1).unwrap());
+        assert!(
+            !project_recommended_mcp_servers(dir.path(), &v1).unwrap(),
+            "second projection of the same manifest must not write"
+        );
+
+        // Package upgrade drops the recommendation.
+        let v2 = decl_manifest("");
+        assert!(project_recommended_mcp_servers(dir.path(), &v2).unwrap());
+        let cfg = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert!(cfg.recommended.is_empty());
+    }
+
+    #[test]
+    fn project_recommended_drops_dismissals_of_undeclared_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = decl_manifest("[[mcp_servers]]\npreset = \"brave-search\"");
+        let cfg = AgentMcpConfig {
+            dismissed: vec!["brave-search".into(), "ghost".into()],
+            ..Default::default()
+        };
+        save_agent_mcp_config(dir.path(), &cfg).unwrap();
+
+        assert!(project_recommended_mcp_servers(dir.path(), &manifest).unwrap());
+        let cfg = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            cfg.dismissed,
+            vec!["brave-search".to_string()],
+            "a dismissal for a no-longer-declared server must be pruned, the live one kept"
+        );
+        assert!(cfg.is_dismissed("brave-search"));
+        assert!(!cfg.is_dismissed("ghost"));
+    }
+
+    #[test]
+    fn recommended_tools_map_skips_empty_whitelists() {
+        let manifest = decl_manifest(
+            r#"[[mcp_servers]]
+preset = "brave-search"
+tools = ["brave_web_search"]
+
+[[mcp_servers]]
+hosted = "pm""#,
+        );
+        let cfg = AgentMcpConfig {
+            recommended: manifest.mcp_servers.clone(),
+            ..Default::default()
+        };
+        let map = cfg.recommended_tools_map();
+        assert_eq!(map.len(), 1, "an empty whitelist is 'no opinion'");
+        assert_eq!(map["brave-search"], vec!["brave_web_search".to_string()]);
+        assert!(cfg.recommendation("pm").is_some());
+    }
+
+    /// The whitelist is per server, and a server with no declared tools keeps
+    /// the "everything on" baseline.
+    #[test]
+    fn merge_mcp_tools_config_applies_whitelist_per_server() {
+        let persisted = AgentMcpToolsConfig::default();
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
+        server_tools.insert(
+            "brave-search".to_string(),
+            vec![
+                McpToolDescriptor {
+                    name: "brave_web_search".into(),
+                    description: None,
+                },
+                McpToolDescriptor {
+                    name: "brave_news".into(),
+                    description: None,
+                },
+            ],
+        );
+        server_tools.insert(
+            "context7".to_string(),
+            vec![McpToolDescriptor {
+                name: "resolve-library-id".into(),
+                description: None,
+            }],
+        );
+
+        let mut recommended: IndexMap<String, Vec<String>> = IndexMap::new();
+        recommended.insert("brave-search".to_string(), vec!["brave_web_search".into()]);
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &recommended);
+        assert!(tool_enabled_in(&merged.servers["brave-search"], "brave_web_search").unwrap());
+        assert!(
+            !tool_enabled_in(&merged.servers["brave-search"], "brave_news").unwrap(),
+            "a tool outside the declared whitelist starts disabled"
+        );
+        assert!(
+            tool_enabled_in(&merged.servers["context7"], "resolve-library-id").unwrap(),
+            "undeclared server keeps the everything-enabled baseline"
+        );
+    }
+
+    /// A user's explicit choice still beats the package whitelist.
+    #[test]
+    fn merge_mcp_tools_config_user_choice_beats_whitelist() {
+        let mut persisted = AgentMcpToolsConfig::default();
+        persisted.servers.insert(
+            "brave-search".to_string(),
+            vec![
+                AgentMcpToolItem::new("brave_web_search", false),
+                AgentMcpToolItem::new("brave_news", true),
+            ],
+        );
+        let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
+        server_tools.insert(
+            "brave-search".to_string(),
+            vec![
+                McpToolDescriptor {
+                    name: "brave_web_search".into(),
+                    description: None,
+                },
+                McpToolDescriptor {
+                    name: "brave_news".into(),
+                    description: None,
+                },
+            ],
+        );
+        let mut recommended: IndexMap<String, Vec<String>> = IndexMap::new();
+        recommended.insert("brave-search".to_string(), vec!["brave_web_search".into()]);
+
+        let merged = merge_mcp_tools_config(&persisted, &server_tools, &recommended);
+        assert!(!tool_enabled_in(&merged.servers["brave-search"], "brave_web_search").unwrap());
+        assert!(tool_enabled_in(&merged.servers["brave-search"], "brave_news").unwrap());
+    }
+
+    /// `agent_mcp.json` round-trips the new fields, and a file written
+    /// before ADR-104 (no `recommended` / `dismissed` keys) still loads.
+    #[test]
+    fn agent_mcp_config_recommended_round_trip_and_legacy_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = decl_manifest(
+            "[[mcp_servers]]\npreset = \"brave-search\"\ntools = [\"brave_web_search\"]",
+        );
+        let cfg = AgentMcpConfig {
+            recommended: manifest.mcp_servers.clone(),
+            dismissed: vec!["brave-search".into()],
+            ..Default::default()
+        };
+        save_agent_mcp_config(dir.path(), &cfg).unwrap();
+
+        let back = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(back.recommended, cfg.recommended);
+        assert_eq!(back.dismissed, cfg.dismissed);
+    }
+
+    /// Adversarial: an old file with a *flat* array is still migrated, and the
+    /// migration must not invent recommendations.
+    #[test]
+    fn legacy_flat_migration_leaves_recommendations_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let flat = serde_json::to_string(&vec![mcp_def("context7")]).unwrap();
+        std::fs::write(dir.path().join("config").join("agent_mcp.json"), flat).unwrap();
+
+        let cfg = load_agent_mcp_config(dir.path()).unwrap().unwrap();
+        assert_eq!(cfg.catalog.len(), 1);
+        assert!(cfg.recommended.is_empty());
+        assert!(cfg.dismissed.is_empty());
+    }
+}

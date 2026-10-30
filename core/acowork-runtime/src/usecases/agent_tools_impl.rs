@@ -50,7 +50,8 @@ use async_trait::async_trait;
 use crate::agent_config;
 use crate::usecases::agent_tools::{
     AgentToolsError, AgentToolsService, BuiltinToolsResponse, McpServersResponse, McpToolsResponse,
-    MergedToolsResponse, PutBuiltinToolsBody, PutMcpServersBody, PutMcpToolsBody,
+    MergedToolsResponse, PutBuiltinToolsBody, PutMcpRecommendationBody, PutMcpServersBody,
+    PutMcpToolsBody,
 };
 
 /// Concrete [`AgentToolsService`] backed by the
@@ -63,20 +64,66 @@ impl RuntimeAgentToolsService {
     pub fn new(work_dir: PathBuf) -> Self {
         Self { work_dir }
     }
+
+    /// Single construction point for the `GET /mcp-servers` payload:
+    /// active names + the ADR-104 recommendation views derived from the
+    /// same loaded config, so the two halves can never disagree.
+    fn mcp_servers_snapshot(&self, agent_id: &str) -> McpServersResponse {
+        let cfg = agent_config::load_agent_mcp_config(&self.work_dir)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let active_servers = cfg.active_server_names();
+        let installed: HashSet<String> = cfg.merged().into_iter().map(|s| s.name).collect();
+        let active: HashSet<String> = active_servers.iter().cloned().collect();
+        let recommended = crate::usecases::mcp_recommendation::build_recommendation_views(
+            &cfg, &installed, &active,
+        );
+        McpServersResponse {
+            agent_id: agent_id.to_string(),
+            active_servers,
+            recommended,
+        }
+    }
 }
 
 #[async_trait]
 impl AgentToolsService for RuntimeAgentToolsService {
     async fn get_mcp_servers(&self, agent_id: &str) -> McpServersResponse {
-        let active = agent_config::load_agent_mcp_config(&self.work_dir)
-            .ok()
-            .flatten()
-            .map(|m| m.active_server_names())
+        self.mcp_servers_snapshot(agent_id)
+    }
+
+    async fn put_mcp_recommendation(
+        &self,
+        agent_id: &str,
+        key: &str,
+        body: PutMcpRecommendationBody,
+    ) -> Result<McpServersResponse, AgentToolsError> {
+        let mut cfg = agent_config::load_agent_mcp_config(&self.work_dir)
+            .map_err(AgentToolsError::Persistence)?
             .unwrap_or_default();
-        McpServersResponse {
-            agent_id: agent_id.to_string(),
-            active_servers: active,
+
+        // Only declared recommendations are addressable: a stale key from a
+        // previous package version must not resurrect a phantom row.
+        if cfg.recommendation(key).is_none() {
+            return Err(AgentToolsError::UnknownRecommendation(key.to_string()));
         }
+
+        cfg.dismissed.retain(|k| k != key);
+        if body.dismissed {
+            cfg.dismissed.push(key.to_string());
+        }
+        agent_config::save_agent_mcp_config(&self.work_dir, &cfg)
+            .map_err(AgentToolsError::Persistence)?;
+
+        tracing::info!(
+            agent_id,
+            key,
+            dismissed = body.dismissed,
+            "RuntimeAgentToolsService::put_mcp_recommendation: dismissal persisted"
+        );
+
+        Ok(self.mcp_servers_snapshot(agent_id))
     }
 
     async fn put_mcp_servers(
@@ -119,10 +166,7 @@ impl AgentToolsService for RuntimeAgentToolsService {
             "RuntimeAgentToolsService::put_mcp_servers: active_names persisted"
         );
 
-        Ok(McpServersResponse {
-            agent_id: agent_id.to_string(),
-            active_servers: body.servers,
-        })
+        Ok(self.mcp_servers_snapshot(agent_id))
     }
 
     async fn get_builtin_tools(&self, agent_id: &str) -> BuiltinToolsResponse {
@@ -230,11 +274,27 @@ impl AgentToolsService for RuntimeAgentToolsService {
             })
             .unwrap_or_default();
 
+        // ADR-104: reuse the exact derivation the `/mcp-servers` route uses,
+        // so the recommendation group cannot disagree between the two routes.
+        let recommended = match mcp_cfg.as_ref() {
+            Some(cfg) => {
+                let installed: std::collections::HashSet<String> =
+                    cfg.merged().into_iter().map(|s| s.name).collect();
+                let active: std::collections::HashSet<String> =
+                    mcp_servers.iter().cloned().collect();
+                crate::usecases::mcp_recommendation::build_recommendation_views(
+                    cfg, &installed, &active,
+                )
+            }
+            None => Vec::new(),
+        };
+
         MergedToolsResponse {
             agent_id: agent_id.to_string(),
             tools,
             mcp_servers,
             mcp_servers_defs,
+            recommended,
         }
     }
 
@@ -272,5 +332,237 @@ impl AgentToolsService for RuntimeAgentToolsService {
             agent_id: agent_id.to_string(),
             servers: body.servers,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usecases::agent_tools::McpRecommendationState;
+    use acowork_core::protocol::{McpServerConfigDef, McpTransportDef};
+
+    fn mcp_def(name: &str) -> McpServerConfigDef {
+        McpServerConfigDef {
+            name: name.to_string(),
+            display_name: None,
+            transport: McpTransportDef::Stdio,
+            url: None,
+            command: "npx".to_string(),
+            args: vec![],
+            env: std::collections::HashMap::new(),
+            headers: std::collections::HashMap::new(),
+            tool_timeout_secs: None,
+            install: None,
+            required_secrets: vec![],
+            origin: None,
+        }
+    }
+
+    fn manifest(toml_body: &str) -> acowork_core::manifest::AgentManifest {
+        acowork_core::manifest::AgentManifest::from_toml(&format!(
+            r#"
+agent_id = "com.test.svc"
+version = "1.0.0"
+name = "Svc"
+description = "service test"
+author = "test"
+runtime_version = "0.1.0"
+{toml_body}
+"#
+        ))
+        .expect("manifest should parse")
+    }
+
+    /// Seed `agent_mcp.json` the way startup does: project the manifest,
+    /// then install one catalog entry.
+    fn seeded_service(dir: &std::path::Path) -> RuntimeAgentToolsService {
+        let m = manifest(
+            r#"[[mcp_servers]]
+preset = "brave-search"
+tools = ["brave_web_search"]
+why = "web research"
+
+[[mcp_servers]]
+hosted = "pm""#,
+        );
+        agent_config::project_recommended_mcp_servers(dir, &m).unwrap();
+        let mut cfg = agent_config::load_agent_mcp_config(dir).unwrap().unwrap();
+        cfg.catalog.push(mcp_def("brave-search"));
+        agent_config::save_agent_mcp_config(dir, &cfg).unwrap();
+        RuntimeAgentToolsService::new(dir.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn get_mcp_servers_reports_the_five_state_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = seeded_service(dir.path());
+
+        let resp = svc.get_mcp_servers("agent-1").await;
+        assert_eq!(resp.recommended.len(), 2);
+
+        let brave = &resp.recommended[0];
+        assert_eq!(brave.key, "brave-search");
+        assert_eq!(brave.source, "preset");
+        assert_eq!(brave.tools, vec!["brave_web_search".to_string()]);
+        assert_eq!(brave.why.as_deref(), Some("web research"));
+        assert_eq!(
+            brave.state,
+            McpRecommendationState::InstalledInactive,
+            "installed in the catalog but not ticked for this agent"
+        );
+
+        let pm = &resp.recommended[1];
+        assert_eq!(pm.key, "pm");
+        assert_eq!(pm.source, "hosted");
+        assert_eq!(
+            pm.state,
+            McpRecommendationState::NotInstalled,
+            "a hosted server is only 'not installed' while it is missing from the merged list"
+        );
+        assert!(resp.active_servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn merged_tools_carries_the_same_recommendation_derivation() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = seeded_service(dir.path());
+
+        let merged = svc.get_merged_tools("agent-1").await;
+        let dedicated = svc.get_mcp_servers("agent-1").await;
+
+        assert_eq!(
+            merged.recommended.len(),
+            dedicated.recommended.len(),
+            "the two routes must agree on the row set"
+        );
+        for (a, b) in merged.recommended.iter().zip(dedicated.recommended.iter()) {
+            assert_eq!(a.key, b.key);
+            assert_eq!(a.state, b.state);
+        }
+        // Sanity: the seeded agent really does declare both rows.
+        assert_eq!(merged.recommended.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn activating_a_recommended_server_flips_it_to_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = seeded_service(dir.path());
+
+        svc.put_mcp_servers(
+            "agent-1",
+            PutMcpServersBody {
+                servers: vec!["brave-search".into()],
+            },
+        )
+        .await
+        .unwrap();
+
+        let resp = svc.get_mcp_servers("agent-1").await;
+        assert_eq!(resp.active_servers, vec!["brave-search".to_string()]);
+        assert_eq!(
+            resp.recommended[0].state,
+            McpRecommendationState::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn dismiss_and_restore_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = seeded_service(dir.path());
+
+        let resp = svc
+            .put_mcp_recommendation(
+                "agent-1",
+                "brave-search",
+                PutMcpRecommendationBody { dismissed: true },
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.recommended[0].state, McpRecommendationState::Dismissed);
+
+        // Survives a restart: the flag is on disk, not in memory.
+        let on_disk = agent_config::load_agent_mcp_config(dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(on_disk.dismissed, vec!["brave-search".to_string()]);
+        // The declaration itself is untouched — it is package-owned.
+        assert_eq!(on_disk.recommended.len(), 2);
+
+        let resp = svc
+            .put_mcp_recommendation(
+                "agent-1",
+                "brave-search",
+                PutMcpRecommendationBody { dismissed: false },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.recommended[0].state,
+            McpRecommendationState::InstalledInactive
+        );
+        let on_disk = agent_config::load_agent_mcp_config(dir.path())
+            .unwrap()
+            .unwrap();
+        assert!(on_disk.dismissed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dismissing_twice_does_not_duplicate_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = seeded_service(dir.path());
+        for _ in 0..2 {
+            svc.put_mcp_recommendation(
+                "agent-1",
+                "brave-search",
+                PutMcpRecommendationBody { dismissed: true },
+            )
+            .await
+            .unwrap();
+        }
+        let on_disk = agent_config::load_agent_mcp_config(dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(on_disk.dismissed, vec!["brave-search".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn unknown_recommendation_key_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = seeded_service(dir.path());
+        let err = svc
+            .put_mcp_recommendation(
+                "agent-1",
+                "ghost",
+                PutMcpRecommendationBody { dismissed: true },
+            )
+            .await
+            .expect_err("a stale key must not create a phantom dismissal");
+        assert!(matches!(
+            err,
+            AgentToolsError::UnknownRecommendation(ref k) if k == "ghost"
+        ));
+        let on_disk = agent_config::load_agent_mcp_config(dir.path())
+            .unwrap()
+            .unwrap();
+        assert!(on_disk.dismissed.is_empty());
+    }
+
+    /// The Tools panel reads `recommended` off the `PUT /mcp-servers`
+    /// acknowledgement too, so one user action does not need a follow-up GET.
+    #[tokio::test]
+    async fn put_mcp_servers_returns_recommendations_as_well() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = seeded_service(dir.path());
+        let resp = svc
+            .put_mcp_servers(
+                "agent-1",
+                PutMcpServersBody {
+                    servers: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.recommended.len(), 2);
+        assert!(resp.active_servers.is_empty());
     }
 }

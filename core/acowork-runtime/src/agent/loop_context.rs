@@ -624,11 +624,15 @@ impl AgentLoop {
 
         match self.session_core.build_provider_for(
             &resolved.provider_id,
+            Some(resolved.model_id.as_str()),
             None,
-            &self.core.config,
-            &self.core.global_provider_list,
-            &self.core.provider_key_vault,
-            self.core.compat_cache.as_ref(),
+            &super::session_core::ProviderBuildContext {
+                config: &self.core.config,
+                global_provider_list: &self.core.global_provider_list,
+                provider_key_vault: &self.core.provider_key_vault,
+                compat_cache: self.core.compat_cache.as_ref(),
+                    responses_compat_cache: self.core.responses_compat_cache.as_ref(),
+            },
         ) {
             Some(p) => {
                 tracing::info!(
@@ -1513,7 +1517,29 @@ impl AgentLoop {
                 .and_then(|c| c.default_reasoning_effort.as_deref())
                 .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
         });
-        context_builder.set_reasoning_effort(reasoning_effort.clone());
+        // Clamp the level into the set the model actually declares
+        // (models.dev `reasoning_options`). A level the model does not
+        // support is answered with HTTP 400 by some vendors and silently
+        // ignored by others; clamping keeps the request inside the
+        // declared support set. The *persisted* session value keeps the
+        // user's choice -- only the wire value is clamped.
+        let reasoning_effort = reasoning_effort.map(|effort| {
+            let supported = caps
+                .as_ref()
+                .and_then(|c| c.reasoning_efforts.as_deref())
+                .unwrap_or_default();
+            let clamped = effort.clamp_to_supported(supported);
+            if clamped != effort {
+                tracing::info!(
+                    model = %current_model,
+                    requested = %effort,
+                    clamped = %clamped,
+                    "reasoning effort clamped into the model's declared support set"
+                );
+            }
+            clamped
+        });
+        context_builder.set_reasoning_effort(reasoning_effort);
         // Cache for emergency trim retry in call_llm_streaming_inner()
         // where context_builder is immutable.
         self.last_reasoning_effort = reasoning_effort;
@@ -1535,9 +1561,11 @@ impl AgentLoop {
             .or(self.core.manifest_temperature)
             .unwrap_or(crate::config::DEFAULT_TEMPERATURE);
         context_builder.set_temperature(Some(temperature));
+        // ADR-104: the agent-level output ceiling (agent_config.json,
+        // manifest-seeded). `None` = the Gateway capability decides below.
+        context_builder.set_max_output_tokens(self.core.max_output_tokens_override);
 
         let mut chat_request = context_builder.build(
-            &self.core.manifest,
             &self.session.history,
             // ADR-060 §5.5 erratum: no Block D arg — the current user
             // message is carried by Block B's tail (history).
@@ -2330,7 +2358,69 @@ mod tests {
             knowledge_cutoff: None,
             default_reasoning_effort: None,
             thinking_mode: None,
+            reasoning_efforts: None,
         }
+    }
+
+    /// A model whose declared support set is `low`/`high`/`max` (the
+    /// DeepSeek-style shape) must never receive `medium`: the level is
+    /// clamped down to `low` on the wire.
+    #[test]
+    fn build_chat_request_clamps_the_effort_into_the_declared_support_set() {
+        let mut loop_ = build_loop();
+        {
+            let mut list = loop_.core.global_provider_list.write().unwrap();
+            *list = vec![ProviderListItem {
+                id: "deepseek".to_string(),
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+                compact_model: None,
+                custom: false,
+                models: vec![ProviderModelEntry {
+                    id: "deepseek-v4-flash".to_string(),
+                    capabilities: ModelCapabilitiesInfo {
+                        reasoning_efforts: Some(vec![
+                            "low".to_string(),
+                            "high".to_string(),
+                            "max".to_string(),
+                        ]),
+                        ..caps(128_000)
+                    },
+                    max_output_tokens_limit: 32_768,
+                    protocol_type: None,
+                    base_url: None,
+                    protocol_probe: None,
+                }],
+            }];
+        }
+        loop_.session.set_reasoning_effort(Some(
+            acowork_core::providers::traits::ReasoningEffort::Medium,
+        ));
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        let request = loop_.build_chat_request(&mut builder, "deepseek-v4-flash");
+        assert_eq!(
+            request.reasoning_effort,
+            Some(acowork_core::providers::traits::ReasoningEffort::Low),
+            "an unsupported level must be clamped down, not sent as-is"
+        );
+    }
+
+    /// A model without a declared support set (custom provider) gets the
+    /// chosen level unchanged.
+    #[test]
+    fn build_chat_request_keeps_the_effort_when_the_support_set_is_unknown() {
+        let mut loop_ = build_loop();
+        loop_.session.set_reasoning_effort(Some(
+            acowork_core::providers::traits::ReasoningEffort::Medium,
+        ));
+
+        let mut builder = ContextBuilder::new("Kernel".to_string());
+        let request = loop_.build_chat_request(&mut builder, "test-model");
+        assert_eq!(
+            request.reasoning_effort,
+            Some(acowork_core::providers::traits::ReasoningEffort::Medium)
+        );
     }
 
     fn build_loop() -> AgentLoop {
@@ -2377,11 +2467,17 @@ mod tests {
                         id: "deepseek-v4-flash".to_string(),
                         capabilities: caps(128_000),
                         max_output_tokens_limit: 32_768,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     },
                     ProviderModelEntry {
                         id: "deepseek-v4-pro".to_string(),
                         capabilities: caps(128_000),
                         max_output_tokens_limit: 32_768,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     },
                 ],
             },
@@ -2396,11 +2492,17 @@ mod tests {
                         id: "qwen2.5:0.5b".to_string(),
                         capabilities: caps(32_000),
                         max_output_tokens_limit: 16_384,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     },
                     ProviderModelEntry {
                         id: "llama3:8b".to_string(),
                         capabilities: caps(8_000),
                         max_output_tokens_limit: 8_192,
+                        protocol_type: None,
+                        base_url: None,
+                        protocol_probe: None,
                     },
                 ],
             },

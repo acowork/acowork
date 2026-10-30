@@ -1,9 +1,13 @@
-import { FileText, Folder, X, Hash } from "lucide-react";
+import { X } from "lucide-react";
+import { cn } from "../../lib/utils";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useChatSessionStore } from "../../stores/chatSessionStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
+import { attachedItemArmOf } from "../../lib/types";
+import { AttachmentCapsule } from "./AttachmentCapsule";
+import { attachmentGlyph, selectionRange } from "./attachmentGlyph";
 
 /** Stable empty array reference to avoid Zustand infinite re-renders */
 const EMPTY_CTX: never[] = [];
@@ -83,11 +87,26 @@ export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | 
         // remove them via the X button. Files & selections get the full
         // pointer/keyboard affordance.
         const isOpenable = item.type === "file" || item.type === "selection";
+        // The glyph table is keyed by the ADR-046 wire arm the *sent* message
+        // carries, so the tray chip and the transcript chip draw the same item
+        // the same way. The mapping is the send path's own — a second copy here
+        // would be the "two lists, one reader" shape again.
+        const { Icon, className } = attachmentGlyph(attachedItemArmOf(item));
+        const range =
+          item.type === "selection" ? selectionRange(item.startLine, item.endLine) : undefined;
+        const chipBody = (
+          <>
+            <Icon className={cn("h-3.5 w-3.5 shrink-0", className)} />
+            <span className="max-w-[200px] truncate">{item.name}</span>
+            {range && <span className="text-text-tertiary">{range}</span>}
+          </>
+        );
         return (
-          <div
-            key={item.id}
-            className="inline-flex items-center gap-1 rounded-md border border-border-outer bg-zinc-50 text-xs text-text-secondary  dark:bg-zinc-800"
-          >
+          // The frame is the shared capsule. It stays the decorative `span`
+          // form here on purpose: the tray chip needs two nested controls
+          // (open and remove), and a capsule that renders a `button` would put
+          // the remove button inside it. Interactivity lives in the children.
+          <AttachmentCapsule key={item.id} title={item.absPath} className="gap-0 p-0">
             {isOpenable ? (
               /* Clickable chip body — opens the workspace ref in fileTab.
                * `role="button"` + tabIndex lets keyboard users Enter/Space
@@ -95,8 +114,7 @@ export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | 
               <div
                 role="button"
                 tabIndex={0}
-                className="flex cursor-pointer items-center gap-1 rounded-l-md px-2 py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]/40"
-                title={item.absPath}
+                className="flex cursor-pointer items-center gap-1.5 rounded-l-md px-2.5 py-1 hover:bg-zinc-100 dark:hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]/40"
                 onClick={handleOpen}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
@@ -105,24 +123,11 @@ export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | 
                   }
                 }}
               >
-                {item.type === "selection" ? (
-                  <Hash className="h-3 w-3 shrink-0 text-[var(--color-accent)]" />
-                ) : (
-                  <FileText className="h-3 w-3 shrink-0 text-text-tertiary" />
-                )}
-                <span className="max-w-[200px] truncate">{item.name}</span>
-                {item.type === "selection" && item.startLine != null && item.endLine != null && (
-                  <span className="text-text-tertiary ">
-                    {item.startLine}-{item.endLine}
-                  </span>
-                )}
+                {chipBody}
               </div>
             ) : (
               /* Non-openable (folder): plain body, no click affordance. */
-              <div className="flex items-center gap-1 rounded-l-md px-2 py-0.5">
-                <Folder className="h-3 w-3 shrink-0 text-amber-500" />
-                <span className="max-w-[200px] truncate">{item.name}</span>
-              </div>
+              <div className="flex items-center gap-1.5 rounded-l-md px-2.5 py-1">{chipBody}</div>
             )}
             {/* Real <button> for X — outside the clickable div, so we don't
                 get a button-in-button DOM structure. */}
@@ -134,7 +139,7 @@ export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | 
             >
               <X className="h-3 w-3" />
             </button>
-          </div>
+          </AttachmentCapsule>
         );
       })}
     </div>

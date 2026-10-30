@@ -202,6 +202,18 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
                             .as_ref()
                             .map(|moda| (moda.input.clone(), moda.output.clone()))
                             .unwrap_or_default();
+                        // ADR-103 D1/D2: the Gateway is the single decision
+                        // point. Publish the per-model effective protocol
+                        // ONLY when it differs from the provider-level one —
+                        // absent field = inherit (proto3 optional presence).
+                        // In S1 nothing persists `responses` yet, so this
+                        // always equals the provider level and the wire is
+                        // byte-identical to the status quo (zero traffic
+                        // change). Probe verdicts are NOT delivered (§3).
+                        let (effective, base_url_override) =
+                            crate::http::models_api::resolve_protocol(p, &m.id);
+                        let proto_protocol = (effective != p.protocol_type)
+                            .then(|| i32::from(map_protocol_type(&effective)));
                         ProviderModelRef {
                             id: m.id.clone(),
                             capabilities: Some(acowork_core::mqtt_proto::ModelCapabilities {
@@ -211,8 +223,15 @@ pub(crate) fn build_available_providers(gw: &GatewayState) -> AvailableProviders
                                 output_modalities,
                                 supports_reasoning: m.capabilities.supports_reasoning,
                                 default_reasoning_effort: m.capabilities.default_reasoning_effort.clone(),
+                                reasoning_efforts: m
+                                    .capabilities
+                                    .reasoning_efforts
+                                    .clone()
+                                    .unwrap_or_default(),
                             }),
                             max_output_tokens_limit: m.max_output_tokens_limit,
+                            protocol_type: proto_protocol,
+                            base_url: base_url_override,
                         }
                     })
                     .collect(),
@@ -464,6 +483,16 @@ pub(crate) fn map_protocol_type(pt: &ProtocolType) -> acowork_core::mqtt_proto::
         ProtocolType::Anthropic => acowork_core::mqtt_proto::LlmProtocol::Anthropic,
         ProtocolType::Google => acowork_core::mqtt_proto::LlmProtocol::Google,
         ProtocolType::Ollama => acowork_core::mqtt_proto::LlmProtocol::Ollama,
+        // ADR-103 D3: Responses shape over the MQTT wire.
+        ProtocolType::Responses => acowork_core::mqtt_proto::LlmProtocol::Responses,
+        // A read-side tolerance value never originates here (the Gateway
+        // resolves `Unknown` away before publishing), but the match must be
+        // total; publishing it as UNSPECIFIED would let old Runtimes silently
+        // pick OpenAI, so keep it visible.
+        ProtocolType::Unknown => {
+            tracing::warn!("map_protocol_type: Unknown protocol published as UNSPECIFIED (should be unreachable)");
+            acowork_core::mqtt_proto::LlmProtocol::Unspecified
+        }
     }
 }
 
@@ -726,3 +755,117 @@ mod tests {
     }
 }
 
+
+// ── ADR-103 S1: model-level wire emission tests ───────────────────────
+
+#[cfg(test)]
+mod adr103_builder_tests {
+    use super::*;
+    use acowork_core::mqtt_proto::LlmProtocol;
+    use acowork_core::protocol::{
+        ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry,
+    };
+
+    fn caps() -> ModelCapabilitiesInfo {
+        serde_json::from_value(serde_json::json!({
+            "context_window": 1000u64, "max_output_tokens": 100u64
+        }))
+        .unwrap()
+    }
+
+    fn gw_with(model: ProviderModelEntry) -> GatewayState {
+        let mut gw = GatewayState::new("/tmp/test-vault");
+        // Use a local provider id: keyless publish is allowed only for
+        // local providers, and the test vault is locked.
+        gw.resource_cache.provider_list.version = 1;
+        gw.resource_cache.provider_list.providers = vec![ProviderListItem {
+            id: "ollama".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            protocol_type: ProtocolType::OpenAI,
+            models: vec![model],
+            compact_model: None,
+            custom: false,
+        }];
+        gw.config = Some(crate::config::GatewayConfig::default());
+        gw
+    }
+
+    fn model(json: serde_json::Value) -> ProviderModelEntry {
+        let mut m: ProviderModelEntry = serde_json::from_value(serde_json::json!({
+            "id": "gpt-5",
+            "capabilities": caps(),
+            "max_output_tokens_limit": 4096u64,
+        }))
+        .unwrap();
+        if let Some(v) = json.get("protocol_type") {
+            m.protocol_type = Some(serde_json::from_value(v.clone()).unwrap());
+        }
+        if let Some(v) = json.get("protocol_probe") {
+            m.protocol_probe = Some(serde_json::from_value(v.clone()).unwrap());
+        }
+        if let Some(v) = json.get("base_url") {
+            m.base_url = v.as_str().map(|s| s.to_string());
+        }
+        m
+    }
+
+    #[test]
+    fn status_quo_payload_carries_no_model_level_fields() {
+        // Zero-traffic-change invariant: with no model-level selection, the
+        // published ProviderModelRef is byte-identical to pre-ADR-103 (all
+        // new optional fields absent).
+        let gw = gw_with(model(serde_json::json!({})));
+        let payload = build_available_providers(&gw);
+        let m = &payload.providers[0].models[0];
+        assert_eq!(m.protocol_type, None);
+        assert_eq!(m.base_url, None);
+    }
+
+    #[test]
+    fn gated_responses_selection_emits_model_level_override() {
+        let m = model(serde_json::json!({
+            "protocol_type": "responses",
+            "protocol_probe": { "state": "verified" },
+            "base_url": "https://api.openai.com/v1",
+        }));
+        let gw = gw_with(m);
+        let payload = build_available_providers(&gw);
+        let pm = &payload.providers[0].models[0];
+        // Effective Responses != provider OpenAI -> model-level field present.
+        assert_eq!(pm.protocol_type, Some(LlmProtocol::Responses as i32));
+        assert_eq!(pm.base_url.as_deref(), Some("https://api.openai.com/v1"));
+    }
+
+    #[test]
+    fn an_unverified_responses_selection_emits_nothing_model_level() {
+        // A selection without a passing verdict resolves to the provider
+        // level -> model-level fields absent -> the Runtime inherits, so
+        // the wire stays identical to the status quo. This is what keeps
+        // "selected but not verified" from reaching live traffic.
+        let m = model(serde_json::json!({
+            "protocol_type": "responses",
+            "protocol_probe": { "state": "failed" },
+            "base_url": "https://api.openai.com/v1",
+        }));
+        let gw = gw_with(m);
+        let payload = build_available_providers(&gw);
+        let pm = &payload.providers[0].models[0];
+        assert_eq!(pm.protocol_type, None);
+        assert_eq!(pm.base_url, None);
+    }
+
+    #[test]
+    fn map_protocol_type_new_variants() {
+        assert_eq!(
+            map_protocol_type(&ProtocolType::Responses),
+            LlmProtocol::Responses
+        );
+        assert_eq!(i32::from(LlmProtocol::Responses), 5);
+        // Unknown is published as UNSPECIFIED only as a last-resort total
+        // match; resolve_protocol removes it before this point.
+        assert_eq!(
+            map_protocol_type(&ProtocolType::Unknown),
+            LlmProtocol::Unspecified
+        );
+    }
+}

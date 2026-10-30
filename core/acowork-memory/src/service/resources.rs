@@ -439,11 +439,16 @@ mod tests {
                         id: "deepseek-v3".into(),
                         capabilities: None,
                         max_output_tokens_limit: 0,
+                        // ADR-103: model-level fields — absent = inherit provider level.
+                        protocol_type: None,
+                        base_url: None,
                     },
                     ProviderModelRef {
                         id: "kimi".into(),
                         capabilities: None,
                         max_output_tokens_limit: 0,
+                        protocol_type: None,
+                        base_url: None,
                     },
                 ],
                 compact_model: "deepseek-v3".into(),

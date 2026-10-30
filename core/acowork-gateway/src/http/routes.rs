@@ -96,6 +96,11 @@ pub struct AppState {
     /// mints tokens bound to the caller. Shared with the MQTT dispatch
     /// (enroll consumes them).
     pub enrollment_tokens: Option<crate::mqtt::SharedEnrollmentTokenStore>,
+    /// ADR-103 D10.5: 24 h cache of protocol-probe verdicts, keyed by
+    /// `(provider, model, protocol)`. Kept off `GatewayState` because it is
+    /// derived metadata with a TTL, not configuration: nothing here is
+    /// persisted, and a restart simply re-probes.
+    pub probe_cache: Arc<crate::probe::ProbeCache>,
 }
 
 impl AppState {
@@ -121,6 +126,7 @@ impl AppState {
             agent_owners: None,
             pending_installs: None,
             enrollment_tokens: None,
+            probe_cache: Arc::new(crate::probe::ProbeCache::new()),
         }
     }
 }
@@ -301,6 +307,11 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::workspaces::workspace_routes())
         .merge(crate::http::publish_api::publish_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
+        // ADR-104: the curated MCP preset registry moved out of the Desktop
+        // (TypeScript) into the Gateway, because a package manifest references
+        // a preset by id and an id whose definition lives in one client is not
+        // a platform fact.
+        .merge(crate::http::mcp_presets::mcp_preset_routes())
         .merge(crate::http::nodes_api::nodes_routes())
         // ADR-089 D2: LSP relay reverse proxy (HTTP + WebSocket).
         .merge(crate::http::lsp_proxy::lsp_proxy_routes())
@@ -737,6 +748,16 @@ impl ApiError {
 
     /// 403 — authenticated but not permitted (e.g. a non-admin calling an
     /// admin-only account-management route).
+    /// 429 — a caller-supplied operation was throttled (e.g. an ADR-103
+    /// protocol probe charged against the provider's rate-limit bucket).
+    pub fn too_many_requests(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 429,
+            structured: None,
+        }
+    }
+
     pub fn forbidden(msg: &str) -> Self {
         Self {
             error: msg.to_string(),

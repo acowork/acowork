@@ -417,6 +417,20 @@ interface AgentStoreState {
    *  (still booting / unreachable). */
   fetchLatestSession: (agentId: string) => Promise<LatestSessionResult>;
   /**
+   * The Runtime's `Active` session set (ADR-038) — "which sessions does this
+   * agent have open right now" — via `GET /sessions?active=true`.
+   *
+   * This is the desktop tab strip's restore source after a client restart:
+   * the set lives in the Runtime (open/close are the only members), so the
+   * client projects it instead of persisting its own copy. Deliberately does
+   * NOT touch `agents[agentId].sessions` — the projection itself belongs to
+   * `chatStore.adoptRuntimeTabs`; this is the read.
+   *
+   * `null` = the query failed (transient 503 in the Runtime boot window).
+   * An empty array is a real answer: nothing is active.
+   */
+  fetchActiveSessions: (agentId: string) => Promise<SessionInfo[] | null>;
+  /**
    * Single resolver + opener for an agent's active session (single-flight
    * per agent). Consolidates the former chain X / chain Y duplicates:
    * `activeSessionId` present → `noop`; `/latest-session` tri-state
@@ -728,6 +742,30 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     const promise = (async (): Promise<ResolveActiveSessionResult> => {
       if (useChatStore.getState().agentStates[agentId]?.activeSessionId) {
         return "noop";
+      }
+
+      // ADR-038 cold start: the sessions the user had open are Runtime truth
+      // (`Active` = resident in its session map), so ask for that SET and
+      // project it onto the tab strip. This is the primary restore path — it
+      // covers a session that is still RUNNING, which `/latest-session` (a
+      // single pointer at the newest session) cannot: after a Desktop restart
+      // the running session is open in the Runtime even though the client has
+      // no tab for it. Only runs while the strip is empty (cold start), once
+      // per app launch per agent.
+      const chatStore = useChatStore.getState();
+      if (chatStore.needsTabRestore(agentId)) {
+        const active = await get().fetchActiveSessions(agentId);
+        // `null` = the query itself failed (Runtime still booting). Fall
+        // through to the pointer path below rather than declaring the agent
+        // session-less; the latch stays clear, so a later attempt restores.
+        if (active) {
+          const restored = await chatStore.adoptRuntimeTabs(agentId, active);
+          if (restored) {
+            // Strip titles come from the session list, not from the tabs.
+            void get().fetchSessions(agentId);
+            return "opened";
+          }
+        }
       }
 
       const latest = await get().fetchLatestSession(agentId);
@@ -1175,6 +1213,33 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     } catch (e) {
       log.error(`[AgentStore] fetchLatestSession(${agentId}) failed:`, e);
       return { status: "unavailable" };
+    }
+  },
+
+  fetchActiveSessions: async (agentId: string): Promise<SessionInfo[] | null> => {
+    try {
+      // ADR-076 §决策 5: an admin viewing another user's sessions appends
+      // `?as_user=`; the Gateway only honors it for admin tokens on GET.
+      const viewAs = useAuthStore.getState().viewAsUserId;
+      const asUser = viewAs ? `&as_user=${encodeURIComponent(viewAs)}` : "";
+      // `size=200` is the Runtime's cap. The Active set is tiny by nature (one
+      // entry per open tab) but it is a *filtered* page all the same, so ask
+      // for the whole cap in one request rather than paging through it.
+      const resp = await with503Retry(
+        () =>
+          fetch(
+            `${getGatewayUrl()}/api/agents/${agentId}/sessions?active=true&size=200${asUser}`,
+          ),
+        { tag: `AgentStore.fetchActiveSessions(${agentId})`, logger: log },
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = (await resp.json()) as { sessions?: SessionInfo[] };
+      return data.sessions ?? [];
+    } catch (e) {
+      // NOT evidence of "nothing is open" — see the `null` contract on the
+      // interface. The caller keeps its own fallback path.
+      log.warn("[AgentStore] fetchActiveSessions failed:", e);
+      return null;
     }
   },
 

@@ -266,6 +266,9 @@ picks up rotated certs on restart, and Gateway tunnels reconnect automatically.
 **End-to-end walkthrough** (Cloudflare DNS + Aliyun ECS, including the wildcard certificate and the
 grey-cloud requirement): [docs/runbooks/relay-ecs-cloudflare-deploy.md](./docs/runbooks/relay-ecs-cloudflare-deploy.md).
 
+**Self-hosting inside mainland China** (Aliyun ECS + a domain eligible for ICP filing; self-use needs no
+telecom licence but **does** need ICP filing): [docs/runbooks/relay-selfhost-cn-deploy.md](./docs/runbooks/relay-selfhost-cn-deploy.md).
+
 ### ✍️ Try it: write a manifest in 30 seconds
 
 ```toml

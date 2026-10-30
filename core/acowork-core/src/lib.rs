@@ -99,9 +99,11 @@ pub use lsp::{
     LspRegistryFile, LspRuntimeEntry, LspServerEntry, LspServersConfig, LspSource,
 };
 pub use manifest::{
-    AgentManifest, CapabilityDef, LlmBudget, LlmConfig, ManifestConsolidationQuality,
-    ManifestDedupQuality, ManifestMemoryQuality, ProviderConfig, RagToolConfig, RoutingConfig,
-    SkillMode, SkillsConfig, ToolDeclaration,
+    AgentManifest, CapabilityDef, DraftCapability, LlmBudget, LlmConfig, ManifestConfigDefaults,
+    ManifestDraft,
+    ManifestConsolidationQuality, ManifestDedupQuality, ManifestGraphReport, ManifestMemoryQuality,
+    McpServerDecl, McpSourceKind, ProviderConfig, RagToolConfig, RoutingConfig, SkillDecl, SkillMode,
+    SkillsConfig, ToolDeclaration,
 };
 pub use protocol::{
     ConversationEntryDto, GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo,

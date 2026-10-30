@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { ModelCapabilitiesInfo } from "../../lib/types";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
@@ -5,10 +6,18 @@ import { useTranslation } from "../../i18n/useTranslation";
 
 interface ModelCapEditorProps {
   modelId: string;
-  caps: ModelCapabilitiesInfo;
+  /** Capability fields; omit to render a protocol-only card (ADR-103 D11). */
+  caps?: ModelCapabilitiesInfo;
+  /**
+   * ADR-103 D11 position 3+4: the protocol dropdown / base_url / verify block.
+   * Injected as a slot so this component stays ignorant of protocol semantics.
+   */
+  protocolSection?: ReactNode;
+  /** Trailing header hint (e.g. the `Ⓡ Responses` chip). */
+  headerHint?: ReactNode;
   expanded: boolean;
   onToggle: () => void;
-  onUpdate: (field: keyof ModelCapabilitiesInfo, value: unknown) => void;
+  onUpdate?: (field: keyof ModelCapabilitiesInfo, value: unknown) => void;
 }
 
 const INPUT_MODALITIES = ["text", "image", "audio", "video"] as const;
@@ -18,11 +27,16 @@ const OUTPUT_MODALITIES = ["text", "image"] as const;
 export function ModelCapEditor({
   modelId,
   caps,
+  protocolSection,
+  headerHint,
   expanded,
   onToggle,
   onUpdate,
 }: ModelCapEditorProps) {
   const { t } = useTranslation();
+  const update = (field: keyof ModelCapabilitiesInfo, value: unknown) => {
+    onUpdate?.(field, value);
+  };
 
   return (
     <div className="rounded border border-border-outer">
@@ -33,17 +47,21 @@ export function ModelCapEditor({
       >
         <span className="text-text-tertiary">{expanded ? "\u25BC" : "\u25B6"}</span>
         <span className="flex-1 truncate text-left">{modelId}</span>
-        <span className="text-text-tertiary">{caps.context_window ? `${(caps.context_window / 1000).toFixed(0)}K ctx` : ""}</span>
+        {headerHint}
+        <span className="text-text-tertiary">{caps?.context_window ? `${(caps.context_window / 1000).toFixed(0)}K ctx` : ""}</span>
       </button>
       {expanded && (
         <div className="border-t border-border-divider px-2 py-2">
+          {protocolSection}
+          {caps && (
+          <>
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="mb-0.5 block text-xs text-text-tertiary">{t("harness.contextWindow")}</label>
               <StyledInput
                 type="number"
                 value={caps.context_window?.toString() ?? ""}
-                onChange={(e) => onUpdate("context_window", parseInt(e.target.value) || 0)}
+                onChange={(e) => update("context_window", parseInt(e.target.value) || 0)}
                 placeholder="e.g. 128000"
                 className="dark:border-zinc-700 dark:bg-zinc-900 "
               />
@@ -53,7 +71,7 @@ export function ModelCapEditor({
               <StyledInput
                 type="number"
                 value={caps.max_output_tokens?.toString() ?? ""}
-                onChange={(e) => onUpdate("max_output_tokens", parseInt(e.target.value) || 0)}
+                onChange={(e) => update("max_output_tokens", parseInt(e.target.value) || 0)}
                 placeholder="e.g. 16384"
                 className="dark:border-zinc-700 dark:bg-zinc-900 "
               />
@@ -64,7 +82,7 @@ export function ModelCapEditor({
               <input
                 type="checkbox"
                 checked={caps.supports_tool_calling ?? false}
-                onChange={(e) => onUpdate("supports_tool_calling", e.target.checked)}
+                onChange={(e) => update("supports_tool_calling", e.target.checked)}
                 className="accent-[var(--color-accent)]"
               />
               {t("harness.supportsToolCalling")}
@@ -73,7 +91,7 @@ export function ModelCapEditor({
               <input
                 type="checkbox"
                 checked={caps.supports_reasoning ?? false}
-                onChange={(e) => onUpdate("supports_reasoning", e.target.checked)}
+                onChange={(e) => update("supports_reasoning", e.target.checked)}
                 className="accent-[var(--color-accent)]"
               />
               {t("harness.reasoning")}
@@ -93,7 +111,7 @@ export function ModelCapEditor({
                         const nextMod = e.target.checked
                           ? [...current, mod]
                           : current.filter(m => m !== mod);
-                        onUpdate("modalities", { ...caps.modalities, input: nextMod });
+                        update("modalities", { ...caps.modalities, input: nextMod });
                       }}
                       className="accent-[var(--color-accent)]"
                     />
@@ -115,7 +133,7 @@ export function ModelCapEditor({
                         const nextMod = e.target.checked
                           ? [...current, mod]
                           : current.filter(m => m !== mod);
-                        onUpdate("modalities", { ...caps.modalities, output: nextMod });
+                        update("modalities", { ...caps.modalities, output: nextMod });
                       }}
                       className="accent-[var(--color-accent)]"
                     />
@@ -128,18 +146,27 @@ export function ModelCapEditor({
           {caps.supports_reasoning && (
             <div className="mt-1.5">
               <label className="mb-0.5 block text-xs text-text-tertiary">{t("harness.defaultReasoningEffort")}</label>
+              {/* Every backend level is offered here on purpose: this card is
+                  the override surface, so a stale or wrong catalog entry must
+                  stay correctable. The chat effort dropdown is the place that
+                  narrows itself to the model's declared levels. */}
               <Dropdown
                 value={caps.default_reasoning_effort ?? "auto"}
-                onChange={(v) => onUpdate("default_reasoning_effort", v)}
+                onChange={(v) => update("default_reasoning_effort", v)}
                 options={[
                   { value: "auto", label: "Auto" },
                   { value: "off", label: "Off" },
+                  { value: "minimal", label: "Minimal" },
                   { value: "low", label: "Low" },
                   { value: "medium", label: "Medium" },
                   { value: "high", label: "High" },
+                  { value: "xhigh", label: "XHigh" },
+                  { value: "max", label: "Max" },
                 ]}
               />
             </div>
+          )}
+          </>
           )}
         </div>
       )}

@@ -59,6 +59,7 @@ import { ViewRunButton } from "./ViewRunButton";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote, truncateQuote } from "./ReplyQuote";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
@@ -621,6 +622,7 @@ const GroupRowView = memo(function GroupRowView({
                   key={a.id}
                   chatSessionId={chatSessionId}
                   attachment={a}
+                  onClick={() => void openChatAttachment(chatSessionId, a)}
                 />
               ))}
             </div>
@@ -632,7 +634,7 @@ const GroupRowView = memo(function GroupRowView({
               also count as content, which is what keeps a file-with-no-words
               head row from painting the empty-turn placeholder. */}
           <ExecAttachmentLabels
-            labels={row.meta?.exec_attachments ?? []}
+            labels={row.meta?.exec_attachments}
             align={own ? "end" : "start"}
           />
           {/* What this answer answers. The answered card no longer paints a

@@ -121,6 +121,16 @@ pub struct ModelCapabilitiesInfo {
     /// When `None`, the provider auto-detects based on model capabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_mode: Option<String>,
+    /// Reasoning effort levels this model supports (models.dev
+    /// `reasoning_options[].values` for the `effort` option), e.g.
+    /// `["low", "medium", "high", "xhigh", "max"]`.
+    ///
+    /// `None` = unknown (custom model without a catalog entry) — the UI then
+    /// shows the generic level set and the Runtime sends the chosen level
+    /// unchanged. When present, the Runtime clamps a chosen level into this
+    /// set so the request never carries an unsupported value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 impl ModelCapabilitiesInfo {
@@ -225,7 +235,11 @@ pub struct ProviderListItem {
     pub id: String,
     /// API base URL
     pub base_url: String,
-    /// LLM protocol type
+    /// LLM protocol type (provider-level default). ADR-103 D2: `#[serde(default)]`
+    /// tolerates a missing field in older on-disk payloads (phase-1 read side).
+    /// Note this does NOT rescue unknown enum *values* — that is what
+    /// `ProtocolType::Unknown` (`#[serde(other)]`) is for.
+    #[serde(default)]
     pub protocol_type: ProtocolType,
     /// Available models for this provider with full capabilities
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -252,6 +266,100 @@ pub struct ProviderModelEntry {
     /// Gateway-level max output tokens limit for this model
     #[serde(default = "default_max_output_tokens_limit")]
     pub max_output_tokens_limit: u64,
+    /// User-selected protocol intention for this model (ADR-103 D1/D2).
+    /// `None` = no explicit choice (effective protocol follows npm derivation).
+    /// Written ONLY by an explicit user action (protocol dropdown / REST).
+    /// Whether `Responses` actually takes effect additionally requires
+    /// `protocol_probe ∈ {verified, degraded}` — the D1 gate is decided
+    /// once in the Gateway (`resolve_protocol`); Runtime and frontend only
+    /// consume the result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_type: Option<ProtocolType>,
+    /// Per-model base URL override, used when the model's Responses endpoint
+    /// differs from the provider default (e.g. MiniMax: provider base is
+    /// `/anthropic/v1`, Responses needs `/v1`). Written by explicit user
+    /// action; a successful probe may *suggest* a value but MUST NOT write
+    /// it (ADR-103 D10.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Probe verdict for `protocol_type` (ADR-103 D10/D12). Written only by
+    /// the Gateway save/probe path. Gates whether `Responses` takes effect
+    /// (D1); MUST NOT be re-evaluated during a session. NOT delivered to
+    /// Runtime (ADR-103 §3 red line 2) — it is Gateway-side display/gating
+    /// metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_probe: Option<ProtocolProbe>,
+}
+
+/// Probe verdict states (ADR-103 D10.3).
+///
+/// `verified` / `degraded` gate `Responses` ON; `failed` / `stale` /
+/// `unverified` / `Unknown` gate it OFF (effective protocol falls back to
+/// the npm-derived default). Unknown wire values deserialize to `Unknown`
+/// and are treated as "not passed" (D1 MUST).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeState {
+    /// L1+L2+L3 all passed against the real endpoint.
+    Verified,
+    /// Passed, but only after a D8 field trim (e.g. `reasoning` was dropped).
+    Degraded,
+    /// Probe failed — carries the failure class/reason for the UI yellow badge.
+    Failed,
+    /// Provider config changed since the probe; verdict no longer trustworthy.
+    Stale,
+    /// Never probed (default when the field is absent).
+    #[default]
+    Unverified,
+    /// Read-side tolerance for unknown wire values (treated as not-passed).
+    #[serde(other)]
+    Unknown,
+}
+
+impl ProbeState {
+    /// The D1 gate: does this verdict enable the selected `Responses` protocol?
+    /// Only `verified` and `degraded` pass; everything else (including
+    /// `Unknown`) fails.
+    pub fn gates_responses(&self) -> bool {
+        matches!(self, ProbeState::Verified | ProbeState::Degraded)
+    }
+}
+
+/// Persisted probe verdict for a model-level `protocol_type` selection
+/// (ADR-103 D10/D12). Written only by the Gateway probe path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ProtocolProbe {
+    /// Verdict state — the gate input.
+    pub state: ProbeState,
+    /// Probe tiers that passed, e.g. `["L1","L2","L3"]` (D10.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tier_passed: Vec<String>,
+    /// Failure reason shown by the yellow "selected but not enabled" badge
+    /// (D11). Only meaningful when `state == Failed` / `Unknown`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The base URL the probe actually hit, when it differs from the
+    /// provider default (D10.1 `observed_base_url`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_base_url: Option<String>,
+    /// Request fields the probe had to drop to get a 2xx (D8 trim).
+    ///
+    /// Non-empty is what makes `state == Degraded` meaningful: the endpoint
+    /// works, but only without a field the Runtime would otherwise send. The UI
+    /// spells these out ("reasoning 参数被省略") so the degradation is visible
+    /// rather than inferred from the state alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stripped_fields: Vec<String>,
+    /// RFC 3339 timestamp of the probe (cache TTL / staleness display).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probed_at: Option<String>,
+}
+
+impl ProtocolProbe {
+    /// Convenience: gate check on the verdict state.
+    pub fn gates_responses(&self) -> bool {
+        self.state.gates_responses()
+    }
 }
 
 /// MCP server list entry — delivered by Gateway to Runtime via AgentHelloResult.
@@ -453,6 +561,186 @@ pub enum AttachedItem {
         client_id: Option<String>,
     },
 }
+
+/// What a Chat surface is allowed to say about an [`AttachedItem`].
+///
+/// A workspace reference resolves at a node-local path and an uploaded blob
+/// lives under a content hash in one Agent's `files/` dir. The Chat store
+/// belongs to the user service and the Chat Router runs on whichever Node the
+/// conversation was pinned to, so neither can open either location — reading a
+/// node path from the Gateway breaks the moment Gateway and Node sit on
+/// different hosts (ADR-009 §5). What every surface *can* agree on is what the
+/// item was called and which arm of the union it came from, plus the
+/// decoration a chip renders. That is this type, and it is the only attachment
+/// shape a Chat row or a router prompt may carry.
+///
+/// The single producer is [`AttachmentLabel::from_item`] — the Gateway calls
+/// it through [`AttachmentLabel::from_value`] when it writes the row label and
+/// the Chat Router calls it when it renders the turn — so the human's screen
+/// and the model's prompt describe the same attachment with the same words,
+/// **and count the same set of them**. The blindness this removes was a real
+/// incident: a turn whose only content was a workspace reference was routed as
+/// "no attachment", because the one list the router read (`chat_attachments`,
+/// the uploaded files) is not the one the reference rode in on.
+///
+/// `filename` and `kind` keep the keys the row shape already shipped with, and
+/// every added field is defaulted, so a row written before this existed still
+/// parses (with no size/line decoration) instead of dropping out of the history
+/// window.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentLabel {
+    /// Upload arms send `filename`, workspace arms send `name` (a
+    /// repo-relative path is display text there, not a location); an item that
+    /// sent only a path is reduced to its last segment.
+    pub filename: String,
+    /// The ADR-046 item type, quoted from the wire (`attached_file`,
+    /// `image_upload`, …). Drives the glyph every surface draws for it — the
+    /// tag is data, never a label printed at the user.
+    #[serde(default)]
+    pub kind: String,
+    /// Document format for the upload arms (`pdf`, `png`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Blob size for the upload arms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Line range for `attached_selection`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+}
+
+impl AttachmentLabel {
+    /// Project an attachment onto what a Chat surface may render.
+    ///
+    /// `None` when the projection has no name to show. That rule lives here,
+    /// on the projection, and not at the two call sites: a chip or a prompt
+    /// line for an unnamed item is the lie this type exists to stop telling,
+    /// and a stored row and a live turn that disagree about *which* items
+    /// count would be the same blindness in a new costume.
+    pub fn from_item(item: &AttachedItem) -> Option<Self> {
+        let base = |name: &str, abs_path: &str| {
+            if !name.is_empty() {
+                name.to_string()
+            } else {
+                // Last resort: an item that sent only its path. The directory
+                // part is a node-local layout the chat cannot read, so this
+                // arm alone is trimmed to its last component — and a Windows
+                // path is the case a `/`-only split would silently miss.
+                abs_path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(abs_path)
+                    .to_string()
+            }
+        };
+        let label = match item {
+            AttachedItem::FileUpload {
+                filename,
+                format,
+                size_bytes,
+                ..
+            } => Self {
+                filename: filename.clone(),
+                kind: "file_upload".to_string(),
+                format: Some(format.clone()),
+                size_bytes: Some(*size_bytes),
+                start_line: None,
+                end_line: None,
+            },
+            AttachedItem::ImageUpload {
+                filename,
+                format,
+                size_bytes,
+                ..
+            } => Self {
+                filename: filename.clone(),
+                kind: "image_upload".to_string(),
+                format: Some(format.clone()),
+                size_bytes: Some(*size_bytes),
+                start_line: None,
+                end_line: None,
+            },
+            AttachedItem::AttachedFile { abs_path, name, .. } => Self {
+                filename: base(name, abs_path),
+                kind: "attached_file".to_string(),
+                format: None,
+                size_bytes: None,
+                start_line: None,
+                end_line: None,
+            },
+            AttachedItem::AttachedSelection {
+                abs_path,
+                name,
+                start_line,
+                end_line,
+                ..
+            } => Self {
+                filename: base(name, abs_path),
+                kind: "attached_selection".to_string(),
+                format: None,
+                size_bytes: None,
+                start_line: Some(*start_line),
+                end_line: Some(*end_line),
+            },
+            AttachedItem::AttachedFolder { abs_path, name, .. } => Self {
+                filename: base(name, abs_path),
+                kind: "attached_folder".to_string(),
+                format: None,
+                size_bytes: None,
+                start_line: None,
+                end_line: None,
+            },
+        };
+        (!label.filename.is_empty()).then_some(label)
+    }
+
+    /// Parse one wire entry into a label. An entry the union cannot read, or
+    /// reads into something with no name, is `None`: it would be a chip for
+    /// what the Agent never received, which is the exact lie the row labels
+    /// exist to stop telling.
+    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let item: AttachedItem = serde_json::from_value(value.clone()).ok()?;
+        Self::from_item(&item)
+    }
+}
+
+/// Metadata of one file attached to a durable chat message (design 27 §4.2.1).
+///
+/// The Gateway produces this from the **stored row** — the user service
+/// re-reads name / mime / size from the session's `files/` dir when it appends
+/// the message, so this is the authoritative description of what the user
+/// attached, never a client claim.
+///
+/// Consumed by the Chat Router in two places that must agree byte for byte:
+/// the history projection (a row already in the transcript) and the current
+/// turn's own view (the message being routed). Bytes are deliberately absent —
+/// the Runtime pulls those over its own attachment route, and only when it
+/// actually needs to hand them to an execution session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatAttachmentMeta {
+    /// Per-field defaults: a row written by an older (or buggier) producer
+    /// must degrade to an incomplete description of the file, never drop the
+    /// whole message from the router's history window.
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+/// Delivery-params key carrying this turn's [`ChatAttachmentMeta`] list.
+///
+/// It lives here, next to the type, because the key crosses a process
+/// boundary that the compiler cannot check: the Gateway writes it and the
+/// Chat Router reads it. Runtime-side the reader is deliberately tolerant
+/// (a wrong shape costs the files, not the turn), which means a renamed key
+/// on one side degrades **silently** to "this turn carried nothing" — the
+/// exact blindness the field exists to remove. One constant, two sides.
+pub const CHAT_ATTACHMENTS_PARAM: &str = "chat_attachments";
 
 /// Legacy — replaced by `AttachedItem` (ADR-046). Retained for
 /// deserialization of old `attached_context` payloads during transition.
@@ -937,6 +1225,32 @@ pub enum ProtocolType {
     #[default]
     #[serde(alias = "openai-compatible")]
     OpenAI,
+    /// OpenAI Responses API (`POST {base}/responses`) — ADR-103 D3.
+    /// Only ever *effective* when the user explicitly selected it AND the
+    /// Gateway probe passed (D1 gate); nothing writes this value to disk in
+    /// the phase-1 release (D2 two-stage rollout).
+    #[serde(alias = "openai-responses")]
+    Responses,
+    /// ADR-103 D2 phase-1 read-side tolerance: an unknown wire value
+    /// deserializes here instead of hard-failing the whole payload.
+    /// Consumers MUST treat it as "no usable choice" — fall back to the
+    /// npm-derived default with a `warn!`, never guess a concrete protocol.
+    #[serde(other)]
+    Unknown,
+}
+
+impl std::fmt::Display for ProtocolType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ProtocolType::Anthropic => "anthropic",
+            ProtocolType::Google => "google",
+            ProtocolType::Ollama => "ollama",
+            ProtocolType::OpenAI => "openai",
+            ProtocolType::Responses => "responses",
+            ProtocolType::Unknown => "unknown",
+        };
+        f.write_str(s)
+    }
 }
 
 /// Convert MQTT protobuf `LlmProtocol` (as i32) to domain `ProtocolType`.
@@ -951,8 +1265,47 @@ pub fn llm_protocol_to_protocol_type(proto: i32) -> ProtocolType {
         Ok(crate::mqtt_proto::LlmProtocol::Anthropic) => ProtocolType::Anthropic,
         Ok(crate::mqtt_proto::LlmProtocol::Google) => ProtocolType::Google,
         Ok(crate::mqtt_proto::LlmProtocol::Ollama) => ProtocolType::Ollama,
-        // Unspecified or unknown -> default to OpenAI-compatible
-        _ => ProtocolType::OpenAI,
+        Ok(crate::mqtt_proto::LlmProtocol::Responses) => ProtocolType::Responses,
+        Ok(crate::mqtt_proto::LlmProtocol::Openai) => ProtocolType::OpenAI,
+        // Unspecified or unknown -> default to OpenAI-compatible. ADR-103 D3:
+        // this fallback was silent; an old Runtime receiving a value it does
+        // not know (e.g. RESPONSES=5) would send Responses-only models to
+        // /chat/completions. Make the fallback visible (R1 mitigation).
+        _ => {
+            tracing::warn!(
+                proto,
+                "llm_protocol_to_protocol_type: unrecognized LlmProtocol value, falling back to OpenAI-compatible"
+            );
+            ProtocolType::OpenAI
+        }
+    }
+}
+
+/// ADR-103 D2 — model-level proto→domain protocol mapping with
+/// inherit-on-anomaly semantics.
+///
+/// Deliberately NOT `llm_protocol_to_protocol_type`: that maps
+/// `UNSPECIFIED(0)`/unknown to `OpenAI`, which for a *model-level* field
+/// would silently re-classify every model of an Anthropic / Google / Ollama
+/// provider (§3 MQTT row). Here:
+/// - `None` (field absent)  -> `None` = inherit the provider-level protocol.
+/// - `Some(1..=5)`          -> the mapped protocol.
+/// - `Some(0)` / unknown    -> `None` + warn (inherit; never guess).
+pub fn model_protocol_from_proto(proto: Option<i32>) -> Option<ProtocolType> {
+    let v = proto?;
+    match crate::mqtt_proto::LlmProtocol::try_from(v) {
+        Ok(crate::mqtt_proto::LlmProtocol::Openai) => Some(ProtocolType::OpenAI),
+        Ok(crate::mqtt_proto::LlmProtocol::Anthropic) => Some(ProtocolType::Anthropic),
+        Ok(crate::mqtt_proto::LlmProtocol::Google) => Some(ProtocolType::Google),
+        Ok(crate::mqtt_proto::LlmProtocol::Ollama) => Some(ProtocolType::Ollama),
+        Ok(crate::mqtt_proto::LlmProtocol::Responses) => Some(ProtocolType::Responses),
+        _ => {
+            tracing::warn!(
+                proto = v,
+                "model_protocol_from_proto: UNSPECIFIED/unknown model-level protocol; inheriting provider-level (never re-classifying)"
+            );
+            None
+        }
     }
 }
 
@@ -965,6 +1318,9 @@ impl std::str::FromStr for ProtocolType {
             "google" | "gemini" => Ok(ProtocolType::Google),
             "ollama" => Ok(ProtocolType::Ollama),
             "openai" | "openai-compatible" => Ok(ProtocolType::OpenAI),
+            // ADR-103 D3: Responses API (npm `@ai-sdk/openai`-compatible
+            // `POST {base}/responses`).
+            "responses" | "openai-responses" => Ok(ProtocolType::Responses),
             _ => Err(format!("Unknown protocol type: {}", s)),
         }
     }
@@ -1707,6 +2063,17 @@ pub struct McpServerConfigDef {
     /// Empty vec => usable without any secret.
     #[serde(default)]
     pub required_secrets: Vec<String>,
+    /// Where this catalog entry came from (ADR-104).
+    ///
+    /// Provenance, not behaviour: nothing reads it to decide what to run.
+    /// It exists so a user staring at a surprise entry in the catalog can
+    /// tell "I added this" from "a package suggested it"
+    /// (`agent-package:<agent_id>`) from "a preset scan created it"
+    /// (`preset:<preset_id>`), and so the Tools panel can label a
+    /// package-suggested install without keeping its own side table.
+    /// Format: `<kind>:<id>`, `None` = added by hand / pre-ADR-104 entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// MCP transport type (wire format).
@@ -2514,5 +2881,112 @@ mod tests {
         // Non-cache fields are intact.
         assert_eq!(parsed.context_window, 200_000);
         assert_eq!(parsed.total_input_tokens, Some(4500));
+    }
+}
+
+// ── ADR-103 S1: protocol-shape read-side tolerance tests ──────────────
+
+#[cfg(test)]
+mod adr103_tests {
+    use super::*;
+
+    #[test]
+    fn responses_variant_serde_roundtrip_and_alias() {
+        let v: ProtocolType = serde_json::from_str("\"responses\"").unwrap();
+        assert_eq!(v, ProtocolType::Responses);
+        // Historical/alias spelling must also parse (D3).
+        let v: ProtocolType = serde_json::from_str("\"openai-responses\"").unwrap();
+        assert_eq!(v, ProtocolType::Responses);
+        // Serialize uses the canonical lowercase name.
+        assert_eq!(serde_json::to_string(&ProtocolType::Responses).unwrap(), "\"responses\"");
+        // Display round-trips through FromStr.
+        assert_eq!("responses".parse::<ProtocolType>().unwrap(), ProtocolType::Responses);
+        assert_eq!("openai-responses".parse::<ProtocolType>().unwrap(), ProtocolType::Responses);
+        assert_eq!(ProtocolType::Responses.to_string(), "responses");
+    }
+
+    #[test]
+    fn unknown_wire_value_deserializes_to_unknown_not_error() {
+        // Phase-1 read side: a future/unknown protocol string must not kill
+        // the whole payload (D2).
+        let v: ProtocolType = serde_json::from_str("\"mistral-jetstream\"").unwrap();
+        assert_eq!(v, ProtocolType::Unknown);
+        assert_eq!(ProtocolType::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn provider_list_item_missing_protocol_type_defaults_to_openai() {
+        // Old on-disk payloads predate the field entirely.
+        let json = r#"{"id":"p","base_url":"http://x","models":[]}"#;
+        let item: ProviderListItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.protocol_type, ProtocolType::OpenAI);
+    }
+
+    #[test]
+    fn provider_model_entry_old_json_has_none_new_fields() {
+        let json = r#"{"id":"m","capabilities":{"context_window":1000,"max_output_tokens":100},"max_output_tokens_limit":100}"#;
+        let e: ProviderModelEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(e.protocol_type, None);
+        assert_eq!(e.base_url, None);
+        assert_eq!(e.protocol_probe, None);
+        // And serialization omits all three (no on-disk churn).
+        let out = serde_json::to_string(&e).unwrap();
+        assert!(!out.contains("protocol_type"));
+        assert!(!out.contains("protocol_probe"));
+    }
+
+    #[test]
+    fn probe_state_gate_only_verified_and_degraded_pass() {
+        for s in [ProbeState::Verified, ProbeState::Degraded] {
+            assert!(s.gates_responses(), "{s:?} must pass the D1 gate");
+        }
+        for s in [ProbeState::Failed, ProbeState::Stale, ProbeState::Unverified, ProbeState::Unknown] {
+            assert!(!s.gates_responses(), "{s:?} must not pass the D1 gate");
+        }
+        // Unknown wire value tolerated, treated as not-passed.
+        let st: ProbeState = serde_json::from_str("\"telepathic\"").unwrap();
+        assert_eq!(st, ProbeState::Unknown);
+        assert!(!st.gates_responses());
+    }
+
+    #[test]
+    fn model_protocol_from_proto_absent_means_inherit() {
+        // Absent field = inherit provider level — MUST NOT become OpenAI via
+        // llm_protocol_to_protocol_type (which maps UNSPECIFIED -> OpenAI).
+        assert_eq!(model_protocol_from_proto(None), None);
+        // Explicit UNSPECIFIED(0) / unknown values: inherit + warn, never guess.
+        assert_eq!(model_protocol_from_proto(Some(0)), None);
+        assert_eq!(model_protocol_from_proto(Some(99)), None);
+        // Known values map 1:1.
+        assert_eq!(model_protocol_from_proto(Some(1)), Some(ProtocolType::OpenAI));
+        assert_eq!(model_protocol_from_proto(Some(2)), Some(ProtocolType::Anthropic));
+        assert_eq!(model_protocol_from_proto(Some(3)), Some(ProtocolType::Google));
+        assert_eq!(model_protocol_from_proto(Some(4)), Some(ProtocolType::Ollama));
+        assert_eq!(model_protocol_from_proto(Some(5)), Some(ProtocolType::Responses));
+    }
+
+    #[test]
+    fn existing_protocol_wire_names_are_frozen() {
+        // S1 zero-traffic-change boundary: the four pre-ADR-103 variants keep
+        // their exact serde names on disk / REST / MQTT-JSON surfaces.
+        for (v, name) in [
+            (ProtocolType::Anthropic, "\"anthropic\""),
+            (ProtocolType::Google, "\"google\""),
+            (ProtocolType::Ollama, "\"ollama\""),
+            (ProtocolType::OpenAI, "\"openai\""),
+        ] {
+            assert_eq!(serde_json::to_string(&v).unwrap(), name);
+        }
+        // The legacy alias still parses.
+        let v: ProtocolType = serde_json::from_str("\"openai-compatible\"").unwrap();
+        assert_eq!(v, ProtocolType::OpenAI);
+    }
+
+    #[test]
+    fn llm_protocol_to_protocol_type_covers_responses() {
+        assert_eq!(llm_protocol_to_protocol_type(5), ProtocolType::Responses);
+        // Provider-level semantics unchanged: UNSPECIFIED/unknown -> OpenAI.
+        assert_eq!(llm_protocol_to_protocol_type(0), ProtocolType::OpenAI);
+        assert_eq!(llm_protocol_to_protocol_type(42), ProtocolType::OpenAI);
     }
 }

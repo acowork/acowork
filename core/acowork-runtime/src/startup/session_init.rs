@@ -348,6 +348,19 @@ pub(crate) async fn phase_b_init_session(
         crate::usecases::RuntimeAttachmentService::new(work_dir_path.to_path_buf()),
     );
 
+    // ADR-104: project the package's `[[mcp_servers]]` into
+    // `agent_mcp.json`'s `recommended` list before anything reads that file.
+    // The list is derived state (rewritten every boot), and it is what the
+    // Tools panel renders as "this agent suggests" plus what seeds
+    // `agent_mcp_tools.json`'s per-server defaults. A failure here must not
+    // block startup: the agent runs fine without its recommendations.
+    if let Err(e) = crate::agent_config::project_recommended_mcp_servers(
+        work_dir_path,
+        &ctx.loaded.manifest,
+    ) {
+        tracing::warn!(error = %e, "Failed to project manifest [[mcp_servers]] into agent_mcp.json");
+    }
+
     // ADR-101: the agent's MCP catalog (pushed by the Gateway) decides whether
     // the official memory service is wired for this agent. Read once here; the
     // manifest hand-off below keys on it and nothing else.
@@ -362,6 +375,8 @@ pub(crate) async fn phase_b_init_session(
         // Inject the per-agent compatibility cache so `build_provider_for`
         // can wire it into rebuilt providers (429-retry / session-resume).
         c.compat_cache = ctx.compat_cache.take();
+        // ADR-103 D8/S7: the Responses trim cache travels with it.
+        c.responses_compat_cache = ctx.responses_compat_cache.take();
 
         // Agent-specific compaction prompt (prompts/summary.md, optional).
         // Loaded once in Phase A (see `AgentBootContext::compaction_prompt`)
@@ -647,21 +662,32 @@ pub(crate) async fn phase_b_init_session(
         {
             let mut updated = agent_cfg.clone();
             let mut dirty = false;
+            // ── manifest layer: one projection, never an overwrite ──
+            // ADR-104: every manifest-authored knob reaches `agent_config.json`
+            // through `config_defaults()`, and only into fields this file
+            // leaves `None`. That is what makes the file the single source of
+            // truth at request time: the manifest is read once, at seed time,
+            // instead of being re-consulted by individual consumers
+            // (temperature / context_window used to be seeded here while
+            // `[llm].max_tokens` was read straight off the manifest inside the
+            // request builder — two landing paths for one declaration).
+            if updated.seed_from_manifest(&ctx.loaded.manifest.config_defaults()) {
+                dirty = true;
+            }
 
-            // ── context_window: manifest.llm.context_window → 200K ──
-            // Note: manifest `Some(0)` (old "no limit") is invalid under
-            // ADR-074 §6 — the resolution chain skips it and falls to
-            // DEFAULT_CONTEXT_WINDOW. We still persist whatever the
-            // manifest says; the chain does the filtering at resolve time.
+            // ── context_window: → 200K ──
+            // Note: `Some(0)` (old "no limit") is invalid under ADR-074 §6 —
+            // the resolution chain skips it and falls to
+            // DEFAULT_CONTEXT_WINDOW. We still persist whatever the manifest
+            // says; the chain does the filtering at resolve time.
             if updated.context_window.is_none() {
-                let manifest_cw = ctx.loaded.manifest.llm.context_window;
-                updated.context_window =
-                    Some(manifest_cw.unwrap_or(crate::config::DEFAULT_CONTEXT_WINDOW));
+                updated.context_window = Some(crate::config::DEFAULT_CONTEXT_WINDOW);
                 dirty = true;
             }
             c.context_window_override = updated.context_window;
             // ADR-061: compression ratio threshold — None = built-in default
-            // (0.90), no manifest/fallback chain, so no dirty-write here.
+            // (0.90). The manifest may seed it (above); there is no
+            // config-level fallback, so no dirty-write here.
             c.compression_ratio_threshold = updated.compression_ratio_threshold;
             // Per-agent session language override — None = fall through to
             // the global `UserProfile.language` (no fallback chain, the
@@ -670,13 +696,19 @@ pub(crate) async fn phase_b_init_session(
             // `update_user_identity` push.
             c.session_language_override = updated.session_language.clone();
 
-            // ── temperature: manifest.llm.temperature → 0.3 ─────────
+            // ── temperature: → 0.3 ──
             if updated.temperature.is_none() {
-                let manifest_temp = ctx.loaded.manifest.llm.temperature;
-                updated.temperature =
-                    Some(manifest_temp.unwrap_or(crate::config::DEFAULT_TEMPERATURE));
+                updated.temperature = Some(crate::config::DEFAULT_TEMPERATURE);
                 dirty = true;
             }
+            c.temperature_override = updated.temperature;
+
+            // ── max_output_tokens: no fallback (None = model native) ──
+            // Seeded from the manifest above; the request builder treats it as
+            // a *ceiling* over the Gateway's per-model capability, not as the
+            // old manifest-level request hard override.
+            c.max_output_tokens_override =
+                updated.max_output_tokens.map(|v| v.min(u32::MAX as u64) as u32);
             c.temperature_override = updated.temperature;
 
             // ── max_iterations: RuntimeConfig.max_iterations (200) ──

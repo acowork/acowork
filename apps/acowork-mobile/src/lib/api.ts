@@ -155,20 +155,27 @@ function trim(u: string): string {
 }
 
 /**
- * One authenticated request with the 401→refresh→replay ladder.
- * `path` must start with `/api`.
+ * One authenticated request with the 401→refresh→replay ladder, returning the
+ * raw `Response`.
+ *
+ * Split from `req` because not every authenticated GET is JSON: attachment
+ * bytes are bearer-guarded too (a bare `<img src>` or `<a href>` cannot send
+ * the header), so the bytes path needs the same rotation ladder without the
+ * JSON envelope handling. One ladder, two readers.
  */
-async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function authedFetch(
+  path: string,
+  init: { method?: string; headers?: Record<string, string>; body?: BodyInit } = {},
+): Promise<Response> {
   const a = auth
   if (!a) throw new Error('auth bridge not installed')
   const send = async (token: string | null): Promise<Response> => {
-    const headers: Record<string, string> = { Accept: 'application/json' }
-    if (body !== undefined) headers['Content-Type'] = 'application/json'
+    const headers: Record<string, string> = { ...init.headers }
     if (token) headers.Authorization = `Bearer ${token}`
     return fetch(`${trim(a.baseUrl())}${path}`, {
-      method,
+      method: init.method ?? 'GET',
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: init.body,
       signal: timeoutSignal(REQUEST_TIMEOUT_MS),
     })
   }
@@ -186,12 +193,50 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     }
     res = await send(a.accessToken())
   }
+  return res
+}
+
+/**
+ * One authenticated request with the 401→refresh→replay ladder.
+ * `path` must start with `/api`.
+ */
+async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await authedFetch(path, {
+    method,
+    headers: {
+      Accept: 'application/json',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
   if (!res.ok) throw new GatewayError(res.status, await res.text().catch(() => ''))
   if (res.status === 204) return undefined as T
   // Some accepted responses (e.g. 202 on send) carry no body.
   const text = await res.text()
   if (!text) return undefined as T
   return JSON.parse(text) as T
+}
+
+/**
+ * `GET /api/chat-sessions/{id}/files/{attachment_id}` — one chat attachment's
+ * bytes, or its thumbnail sidecar with `thumb`.
+ *
+ * Session-routed, not account-routed: a group chat has no single `userId` to
+ * scope the account route by (the same reason Desktop's `downloadChatAttachment`
+ * gained a session twin). `GatewayError` on any non-2xx so the caller can tell
+ * "the blob is gone" (404, a migrated row) from "network down".
+ */
+export async function fetchChatAttachmentBlob(
+  chatSessionId: string,
+  attachmentId: string,
+  opts?: { thumb?: boolean },
+): Promise<Blob> {
+  const q = opts?.thumb ? '?thumb=1' : ''
+  const res = await authedFetch(
+    `/api/chat-sessions/${encodeURIComponent(chatSessionId)}/files/${encodeURIComponent(attachmentId)}${q}`,
+  )
+  if (!res.ok) throw new GatewayError(res.status, await res.text().catch(() => ''))
+  return res.blob()
 }
 
 /* ------------------------------------------------------------------ */

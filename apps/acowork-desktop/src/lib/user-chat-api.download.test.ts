@@ -27,7 +27,7 @@ vi.mock("./config", () => ({ getGatewayUrl: () => "http://127.0.0.1:19876" }));
 import { invoke } from "@tauri-apps/api/core";
 import type { Channel } from "@tauri-apps/api/core";
 import { save as showSaveDialog } from "@tauri-apps/plugin-dialog";
-import { downloadChatAttachment } from "./user-chat-api";
+import { downloadChatAttachment, downloadChatAttachmentBySession } from "./user-chat-api";
 import type { ChatAttachment } from "./types";
 
 const ATTACHMENT: ChatAttachment = {
@@ -92,5 +92,36 @@ describe("downloadChatAttachment", () => {
       defaultPath: "报告 v2.pdf",
       filters: [{ name: "报告 v2.pdf", extensions: ["pdf"] }],
     });
+  });
+});
+
+/**
+ * The session-scoped twin. The group surface never holds the owning
+ * `userId`, so it addresses the same blob through
+ * `/api/chat-sessions/{sid}/files/{aid}` (participation-checked server-side).
+ * One transfer implementation, two addresses — the split is only about which
+ * identity the caller happens to have.
+ */
+describe("downloadChatAttachmentBySession", () => {
+  it("addresses the session route and still hands Rust only url + path", async () => {
+    vi.mocked(showSaveDialog).mockResolvedValue("D:\Downloads\报告 v2.pdf");
+
+    await expect(
+      downloadChatAttachmentBySession("chat-1", ATTACHMENT),
+    ).resolves.toBe(true);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const [cmd, args] = vi.mocked(invoke).mock.calls[0] as [string, Record<string, unknown>];
+    expect(cmd).toBe("download_attachment");
+    expect(args.url).toBe("http://127.0.0.1:19876/api/chat-sessions/chat-1/files/att-1");
+    expect(Object.keys(args).sort()).toEqual(["onProgress", "path", "url"]);
+  });
+
+  it("does nothing when the user cancels", async () => {
+    vi.mocked(showSaveDialog).mockResolvedValue(null);
+    await expect(
+      downloadChatAttachmentBySession("chat-1", ATTACHMENT),
+    ).resolves.toBe(false);
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

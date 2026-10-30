@@ -29,6 +29,29 @@ pub enum ProviderErrorType {
     /// Stream silence — no data received within per-chunk read timeout.
     /// Retryable — the provider may have been temporarily overloaded.
     StreamTimeout,
+    /// The endpoint does not exist for this provider/model (ADR-103 D8).
+    /// Responses-shaped example: `POST /responses` answers 404 naming
+    /// `responses`/unknown endpoint. NOT retryable: re-issuing the same
+    /// request cannot succeed, the protocol choice itself is wrong.
+    EndpointUnavailable,
+    /// The provider rejects a request field it does not implement
+    /// (ADR-103 D8). Carries the field name as a machine-readable prefix in
+    /// [`ProviderError::message`], see [`ProviderError::unsupported_field`].
+    /// NOT retryable as-is; only a trim-then-retry may succeed (ADR-103 S7).
+    UnsupportedField,
+    /// The request is internally inconsistent (image placement, empty
+    /// `input`, illegal tool name, over-window). NOT retryable and MUST NOT
+    /// trigger field trimming — the caller has to change the content
+    /// (ADR-103 D8).
+    ContentIntegrity,
+    /// The server reported a terminal failure inside the stream
+    /// (`response.failed`). Partial output may already have been delivered,
+    /// so this is never retried blindly (ADR-103 D8).
+    InBandFailure,
+    /// The stream ended without the protocol's terminal event. Partial
+    /// output may already have reached the caller — never retried blindly
+    /// (ADR-103 D8).
+    TruncatedStream,
     /// Unclassified error.
     Unknown,
 }
@@ -91,6 +114,24 @@ impl ProviderError {
             ProviderErrorType::StreamTimeout => {
                 "Response timeout.".to_string()
             }
+            ProviderErrorType::EndpointUnavailable => {
+                "This provider does not support the selected protocol. Switch the model                  protocol back to Chat Completions in model settings."
+                    .to_string()
+            }
+            ProviderErrorType::UnsupportedField => {
+                "This provider rejects a request field the model settings enable.                  Adjust the model settings."
+                    .to_string()
+            }
+            ProviderErrorType::ContentIntegrity => {
+                "The request content was rejected by the provider. Check the message and                  attachments."
+                    .to_string()
+            }
+            ProviderErrorType::InBandFailure => {
+                "The model reported a failure while answering.".to_string()
+            }
+            ProviderErrorType::TruncatedStream => {
+                "The answer was cut off before it finished.".to_string()
+            }
             ProviderErrorType::ClientError => {
                 "Invalid request. Check model/tool config.".to_string()
             }
@@ -119,6 +160,44 @@ impl ProviderError {
             retryable,
             retry_after_ms: None,
         }
+    }
+
+    /// Machine-readable prefix used to carry the offending field name inside
+    /// [`ProviderError::message`] (ADR-103 D8 `UnsupportedField{field}`).
+    ///
+    /// `ProviderError` has a deliberately narrow shape shared by every
+    /// provider, so the field travels in the message behind this marker
+    /// instead of widening the struct. [`ProviderError::unsupported_field`]
+    /// is the only allowed reader.
+    pub const UNSUPPORTED_FIELD_MARKER: &'static str = "unsupported field `";
+
+    /// Build the `UnsupportedField` classification for a provider that
+    /// rejected a specific request field (ADR-103 D8).
+    ///
+    /// `field` is the wire name the provider complained about (`reasoning`,
+    /// `tool_choice`, `text.format`, `temperature`, `top_p`), `detail` is the
+    /// provider's own wording, kept for the details panel.
+    pub fn unsupported_field_error(field: &str, detail: String) -> Self {
+        Self {
+            message: format!("{}{}`, {}", Self::UNSUPPORTED_FIELD_MARKER, field, detail),
+            user_message: Self::compute_user_message(&ProviderErrorType::UnsupportedField, None),
+            status_code: Some(400),
+            error_type: ProviderErrorType::UnsupportedField,
+            // A retry with the field trimmed may succeed; the untrimmed
+            // request never will (ADR-103 D8/S7).
+            retryable: false,
+            retry_after_ms: None,
+        }
+    }
+
+    /// The field name this error rejected, if it was classified as
+    /// `UnsupportedField` (ADR-103 D8, consumed by the S7 trim whitelist).
+    pub fn unsupported_field(&self) -> Option<&str> {
+        if self.error_type != ProviderErrorType::UnsupportedField {
+            return None;
+        }
+        let rest = self.message.strip_prefix(Self::UNSUPPORTED_FIELD_MARKER)?;
+        rest.split('`').next().filter(|field| !field.is_empty())
     }
 
     /// Convenience constructor for network-level errors.
@@ -648,24 +727,36 @@ pub struct FunctionCall {
 /// Reasoning effort level for thinking-capable models.
 ///
 /// Maps to provider-specific parameters:
-/// - OpenAI-compatible: `reasoning_effort` field ("low", "medium", "high")
+/// - OpenAI-compatible completions: `reasoning_effort` field ("low", "medium", "high")
+/// - OpenAI Responses: `reasoning.effort` ("minimal", "low", "medium", "high", "xhigh", "max")
 /// - Anthropic: `thinking` block with `budget_tokens`
-/// - Google: `thinkingConfig` with `thinkingBudget`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+///
+/// The enum covers every level the models.dev catalog declares
+/// (`reasoning_options.effort.values`): `minimal`, `low`, `medium`, `high`,
+/// `xhigh`, `max`. `none` (the catalog's spelling of "off") maps to `Off`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     /// Let the model decide its own reasoning depth — no parameter is sent to the LLM.
     /// Displayed in the frontend; the control is shown and "Auto" is selected by default.
     #[default]
     Auto,
-    /// Disable thinking/reasoning entirely.
+    /// Do not control reasoning — no reasoning parameter is sent to the LLM.
+    ///
+    /// Deliberately NOT "send `none`": the `none` value is rejected by some
+    /// vendors (MiniMax M3.1-Flash answers HTTP 400) and silently ignored by
+    /// others. Omitting the parameter is the only shape every vendor accepts.
     Off,
+    /// The lightest reasoning level some vendors expose ("minimal").
+    Minimal,
     /// Light reasoning — fast responses with minimal thinking.
     Low,
     /// Balanced reasoning — good trade-off between speed and depth.
     Medium,
     /// Deep reasoning — thorough analysis, slower responses.
     High,
+    /// Extra-deep reasoning — one step below the maximum ("xhigh").
+    XHigh,
     /// Maximum reasoning depth — exhaustive thinking for complex problems.
     Max,
 }
@@ -673,31 +764,72 @@ pub enum ReasoningEffort {
 impl ReasoningEffort {
     /// Parse from a string slice (case-insensitive).
     /// Returns `None` if the string does not match any known variant.
+    ///
+    /// Accepts the catalog spellings as well: `none` → `Off`, `default` →
+    /// `Auto`, `xhigh`/`x_high` → `XHigh`.
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "auto" => Some(Self::Auto),
+            "auto" | "default" => Some(Self::Auto),
             "off" | "none" => Some(Self::Off),
+            "minimal" => Some(Self::Minimal),
             "low" => Some(Self::Low),
             "medium" | "med" => Some(Self::Medium),
             "high" => Some(Self::High),
+            "xhigh" | "x_high" => Some(Self::XHigh),
             "max" | "maximum" => Some(Self::Max),
             _ => None,
         }
     }
 
-    /// Convert to the OpenAI-compatible API string value.
-    /// Returns `None` for `Auto` (no parameter sent) and `Off` (omit field).
-    pub fn to_openai_str(&self) -> Option<&'static str> {
+    /// Rank of the effort level, used for ordering and clamping.
+    /// `Auto`/`Off` have no rank (they are not depth levels).
+    pub fn rank(&self) -> Option<u8> {
         match self {
-            // Auto and Off both result in omitting the field; provider uses its own default.
-            Self::Auto => None,
-            Self::Off => None,
-            Self::Low => Some("low"),
-            Self::Medium => Some("medium"),
-            Self::High => Some("high"),
-            // Most OpenAI-compatible APIs cap at "high".
-            Self::Max => Some("high"),
+            Self::Auto | Self::Off => None,
+            Self::Minimal => Some(1),
+            Self::Low => Some(2),
+            Self::Medium => Some(3),
+            Self::High => Some(4),
+            Self::XHigh => Some(5),
+            Self::Max => Some(6),
         }
+    }
+
+    /// Clamp this effort to the set of levels the target model actually
+    /// supports (`models.dev` `reasoning_options.effort.values`).
+    ///
+    /// Rules:
+    /// - `Auto`/`Off` are always kept as-is (they send no depth level).
+    /// - Otherwise the deepest supported level that is **not deeper** than the
+    ///   request wins; when the model supports no level at or below the
+    ///   request, its shallowest supported level is used.
+    /// - An empty / unparsable `supported` list means "unknown" → unchanged.
+    ///
+    /// This keeps the wire request inside the model's declared support set
+    /// instead of letting the provider reject it with HTTP 400.
+    pub fn clamp_to_supported(&self, supported: &[String]) -> Self {
+        let Some(requested) = self.rank() else {
+            return *self;
+        };
+        let mut levels: Vec<(u8, Self)> = supported
+            .iter()
+            .filter_map(|s| Self::from_str_loose(s))
+            .filter_map(|e| e.rank().map(|r| (r, e)))
+            .collect();
+        if levels.is_empty() {
+            return *self;
+        }
+        levels.sort_by_key(|(r, _)| *r);
+        // Deepest supported level that is not deeper than the request.
+        if let Some((_, effort)) = levels
+            .iter()
+            .rev()
+            .find(|(rank, _)| *rank <= requested)
+        {
+            return *effort;
+        }
+        // Nothing at or below the request → the model's shallowest level.
+        levels[0].1
     }
 }
 
@@ -706,9 +838,11 @@ impl std::fmt::Display for ReasoningEffort {
         match self {
             Self::Auto => write!(f, "auto"),
             Self::Off => write!(f, "off"),
+            Self::Minimal => write!(f, "minimal"),
             Self::Low => write!(f, "low"),
             Self::Medium => write!(f, "medium"),
             Self::High => write!(f, "high"),
+            Self::XHigh => write!(f, "xhigh"),
             Self::Max => write!(f, "max"),
         }
     }
@@ -836,6 +970,101 @@ pub trait Provider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── ReasoningEffort ───────────────────────────────────────────────
+
+    /// The catalog spells "off" as `none` and "auto" as `default`; both
+    /// must parse, otherwise a catalog value silently degrades to Auto.
+    #[test]
+    fn reasoning_effort_parses_catalog_spellings() {
+        assert_eq!(ReasoningEffort::from_str_loose("none"), Some(ReasoningEffort::Off));
+        assert_eq!(ReasoningEffort::from_str_loose("default"), Some(ReasoningEffort::Auto));
+        assert_eq!(ReasoningEffort::from_str_loose("minimal"), Some(ReasoningEffort::Minimal));
+        assert_eq!(ReasoningEffort::from_str_loose("xhigh"), Some(ReasoningEffort::XHigh));
+        assert_eq!(ReasoningEffort::from_str_loose("XHIGH"), Some(ReasoningEffort::XHigh));
+        assert_eq!(ReasoningEffort::from_str_loose("bogus"), None);
+    }
+
+    /// The depth order must be strictly increasing — the clamping below
+    /// relies on it.
+    #[test]
+    fn reasoning_effort_ranks_are_ordered() {
+        let levels = [
+            ReasoningEffort::Minimal,
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ];
+        for w in levels.windows(2) {
+            assert!(w[0].rank().unwrap() < w[1].rank().unwrap());
+        }
+        assert_eq!(ReasoningEffort::Auto.rank(), None);
+        assert_eq!(ReasoningEffort::Off.rank(), None);
+    }
+
+    /// The requested level is kept when the model supports it.
+    #[test]
+    fn clamp_keeps_a_supported_level() {
+        let supported = vec!["low".to_string(), "medium".to_string(), "high".to_string()];
+        assert_eq!(
+            ReasoningEffort::Medium.clamp_to_supported(&supported),
+            ReasoningEffort::Medium
+        );
+    }
+
+    /// A level the model does not support is folded down to the deepest
+    /// supported one that is not deeper than the request (DeepSeek-style
+    /// `low`/`high`/`max` models must never receive `medium`).
+    #[test]
+    fn clamp_folds_down_to_a_supported_level() {
+        let supported = vec!["low".to_string(), "high".to_string(), "max".to_string()];
+        assert_eq!(
+            ReasoningEffort::Medium.clamp_to_supported(&supported),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            ReasoningEffort::High.clamp_to_supported(&supported),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            ReasoningEffort::Max.clamp_to_supported(&supported),
+            ReasoningEffort::Max
+        );
+    }
+
+    /// When the model supports nothing at or below the request, its
+    /// shallowest supported level wins.
+    #[test]
+    fn clamp_folds_up_to_the_shallowest_supported_level() {
+        let supported = vec!["high".to_string(), "max".to_string()];
+        assert_eq!(
+            ReasoningEffort::Low.clamp_to_supported(&supported),
+            ReasoningEffort::High
+        );
+    }
+
+    /// An unknown support set (custom model) leaves the choice untouched.
+    #[test]
+    fn clamp_keeps_the_level_when_the_support_set_is_unknown() {
+        assert_eq!(
+            ReasoningEffort::High.clamp_to_supported(&[]),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            ReasoningEffort::High.clamp_to_supported(&["bogus".to_string()]),
+            ReasoningEffort::High
+        );
+    }
+
+    /// `Auto`/`Off` carry no depth level, so they are never clamped.
+    #[test]
+    fn clamp_never_touches_auto_or_off() {
+        let supported = vec!["high".to_string()];
+        assert_eq!(ReasoningEffort::Auto.clamp_to_supported(&supported), ReasoningEffort::Auto);
+        assert_eq!(ReasoningEffort::Off.clamp_to_supported(&supported), ReasoningEffort::Off);
+    }
 
     #[test]
     fn parse_data_uri_splits_media_type_from_payload() {

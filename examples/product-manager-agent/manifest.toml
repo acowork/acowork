@@ -10,6 +10,7 @@ description = "A product manager agent skilled in product strategy, user researc
 author = "ACowork Team"
 runtime_version = "0.1.0"
 dev = false
+labels = ["product", "planning"]
 avatar = "assets/avatar.jpg"
 
 identity_deps = ["display_name", "language", "timezone"]
@@ -91,6 +92,15 @@ fallback_order = ["claude", "openai"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+
+# ADR-104: behaviour defaults for agent_config.json. Seeded only into
+# fields the user has not set; never overwrites a user value.
+[config]
+temperature = 0.7
+context_window = 200000
+max_output_tokens = 8192
+max_iterations = 40
+
 [memory]
 enabled = true
 retention_days = 365
@@ -102,24 +112,50 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
+# ADR-104: recommended MCP servers. Recommendation, not installation —
+# the user confirms install/activation in the Tools panel (ADR-090).
+
+[[mcp_servers]]
+hosted = "memory"
+why = "Remember product context, stakeholders and past decisions across sessions"
+
+[[mcp_servers]]
+hosted = "pm"
+why = "File requirements and roadmap items as tasks the team can pick up"
+
+[[mcp_servers]]
+preset = "figma"
+why = "Read Figma designs directly (frames, components, styles) for design review"
+
+[[mcp_servers]]
+preset = "notion"
+why = "Pull PRDs and specs out of Notion instead of pasting them in"
+
 [capabilities.product_strategy]
 description = "Define product vision, target users, positioning, goals, bets, and success metrics"
+skills = ["product-strategy"]
 
 [capabilities.user_research]
 description = "Plan and synthesize user research, interviews, personas, journeys, and opportunity areas"
+skills = ["user-research"]
 
 [capabilities.prd_writing]
 description = "Write product requirements with problem framing, user stories, acceptance criteria, metrics, and non-goals"
+skills = ["prd-writing"]
 
 [capabilities.roadmap_prioritization]
 description = "Prioritize roadmap items using evidence, impact, effort, confidence, risk, and strategic alignment"
+skills = ["roadmap-prioritization"]
 
 [capabilities.figma_design_review]
 description = "Review Figma designs for product intent, user flow, UX clarity, states, accessibility, and engineering handoff readiness"
+skills = ["figma-design-review"]
 
 [capabilities.feature_acceptance]
 description = "Validate implemented features against PRD, Figma, acceptance criteria, metrics, and release readiness"
+skills = ["feature-acceptance"]
 
 [capabilities.launch_planning]
 description = "Plan product launches with rollout, communication, analytics, support readiness, risks, and post-launch learning"
+skills = ["launch-planning"]
 

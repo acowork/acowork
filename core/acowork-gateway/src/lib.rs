@@ -19,6 +19,7 @@ pub mod handlers;
 pub mod lifecycle;
 pub mod mqtt;
 pub mod operation_store;
+pub mod probe;
 pub mod rate;
 pub mod relay;
 pub mod resource_cache;

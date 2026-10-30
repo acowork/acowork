@@ -43,6 +43,23 @@ pub(crate) fn resolve_provider_key(
 use crate::conversation::StreamingStateMap;
 use crate::providers::reliable::RetryWaitHandle;
 
+/// Borrowed shared state needed to (re)build a provider instance.
+///
+/// ADR-103: `build_provider_for` gained a `model_id` parameter (model-level
+/// protocol/base-url overrides); bundling the four always-travel-together
+/// shared-state borrows into this parameter object keeps the arity sane and
+/// the call sites honest (you cannot mix a stale config with a fresh vault).
+pub(crate) struct ProviderBuildContext<'a> {
+    pub config: &'a crate::config::RuntimeConfig,
+    pub global_provider_list: &'a RwLock<Vec<acowork_core::protocol::ProviderListItem>>,
+    pub provider_key_vault:
+        &'a RwLock<std::collections::HashMap<String, Vec<acowork_core::protocol::ProviderKeyEntry>>>,
+    pub compat_cache: Option<&'a Arc<crate::providers::compat::CompatCache>>,
+    /// ADR-103 D8/S7 trim cache for `/responses` providers.
+    pub responses_compat_cache:
+        Option<&'a Arc<crate::providers::responses_compat::ResponsesCompatCache>>,
+}
+
 /// Per-session state for one AgentLoop instance.
 ///
 /// Constructed from the shared [`super::agent_core::AgentCore`] template
@@ -776,12 +793,15 @@ impl SessionCore {
     pub fn build_provider_for(
         &self,
         provider_id: &str,
+        model_id: Option<&str>,
         account_id: Option<&str>,
-        config: &crate::config::RuntimeConfig,
-        global_provider_list: &std::sync::RwLock<Vec<acowork_core::protocol::ProviderListItem>>,
-        provider_key_vault: &std::sync::RwLock<std::collections::HashMap<String, Vec<acowork_core::protocol::ProviderKeyEntry>>>,
-        compat_cache: Option<&std::sync::Arc<crate::providers::compat::CompatCache>>,
+        ctx: &ProviderBuildContext<'_>,
     ) -> Option<Arc<dyn acowork_core::providers::traits::Provider>> {
+        let config = ctx.config;
+        let global_provider_list = ctx.global_provider_list;
+        let provider_key_vault = ctx.provider_key_vault;
+        let compat_cache = ctx.compat_cache;
+        let responses_compat_cache = ctx.responses_compat_cache;
         let provider_meta = {
             let list = global_provider_list.read().unwrap();
             list.iter().find(|p| p.id == provider_id).cloned()
@@ -804,29 +824,38 @@ impl SessionCore {
         };
 
         tracing::debug!(
-            provider_id = %provider_id,
+            provider_id = %provider_meta.id,
+            model_id = model_id.unwrap_or(""),
             base_url = %provider_meta.base_url,
             protocol_type = ?provider_meta.protocol_type,
             api_key_len = api_key.as_ref().map(|k| k.len()).unwrap_or(0),
             api_key_present = api_key.is_some(),
             vault_contains_provider = provider_key_vault.read().unwrap().contains_key(provider_id),
             has_compat_cache = compat_cache.is_some(),
+            has_responses_compat_cache = responses_compat_cache.is_some(),
             "build_provider_for resolved credentials (debug)"
         );
+
+        // ADR-103 D2: (provider, model)-grained construction. Consume the
+        // Gateway-resolved model-level protocol / base_url override; no
+        // model entry (or unknown id) = inherit provider level with a warn.
+        let (effective_protocol, effective_base_url) =
+            crate::providers::router::effective_protocol_and_base(&provider_meta, model_id);
 
         let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
         let wiring = crate::providers::router::ProviderWiring {
             provider_id: Some(provider_meta.id.clone()),
             compat_cache: compat_cache.cloned(),
+            responses_compat_cache: responses_compat_cache.cloned(),
         };
         let raw = crate::providers::router::create_provider_with_wiring(
             &provider_meta.id,
-            &provider_meta.protocol_type,
+            &effective_protocol,
             api_key.as_deref(),
-            if provider_meta.base_url.is_empty() {
+            if effective_base_url.is_empty() {
                 None
             } else {
-                Some(&provider_meta.base_url)
+                Some(effective_base_url.as_str())
             },
             timeouts,
             wiring,

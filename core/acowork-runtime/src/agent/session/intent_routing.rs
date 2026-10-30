@@ -495,11 +495,15 @@ mod tests {
             knowledge_cutoff: None,
             default_reasoning_effort: None,
             thinking_mode: None,
+            reasoning_efforts: None,
         };
         let entry = |id: &str| ProviderModelEntry {
             id: id.to_string(),
             capabilities: caps.clone(),
             max_output_tokens_limit: 0,
+            protocol_type: None,
+            base_url: None,
+            protocol_probe: None,
         };
         let provider = |id: &str, models: Vec<ProviderModelEntry>| ProviderListItem {
             id: id.into(),

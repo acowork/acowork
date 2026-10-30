@@ -10,6 +10,7 @@ description = "An experienced senior software engineer capable of code review, a
 author = "ACowork Team"
 runtime_version = "0.1.0"
 dev = false
+labels = ["engineering", "coding"]
 avatar = "assets/avatar.jpg"
 
 identity_deps = ["language", "timezone"]
@@ -85,6 +86,15 @@ fallback_order = ["openai", "claude"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+
+# ADR-104: behaviour defaults for agent_config.json. Seeded only into
+# fields the user has not set; never overwrites a user value.
+[config]
+temperature = 0.3
+context_window = 200000
+max_output_tokens = 8192
+max_iterations = 40
+
 [memory]
 enabled = true
 retention_days = 180
@@ -96,11 +106,29 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
+# ADR-104: recommended MCP servers. Recommendation, not installation —
+# the user confirms install/activation in the Tools panel (ADR-090).
+
+[[mcp_servers]]
+hosted = "memory"
+why = "Recall architecture decisions and earlier debugging findings"
+
+[[mcp_servers]]
+preset = "context7"
+why = "Check current, version-specific library APIs before recommending code"
+
+[[mcp_servers]]
+preset = "brave-search"
+why = "Look up errors and release notes the local docs do not cover"
+required_secrets = ["BRAVE_API_KEY"]
+
 [capabilities.code_review]
 description = "Perform a thorough code review with actionable feedback"
+skills = ["code-review"]
 
 [capabilities.architecture_design]
 description = "Design system architecture with module breakdown and interface definitions"
+skills = ["architecture-design"]
 
 [capabilities.debug_assist]
 description = "Debug and troubleshoot issues with systematic root-cause analysis"

@@ -482,7 +482,6 @@ impl AgentLoop {
                             let caps = self.get_model_capabilities(&model_name);
                             let max_output_limit = self.core.max_output_tokens_limit_for_model(&model_name);
                             let mut chat_request = context_builder.unwrap().build(
-                                &self.core.manifest,
                                 &self.session.history,
                                 // ADR-060 §5.5 erratum: no Block D arg. The
                                 // current user message survives compaction in
@@ -493,8 +492,7 @@ impl AgentLoop {
                             );
                             // Preserve reasoning_effort from the original request
                             // (already resolved in build_chat_request()).
-                            chat_request.reasoning_effort =
-                                self.last_reasoning_effort.clone();
+                            chat_request.reasoning_effort = self.last_reasoning_effort;
                             chat_request.thinking_mode =
                                 self.last_thinking_mode.clone();
                             return self

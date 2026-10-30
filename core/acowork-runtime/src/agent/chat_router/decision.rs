@@ -58,6 +58,25 @@ pub struct DecisionRecord {
     /// Number of projected history rows (excluding the current message).
     #[serde(default)]
     pub history_len: usize,
+    /// Attachments on the turn being routed (count only — the log never
+    /// carries filenames or types; ADR-096). Additive: lines written before
+    /// the router could see attachments deserialize as zero and are still
+    /// distinguishable — a pre-fix line for a turn that did have files is
+    /// simply indistinguishable from a genuinely empty one, which is exactly
+    /// the blindness this field removes going forward.
+    #[serde(default)]
+    pub attachments: usize,
+    /// Workspace references on the turn (count only, same rule as
+    /// [`Self::attachments`]). Kept separate because the two are different
+    /// facts for the reader: an upload's bytes can be pulled and handed to a
+    /// session, a reference is a path only the node that owns it can open. A
+    /// turn with `att=0 ref=1` is the exact shape of the incident this covers.
+    #[serde(default)]
+    pub refs: usize,
+    /// The turn carried attachments and no text, i.e. Block C routed the
+    /// attachment-only placeholder rather than a typed body.
+    #[serde(default)]
+    pub attachment_only: bool,
     /// Information-tool rounds run before the decision (`memory_recall` /
     /// `http_request`); absent when the turn answered or routed directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,8 +99,14 @@ impl DecisionRecord {
             .map(|s| format!(" -> {s}"))
             .unwrap_or_default();
         format!(
-            "chat={} decision={}{} latency={}ms outcome={}",
-            self.chat_id, self.decision, target, self.latency_ms, self.outcome
+            "chat={} decision={}{} att={} ref={} latency={}ms outcome={}",
+            self.chat_id,
+            self.decision,
+            target,
+            self.attachments,
+            self.refs,
+            self.latency_ms,
+            self.outcome
         )
     }
 }
@@ -125,6 +150,9 @@ mod tests {
             prefix_hash: "9f2c1a7b".into(),
             anchor_seq: 40,
             history_len: 18,
+            attachments: 0,
+            refs: 0,
+            attachment_only: false,
             info_rounds: Some(1),
             prompt_tokens: Some(3120),
             cache_read_tokens: Some(2816),
@@ -163,5 +191,24 @@ mod tests {
         assert_eq!(parsed.history_len, 0);
         assert_eq!(parsed.prefix_hash, "");
         assert_eq!(parsed.info_rounds, None);
+        // Written before the router could see attachments: reads as "none".
+        assert_eq!(parsed.attachments, 0);
+        assert!(!parsed.attachment_only);
+    }
+
+    /// The field exists because a turn carrying a file used to be
+    /// indistinguishable in this log from the same text carrying nothing —
+    /// which is why the router's blindness to attachments went unnoticed.
+    #[test]
+    fn attachment_fields_are_written_and_carry_no_filenames() {
+        let mut rec = record();
+        rec.attachments = 2;
+        rec.attachment_only = true;
+        let line = serde_json::to_string(&rec).unwrap();
+        assert!(line.contains(r#""attachments":2"#));
+        assert!(line.contains(r#""attachment_only":true"#));
+        // Metadata only: the log never carries what the user attached (ADR-096).
+        assert!(!line.contains("filename"));
+        assert!(rec.summary().contains("att=2"));
     }
 }

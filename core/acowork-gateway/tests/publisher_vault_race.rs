@@ -83,6 +83,7 @@ fn empty_capabilities() -> ModelCapabilitiesInfo {
         knowledge_cutoff: None,
         default_reasoning_effort: None,
         thinking_mode: None,
+        reasoning_efforts: None,
     }
 }
 
@@ -150,6 +151,9 @@ fn build_shared_state(vault_dir: &std::path::Path, password: &str) -> SharedHttp
             id: "minimax-abab6".to_string(),
             capabilities: empty_capabilities(),
             max_output_tokens_limit: 16_384,
+            protocol_type: None,
+            base_url: None,
+            protocol_probe: None,
         }],
     }];
     gw_state.resource_cache.provider_list.version = 1;

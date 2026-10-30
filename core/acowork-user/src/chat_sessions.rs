@@ -46,7 +46,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
@@ -297,24 +297,17 @@ pub struct IntentMeta {
     /// `user_message` with genuine chat attachments (those are
     /// [`SessionMessage::attachments`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exec_attachments: Vec<ExecAttachmentLabel>,
+    pub exec_attachments: Vec<AttachmentLabel>,
 }
 
-/// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12): what the item
-/// was called on the surface that sent it, plus which arm of the ADR-046
-/// `AttachedItem` union it came from. Pure display data — the chat renders it
-/// and never resolves it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecAttachmentLabel {
-    /// Upload arms send `filename`, workspace arms send `name` (a repo-relative
-    /// path is display text there, not a location); an item that sent only a
-    /// path is reduced to its last segment by the Gateway.
-    pub filename: String,
-    /// The ADR-046 item type, quoted from the wire. Empty = the sender did not
-    /// say which arm it was.
-    #[serde(default)]
-    pub kind: String,
-}
+/// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12).
+///
+/// The type lives in `acowork-core` because it is not the user service's
+/// shape to own: the Gateway produces it from the ADR-046 union, this store
+/// persists it, the Chat Router reads it into a prompt and the desktop reads
+/// it into a chip. Naming it once is what keeps the transcript, the prompt and
+/// the UI from describing the same attachment three different ways.
+pub use acowork_core::protocol::AttachmentLabel;
 
 /// The decision an `interaction_request` card asks a human to make
 /// (design 27 §5.5.4). The card carries the summary needed to decide —
@@ -591,6 +584,34 @@ fn carries_chat_md(kind: SessionKind) -> bool {
     matches!(kind, SessionKind::UserGroup | SessionKind::ProjectGroup)
 }
 
+/// Load a group session's `chat.md` from disk, reading at most
+/// [`MAX_CHAT_MD_BYTES`] + 1 so the ceiling holds even for a file written
+/// out of band. `Ok(None)` when the file does not exist.
+///
+/// This is a whole-file read and stays one **by design**: `chat.md` is a
+/// user-authored prompt document, not a session log. ADR-096's red line
+/// forbids full reads of `messages.jsonl` — a file that grows with the
+/// conversation, where every row count / seq / span must come from write-time
+/// derived state. `chat.md` is capped on write ([`write_chat_md`]) and capped
+/// again here, so the request path never allocates more than the cap.
+fn load_chat_md_bounded(path: &Path) -> Result<Option<String>, String> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let mut text = String::new();
+    file.take(MAX_CHAT_MD_BYTES as u64 + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if text.len() > MAX_CHAT_MD_BYTES {
+        return Err(format!(
+            "chat.md exceeds the {MAX_CHAT_MD_BYTES}-byte cap"
+        ));
+    }
+    Ok(Some(text))
+}
+
 /// Read a group session's `chat.md`, seeding [`default_group_chat_md`] on the
 /// first touch. `Ok(None)` for kinds without a prompt file; an unreadable file
 /// is surfaced as `Err` (the caller answers 5xx) rather than masked by the
@@ -602,14 +623,13 @@ pub fn read_chat_md(data_dir: &Path, session: &ChatSession) -> Result<Option<Str
         return Ok(None);
     }
     let path = chat_md_path(&session_dir(data_dir, &session.session_id));
-    match fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    match load_chat_md_bounded(&path)? {
+        Some(text) => Ok(Some(text)),
+        None => {
             let seed = default_group_chat_md();
             let _ = fs::write(&path, &seed);
             Ok(Some(seed))
         }
-        Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
 
@@ -2826,6 +2846,25 @@ mod tests {
         );
     }
 
+    /// A `chat.md` written out of band (not through `write_chat_md`) must not
+    /// turn the request path into an unbounded read: the loader reads at most
+    /// cap + 1 bytes and refuses the result.
+    #[test]
+    fn chat_md_over_the_cap_is_refused_on_read() {
+        let dir = temp_dir();
+        let group = group_session(&dir);
+        let path = session_dir(&dir, &group.session_id).join("chat.md");
+        fs::write(&path, "a".repeat(MAX_CHAT_MD_BYTES + 1)).unwrap();
+        let err = read_chat_md(&dir, &group).expect_err("over the cap must be refused");
+        assert!(err.contains("cap"), "unexpected error: {err}");
+
+        // At the cap the file is served as-is (the tail reserve is a write-side
+        // budget, not a read-side truncation).
+        fs::write(&path, "a".repeat(MAX_CHAT_MD_BYTES)).unwrap();
+        let text = read_chat_md(&dir, &group).unwrap().unwrap();
+        assert_eq!(text.len(), MAX_CHAT_MD_BYTES);
+    }
+
     #[test]
     fn gateway_dispatch_meta_survives_the_store_round_trip() {
         // The full JSON boundary, not a typed construction: the Gateway
@@ -4068,13 +4107,15 @@ mod tests {
         let s = ua_session(&dir);
         let mut m = msg("u1", KIND_USER_MESSAGE, "take a look", "pinned-1");
         m.meta.exec_attachments = vec![
-            ExecAttachmentLabel {
+            AttachmentLabel {
                 filename: "src/main.rs".into(),
                 kind: "attached_file".into(),
+                ..Default::default()
             },
-            ExecAttachmentLabel {
+            AttachmentLabel {
                 filename: "notes.md".into(),
                 kind: "upload".into(),
+                ..Default::default()
             },
         ];
         let (stored, _) = append_message(&dir, &s.session_id, &m, 2).unwrap();
@@ -4113,9 +4154,10 @@ mod tests {
         let s = ua_session(&dir);
         // No body, no chat-side attachment ids — only the execution labels.
         let mut labels_only = msg("u1", KIND_USER_MESSAGE, "", "pinned-2");
-        labels_only.meta.exec_attachments = vec![ExecAttachmentLabel {
+        labels_only.meta.exec_attachments = vec![AttachmentLabel {
             filename: "diff.patch".into(),
             kind: "upload".into(),
+            ..Default::default()
         }];
         assert!(append_message(&dir, &s.session_id, &labels_only, 2).is_ok());
         // With no content of any kind the row is still refused: an empty,

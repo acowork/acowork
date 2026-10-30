@@ -599,31 +599,60 @@ impl SessionMeta {
     /// (and local mode) depends on, and locking them to admins would
     /// strand users outside their own history.
     ///
-    /// The exception is an ownerless session marked `Private`: an
-    /// unclaimed session nobody may read is also one nobody may write, or
-    /// the first user to touch it could flip the flag back and re-share
-    /// it with everyone.
+    /// Two ownerless cases are exceptions, and they pull in opposite
+    /// directions:
     ///
-    /// An **administrator is held to the same rule as anyone else**: an
-    /// execution session has exactly one initiator, so letting an admin type
-    /// into someone else's would put a second person into a conversation
-    /// that is defined as single-initiator (ADR-076 §决策 4). Reading is
-    /// what the role buys, and `as_user` covers the "look at it as them"
-    /// case without a write. Local mode keeps full access — there is no
-    /// second account to protect a session from.
+    /// * `Private` — **nobody** writes it, admin included: an unclaimed
+    ///   session nobody may read is also one nobody may write, or the
+    ///   first user to touch it could flip the flag back and re-share it
+    ///   with everyone.
+    /// * `Members` — **only an administrator** writes it. On a *claimed*
+    ///   session `Members` is a pure read grant (see below), but with no
+    ///   initiator that rule protects nobody and merely strands the row:
+    ///   readable by the chat's participants, writable by no one, which the
+    ///   ChatPanel renders as a permanently locked composer. Admin adoption
+    ///   is such a session's only exit — rows created before an admin scope
+    ///   carried a uid look exactly like this (ADR-076 §决策 4).
+    ///
+    /// Otherwise an **administrator is held to the same rule as anyone
+    /// else**: a claimed execution session has exactly one initiator, so
+    /// letting an admin type into someone else's would put a second person
+    /// into a conversation that is defined as single-initiator (ADR-076
+    /// §决策 4). Reading is what the role buys, and `as_user` covers the
+    /// "look at it as them" case without a write. Local mode keeps full
+    /// access — there is no second account to protect a session from.
     pub fn is_writable_by(&self, scope: &SessionScope) -> bool {
         match scope {
             SessionScope::Unfiltered => true,
             SessionScope::Admin { uid, .. } | SessionScope::User { uid, .. } => {
                 match self.initiator.as_deref() {
-                // `Members` behaves like `Private` for writes: chat
-                // participants read the group execution history, they do
-                // not own or mutate the session itself — their messages
-                // enter through the agent's delivery path, not a direct
-                // session write (design 27 §8.2).
-                None => !self
-                    .visibility
-                    .is_some_and(|v| v.is_private() || v == SessionVisibility::Members),
+                // Nobody recorded a claim, so there is nobody to protect:
+                // the pre-account rule above stands — whoever may read it
+                // may write it, `Private` stays the one exception (an
+                // unclaimed private session belongs to no one, and the
+                // first writer could re-share it with everyone), and
+                // `Members` stays a read grant (§8.2 — a member never owns
+                // the group's execution session).
+                //
+                // An administrator is the exception to that last one, and
+                // only here: with no initiator there is no single-initiator
+                // rule to defeat, but an *unclaimed* chat-bound session is
+                // unreachable from every other surface. Sessions created
+                // before an admin scope carried a uid are exactly that: read
+                // through the chat binding, locked as "shared by another
+                // account" for everyone, admin included, with no way back.
+                None => match self.visibility {
+                    Some(SessionVisibility::Private) => false,
+                    Some(SessionVisibility::Members) => {
+                        matches!(scope, SessionScope::Admin { .. })
+                    }
+                    _ => true,
+                },
+                // A claimed session has exactly one writer — admin included.
+                // `Members` never transfers ownership: chat participants read
+                // the group execution history, their messages enter through
+                // the agent's delivery path, not a direct session write
+                // (design 27 §8.2).
                 Some(initiator) => initiator == uid.as_str(),
                 }
             }

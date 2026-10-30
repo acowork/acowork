@@ -210,6 +210,7 @@ mod tests {
     fn test_capability_def(desc: &str) -> acowork_core::CapabilityDef {
         acowork_core::CapabilityDef {
             description: desc.to_string(),
+            skills: Vec::new(),
             input_schema: None,
             output_schema: None,
         }

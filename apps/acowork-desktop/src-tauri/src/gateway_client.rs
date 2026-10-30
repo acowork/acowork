@@ -957,7 +957,9 @@ impl GatewayClient {
         model_capabilities: &HashMap<String, ModelCapabilities>,
         compact_model: Option<&str>,
         custom: bool,
-    ) -> Result<OperationAck> {
+        model_protocols: &ModelProtocolIntent,
+        model_base_urls: &HashMap<String, String>,
+    ) -> Result<ProviderAddResult> {
         let keys_json: Vec<serde_json::Value> = keys
             .iter()
             .map(|k| {
@@ -1007,6 +1009,17 @@ impl GatewayClient {
         // Send compact_model if provided
         if let Some(cm) = compact_model {
             body["compact_model"] = serde_json::Value::String(cm.to_string());
+        }
+        // ADR-103 D1/D10.3: per-model protocol intent + base URL override.
+        // A `null` value is meaningful (clear the selection), so only an empty
+        // map is skipped.
+        if !model_protocols.is_empty() {
+            body["model_protocols"] = serde_json::to_value(model_protocols)
+                .expect("model_protocols serialization cannot fail");
+        }
+        if !model_base_urls.is_empty() {
+            body["model_base_urls"] = serde_json::to_value(model_base_urls)
+                .expect("model_base_urls serialization cannot fail");
         }
         let resp = self
             .send(|| {
@@ -1079,7 +1092,9 @@ impl GatewayClient {
         models: Option<&[String]>,
         model_capabilities: &HashMap<String, ModelCapabilities>,
         compact_model: Option<&str>,
-    ) -> Result<GenericMessageResponse> {
+        model_protocols: &ModelProtocolIntent,
+        model_base_urls: &HashMap<String, String>,
+    ) -> Result<ProviderUpdateResult> {
         let mut body = serde_json::Map::new();
         // Multi-account entries. The Gateway appends each non-empty
         // entry as a fresh vault account; existing accounts are
@@ -1137,6 +1152,23 @@ impl GatewayClient {
             body.insert(
                 "compact_model".to_string(),
                 serde_json::Value::String(cm.to_string()),
+            );
+        }
+        // ADR-103 D1/D10.3: per-model protocol intent + base URL override.
+        // An empty map means "leave every selection untouched"; an explicit
+        // `null` value clears one model's selection.
+        if !model_protocols.is_empty() {
+            body.insert(
+                "model_protocols".to_string(),
+                serde_json::to_value(model_protocols)
+                    .expect("model_protocols serialization cannot fail"),
+            );
+        }
+        if !model_base_urls.is_empty() {
+            body.insert(
+                "model_base_urls".to_string(),
+                serde_json::to_value(model_base_urls)
+                    .expect("model_base_urls serialization cannot fail"),
             );
         }
         let resp = self
@@ -1240,6 +1272,96 @@ pub struct AgentDetailResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenericMessageResponse {
     pub message: String,
+}
+
+/// ADR-103 D12.1 — one model's save-time probe verdict, as the Gateway
+/// returns it on `POST /api/providers` and `PUT /api/providers/{provider}`.
+///
+/// The shell is a transport; this mirrors the wire shape of
+/// `acowork_gateway::probe::ProbeReport` so the verdicts reach the UI instead
+/// of being dropped. Dropping them was a real defect: the user was told
+/// "save to verify", the save did probe, and the answer was thrown away —
+/// a selection that failed to verify looked like one that silently succeeded.
+///
+/// `usage` is deliberately absent: it is billing telemetry the UI does not
+/// render, and an unused field here would be dead weight.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderProbeReport {
+    /// Model id the verdict is about.
+    pub model: String,
+    /// Protocol label (`"responses"` in v1).
+    #[serde(default)]
+    pub protocol: String,
+    /// Tier the save paid for (`"standard"` = L1+L2, `"deep"` = +L3).
+    #[serde(default)]
+    pub tier: String,
+    /// `true` when the verdict came from the 24 h cache, not a live call.
+    #[serde(default)]
+    pub cached: bool,
+    pub outcome: ProviderProbeOutcome,
+}
+
+/// Mirror of the Gateway's `ProbeOutcome`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderProbeOutcome {
+    /// The D10 verdict: `true` means the selection passed the D1 gate (see
+    /// [`Self::stripped_fields`] for the "passes, but only without a field"
+    /// case).
+    pub success: bool,
+    /// Tiers that passed, in order (`["L1","L2","L3"]`).
+    #[serde(default)]
+    pub tier_passed: Vec<String>,
+    #[serde(default)]
+    pub latency_ms: u64,
+    /// Base URL that actually answered, when it differs from the configured
+    /// one (the `/v1` recovery path).
+    #[serde(default)]
+    pub observed_base_url: Option<String>,
+    #[serde(default)]
+    pub error: Option<ProviderProbeFailure>,
+    /// Request fields the probe had to drop to get a 2xx (D8 trim). Non-empty
+    /// with `success: true` is the degraded verdict.
+    #[serde(default)]
+    pub stripped_fields: Vec<String>,
+}
+
+/// Mirror of the Gateway's `ProbeFailure`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderProbeFailure {
+    /// Machine-readable error class (`TransportError`, `UnsupportedField`, …).
+    #[serde(default)]
+    pub class: String,
+    /// Human-readable reason — this is what the UI shows the user.
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    /// The request field a 400 blamed (`UnsupportedField` only).
+    #[serde(default)]
+    pub unsupported_field: Option<String>,
+}
+
+/// `POST /api/providers` — the ADR-059 ack plus this save's probe verdicts.
+///
+/// Mirrors `acowork_gateway::http::provider_api::ProviderSaveResponse`. The
+/// ack is flattened so the IPC shape is byte-identical to the old
+/// `OperationAck` return; `probes` is empty for every save that probed nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderAddResult {
+    #[serde(flatten)]
+    pub ack: OperationAck,
+    #[serde(default)]
+    pub probes: Vec<ProviderProbeReport>,
+}
+
+/// `PUT /api/providers/{provider}` — mirrors the Gateway's
+/// `ProviderUpdateResponse`: a plain message plus this save's probe verdicts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderUpdateResult {
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub probes: Vec<ProviderProbeReport>,
 }
 
 /// ADR-059 §7.3 — mirror of the Gateway's `OperationAck`.
@@ -1376,6 +1498,15 @@ pub struct VaultKeyEntry {
     pub custom: bool,
 }
 
+/// ADR-103 D1: per-model protocol intent (`model id -> protocol`).
+///
+/// The value is the wire protocol name (`"responses"` / `"openai"` /
+/// `"anthropic"` / `"google"` / `"ollama"`); `None` clears the selection for
+/// that model ("follow the data"), which restores the npm-derived default and
+/// drops the stored probe verdict. The shell is a transport here — the Gateway
+/// owns validation and the D1 gate, so the value stays a plain wire string.
+pub type ModelProtocolIntent = HashMap<String, Option<String>>;
+
 /// Model capabilities info
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -1473,7 +1604,9 @@ pub struct FileUploadResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentDetailResponse, AgentListEntry};
+    use super::{
+        AgentDetailResponse, AgentListEntry, ProviderAddResult, ProviderUpdateResult,
+    };
 
     /// Real `GET /api/agents` sample (single entry) — locks the Tauri mirror
     /// to the Gateway's current wire shape after the `running`/`connected`
@@ -1539,5 +1672,80 @@ mod tests {
             serde_json::from_str(json).expect("Gateway detail must decode");
         assert!(detail.alive);
         assert_eq!(detail.pid, None);
+    }
+
+    /// ADR-103 D12.1 — the save responses MUST deliver the probe verdicts.
+    ///
+    /// `ProviderUpdateResponse` carries `{message, probes}`; decoding it as
+    /// `GenericMessageResponse` (the pre-fix code) silently dropped `probes`,
+    /// which is why a failed verification produced no feedback at all. This
+    /// fixture is a real `PUT /api/providers/{provider}` body with one failed
+    /// and one degraded verdict.
+    #[test]
+    fn provider_update_result_keeps_the_probe_verdicts() {
+        let json = r#"{
+            "message": "Provider 'acme' updated",
+            "probes": [
+                {
+                    "model": "acme-3.1-flash",
+                    "protocol": "responses",
+                    "tier": "deep",
+                    "cached": false,
+                    "outcome": {
+                        "success": false,
+                        "tier_passed": ["L1"],
+                        "latency_ms": 412,
+                        "error": {
+                            "class": "UnsupportedField",
+                            "message": "endpoint rejected 'reasoning'",
+                            "http_status": 400,
+                            "unsupported_field": "reasoning"
+                        }
+                    }
+                },
+                {
+                    "model": "acme-4",
+                    "protocol": "responses",
+                    "tier": "standard",
+                    "cached": true,
+                    "outcome": {
+                        "success": true,
+                        "tier_passed": ["L1", "L2"],
+                        "latency_ms": 180,
+                        "observed_base_url": "https://api.acme.test/v1",
+                        "stripped_fields": ["reasoning"]
+                    }
+                }
+            ]
+        }"#;
+        let body: ProviderUpdateResult =
+            serde_json::from_str(json).expect("PUT /api/providers must decode");
+        assert_eq!(body.message, "Provider 'acme' updated");
+        assert_eq!(body.probes.len(), 2);
+        let failed = &body.probes[0];
+        assert!(!failed.outcome.success);
+        assert_eq!(failed.outcome.tier_passed, vec!["L1".to_string()]);
+        let err = failed.outcome.error.as_ref().expect("failure reason");
+        assert_eq!(err.class, "UnsupportedField");
+        assert_eq!(err.http_status, Some(400));
+        let degraded = &body.probes[1];
+        assert!(degraded.outcome.success);
+        assert!(degraded.cached);
+        assert_eq!(degraded.outcome.stripped_fields, vec!["reasoning".to_string()]);
+    }
+
+    /// The `POST` shape flattens the ADR-059 ack, so the legacy `OperationAck`
+    /// fields must survive alongside `probes`. A save that probed nothing omits
+    /// the key entirely and must still decode.
+    #[test]
+    fn provider_add_result_flattens_the_ack_and_tolerates_no_probes() {
+        let json = r#"{
+            "operation_id": "b1f0e2c4-0000-4000-8000-000000000001",
+            "state": "committed"
+        }"#;
+        let body: ProviderAddResult =
+            serde_json::from_str(json).expect("POST /api/providers must decode");
+        assert_eq!(body.ack.state, "committed");
+        assert!(body.probes.is_empty());
     }
 }

@@ -673,6 +673,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     }
 
     let mut compat_cache: Option<Arc<crate::providers::compat::CompatCache>> = None;
+    let mut responses_compat_cache: Option<
+        Arc<crate::providers::responses_compat::ResponsesCompatCache>,
+    > = None;
 
     let (provider, resolved_model, available_models, protocol_type) = {
         // ADR-033: MQTT available_cache is the only provider source (gRPC path removed per ADR-040).
@@ -713,13 +716,22 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         Some(api_key.as_str())
                     };
                     let available = prov.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
-                    let model_id = prov
-                        .models
-                        .first()
+                    let chosen_model = prov.models.first();
+                    let model_id = chosen_model
                         .map(|m| m.id.clone())
                         .unwrap_or_else(|| "default".to_string());
-                    let proto_str =
-                        acowork_core::protocol::llm_protocol_to_protocol_type(prov.protocol_type);
+                    // ADR-103 D2: consume the Gateway-resolved model-level
+                    // protocol / base_url override; absent = inherit the
+                    // provider level (never re-derive here).
+                    let proto_str = chosen_model
+                        .and_then(|m| acowork_core::protocol::model_protocol_from_proto(m.protocol_type))
+                        .unwrap_or_else(|| {
+                            acowork_core::protocol::llm_protocol_to_protocol_type(prov.protocol_type)
+                        });
+                    let effective_base_url: Option<&str> = chosen_model
+                        .and_then(|m| m.base_url.as_deref())
+                        .filter(|u| !u.is_empty())
+                        .or((!prov.base_url.is_empty()).then_some(prov.base_url.as_str()));
                     let timeouts = Some(crate::providers::router::ProviderTimeouts::from(config));
 
                     // Load (or initialize) the per-agent compatibility cache.
@@ -731,16 +743,26 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                     let compat_cache_arc =
                         crate::providers::compat::CompatCache::load(compat_cache_path);
                     compat_cache = Some(compat_cache_arc.clone());
+
+                    // ADR-103 D8/S7: the Responses trim cache lives in its own
+                    // file — same directory, different payload type.
+                    let responses_cache_arc =
+                        crate::providers::responses_compat::load(std::path::Path::new(
+                            &config.work_dir,
+                        ));
+                    responses_compat_cache = Some(responses_cache_arc.clone());
+
                     let wiring = crate::providers::router::ProviderWiring {
                         provider_id: Some(prov.id.clone()),
                         compat_cache: Some(compat_cache_arc),
+                        responses_compat_cache: Some(responses_cache_arc),
                     };
 
                     let provider = crate::providers::router::create_provider_with_wiring(
                         &prov.id,
                         &proto_str,
                         api_key_opt,
-                        Some(&prov.base_url),
+                        effective_base_url,
                         timeouts,
                         wiring,
                     );
@@ -1291,6 +1313,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         protocol_type,
         gateway_current_provider_id,
         compat_cache,
+        responses_compat_cache,
         emb_provider,
         active_tools,
         full_tool_specs,

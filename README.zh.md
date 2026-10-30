@@ -255,6 +255,9 @@ sudo systemctl enable --now acowork-relay
 **端到端实操**（Cloudflare 泛解析 + Aliyun ECS 部署，含通配符证书与「必须灰云」约束）：
 [docs/runbooks/relay-ecs-cloudflare-deploy.md](./docs/runbooks/relay-ecs-cloudflare-deploy.md)。
 
+**境内自建**（阿里云 ECS + 境内域名 + ICP 备案，自用自建无需牌照但**必须备案**）：
+[docs/runbooks/relay-selfhost-cn-deploy.md](./docs/runbooks/relay-selfhost-cn-deploy.md)。
+
 ### ✍️ 30 秒写出第一个 Agent
 
 ```toml
