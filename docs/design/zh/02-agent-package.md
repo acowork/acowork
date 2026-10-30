@@ -346,7 +346,7 @@ preset = "brave-search"                 # 平台预设 id（Gateway 注册表）
 why = "联网检索最新天气资料"              # 展示给用户看，原样渲染
 required_secrets = ["BRAVE_API_KEY"]     # 缺密钥时该卡片点名提示
 tools = ["brave_web_search"]             # 工具子集；启用后成为初始勾选集
-required = false                         # 软必需：未满足只提示"能力受限"
+required = false                         # 软必需：不阻断；缺口在工具面板可见（该行标"必需"，缺密钥点名提示）
 
 [[mcp_servers]]
 hosted = "memory"                        # Gateway 托管服务（pm / doc / memory）

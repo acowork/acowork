@@ -191,8 +191,9 @@ pub struct McpServerDecl {
     /// set in `agent_mcp_tools.json` once the user activates the server.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    /// Soft requirement: when unmet the UI shows "capability limited". It
-    /// never blocks startup or chat.
+    /// Soft requirement: unmet never blocks startup or chat. The gap is
+    /// visible in the Tools panel — the recommendation row is badged
+    /// "required", and a missing secret is named on the card.
     #[serde(default)]
     pub required: bool,
     /// Author's reason, shown verbatim in the Tools panel.

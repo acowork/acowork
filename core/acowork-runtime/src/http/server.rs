@@ -2887,6 +2887,7 @@ async fn get_agent_tools(
             "tools": [],
             "mcp_servers": [],
             "mcp_servers_defs": [],
+            "recommended": [],
         })));
     }
     let svc = state
@@ -2908,6 +2909,12 @@ async fn get_agent_tools(
         "tools": resp.tools,
         "mcp_servers": resp.mcp_servers,
         "mcp_servers_defs": resp.mcp_servers_defs,
+        // ADR-104: the package's `[[mcp_servers]]` recommendations. The
+        // Desktop Tools panel renders the recommendation group from THIS
+        // endpoint (one round-trip for the whole panel), so dropping the
+        // field here made the group invisible even though the use case
+        // had already derived the views.
+        "recommended": resp.recommended,
     })))
 }
 
@@ -2962,6 +2969,10 @@ async fn get_agent_mcp_servers(
     Ok(Json(serde_json::json!({
         "agent_id": resp.agent_id,
         "active_servers": resp.active_servers,
+        // ADR-104: same derivation as the `/tools` route — both routes must
+        // carry the recommendation views, or they disagree about what the
+        // package recommends.
+        "recommended": resp.recommended,
     })))
 }
 
@@ -4906,7 +4917,14 @@ mod tests {
             ],
             local: vec![],
             active_names: None,
-            recommended: Vec::new(),
+            // ADR-104: one package-declared recommendation, so the HTTP
+            // response can be checked for the field the Tools panel reads.
+            recommended: vec![acowork_core::manifest::McpServerDecl {
+                preset: Some("context7".to_string()),
+                required: true,
+                why: Some("docs".to_string()),
+                ..Default::default()
+            }],
             dismissed: Vec::new(),
         };
         crate::agent_config::save_agent_mcp_config(std::path::Path::new(&temp_dir), &initial_mcp)
@@ -5032,6 +5050,32 @@ mod tests {
         assert_eq!(defs[0]["active"], true);
         assert_eq!(defs[1]["name"], "search");
         assert_eq!(defs[1]["active"], false);
+
+        // 3c) ADR-104: the response carries the package's `[[mcp_servers]]`
+        //     recommendations. The Desktop Tools panel renders the whole
+        //     panel — builtin tools, MCP toggles AND the recommendation
+        //     group — from THIS one round-trip, so the handler dropping
+        //     `recommended` made the group invisible even though the use
+        //     case had already derived the views.
+        let recommended = tools["recommended"].as_array().unwrap();
+        assert_eq!(recommended.len(), 1, "the declared recommendation listed");
+        assert_eq!(recommended[0]["key"], "context7");
+        assert_eq!(recommended[0]["source"], "preset");
+        assert_eq!(recommended[0]["required"], true);
+        assert_eq!(recommended[0]["why"], "docs");
+        // context7 was ticked in step 1 → the row is already active.
+        assert_eq!(recommended[0]["state"], "active");
+
+        // 3d) The dedicated route must agree with `/tools` — two routes
+        //     answering "what does this package recommend" with different
+        //     lists is how the two views drift apart.
+        let resp = client.get(&url).send().await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["recommended"].as_array().unwrap().len(),
+            1,
+            "GET /mcp-servers carries the same recommendation rows"
+        );
 
         // 5) PUT mcp-servers with an unknown name → 400 (not 200 with
         //    silent drop, which was the pre-fix symptom at the

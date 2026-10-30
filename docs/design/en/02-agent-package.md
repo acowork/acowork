@@ -351,7 +351,7 @@ preset = "brave-search"                 # platform preset id (Gateway registry)
 why = "fresh weather data from the web" # shown to the user verbatim
 required_secrets = ["BRAVE_API_KEY"]    # named on the card when missing
 tools = ["brave_web_search"]            # subset; the initial enabled set
-required = false                        # soft: unmet shows "capability limited"
+required = false                        # soft: never blocks; the gap shows in the Tools panel (row badged "required", missing key named)
 
 [[mcp_servers]]
 hosted = "memory"                       # Gateway-hosted service (pm / doc / memory)

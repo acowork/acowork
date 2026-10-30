@@ -170,7 +170,8 @@ pub struct McpRecommendationView {
     pub tools: Vec<String>,
     /// Secrets the server needs before it is usable.
     pub required_secrets: Vec<String>,
-    /// Soft requirement — unmet means "capability limited", never a block.
+    /// Soft requirement — unmet never blocks; the Tools panel badges the
+    /// recommendation row "required" and names any missing secret.
     pub required: bool,
     /// Author's justification, shown verbatim.
     pub why: Option<String>,
