@@ -1,10 +1,12 @@
 //! ADR-103 D8/S7 — the Responses trim profile and its evidence cache.
 //!
-//! `POST /responses` has exactly one field v1 is allowed to drop when a
-//! provider rejects it: `reasoning` (MiniMax M3.1-Flash answers 400 for
-//! `reasoning.effort: none`). Everything else — `tool_choice`, `text.format`,
-//! `temperature`, `top_p`, `tools` — changes model behaviour when silently
-//! dropped, so those surface to the user instead (D8 "v1 明确不裁").
+//! `POST /responses` has two fields the trim path may drop when a provider
+//! rejects them: `reasoning` (MiniMax M3.1-Flash answers 400 for
+//! `reasoning.effort: none`) and `temperature` (reasoning models answer 400
+//! with "'temperature' is not supported with this model"). Everything else —
+//! `tool_choice`, `text.format`, `top_p`, `tools` — changes model behaviour
+//! when silently dropped without an endpoint-side rejection to justify it,
+//! so those surface to the user instead (D8 "明确不裁").
 //!
 //! Two rules shape this module:
 //!
@@ -35,31 +37,50 @@ pub const RESPONSES_COMPAT_FILE: &str = "provider_compat_responses.json";
 /// What the Runtime omits from a Responses request body for one
 /// `(provider, model)` pair.
 ///
-/// A single field today, deliberately: `omit_reasoning` mirrors exactly one
-/// entry of [`acowork_core::providers::responses_errors::TRIMMABLE_FIELDS`],
-/// and widening it requires an ADR change (every extra entry is a silent
-/// behaviour change for the user).
+/// One bool per whitelisted field, mirroring
+/// [`acowork_core::providers::responses_errors::TRIMMABLE_FIELDS`] exactly
+/// (a pinned test enforces the correspondence). Widening it requires an ADR
+/// change — every extra entry is a silent behaviour change for the user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResponsesTrim {
     /// Drop the `reasoning: { effort }` block entirely.
+    #[serde(default)]
     pub omit_reasoning: bool,
+    /// Drop the `temperature` field entirely.
+    #[serde(default)]
+    pub omit_temperature: bool,
     /// Unix timestamp of the last successful use (diagnostics only; the TTL is
     /// anchored on the promotion time inside the cache).
     pub last_success_unix_ts: u64,
 }
 
 impl ResponsesTrim {
-    /// The one trim v1 knows how to apply.
+    /// The `reasoning` trim.
     pub fn omit_reasoning() -> Self {
         Self {
             omit_reasoning: true,
             last_success_unix_ts: 0,
+            ..Default::default()
+        }
+    }
+
+    /// The `temperature` trim.
+    pub fn omit_temperature() -> Self {
+        Self {
+            omit_temperature: true,
+            last_success_unix_ts: 0,
+            ..Default::default()
         }
     }
 
     /// No trim — used to compare against "did we send it as-is?".
     pub fn none() -> Self {
         Self::default()
+    }
+
+    /// Is anything at all dropped by this profile?
+    pub fn is_none(&self) -> bool {
+        !self.omit_reasoning && !self.omit_temperature
     }
 
     /// Fields this profile drops, named as the provider names them (so the
@@ -69,6 +90,9 @@ impl ResponsesTrim {
         if self.omit_reasoning {
             fields.push("reasoning");
         }
+        if self.omit_temperature {
+            fields.push("temperature");
+        }
         fields
     }
 }
@@ -76,13 +100,15 @@ impl ResponsesTrim {
 impl TrimAction for ResponsesTrim {
     fn same_action(&self, other: &Self) -> bool {
         self.omit_reasoning == other.omit_reasoning
+            && self.omit_temperature == other.omit_temperature
     }
 
     fn describe(&self) -> String {
-        if self.omit_reasoning {
-            "omit[reasoning]".to_string()
-        } else {
+        let stripped = self.stripped_fields();
+        if stripped.is_empty() {
             "omit[]".to_string()
+        } else {
+            format!("omit[{}]", stripped.join(","))
         }
     }
 

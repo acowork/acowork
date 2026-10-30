@@ -1171,8 +1171,8 @@ impl ResponsesProvider {
     /// Send `request` with the D8 trim discipline.
     ///
     /// Deliberately **not** a fallback chain (D8 "明确不做"): at most two
-    /// requests are ever sent, and only the single whitelisted field
-    /// ([`TRIMMABLE_FIELDS`]) may be dropped. The decision to drop it is
+    /// requests are ever sent, and only fields on the whitelist
+    /// ([`TRIMMABLE_FIELDS`]) may be dropped. The decision to drop one is
     /// evidence-gated through the shared [`CompatCache`](super::compat::CompatCache)
     /// policy — three confirmations promote a candidate to durable, a plain
     /// success resets pending evidence, and a fast-path failure invalidates.
@@ -1196,9 +1196,9 @@ impl ResponsesProvider {
             "Responses request mapped (ADR-103 D5)"
         );
 
-        // Nothing to learn when the caller asked for no reasoning at all:
-        // `Auto` omits the block, so a 400 cannot be about it.
-        if native.reasoning.is_none() {
+        // Nothing to learn when the body carries no trimmable field at all:
+        // a 400 cannot be about a field we never sent.
+        if native.reasoning.is_none() && native.temperature.is_none() {
             let response = self.post_native(&native, stream).await?;
             if response.status().is_success() {
                 return Ok(TrimmedSend {
@@ -1217,17 +1217,24 @@ impl ResponsesProvider {
         if let Some(key) = key.as_deref()
             && let Some(cache) = self.compat_cache.as_ref()
             && let Some(learned) = cache.get(key)
-            && learned.omit_reasoning
         {
-            native.reasoning = None;
-            applied = learned;
-            cached_hit = true;
-            tracing::warn!(
-                key,
-                model = %native.model,
-                stripped = ?applied.stripped_fields(),
-                "Responses fast path applied a learned trim (ADR-103 D8) - the request carries no reasoning block"
-            );
+            if learned.omit_reasoning && native.reasoning.is_some() {
+                native.reasoning = None;
+                applied.omit_reasoning = true;
+            }
+            if learned.omit_temperature && native.temperature.is_some() {
+                native.temperature = None;
+                applied.omit_temperature = true;
+            }
+            cached_hit = !applied.is_none();
+            if cached_hit {
+                tracing::warn!(
+                    key,
+                    model = %native.model,
+                    stripped = ?applied.stripped_fields(),
+                    "Responses fast path applied a learned trim (ADR-103 D8) - the request omits those fields"
+                );
+            }
         }
 
         let response = self.post_native(&native, stream).await?;
@@ -1236,7 +1243,7 @@ impl ResponsesProvider {
             if let Some(key) = key.as_deref()
                 && let Some(cache) = self.compat_cache.as_ref()
             {
-                if applied.omit_reasoning {
+                if !applied.is_none() {
                     cache.record_fallback_success(key, applied.clone(), ErrorClass::RequestSchema);
                 } else {
                     // Verbatim success: contradicting evidence, the accident
@@ -1266,13 +1273,26 @@ impl ResponsesProvider {
             return Err(error);
         }
 
-        // ── Retry: only the whitelisted field, only once (D8) ──────────────
+        // ── Retry: only a whitelisted field, only once (D8) ────────────────
         let trimmable = error
             .unsupported_field()
             .filter(|field| TRIMMABLE_FIELDS.contains(field));
         let Some(field) = trimmable else {
             return Err(error);
         };
+        // Drop exactly the field the endpoint named. A field that is not in
+        // the body cannot be the 400's cause; re-sending would repeat it.
+        match field {
+            "reasoning" if native.reasoning.is_some() => {
+                native.reasoning = None;
+                applied.omit_reasoning = true;
+            }
+            "temperature" if native.temperature.is_some() => {
+                native.temperature = None;
+                applied.omit_temperature = true;
+            }
+            _ => return Err(error),
+        }
         tracing::warn!(
             model = %model,
             field,
@@ -1280,8 +1300,6 @@ impl ResponsesProvider {
             "provider rejected `{field}` - retrying once with the field omitted (ADR-103 D8 trim)"
         );
 
-        native.reasoning = None;
-        applied = ResponsesTrim::omit_reasoning();
         let retry = self.post_native(&native, stream).await?;
         if retry.status().is_success() {
             if let Some(key) = key.as_deref()
@@ -1292,7 +1310,7 @@ impl ResponsesProvider {
             tracing::warn!(
                 model = %model,
                 stripped = ?applied.stripped_fields(),
-                "Responses request succeeded only after the D8 trim - this (provider, model) is DEGRADED: the selected reasoning effort is not applied"
+                "Responses request succeeded only after the D8 trim - this (provider, model) is DEGRADED: the stripped fields' settings are not applied"
             );
             return Ok(TrimmedSend {
                 response: retry,
@@ -1326,7 +1344,7 @@ impl Provider for ResponsesProvider {
             .send_with_trim(&request, false)
             .await
             .map_err(acowork_core::AcoworkError::Provider)?;
-        if applied.omit_reasoning {
+        if !applied.is_none() {
             tracing::debug!(stripped = ?applied.stripped_fields(), "Responses chat parsed a trimmed response");
         }
 
@@ -1349,7 +1367,7 @@ impl Provider for ResponsesProvider {
             .send_with_trim(&request, true)
             .await
             .map_err(acowork_core::AcoworkError::Provider)?;
-        if applied.omit_reasoning {
+        if !applied.is_none() {
             tracing::debug!(stripped = ?applied.stripped_fields(), "Responses stream opened on a trimmed request");
         }
 
@@ -2577,14 +2595,15 @@ mod d8_trim_tests {
 
     #[tokio::test]
     async fn non_whitelisted_field_400_is_never_trimmed() {
-        // `temperature` is a recognized field but NOT trimmable (D8: dropping
-        // it silently changes model behaviour).
+        // `top_p` is a recognized field but NOT trimmable (D8: dropping it
+        // silently changes model behaviour without an endpoint-side rejection
+        // of the value we actually sent to justify it).
         let mut server = Server::new_async().await;
         let only = server
             .mock("POST", "/responses")
             .with_status(400)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"error":{"message":"unsupported parameter: temperature"}}"#)
+            .with_body(r#"{"error":{"message":"unsupported parameter: top_p"}}"#)
             .expect(1)
             .create_async()
             .await;
@@ -2599,9 +2618,116 @@ mod d8_trim_tests {
         );
 
         assert_eq!(err.error_type, ProviderErrorType::UnsupportedField);
-        assert_eq!(err.unsupported_field(), Some("temperature"));
+        assert_eq!(err.unsupported_field(), Some("top_p"));
         only.assert();
         assert!(provider.compat_cache.as_ref().unwrap().get(&key()).is_none());
+    }
+
+    #[tokio::test]
+    async fn temperature_400_retries_once_without_the_field() {
+        // Reasoning models answer 400 for `temperature` outright ("not
+        // supported with this model") while the Runtime's fallback chain
+        // injects DEFAULT_TEMPERATURE. The trim path must drop exactly that
+        // field and retry once (ADR-103 D8 whitelist, revised).
+        let mut req = request(ReasoningEffort::Low);
+        req.temperature = Some(0.7);
+        let mut native = map_request(&req).unwrap();
+        native.temperature = None;
+        let body_without_temperature = serde_json::to_value(&native).unwrap();
+
+        let mut server = Server::new_async().await;
+        let rejected = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Regex("\"temperature\"".to_string()))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","type":"invalid_request_error","param":"temperature"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let accepted = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Json(body_without_temperature))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ok_body())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let work = work_dir("temp_trim");
+        let provider = trimmed_provider(server.url().as_str(), &work);
+        let response = provider
+            .chat(req)
+            .await
+            .expect("the temperature-trimmed retry must succeed");
+
+        assert_eq!(response.content, "ok");
+        rejected.assert();
+        accepted.assert();
+
+        // One success is evidence, not policy (the 2026-09-05 rule): the
+        // temperature trim must stay a candidate, not a durable entry.
+        let cache = provider.compat_cache.as_ref().unwrap();
+        assert!(
+            cache.get(&key()).is_none(),
+            "a single trim success must stay a candidate"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_temperature_trims_promote_to_a_fast_path() {
+        // After enough confirmations the temperature trim hardens into the
+        // durable fast path: subsequent chats send ONE request, already
+        // without the field.
+        fn temp_request() -> ChatRequest {
+            let mut req = request(ReasoningEffort::Low);
+            req.temperature = Some(0.7);
+            req
+        }
+        let mut native = map_request(&temp_request()).unwrap();
+        native.temperature = None;
+        let accepted_body = serde_json::to_value(&native).unwrap();
+
+        let mut server = Server::new_async().await;
+        let confirmations = COMPAT_CONFIRM_REQUIRED as usize;
+        let rejected = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Regex("\"temperature\"".to_string()))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"message":"Unsupported parameter: 'temperature' is not supported with this model.","type":"invalid_request_error","param":"temperature"}}"#)
+            .expect(confirmations)
+            .create_async()
+            .await;
+        let accepted = server
+            .mock("POST", "/responses")
+            .match_body(Matcher::Json(accepted_body))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ok_body())
+            .expect(confirmations + 1)
+            .create_async()
+            .await;
+
+        let work = work_dir("temp_promote");
+        let provider = trimmed_provider(server.url().as_str(), &work);
+        for _ in 0..confirmations {
+            provider
+                .chat(temp_request())
+                .await
+                .expect("trimmed retry succeeds");
+        }
+        let cache = provider.compat_cache.as_ref().unwrap();
+        assert_eq!(cache.get(&key()), Some(ResponsesTrim::omit_temperature()));
+
+        // The promoted trim must skip the rejected request entirely: one send.
+        provider
+            .chat(temp_request())
+            .await
+            .expect("fast path succeeds");
+        rejected.assert();
+        accepted.assert();
     }
 
     #[tokio::test]
