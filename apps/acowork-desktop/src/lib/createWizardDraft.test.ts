@@ -288,6 +288,15 @@ describe("stepIssues — skills and capabilities", () => {
   it("ignores the schema cells when they are left empty", () => {
     expect(stepIssues("skills", state({ capabilities: [cap()] }))).toEqual([]);
   });
+
+  it("blocks on a skill ZIP that is still parsing or failed to parse", () => {
+    // The upload rows are not part of `WizardState`, so they arrive through
+    // the context — but the gate they trigger is the same gate.
+    expect(stepIssues("skills", state(), { unparsedSkills: 1 }))
+      .toContain("skillsUnparsed");
+    expect(stepIssues("skills", state(), { unparsedSkills: 0 })).toEqual([]);
+    expect(stepIssues("skills", state())).toEqual([]);
+  });
 });
 
 describe("undeclaredToolDeps — advisory reachability", () => {

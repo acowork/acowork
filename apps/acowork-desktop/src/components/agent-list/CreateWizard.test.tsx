@@ -116,15 +116,28 @@ describe("CreateWizard — step rail", () => {
 });
 
 describe("CreateWizard — step 1: identity and labels", () => {
-  it("cannot advance without a reverse-domain id and a name", async () => {
+  it("does not advance on an invalid step, and only complains after the user tries", async () => {
     renderWizard();
-    expect((next() as HTMLButtonElement).disabled).toBe(true);
+    // Nothing is flagged before the user acts — an empty form is not an error.
+    expect(screen.queryByText(/Agent ID must be reverse-domain/)).toBeNull();
+    expect(screen.queryByText(/A display name is required/)).toBeNull();
+
+    fireEvent.click(next());
+    // Still on step 1, and now the problems are spelled out.
+    expect(screen.getByLabelText("Agent ID")).toBeTruthy();
+    expect(screen.getByText(/Agent ID must be reverse-domain/)).toBeTruthy();
+    expect(screen.getByText(/A display name is required/)).toBeTruthy();
 
     await fillBasics("not-a-domain", "Agent");
-    expect((next() as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(next());
+    expect(screen.getByLabelText("Agent ID")).toBeTruthy();
 
     await fillBasics("com.example.agent", "Agent");
-    expect((next() as HTMLButtonElement).disabled).toBe(false);
+    // The list clears itself once the fields are valid.
+    expect(screen.queryByText(/Agent ID must be reverse-domain/)).toBeNull();
+    fireEvent.click(next());
+    // Advanced to step 2 (config).
+    expect(screen.queryByLabelText("Agent ID")).toBeNull();
   });
 
   it("refuses an invalid label and keeps it out of the draft", async () => {
@@ -196,9 +209,12 @@ describe("CreateWizard — step 2: [config] defaults", () => {
     await fillBasics();
     fireEvent.click(next());
     fireEvent.change(screen.getByLabelText("Temperature"), { target: { value: "5" } });
-    expect((next() as HTMLButtonElement).disabled).toBe(true);
     // Step-level issue text is visible next to the field, not in a dialog.
     expect(screen.getAllByText(/outside its allowed range/).length).toBeGreaterThan(0);
+    // And the wizard refuses to leave the step — saying why, once.
+    fireEvent.click(next());
+    expect(screen.getByText(/error\(s\) - cannot create/)).toBeTruthy();
+    expect(screen.getByLabelText("Temperature")).toBeTruthy();
   });
 });
 
@@ -256,6 +272,31 @@ describe("CreateWizard — step 3: tools and MCP", () => {
     );
   });
 
+  it("names every selected server next to its own required switch", async () => {
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+    await waitFor(() => expect(screen.getByLabelText("Brave Search")).toBeTruthy());
+    fireEvent.click(screen.getByLabelText("Brave Search"));
+    fireEvent.click(screen.getByLabelText("pm"));
+
+    // The name is on the row, so the row is self-describing.
+    const selected = screen.getByText(/^Selected \(2\)$/).parentElement as HTMLElement;
+    expect(selected.textContent).toContain("Brave Search");
+    expect(selected.textContent).toContain("brave-search");
+    expect(selected.textContent).toContain("Tasks and project data");
+    expect(selected.textContent).toContain("(pm)");
+
+    // A labelled Switch stretches to `w-full` (the iOS row layout), which
+    // squeezed the name out of the row — the author could not tell which
+    // switch belonged to which server. The switch must not claim the row.
+    for (const sw of screen.getAllByRole("switch", { name: "Required" })) {
+      const label = sw.closest("label");
+      expect(label?.className ?? "").not.toContain("w-full");
+    }
+  });
+
   it("keeps authoring usable when the preset registry is unreachable", async () => {
     fetchMcpPresets.mockRejectedValue(new Error("gateway down"));
     renderWizard();
@@ -270,6 +311,43 @@ describe("CreateWizard — step 3: tools and MCP", () => {
 });
 
 describe("CreateWizard — step 4: skills and capabilities", () => {
+  it("says why the step is blocked when a skill ZIP fails to parse", async () => {
+    // A ZIP that cannot be parsed must not be carried into the manifest, so
+    // it blocks the step — and the block has to be *explained*, like every
+    // other gate. The row carries the raw parser error; the step-level
+    // list carries the reason the wizard refuses to move on.
+    wireInvoke({
+      parse_skill_zip_preview: () => {
+        throw new Error("not a valid zip");
+      },
+    });
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+    fireEvent.click(next());
+
+    const file = new File([new Uint8Array([1, 2, 3])], "req.zip", { type: "application/zip" });
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [file] },
+    });
+    await waitFor(() => expect(screen.getByText(/not a valid zip/)).toBeTruthy());
+
+    // Quiet until the user tries to leave the step.
+    expect(screen.queryByText(/still parsing, or failed to parse/)).toBeNull();
+
+    fireEvent.click(next());
+    // The reason is spelled out, and the wizard stays put.
+    expect(screen.getByText(/still parsing, or failed to parse/)).toBeTruthy();
+    expect(
+      screen.getByLabelText("Click or drop .zip files (containing a SKILL.md)"),
+    ).toBeTruthy();
+
+    // Removing the broken row clears the block.
+    fireEvent.click(screen.getByLabelText("Remove skill"));
+    expect(screen.queryByText(/still parsing, or failed to parse/)).toBeNull();
+  });
+
   it("does not turn an uploaded skill into a capability (the old 1:1 bug)", async () => {
     renderWizard();
     await fillBasics();
@@ -339,16 +417,23 @@ describe("CreateWizard — step 4: skills and capabilities", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Add action" }));
     fireEvent.change(screen.getByLabelText("Action name"), { target: { value: "Bad-Action" } });
-    expect((next() as HTMLButtonElement).disabled).toBe(true);
+    // Quiet until the user tries to leave the step.
+    expect(screen.queryByText(/must match \[a-z0-9_\]/)).toBeNull();
+    fireEvent.click(next());
     expect(screen.getByText(/must match \[a-z0-9_\]/)).toBeTruthy();
+    // Still on the skills step.
+    expect(screen.getByLabelText("Action name")).toBeTruthy();
 
     fireEvent.change(screen.getByLabelText("Action name"), { target: { value: "ok_action" } });
-    expect((next() as HTMLButtonElement).disabled).toBe(false);
+    // The list goes away as soon as the field is fixed.
+    expect(screen.queryByText(/must match \[a-z0-9_\]/)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Input / output schema (JSON)" }));
     fireEvent.change(screen.getByLabelText("Input schema"), { target: { value: "{oops" } });
-    expect((next() as HTMLButtonElement).disabled).toBe(true);
+    // The list stays armed after the first attempt, so it reports live.
     expect(screen.getAllByText(/not valid JSON/).length).toBeGreaterThan(0);
+    fireEvent.click(next());
+    expect(screen.getByLabelText("Input schema")).toBeTruthy();
   });
 
   it("warns about a skill dependency nothing declares, without blocking", async () => {

@@ -340,6 +340,19 @@ export type StepIssue =
   | "capabilitySchemaInvalid"
   | "skillsUnparsed";
 
+/**
+ * Facts about the current step that are not part of `WizardState`.
+ *
+ * The skill rows are UI state — a ZIP still being parsed, a ZIP that
+ * failed — not declarations, so they do not belong in `WizardState`.
+ * They still gate the step, so the gate function needs them; it takes
+ * them from the caller rather than keeping a second source of truth.
+ */
+export interface StepContext {
+  /** Skill rows that are not ready: still parsing, or failed to parse. */
+  unparsedSkills?: number;
+}
+
 /** Action name charset: `[a-z0-9_]`, and it cannot start with a digit. */
 export const CAPABILITY_ACTION_RE = /^[a-z][a-z0-9_]*$/;
 
@@ -356,7 +369,11 @@ function hasDuplicateAction(caps: CapabilityInput[]): boolean {
 }
 
 /** Report every reason the current step is not finished. Empty = may advance. */
-export function stepIssues(step: WizardStepKey, state: WizardState): StepIssue[] {
+export function stepIssues(
+  step: WizardStepKey,
+  state: WizardState,
+  ctx?: StepContext,
+): StepIssue[] {
   const issues: StepIssue[] = [];
   switch (step) {
     case "basic": {
@@ -393,6 +410,12 @@ export function stepIssues(step: WizardStepKey, state: WizardState): StepIssue[]
       }
       if (state.capabilities.some((c) => parseSchemaCell(c.outputSchema) === undefined && c.outputSchema.trim() !== "")) {
         issues.push("capabilitySchemaInvalid");
+      }
+      // A ZIP that is still parsing, or that failed to parse, must not be
+      // carried into the manifest — so it blocks the step like any other
+      // capability problem, and it is reported through the same channel.
+      if ((ctx?.unparsedSkills ?? 0) > 0) {
+        issues.push("skillsUnparsed");
       }
       break;
     }

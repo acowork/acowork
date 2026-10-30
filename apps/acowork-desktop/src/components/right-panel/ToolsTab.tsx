@@ -311,8 +311,9 @@ export function ToolsTab() {
           if (data.mcp_servers_defs && Array.isArray(data.mcp_servers_defs)) {
             setMcpServerDefs(data.mcp_servers_defs as McpServerView[]);
           }
-          // ADR-104: manifest-declared recommendations (absent when the
-          // package declares none — `skip_serializing_if` on the wire).
+          // ADR-104: manifest-declared recommendations. The Runtime always
+          // sends the key (an empty array when the package declares none);
+          // the guard is for older Runtimes that omit it entirely.
           setRecommendations(
             Array.isArray(data.recommended)
               ? (data.recommended as McpRecommendationView[])

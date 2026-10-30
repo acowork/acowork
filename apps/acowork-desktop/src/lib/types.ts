@@ -2267,7 +2267,10 @@ export interface McpRecommendationView {
   tools: string[];
   /** Secrets needed before the server is usable. */
   required_secrets: string[];
-  /** Soft requirement — unmet means "capability limited", never a block. */
+  /**
+   * Soft requirement — unmet never blocks chat or startup. The Tools panel
+   * badges the recommendation row "required" and names any missing secret.
+   */
   required: boolean;
   /** Author's justification, shown verbatim (their words, not ours). */
   why?: string;

@@ -137,6 +137,15 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
 
+  /**
+   * Has the user tried to leave this step? The blocking-issue list stays
+   * hidden until then: an empty form is not a broken form, and a red box
+   * under untouched fields reads as "you already did something wrong".
+   * Once the user has tried to advance, the list stays visible and updates
+   * live while they fix the fields.
+   */
+  const [showIssues, setShowIssues] = useState(false);
+
   // Reset on open. Every piece of wizard state resets together: leaving one
   // behind (the old code forgot `skills` on a failed create) means the next
   // open shows a draft the user never made.
@@ -151,6 +160,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
     setOpenSchema(new Set());
     setPreview(null);
     setPreviewError(null);
+    setShowIssues(false);
   }, [open]);
 
   // Static catalogs, loaded once per open: the builtin tool list comes from
@@ -194,11 +204,14 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
    */
   const draftState: WizardState = useMemo(() => ({ ...state, skills }), [state, skills]);
 
-  const issues = stepIssues(step, draftState);
-  /** A parse in flight or a failed parse blocks leaving step 4. */
-  const skillsUnparsed = skillRows.some((r) => r.status !== "ready");
-  const canAdvance =
-    issues.length === 0 && (step !== "skills" || !skillsUnparsed) && !busy;
+  const issues = stepIssues(step, draftState, {
+    // A parse in flight or a failed parse blocks leaving step 4 — the gate
+    // lives in `stepIssues`, so the issue list and the advance button can
+    // never disagree about what is blocking.
+    unparsedSkills: skillRows.filter((r) => r.status !== "ready").length,
+  });
+  /** Blocking problems on this step. They gate advancing, not the button. */
+  const blocked = issues.length > 0;
 
   const stepIndex = STEPS.findIndex((s) => s.key === step);
   const isLast = stepIndex === STEPS.length - 1;
@@ -474,12 +487,24 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
       return;
     }
     const next = STEPS[stepIndex + 1];
-    if (next) setStep(next.key);
+    if (!next) return;
+    if (blocked) {
+      // First attempt on an invalid step: show what is wrong instead of
+      // silently refusing to advance. From here the list stays visible and
+      // tracks the fields live.
+      setShowIssues(true);
+      return;
+    }
+    setShowIssues(false);
+    setStep(next.key);
   };
 
   const handleBack = () => {
     const prev = STEPS[stepIndex - 1];
-    if (prev) setStep(prev.key);
+    if (!prev) return;
+    // Going back re-arms the gate: the next step is a fresh page.
+    setShowIssues(false);
+    setStep(prev.key);
   };
 
   if (!open) return null;
@@ -491,7 +516,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-modal-overlay" onClick={busy ? undefined : onClose} />
 
-      <div className="relative z-10 flex max-h-[90vh] w-full max-w-2xl flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl">
+      <div className="relative z-10 flex max-h-[90vh] w-full max-w-3xl flex-col rounded-md border border-border-outer bg-modal-surface shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <div className="flex items-center gap-2">
@@ -813,13 +838,16 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                     <p className="text-10 font-medium uppercase tracking-wide text-text-tertiary">
                       {t("createWizard.mcpSelectedCount", { count: state.mcp.length })}
                     </p>
+                    {/* What "Required" means, stated once for the whole block —
+                        per row it was invisible until the switch was flipped. */}
+                    <p className="text-10 text-text-tertiary">{t("createWizard.mcpRequiredHint")}</p>
                     {state.mcp.map((pick) => (
                       <div
                         key={`${pick.kind}:${pick.id}`}
                         className="space-y-2 rounded-md border border-border-divider px-3 py-2"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="truncate font-mono text-11 text-text-secondary">
+                          <span className="min-w-0 flex-1 truncate font-mono text-11 text-text-secondary">
                             {pick.label}
                             <span className="ml-1 text-text-tertiary">({pick.id})</span>
                           </span>
@@ -831,19 +859,26 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                             disabled={busy}
                             size="sm"
                             label={t("createWizard.mcpRequiredLabel")}
+                            // Material layout so the switch doesn't try to
+                            // stretch to the full row width: the default
+                            // `labelPosition="left"` applies `w-full`, which
+                            // squeezed the MCP name out of the row entirely
+                            // (same workaround as RemoteFolderPicker).
+                            labelPosition="right"
                           />
                         </div>
-                        <StyledInput
-                          type="text"
-                          value={pick.why}
-                          onChange={(e) => patchPick(pick.kind, pick.id, { why: e.target.value })}
-                          placeholder={t("createWizard.mcpWhyPlaceholder")}
-                          aria-label={`${t("createWizard.mcpWhyLabel")} ${pick.id}`}
-                          disabled={busy}
-                        />
-                        {pick.required && (
-                          <p className="text-10 text-text-tertiary">{t("createWizard.mcpRequiredHint")}</p>
-                        )}
+                        {/* A labelled field, not a bare placeholder: the author
+                            must know this text is spoken to the end user. */}
+                        <Field label={t("createWizard.mcpWhyLabel")} hint={t("createWizard.mcpWhyHint")}>
+                          <StyledInput
+                            type="text"
+                            value={pick.why}
+                            onChange={(e) => patchPick(pick.kind, pick.id, { why: e.target.value })}
+                            placeholder={t("createWizard.mcpWhyPlaceholder")}
+                            aria-label={`${t("createWizard.mcpWhyLabel")} ${pick.id}`}
+                            disabled={busy}
+                          />
+                        </Field>
                       </div>
                     ))}
                     <p className="text-10 text-text-tertiary">{t("createWizard.mcpToolsHint")}</p>
@@ -1055,8 +1090,9 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
             </div>
           )}
 
-          {/* Step-level blocking issues, in the user's language. */}
-          {issueLines.length > 0 && step !== "preview" && (
+          {/* Step-level blocking issues, in the user's language. Hidden until
+              the user tries to advance — see `showIssues`. */}
+          {showIssues && issueLines.length > 0 && step !== "preview" && (
             <IssueList tone="danger" title={t("createWizard.previewErrors", { count: issueLines.length })} items={issueLines} />
           )}
 
@@ -1073,9 +1109,12 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
             {stepIndex === 0 ? t("common.cancel") : t("common.back")}
           </button>
 
+          {/* The Next button stays enabled on an invalid step: clicking it is
+              what reveals the problems. Disabling it would leave the user
+              with a dead button and no explanation. */}
           <button
             onClick={handleNext}
-            disabled={!canAdvance || (isLast && (previewBusy || !!previewError))}
+            disabled={busy || (isLast && (previewBusy || !!previewError))}
             className="flex items-center gap-2 rounded btn-accent px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? (
@@ -1347,6 +1386,8 @@ function issueText(issue: StepIssue, t: (key: string, opts?: Record<string, unkn
       return t("createWizard.issueCapabilityActionDuplicate");
     case "capabilitySchemaInvalid":
       return t("createWizard.issueCapabilitySchemaInvalid");
+    case "skillsUnparsed":
+      return t("createWizard.issueSkillsUnparsed");
     default:
       return null;
   }
