@@ -1063,6 +1063,10 @@
     "uploadFailed": "上傳失敗",
     "removeFile": "移除 {{filename}}"
   },
+  "attachment": {
+    "zoomLabel": "檢視大圖：{{filename}}",
+    "openFailed": "無法打開「{{filename}}」——檔案可能已被刪除或服務不可達"
+  },
   "language": {
     "zhCN": "中文（簡體）",
     "zhTW": "中文（繁體）",

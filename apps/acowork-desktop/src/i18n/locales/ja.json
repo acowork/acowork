@@ -1073,6 +1073,10 @@
     "uploadFailed": "アップロードに失敗しました",
     "removeFile": "{{filename}} を削除"
   },
+  "attachment": {
+    "zoomLabel": "拡大表示：{{filename}}",
+    "openFailed": "「{{filename}}」を開けません — ファイルが削除されたか、サービスに接続できません"
+  },
   "language": {
     "zhCN": "中国語（簡体字）",
     "zhTW": "中国語（繁体字）",

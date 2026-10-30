@@ -1074,6 +1074,10 @@
     "uploadFailed": "업로드 실패",
     "removeFile": "{{filename}} 제거"
   },
+  "attachment": {
+    "zoomLabel": "원본 보기: {{filename}}",
+    "openFailed": "「{{filename}}」을(를) 열 수 없습니다 — 파일이 삭제되었거나 서비스에 연결할 수 없습니다"
+  },
   "language": {
     "zhCN": "중국어（간체）",
     "zhTW": "중국어（번체）",

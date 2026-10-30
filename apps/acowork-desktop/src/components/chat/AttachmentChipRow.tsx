@@ -3,9 +3,14 @@
  * entry as a styled chip / thumbnail widget. Dispatched by `kind`:
  *
  *   - `file_upload`      → DocumentChip (legacy component, unchanged).
- *   - `image_upload`     → 56×56 thumbnail. Lazily fetches the blob from
- *                          `GET /api/agents/{agentId}/files/{documentId}`
- *                          via `URL.createObjectURL`; revokes on unmount.
+ *   - `image_upload`     → 56×56 thumbnail, tappable to view the full image.
+ *                          The blob comes from `lib/agentFile.ts` (the agent's
+ *                          file route); the row holds the *bytes* and derives
+ *                          its object URL from them, so opening the viewer
+ *                          costs no second download — the agent route serves no
+ *                          thumbnail sidecar, so the thumbnail's bytes already
+ *                          ARE the full image. The row's own URL is revoked on
+ *                          unmount; the viewer gets a separate one.
  *                          Uses `width`/`height` from metadata as CSS
  *                          aspect-ratio hint; falls back to `<img onLoad>`
  *                          natural sizing when absent.
@@ -23,9 +28,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, X } from "lucide-react";
 import type { AttachedFileItem, AttachedFolderItem, AttachedItem, AttachedSelectionItem, ImageUploadItem } from "../../lib/types";
-import { getGatewayUrl } from "../../lib/config";
 import { log } from "../../lib/logger";
 import { cn } from "../../lib/utils";
+import { fetchAgentFileBlob } from "../../lib/agentFile";
+import { openExecImageAttachment } from "../../lib/openExecAttachment";
+import { useTranslation } from "../../i18n/useTranslation";
 import { attachmentGlyph, selectionRange } from "./attachmentGlyph";
 import { AttachmentCapsule } from "./AttachmentCapsule";
 import { DocumentChip } from "./DocumentChip";
@@ -158,49 +165,44 @@ function ImageAttachmentThumbnail({
   onRemove?: () => void;
   pending?: boolean;
 }) {
-  const [url, setUrl] = useState<string | null>(null);
+  const [image, setImage] = useState<{ blob: Blob; url: string } | null>(null);
   const [failed, setFailed] = useState(false);
   const [naturalLoaded, setNaturalLoaded] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
-  /** The row's own object URL, released from the cleanup body. It cannot be
-   *  released through a `setState` updater: React drops updates to an
-   *  unmounted component, so the updater never runs — which is exactly when
-   *  the release matters. A transcript row is unmounted the moment it scrolls
-   *  out of the virtualized window, so the previous spelling leaked one object
-   *  URL per image the user ever scrolled past. */
-  const urlRef = useRef<string | null>(null);
+  /** The row's own object URL, released from the effect's cleanup. It cannot
+   *  be released through a `setState` updater: React drops updates to an
+   *  unmounted component, so the updater never runs and the URL leaks — which
+   *  is what the previous version of this effect did. */
+  const thumbUrlRef = useRef<string | null>(null);
+  const { t } = useTranslation();
 
   useEffect(() => {
     if (!agentId) return;
     let cancelled = false;
     const ctrl = new AbortController();
-    const blobUrl = `${getGatewayUrl()}/api/agents/${encodeURIComponent(agentId)}/files/${encodeURIComponent(item.documentId)}`;
-    fetch(blobUrl, { signal: ctrl.signal })
-      .then((resp) => {
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        return resp.blob();
-      })
+    void fetchAgentFileBlob(agentId, item.documentId, { signal: ctrl.signal })
       .then((blob) => {
         if (cancelled) return;
-        const objectUrl = URL.createObjectURL(blob);
-        urlRef.current = objectUrl;
-        setUrl(objectUrl);
+        // The row holds the BYTES, not just a URL: the agent file route serves
+        // no thumbnail sidecar, so these are the full image, and opening the
+        // viewer must not download them a second time.
+        const url = URL.createObjectURL(blob);
+        thumbUrlRef.current = url;
+        setImage({ blob, url });
       })
       .catch((err) => {
-        if (cancelled || (err instanceof DOMException && err.name === "AbortError")) {
-          return;
-        }
+        if (cancelled) return;
         log.warn("[AttachmentChipRow] image blob fetch failed:", err);
         setFailed(true);
       });
     return () => {
       cancelled = true;
       ctrl.abort();
-      if (urlRef.current) {
-        URL.revokeObjectURL(urlRef.current);
-        urlRef.current = null;
+      if (thumbUrlRef.current) {
+        URL.revokeObjectURL(thumbUrlRef.current);
+        thumbUrlRef.current = null;
       }
-      setUrl(null);
+      setImage(null);
     };
   }, [agentId, item.documentId]);
 
@@ -216,6 +218,18 @@ function ImageAttachmentThumbnail({
     }
   }, [item.width, item.height]);
 
+  const url = image?.url ?? null;
+
+  const handleOpenImage = useCallback(() => {
+    if (!agentId || !image || pending) return;
+    // What the click MEANS is the dispatcher's decision, not this row's —
+    // same rule `ChatAttachmentChip` follows with `openChatAttachment`.
+    void openExecImageAttachment(
+      { agentId, documentId: item.documentId, filename: item.filename },
+      image.blob,
+    );
+  }, [agentId, image, item.documentId, item.filename, pending]);
+
   // Use metadata width/height as aspect-ratio hint when present.
   // When absent, the img's natural aspect ratio takes over via onLoad.
   const aspectRatio =
@@ -230,18 +244,26 @@ function ImageAttachmentThumbnail({
       style={aspectRatio ? { aspectRatio } : undefined}
     >
       {url ? (
-        <img
-          ref={imgRef}
-          src={url}
-          alt={item.filename}
-          className="h-full w-full object-cover"
-          onLoad={handleLoad}
-          style={
-            !naturalLoaded && aspectRatio
-              ? { opacity: 0.5 }
-              : undefined
-          }
-        />
+        <button
+          type="button"
+          onClick={handleOpenImage}
+          disabled={pending}
+          aria-label={t("attachment.zoomLabel", { filename: item.filename })}
+          className="h-full w-full cursor-zoom-in disabled:cursor-default"
+        >
+          <img
+            ref={imgRef}
+            src={url}
+            alt={item.filename}
+            className="h-full w-full object-cover"
+            onLoad={handleLoad}
+            style={
+              !naturalLoaded && aspectRatio
+                ? { opacity: 0.5 }
+                : undefined
+            }
+          />
+        </button>
       ) : (
         <div className="flex h-full w-full items-center justify-center text-10 text-text-tertiary">
           {failed ? "!" : "…"}

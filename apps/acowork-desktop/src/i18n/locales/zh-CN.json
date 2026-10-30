@@ -1155,6 +1155,10 @@
     "uploadFailed": "上传失败",
     "removeFile": "移除 {{filename}}"
   },
+  "attachment": {
+    "zoomLabel": "查看大图：{{filename}}",
+    "openFailed": "无法打开「{{filename}}」——文件可能已被删除或服务不可达"
+  },
   "language": {
     "zhCN": "中文 (简体)",
     "zhTW": "中文 (繁體)",

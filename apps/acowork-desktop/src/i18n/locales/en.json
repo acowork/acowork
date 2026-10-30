@@ -1439,6 +1439,10 @@
     "uploadFailed": "Upload failed",
     "removeFile": "Remove {{filename}}"
   },
+  "attachment": {
+    "zoomLabel": "View full size: {{filename}}",
+    "openFailed": "Cannot open 「{{filename}}」 — the file may have been deleted, or the service is unreachable"
+  },
   "language": {
     "zhCN": "Chinese (Simplified)",
     "zhTW": "Chinese (Traditional)",
