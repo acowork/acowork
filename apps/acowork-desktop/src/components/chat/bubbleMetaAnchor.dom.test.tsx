@@ -47,6 +47,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
           },
           sending: {},
           draft: {},
+          attachedContext: {},
         }),
       {
         getState: () => ({

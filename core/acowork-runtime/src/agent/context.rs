@@ -3,7 +3,6 @@
 //! Builds the complete context for LLM requests following the priority order
 //! defined in docs/03-agent-runtime.md §3.1.
 
-use acowork_core::manifest::AgentManifest;
 use acowork_core::protocol::ModelCapabilitiesInfo;
 use acowork_core::providers::traits::{
     CacheControl, ChatMessage, ChatRequest, ContentPart, MessageRole, ReasoningEffort,
@@ -81,6 +80,14 @@ pub struct ContextBuilder {
     /// `agent_config.json.temperature` (Layer 1) → `manifest.llm.temperature` (Layer 2) → `DEFAULT_TEMPERATURE` (Layer 3).
     /// Set per-session via `set_temperature()` from AgentLoop before each build.
     temperature: Option<f32>,
+    /// Output-token ceiling for this request (ADR-104).
+    ///
+    /// Layer 1 of the "how many tokens may this request produce" chain:
+    /// `agent_config.json.max_output_tokens` (seeded from the manifest's
+    /// `[config].max_output_tokens`) → Gateway per-model capability →
+    /// conservative 4096. Set per-iteration by `AgentLoop` from
+    /// `AgentCore::max_output_tokens_override`.
+    max_output_tokens: Option<u32>,
     /// Reusable token counter for system prompt estimation.
     counter: TokenCounter,
 }
@@ -105,6 +112,7 @@ impl ContextBuilder {
             reasoning_effort: None,
             thinking_mode: None,
             temperature: None,
+            max_output_tokens: None,
             counter: TokenCounter::new(),
         }
     }
@@ -150,6 +158,12 @@ impl ContextBuilder {
     /// Set the LLM temperature override for this builder. `None` clears the
     /// override and falls back to [`DEFAULT_TEMPERATURE`] when building the
     /// ChatRequest. Called by AgentLoop each iteration from session/core state.
+    /// Set the output-token ceiling for this request. `None` = let the
+    /// Gateway's per-model capability decide (see [`Self::max_output_tokens`]).
+    pub fn set_max_output_tokens(&mut self, max_output_tokens: Option<u32>) {
+        self.max_output_tokens = max_output_tokens;
+    }
+
     pub fn set_temperature(&mut self, temperature: Option<f32>) {
         self.temperature = temperature;
     }
@@ -539,7 +553,6 @@ impl ContextBuilder {
     /// `build`.
     pub fn build(
         &self,
-        manifest: &AgentManifest,
         history: &HistoryManager,
         gateway_capabilities: Option<&ModelCapabilitiesInfo>,
         max_output_tokens_limit: u64,
@@ -691,15 +704,16 @@ impl ContextBuilder {
         // When absent, model is empty — the LLM call will fail with a clear error.
         let model = self.override_model.clone().unwrap_or_default();
 
-        // Auto-set max_tokens based on model capabilities with the following priority:
-        // 1. manifest.llm.max_tokens (user explicit config, backward compatible)
+        // Auto-set max_tokens with the following priority (ADR-104):
+        // 1. agent_config.json.max_output_tokens (user- or manifest-seeded
+        //    ceiling, injected via `set_max_output_tokens`)
         // 2. Gateway model_capabilities.max_output_tokens
         // 3. Warn + conservative default 4096
-        let max_tokens = if let Some(explicit) = manifest.llm.max_tokens {
+        let max_tokens = if let Some(explicit) = self.max_output_tokens {
             tracing::info!(
                 max_tokens = explicit,
-                source = "manifest",
-                "Using explicitly configured max_tokens"
+                source = "agent_config",
+                "Using the agent-level max_output_tokens ceiling"
             );
             Some(explicit)
         } else if let Some(caps) = gateway_capabilities {
@@ -978,33 +992,14 @@ pub fn detect_environment_text() -> &'static str {
 mod tests {
     use super::*;
 
-    fn test_manifest() -> AgentManifest {
-        AgentManifest::from_toml(
-            r#"
-            agent_id = "com.test.ctx"
-            version = "1.0.0"
-            name = "Test Agent"
-            description = "Test"
-            author = "test"
-            runtime_version = "0.1.0"
-
-            [llm]
-            provider = "openai"
-            model = "gpt-4"
-        "#,
-        )
-        .unwrap()
-    }
-
     #[test]
     fn test_context_builder_basic() {
-        let manifest = test_manifest();
         let mut history = HistoryManager::new(10000);
         history.append(ChatMessage::user("Hello"));
 
         let builder = ContextBuilder::new("You are a helpful assistant.".to_string())
             .with_override_model("gpt-4".to_string());
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
 
         assert_eq!(request.model, "gpt-4");
         assert_eq!(request.messages.len(), 2); // system + user
@@ -1023,7 +1018,6 @@ mod tests {
     /// `0.12` → 200).
     #[test]
     fn test_build_chat_request_rounds_temperature_for_wire() {
-        let manifest = test_manifest();
         let history = HistoryManager::new(10000);
 
         for (input, expected) in [
@@ -1036,7 +1030,7 @@ mod tests {
         ] {
             let mut builder = ContextBuilder::new("You are a helper.".to_string());
             builder.set_temperature(Some(input));
-            let request = builder.build(&manifest, &history, None, 32_768);
+            let request = builder.build(&history, None, 32_768);
             let wire = serde_json::json!(request.temperature);
             assert_eq!(wire.to_string(), expected, "input {input}");
         }
@@ -1044,13 +1038,12 @@ mod tests {
 
     #[test]
     fn test_context_builder_with_identity() {
-        let manifest = test_manifest();
         let history = HistoryManager::new(10000);
 
         let builder = ContextBuilder::new("You are a helper.".to_string())
             .with_identity(Some("Name: Alice, City: Shanghai".to_string()));
 
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
         assert!(request.messages[0].content.contains("Alice"));
     }
 
@@ -1060,7 +1053,6 @@ mod tests {
     /// removal during future refactors of `ContextBuilder::build()`.
     #[test]
     fn test_context_builder_injects_language_directive_when_identity_has_language() {
-        let manifest = test_manifest();
         let history = HistoryManager::new(10000);
 
         let identity =
@@ -1068,7 +1060,7 @@ mod tests {
         let builder =
             ContextBuilder::new("You are a helper.".to_string()).with_identity(Some(identity));
 
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
         let system = &request.messages[0].content;
         assert!(
             system.contains("Language field above"),
@@ -1122,9 +1114,8 @@ mod tests {
         );
 
         // build() must omit the cleared sections entirely.
-        let manifest = test_manifest();
         let history = HistoryManager::new(10000);
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
         let system = &request.messages[0].content;
         assert!(
             !system.contains("Memory Conflicts Needing Confirmation"),
@@ -1144,7 +1135,6 @@ mod tests {
         // Output is A/B only; the current user message lives at Block B's
         // tail (run_inner appends it to history before build) and appears
         // EXACTLY ONCE — no tail duplicate.
-        let manifest = test_manifest();
         let mut history = HistoryManager::new(10000);
         history.append(ChatMessage::user("First turn"));
         history.append(ChatMessage::assistant("First reply"));
@@ -1155,7 +1145,7 @@ mod tests {
         // Current user message is part of history (Block B), not a separate arg.
         let current = ChatMessage::user("Second turn");
         history.append(current.clone());
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
 
         // [0] Block A (System + ephemeral breakpoint)
         assert_eq!(request.messages[0].role, MessageRole::System);
@@ -1196,7 +1186,6 @@ mod tests {
 
         // Tool-loop iterations: history tail is a Tool message; the earlier
         // user turn appears once (in Block B), no tail duplicate.
-        let manifest = test_manifest();
         let mut history = HistoryManager::new(10000);
         history.append(ChatMessage::user("Turn"));
         // A REAL tool_call on the assistant turn keeps the tool result
@@ -1217,7 +1206,7 @@ mod tests {
         let builder =
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
 
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
         // [0] A, [1..3] B — no D, no C (ADR-060 v2 + §5.5 erratum).
         assert_eq!(request.messages.len(), 4);
         assert_eq!(request.messages[3].role, MessageRole::Tool);
@@ -1240,13 +1229,12 @@ mod tests {
         // G9: when abstention triggers (empty retrieval + enabled), the
         // prompt is injected into the system prompt (Block A) after the
         // retrieved-memory slot. On the normal path it is absent.
-        let manifest = test_manifest();
         let history = HistoryManager::new(10000);
 
         // Normal path: no abstention prompt set → Block A unchanged.
         let builder =
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
         assert!(
             !request.messages[0]
                 .content
@@ -1258,7 +1246,7 @@ mod tests {
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
         builder
             .set_abstention_prompt("When you are not confident, say you're not sure.".to_string());
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
         assert!(
             request.messages[0]
                 .content
@@ -1275,7 +1263,7 @@ mod tests {
             ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
         builder.set_abstention_prompt("prompt".to_string());
         builder.clear_abstention_prompt();
-        let request = builder.build(&manifest, &history, None, 32_768);
+        let request = builder.build(&history, None, 32_768);
         assert!(
             !request.messages[0]
                 .content
@@ -1371,6 +1359,58 @@ mod tests {
             thinking_mode: None,
             reasoning_efforts: None,
         }
+    }
+
+    // ── ADR-104: output-token ceiling resolution ──────────────────────
+
+    /// The agent-level ceiling wins over the Gateway capability — this is
+    /// what replaced the old manifest-level `max_tokens` read inside build().
+    #[test]
+    fn test_agent_level_max_output_tokens_wins_over_gateway_caps() {
+        let mut history = HistoryManager::new(10000);
+        history.append(ChatMessage::user("hi"));
+
+        let mut builder = ContextBuilder::new("sys".to_string())
+            .with_override_model("gpt-4".to_string())
+            .with_tools(vec![]);
+        builder.set_max_output_tokens(Some(1234));
+
+        let caps = test_caps(200_000, 16_384);
+        let request = builder.build(&history, Some(&caps), 32_768);
+        assert_eq!(request.max_tokens, Some(1234));
+    }
+
+    /// No agent-level opinion => the Gateway per-model capability decides.
+    #[test]
+    fn test_gateway_caps_used_when_no_agent_ceiling() {
+        let mut history = HistoryManager::new(10000);
+        history.append(ChatMessage::user("hi"));
+
+        let builder = ContextBuilder::new("sys".to_string())
+            .with_override_model("gpt-4".to_string())
+            .with_tools(vec![]);
+
+        let caps = test_caps(200_000, 16_384);
+        let request = builder.build(&history, Some(&caps), 32_768);
+        assert_eq!(request.max_tokens, Some(16_384));
+    }
+
+    /// Clearing the ceiling falls back to auto-detection — the "user cleared
+    /// the field in the Setup panel" path.
+    #[test]
+    fn test_clearing_agent_ceiling_falls_back_to_gateway_caps() {
+        let mut history = HistoryManager::new(10000);
+        history.append(ChatMessage::user("hi"));
+
+        let mut builder = ContextBuilder::new("sys".to_string())
+            .with_override_model("gpt-4".to_string())
+            .with_tools(vec![]);
+        builder.set_max_output_tokens(Some(512));
+        builder.set_max_output_tokens(None);
+
+        let caps = test_caps(200_000, 8_192);
+        let request = builder.build(&history, Some(&caps), 32_768);
+        assert_eq!(request.max_tokens, Some(8_192));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { FileText, FileSpreadsheet, Table, X, Loader, Check, AlertCircle } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { useTranslation } from "../../i18n/useTranslation";
+import { AttachmentCapsule, formatAttachmentSize } from "./AttachmentCapsule";
 
 /** Status of a document upload/persistence */
 export type DocumentChipStatus = "uploading" | "success" | "error";
@@ -38,12 +39,9 @@ function formatIcon(format: string) {
   }
 }
 
-/** Format bytes to human-readable string */
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
+/** Format bytes to human-readable string — the shared capsule spelling, so a
+ *  document chip and a Chat attachment chip state the same weight identically. */
+const formatSize = formatAttachmentSize;
 
 export function DocumentChip({
   filename,
@@ -55,20 +53,21 @@ export function DocumentChip({
   className,
 }: DocumentChipProps) {
   const { t } = useTranslation();
-  const borderClass = status === "uploading"
-    ? "border-border-divider animate-pulse"
-    : status === "error"
-      ? "border-red-400 dark:border-red-500 bg-red-50 dark:bg-red-900/20"
-      : "border-border-outer  bg-zinc-50 dark:bg-zinc-800";
+  // The frame belongs to `AttachmentCapsule` — this only states what a status
+  // does to it, so a document chip and a workspace-ref chip cannot drift in
+  // padding, radius, background or font the way the two surfaces once did.
+  const statusFrame =
+    status === "uploading"
+      ? "border-border-divider bg-zinc-50 animate-pulse dark:bg-zinc-800"
+      : status === "error"
+        ? "border-red-400 bg-red-50 dark:border-red-500 dark:bg-red-900/20"
+        : undefined;
 
   return (
-    <div
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs",
-        "text-text-secondary ",
-        borderClass,
-        className,
-      )}
+    <AttachmentCapsule
+      title={filename}
+      pending={status === "uploading"}
+      className={cn(statusFrame, className)}
     >
       {/* Format icon */}
       {formatIcon(format)}
@@ -111,6 +110,6 @@ export function DocumentChip({
           <X className="h-3 w-3" />
         </button>
       )}
-    </div>
+    </AttachmentCapsule>
   );
 }

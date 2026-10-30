@@ -10,6 +10,7 @@ description = "A principal-level software architect skilled in requirements anal
 author = "ACowork Team"
 runtime_version = "0.1.0"
 dev = false
+labels = ["architecture", "design"]
 avatar = "assets/avatar.jpg"
 
 identity_deps = ["language", "timezone"]
@@ -98,6 +99,15 @@ fallback_order = ["claude", "openai"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+
+# ADR-104: behaviour defaults for agent_config.json. Seeded only into
+# fields the user has not set; never overwrites a user value.
+[config]
+temperature = 0.4
+context_window = 200000
+max_output_tokens = 8192
+max_iterations = 40
+
 [memory]
 enabled = true
 retention_days = 365
@@ -109,15 +119,30 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
+# ADR-104: recommended MCP servers. Recommendation, not installation —
+# the user confirms install/activation in the Tools panel (ADR-090).
+
+[[mcp_servers]]
+hosted = "memory"
+why = "Retain ADRs, trade-off analyses and review outcomes over time"
+
+[[mcp_servers]]
+preset = "context7"
+why = "Verify framework capabilities and version constraints before designing"
+
 [capabilities.architecture_strategy]
 description = "Create architecture strategies with explicit trade-offs, decision records, and migration paths"
+skills = ["architecture-strategy"]
 
 [capabilities.system_design_review]
 description = "Review system designs for boundaries, coupling, scalability, reliability, security, and operability"
+skills = ["system-design-review"]
 
 [capabilities.technical_planning]
 description = "Convert approved designs into implementation plans with clear module ownership, interfaces, tests, and rollout steps"
+skills = ["technical-planning"]
 
 [capabilities.architecture_risk_assessment]
 description = "Assess architectural risks, blast radius, reversibility, rollback paths, and operational failure modes"
+skills = ["architecture-risk-assessment"]
 

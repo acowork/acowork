@@ -71,7 +71,10 @@ function blockAround(file: string, anchor: string, before: number, after: number
 describe("DocumentChip uploading state", () => {
   it("wears a neutral hairline, not the highlight color", () => {
     const { container } = render(<DocumentChip filename="spec.pdf" format="pdf" status="uploading" />);
-    const chip = container.querySelector("div[class*='rounded-md border']") as HTMLElement;
+    // Tag-agnostic on purpose: the chip's frame is the shared
+    // `AttachmentCapsule`, which renders a `button` when interactive and a
+    // `span` otherwise. Pinning `div` here would fail on a correct chip.
+    const chip = container.querySelector("[class*='rounded-md border']") as HTMLElement;
     expect(chip.className).toContain("border-border-divider");
     expect(chip.className).not.toContain("--color-accent");
     // The pulse is what replaced the accent as the progress cue.
@@ -80,7 +83,10 @@ describe("DocumentChip uploading state", () => {
 
   it("keeps the resting state on the outer hairline", () => {
     const { container } = render(<DocumentChip filename="spec.pdf" format="pdf" status="success" />);
-    const chip = container.querySelector("div[class*='rounded-md border']") as HTMLElement;
+    // Tag-agnostic on purpose: the chip's frame is the shared
+    // `AttachmentCapsule`, which renders a `button` when interactive and a
+    // `span` otherwise. Pinning `div` here would fail on a correct chip.
+    const chip = container.querySelector("[class*='rounded-md border']") as HTMLElement;
     expect(chip.className).toContain("border-border-outer");
   });
 });

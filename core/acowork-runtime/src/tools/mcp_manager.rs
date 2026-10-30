@@ -109,6 +109,7 @@ mod tests {
             tool_timeout_secs: Some(30),
             install: None,
             required_secrets: vec![],
+            origin: None,
         };
         assert_eq!(def.name, "test-server");
         assert_eq!(def.command, "test-cmd");
@@ -188,7 +189,18 @@ pub fn reconcile_and_persist_mcp_tools(
             None
         })
         .unwrap_or_default();
-    let merged = crate::agent_config::merge_mcp_tools_config(&persisted, &server_tools);
+    // ADR-104: the default-enabled subset per server comes from the
+    // package's `[[mcp_servers]].tools` whitelist, projected into
+    // `agent_mcp.json`'s `recommended` list at startup.
+    let recommended_tools = crate::agent_config::load_agent_mcp_config(work_dir)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "reconcile: failed to load agent_mcp.json");
+            None
+        })
+        .map(|cfg| cfg.recommended_tools_map())
+        .unwrap_or_default();
+    let merged =
+        crate::agent_config::merge_mcp_tools_config(&persisted, &server_tools, &recommended_tools);
     if let Err(e) = crate::agent_config::save_agent_mcp_tools_config(work_dir, &merged) {
         tracing::warn!(
             error = %e,
@@ -444,6 +456,8 @@ mod filter_tests {
             catalog,
             local: vec![],
             active_names: None,
+            recommended: Vec::new(),
+            dismissed: Vec::new(),
         };
         crate::agent_config::save_agent_mcp_config(dir.path(), &cfg).expect("save catalog");
         dir

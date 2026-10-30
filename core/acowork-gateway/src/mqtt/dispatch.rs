@@ -2762,6 +2762,9 @@ mod tests {
                     name: "Architect".to_string(),
                     install_path: "/tmp/pkg/architect".to_string(),
                     manifest: acowork_core::AgentManifest {
+                        config: Default::default(),
+                        labels: Vec::new(),
+                        mcp_servers: Vec::new(),
                         agent_id: "com.acowork.architect".to_string(),
                         version: "1.0.0".to_string(),
                         name: "Architect".to_string(),
@@ -2818,6 +2821,9 @@ mod tests {
             name: "Architect".to_string(),
             install_path: "/tmp/pkg/architect".to_string(),
             manifest: acowork_core::AgentManifest {
+                config: Default::default(),
+                labels: Vec::new(),
+                mcp_servers: Vec::new(),
                 agent_id: "com.acowork.architect".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Architect".to_string(),
@@ -2949,6 +2955,9 @@ mod tests {
                     name: "Architect".to_string(),
                     install_path: "/tmp/pkg/architect".to_string(),
                     manifest: acowork_core::AgentManifest {
+                        config: Default::default(),
+                        labels: Vec::new(),
+                        mcp_servers: Vec::new(),
                         agent_id: "com.acowork.architect".to_string(),
                         version: "1.0.0".to_string(),
                         name: "Architect".to_string(),
@@ -3305,6 +3314,9 @@ mod tests {
                 name: "To Remove".to_string(),
                 install_path: "/tmp/pkg/rm".to_string(),
                 manifest: acowork_core::AgentManifest {
+                    config: Default::default(),
+                    labels: Vec::new(),
+                    mcp_servers: Vec::new(),
                     agent_id: "com.acowork.to-remove".to_string(),
                     version: "1.0.0".to_string(),
                     name: "To Remove".to_string(),

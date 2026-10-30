@@ -9,18 +9,24 @@
  *                          Uses `width`/`height` from metadata as CSS
  *                          aspect-ratio hint; falls back to `<img onLoad>`
  *                          natural sizing when absent.
- *   - `attached_file`    → workspace file chip (FileText icon + name).
- *   - `attached_selection` → workspace line-range chip (Hash icon + range).
- *   - `attached_folder`  → workspace folder chip (Folder icon + name).
+ *   - `attached_file`    → workspace ref chip.
+ *   - `attached_selection` → workspace ref chip + line range.
+ *   - `attached_folder`  → workspace ref chip.
+ *
+ * The three workspace arms render through ONE `WorkspaceRefChip`; which glyph,
+ * tint and range it shows is read from `attachmentGlyph` and the item itself,
+ * so a new arm is a row in that table and not a new component.
  *
  * Each attachment is a stand-alone system entry in the message list (NOT
  * inline in a user bubble). Clickable workspace refs call `onChipClick`.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileText, Folder, Hash, Loader2, X } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 import type { AttachedFileItem, AttachedFolderItem, AttachedItem, AttachedSelectionItem, ImageUploadItem } from "../../lib/types";
 import { getGatewayUrl } from "../../lib/config";
 import { log } from "../../lib/logger";
+import { cn } from "../../lib/utils";
+import { attachmentGlyph, selectionRange } from "./attachmentGlyph";
 import { AttachmentCapsule } from "./AttachmentCapsule";
 import { DocumentChip } from "./DocumentChip";
 
@@ -72,26 +78,13 @@ export function AttachmentChipRow({
         />
       );
     case "attached_file":
+    case "attached_selection":
+    case "attached_folder":
+      // One component for the three workspace arms: they are the same chip
+      // with a different glyph and an optional line range, both of which it
+      // reads off the item itself.
       return (
         <WorkspaceRefChip
-          item={item}
-          compact={compact}
-          onClick={onChipClick ? () => onChipClick(item) : undefined}
-          pending={pending}
-        />
-      );
-    case "attached_selection":
-      return (
-        <SelectionChip
-          item={item}
-          compact={compact}
-          onClick={onChipClick ? () => onChipClick(item) : undefined}
-          pending={pending}
-        />
-      );
-    case "attached_folder":
-      return (
-        <FolderChip
           item={item}
           compact={compact}
           onClick={onChipClick ? () => onChipClick(item) : undefined}
@@ -103,89 +96,45 @@ export function AttachmentChipRow({
 
 // ── Sub-components ─────────────────────────────────────────────────
 
+/**
+ * The three workspace arms are one chip.
+ *
+ * They differed only in glyph, tint and whether a line range is printed — all
+ * three of which the glyph table and the item's own fields already say. Keeping
+ * three copies meant three edits per change and three chances to drift, which is
+ * the fragmentation this file's capsule + table exist to remove.
+ */
 function WorkspaceRefChip({
   item,
   compact,
   onClick,
   pending,
 }: {
-  item: AttachedFileItem;
+  item: AttachedFileItem | AttachedSelectionItem | AttachedFolderItem;
   compact: boolean;
   onClick?: () => void;
   pending?: boolean;
 }) {
+  const { Icon, className } = attachmentGlyph(item.type);
+  const range =
+    item.type === "attached_selection"
+      ? selectionRange(item.startLine, item.endLine)
+      : undefined;
+  const provenance = range ? `${item.absPath} ${range}` : item.absPath;
   return (
     <AttachmentCapsule
       compact={compact}
       pending={pending}
-      title={pending ? "等待服务器确认..." : item.absPath}
+      title={pending ? "等待服务器确认..." : provenance}
       onClick={onClick}
     >
       {pending ? (
-        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-text-tertiary" />
+        <Loader2 className={cn("h-4 w-4 shrink-0 animate-spin", className)} />
       ) : (
-        <FileText className="h-4 w-4 shrink-0 text-text-tertiary" />
+        <Icon className={cn("h-4 w-4 shrink-0", className)} />
       )}
       <span className="max-w-[200px] truncate font-medium">{item.name}</span>
-    </AttachmentCapsule>
-  );
-}
-
-function SelectionChip({
-  item,
-  compact,
-  onClick,
-  pending,
-}: {
-  item: AttachedSelectionItem;
-  compact: boolean;
-  onClick?: () => void;
-  pending?: boolean;
-}) {
-  return (
-    <AttachmentCapsule
-      compact={compact}
-      pending={pending}
-      title={pending ? "等待服务器确认..." : `${item.absPath}:${item.startLine}-${item.endLine}`}
-      onClick={onClick}
-    >
-      {pending ? (
-        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-accent)]" />
-      ) : (
-        <Hash className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
-      )}
-      <span className="max-w-[180px] truncate font-medium">{item.name}</span>
-      <span className="text-text-tertiary ">
-        {item.startLine}-{item.endLine}
-      </span>
-    </AttachmentCapsule>
-  );
-}
-
-function FolderChip({
-  item,
-  compact,
-  onClick,
-  pending,
-}: {
-  item: AttachedFolderItem;
-  compact: boolean;
-  onClick?: () => void;
-  pending?: boolean;
-}) {
-  return (
-    <AttachmentCapsule
-      compact={compact}
-      pending={pending}
-      title={pending ? "等待服务器确认..." : item.absPath}
-      onClick={onClick}
-    >
-      {pending ? (
-        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-amber-500" />
-      ) : (
-        <Folder className="h-4 w-4 shrink-0 text-amber-500" />
-      )}
-      <span className="max-w-[200px] truncate font-medium">{item.name}</span>
+      {range && <span className="text-text-tertiary">{range}</span>}
     </AttachmentCapsule>
   );
 }

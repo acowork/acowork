@@ -66,6 +66,13 @@ pub struct DecisionRecord {
     /// the blindness this field removes going forward.
     #[serde(default)]
     pub attachments: usize,
+    /// Workspace references on the turn (count only, same rule as
+    /// [`Self::attachments`]). Kept separate because the two are different
+    /// facts for the reader: an upload's bytes can be pulled and handed to a
+    /// session, a reference is a path only the node that owns it can open. A
+    /// turn with `att=0 ref=1` is the exact shape of the incident this covers.
+    #[serde(default)]
+    pub refs: usize,
     /// The turn carried attachments and no text, i.e. Block C routed the
     /// attachment-only placeholder rather than a typed body.
     #[serde(default)]
@@ -92,11 +99,12 @@ impl DecisionRecord {
             .map(|s| format!(" -> {s}"))
             .unwrap_or_default();
         format!(
-            "chat={} decision={}{} att={} latency={}ms outcome={}",
+            "chat={} decision={}{} att={} ref={} latency={}ms outcome={}",
             self.chat_id,
             self.decision,
             target,
             self.attachments,
+            self.refs,
             self.latency_ms,
             self.outcome
         )
@@ -143,6 +151,7 @@ mod tests {
             anchor_seq: 40,
             history_len: 18,
             attachments: 0,
+            refs: 0,
             attachment_only: false,
             info_rounds: Some(1),
             prompt_tokens: Some(3120),

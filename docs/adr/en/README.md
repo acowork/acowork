@@ -122,6 +122,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 94 | [ADR-101](./ADR-101-memory-standalone-mcp-service.md) | Extracting the Memory Module from the Runtime into a Replaceable Standalone Service acowork-memory (MCP Integration) | Proposed (pending architecture review) | [zh](../zh/ADR-101-memory-standalone-mcp-service.md) |
 | 95 | [ADR-102](./ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain.md) | TurnOrigin Vocabulary and PM Dispatch Chain Governance | Accepted | [zh](../zh/ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain.md) |
 | 96 | [ADR-103](./ADR-103-openai-responses-provider-shape.md) | Supporting the OpenAI Responses API as a Provider Shape | Accepted (decided 2026-11-XX; not yet implemented) | [zh](../zh/ADR-103-openai-responses-provider-shape.md) |
+| 97 | [ADR-104](./ADR-104-agent-manifest-declaration-surface.md) | Restructuring the Manifest Declaration Surface — `[config]`, `[[mcp_servers]]`, capability↔skill, `labels` | Implemented (P1–P5) | [zh](../zh/ADR-104-agent-manifest-declaration-surface.md) |
 
 ---
 

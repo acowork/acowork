@@ -42,15 +42,25 @@ import { useAuthStore } from "./authStore";
 
 // ── Wire types (mirror `chat_sessions_api.rs` responses) ──────────────
 
-/** ADR-100 D12: one display label for something an execution view's composer
- *  handed to the task alongside a turn. Labels only — no path, no id, nothing
- *  the chat side could try to open, because the attachment bytes stay in the
- *  execution session (design 27 §4.2.1). Mirrors `chat_sessions::ExecAttachmentLabel`. */
+/** ADR-100 D12: one display label for something a composer handed to the task
+ *  alongside a turn. Labels only — no path, no id, nothing the chat side could
+ *  try to open, because the attachment bytes stay in the execution session
+ *  (design 27 §4.2.1). Mirrors `acowork_core::protocol::AttachmentLabel`, the
+ *  same projection the Chat Router renders into its prompt: the chip and the
+ *  prompt describe one attachment with one shape. */
 export interface ExecAttachmentLabel {
   filename: string;
-  /** The ADR-046 item arm (`upload` / `file` / `attached_folder` / `selection`);
-   *  absent when the sender did not say which arm it was. */
+  /** The ADR-046 item arm (`attached_file` / `image_upload` / …); absent on a
+   *  row written before the projection carried one. Drives the glyph — never
+   *  text shown to the user. */
   kind?: string;
+  /** Upload arms only: document format (`pdf`, `png`). */
+  format?: string;
+  /** Upload arms only: blob size in bytes. */
+  sizeBytes?: number;
+  /** `attached_selection` only. */
+  startLine?: number;
+  endLine?: number;
 }
 
 /** One durable chat row. Mirrors `chat_sessions_api::MessageRow`. */

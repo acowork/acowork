@@ -139,7 +139,12 @@ router **不加载**：
 
 ```
 [attachments] report.pdf (application/pdf, 12KB), screenshot.png (image/png, 340KB)
+[attached refs] chat_prompt.rs, src/lib.rs (L12-L25)
 ```
+
+两行是回合携带的两类附件，来自两个不同的参数：`[attachments]` 是上传进本 chat 的文件（`chat_attachments`，Gateway 能从会话 `files/` 读回元数据）；`[attached refs]` 是人从工作区指过来的引用（`attached_items`，node-local 路径 Gateway 读不到，所以只有显示名与行区间——即 `acowork_core::protocol::AttachmentLabel` 这一枚投影，与 chat 行 `meta.exec_attachments`、与桌面芯片同一形状）。
+
+两行都由 `context::attachment_lines` 渲染，Block B（历史行）与 Block C（当前回合）走同一条路径：**被路由的那一条，必须在它成为历史之后逐字节读起来一样**，否则之后的每一轮都在推理一份从未出现过的记录。行区间统一拼作 `L{start}-L{end}`（单行 `L{start}`），与芯片的 `selectionRange` 一致。
 
 ### 4.2 确定性要求
 
@@ -247,7 +252,7 @@ S2           idle     3h  task  Review ADR-098
 [attachments] login-error.png (image/png, 182KB)
 ```
 
-纯附件轮（`text` 为空或只有空白，附件非空）**不是**空消息：`[user message]` 位置写固定占位 `(no text — the message is its attachments)`，再接附件行。空 body 会让模型当作"没说话"而倾向于不路由；固定占位明确告诉它人发了东西、只是没打字。占位文案逐字节固定（决策可复现性要求），与决策日志的 `attachment_only` 共用同一个谓词，避免"日志说纯附件轮、提示词却渲染了文本"这类漂移。
+纯附件轮（`text` 为空或只有空白，**上传件或引用任一非空**）**不是**空消息：`[user message]` 位置写固定占位 `(no text — the message is its attachments)`，再接附件行。空 body 会让模型当作"没说话"而倾向于不路由；固定占位明确告诉它人发了东西、只是没打字。占位文案逐字节固定（决策可复现性要求），与决策日志的 `attachment_only` 共用同一个谓词（`context::is_attachment_only`），避免"日志说纯附件轮、提示词却渲染了文本"这类漂移。"这一轮到底有没有内容"同样只有这一处判据（`context::turn_has_content`）：`chat_turn_text` 的路由闸门问它，Block C 也问它，不会再出现闸门按一份列表放行、提示词按另一份列表渲染成空白。
 
 合并的好处：最后一条消息承载全部「本轮视图」，它前面的历史与 system 保持逐字节稳定。
 

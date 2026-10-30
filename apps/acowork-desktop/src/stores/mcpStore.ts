@@ -131,6 +131,20 @@ interface McpActivationActions {
    * cleared). Idempotent.
    */
   clearServerLoading: (agentId: string, serverName: string) => void;
+  /**
+   * ADR-104: dismiss (or restore) one manifest-declared MCP recommendation.
+   *
+   * The dismissal flag is the only user-writable part of a recommendation —
+   * everything else is re-projected from the manifest on every agent start,
+   * so a client-supplied value would be overwritten anyway. Resolves to the
+   * Runtime's refreshed `GET /mcp-servers` payload so the caller can render
+   * the authoritative state instead of patching its own copy.
+   */
+  putRecommendation: (
+    agentId: string,
+    key: string,
+    dismissed: boolean,
+  ) => Promise<void>;
 }
 
 // ── Combined store ───────────────────────────────────────────────────
@@ -489,6 +503,27 @@ export const useMcpStore = create<McpStore>((set, get) => ({
     }));
 
     await get().setActiveServers(agentId, newServers);
+  },
+
+  putRecommendation: async (agentId: string, key: string, dismissed: boolean) => {
+    const resp = await fetch(
+      `${getGatewayUrl()}/api/agents/${agentId}/mcp-recommendations/${encodeURIComponent(key)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dismissed }),
+      },
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+      const message = err.error || `HTTP ${resp.status}`;
+      set({ error: message });
+      throw new Error(message);
+    }
+    // The dismissal does not change the active set, but it does change the
+    // recommendation states — the caller re-reads /tools and needs the
+    // per-agent refresh event the other config mutations emit.
+    emitAgentConfigRefresh(agentId);
   },
 
   clearServerLoading: (agentId: string, serverName: string) => {

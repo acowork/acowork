@@ -894,6 +894,9 @@ mod tests {
         async fn seed_installed(state: &AppState, instance: &str) {
             use crate::gateway::state::AgentInfo;
             let manifest = acowork_core::AgentManifest {
+                config: Default::default(),
+                labels: Vec::new(),
+                mcp_servers: Vec::new(),
                 agent_id: "com.example.x".to_string(),
                 version: "1.0.0".to_string(),
                 name: "X".to_string(),

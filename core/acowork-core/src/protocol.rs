@@ -562,6 +562,151 @@ pub enum AttachedItem {
     },
 }
 
+/// What a Chat surface is allowed to say about an [`AttachedItem`].
+///
+/// A workspace reference resolves at a node-local path and an uploaded blob
+/// lives under a content hash in one Agent's `files/` dir. The Chat store
+/// belongs to the user service and the Chat Router runs on whichever Node the
+/// conversation was pinned to, so neither can open either location — reading a
+/// node path from the Gateway breaks the moment Gateway and Node sit on
+/// different hosts (ADR-009 §5). What every surface *can* agree on is what the
+/// item was called and which arm of the union it came from, plus the
+/// decoration a chip renders. That is this type, and it is the only attachment
+/// shape a Chat row or a router prompt may carry.
+///
+/// The single producer is [`AttachmentLabel::from_item`] — the Gateway calls
+/// it through [`AttachmentLabel::from_value`] when it writes the row label and
+/// the Chat Router calls it when it renders the turn — so the human's screen
+/// and the model's prompt describe the same attachment with the same words,
+/// **and count the same set of them**. The blindness this removes was a real
+/// incident: a turn whose only content was a workspace reference was routed as
+/// "no attachment", because the one list the router read (`chat_attachments`,
+/// the uploaded files) is not the one the reference rode in on.
+///
+/// `filename` and `kind` keep the keys the row shape already shipped with, and
+/// every added field is defaulted, so a row written before this existed still
+/// parses (with no size/line decoration) instead of dropping out of the history
+/// window.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentLabel {
+    /// Upload arms send `filename`, workspace arms send `name` (a
+    /// repo-relative path is display text there, not a location); an item that
+    /// sent only a path is reduced to its last segment.
+    pub filename: String,
+    /// The ADR-046 item type, quoted from the wire (`attached_file`,
+    /// `image_upload`, …). Drives the glyph every surface draws for it — the
+    /// tag is data, never a label printed at the user.
+    #[serde(default)]
+    pub kind: String,
+    /// Document format for the upload arms (`pdf`, `png`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Blob size for the upload arms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// Line range for `attached_selection`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+}
+
+impl AttachmentLabel {
+    /// Project an attachment onto what a Chat surface may render.
+    ///
+    /// `None` when the projection has no name to show. That rule lives here,
+    /// on the projection, and not at the two call sites: a chip or a prompt
+    /// line for an unnamed item is the lie this type exists to stop telling,
+    /// and a stored row and a live turn that disagree about *which* items
+    /// count would be the same blindness in a new costume.
+    pub fn from_item(item: &AttachedItem) -> Option<Self> {
+        let base = |name: &str, abs_path: &str| {
+            if !name.is_empty() {
+                name.to_string()
+            } else {
+                // Last resort: an item that sent only its path. The directory
+                // part is a node-local layout the chat cannot read, so this
+                // arm alone is trimmed to its last component — and a Windows
+                // path is the case a `/`-only split would silently miss.
+                abs_path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(abs_path)
+                    .to_string()
+            }
+        };
+        let label = match item {
+            AttachedItem::FileUpload {
+                filename,
+                format,
+                size_bytes,
+                ..
+            } => Self {
+                filename: filename.clone(),
+                kind: "file_upload".to_string(),
+                format: Some(format.clone()),
+                size_bytes: Some(*size_bytes),
+                start_line: None,
+                end_line: None,
+            },
+            AttachedItem::ImageUpload {
+                filename,
+                format,
+                size_bytes,
+                ..
+            } => Self {
+                filename: filename.clone(),
+                kind: "image_upload".to_string(),
+                format: Some(format.clone()),
+                size_bytes: Some(*size_bytes),
+                start_line: None,
+                end_line: None,
+            },
+            AttachedItem::AttachedFile { abs_path, name, .. } => Self {
+                filename: base(name, abs_path),
+                kind: "attached_file".to_string(),
+                format: None,
+                size_bytes: None,
+                start_line: None,
+                end_line: None,
+            },
+            AttachedItem::AttachedSelection {
+                abs_path,
+                name,
+                start_line,
+                end_line,
+                ..
+            } => Self {
+                filename: base(name, abs_path),
+                kind: "attached_selection".to_string(),
+                format: None,
+                size_bytes: None,
+                start_line: Some(*start_line),
+                end_line: Some(*end_line),
+            },
+            AttachedItem::AttachedFolder { abs_path, name, .. } => Self {
+                filename: base(name, abs_path),
+                kind: "attached_folder".to_string(),
+                format: None,
+                size_bytes: None,
+                start_line: None,
+                end_line: None,
+            },
+        };
+        (!label.filename.is_empty()).then_some(label)
+    }
+
+    /// Parse one wire entry into a label. An entry the union cannot read, or
+    /// reads into something with no name, is `None`: it would be a chip for
+    /// what the Agent never received, which is the exact lie the row labels
+    /// exist to stop telling.
+    pub fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let item: AttachedItem = serde_json::from_value(value.clone()).ok()?;
+        Self::from_item(&item)
+    }
+}
+
 /// Metadata of one file attached to a durable chat message (design 27 §4.2.1).
 ///
 /// The Gateway produces this from the **stored row** — the user service
@@ -1918,6 +2063,17 @@ pub struct McpServerConfigDef {
     /// Empty vec => usable without any secret.
     #[serde(default)]
     pub required_secrets: Vec<String>,
+    /// Where this catalog entry came from (ADR-104).
+    ///
+    /// Provenance, not behaviour: nothing reads it to decide what to run.
+    /// It exists so a user staring at a surprise entry in the catalog can
+    /// tell "I added this" from "a package suggested it"
+    /// (`agent-package:<agent_id>`) from "a preset scan created it"
+    /// (`preset:<preset_id>`), and so the Tools panel can label a
+    /// package-suggested install without keeping its own side table.
+    /// Format: `<kind>:<id>`, `None` = added by hand / pre-ADR-104 entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// MCP transport type (wire format).

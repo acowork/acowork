@@ -10,6 +10,7 @@ description = "A document management agent skilled in collecting, organizing, ar
 author = "ACowork Team"
 runtime_version = "0.1.0"
 dev = false
+labels = ["documents", "knowledge-base"]
 avatar = "assets/avatar.jpg"
 
 identity_deps = ["display_name", "language", "timezone"]
@@ -92,6 +93,15 @@ fallback_order = ["claude", "openai"]
 max_output_tokens = 8192
 exceeded_action = "warn"
 
+
+# ADR-104: behaviour defaults for agent_config.json. Seeded only into
+# fields the user has not set; never overwrites a user value.
+[config]
+temperature = 0.4
+context_window = 200000
+max_output_tokens = 8192
+max_iterations = 40
+
 [memory]
 enabled = true
 retention_days = 365
@@ -103,24 +113,42 @@ idle_timeout_secs = 3600
 [sandbox]
 enabled = false
 
+# ADR-104: recommended MCP servers. Recommendation, not installation —
+# the user confirms install/activation in the Tools panel (ADR-090).
+
+[[mcp_servers]]
+hosted = "doc"
+why = "Read and write the shared document library instead of local files"
+
+[[mcp_servers]]
+preset = "docling"
+why = "Convert PDF / Office files the built-in doc_reader cannot parse"
+
 [capabilities.document_collection]
 description = "Collect source documents, references, meeting notes, specs, and links with provenance and scope tracking"
+skills = ["document-collection"]
 
 [capabilities.document_organization]
 description = "Organize documents into clear information architecture, indexes, categories, tags, and navigation"
+skills = ["document-organization"]
 
 [capabilities.document_writing]
 description = "Write clear technical, product, process, and knowledge-base documentation for target audiences"
+skills = ["document-writing"]
 
 [capabilities.format_conversion]
 description = "Convert documentation between Markdown, HTML, plain text, structured templates, and other supported formats"
+skills = ["format-conversion"]
 
 [capabilities.archive_management]
 description = "Archive documents with versioning, retention rules, metadata, provenance, and retrieval paths"
+skills = ["archive-management"]
 
 [capabilities.knowledge_base_maintenance]
 description = "Maintain knowledge bases by deduplicating, linking, updating, deprecating, and curating content"
+skills = ["knowledge-base-maintenance"]
 
 [capabilities.document_quality_review]
 description = "Review documents for accuracy, completeness, clarity, structure, consistency, links, and freshness"
+skills = ["document-quality-review"]
 

@@ -139,7 +139,12 @@ Attachments are never inlined; only fixed-format metadata is appended:
 
 ```
 [attachments] report.pdf (application/pdf, 12KB), screenshot.png (image/png, 340KB)
+[attached refs] chat_prompt.rs, src/lib.rs (L12-L25)
 ```
+
+The two lines are the two kinds of thing a turn can carry, arriving on two different params: `[attachments]` is files uploaded into this chat (`chat_attachments`, whose metadata the Gateway reads back from the session's `files/` dir); `[attached refs]` is workspace references the human pointed at (`attached_items`, node-local paths the Gateway cannot read, so only a display name and a line range travel — the `acowork_core::protocol::AttachmentLabel` projection, the same shape the chat row's `meta.exec_attachments` and the desktop chip carry).
+
+Both lines come from `context::attachment_lines`, and Block B (history rows) and Block C (the current turn) go through it: **the message the router decided on must read byte-for-byte the same once it is history**, or every later turn reasons over a transcript that never existed. A line range is spelled `L{start}-L{end}` (`L{start}` when single), matching the chips' `selectionRange`.
 
 ### 4.2 Determinism
 
@@ -247,7 +252,7 @@ Continuing the login redirect issue, and please check the review comments on ADR
 [attachments] login-error.png (image/png, 182KB)
 ```
 
-An attachment-only turn (empty or whitespace-only `text`, at least one attachment) is **not** an empty message: the `[user message]` slot carries the fixed placeholder `(no text — the message is its attachments)` followed by the attachment line. An empty body reads as "the human said nothing" and biases the model away from routing; the fixed placeholder says they sent something and simply did not type. The placeholder is byte-fixed (decision reproducibility) and shares one predicate with the decision log's `attachment_only`, so "the log says attachment-only while the prompt rendered text" cannot happen.
+An attachment-only turn (empty or whitespace-only `text`, at least one upload **or** reference) is **not** an empty message: the `[user message]` slot carries the fixed placeholder `(no text — the message is its attachments)` followed by the attachment line. An empty body reads as "the human said nothing" and biases the model away from routing; the fixed placeholder says they sent something and simply did not type. The placeholder is byte-fixed (decision reproducibility) and shares one predicate with the decision log's `attachment_only` (`context::is_attachment_only`), so "the log says attachment-only while the prompt rendered text" cannot happen. Whether a turn carries content at all has that same single owner (`context::turn_has_content`): the routing gate in `chat_turn_text` asks it and Block C asks it, so a turn can no longer pass the gate on one list and render as blank on the other.
 
 The benefit: the final message carries the whole "this turn" view, while the system and history before it stay byte-stable.
 

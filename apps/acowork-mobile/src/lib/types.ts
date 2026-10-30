@@ -372,12 +372,21 @@ export interface ChatSessionInfo {
   message_count: number
 }
 
-/** ADR-100 D12: one display label for something an execution view's composer
- *  handed to the task alongside a turn. Mirrors `chat_sessions::ExecAttachmentLabel`. */
+/** ADR-100 D12: one display label for something a composer handed to the task
+ *  alongside a turn. Mirrors `acowork_core::protocol::AttachmentLabel` — the
+ *  same projection the Chat Router renders into its prompt and the desktop
+ *  renders into a chip. Labels only: no path, no id, nothing this side could
+ *  open, because the attachment belongs to the execution session (ADR-009 §5). */
 export interface ExecAttachmentLabel {
   filename: string
-  /** The ADR-046 item arm; absent when the sender did not say which arm it was. */
+  /** The ADR-046 item arm (`attached_file` / `image_upload` / …); absent on a
+   *  row written before the projection carried one. Drives the glyph — never
+   *  text shown to the user. */
   kind?: string
+  format?: string
+  sizeBytes?: number
+  startLine?: number
+  endLine?: number
 }
 
 export interface ChatMessagesPage {

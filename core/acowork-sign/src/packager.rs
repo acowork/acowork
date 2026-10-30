@@ -9,9 +9,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
+use acowork_core::AgentManifest;
 use acowork_core::packaging::{PackageOptions, should_exclude_path};
 
-use crate::error::Result;
+use crate::error::{Result, SignError};
 
 // ---------------------------------------------------------------------------
 // Package builder
@@ -45,6 +46,11 @@ pub fn build_agent_package(
     options: Option<&PackageOptions>,
 ) -> Result<()> {
     let opts = options.cloned().unwrap_or_default();
+    // ADR-104: refuse to emit a package whose declarations reference skills it
+    // does not ship. Publishing is the last moment where the author still has
+    // the sources in front of them; failing at install time instead would
+    // surface the same defect to a user who cannot fix it.
+    validate_declaration_graph(agent_dir)?;
     build_agent_package_with_options(agent_dir, output_path, &opts)
 }
 
@@ -64,6 +70,53 @@ fn build_agent_package_with_options(
 
     archive.finish()?;
     Ok(())
+}
+
+/// Declaration-graph gate for packaging (ADR-104).
+///
+/// Checks the half of the graph the packager can see:
+///
+/// - `manifest.toml` must parse and pass `AgentManifest::validate()`;
+/// - every `capabilities.*.skills` entry must name a directory under
+///   `skills/` in the package.
+///
+/// The tool-dependency half of the graph needs `SKILL.md` frontmatter, whose
+/// parser lives in the Runtime, so it is checked at install/refresh time
+/// instead (warnings only — a missing tool degrades one skill, it does not
+/// make the package invalid).
+fn validate_declaration_graph(agent_dir: &Path) -> Result<()> {
+    let manifest_path = agent_dir.join("manifest.toml");
+    let manifest_str = fs::read_to_string(&manifest_path)?;
+    let manifest = AgentManifest::from_toml(&manifest_str)
+        .map_err(|e| SignError::InvalidPackage(format!("invalid manifest.toml: {e}")))?;
+
+    // Skill identity = the `skills/<dir>/` name (ADR-104 §Capability): the
+    // manifest links to skills by name, and the directory name IS that name.
+    let mut skill_names: Vec<String> = Vec::new();
+    if let Ok(entries) = fs::read_dir(agent_dir.join("skills")) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                skill_names.push(name.to_string());
+            }
+        }
+    }
+
+    let refs: Vec<&str> = skill_names.iter().map(String::as_str).collect();
+    let errors = manifest.validate_capability_skills(&refs);
+    if errors.is_empty() {
+        return Ok(());
+    }
+    Err(SignError::InvalidPackage(format!(
+        "manifest capabilities reference skills that are not in the package: {} (shipped skills: {})",
+        errors.join("; "),
+        if refs.is_empty() {
+            "<none>".to_string()
+        } else {
+            refs.join(", ")
+        }
+    )))
 }
 
 /// Recursively walk a directory and add files to the ZIP archive
@@ -145,7 +198,20 @@ mod tests {
         fs::create_dir_all(dir.join("config")).unwrap();
 
         // Write some test files
-        fs::write(dir.join("manifest.toml"), b"agent_id = \"com.test\"").unwrap();
+        // A real manifest, not a stub: `build_agent_package` validates it
+        // (ADR-104) — a fixture that could never be published would make the
+        // packaging tests assert behaviour on packages the tool rejects.
+        fs::write(
+            dir.join("manifest.toml"),
+            br#"agent_id = "com.test"
+version = "1.0.0"
+name = "Test Agent"
+description = "packaging fixture"
+author = "test"
+runtime_version = "0.1.0"
+"#,
+        )
+        .unwrap();
         fs::write(dir.join("prompts/system.md"), b"You are a test agent.").unwrap();
         fs::write(dir.join("skills/search/skill.md"), b"Search skill.").unwrap();
         fs::write(
@@ -369,5 +435,128 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tmp_dir);
     }
-}
 
+    // ── ADR-104: declaration-graph gate at packaging time ──────────────
+
+    const VALID_MANIFEST: &str = r#"agent_id = "com.test.graph"
+version = "1.0.0"
+name = "Graph"
+description = "graph gate test"
+author = "test"
+runtime_version = "0.1.0"
+labels = ["test"]
+
+[capabilities.research]
+description = "Search the web"
+skills = ["search"]
+"#;
+
+    fn agent_dir_with(dir: &Path, manifest: &str, skills: &[&str]) {
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(dir.join("prompts/system.md"), b"You are a test agent.").unwrap();
+        fs::write(dir.join("manifest.toml"), manifest.as_bytes()).unwrap();
+        for skill in skills {
+            fs::create_dir_all(dir.join("skills").join(skill)).unwrap();
+            fs::write(
+                dir.join("skills").join(skill).join("SKILL.md"),
+                b"---\nname: x\n---\nbody\n",
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn graph_gate_accepts_a_consistent_package() {
+        let tmp_dir = std::env::temp_dir().join("acowork-test-graph-ok");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let agent_dir = tmp_dir.join("agent");
+        agent_dir_with(&agent_dir, VALID_MANIFEST, &["search"]);
+
+        validate_declaration_graph(&agent_dir).expect("consistent package must pass");
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn graph_gate_rejects_dangling_capability_skill() {
+        let tmp_dir = std::env::temp_dir().join("acowork-test-graph-dangling");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let agent_dir = tmp_dir.join("agent");
+        agent_dir_with(&agent_dir, VALID_MANIFEST, &["other-skill"]);
+
+        let err = validate_declaration_graph(&agent_dir).expect_err("dangling ref must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("search"), "error must name the missing skill: {msg}");
+        assert!(
+            msg.contains("other-skill"),
+            "error must list what the package actually ships: {msg}"
+        );
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn graph_gate_rejects_invalid_manifest() {
+        let tmp_dir = std::env::temp_dir().join("acowork-test-graph-badmanifest");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let agent_dir = tmp_dir.join("agent");
+        agent_dir_with(&agent_dir, "agent_id = \"no-dots\"", &[]);
+
+        assert!(
+            validate_declaration_graph(&agent_dir).is_err(),
+            "a manifest that fails validate() must not be packaged"
+        );
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn graph_gate_allows_packages_without_capabilities() {
+        let tmp_dir = std::env::temp_dir().join("acowork-test-graph-nocaps");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let agent_dir = tmp_dir.join("agent");
+        agent_dir_with(
+            &agent_dir,
+            r#"agent_id = "com.test.nocaps"
+version = "1.0.0"
+name = "No Caps"
+description = "no capability declarations"
+author = "test"
+runtime_version = "0.1.0"
+"#,
+            &[],
+        );
+
+        validate_declaration_graph(&agent_dir).expect("no capabilities => nothing to cross-check");
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// The public entry point must run the gate before writing the archive —
+    /// a broken package must leave no file behind.
+    #[test]
+    fn build_agent_package_refuses_to_write_an_invalid_package() {
+        let tmp_dir = std::env::temp_dir().join("acowork-test-graph-entry");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let agent_dir = tmp_dir.join("agent");
+        agent_dir_with(&agent_dir, VALID_MANIFEST, &["not-search"]);
+
+        let out = tmp_dir.join("out.agent");
+        let err = build_agent_package(&agent_dir, &out, None).expect_err("must refuse");
+        assert!(err.to_string().contains("skills"));
+        assert!(!out.exists(), "no archive may be written for a rejected package");
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn build_agent_package_writes_a_valid_package() {
+        let tmp_dir = std::env::temp_dir().join("acowork-test-graph-valid");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let agent_dir = tmp_dir.join("agent");
+        agent_dir_with(&agent_dir, VALID_MANIFEST, &["search"]);
+
+        let out = tmp_dir.join("out.agent");
+        build_agent_package(&agent_dir, &out, None).expect("valid package builds");
+        assert!(out.exists());
+        let names = list_archive_entries(&out);
+        assert!(names.contains(&"manifest.toml".to_string()));
+        assert!(names.contains(&"skills/search/SKILL.md".to_string()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+}
