@@ -162,6 +162,13 @@ function ImageAttachmentThumbnail({
   const [failed, setFailed] = useState(false);
   const [naturalLoaded, setNaturalLoaded] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
+  /** The row's own object URL, released from the cleanup body. It cannot be
+   *  released through a `setState` updater: React drops updates to an
+   *  unmounted component, so the updater never runs — which is exactly when
+   *  the release matters. A transcript row is unmounted the moment it scrolls
+   *  out of the virtualized window, so the previous spelling leaked one object
+   *  URL per image the user ever scrolled past. */
+  const urlRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!agentId) return;
@@ -176,6 +183,7 @@ function ImageAttachmentThumbnail({
       .then((blob) => {
         if (cancelled) return;
         const objectUrl = URL.createObjectURL(blob);
+        urlRef.current = objectUrl;
         setUrl(objectUrl);
       })
       .catch((err) => {
@@ -188,10 +196,11 @@ function ImageAttachmentThumbnail({
     return () => {
       cancelled = true;
       ctrl.abort();
-      setUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return null;
-      });
+      if (urlRef.current) {
+        URL.revokeObjectURL(urlRef.current);
+        urlRef.current = null;
+      }
+      setUrl(null);
     };
   }, [agentId, item.documentId]);
 
