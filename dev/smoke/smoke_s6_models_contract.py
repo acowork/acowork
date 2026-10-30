@@ -48,6 +48,8 @@ HTTP_PORT = 28896
 MQTT_PORT = 28895
 PROVIDER = "deepseek"
 MODEL = "deepseek-chat"
+# A provider the catalog does not know at all, serving the same model id.
+CUSTOM = "custom-smoke"
 DECLARED_ONLY = "deepseek-lite"
 FAKE_PORTS = {"healthy": 28899, "missing": 28897}
 
@@ -246,10 +248,10 @@ def update_provider(base_url, models):
     })
 
 
-def rows():
-    status, body = http("GET", "/api/models/" + PROVIDER)
+def rows(provider=PROVIDER):
+    status, body = http("GET", "/api/models/" + provider)
     if status != 200:
-        raise RuntimeError("GET /api/models/%s -> %s %s" % (PROVIDER, status, body))
+        raise RuntimeError("GET /api/models/%s -> %s %s" % (provider, status, body))
     models = body.get("models") if isinstance(body, dict) else body
     return {m.get("id"): m for m in models or []}
 
@@ -326,6 +328,22 @@ def main():
         check("declared levels", proj[MODEL].get("reasoning_efforts"),
               ["low", "medium", "high", "xhigh", "max"])
         check("undeclared model stays unknown", proj[DECLARED_ONLY].get("reasoning_efforts"), None)
+
+        print("\n[5] a custom provider does NOT inherit another endpoint's levels")
+        # Same model id, different endpoint: the catalog's level set describes
+        # the endpoint it was declared for, not this one, so the UI must fall
+        # back to the generic set instead of showing (and clamping to) a
+        # capability this endpoint never claimed.
+        status, _ = http("POST", "/api/providers", {
+            "provider": CUSTOM,
+            "name": "Custom Acme",
+            "keys": [{"alias": "", "key": "sk-smoke"}],
+            "base_url": "http://127.0.0.1:%d/v1" % FAKE_PORTS["healthy"],
+            "models": [MODEL],
+        })
+        check("POST /api/providers (custom) status", status, 201)
+        custom_row = rows(CUSTOM).get(MODEL) or {}
+        check("custom provider: no declared levels", custom_row.get("reasoning_efforts"), None)
     finally:
         stop(gateway)
         stop(healthy)

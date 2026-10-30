@@ -504,10 +504,20 @@ The three may all differ (e.g. MiniMax-M3: `shape=null`, user selected `protocol
 **Decisions**:
 
 1. **`Off` = do not control reasoning = omit the parameter.** Send neither `none` (some vendors answer 400) nor `low` (the opposite of "off"). Both the completions and the Responses paths omit it; Anthropic is the exception — the protocol has a native "off" (`thinking: {type: "disabled"}`), so that is still sent. At the protocol layer `Auto` and `Off` are therefore equivalent; they differ only in UI meaning (`Auto` = let the model decide, `Off` = do not reason).
-2. **The level set is declared by the model, and the path is one-directional.** `offline_providers.json.reasoning_options` (only the `values` of the `effort` entry) → `ModelInfo.reasoning_efforts` → `ModelCapabilitiesInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts` (`repeated string`, proto field 7). The frontend and the Runtime both consume that single list and **MUST NOT** hard-code a level table of their own.
+2. **The level set is declared by the provider that serves it, and the path is one-directional.** `offline_providers.json.reasoning_options` (only the `values` of the `effort` entry) → `ModelInfo.reasoning_efforts` → `ModelCapabilitiesInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts` (`repeated string`, proto field 7). The frontend and the Runtime both consume that single list and **MUST NOT** hard-code a level table of their own.
 3. **`None` = unknown (custom model / no catalog entry)**: the frontend offers the generic five `low/medium/high/xhigh/max` (`minimal` is excluded — it is a vendor-private level, and offering it in the generic set invites a bad pick), and the Runtime does not clamp.
 4. **Both sides clamp the same way**: when the chosen level is outside the support set, the **deepest** supported level that is **not deeper** than the request wins; when the support set has nothing at or below the request, its shallowest level wins. `Auto`/`Off` are never clamped. The Runtime clamps before building the request (`ReasoningEffort::clamp_to_supported`); the frontend clamps only for display and write-back (`clampReasoningLevel`). **The user's persisted choice is never rewritten** — the catalog can be stale, and its staleness must not destroy the user's selection.
 5. **The enum covers the catalog's spellings**: `Minimal` / `XHigh` join the enum, `from_str_loose` accepts `minimal` / `xhigh` / `x_high` / `default` / `none`; an unparsable value still falls back to `Auto` but **MUST** `warn!` (the silent fallback is what made hand-edited configs look like "the setting does not stick").
+
+**Catalog lookup precedence (same provider → vendor → the rest)**: `enrich_model_from_offline` used to scan the 230 catalog providers by model id alone and take **the first one that declared the field**, in the catalog file's key order — so the same `qwen3.8-max` took its levels from `alibaba-token-plan-cn` (`low/medium/xhigh`), and a refresh could hand the same model `requesty`'s (`none/low/medium/high/max`) instead. That is not a data problem but a *missing precedence* problem. It is now three tiers:
+
+| Tier | Definition | What it may supply |
+|---|---|---|
+| 1 `SameProvider` | The catalog lists this model under the configured provider id | The only tier allowed to declare `reasoning_efforts` |
+| 2 `Vendor` | The vendor entry named by `canonical_model_id` (`"<vendor>/<canonical model id>"`, declared by 85% of the catalog's 8848 entries) | Model-intrinsic fields: ctx / tool_call / attachment / modalities |
+| 3 `ThirdParty` | Any other provider that lists the model, **smallest provider id first** | Same fields, as a fallback; no longer dependent on file order |
+
+**`reasoning_efforts` accepts tier 1 only**: a level set is "which levels does *this endpoint* expose", not an intrinsic property of the model. A custom provider (an id the catalog does not have) therefore always gets `None` → the frontend's generic five, no Runtime clamping. If the user declared levels in their own config (`provider_list.json`'s `capabilities.reasoning_efforts`), theirs wins — that is a direct statement about their own endpoint.
 
 **Engineering constraints**:
 

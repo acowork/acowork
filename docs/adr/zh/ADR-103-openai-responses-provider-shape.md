@@ -507,6 +507,16 @@ flowchart LR
 4. **裁剪口径两侧一致**：用户选的档位不在支持集内时，取「**不超过**请求档位的最深支持档」；若支持集里没有不超过请求的档位，取支持集最浅档。`Auto`/`Off` 不参与裁剪。Runtime 在构造请求前裁（`ReasoningEffort::clamp_to_supported`），前端只在显示与回写时裁（`clampReasoningLevel`），**用户持久化的选择不被改写**——catalog 是可能过期的，不能因为它的过期而毁掉用户的选择。
 5. **枚举补齐 catalog 的拼写**：`Minimal` / `XHigh` 入枚举，`from_str_loose` 接受 `minimal` / `xhigh` / `x_high` / `default` / `none`，无法解析时仍回落 `Auto` 但 **MUST** `warn!`（静默回落是上一版手改配置「设置没生效」的成因）。
 
+**catalog 查询的优先级（同 provider → 官方 → 其余）**：`enrich_model_from_offline` 过去只按模型 id 在 230 个 catalog provider 里线性扫、**第一个声明了该字段的胜出**，而顺序就是 6.3MB JSON 的 key 顺序——于是同一个 `qwen3.8-max` 的档位取自 `alibaba-token-plan-cn`（`low/medium/xhigh`），换台机器/换次刷新可能就变成 `requesty`（`none/low/medium/high/max`）。这不是数据问题，是**没有优先级的匹配**问题。现在统一为三级：
+
+| 级别 | 定义 | 用途 |
+|---|---|---|
+| 1 `SameProvider` | 配置的 provider id 在 catalog 里有该模型的条目 | 唯一有资格声明 `reasoning_efforts` 的一级 |
+| 2 `Vendor` | `canonical_model_id`（`"<厂商>/<规范模型 id>"`，catalog 8848 条里 85% 声明了它）指向的厂商条目 | ctx / tool_call / 附件 / modalities 等**模型自身属性** |
+| 3 `ThirdParty` | 其余声明了该模型的 provider，**按 provider id 字典序**取最小 | 同上，兜底；顺序不再依赖文件顺序 |
+
+**`reasoning_efforts` 只认第 1 级**：档位集合是「这个端点暴露了哪些档」，不是模型的固有属性。自定义 provider（catalog 里没有这个 id）因此恒为 `None` → 前端通用五档、Runtime 不裁剪；用户若在配置里自己声明了档位（`provider_list.json` 的 `capabilities.reasoning_efforts`），以用户的为准——那是他对自有端点的直接陈述。
+
 **工程约束**：
 
 - 线格式映射 **MUST** 由各 provider 实现自己持有（completions 的 `openai_reasoning_str`、Responses 的 `reasoning_effort_str`、Anthropic 的 `map_anthropic_thinking`）。**MUST NOT** 在 core 上再挂一份「通用映射」——v0.6 删掉的 `ReasoningEffort::to_openai_str` 正是这种东西：零调用点，且 `Off` 一处省略、一处发 `low`，与 `openai_reasoning_str` 语义相反。同一语义有两个实现时，漂移只是时间问题。
