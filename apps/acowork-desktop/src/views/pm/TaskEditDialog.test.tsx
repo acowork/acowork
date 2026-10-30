@@ -19,13 +19,15 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import type { PmAttachmentMeta, PmTaskResponse } from "../../lib/pm-types";
+import type { PmAttachmentMeta, PmTaskActivity, PmTaskResponse } from "../../lib/pm-types";
 
 const mocks = vi.hoisted(() => ({
   mode: "edit" as "edit" | "create" | null,
   detail: null as PmTaskResponse | null,
   attachments: [] as PmAttachmentMeta[],
+  activity: [] as PmTaskActivity[],
   uploading: false,
+  replying: false,
   error: null as string | null,
   projectId: null as string | null,
   createParentId: null as string | null,
@@ -41,6 +43,7 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
   uploadAttachment: vi.fn(async () => ({ id: "att-1" }) as unknown as PmAttachmentMeta),
   deleteAttachment: vi.fn(async () => true),
+  addReply: vi.fn(async () => true),
   removeTask: vi.fn(),
   moveTask: vi.fn(async () => true),
   reviewTask: vi.fn(async () => true),
@@ -54,7 +57,10 @@ function detailState() {
     taskId: mocks.detail?.id ?? null,
     detail: mocks.detail,
     attachments: mocks.attachments,
+    activity: mocks.activity,
     uploading: mocks.uploading,
+    replying: mocks.replying,
+    addReply: mocks.addReply,
     loading: false,
     error: mocks.error,
     mode: mocks.mode,
@@ -103,6 +109,14 @@ vi.mock("./SubtaskTree", () => ({
 vi.mock("../../lib/pm-api", () => ({
   attachmentUrl: (id: string) => `/api/pm/attachments/${id}`,
   deleteTask: (...args: unknown[]) => mocks.deleteTask(...args),
+}));
+
+// 提交历史区有自己的测试（TaskActivity.test.tsx）；在对话框测试里它是一个
+// 带标记的接缝 —— 这里要证明的是"有落盘的行才渲染它"，不是它内部长什么样。
+vi.mock("./TaskActivity", () => ({
+  TaskActivitySection: ({ activity }: { activity: PmTaskActivity[] }) => (
+    <div data-testid="activity-section" data-count={activity.length} />
+  ),
 }));
 
 vi.mock("../../components/common/ToastProvider", () => ({ showToast: vi.fn() }));
@@ -191,7 +205,9 @@ beforeEach(() => {
   mocks.mode = "edit";
   mocks.detail = row();
   mocks.attachments = [];
+  mocks.activity = [];
   mocks.uploading = false;
+  mocks.replying = false;
   mocks.error = null;
   mocks.projectId = null;
   mocks.createParentId = null;
@@ -264,6 +280,20 @@ describe("chrome — the box the user asked to keep", () => {
 });
 
 describe("the three carried-over capabilities", () => {
+  // 提交历史（t-80cf07ec）：Agent 交完活，任务面上必须读得到他提交了什么、
+  // 人类回了什么。这一条只证明"对话框把 store 里的历史挂上了这个面"，
+  // 行内容本身在 TaskActivity.test.tsx。
+  it("a persisted row shows the submission timeline with the stored history", () => {
+    mocks.activity = [
+      { id: "act-1", kind: "submitted", actor: "a", actor_kind: "agent", text: "done", attachment_ids: [], created_at: "2026-10-30T08:40:00Z" },
+      { id: "act-2", kind: "comment", actor: "human", actor_kind: "user", text: "ok", attachment_ids: [], created_at: "2026-10-30T08:41:00Z" },
+    ] as PmTaskActivity[];
+    render(<TaskEditDialog onClose={() => {}} />);
+    const section = screen.getByTestId("activity-section");
+    expect(section.getAttribute("data-count")).toBe("2");
+    expect(screen.getByText("pm.activity.title")).toBeTruthy();
+  });
+
   it("a persisted row offers attachments, subtasks and delete", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     expect(screen.getByText("pm.task.attachments")).toBeTruthy();
@@ -277,6 +307,7 @@ describe("the three carried-over capabilities", () => {
     mocks.detail = null;
     render(<TaskEditDialog onClose={() => {}} />);
     expect(screen.queryByText("pm.task.uploadAttachment")).toBeNull();
+    expect(screen.queryByTestId("activity-section")).toBeNull();
     expect(screen.queryByTestId("subtask-tree")).toBeNull();
     expect(screen.queryByText("pm.task.delete")).toBeNull();
     // but the form itself is the same form

@@ -14,6 +14,7 @@ import type {
   PmAttachmentMeta,
   PmProject,
   PmTask,
+  PmTaskActivity,
   PmTaskResponse,
   ReparentInput,
   ReviewInput,
@@ -191,9 +192,24 @@ export function reviewTask(tid: string, approved: boolean, comment?: string) {
   });
 }
 
-/** 追加备注（服务端 P3 预留，当前 404 则忽略） */
-export function addNote(tid: string, text: string) {
-  return request<void>(`/tasks/${encodeURIComponent(tid)}/notes`, {
+/**
+ * 任务活动历史（提交 / 审核 / 回复），服务端按时间升序返回。
+ *
+ * 与 `task.result` 的分工：`result` 是"最后一次提交"（列表接口就带），
+ * 活动流是全量历史，只在任务详情面上按需拉取（`GET /tasks/:tid/activity`）。
+ */
+export function listTaskActivity(tid: string) {
+  return request<PmTaskActivity[]>(`/tasks/${encodeURIComponent(tid)}/activity`);
+}
+
+/**
+ * 追加一条回复（人类回复 Agent 的提交）。
+ *
+ * 回复不是状态变更：服务端只写活动流，不动 `status` / `review_status`。
+ * 批准/拒绝走 `reviewTask()`。
+ */
+export function addTaskActivity(tid: string, text: string) {
+  return request<PmTaskActivity>(`/tasks/${encodeURIComponent(tid)}/activity`, {
     method: "POST",
     body: JSON.stringify({ text }),
   });

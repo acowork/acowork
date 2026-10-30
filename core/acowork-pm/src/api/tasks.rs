@@ -5,8 +5,8 @@ use axum::extract::{Path, State};
 use axum::Json;
 
 use crate::types::{
-    AttachmentId, CreateTask, MemberKind, ProjectId, ReparentTask, ReviewStatus, Task, TaskFilter,
-    TaskId, TaskStatus, UpdateTask,
+    AttachmentId, CreateTask, MemberKind, ProjectId, ReparentTask, ReviewStatus, Task, TaskActivity,
+    TaskFilter, TaskId, TaskStatus, UpdateTask,
 };
 
 use super::ApiState;
@@ -249,7 +249,10 @@ pub async fn review(
         .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
     // review 可由 human 完成（REST 路径默认 X-Actor=human）或 instance 完成（MCP 路径）
     let before = state.store.get_task(&tid).await?;
-    let task = state.store.review_task(&tid, input.approved, reviewer).await?;
+    let task = state
+        .store
+        .review_task(&tid, input.approved, reviewer, input._comment.as_deref())
+        .await?;
     // Design 27 §5.4 (revised): creation approval does **not** dispatch
     // immediately here — dispatch is triggered solely by
     // `dispatch::spawn_scanner` on `start_at` due (the task stays `pending`
@@ -265,8 +268,53 @@ pub async fn review(
 #[serde(deny_unknown_fields)]
 pub struct ReviewTaskRequest {
     pub approved: bool,
+    /// 审核正文（拒绝理由 / 批准附言）。字段名沿用既有客户端契约
+    /// （Desktop `reviewTask()`、Mobile），服务端把它落到活动流而不是丢弃。
     #[serde(default)]
     pub _comment: Option<String>,
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// GET|POST /tasks/:tid/activity
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 任务活动历史（提交 / 审核 / 回复），按时间升序。
+#[tracing::instrument(skip(state))]
+pub async fn list_activity(
+    State(state): State<ApiState>,
+    Path(tid): Path<String>,
+) -> Result<Json<Vec<TaskActivity>>, crate::error::PmError> {
+    let tid = tid.parse::<TaskId>()?;
+    let entries = state.store.list_activity(&tid).await?;
+    Ok(Json(entries))
+}
+
+/// 追加一条回复（人类在任务面上回复 Agent 的提交）。
+///
+/// 回复**不是**状态变更：不动 `status` / `review_status`，只进活动流，
+/// 所以它和审核是两个动作——批准/拒绝走 `/review`，纯回复走这里。
+#[tracing::instrument(skip(state, input))]
+pub async fn add_activity(
+    State(state): State<ApiState>,
+    Path(tid): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<AddActivityRequest>,
+) -> Result<Json<TaskActivity>, crate::error::PmError> {
+    let tid = tid.parse::<TaskId>()?;
+    let actor = headers
+        .get("x-actor")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(crate::error::PmError::Internal(
+            "missing X-Actor header".to_string(),
+        ))?;
+    let entry = state.store.add_task_comment(&tid, &input.text, actor).await?;
+    Ok(Json(entry))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddActivityRequest {
+    pub text: String,
 }
 
 // ────────────────────────────────────────────────────────────────────────────

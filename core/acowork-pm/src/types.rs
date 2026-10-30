@@ -79,6 +79,7 @@ macro_rules! define_id {
 define_id!(ProjectId, "p-", "project");
 define_id!(TaskId, "t-", "task");
 define_id!(AttachmentId, "att-", "attachment");
+define_id!(ActivityId, "act-", "activity");
 
 // ────────────────────────────────────────────────────────────────────────────
 // 枚举
@@ -458,6 +459,92 @@ pub struct TaskResult {
     /// 提交者：`agent_instance_id`（UUID，ADR-073），由 `X-MCP-Actor` 注入。
     pub submitted_by: String,
     pub submitted_at: DateTime<Utc>,
+}
+
+/// 任务活动类型（[`TaskActivity`] 的条目类别）。
+///
+/// 只收录**协作面上需要被人读到**的事件：提交、审核结论、回复。
+/// 状态机自身的流转（拖动改 status、claim、取消）由 `Task` 字段与
+/// `updated_at` 表达，不进活动流——否则同一事实出现两个真源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityKind {
+    /// Agent 提交结果（REST `submit` / MCP `pm_submit_task`）。
+    Submitted,
+    /// 人类审核通过（`text` 可为空）。
+    Approved,
+    /// 人类审核拒绝（`text` = 拒绝理由）。
+    Rejected,
+    /// 追加回复（人类回复 Agent 的提交，或 Agent 补充说明）。
+    Comment,
+}
+
+/// 任务活动条目（append-only，持久化在 `{task_dir}/activity.json`）。
+///
+/// **为什么独立于 `task.json`**：`Task` 是可变记录（每次 PATCH 全量重写），
+/// 活动是只追加事件流（随提交次数增长）。塞进 `task.json` 会让每次字段编辑
+/// 重写全部历史，并让看板列表响应（`find_tasks` 序列化每个 `task.json`）
+/// 跟着线性膨胀。
+///
+/// **与 `Task::result` 的关系**：`result` 保留为"最后一次提交"（MCP
+/// `pm_get_task` 与 Mobile 的既有契约），与最新一条 `Submitted` 在同一次
+/// 写入中落盘，二者不可能漂移。历史全量以本结构为准。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskActivity {
+    pub id: ActivityId,
+    pub kind: ActivityKind,
+    /// 身份：agent instance_id（UUID，ADR-073）或人类 user id（ADR-076，
+    /// 含遗留常量 `human`）。
+    pub actor: String,
+    /// 身份类型。前端据此决定去 agent 目录还是登录账号解析显示名
+    /// （与 [`ProjectMember::kind`] 同一套判别）。
+    pub actor_kind: MemberKind,
+    /// 正文：提交文本 / 拒绝理由 / 回复内容。审核通过可以只有结论没有正文。
+    #[serde(default)]
+    pub text: String,
+    /// 提交引用的附件（仅 `Submitted` 有意义）。
+    #[serde(default)]
+    pub attachment_ids: Vec<AttachmentId>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl TaskActivity {
+    /// 构造一条活动记录（`actor_kind` 由 `actor` 推断，ADR-076 §决策 10/11）。
+    pub fn new(kind: ActivityKind, actor: &str, text: impl Into<String>) -> Self {
+        Self {
+            id: ActivityId::generate(),
+            kind,
+            actor: actor.to_string(),
+            actor_kind: MemberKind::from_actor(actor),
+            text: text.into(),
+            attachment_ids: Vec::new(),
+            created_at: Utc::now(),
+        }
+    }
+
+    /// 由提交结果派生 `Submitted` 活动条目。
+    ///
+    /// `Task::result`（最后一次提交）与历史里那条 `Submitted` 的字段来源
+    /// 同一个 `TaskResult`，"两者一致"这个不变量因此有唯一构造点。
+    pub fn submitted(result: &TaskResult) -> Self {
+        Self {
+            id: ActivityId::generate(),
+            kind: ActivityKind::Submitted,
+            actor: result.submitted_by.clone(),
+            actor_kind: MemberKind::from_actor(&result.submitted_by),
+            text: result.text.clone(),
+            attachment_ids: result.attachment_ids.clone(),
+            created_at: result.submitted_at,
+        }
+    }
+
+    /// 历史遗留数据补种用的**确定性** ID（见
+    /// [`crate::store::tree`] 的 `seeded_activity`）：同一个 `result`
+    /// 无论被读多少次，衍生的那条提交记录 ID 恒定，前端 key 因此稳定。
+    pub fn seeded_id(task_id: &TaskId) -> ActivityId {
+        ActivityId(format!("act-seed-{}", &task_id.as_str()[2..]))
+    }
 }
 
 /// `POST /api/pm/projects/:pid/tasks` 请求体。

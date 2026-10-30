@@ -148,12 +148,33 @@ export interface PmDependency {
   kind: DependencyKind;
 }
 
-/** Agent 提交结果 */
+/** Agent 提交结果（= 最后一次提交；历史全量见 `PmTaskActivity`） */
 export interface PmTaskResult {
   text: string;
   attachment_ids: string[];
   submitted_by: string;
   submitted_at: string;
+}
+
+/** 任务活动条目类型（对齐服务端 `ActivityKind`） */
+export type PmActivityKind = "submitted" | "approved" | "rejected" | "comment";
+
+/**
+ * 任务活动条目（对齐服务端 `TaskActivity`，`{task_dir}/activity.json`）。
+ *
+ * 提交 / 审核结论 / 回复都在这条时间线上，按 `created_at` 升序。
+ * `actor_kind` 决定显示信息从哪来：`agent` → agent 目录，`user` → 登录账号
+ * / 用户目录（与 `PmProjectMember.kind` 同一套判别，见 `views/pm/pmMembers.ts`）。
+ */
+export interface PmTaskActivity {
+  id: string;
+  kind: PmActivityKind;
+  /** agent instance_id（UUID）或人类 user id（含遗留常量 `human`） */
+  actor: string;
+  actor_kind: PmMemberKind;
+  text: string;
+  attachment_ids: string[];
+  created_at: string;
 }
 
 /** 附件元数据（二进制文件在服务端 attachments/{id}/ 目录） */

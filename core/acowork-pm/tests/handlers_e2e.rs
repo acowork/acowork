@@ -19,6 +19,8 @@
 //! | POST   /tasks/:tid/claim              |   ✓   | 500 missing actor   |
 //! | POST   /tasks/:tid/submit             |   ✓   |                     |
 //! | POST   /tasks/:tid/review             |   ✓   |                     |
+//! | GET    /tasks/:tid/activity           |   ✓   | 404 unknown task    |
+//! | POST   /tasks/:tid/activity           |   ✓   | 400 empty text      |
 //! | GET    /tasks/:tid/children           |   ✓   |                     |
 //! | GET    /tasks/:tid/attachments        |   ✓   |                     |
 //! | POST   /tasks/:tid/attachments        |   ✓   | 404 unknown task   |
@@ -442,8 +444,133 @@ async fn claim_submit_review_full_lifecycle() {
     assert_eq!(body["review_status"], "approved");
 }
 
-// ── project members（联动指派前置）────────────────────────────────────
+// ── activity（提交历史 / 人类回复）────────────────────────────────────
 
+/// `GET|POST /tasks/:tid/activity` + `POST /tasks/:tid/review` 的 `_comment`：
+/// 提交、审核理由、人类回复都必须能在任务面上读回来（缺陷：提交后什么都看不到）。
+#[tokio::test]
+async fn activity_endpoints_record_submits_and_replies() {
+    let app = TestApp::new().await;
+    let router = app.router();
+    let pid = create_project(&app, "P").await;
+    let agent = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+    let add = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/members"),
+        serde_json::json!({ "instance_id": agent }),
+    );
+    let (status, _) = body_json(router.clone().oneshot(add).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let create = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/tasks"),
+        serde_json::json!({"title": "T", "type": "checkpoint"}),
+    );
+    let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
+    let tid = body["id"].as_str().unwrap().to_string();
+
+    let claim = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/tasks/{tid}/claim"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-actor", agent)
+        .body(Body::from("{}"))
+        .unwrap();
+    let (status, _) = body_json(router.clone().oneshot(claim).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let submit = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/tasks/{tid}/submit"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-actor", agent)
+        .body(Body::from(r#"{"text":"实现完成，测试全绿"}"#))
+        .unwrap();
+    let (status, _) = body_json(router.clone().oneshot(submit).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // review 的 `_comment` 以前被服务端直接丢弃，现在进历史。
+    let review = TestApp::request_with_actor(
+        Method::POST,
+        &format!("/tasks/{tid}/review"),
+        serde_json::json!({"approved": false, "_comment": "缺一张截图"}),
+    );
+    let (status, _) = body_json(router.clone().oneshot(review).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let get_activity = TestApp::request_no_body(
+        Method::GET,
+        &format!("/tasks/{tid}/activity"),
+    );
+    let (status, body) = body_json(router.clone().oneshot(get_activity).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["submitted", "rejected"],
+    );
+    assert_eq!(body[0]["text"], "实现完成，测试全绿");
+    assert_eq!(body[0]["actor"], agent);
+    assert_eq!(body[0]["actor_kind"], "agent");
+    assert_eq!(body[1]["text"], "缺一张截图", "review comment must persist");
+
+    // 人类回复（不动状态）。
+    let reply = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/tasks/{tid}/activity"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-actor", "human")
+        .body(Body::from(r#"{"text":"重新提交一次看看"}"#))
+        .unwrap();
+    let (status, body) = body_json(router.clone().oneshot(reply).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "comment");
+    assert_eq!(body["actor_kind"], "user");
+
+    let get_activity = TestApp::request_no_body(Method::GET, &format!("/tasks/{tid}/activity"));
+    let (_, body) = body_json(router.clone().oneshot(get_activity).await.unwrap()).await;
+    assert_eq!(body.as_array().unwrap().len(), 3);
+    assert_eq!(body[2]["text"], "重新提交一次看看");
+
+    // 回复不是状态变更：任务仍停在 rejected。
+    let get = TestApp::request_no_body(Method::GET, &format!("/tasks/{tid}"));
+    let (_, body) = body_json(router.oneshot(get).await.unwrap()).await;
+    assert_eq!(body["status"], "rejected");
+}
+
+/// 空正文的回复 → 400；不存在任务的 activity → 404。
+#[tokio::test]
+async fn activity_endpoints_error_paths() {
+    let app = TestApp::new().await;
+    let router = app.router();
+    let pid = create_project(&app, "P").await;
+    let create = TestApp::json_request(
+        Method::POST,
+        &format!("/projects/{pid}/tasks"),
+        serde_json::json!({"title": "T"}),
+    );
+    let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
+    let tid = body["id"].as_str().unwrap().to_string();
+
+    let empty = TestApp::request_with_actor(
+        Method::POST,
+        &format!("/tasks/{tid}/activity"),
+        serde_json::json!({"text": "   "}),
+    );
+    let (status, body) = body_json(router.clone().oneshot(empty).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+
+    let missing = TestApp::request_no_body(Method::GET, "/tasks/t-doesnotexist/activity");
+    let (status, _) = body_json(router.oneshot(missing).await.unwrap()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ── project members（联动指派前置）────────────────────────────────────
 /// 成员 CRUD 错误路径 e2e：
 /// 重复添加 409 / 移除不存在 404 / 指派非成员 400 / 成员有未完成任务移除 409。
 /// （happy path 由 `claim_submit_review_full_lifecycle` + `remote_e2e` 覆盖；

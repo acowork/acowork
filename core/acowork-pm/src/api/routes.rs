@@ -100,6 +100,10 @@ pub fn pm_router(
         .route("/tasks/{tid}/claim", post(tasks::claim))
         .route("/tasks/{tid}/submit", post(tasks::submit))
         .route("/tasks/{tid}/review", post(tasks::review))
+        .route(
+            "/tasks/{tid}/activity",
+            get(tasks::list_activity).post(tasks::add_activity),
+        )
         .route("/tasks/{tid}/children", get(tasks::list_children))
         // ── Attachments ──────────────────────────────────────────
         .route(

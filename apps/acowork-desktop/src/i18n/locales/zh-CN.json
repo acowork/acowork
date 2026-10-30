@@ -1890,6 +1890,18 @@
       "ariaColumn": "{{status}} 列",
       "dropHint": "拖放到此处"
     },
+    "activity": {
+      "title": "提交记录",
+      "empty": "还没有提交",
+      "submitted": "提交结果",
+      "approved": "已批准",
+      "rejected": "已拒绝",
+      "comment": "回复",
+      "unknownActor": "未知成员",
+      "reply": "回复",
+      "replyPlaceholder": "回复这次提交…",
+      "sending": "发送中…"
+    },
     "task": {
       "subtasks": "子任务",
       "details": "详情",

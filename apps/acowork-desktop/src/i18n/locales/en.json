@@ -1873,6 +1873,18 @@
       "ariaColumn": "{{status}} column",
       "dropHint": "Drop here"
     },
+    "activity": {
+      "title": "Submissions",
+      "empty": "Nothing submitted yet",
+      "submitted": "Submitted",
+      "approved": "Approved",
+      "rejected": "Rejected",
+      "comment": "Reply",
+      "unknownActor": "Unknown",
+      "reply": "Reply",
+      "replyPlaceholder": "Reply to the submission…",
+      "sending": "Sending…"
+    },
     "task": {
       "subtasks": "Subtasks",
       "details": "Details",
