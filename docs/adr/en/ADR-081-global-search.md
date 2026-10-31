@@ -187,6 +187,36 @@ Internal implementation (the Runtime usecase layer, the ADR-040 pattern):
 - **file**: reuses `workspace_query::search_files` (ripgrep) + `find_files`
 - **git**: **reuses the existing commit search, no server-side `--grep`**. The global git tab's retrieval semantic stays identical to the workspace git banner's `CommitPicker` (subject/author/hash substring). To support "all agents / cross-workspace" retrieval, `git_query::log` would only need an optional enhancement — a server-side `--all` (all repositories) or keyword pre-filter parameter. P0 simply has the Desktop reuse `/git/log` paging + client-side filtering (the same logic as CommitPicker) and adds no backend complexity
 
+> **Implemented deviation (amended: file-name matching in the file scope)**
+>
+> D2 defines the file scope as "ripgrep full text **+** filename fuzzy", but at
+> implementation time the Desktop file tab only called `GET /workspaces/search`
+> (content search) and never called `/workspaces/find` (filename fuzzy).
+> Consequence: **searching global search by file name always returned zero
+> results**, while the workspace file search on the right (which uses
+> `/workspaces/find`) did find the file — two entry points answering the same
+> query differently.
+>
+> Amendment: file-name matching moves down into `workspace_query::search_files`
+> itself, so one walk produces **content hits** and **file-name hits** together:
+>
+> - a new query parameter `match_file_names` (default `true`; pass `false` for
+>   the old content-only behaviour);
+> - `SearchMatchDto` gains a `kind` field (`content` / `name`); a name hit has
+>   **no line** (`line` / `column` are `null`), and the client renders and
+>   locates accordingly instead of guessing from a sentinel like `0`;
+> - ordering: name hits first (ranked by the same fuzzy score `find_files`
+>   uses), then content hits in workspace order;
+> - `case_sensitive` gates both halves: name matching compares the query and
+>   the file name in the same case form, so with it on `Foo` no longer matches
+>   `foo.ts` (`/workspaces/find` itself stays case-insensitive by contract);
+> - one file walk serves both halves — no second scan of the disk. Once the
+>   content budget is full the walk stops reading file bodies but keeps
+>   traversing, so the file-name hits stay complete.
+>
+> The global search file tab and the workspace search therefore return the
+> **same** result set for the same query.
+
 The Gateway reverse-proxies one line: `/api/agents/{id}/search` → Runtime `/search`
 (following the existing `proxy_to_runtime` pattern, [proxy.rs:517](../../../core/acowork-gateway/src/http/proxy.rs#L517)).
 

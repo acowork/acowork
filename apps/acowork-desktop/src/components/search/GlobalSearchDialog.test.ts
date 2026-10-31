@@ -98,8 +98,8 @@ describe("filterGitCommits", () => {
 describe("toFileHits", () => {
     it("maps ripgrep matches to SearchHit rows with locate meta", () => {
         const hits = toFileHits("agent-1", "ws-1", [
-            { file: "src/foo.ts", line: 42, column: 5, text: "const x = 1" },
-            { file: "README.md", line: 1, column: 0, text: "# Hello" },
+            { file: "src/foo.ts", line: 42, column: 5, text: "const x = 1", kind: "content" },
+            { file: "README.md", line: 1, column: 0, text: "# Hello", kind: "content" },
         ]);
         expect(hits).toHaveLength(2);
         expect(hits[0]).toMatchObject({
@@ -112,8 +112,45 @@ describe("toFileHits", () => {
             workspaceId: "ws-1",
             path: "src/foo.ts",
             line: 42,
+            kind: "content",
         });
         expect(hits[1].title).toBe("README.md");
+    });
+
+    // ADR-081 D2: the file scope is "ripgrep full text **+** filename
+    // fuzzy". A file-name hit has no line — the row must not pretend
+    // otherwise, and the editor must not try to jump to line 0.
+    it("maps a file-name match to a row without a line", () => {
+        const hits = toFileHits("agent-1", "ws-1", [
+            {
+                file: "src/context_compression.rs",
+                text: "context_compression.rs",
+                kind: "name",
+            },
+        ]);
+        expect(hits).toHaveLength(1);
+        expect(hits[0]).toMatchObject({
+            type: "file",
+            id: "src/context_compression.rs:name",
+            title: "context_compression.rs",
+            snippet: "context_compression.rs",
+            sub: "src/context_compression.rs",
+            path: "src/context_compression.rs",
+            kind: "name",
+        });
+        expect(hits[0].line).toBeUndefined();
+    });
+
+    // A file whose name matches AND whose body matches the query yields
+    // two rows. Their ids must differ, otherwise React reuses one key and
+    // one of the two hits becomes unselectable.
+    it("gives a name hit and a content hit of the same file distinct ids", () => {
+        const hits = toFileHits("agent-1", "ws-1", [
+            { file: "src/foo.ts", text: "foo.ts", kind: "name" },
+            { file: "src/foo.ts", line: 7, column: 2, text: "foo()", kind: "content" },
+        ]);
+        expect(hits).toHaveLength(2);
+        expect(hits[0].id).not.toBe(hits[1].id);
     });
 });
 

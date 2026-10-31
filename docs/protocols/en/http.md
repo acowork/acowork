@@ -633,7 +633,7 @@ Mapping and gating rules:
 | POST | `/api/agents/{id}/workspaces` | Add workspace directory | `/workspaces` |
 | GET | `/api/agents/{id}/workspaces/tree` | Directory tree | `/workspaces/tree` |
 | GET | `/api/agents/{id}/workspaces/find` | Find file by name | `/workspaces/find` |
-| GET | `/api/agents/{id}/workspaces/search` | Content search (`include`, `max_results`, `case_sensitive`, `whole_word`) | `/workspaces/search` |
+| GET | `/api/agents/{id}/workspaces/search` | Content search (`include`, `max_results`, `case_sensitive`, `whole_word`, `match_file_names`) | `/workspaces/search` |
 | PUT | `/api/agents/{id}/workspaces/{ws_id}` | Update workspace (alias, access, etc.) | `/workspaces/{ws_id}` |
 | DELETE | `/api/agents/{id}/workspaces/{ws_id}` | Delete workspace | `/workspaces/{ws_id}` |
 | PUT | `/api/agents/{id}/workspaces/{ws_id}/prompt-file` | Set injection prompt file | `/workspaces/{ws_id}/prompt-file` |
