@@ -292,6 +292,18 @@ fn http_post_json_auth(port: u16, path: &str, body: &[u8], token: &str) -> (u16,
     (s, body_str(&b), b)
 }
 
+fn http_put_json_auth(port: u16, path: &str, body: &[u8], token: &str) -> (u16, String, Vec<u8>) {
+    let (s, _, b) = http_request(
+        port,
+        "PUT",
+        path,
+        Some(body),
+        "application/json",
+        &[("Authorization", &format!("Bearer {token}"))],
+    );
+    (s, body_str(&b), b)
+}
+
 fn http_delete_auth(port: u16, path: &str, token: &str) -> (u16, String, Vec<u8>) {
     let (s, _, b) = http_request(port, "DELETE", path, None, "", &[("Authorization", &format!("Bearer {token}"))]);
     (s, body_str(&b), b)
@@ -701,6 +713,97 @@ fn group_mention_fans_out_with_explicit_per_target_status() {
     let other = serde_json::json!({"chat_session_id": gsid, "from_user": "not-a-member", "targets": ["agent-mention-g"], "text": "x"});
     let (code, _, _) = http_post_json_auth(http, "/api/intents/mentions", &serde_json::to_vec(&other).unwrap(), &token);
     assert!((400..500).contains(&code), "non-member fan-out refused ({code})");
+}
+
+/// ADR-105: an un-addressed group message reaches the group's default
+/// responder instead of being stored and forgotten — and when no responder is
+/// configured it stays archive-only, reported as such rather than silently.
+///
+/// The three facts this pins on the wire:
+/// * `targets: []` is a *positive* instruction ("you decide"), not a malformed
+///   mention: the human row is still written once, with `mentions: []` and the
+///   decision in `auto_routed_to`;
+/// * an uninstalled responder fails *loudly* — a `delivery_failed` notice row
+///   lands in the transcript, which is the whole point of the change (the old
+///   silence is the bug);
+/// * clearing the role restores archive-only, so a group of humans never gets
+///   an agent butting in.
+#[test]
+fn unaddressed_group_message_reaches_the_default_responder() {
+    let _serial = lock_chain();
+    let (gw, token, root) = boot_multi_user("responder");
+    let http = gw.http_port;
+    let up = user_service_port(&gw.home);
+
+    let agent = "agent-responder-g";
+    let b = serde_json::json!({"project_id": "proj-responder-1", "participants": [root, agent], "title": "R"});
+    let (code, body, _) = http_post_json(up, "/internal/chat-sessions/group/sync", &serde_json::to_vec(&b).unwrap());
+    assert!((200..300).contains(&code), "group sync: {code} {body}");
+    let gsid = json_parse(&body)["session_id"].as_str().unwrap().to_string();
+
+    // Nobody addressed, nobody configured: archive-only, and the response says
+    // exactly that (the caller can tell it apart from a failed fan-out).
+    let plain = |text: &str| {
+        serde_json::json!({"chat_session_id": gsid, "from_user": root, "targets": [], "text": text})
+    };
+    let (code, body, _) = http_post_json_auth(http, "/api/intents/mentions", &serde_json::to_vec(&plain("hello, anyone?")).unwrap(), &token);
+    assert_eq!(code, 200, "an un-addressed group message is accepted: {body}");
+    assert_eq!(json_parse(&body)["routed"].as_str(), Some("archived"));
+    let page = messages(http, &token, &gsid);
+    let rows = page["messages"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "one human row, nothing else");
+    assert_eq!(rows[0]["kind"].as_str(), Some("user_message"));
+    assert_eq!(rows[0]["meta"]["auto_routed_to"], serde_json::Value::Null);
+
+    // Configuring the responder is owner-or-admin; here root is both founder
+    // and bootstrap admin.
+    let agent_uuid = "9f0d2a44-1111-4222-8333-44445555aef0";
+    let b = serde_json::json!({"project_id": "proj-responder-2", "participants": [root, agent_uuid], "title": "R2"});
+    let (code, body, _) = http_post_json(up, "/internal/chat-sessions/group/sync", &serde_json::to_vec(&b).unwrap());
+    assert!((200..300).contains(&code), "group sync: {code} {body}");
+    let gsid2 = json_parse(&body)["session_id"].as_str().unwrap().to_string();
+    let uri = format!("/api/chat-sessions/{gsid2}/responder");
+    let set = serde_json::json!({"responder": agent_uuid});
+    let (code, body, _) = http_post_json_auth(http, &uri, &serde_json::to_vec(&set).unwrap(), &token);
+    assert_eq!(code, 405, "the role is a PUT, not a POST: {body}");
+    let (code, body, _) = http_put_json_auth(http, &uri, &serde_json::to_vec(&set).unwrap(), &token);
+    assert!((200..300).contains(&code), "owner sets the responder: {code} {body}");
+    assert_eq!(json_parse(&body)["responder"].as_str(), Some(agent_uuid));
+
+    // The delivery itself: the agent is not installed, so the outcome is a
+    // loud per-target failure PLUS a durable receipt — never silence.
+    let m = serde_json::json!({"chat_session_id": gsid2, "from_user": root, "targets": [], "text": "and then?"});
+    let (code, body, _) = http_post_json_auth(http, "/api/intents/mentions", &serde_json::to_vec(&m).unwrap(), &token);
+    assert_eq!(code, 200, "auto-routed send is accepted: {code} {body}");
+    let v = json_parse(&body);
+    assert_eq!(v["routed"].as_str(), Some("responder"));
+    assert_eq!(v["results"][0]["status"].as_str(), Some("failed"), "uninstalled agent is loud: {body}");
+    let page = messages(http, &token, &gsid2);
+    let rows = page["messages"].as_array().unwrap();
+    let human = rows.iter().find(|r| r["kind"].as_str() == Some("user_message")).expect("human row");
+    assert_eq!(human["meta"]["mentions"].as_array().unwrap().len(), 0, "the human named nobody");
+    assert_eq!(
+        human["meta"]["auto_routed_to"].as_str(),
+        Some(agent_uuid),
+        "the decision is recorded on the utterance it decided"
+    );
+    let notice = rows
+        .iter()
+        .find(|r| r["meta"]["notice_type"].as_str() == Some("delivery_failed"))
+        .expect("a failed delivery leaves a durable receipt");
+    assert_eq!(notice["kind"].as_str(), Some("system_notice"));
+    assert_eq!(notice["meta"]["in_reply_to"], human["meta"]["message_id"], "threaded to its trigger");
+
+    // Clearing the role goes back to archive-only (a group of humans must be
+    // able to stop the agent from answering).
+    let clear = serde_json::json!({"responder": null});
+    let (code, body, _) = http_put_json_auth(http, &uri, &serde_json::to_vec(&clear).unwrap(), &token);
+    assert!((200..300).contains(&code), "clear: {code} {body}");
+    assert_eq!(json_parse(&body)["responder"], serde_json::Value::Null);
+    let m = serde_json::json!({"chat_session_id": gsid2, "from_user": root, "targets": [], "text": "just us now"});
+    let (code, body, _) = http_post_json_auth(http, "/api/intents/mentions", &serde_json::to_vec(&m).unwrap(), &token);
+    assert_eq!(code, 200);
+    assert_eq!(json_parse(&body)["routed"].as_str(), Some("archived"));
 }
 
 /// The card-answer channel of `chat-message` also serves group sessions

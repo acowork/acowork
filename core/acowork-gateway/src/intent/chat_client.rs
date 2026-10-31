@@ -41,9 +41,49 @@ impl ParticipantRef {
             ParticipantRef::Typed { id, .. } => id,
         }
     }
+
+    /// Is this a **typed** agent participant? Same rule the user service
+    /// enforces when the responder role is written (ADR-105): an untyped
+    /// legacy row is not evidence of an agent, so it cannot be one.
+    pub fn is_agent(&self) -> bool {
+        matches!(
+            self,
+            ParticipantRef::Typed {
+                identity: Some(identity),
+                ..
+            } if identity == "agent"
+        )
+    }
 }
 
 impl SessionInfo {
+    /// The default responder this delivery may actually use (ADR-105).
+    ///
+    /// The stored role is re-validated against the **current** roster on every
+    /// read, because the two facts it depends on live in different places and
+    /// can drift: the role is written through the user service (which clears it
+    /// when the member leaves) while a group's roster is also re-synced by PM
+    /// and an agent can be uninstalled at any time. Deliver-to-nobody must never
+    /// be the outcome of a stale id, so a responder that is no longer an agent
+    /// member reads as "no responder" here — the message then follows the
+    /// archive-only path, which is at least the historical behaviour rather than
+    /// a silent drop into an id that cannot answer.
+    ///
+    /// (An uninstalled-but-still-a-member agent passes this check on purpose:
+    /// the delivery then fails loudly with `target_not_installed`, and that
+    /// failure is surfaced as a `delivery_failed` row instead of being hidden.)
+    pub fn live_default_responder(&self) -> Option<&str> {
+        let responder = self
+            .default_responder
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())?;
+        self.participants
+            .iter()
+            .any(|p| p.id() == responder && p.is_agent())
+            .then_some(responder)
+    }
+
     /// Design 27 §5.5.4 / plan 2b.3: whether this Chat session has a human
     /// participant who could answer a decision card. `None` = undecidable
     /// (legacy untyped rows, or the session was never loaded) — callers
@@ -84,6 +124,11 @@ pub struct SessionInfo {
     /// seeded.
     #[serde(default)]
     pub chat_prompt: Option<String>,
+    /// The group's default responder (ADR-105): the agent instance an
+    /// un-addressed human message is delivered to. `None` = no such role, so
+    /// an un-addressed group message stays archive-only.
+    #[serde(default)]
+    pub default_responder: Option<String>,
 }
 
 /// The subset of `SessionMessage` the Gateway writes (system append).
