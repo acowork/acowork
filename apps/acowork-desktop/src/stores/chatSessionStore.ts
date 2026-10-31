@@ -35,15 +35,15 @@
 
 import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
-import { SessionAccessError } from "../lib/session-control";
 import { toWireAttachedItems, workspaceRefToAttachedItem } from "../lib/types";
 import type { WorkspaceRef } from "../lib/types";
 import { useAuthStore } from "./authStore";
 
 // ── Wire types (mirror `chat_sessions_api.rs` responses) ──────────────
 
-/** ADR-100 D12: one display label for something a composer handed to the task
- *  alongside a turn. Labels only — no path, no id, nothing the chat side could
+/** ADR-100: one display label for something the Chat-surface composer handed
+ *  to the task alongside a turn (the execution surface's own sends never reach
+ *  this code — Rev. 8 / D14 writes them to their own session, not to chat). Labels only — no path, no id, nothing the chat side could
  *  try to open, because the attachment bytes stay in the execution session
  *  (design 27 §4.2.1). Mirrors `acowork_core::protocol::AttachmentLabel`, the
  *  same projection the Chat Router renders into its prompt: the chip and the
@@ -114,9 +114,10 @@ export interface ChatMessageRow {
       question?: string;
       options?: string[];
     };
-    /** ADR-100 D12: labels of the execution session's own attached items on a
-     *  `user_message` sent from an execution view's composer. Present only on
-     *  that head row; never resolvable from here (see [`ExecAttachmentLabel`]). */
+    /** ADR-100: display-only labels of the items the Chat-surface composer
+     *  handed to this turn (an execution-view send writes to its own session
+     *  instead — Rev. 8 / D14). Present only on the head row; never resolvable
+     *  from here (see [`ExecAttachmentLabel`]). */
     exec_attachments?: ExecAttachmentLabel[];
   };
   attachment_ids?: string[];
@@ -289,68 +290,6 @@ function sendChatMessage(
     // into the Chat store.
     ...(attachedItems && attachedItems.length > 0 ? { attached_items: attachedItems } : {}),
   });
-}
-
-/** ADR-100 D12: post one turn from an EXECUTION view's composer into the Chat
- *  session that execution session is bound to, pinned straight back to that
- *  same session (`forExecutionSessionId`).
- *
- *  Same channel as `sendChatMessage`, and deliberately not the session-scoped
- *  write: the durable `user_message` row lands under the human's own identity
- *  before delivery resolves (design 27 §5.1), so the Chat shows a real question
- *  rather than a result the Runtime transcribed on the user's behalf. The pin
- *  is what makes it safe to leave the Chat surface — the receiving Agent skips
- *  its Chat Router, so the turn still runs in the session the human is looking
- *  at, and the continuation echo threads under this row (`in_reply_to`), which
- *  is how the two surfaces read as one round.
- *
- *  `messageId` is the id the composer already minted for its optimistic bubble:
- *  the Chat row, the execution session's JSONL row and the bubble then reconcile
- *  on one id instead of duplicating. `command` / `attachedItems` are the ADR-046
- *  turn facts the session-scoped write would have carried; the Gateway honors
- *  them on this pinned path only, so the send loses no capability. Attachment
- *  BYTES stay in the execution session — the Chat row records labels only. */
-export async function sendPinnedChatMessage(params: {
-  me: string;
-  agentId: string;
-  chatSessionId: string;
-  text: string;
-  messageId: string;
-  executionSessionId: string;
-  command?: string;
-  attachedItems?: unknown[];
-}): Promise<void> {
-  try {
-    await req<void>("POST", "/api/intents/chat-message", {
-      chat_session_id: params.chatSessionId,
-      from_user: params.me,
-      text: params.text,
-      in_reply_to: "",
-      message_id: params.messageId,
-      for_execution_session: params.executionSessionId,
-      // ADR-100 D12: which Agent owns this execution session. Ignored on a 1:1
-      // chat (the Gateway resolves its single agent participant) and required
-      // when the bound chat is a group — a PM task's session is bound to the
-      // project group it was dispatched from, and a group has several agents, so
-      // without it the Gateway has no target and refuses the send. It is a claim
-      // the Gateway checks against this chat's participants, not a trust.
-      pinned_agent: params.agentId,
-      ...(params.command ? { command: params.command } : {}),
-      ...(params.attachedItems && params.attachedItems.length > 0
-        ? { attached_items: params.attachedItems }
-        : {}),
-    });
-  } catch (e) {
-    // A deleted Chat session outlives the execution session it was bound to
-    // (design 27 §5.5.5), and that reads as a 404 — terminal, and NOT "the
-    // Gateway is down". Surfacing it as the shared access-error type is what
-    // lets the execution composer say why, exactly as the session-scoped path
-    // does; every other status travels unchanged.
-    if (e instanceof ChatRequestError && (e.status === 401 || e.status === 403 || e.status === 404)) {
-      throw new SessionAccessError(e.status, params.agentId, e.message);
-    }
-    throw e;
-  }
 }
 
 /** Archive-only group message: one `user_message` row, no delivery.
