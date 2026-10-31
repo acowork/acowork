@@ -27,12 +27,12 @@ export interface SessionInfo {
    */
   message_count?: number
   /**
-   * ADR-100 D12: the Chat session this execution session came from, when it
-   * did (design 27 §8.2). The composer reads it as a routing flag: with a
-   * binding the human's words go through the Chat entry point, so the
-   * conversation holds a real `user_message` row of theirs and the execution
-   * view's turn still lands back here. Absent = no Chat to file into, which is
-   * also what an older Runtime returns — both keep the session-scoped write.
+   * ADR-100: the Chat session this execution session came from, when it did
+   * (design 27 §8.2). History, not a routing flag: ADR-100 Rev. 8 (D14)
+   * canceled the chat mirror, so the composer always writes to this session
+   * (`POST /sessions/{sid}/messages`) and the chat gains no row. The binding
+   * still says which chat the session belongs to. Absent = it came from no
+   * chat, which is also what an older Runtime returns.
    */
   chat_session_id?: string | null
 }

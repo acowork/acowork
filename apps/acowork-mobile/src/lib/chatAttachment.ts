@@ -6,7 +6,7 @@
  * The rule this module exists to enforce: a chat attachment is a *file the
  * user uploaded*, so it is tappable and it says what it is (name + size) —
  * not `📎 name` in body text. The execution surface's `exec_attachments` stay
- * inert (ADR-100 D12): those bytes belong to that run, not to this chat.
+ * inert (ADR-100): those bytes belong to that run, not to this chat.
  */
 
 import { fetchChatAttachmentBlob } from './api'
