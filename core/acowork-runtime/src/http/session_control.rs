@@ -750,6 +750,45 @@ pub(crate) async fn post_send_message(
     authorize_write(&state, &sid, &scope)?;
     let body = body.map(|Json(b)| b).unwrap_or_default();
 
+    // ADR-038 / ADR-100 Rev. 8: the execution surface's ONLY write path.
+    //
+    // The session must be **Active** for the turn to land: `dispatch_inbound`
+    // hands the message to the in-memory session task, and a session that is
+    // only on disk (`Closed`) has no task — the message would be dropped
+    // after a 202, silently.
+    //
+    // `Closed` is not an edge case: ADR-038's `Closed` means "on disk, not in
+    // memory", and **every** session is `Closed` right after a Runtime
+    // restart, and after an idle eviction. The human is looking at a
+    // transcript and typing into it — reopening the session they are
+    // looking at is the only honest answer, and it is what
+    // `open_pinned_target` used to do for the pinned path before ADR-100
+    // Rev. 8 deleted that path. The Desktop's foreground tab re-opens via
+    // `POST /sessions/{sid}/open`, but a background tab (restored by
+    // `adoptRuntimeTabs` without an open round-trip) and the mobile
+    // composer would otherwise lose the message.
+    //
+    // So the write path opens what it needs, exactly as ADR-038's open
+    // state machine does everywhere else: `NotFound` is refused (there is
+    // nothing to write into), `Closed` is resumed from disk, `Active` is a
+    // no-op.
+    let sm = session_manager(&state).await?;
+    let active = {
+        let mut guard = sm.lock().await;
+        guard.ensure_session_active(&sid).await
+    };
+    match active {
+        Ok(true) => {}
+        Ok(false) => return Err(not_found(&sid)),
+        Err(e) => {
+            tracing::warn!(session_id = %sid, error = %e, "failed to resume session for send");
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to open session for send: {e}"),
+            ));
+        }
+    }
+
     let queued = crate::http::server::dispatch_session_action(
         &state,
         "chat_message",
@@ -762,10 +801,9 @@ pub(crate) async fn post_send_message(
             // The Gateway verified this caller before proxying, and
             // `authorize_write` above already checked the scope may write this
             // session. It is the one honest answer to "who can answer a card
-            // this turn raises in the bound chat" (ADR-100 Rev. 6); the
-            // client's `for_execution_session` pin answers the same question
-            // but only when it has the binding, which a router-created
-            // session's client row may not carry.
+            // this turn raises in the bound chat" (ADR-100 Rev. 6): the scope
+            // the Gateway verified is a fact about the caller, not a hint a
+            // client carries about a binding it may not know.
             answerable_by: scope.caller_uid().unwrap_or_default().to_string(),
         },
     )

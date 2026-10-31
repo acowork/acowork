@@ -725,8 +725,8 @@ async fn run_turn(
                                 repo: envelope.repo.clone(),
                                 kind: envelope.kind.clone(),
                                 chat_attachment_ids: envelope.chat_attachment_ids.clone(),
-                                // Same arm the pinned path fills on its
-                                // `ChatMessage`: a workspace reference means one
+                                // Same arm the execution surface's own write
+                                // fills on its `ChatMessage`: a workspace reference means one
                                 // thing whichever transport carried the turn.
                                 attached_items: crate::agent::intent_turn::attached_items_from_params(
                                     &envelope.params,
@@ -1307,7 +1307,6 @@ mod tests {
             status: String::new(),
             has_human: Some(true),
             chat_attachment_ids: Vec::new(),
-            for_execution_session: String::new(),
         }
     }
 

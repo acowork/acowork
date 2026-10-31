@@ -1058,29 +1058,26 @@ async fn human_to_human_legacy_routes_run_on_the_new_store() {
     assert_eq!(code, 404, "non-member gets the hidden 404");
 }
 
-/// ADR-100 D12: an execution view's composer sends through the Chat entry, so
-/// the head of the turn is written under the caller's own identity and lands
-/// durably before delivery is attempted. The row carries display names for its
-/// attachments and nothing that the Chat side could lie about opening.
+/// A chat-surface send files its head row under the caller's own identity and
+/// lands it durably before delivery is attempted. Workspace references are
+/// display-only in the Chat row: the execution session is their only home.
 #[test]
-fn a_pinned_send_lands_the_head_row_with_display_only_attachments() {
+fn a_chat_send_with_workspace_references_lands_display_only_labels() {
     let _serial = lock_chain();
-    let (gw, token, root) = boot_multi_user("pinned");
+    let (gw, token, root) = boot_multi_user("chatsend");
     let http = gw.http_port;
     let sid = default_pair(http, &token, "agent-pin-1")["session_id"]
         .as_str()
         .unwrap()
         .to_string();
 
-    // The composer mints the row id itself: the bubble it already rendered,
-    // this Chat row and the execution session's own line are one row.
+    // The composer mints the row id itself: the bubble it already rendered and
+    // this Chat row settle on one id.
     let m = serde_json::json!({
         "chat_session_id": sid,
         "from_user": root,
         "text": "keep going on the fix",
         "message_id": "msg-pin-1",
-        "for_execution_session": "20261023_131156_a3bb7d",
-        "command": "review",
         "attached_items": [
             { "type": "attached_file", "name": "src/main.rs", "absPath": "E:/work/demo/src/main.rs" },
             { "type": "file_upload", "documentId": "doc-notes", "filename": "notes.md", "format": "md", "sizeBytes": 12 },
@@ -1088,7 +1085,7 @@ fn a_pinned_send_lands_the_head_row_with_display_only_attachments() {
     });
     let (code, body, _) =
         http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&m).unwrap(), &token);
-    assert_eq!(code, 200, "pinned send accepted; body:\n{body}");
+    assert_eq!(code, 200, "send accepted; body:\n{body}");
 
     let page = messages(http, &token, &sid);
     let rows = page["messages"].as_array().cloned().unwrap_or_default();
@@ -1113,141 +1110,61 @@ fn a_pinned_send_lands_the_head_row_with_display_only_attachments() {
     let raw = serde_json::to_string(&labels).unwrap();
     assert!(!raw.contains("E:/work/demo") && !raw.contains("absPath"), "no path rides along: {raw}");
 
-    // Handing the task a file with no message is a legitimate send on the
-    // execution surface — the pinned path must not reject what the
-    // session-scoped write accepted.
+    // Handing the agent a file with no message is a legitimate send: a label is
+    // content, not an empty turn.
     let only = serde_json::json!({
         "chat_session_id": sid,
         "from_user": root,
         "text": "",
         "message_id": "msg-pin-2",
-        "for_execution_session": "20261023_131156_a3bb7d",
-        "attached_items": [{ "type": "file_upload", "documentId": "doc-diff", "filename": "diff.patch", "format": "patch", "sizeBytes": 7 }],
+        "attached_items": [{ "type": "file_upload", "documentId": "doc-diff", "filename": "diff.md", "format": "md", "sizeBytes": 9 }],
     });
     let (code, body, _) =
         http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&only).unwrap(), &token);
-    assert_eq!(code, 200, "an attachment-only pinned send is a turn: {code} {body}");
-
-    // The ceilings bite only where the field would actually be delivered.
-    let long = "x".repeat(200);
-    let over = serde_json::json!({
-        "chat_session_id": sid, "from_user": root, "text": "oversized skill name",
-        "message_id": "msg-pin-3", "for_execution_session": "20261023_131156_a3bb7d",
-        "command": long,
-    });
-    let (code, body, _) =
-        http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&over).unwrap(), &token);
-    assert_eq!(code, 400, "a pinned skill name is not silently truncated: {code} {body}");
-    let after = messages(http, &token, &sid);
-    assert_eq!(
-        after["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|r| r["body"].as_str() == Some("oversized skill name"))
-            .count(),
-        0,
-        "a rejected send writes no row",
-    );
-
-    // Without a pin the same field is dropped before delivery (a routed turn
-    // is consumed as an Intent, which has no skill arm), so refusing the
-    // message would punish the human for a value nobody reads.
-    let unpin = serde_json::json!({
-        "chat_session_id": sid, "from_user": root, "text": "no pin here", "command": long,
-    });
-    let (code, body, _) =
-        http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&unpin).unwrap(), &token);
-    assert_eq!(code, 200, "an unpinned overshoot is dropped, not rejected: {code} {body}");
+    assert_eq!(code, 200, "an attachment-only send is a turn: {code} {body}");
 }
 
-/// ADR-100 D12: a PM task's execution session is bound to the PROJECT GROUP it was
-/// dispatched from (ADR-099), and a group has no single agent to deliver to — so
-/// without a pin-aware branch the follow-up the whole feature exists for is
-/// refused with a 400. The executor the client names is checked, not honoured:
-/// its answer is written into this chat, so it has to belong to it.
+/// A group message names no agent and answers no card, so there is no target
+/// to derive: it is refused at the boundary and files no row (§5.3 form ③ —
+/// the archive path is a chat write, not this entry).
 #[test]
-fn a_pinned_send_into_a_group_files_the_head_row_and_checks_its_target() {
+fn a_bare_group_send_is_refused_and_writes_no_row() {
     let _serial = lock_chain();
-    let (gw, token, root) = boot_multi_user("pingroup");
+    let (gw, token, root) = boot_multi_user("grprefuse");
     let http = gw.http_port;
     let up = user_service_port(&gw.home);
 
-    let b = serde_json::json!({"project_id": "proj-pingroup-1", "participants": [root, "agent-pin-g"], "title": "G"});
+    let b = serde_json::json!({"project_id": "proj-pingroup-1", "participants": [root, "agent-pin-g"]});
     let (code, body, _) = http_post_json(up, "/internal/chat-sessions/group/sync", &serde_json::to_vec(&b).unwrap());
     assert!((200..300).contains(&code), "group sync: {code} {body}");
     let gsid = json_parse(&body)["session_id"].as_str().unwrap().to_string();
 
-    let m = serde_json::json!({
-        "chat_session_id": gsid,
-        "from_user": root,
-        "text": "continue the task",
-        "message_id": "msg-gp-1",
-        "for_execution_session": "20261024_090000_deadbeef",
-        "pinned_agent": "agent-pin-g",
-    });
+    let plain = serde_json::json!({"chat_session_id": gsid, "from_user": root, "text": "hello group"});
     let (code, body, _) =
-        http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&m).unwrap(), &token);
-    assert_eq!(code, 200, "a pinned send into a group is a turn: {code} {body}");
-
-    let page = messages(http, &token, &gsid);
-    let row = page["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .rev()
-        .find(|r| r["meta"]["message_id"].as_str() == Some("msg-gp-1"))
-        .unwrap_or_else(|| panic!("the head row must be filed in the group: {page}"));
-    assert_eq!(row["kind"].as_str(), Some("user_message"));
-    assert_eq!(
-        row["from"].as_str(),
-        Some(root.as_str()),
-        "the human speaks for themselves in the group too"
-    );
-    assert_eq!(row["to"].as_str(), Some("agent-pin-g"), "the row names who answers it");
-
-    // The claim is verified against this chat's participants.
-    let stranger = serde_json::json!({
-        "chat_session_id": gsid,
-        "from_user": root,
-        "text": "run this elsewhere",
-        "message_id": "msg-gp-2",
-        "for_execution_session": "20261024_090000_deadbeef",
-        "pinned_agent": "agent-not-in-group",
-    });
-    let (code, body, _) =
-        http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&stranger).unwrap(), &token);
-    assert_eq!(code, 403, "a foreign instance is refused: {code} {body}");
+        http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&plain).unwrap(), &token);
+    assert_eq!(code, 400, "a group send without a card target needs a card: {code} {body}");
     let after = messages(http, &token, &gsid);
     assert_eq!(
         after["messages"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|r| r["body"].as_str() == Some("run this elsewhere"))
+            .filter(|r| r["body"].as_str() == Some("hello group"))
             .count(),
         0,
         "a refused send writes no row"
     );
-
-    // A plain group message still has no derivable target: D12 opened the door
-    // for the pinned turn only, never for the archive path (§5.3 form ③).
-    let plain = serde_json::json!({"chat_session_id": gsid, "from_user": root, "text": "hello group"});
-    let (code, body, _) =
-        http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&plain).unwrap(), &token);
-    assert_eq!(code, 400, "an unpinned group send still needs a card: {code} {body}");
 }
 
-/// ADR-100 D12: the content gate and the attachment check must judge the turn
+/// ADR-100: the content gate and the attachment check must judge the turn
 /// this Gateway will ACTUALLY deliver, not the bytes that arrived. Two shapes
-/// used to be accepted at the gate and then die — a pinned entry the Runtime
+/// used to be accepted at the gate and then die — an entry the Runtime
 /// could not parse would have shown the chat a chip for a file the Agent never
 /// received, and a label-less item with no text filed an empty row.
 ///
-/// The attachment arm is NOT pin-only: a routed turn (the Chat surface's own
-/// composer, which never pins) carries `attached_items` into the `Intent`
-/// shape, so an attachment-only send is content on both paths. `command` stays
-/// pin-only — the Intent shape has no skill arm.
+/// The attachment arm is the routed turn's own: `attached_items` rides the
+/// `Intent` shape into whichever execution session takes the turn, so an
+/// attachment-only send is content, not an empty row.
 #[test]
 fn a_send_with_nothing_to_deliver_is_a_readable_400() {
     let _serial = lock_chain();
@@ -1257,7 +1174,6 @@ fn a_send_with_nothing_to_deliver_is_a_readable_400() {
         .as_str()
         .unwrap()
         .to_string();
-    let pin = "20261024_090000_deadbeef";
     let post = |body: &serde_json::Value| {
         let (code, body, _) = http_post_json_auth(
             http,
@@ -1268,16 +1184,15 @@ fn a_send_with_nothing_to_deliver_is_a_readable_400() {
         (code, body)
     };
 
-    // (a) No pin: the routed turn has an attachment arm too, so a file with no
-    // words is a turn — the Chat surface's "Add to Chat" must not be judged
-    // empty just because it never names a session.
+    // (a) A file with no words is still a turn: the Chat surface's "Add to
+    // Chat" must not be judged empty because it carries no prose.
     let unpin = serde_json::json!({
         "chat_session_id": sid, "from_user": root, "text": "",
         "message_id": "msg-cap-1",
         "attached_items": [{ "type": "attached_file", "name": "src/main.rs", "absPath": "E:/work/demo/src/main.rs" }],
     });
     let (code, body) = post(&unpin);
-    assert_eq!(code, 200, "an unpinned attachment-only send is a turn: {code} {body}");
+    assert_eq!(code, 200, "an attachment-only send is a turn: {code} {body}");
     let row = messages(http, &token, &sid)["messages"]
         .as_array()
         .cloned()
@@ -1299,7 +1214,7 @@ fn a_send_with_nothing_to_deliver_is_a_readable_400() {
         "attached_items": [{ "type": "upload", "filename": "notes.md" }],
     });
     let (code, body) = post(&bogus);
-    assert_eq!(code, 400, "an unreadable attached_item is a 400 unpinned too: {code} {body}");
+    assert_eq!(code, 400, "an unreadable attached_item is a 400: {code} {body}");
     let after = messages(http, &token, &sid);
     assert_eq!(
         after["messages"]
@@ -1316,7 +1231,7 @@ fn a_send_with_nothing_to_deliver_is_a_readable_400() {
     // text either there is nothing left to file.
     let nameless = serde_json::json!({
         "chat_session_id": sid, "from_user": root, "text": "",
-        "message_id": "msg-cap-3", "for_execution_session": pin,
+        "message_id": "msg-cap-3",
         "attached_items": [{ "type": "file_upload", "documentId": "d", "filename": "", "format": "md", "sizeBytes": 1 }],
     });
     let (code, body) = post(&nameless);

@@ -7033,6 +7033,46 @@ mod tests {
         let (dispatch_tx, mut dispatch_rx) =
             tokio::sync::mpsc::unbounded_channel::<(String, InboundMessage)>();
 
+        // ADR-038 / ADR-100 Rev. 8: `POST /messages` reopens a session that is
+        // only on disk before queueing the turn, so it needs the live
+        // SessionManager — the other six actions do not. The manager here has
+        // no in-memory sessions, so the `messages` case pays exactly the
+        // `Closed` path this test is meant to keep honest: resume from disk,
+        // then queue.
+        let manager_core = std::sync::Arc::new(crate::agent::agent_core::AgentCore::new(
+            crate::config::RuntimeConfig {
+                work_dir: temp_dir.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            acowork_core::AgentManifest::from_toml(
+                r#"
+                agent_id = "com.test.agent"
+                version = "1.0.0"
+                name = "Test session actions"
+                description = "Pin the owner gate and payloads of the HTTP session actions"
+                author = "test"
+                runtime_version = "0.1.0"
+
+                [llm]
+                provider = "mock"
+                model = "test-model"
+                "#,
+            )
+            .unwrap(),
+            std::sync::Arc::new(acowork_core::providers::mock::MockProvider::single_text("test")),
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = crate::agent::session::SessionManager::new(
+            manager_core,
+            crate::agent::session::session_manager::SessionManagerConfig::default(),
+        );
+        // A resumed session task stamps its workspace context on start; the
+        // resolver must be in place before that happens.
+        manager.set_resolver(new_test_workspace_resolver());
+        let session_manager = std::sync::Arc::new(tokio::sync::Mutex::new(manager));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Some(session_manager)));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             temp_dir.clone(),
@@ -7055,7 +7095,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            session_manager_slot,
             std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await

@@ -30,7 +30,7 @@ const GATEWAY_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const GATEWAY_PULL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The Chat surface a turn owes its visible behaviour to (ADR-099 §2.2
-/// generalised; ADR-100 D12).
+/// generalised; ADR-100).
 ///
 /// Every obligation a turn has toward a Chat session — where an interactive
 /// card is written, who may answer it, whether the turn may block on a human
@@ -109,11 +109,11 @@ impl TurnSurface {
     /// the trigger row is only the thread coordinate, never the answer one —
     /// §5.5.4 resolves an answer against the card's own id. So a turn composed
     /// inside the execution view of a chat-bound session writes a standalone
-    /// card (empty `trigger_message_id`) rather than nothing at all: the
-    /// client's `for_execution_session` pin is a hint that may be missing
-    /// (a router-created session has no client row to read the binding off),
-    /// and losing the card there is what left a group chat blind to the
-    /// question the run had stopped on.
+    /// card (empty `trigger_message_id`) rather than nothing at all: such a
+    /// turn has no Chat row of its own to thread under — mirroring it into the
+    /// Chat transcript was what used to supply one, and dropping that mirror
+    /// (ADR-100 Rev. 8 / D14) is what left a group chat blind to the question
+    /// the run had stopped on, had the card been skipped too.
     pub fn card_target(&self) -> Option<(&str, &str, &str)> {
         if self.chat_session_id.is_empty() {
             return None;
@@ -371,13 +371,13 @@ pub async fn append_chat_row(
 /// it, and `status` so an empty body still reads as a finished run rather than
 /// an unanswered one.
 ///
-/// `in_reply_to` is the exception, and ADR-100 D12 is what created it: a
-/// **pinned** turn — composed in the execution view but delivered through the
-/// Chat entry point — already has its `user_message` row in the chat, keyed by
-/// `trigger_message_id`. Threading the echo under that row is what makes the
-/// chat read as one round (the question the human asked, the answer that came
-/// back) instead of an orphan result with no head. `None` keeps the
-/// standalone shape the echo has always had.
+/// `in_reply_to` is the exception, and the Chat surface is what created it: a
+/// turn the human asked *in* a chat already has its `user_message` row there,
+/// keyed by `trigger_message_id`. Threading the echo under that row is what
+/// makes the chat read as one round (the question the human asked, the answer
+/// that came back) instead of an orphan result with no head. `None` — a turn
+/// composed in the execution view, which has no row of its own in the chat —
+/// keeps the standalone shape the echo has always had.
 ///
 /// `status` is the turn's terminal outcome (ADR-100 revision: intermediate
 /// milestones such as dispatch/start are runtime-only and never persisted, so
@@ -502,11 +502,12 @@ pub async fn post_intent_response(
 }
 
 /// Parse the ADR-046 attachment union an Intent envelope carries (design 27
-/// §4.2.1, ADR-100 D12).
+/// §4.2.1, ADR-100).
 ///
 /// Both transports that take a human Chat turn read the same `attached_items`
-/// key the Gateway stamped into `params_json`: the pinned path feeds
-/// `SessionMessage::ChatMessage`'s own arm, the routed path the `Intent` one.
+/// key the Gateway stamped into `params_json`: the execution surface's write
+/// feeds `SessionMessage::ChatMessage`'s own arm, the Chat surface's turn the
+/// `Intent` one.
 /// One parse for both, so a reference never means two things on the wire.
 ///
 /// An entry the Runtime cannot read is dropped, not fatal — the turn still
@@ -650,11 +651,11 @@ mod tests {
     }
 
     #[test]
-    fn pinned_turn_surface_keeps_its_card_target() {
-        // The root cause this pins: a turn pinned to an execution session was
-        // converted onto the ChatMessage transport carrying content + row id
-        // only, and the card writer's guard read `chat_writeback` — a field
-        // that path never set. `ask_user_question` then wrote no Chat card
+    fn a_surface_without_a_trigger_row_still_has_its_card_target() {
+        // The root cause this pins: a turn written straight against the
+        // execution surface arrived carrying content + row id only, and the
+        // card writer's guard read `chat_writeback` — a field that path never
+        // set. `ask_user_question` then wrote no Chat card
         // while the execution dialog worked fine. The surface is produced
         // from the envelope by BOTH transports, so the coordinates survive
         // the conversion.
@@ -715,7 +716,7 @@ mod tests {
 
     #[test]
     fn waiting_is_not_aborted() {
-        // Symptom 3 of the same root cause: the pinned arm had only a
+        // Symptom 3 of the same root cause: the execution surface's arm had only a
         // `turn_aborted` bool, so a turn that ended *waiting for a human* was
         // echoed to the Chat as `aborted`. One outcome field, read by both
         // terminal writers, and the two states are distinct strings.
@@ -909,12 +910,11 @@ mod tests {
     }
 
     #[test]
-    fn exec_echo_meta_threads_a_pinned_turn_under_its_chat_row() {
-        // ADR-100 D12: a pinned turn was written to the chat as a real
+    fn exec_echo_meta_threads_an_answer_under_its_chat_row() {
+        // A turn the Chat surface asked for was written there as a real
         // `user_message` before it reached the agent, so the echo answers that
-        // row. This is what pairs the two surfaces into one round — without it
-        // the chat would hold an orphan result with no question above it, the
-        // exact shape the pin exists to remove.
+        // row. This is what pairs the surfaces into one round — without it the
+        // chat would hold an orphan result with no question above it.
         let m = exec_echo_meta("row-1", "exec-3", "completed", Some("row-1"));
         assert_eq!(m["in_reply_to"], "row-1");
         // The id keeps the `exec:` prefix: idempotency must not depend on the
