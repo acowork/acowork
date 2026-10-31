@@ -230,6 +230,8 @@
   "chatView": {
     "empty": "该聊天暂无消息",
     "routerFallback": "已自动分配任务",
+    "deliveryFailed": "消息未能送达 {{name}}，请重试或 @ 该 Agent",
+    "deliveryFailedNoTarget": "消息未能送达，请重试或 @ 该 Agent",
     "cardUnanswered": "未获应答：{{question}}",
     "cardAnsweredNote": "已应答：{{answer}}",
     "cardAnsweredInExec": "已在执行会话应答",
@@ -2243,6 +2245,16 @@
     "edit": "编辑",
     "restored": "群聊提示词已恢复默认",
     "restoreFailed": "恢复失败"
+  },
+  "groupResponder": {
+    "title": "默认接收 Agent",
+    "valueNone": "未指定",
+    "hint": "群里没有 @ 任何 Agent 的消息，会交给这个 Agent 处理。它再按自己的判定决定是直接回答，还是转给正在执行的任务。",
+    "readOnlyHint": "群里没有 @ 任何 Agent 的消息，会交给这个 Agent 处理。仅群主或管理员可以修改。",
+    "none": "不指定（不 @ 时只存档）",
+    "saved": "默认接收 Agent 已更新",
+    "saveFailed": "保存失败",
+    "missing": "该 Agent 已不在群里"
   },
   "groupSettings": {
     "title": "群设置"

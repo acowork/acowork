@@ -136,6 +136,8 @@
   "chatView": {
     "empty": "No messages yet",
     "routerFallback": "Assigned automatically",
+    "deliveryFailed": "The message didn't reach {{name}} — retry, or @ the agent",
+    "deliveryFailedNoTarget": "The message wasn't delivered — retry, or @ the agent",
     "cardUnanswered": "Unanswered: {{question}}",
     "cardAnsweredNote": "Answered: {{answer}}",
     "cardAnsweredInExec": "Answered in the execution session",
@@ -2226,6 +2228,16 @@
     "edit": "Edit",
     "restored": "Group chat prompt restored to default",
     "restoreFailed": "Restore failed"
+  },
+  "groupResponder": {
+    "title": "Default responder",
+    "valueNone": "Not set",
+    "hint": "A message in this group that @-mentions nobody goes to this agent. It then decides, on its own, whether to answer directly or hand the turn to a running task.",
+    "readOnlyHint": "A message in this group that @-mentions nobody goes to this agent. Only the group owner or an admin can change it.",
+    "none": "None (un-addressed messages are only archived)",
+    "saved": "Default responder updated",
+    "saveFailed": "Save failed",
+    "missing": "This agent has left the group"
   },
   "groupSettings": {
     "title": "Group settings"

@@ -95,11 +95,17 @@ export function terminalNoticeKey(status?: string): string {
  * guess: `/api/intents/chat-message` files its `user_message` with `to` = the
  * agent it delivered to (1:1, a card answer, a pinned execution turn), and the
  * §5.3.1 mention fan-out files ONE broadcast row (`to` empty) carrying the
- * mentioned agents in `meta.mentions`. Everything else — a `user_user` DM, an
- * un-@'d group remark — goes through the archive-only chat write entry, which
- * stores `to: ""` and wakes nobody. Keying the line on those rows made a DM
- * display "working on it" forever: no agent will ever answer a conversation
- * that contains no agent.
+ * mentioned agents in `meta.mentions`, and since ADR-105 the group send entry
+ * also files an UN-addressed row (`to` empty, `mentions` empty) carrying the
+ * group's default responder in `meta.auto_routed_to`. Everything else — a
+ * `user_user` DM, an un-@'d remark in a group that has no responder — wakes
+ * nobody: `to: ""`, no mentions, no auto-route. Keying the line on those rows
+ * made a DM display "working on it" forever: no agent will ever answer a
+ * conversation that contains no agent.
+ *
+ * `auto_routed_to` is the routing decision, not a mention: the human typed no
+ * name, so it must never render as a chip (the bubble reads `meta.mentions`),
+ * but an agent IS working — which is exactly what this predicate answers.
  */
 export function opensAgentTurn(row: ChatMessageRow): boolean {
   // A card answer continues the EXISTING turn — it does not open a new one.
@@ -107,6 +113,7 @@ export function opensAgentTurn(row: ChatMessageRow): boolean {
   // loop_interaction.rs::chat_card_id).
   if (row.meta?.in_reply_to?.startsWith("card:")) return false;
   if (row.to?.trim()) return true;
+  if (row.meta?.auto_routed_to?.trim()) return true;
   return (row.meta?.mentions?.length ?? 0) > 0;
 }
 
@@ -174,6 +181,18 @@ function answeredAfter(
     if (row.kind === "interaction_request" && row.meta?.in_reply_to === trigger) {
       const cardId = row.meta?.message_id;
       if (!cardId || !closedCards.has(cardId)) return true;
+    }
+    // A delivery that never reached an agent (ADR-105) ends the wait: the
+    // receipt IS the outcome ("nobody received this"), and leaving the wait
+    // line up would promise an answer that is not coming — the same lie the
+    // silent drop told, only louder. `turn_routed` is deliberately NOT here
+    // (the run is still in flight after it).
+    if (
+      row.kind === "system_notice" &&
+      row.meta?.notice_type === "delivery_failed" &&
+      row.meta?.in_reply_to === trigger
+    ) {
+      return true;
     }
   }
   return false;

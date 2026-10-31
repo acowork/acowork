@@ -30,6 +30,7 @@ import {
 import { MemberManagerDialog } from "../../views/pm/MemberManagerDialog";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { GroupChatPromptCard } from "./GroupChatPromptCard";
+import { GroupResponderCard } from "./GroupResponderCard";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { useAuthStore } from "../../stores/authStore";
 import { UserGroupMembersPanel } from "./UserGroupMembersPanel";
@@ -102,6 +103,15 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
   // gate the project itself. Owner-or-admin only (ADR-098).
   const localMode = useLocalMode();
   const canSeePrompt = canGovernProject(project, self, localMode);
+  // Agent members only: "who answers" cannot be a human (the store refuses a
+  // non-agent id too — this just keeps the picker honest).
+  const agentCandidates = useMemo(
+    () =>
+      members
+        .filter((m) => m.kind === "agent")
+        .map((m) => ({ id: m.instance_id, name: m.displayName ?? m.instance_id.slice(0, 8) })),
+    [members],
+  );
 
   return (
     <div className="relative ml-1 flex shrink-0 flex-col" style={{ width }}>
@@ -193,6 +203,14 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
               would refuse. A project channel's owner is the PM project's. */}
           {canSeePrompt && group?.session_id && (
             <GroupChatPromptCard sessionId={group.session_id} />
+          )}
+          {/* Default responder (ADR-105) — shown to every participant (the read
+              is open to members), writable only for owner-or-admin, which the
+              card mirrors from the server's `editable` answer. Candidates are
+              this panel's already-resolved agent members: the same list
+              `sync_group` publishes as the session's roster. */}
+          {group?.session_id && (
+            <GroupResponderCard sessionId={group.session_id} candidates={agentCandidates} />
           )}
         </div>
       </div>

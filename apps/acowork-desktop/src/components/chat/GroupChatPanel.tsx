@@ -403,12 +403,20 @@ const GroupRowView = memo(function GroupRowView({
       // Legacy receipts only — the milestones and the router-fallback receipt
       // are gone from the stream (ADR-100 revision). Whatever survived paints
       // as a quiet centered line, never on an agent's side.
+      //
+      // `name` feeds one receipt: the `delivery_failed` row of ADR-105 says
+      // which agent a message never reached, resolved from the roster like
+      // every other participant reference here (`from` = `to` = that agent on
+      // the Gateway's write). Every other receipt ignores the prop.
+      const failedTarget =
+        row.meta?.notice_type === "delivery_failed" ? nameOf(row.to || row.from).name : undefined;
       return (
         <ChatNoticeEventRow
           row={row}
           className="px-4"
           answered={answered}
           chatAnswered={chatAnswered}
+          name={failedTarget}
         />
       );
     }
