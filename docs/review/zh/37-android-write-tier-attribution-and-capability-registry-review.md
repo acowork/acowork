@@ -120,7 +120,7 @@ design 30 §9 表第 375 行点名：「ACoworkRuntimeAndroid 的 `HostProfile` 
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0/P1/P2 | 设备探测、能力地板、Gate、审计、投影脱敏、证据采集（screencap / logcat / dumpsys / bugreportz，256 KiB 分片 + digest 校验） | **已交付**：499 测试全绿 + 真机（华为 BLA-AL00，system-shell 档）端到端验证 |
+| P0/P1/P2 | 设备探测、能力地板、Gate、审计、投影脱敏、证据采集（screencap / logcat / dumpsys / bugreportz，256 KiB 分片 + digest 校验） | **已交付**：565 测试全绿 + 真机（华为 BLA-AL00，system-shell 档）端到端验证 |
 | P3 | 写档：setprop / settings / setenforce + 文件快照 LIFO 回滚 | **代码就绪、生产接线被 B1 阻塞**：`Gate::decide` 需要归属裁决，而裁决的来源与形状未裁定 |
 | P4 | root 档（`su`） | 需 su 设备实测，与 B1/B2 无关 |
 
@@ -136,3 +136,25 @@ B1 不是"实现有 bug"，而是**生产接线的最后一块拼图缺一个上
 3. Q3 无主节点写档语义与 admin 路径形状；
 4. B2 选项（a/b/c/d）与能力命名规范（点分 / 冒号）；
 5. 若接受 §2 的限定，请同步修订本地 ADR-AND-001 §7.1（移植侧负责回写，并同步 `2026-10-28-readiness-assessment.md` 缺口表）。
+
+---
+
+## 9. 补充证据（2026-11-02，真机安全边界 review 之后）
+
+B2 的原始论据是「写 `/data/data/<pkg>` 与写 `/system` 不是一回事」。本轮在 BLA-AL00（user 版、无 root、uid=2000 shell）上做分类器的对抗扇探，发现**读侧**的论据比写侧更强，而且其中一条根本不是路径问题：
+
+| 实测（同一台设备、同一个 uid、未提权） | 移植侧此前的判定 | 现在 |
+|---|---|---|
+| `content query --uri content://sms/` 返回真实短信正文 | ReadOnly → §4.4 免审批，日志记作「read」 | ForeignRead |
+| `content query --uri content://contacts/people` 返回真实联系人姓名 | 同上 | ForeignRead |
+| `head -c 24 /data/anr/dumptrace_*` 读出别的进程的栈（root 属、0666，在 `drwxrwx--x system` 的目录里） | 同上 | ForeignRead |
+| `ls /sdcard/DCIM` 可列相册 | 同上 | ForeignRead |
+| `dd if=/dev/block/mmcblk0`（整块分区经 `key=` 操作数） | 同上 | ForeignRead |
+
+三点请上游在裁定 B2 时一并考虑：
+
+1. **「读不需要同意」这个前提在 Android 上不成立。** ADR-AND-001 §4.4 免审批只读档的理由是「什么都没变」；但在一台装着用户短信、联系人和相册的手机上，*取值*本身就是隐私事件，与是否改变设备状态无关。移植侧已新增 `Effect::ForeignRead` 表达这一类，并临时借用 `android:fs:system` 授权——这正是 B2 选项 (a)「新增 Node/设备安全域表」要收编的第一个成员。**借用最重的文件档是保守方向**：代价是多要一次审批，不代价是把别人的数据库交出去。
+2. **携带敏感内容的操作数不一定是路径。** 上表前三条里两条的敏感物在 **URI** 里（`content://sms`），任何按前缀写的规则都不可能命中。若上游建能力注册表，建议把「数据主体是谁」与「经由什么文件系统路径」分成两个轴，否则注册表会复制移植侧刚踩过的盲区。
+3. **`fs:outside-app` 这个名字本身在误导。** 写 `/sdcard`（用户自己的文件）是该能力名字承诺过的动作，读 `/sdcard` 则不是同一条规则——移植侧因此把媒体树只放进**读**侧名单。这类「同一能力名覆盖不了读与写两种方向」的形状，是 B2 里「能力粒度」问题的具体实例。
+
+移植侧现状：以上全部已落成回归测试（`a_content_uri_names_a_person_not_a_path`、`reading_another_uids_files_is_not_free` 等），并在真机 harness §14 里逐条对账。B2 未裁定前，`ForeignRead` 继续借用 `fs:system`；裁定后改名是一次机械替换，不影响判定逻辑。
