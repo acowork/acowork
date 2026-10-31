@@ -17,6 +17,40 @@ import { McpRecommendationGroup } from "./McpRecommendationGroup";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 const EMPTY_ARRAY: string[] = [];
+
+/** Scroll cap for the builtin-tools list — nine rows tall.
+ *
+ *  Every number here was MEASURED in Chrome headless against the built
+ *  stylesheet at all five font steps (S/M/L/XL/XXL), not derived from
+ *  the CSS source. Measured row heights: 33 / 34 / 37 / 40 / 43px.
+ *
+ *  A row is:
+ *    - its content box = the taller of
+ *        · the row's strut: the `ListRow` middle column inherits the
+ *          BASE font size, and Tailwind's preflight sets
+ *          `line-height: 1.5` on <html> → base × 1.5;
+ *        · the `size="sm"` Switch's label inline box (20px) — at the S
+ *          step the strut (18px) is shorter than this, so the SWITCH
+ *          decides the row height there, not the text;
+ *    - plus `py-1.5` (0.75rem, a FIXED length — the padding does not
+ *      follow the font knob);
+ *    - plus the 1px hairline `divide-y` paints on the row's top edge
+ *      (the border belongs to the row's own box, so it is part of the
+ *      row height — NOT an extra per-gap addition).
+ *
+ *  Nine rows therefore need 9 × R, where R = max(base×1.5, 20px) + 12px
+ *  + 1px. Verified totals: S 297 / M 306 / L 333 / XL 360 / XXL 387px.
+ *
+ *  WHY NOT `text-11`: the tool name renders at `text-11` (0.786em), but
+ *  the row height comes from the strut and the switch, not the 11px
+ *  label. Sizing from the label yields ~28.5px rows and the list then
+ *  shows one row fewer than intended.
+ *
+ *  Bound to `--ui-font-size` rather than a frozen px, following
+ *  `ProviderPicker`'s GROUP_BODY_MAX_HEIGHT: a frozen cap shows fewer
+ *  than nine rows at the XXL font step and more than nine at S. */
+const BUILTIN_TOOLS_MAX_HEIGHT =
+  "calc((max(var(--ui-font-size, 0.875rem) * 1.5, 20px) + 0.75rem + 1px) * 9)";
 // Stable empty-object reference for Zustand selectors (see line ~178 below).
 // Returning a fresh `{}` from a selector on every render trips
 // `useSyncExternalStore`'s Object.is equality check → infinite re-render →
@@ -529,7 +563,7 @@ export function ToolsTab() {
             {builtinToolsAll.length === 0 ? (
               <EmptyState message={t("agentSetup.noBuiltinTools")} />
             ) : (
-              <OverlayScrollbar maxHeight={192} containerClassName="flex-none w-full">
+              <OverlayScrollbar maxHeight={BUILTIN_TOOLS_MAX_HEIGHT} containerClassName="flex-none w-full">
                 <ListBox variant="plain">
                   {builtinToolsAll.map((entry) => (
                     <ListRow

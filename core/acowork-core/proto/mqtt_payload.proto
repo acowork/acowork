@@ -1090,14 +1090,15 @@ message Intent {
   optional bool has_human_participant = 13;
   /// Runtime runs a node-authenticated HTTP pull for attachment bytes.
   repeated string chat_attachment_ids = 14;
-  /// Design 27 §5.5.5 (ADR-100 D12): pin this turn to ONE execution session
-  /// instead of letting the Chat Router decide. Set when the human composed
-  /// the message while standing in that session's own execution view — who
-  /// answers this is already answered by where they typed it. The Runtime
-  /// delivers straight to it and skips the router (no router call, no reaction
-  /// row). Empty = ordinary routing. Advisory: the Runtime falls back to the
-  /// normal route when the named session is not loaded.
-  string for_execution_session = 15;
+  /// ADR-100 Rev. 8: field 15 (`for_execution_session`, the execution-view
+  /// pin) is retired and MUST NOT be reused. A message composed in an
+  /// execution session no longer travels through the Chat entry at all — it
+  /// is a session-scoped write (`POST /sessions/{sid}/messages`), so there is
+  /// nothing to pin and nothing to route. The number is reserved because the
+  /// wire format is append-only: an old sender's value must never be
+  /// reinterpreted as a different field.
+  reserved 15;
+  reserved "for_execution_session";
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

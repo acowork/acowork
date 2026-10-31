@@ -60,22 +60,6 @@ pub enum SessionOpenOutcome {
     ResumedFromDisk,
 }
 
-/// What a pinned turn (ADR-100 D12) is authorized against, whichever
-/// lifecycle state the target is in.
-///
-/// A closed session answers exactly like a live one — the facts come from the
-/// session-meta store instead of the in-memory conversation, so the pin's
-/// ownership rules do not depend on whether the runtime happens to still hold
-/// the session. See [`SessionManager::pinned_target_facts`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PinnedTargetFacts {
-    /// The Chat session this execution session is bound to (design 27 §8.2).
-    pub chat_session_id: Option<String>,
-    /// The account / agent instance that started it (ADR-076 §决策 4) — the
-    /// one identity allowed to write it.
-    pub initiator: Option<String>,
-}
-
 /// Configuration for SessionManager.
 // (no `Debug`: the session-event publisher below wraps an MQTT handle that
 // has no `Debug` impl, and nothing formats this config.)
@@ -833,86 +817,6 @@ impl SessionManager {
             .insert(key, new_sid.clone())
             .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
         Ok((new_sid, true))
-    }
-
-    /// ADR-100 D12: the two facts a pinned turn is authorized against.
-    ///
-    /// Read from the live conversation when the session is loaded, and from
-    /// the session-meta store when it is only on disk. Both cases must answer
-    /// the same question with the same rules: ADR-038's `Closed` means "on
-    /// disk", not "gone", and after a runtime restart **every** session is
-    /// `Closed` — the ordinary state of the session the human is looking at,
-    /// not an edge case.
-    ///
-    /// Deliberately free of the open state machine: authorization is decided
-    /// on these facts, and only an authorized pin pays for reopening a closed
-    /// session (see [`Self::open_pinned_target`]).
-    ///
-    /// `None` = this agent has no such session (neither live nor on disk);
-    /// the caller drops the pin.
-    pub fn pinned_target_facts(&self, session_id: &str) -> Option<PinnedTargetFacts> {
-        if let Some(handle) = self.get_session(session_id) {
-            let (chat_session_id, initiator) = handle
-                .conversation
-                .as_ref()
-                .map(|conv| (conv.chat_session_id(), conv.initiator()))
-                .unwrap_or((None, None));
-            return Some(PinnedTargetFacts {
-                chat_session_id,
-                initiator,
-            });
-        }
-        let conversations_dir =
-            std::path::Path::new(&self.core.config.work_dir).join("conversations");
-        let meta = crate::conversation::read_session_meta(&conversations_dir, session_id).ok()?;
-        Some(PinnedTargetFacts {
-            chat_session_id: meta.chat_session_id,
-            initiator: meta.initiator,
-        })
-    }
-
-    /// ADR-100 D12: bring a pinned target up so a turn can be delivered to it.
-    ///
-    /// A `Closed` session (on disk, not in memory — what every session is
-    /// right after a restart, or after idle eviction) is reopened through the
-    /// ADR-038 state machine instead of being treated as a stale id. That is
-    /// the whole point of a pin: the human is continuing the conversation on
-    /// their screen, and the session it belongs to is on disk, so "not loaded
-    /// this second" is not an answer.
-    ///
-    /// `false` = the session no longer exists (deleted while the client still
-    /// held the id) or could not be reopened; the caller drops the pin.
-    pub async fn open_pinned_target(&mut self, session_id: &str) -> bool {
-        if self.get_session(session_id).is_some() {
-            return true;
-        }
-        match self.resume_session(session_id).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                tracing::info!(
-                    session_id,
-                    "pinned execution session is gone — no row on disk to reopen"
-                );
-                return false;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    session_id,
-                    error = %e,
-                    "pinned execution session could not be reopened"
-                );
-                return false;
-            }
-        }
-        // The human has explicitly come back to this session, so it is
-        // routable again — the same rule `chat_dispatch(Target::Existing)`
-        // applies to a reopened task: the terminal mirror is a hint, the live
-        // session is the truth. Without this the Chat would keep refusing to
-        // route here and open yet another session on the next message.
-        if let Err(e) = self.terminal_sessions.forget(session_id) {
-            tracing::warn!(session_id, error = %e, "terminal-session mirror rewrite failed");
-        }
-        true
     }
 
     /// Design 27 §6.2: a PM task reaching a terminal state ends its
@@ -2153,6 +2057,59 @@ impl SessionManager {
         // forever (permanent "syncing LLM config" banner in the Desktop).
         self.republish_session_config(session_id);
         Ok(Some(outcome))
+    }
+
+    /// Whether the session has an in-memory task that can take a turn.
+    ///
+    /// Deliberately cheap (`contains_key`, no disk probe): the dispatch
+    /// funnel calls it inline on the single inbound loop, where any I/O
+    /// would head-of-line block every other message. Use
+    /// [`Self::ensure_session_active`] on a per-request task when the
+    /// answer must be "reopen it if it is only on disk".
+    pub fn is_session_active(&self, session_id: &str) -> bool {
+        self.sessions.contains_key(session_id)
+    }
+
+    /// ADR-038 / ADR-100 Rev. 8: make sure a session can **take a turn**,
+    /// reopening it from disk when it is only `Closed`.
+    ///
+    /// The execution surface's only write path (`POST /sessions/{sid}/messages`)
+    /// needs this: `dispatch_inbound` hands the message to the in-memory
+    /// session task, and a session that is only on disk has no task — the
+    /// message would be dropped after a 202, silently.
+    ///
+    /// `Closed` is not an edge case: ADR-038's `Closed` means "on disk, not in
+    /// memory", and **every** session is `Closed` right after a Runtime
+    /// restart, and after an idle eviction. The human is looking at a
+    /// transcript and typing into it — reopening the session they are looking
+    /// at is the only honest answer.
+    ///
+    /// `NotFound` is refused: there is nothing to write into, and the caller
+    /// must hear so (a 404), never a 202 that loses the message.
+    ///
+    /// The terminal mirror (ADR-099 D5) is deliberately **not** touched here.
+    /// It records "this PM task is over, do not route here", and routing is
+    /// the Chat Router's business; a direct write into a session the human
+    /// has open says nothing about where the *next* chat message should go.
+    /// Only `chat_dispatch(Target::Existing)` — a real routing decision —
+    /// forgets the mirror.
+    ///
+    /// `None` = this agent has no such session. `Some(outcome)` = the session
+    /// can take the turn, and the outcome says whether this call is what made
+    /// it possible (`ResumedFromDisk`) or it already could
+    /// (`AlreadyActive`) — the write path broadcasts the former (ADR-038:
+    /// activation is published, never polled), so the distinction is load
+    /// bearing, not decoration.
+    pub async fn ensure_session_active(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<SessionOpenOutcome>> {
+        // One probe: the open state machine already answers all three states
+        // (NotFound / no-op Active / reopen from disk) and refreshes the
+        // retained `SessionConfig` snapshot on the way through. Probing the
+        // lifecycle first and then resuming would just read the same state
+        // twice on the disk path.
+        self.resume_session(session_id).await
     }
 
     /// ADR-076 §决策 4: set the read visibility of a session.
@@ -5981,84 +5938,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 
-    /// ADR-100 D12 revision: a pin to a **closed** session is a pin to a
-    /// session, not to a memory slot. After a restart every session is closed,
-    /// so the facts must come off disk and the target must be reopened — the
-    /// alternative is the defect this pins down: the pin is dropped, the turn
-    /// falls back to routing, and the human gets a brand-new execution session
-    /// instead of the conversation they were reading.
-    ///
-    /// A reopened task also leaves the terminal mirror, so the Chat Router can
-    /// see it again (the mirror is a hint, the live session is the truth).
-    #[tokio::test]
-    async fn a_closed_pin_target_reads_its_facts_off_disk_and_reopens() {
-        let work_dir =
-            std::env::temp_dir().join(format!("acowork-pinned-{}", Uuid::new_v4()));
-        let config = crate::config::RuntimeConfig {
-            work_dir: work_dir.to_string_lossy().to_string(),
-            ..Default::default()
-        };
-        let manifest = acowork_core::AgentManifest::from_toml(
-            r#"
-            agent_id = "com.test.pinned_target"
-            version = "1.0.0"
-            name = "Test pinned target"
-            description = "A closed pin target is reopened, never replaced"
-            author = "test"
-            runtime_version = "0.1.0"
-
-            [llm]
-            provider = "mock"
-            model = "test-model"
-            "#,
-        )
-        .unwrap();
-        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
-        let core = Arc::new(AgentCore::new(
-            config,
-            manifest,
-            provider,
-            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
-        ));
-        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
-        manager.set_resolver(Arc::new(std::sync::RwLock::new(
-            WorkspaceResolver::new_for_test(vec![]),
-        )));
-
-        let key = "conv:task:proj-1:T-8:com.test.pinned_target";
-        let (sid, _) = manager
-            .route_intent_session(key, None, Some("cs-project-group"), None)
-            .await
-            .expect("route task session");
-        manager.close_intent_context(key).await.expect("terminal close");
-        assert!(manager.get_session(&sid).is_none(), "closed: on disk only");
-
-        // The facts survive the transition, so the pin's ownership rules are
-        // the same before and after a restart.
-        let facts = manager.pinned_target_facts(&sid).expect("facts from disk");
-        assert_eq!(facts.chat_session_id.as_deref(), Some("cs-project-group"));
-        assert_eq!(facts.initiator, None);
-
-        assert!(manager.open_pinned_target(&sid).await, "reopened");
-        assert!(manager.get_session(&sid).is_some());
-        assert!(
-            !manager.terminal_sessions.contains(&sid),
-            "a session the human came back to is routable again"
-        );
-        assert!(
-            !crate::agent::session::intent_routing::TerminalSessions::load(&work_dir)
-                .contains(&sid),
-            "and the mirror is rewritten, not just the in-memory copy"
-        );
-
-        // A session this agent never had is refused; the caller then finishes
-        // the turn deterministically instead of opening a replacement.
-        assert!(manager.pinned_target_facts("no-such-session").is_none());
-        assert!(!manager.open_pinned_target("no-such-session").await);
-
-        let _ = std::fs::remove_dir_all(&work_dir);
-    }
-
     /// ADR-099 revision: a `session_config` seed that differs from the mapped
     /// session's own config never opens a new session — a config change alone
     /// is not new work, the router is the only judge of that. And it does not
@@ -6447,6 +6326,58 @@ mod tests {
         assert!(
             chunk_rx.try_recv().is_err(),
             "a NotFound open must not emit any chunk event"
+        );
+    }
+
+    /// ADR-038 / ADR-100 Rev. 8: the execution surface's only write path
+    /// (`POST /sessions/{sid}/messages`) needs an **Active** session, because
+    /// the turn goes to the in-memory session task.
+    ///
+    /// `Closed` is the ordinary state of every session right after a Runtime
+    /// restart and after an idle eviction — not an edge case — so the write
+    /// path must reopen the session the human is looking at instead of
+    /// dropping the message after a 202. `NotFound` must stay refused: there
+    /// is nothing to write into, and the caller has to hear it.
+    #[tokio::test]
+    async fn ensure_session_active_reopens_a_closed_session_and_refuses_a_missing_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut manager, _chunk_rx) = republish_test_manager(&dir);
+        let sid = manager
+            .create_frontend_session(None, None, None, None)
+            .await
+            .unwrap();
+
+        // Active: a no-op that still answers "the turn can land" — and says so
+        // with `AlreadyActive`, which is what keeps the write path from
+        // re-broadcasting an activation nobody caused.
+        assert_eq!(
+            manager.ensure_session_active(&sid).await.unwrap(),
+            Some(SessionOpenOutcome::AlreadyActive),
+            "an active session takes the turn"
+        );
+
+        // Closed: reopened from disk, so the turn has a task to land in — and
+        // the outcome is the fact the caller broadcasts.
+        manager.close_session(&sid).await.unwrap();
+        assert!(
+            manager.get_session(&sid).is_none(),
+            "the closed session has no in-memory task"
+        );
+        assert_eq!(
+            manager.ensure_session_active(&sid).await.unwrap(),
+            Some(SessionOpenOutcome::ResumedFromDisk),
+            "a closed session is reopened for the turn"
+        );
+        assert!(
+            manager.get_session(&sid).is_some(),
+            "the reopened session has a task again"
+        );
+
+        // NotFound: refused, never silently "opened".
+        assert_eq!(
+            manager.ensure_session_active("no-such-session").await.unwrap(),
+            None,
+            "a session that does not exist is refused"
         );
     }
 

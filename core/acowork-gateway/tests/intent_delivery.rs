@@ -74,7 +74,6 @@ fn req(target: &str) -> DeliveryRequest {
         status: String::new(),
         has_human: None,
         chat_attachment_ids: Vec::new(),
-        for_execution_session: String::new(),
     }
 }
 
@@ -644,7 +643,6 @@ fn intent_wire_fields_roundtrip() {
         status: String::new(),
         has_human_participant: None,
         chat_attachment_ids: vec!["att-1".into()],
-        for_execution_session: "s-exec".into(),
     };
     let cmd = ControlCommand {
         instance_id: TARGET.into(),
@@ -671,8 +669,4 @@ fn intent_wire_fields_roundtrip() {
     assert_eq!(back.repo, "https://github.com/o/p");
     assert_eq!(back.session_config_json, r#"{"model":"m1"}"#);
     assert_eq!(back.chat_attachment_ids, vec!["att-1".to_string()]);
-    // ADR-100 D12: the execution-session pin is the whole point of a pinned
-    // turn — if it were lost on the wire the Runtime would route the message
-    // instead of delivering it, silently undoing the composer's intent.
-    assert_eq!(back.for_execution_session, "s-exec");
 }

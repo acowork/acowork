@@ -1,8 +1,8 @@
 # ADR-100：Chat 事件日志化——移除执行状态卡片，在途轮次落时间点事件行
 
 - **编号**：ADR-100
-- **状态**：已接受（Rev. 7，2026-10-30：pinned 回合的落点修订——关停的会话重新打开而不是让 pin 落空，且 pinned 回合永不交给 Chat Router，见 D12 修订；Rev. 6，2026-10-27：非 pinned 的本地回合由运行时补齐 chat 坐标，卡片不再丢失，见 D12 补记；Rev. 5，2026-10-24：ADR-099 删除轮转后 `opened_new` 的取值面收敛，见 D11；Rev. 4，2026-10-23：执行视图的输入改走 chat 入口 + 定向直投，见 D12；Rev. 3：路由反应行落盘 + 头像不变量，见 D11；Rev. 2：撤销中间状态落盘，见 D10）
-- **日期**：2026-10-22（Rev. 2 / Rev. 3 / Rev. 4：2026-10-23；Rev. 5：2026-10-24；Rev. 6：2026-10-27；Rev. 7：2026-10-30）
+- **状态**：已接受（Rev. 8，2026-10-31：取消执行面消息的 chat 镜像，连带删除 D12 的定向直投（pin）机制，见 D14；Rev. 7，2026-10-30：pinned 回合的落点修订——关停的会话重新打开而不是让 pin 落空，且 pinned 回合永不交给 Chat Router，见 D12 修订；Rev. 6，2026-10-27：非 pinned 的本地回合由运行时补齐 chat 坐标，卡片不再丢失，见 D12 补记；Rev. 5，2026-10-24：ADR-099 删除轮转后 `opened_new` 的取值面收敛，见 D11；Rev. 4，2026-10-23：执行视图的输入改走 chat 入口 + 定向直投，见 D12；Rev. 3：路由反应行落盘 + 头像不变量，见 D11；Rev. 2：撤销中间状态落盘，见 D10）
+- **日期**：2026-10-22（Rev. 2 / Rev. 3 / Rev. 4：2026-10-23；Rev. 5：2026-10-24；Rev. 6：2026-10-27；Rev. 7：2026-10-30；Rev. 8：2026-10-31）
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊 §5.5.4 / §5.5.5 / §6）、ADR-099（Chat Router，D3 投递时锚定 pointer）、ADR-086（移动端多会话）、ADR-049（Session 状态子态）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
 
@@ -23,6 +23,8 @@ v2.1（ADR-099 同期）在 chat 事件日志之上叠加了一块 **live 状态
 > **修订 Rev. 6（2026-10-27）**：Rev. 4 把"这一轮对 chat 负有哪些义务"记在**客户端的 pin**上，而 pin 的 chat id 来自会话列表行——Router 创建的会话从不发 `session_created`，桌面端可能压根没有那一行。于是执行视图发出的消息落回 `POST /sessions/{sid}/messages`（`surface` 为空），该轮既不在 chat 里留下人类消息，`ask_user_question` / 审批卡片也无处可落：群聊看不见"这一跑停在等什么"，只留着上一次的中断状态。修法不是再加一层客户端判据，而是**由运行时补齐 surface**：会话的 chat 绑定（durable）给 chat id，写入口已验证的调用者（`x-user-id` scope）给 `answerable_by`；`card_target()` 因此只要求"有 chat + 有可答人"，**不再要求触发行**——§5.5.4 的答案通道本来按卡片自身 id 解析，触发行只是渲染上的归属坐标。卡片以 standalone 形态落盘（`in_reply_to` 为空）。仍然缺的是 Rev. 4 的**头行**：Runtime 不能以用户身份写 `user_message`（D12 已否决该做法），非 pinned 回合在 chat 里依旧没有提问行——补那一半要么客户端把 pin 修好，要么改身份模型。
 
 > **修订 Rev. 7（2026-10-30）**：D12 第 3 条把 pin 定成"提示，不是闸门"——目标会话未加载就清空 hint、落回正常路由。这条规则在 `Closed` 状态下是错的：ADR-038 的 `Closed` 意思是"在盘上、不在内存里"，而**进程重启后每一个会话都是 `Closed`**。于是实测缺陷如下：执行视图里对一个已有会话继续说话 → pin 因"未加载"被丢弃 → 该轮进入 Chat Router → Router 失败（或选中 `dispatch(new)`）→ **每发一条消息就多一个空执行会话**（缺陷现场：一次重启后项目群里连续出现 4~5 个只含 1 条用户消息的执行会话）。修法两条：① pin 的判定与投递都按**会话是否存在**而不是"是否在内存里"——事实从会话元数据存储读，`Closed` 目标经 ADR-038 的开机状态机重新打开后投递，被重新打开的任务同时移出终态镜像（`chat_dispatch(Target::Existing)` 同一条规则）；② 兑现不了的 pin（会话已删除 / 不属于本次发送的 chat / 发起人不是发送者）由**确定性路由**收尾，**永不进入 Chat Router**——新开执行会话是 Chat 会话的权限（Router `dispatch(new)` 或人自己点 `+`），执行会话里发出的用户消息只能回到它自己，除非它发的是 intent。pinned 回合因此也进同一条 per-chat 队列（键 `PendingTurn::pinned_session_id` 区分投递作业与路由作业）：重新打开会话是磁盘工作，不能压在 MQTT 入站循环上，到达顺序也与该 chat 的其它回合保持一致。
+> **修订 Rev. 8（2026-10-31）**：Rev. 4–7 都在给 D12 的 pin 打补丁，而 pin 存在的唯一理由只有一条：**人类在执行面敲下的那句话，也要出现在 chat 转录里**。这个需求本身被取消——执行会话的消息只写执行会话自己（`POST /api/agents/{id}/sessions/{sid}/messages`），不再镜像成 chat 的 `user_message` 行。镜像没了，pin 就没有存在的理由：连带删除 proto `Intent.for_execution_session`、chat 入口的 `for_execution_session` / `pinned_agent` / `command` 及其上限、`is_agent_participant`，以及 Runtime 的 `deliver_pinned_turn` / `PinnedTargetFacts` / `open_pinned_target` / `PendingTurn.pinned_session_id`。Rev. 7 立的那条不变量（"新开执行会话是 Chat 会话的权限，执行会话里发出的用户消息只能回到它自己"）从此**由构造保证**：chat 里唯一的 `user_message` 是 Gateway 为 chat 面回合写的那一条，执行面的消息在数据源上就不是 router 的输入，也就不需要任何东西去"告诉 router 别路由"。代价：chat 转录里看不见执行面那句提问，那一轮在 chat 里只剩交互卡片与终态 echo（standalone 形状，D9 / D13 / Rev. 6 已定形）。发布：Desktop / Mobile / Gateway / Runtime 必须同批——旧前端仍带的 `for_execution_session` 会被 prost 当未知字段丢弃，那次发送于是退化为一条普通 chat 消息并进入 router（可能新建会话），本修订不提供平滑层。
+
 
 ## 背景
 
@@ -128,7 +130,7 @@ Rev. 2 把"派发了 / 开轮了"这类**进度**赶出历史是正确的，但�
 
 **与 D10 的关系。**D10 撤销的是**进度**落盘（派发 / 开轮 / 降级回执），D11 恢复的是**对话反馈**（消息去向）——前者对历史读者零价值，后者有；判据始终是"读者几个月后重看这条消息时是否想知道"。
 
-### D12 — 修订（Rev. 4）：执行视图的输入改走 chat 入口，并以定向直投跳过 router
+### D12 — 修订（Rev. 4）：执行视图的输入改走 chat 入口，并以定向直投跳过 router（Rev. 8 已取消，见 D14）
 
 D9 让绑定 chat 的执行会话把**本地回合的输出**回写进 chat，但那条**人类消息本身**仍只在执行会话的 JSONL 里——chat 于是呈现"只有回答、没有提问"的半轮对话，几个月后翻记录的人看不到任务是被什么话开起来的。补上它最省事的写法是让 Runtime 以**用户身份**替 chat 写一行，这条路被否决：写入口的身份必须是发起人的身份，代写等于把"谁说的"变成实现细节。因此本决策把入口本身换掉——**人在执行视图里说的话，从 chat 入口进去**。
 
@@ -161,9 +163,25 @@ D12 把 pinned 回合投成 `SessionMessage::ChatMessage`，转换时只从信�
 5. **已评估并否决：把两条传输合一（pinned 也投 `SessionMessage::Intent`）。**D12.2 的分歧是真的：附件模型一边是 ADR-046 判别联合（写进本会话 `files/`、node-local 路径），一边是 `chat_attachment_ids`（跨进程 HTTP 拉取）；per-turn skill 注入只存在于 ChatMessage 臂；渲染上人话对信封串；角色上 initiator 对可能的 responder；收尾上 `exec:` 独立行对 §7.1 write-back。合一要么给 Intent 补三个可空字段并在臂内到处 `if is_pinned`（约 700 行带模式标志的单臂，总行数不降反升），要么在运行时和解两套附件语义——后者本身是另一场尚未开始的讨论。它还牵动 mailbox / sweeper / response target 的跨进程语义，需要 Gateway + Runtime + PM 三边同改并重新论证混部兼容。本决策已把"必须显式产出 surface"变成编译期强制点，合一剩下的收益只有"enum 少一个变体"。**重新考虑的触发条件**：出现第 3 条传输；或两套附件模型统一（`AttachedItem` 与 `chat_attachment_ids` 合一）时。
 6. **影响面仅 Runtime 内部，并有一处有意的行为扩张。**Gateway 未改：这些事实本就在信封上（D12 起 pinned 发送即 `has_human: Some(true)`），丢失发生在 Runtime 的转换处。agent↔agent 请求的消费语义不变（pair session 的卡片仍写、`has_human = Some(false)` 仍禁止阻塞）。扩张在 `notify`：fire-and-forget 回合过去因 `chat_writeback` 为空而不写卡片，现按同一判据（绑定了 chat、且有可答的发送人）会写。这是修正而非新策略——问题既然落在群里就该看得见，回合结束时未答的卡片由第 4 条关闭，不留死按钮。
 
+### D14 — 修订（Rev. 8）：取消执行面消息的 chat 镜像，连带取消 D12 的定向直投
+
+**需求事实。**一个执行会话的创建权只有两个来源：① agent 调用 `intent_send`（目标由会话坐标或 conversation_id 决定）；② chat 会话的回合，由收信 agent 的 router 决定投给谁、要不要新建。除此以外，任何一条消息都不该有"新建执行会话"的权力。
+
+**根因。**D12 要买的东西只有一件：人类在执行面敲下的那句话，也要在 chat 转录里看得见。为了让它看得见，那句话被写成 chat 的 `user_message` 行——而 chat 里的 `user_message` 恰恰是 router 的输入。于是必须再发明一个 pin 去告诉 router 闭嘴，并沿着这个提示一路补齐：`pinned_agent` 的参与者校验、`command` / `attached_items` 的上限、目标会话已关闭时把它重开的 `PinnedTargetFacts` / `open_pinned_target`、`PendingTurn.pinned_session_id` 的排队与 drain、pin 被拒之后仍要走确定性路由的兜底。pin 是客户端携带的提示，不是服务端的事实：它会缺失（router 建的会话没有客户端行可读绑定）、会过期（会话被关闭）、会被拒（命名的实例不是参与者），每一种缺失都要再造一条兜底，而每条兜底又需要新的数据模型来描述自己。
+
+**决定：取消这个需求。**执行面 composer 的消息只写进执行会话自己（`POST /api/agents/{id}/sessions/{sid}/messages`），不再镜像到 chat。随之删除：proto `Intent.for_execution_session`（字段 15）、chat 入口的 `for_execution_session` / `pinned_agent` / `command`、Gateway 的 pin 归一化与其四条上限、`is_agent_participant`；Runtime 的 `deliver_pinned_turn`、`PinnedTargetFacts` / `pinned_target_facts` / `open_pinned_target`、`PendingTurn.pinned_session_id` 与 drain 里的 pinned 分岔。
+
+**保留不动。**D9 的输出回写照旧：绑定 chat 的执行会话，其回合的交互卡片与终态 echo 仍落进那个 chat，只是取 standalone 形状（`trigger_message_id` 为空）——这正是 D13 / Rev. 6 已经定形的形状。`answerable_by` 仍由 Gateway 的 `x-user-id` scope 提供：那是关于调用者的事实，不是关于绑定的提示。chat 写入口仍只接受 `interaction_request` / `system_notice` / `agent_message`，`user_message` 只有 Gateway 自己能写。`attached_items` 与 `meta.exec_attachments` 投影留下——它们服务的是 chat 面 composer 自己的 workspace 引用，与镜像无关。
+
+**`Closed` 会话由谁重开。**删除 `open_pinned_target` 不撤销“关停的会话重新打开而不是让消息落空”这条义务，只换归属：`POST /sessions/{sid}/messages` 在自己的请求任务上先 `ensure_session_active`（`Active` 直通、`Closed` 从盘上重开、`NotFound` 返 404）。`Closed` 不是边角情形——ADR-038 的 `Closed` 意思是“在盘上、不在内存里”，而**进程重启后每一个会话都是 `Closed`**，后台标签页（由 `adoptRuntimeTabs` 恢复、不走 `POST /sessions/{sid}/open`）与移动端 composer 都会命中。入站派发环（`dispatch_inbound`）**不做**重开：它内联运行在这台 Runtime 唯一的 MQTT/HTTP 派发循环上，而 resume 要读整份转录，压在这里会让所有入站消息队头阻塞；那一层只做 `contains_key` 的廉价校验，落到没有任务时发 `session_not_opened` 事件（Desktop 给“重新打开”按钮）。
+
+**代价。**chat 转录里不再出现执行面那句人类提问；那一轮在 chat 里只剩卡片与答案。这是本修订主动选择的损失，换来的是"执行面消息触发新执行会话"在构造上不可能，而不是被一条提示挡住。
+
+**否决的替代。**①保留镜像、但把消息来源做成判别式字段：那条字段仍然只能表达"这一次别走 router"，与 pin 同物，复杂度不减；②在执行面发送后补一条 agent 署名的通知行：新增行类型，违背 D10"中间状态不落盘"；③只在 pin 被拒时禁止新建：症状级补丁，D12 的整套流程照留。
+
 ## 验收标准
 
-> 1–8 为 Rev. 1 的验收、9–13 为 Rev. 2 的验收（均保留作历史记录）；当前验收以下方 9–17 为准（14–16 为 Rev. 3 新增，17 为 Rev. 4 新增，与 9–13 并存——Rev. 3 只恢复 `turn_routed` 一条反应行，Rev. 4 不新增任何行类型，都不撤销 Rev. 2 的进度不落盘）。
+> 1–8 为 Rev. 1 的验收、9–13 为 Rev. 2 的验收（均保留作历史记录）；当前验收以下方 9–19 为准（14–16 为 Rev. 3 新增，17 为 Rev. 4 新增，19 为 Rev. 8 新增，与 9–13 并存——Rev. 3 只恢复 `turn_routed` 一条反应行，Rev. 4 不新增任何行类型，都不撤销 Rev. 2 的进度不落盘）。
 
 1. **问题1 消失**：消息发出后、回复落库前，chat 里至少有一条 `turn_dispatched` 事件行可见（1:1 / 群聊 @ / PM 派发三链路一致）。
 2. **问题2 消失**：stop 当前轮后，被加塞的 pending 开新一轮时，chat 出现新一轮的 `turn_started` 事件行如实表达"仍在运行"，不再有无状态的持续态卡片与真相打架。
@@ -181,8 +199,10 @@ D12 把 pinned 回合投成 `SessionMessage::ChatMessage`，转换时只从信�
 14. **路由反应行（D11）**：任何欠 chat 回写的路由回合（1:1 / 群聊 @ / PM 派发 / router 关闭时的人类消息 / 降级新建）投递成功后，chat 出现一条 `tr:{request_id}` 的 `turn_routed` 行，meta 携 `in_reply_to` / `agent_session_id` / `turn_mode`，body 为空；信封重投递不产生第二条；三端渲染为 agent 头像 + 名字 + 气泡（"启动新任务：X" / "继续之前的任务：X"），永不渲染为居中行；等待行在其后继续存在直至终态。
 15. **头像不变量（D11）**：空正文终态行（居中状态行）之后的 agent 回复必须重新带头像 + 名字；`turn_routed` 与其后的真实回复各自独立带头像。
 16. **降级新建（ADR-099 修订联动）**：router 降级（`Fallback`）的 chat 人类消息不再复用 intent_map 映射的历史会话，改经 `chat_dispatch(Target::New)` 新建并绑定同一 chat、重指向映射；`PassThrough`（PM / agent-agent / response / router 关闭）的确定性复用不变。
-17. **执行视图走 chat 入口（D12）**：绑定 chat 的执行会话，其 composer 的发送落 `/api/intents/chat-message` 并携 `for_execution_session` 与客户端 `message_id`；chat 里出现一条**该用户身份**的 `user_message`，其后同一执行会话的终态 `agent_message` 携 `in_reply_to` 指向它，等待行随之消失；执行会话 JSONL 里同一 `message_id` 只有一条用户行；未绑定或无账号时仍走 `POST /sessions/{sid}/messages`，chat 不增行；pin 指向仅 `Closed` 的会话时该会话被重新打开、消息落在原会话里，pin 指向已删除的会话时消息仍被投递（走确定性路由，不进 Chat Router，也不代 pin 开会话，Rev. 7）；pinned 回合的 slash 技能与 `attached_items` 生效，chat 行只出现显示名而不出现路径或 documentId。
-18. **D12 的四个失败面（修复轮补锁）**：① 绑定群 chat 的执行会话其定向发送返 200 且头行落进群、`to` 是 `pinned_agent` 指名的 instance，指名一个非本 chat 参与者时返 403 且不写任何行，未带 pin 的群发仍返 400；② pin 指名一个**绑到别的 chat** 的会话时，该回合并不在别人的任务里跑，也不把那个会话打开，而是落回发送者自己 chat 的确定性路由；③ 回合以报错或附件读取失败收尾时，chat 里仍出现一条 `status=failed` 的终态行指向那条头行（等待行不会永久悬挂）；④ 尾行落库后 mailbox 里那条 `user_message` 请求转为已回答，`GET /api/intents/{message_id}` 报 `answered=true`，sweeper 不再对它产生 `fallback-` 回执。
+17. **执行视图走 chat 入口（D12，Rev. 8 已取消）**：绑定 chat 的执行会话，其 composer 的发送落 `/api/intents/chat-message` 并携 `for_execution_session` 与客户端 `message_id`；chat 里出现一条**该用户身份**的 `user_message`，其后同一执行会话的终态 `agent_message` 携 `in_reply_to` 指向它，等待行随之消失；执行会话 JSONL 里同一 `message_id` 只有一条用户行；未绑定或无账号时仍走 `POST /sessions/{sid}/messages`，chat 不增行；pin 指向仅 `Closed` 的会话时该会话被重新打开、消息落在原会话里，pin 指向已删除的会话时消息仍被投递（走确定性路由，不进 Chat Router，也不代 pin 开会话，Rev. 7）；pinned 回合的 slash 技能与 `attached_items` 生效，chat 行只出现显示名而不出现路径或 documentId。
+18. **D12 的四个失败面（修复轮补锁，Rev. 8 已取消）**：① 绑定群 chat 的执行会话其定向发送返 200 且头行落进群、`to` 是 `pinned_agent` 指名的 instance，指名一个非本 chat 参与者时返 403 且不写任何行，未带 pin 的群发仍返 400；② pin 指名一个**绑到别的 chat** 的会话时，该回合并不在别人的任务里跑，也不把那个会话打开，而是落回发送者自己 chat 的确定性路由；③ 回合以报错或附件读取失败收尾时，chat 里仍出现一条 `status=failed` 的终态行指向那条头行（等待行不会永久悬挂）；④ 尾行落库后 mailbox 里那条 `user_message` 请求转为已回答，`GET /api/intents/{message_id}` 报 `answered=true`，sweeper 不再对它产生 `fallback-` 回执。
+
+19. **执行面消息只写执行会话自己（Rev. 8 / D14）**：执行会话 composer 的发送一律落 `POST /api/agents/{id}/sessions/{sid}/messages`，chat 转录不增行；目标会话仅处于 `Closed`（在盘、不在内存）时由运行时重新打开后投递，消息不丢、不另开新会话；会话已删除时返 404，不静默吞掉；chat 入口不再接受 `for_execution_session` / `pinned_agent` / `command`，群内无卡片目标的裸消息返 400 并指向 `/api/chat-sessions/{id}/messages`。
 
 ## 兼容与迁移
 
@@ -208,9 +228,11 @@ D12 把 pinned 回合投成 `SessionMessage::ChatMessage`，转换时只从信�
 **Rev. 4（D12）：**
 
 - **不改任何既有行的形状**：`user_message` / `agent_message` 的字段与 kind 都不变，pinned 回合只是多了一个来源（执行视图 composer）与一个 `in_reply_to`。历史数据无需迁移，旧执行会话不会因为升级而多出一行或少一行。
-- **`for_execution_session` 是可选字段**：不带它的 `chat-message` 请求行为完全不变（chat 自己的 composer 走的就是这条），因此 Gateway / Runtime / 前端可以任意顺序发布，不存在版本锁。
+- **`for_execution_session` 是可选字段**：不带它的 `chat-message` 请求行为完全不变（chat 自己的 composer 走的就是这条），因此 Gateway / Runtime / 前端可以任意顺序发布，不存在版本锁。（**Rev. 8 已废止**：该字段整体删除；旧客户端仍带它时会被当作未知字段丢弃，那次发送于是退化为一条普通 chat 消息并进入 router——可能新建一个执行会话。因此 Desktop / Mobile / Gateway / Runtime **必须同批发布**，见下文 Rev. 8。）
 - **`meta.exec_attachments` 是新 meta 键**：读侧不认识它时直接忽略，最坏情况是 chat 里看不到附件显示名，不影响解析与渲染。
 - **无绑定即无变化**：未绑定 chat 的执行会话、本地模式（无账号）仍走原 `POST /sessions/{sid}/messages`，链路与升级前逐字节一致。
+
+**Rev. 8（D14）：** proto `Intent` 字段 15（`for_execution_session`）删除。旧前端仍带该字段时，prost 将其作为未知字段丢弃，那次发送于是退化为一条普通 chat 消息并进入 router——**可能新建一个执行会话**。因此 Desktop / Mobile / Gateway / Runtime 必须同批发布，本修订不提供平滑层。执行面发送的唯一通道是 `POST /api/agents/{id}/sessions/{sid}/messages`，两端的 composer 已改为只走它。
 
 ## 非目标
 
@@ -276,3 +298,9 @@ D12 把 pinned 回合投成 `SessionMessage::ChatMessage`，转换时只从信�
 - 后端（`intent_turn.rs` 单测，钉住根因而非症状）：`pinned_turn_surface_keeps_its_card_target` 断言换传输后卡片三坐标（chat / 触发行 / 可答人）与 `has_human` 仍在；`request_turn_owes_its_card_to_the_pair_session_it_was_bound_to` 锁定 Intent 传输走同一产出函数；`unbound_or_senderless_turn_writes_no_card` 覆盖 mailbox-only 与无发送人两种"写不出可答卡片"的情形；`a_bound_chat_with_an_answering_human_makes_a_standalone_card` 锁定 Rev. 6：绑定 chat 的本地回合只要知道谁可答就照样写卡片（standalone，无触发行）；`waiting_is_not_aborted` 锁定 `TurnOutcome` 四态字符串。
 - 回归：`cargo test -p acowork-runtime --lib`（1783 通过）+ `cargo clippy -p acowork-runtime --all-targets -- -D warnings`。
 - 手工验收（真实项目群）：群内 @ 一个 agent 让它提问 → `ask_user_question` 卡片出现在群聊且可就地作答；触发工具审批 → 审批卡片同样落在群里；迭代上限触发的 pause → 群内出现"回复以继续"卡片且终态行状态为 `waiting` 而非 `aborted`；同一问题在执行视图与群聊两处都可答，先答者生效（§5.5.4 一个问题两个回答面）。
+
+**Rev. 8（D14）补充：**
+- 删除的锁定（其对象已不存在）：Runtime `gateway_loop.rs` 的 7 条 pinned 投递测试与 `pinned_envelope` helper、`session_manager.rs` 的 `a_closed_pin_target_reads_its_facts_off_disk_and_reopens`、Gateway `intent_api.rs` 的 `a_pinned_group_send_may_name_only_an_agent_participant` 与 `exec_attachment_labels` / `is_agent_participant` 的 pin 语义、`chat_sessions_e2e.rs` 的两条 pinned 投递测试、Desktop `chatStore.pinnedSend.test.ts`、Mobile `__tests__/pinned-send.test.ts`。
+- 新增的锁定（钉住"执行面消息不进 chat 入口"）：Desktop `chatStore.execSend.test.ts`（绑定与否都只打 `POST /sessions/{sid}/messages`，且从不打 `/api/intents/chat-message`；`command` 与 `params_json` 不丢；气泡 id 即行 id）、Mobile `__tests__/exec-send.test.ts`（同一不变量的两层：store 不再上报绑定，transport 只发一次 session 写）、Gateway `chat_sessions_e2e.rs::a_chat_send_with_workspace_references_lands_display_only_labels`（chat 面 composer 的 workspace 引用仍是 display-only 标签，字节不跨系统）与 `a_bare_group_send_is_refused_and_writes_no_row`（群内无卡片目标的裸消息 400 且不落行）。
+- 保留并改名的锁定（回写线程化仍适用于 chat 面回合）：Gateway `only_an_echo_that_answers_a_human_row_closes_the_request`、Runtime `a_surface_without_a_trigger_row_still_has_its_card_target` / `exec_echo_meta_threads_an_answer_under_its_chat_row`。
+- 新增的锁定（钉住"`Closed` 会话不吞消息"，补回 D12 删除 `open_pinned_target` 时丢掉的那条保证）：Runtime `session_manager.rs::ensure_session_active_reopens_a_closed_session_and_refuses_a_missing_one`（`Active` 直通、`Closed` 重开后返 true、`NotFound` 返 false）；`http::server::tests::session_actions_are_owner_gated_and_keep_their_payload` 现在给服务端一个真 `SessionManager`，使 `POST /messages` 走的正是"从盘上重开再排队"这条路径。

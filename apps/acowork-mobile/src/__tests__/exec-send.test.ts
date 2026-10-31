@@ -1,18 +1,16 @@
 /**
- * ADR-100 D12 — the mobile execution composer sends through the Chat entry
- * point when its session came from a Chat.
+ * An execution-view send on mobile always writes into its own session.
  *
  * Two layers are pinned, because the rule is split on purpose:
- * - the STORE decides whether a pin exists. It reads the binding off the
- *   server's session row (`SessionInfo.chat_session_id`) and requires a
- *   signed-in account, since the Chat channel is identity-bearing. It never
- *   invents a binding and never sends a pin it cannot name a sender for.
- * - the TRANSPORT decides what a pin means on the wire: the chat-message
- *   intent channel, carrying `for_execution_session` plus the client-minted
- *   `message_id` both surfaces reconcile on.
+ * - the STORE hands the transport the session it is showing and nothing else.
+ *   It used to also report the Chat binding (`SessionInfo.chat_session_id`) so
+ *   the transport could post through the Chat entry point; that mirror is what
+ *   forced a delivery pin, so the binding is no longer an input at all.
+ * - the TRANSPORT decides what that means on the wire: one POST to
+ *   `/api/agents/{id}/sessions/{sid}/messages`, carrying the client-minted
+ *   `message_id` the optimistic bubble is keyed on.
  *
- * `command` rides both paths, so a skill picked in the composer survives the
- * change of entry point.
+ * `command` rides the write, so a skill picked in the composer survives.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
@@ -52,7 +50,7 @@ function seedSession(chatSessionId?: string) {
     agents: {
       [AGENT]: {
         info: { id: AGENT, name: 'A', node_id: 'n1' },
-        sessions: [{ session_id: SESSION, title: 'S', can_write: true, chat_session_id: chatSessionId ?? null }],
+        sessions: [{ session_id: SESSION, title: 'S', can_write: true, chat_session_id: chatSessionId } as SessionInfo],
       },
     },
     agentList: [{ id: AGENT, name: 'A', node_id: 'n1' }],
@@ -61,67 +59,61 @@ function seedSession(chatSessionId?: string) {
   useChatStore.setState({ agentStates: { [AGENT]: { ...emptyView(), activeSessionId: SESSION } } })
 }
 
-describe('ADR-100 D12: the store reports the Chat binding', () => {
+describe('the store sends to the session it shows', () => {
   beforeEach(() => {
     useAuthStore.setState({ me: { user_id: ME } as never })
   })
 
   afterEach(() => {
     useAuthStore.setState({ me: null })
+    useChatStore.setState({ agentStates: {} })
+    useAgentStore.setState({ agents: {}, agentList: [] })
   })
 
-  it('passes the pin when the session is bound and a human is signed in', async () => {
+  it('passes no chat binding when the session is bound', async () => {
     seedSession(CHAT)
     const t = fakeTransport()
     setChatTransport(t)
 
-    await useChatStore.getState().sendMessage(AGENT, SESSION, 'continue the task')
+    await useChatStore.getState().sendMessage(AGENT, SESSION, 'run it again')
 
-    expect(t.send).toHaveBeenCalledWith(AGENT, SESSION, 'continue the task', '', {
-      me: ME,
-      chatSessionId: CHAT,
-    })
+    expect(t.send).toHaveBeenCalledWith(AGENT, SESSION, 'run it again', '')
   })
 
-  it('passes no pin for an unbound session — the session-scoped write is its only path', async () => {
-    seedSession()
+  it('sends the same way for an unbound session', async () => {
+    seedSession(undefined)
     const t = fakeTransport()
     setChatTransport(t)
 
-    await useChatStore.getState().sendMessage(AGENT, SESSION, 'hello')
+    await useChatStore.getState().sendMessage(AGENT, SESSION, 'plain')
 
-    expect(t.send).toHaveBeenCalledWith(AGENT, SESSION, 'hello', '', undefined)
+    expect(t.send).toHaveBeenCalledWith(AGENT, SESSION, 'plain', '')
   })
 
-  it('passes no pin without an account, even for a bound session', async () => {
-    // The chat channel 401s an identity-less caller; falling back is the
-    // correct send, not a degraded one.
+  it('sends the same way without an account', async () => {
     useAuthStore.setState({ me: null })
     seedSession(CHAT)
     const t = fakeTransport()
     setChatTransport(t)
 
-    await useChatStore.getState().sendMessage(AGENT, SESSION, 'hello')
+    await useChatStore.getState().sendMessage(AGENT, SESSION, 'plain')
 
-    expect(t.send).toHaveBeenCalledWith(AGENT, SESSION, 'hello', '', undefined)
+    expect(t.send).toHaveBeenCalledWith(AGENT, SESSION, 'plain', '')
   })
 
-  it('keeps the picked skill on the pinned send', async () => {
+  it('keeps the picked skill on the send', async () => {
     seedSession(CHAT)
     const t = fakeTransport()
     setChatTransport(t)
 
-    await useChatStore.getState().sendMessage(AGENT, SESSION, 'weekly report please', 'weekly-report')
+    await useChatStore.getState().sendMessage(AGENT, SESSION, 'draft it', 'weekly-report')
 
-    expect(t.send).toHaveBeenCalledWith(AGENT, SESSION, 'weekly report please', 'weekly-report', {
-      me: ME,
-      chatSessionId: CHAT,
-    })
+    expect(t.send).toHaveBeenCalledWith(AGENT, SESSION, 'draft it', 'weekly-report')
   })
 
   it('paints the optimistic bubble under the id the transport minted', async () => {
-    // One id, three records: the bubble, the Chat row and the execution
-    // session's own transcript row all reconcile on what `send` returns.
+    // One id, two records: the bubble and the execution session's own
+    // transcript row reconcile on what `send` returns.
     seedSession(CHAT)
     const t = fakeTransport({ send: vi.fn(async () => 'mid-7') })
     setChatTransport(t)
@@ -132,7 +124,7 @@ describe('ADR-100 D12: the store reports the Chat binding', () => {
   })
 })
 
-describe('ADR-100 D12: a pin changes the entry point, not the destination', () => {
+describe('the transport writes to the session, never to the chat channel', () => {
   interface Call {
     url: string
     body: Record<string, unknown>
@@ -169,39 +161,24 @@ describe('ADR-100 D12: a pin changes the entry point, not the destination', () =
     vi.unstubAllGlobals()
   })
 
-  it('posts a pinned turn to the chat-message channel', async () => {
-    const mid = await sendMessage(AGENT, SESSION, 'run it again', 'weekly-report', {
-      me: ME,
-      chatSessionId: CHAT,
-    })
-
-    const post = calls.find((c) => c.url.endsWith('/api/intents/chat-message'))
-    expect(post).toBeTruthy()
-    expect(post!.body).toMatchObject({
-      chat_session_id: CHAT,
-      from_user: ME,
-      text: 'run it again',
-      in_reply_to: '',
-      for_execution_session: SESSION,
-      // A bound chat can be a project group, which has several agents: the
-      // send names the one owning this execution session, and the Gateway
-      // checks that claim against the chat's participants.
-      pinned_agent: AGENT,
-      command: 'weekly-report',
-    })
-    // The id returned for the bubble IS the row id sent, or the two surfaces
-    // would each show their own copy of one message.
-    expect(post!.body.message_id).toBe(mid)
-    // And the session-scoped write is not also made: one send, one turn.
-    expect(calls.find((c) => c.url.includes(`/sessions/${SESSION}/messages`))).toBeUndefined()
-  })
-
-  it('keeps the session-scoped write without a pin', async () => {
-    await sendMessage(AGENT, SESSION, 'plain', undefined)
+  it('posts the turn to its own session', async () => {
+    const mid = await sendMessage(AGENT, SESSION, 'run it again', 'weekly-report')
 
     const post = calls.find((c) => c.url.endsWith(`/api/agents/${AGENT}/sessions/${SESSION}/messages`))
     expect(post).toBeTruthy()
-    expect(post!.body).toMatchObject({ content: 'plain', command: '' })
+    expect(post!.body).toMatchObject({
+      content: 'run it again',
+      command: 'weekly-report',
+    })
+    // The id returned for the bubble IS the row id sent, or the transcript and
+    // the bubble would each show their own copy of one message.
+    expect(post!.body.message_id).toBe(mid)
+  })
+
+  it('makes no chat-channel request at all', async () => {
+    await sendMessage(AGENT, SESSION, 'plain', undefined)
+
     expect(calls.find((c) => c.url.endsWith('/api/intents/chat-message'))).toBeUndefined()
+    expect(calls).toHaveLength(1)
   })
 })

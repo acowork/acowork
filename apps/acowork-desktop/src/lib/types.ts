@@ -1568,15 +1568,15 @@ export interface SessionInfo {
    */
   is_active?: boolean;
   /**
-   * ADR-100 D12: the Chat session this execution session is bound to, when it
-   * came from one (the router's `dispatch(new)`, a Chat-surface `+`, or a PM
-   * task dispatched from a project group — design 27 §8.2).
+   * ADR-100: the Chat session this execution session is bound to, when it came
+   * from one (the router's `dispatch(new)`, a Chat-surface `+`, or a PM task
+   * dispatched from a project group — design 27 §8.2).
    *
-   * The execution composer reads it as a routing flag: with a binding, the
-   * human's words are sent through the Chat entry point so they land as a
-   * durable `user_message` row under the user's own identity and the chat
-   * reads as one round (question + execution result). Without one there is no
-   * chat to answer, so the send keeps the session-scoped write.
+   * It is history, not a routing flag. The execution composer no longer reads
+   * it: ADR-100 Rev. 8 (D14) canceled the chat mirror, so every execution-view
+   * send goes to `POST /sessions/{sid}/messages` and chat gains no row. The
+   * binding still names where a turn's interaction cards may land and which
+   * chat the session belongs to.
    *
    * Absent on responses from a Runtime predating the binding — `undefined`
    * means "no chat", which is the correct fallback, not a bug.
@@ -1734,10 +1734,11 @@ export function getStreamingMessageId(s: SessionStatus | undefined | null): stri
  * no-op when already Active, lazy-resume from JSONL when Closed, hard
  * load when NotFound).
  *
- * The Desktop uses this event to (a) flip `isSessionReady = true` so
- * the input area / send button unlock, (b) seed the session header
- * metadata (model, provider, last_active_at) so the user can see which
- * model was used before they type a word.
+ * The Desktop uses this event to (a) record `isSessionReady = true` — the
+ * client's observation of the lifecycle, which no input component gates on
+ * today (the write path is guarded server-side), and (b) seed the session
+ * header metadata (model, provider, last_active_at) so the user can see
+ * which model was used before they type a word.
  */
 export interface SessionOpenedEvent {
   type: "session_opened";
@@ -1763,7 +1764,7 @@ export interface SessionOpenedEvent {
  * Published by the Runtime whenever a session-level control command
  * (e.g. `chat_message`, `model_switch`, `stop`) is rejected because the
  * target session is **Closed** or **NotFound**. The Desktop listens for
- * this event to (a) flip `isSessionReady = false`, (b) surface a toast
+ * this event to (a) record `isSessionReady = false`, (b) surface a toast
  * with a one-click reopen affordance so the contract violation is
  * observable to the user instead of silently dropping the message.
  */

@@ -16,7 +16,6 @@
 
 import { create } from 'zustand'
 import { useAgentStore } from './agentStore'
-import { useAuthStore } from './authStore'
 import type { ChatMessage, LiveStatus, MessagesWindow, SessionInfo, SessionSnapshot } from '../lib/types'
 import {
   startWatching, stopWatching, setRealtimeDeps, pollNetworkState, POLL_INTERVAL_MS,
@@ -156,17 +155,14 @@ export interface ChatTransport {
   fetchSnapshot(agentId: string, sessionId: string): Promise<SessionSnapshot>
   /** Send a user message; resolves with the client message id.
    *
-   *  `pinnedChat` (ADR-100 D12) = this execution session came from a Chat, so
-   *  the message is posted through the Chat entry point and pinned back here.
-   *  The transport decides which endpoint that means; the store only reports
-   *  the binding, because the binding is server data (`SessionInfo`), not a
-   *  client preference. */
+   *  An execution-view send always goes to this session — the Chat binding is
+   *  not an input here. Where the turn's OUTPUT goes (the bound chat's card and
+   *  echo rows) is the Runtime's business, not the composer's. */
   send(
     agentId: string,
     sessionId: string,
     content: string,
     command?: string,
-    pinnedChat?: { me: string; chatSessionId: string },
   ): Promise<string>
   /** v1 approval decision (generic card; tool details ride the WS channel). */
   approval(agentId: string, sessionId: string, requestId: string, approved: boolean): Promise<void>
@@ -328,19 +324,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // into the authoritative copy instead of doubling it.
       // `command` rides the wire as the active skill name — see api.ts.
       //
-      // ADR-100 D12: when this session came from a Chat and a human is signed
-      // in, the send goes through the Chat entry point pinned back here, so the
-      // conversation gets a real `user_message` row (the human's own words, not
-      // a result the Runtime transcribed) while the turn still runs in the
-      // session on screen. Both halves must hold: the Chat channel is
-      // identity-bearing, and only the Runtime knows the binding — an unbound
-      // session keeps the session-scoped write, which is its only path.
-      const me = useAuthStore.getState().me?.user_id ?? ''
-      const chatSessionId =
-        useAgentStore.getState().getSession(agentId, sessionId)?.chat_session_id ?? ''
-      const pinnedChat =
-        me !== '' && chatSessionId !== '' ? { me, chatSessionId } : undefined
-      const mid = await transport.send(agentId, sessionId, text, cmd, pinnedChat)
+      // One entry point: the session on screen. The bound Chat (if any) never
+      // receives a copy of these words, so there is no second surface to keep
+      // the turn on and no pin to ask for one.
+      const mid = await transport.send(agentId, sessionId, text, cmd)
       // Optimistic bubble: the authoritative copy arrives with the idle
       // reload and merges over this entry; this keeps the echo instant.
       set((s) => {

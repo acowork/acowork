@@ -450,39 +450,19 @@ export function tokenClaims(jwt: string): { sub?: string; exp?: number } {
  *  the next user message arrives with `command: "weekly-report"` and the
  *  runtime injects that skill's instructions. Absent = no skill.
  *
- *  `pinnedChat` (ADR-100 D12) switches the ENTRY POINT, not the destination:
- *  the turn is posted to the Chat session this execution session came from,
- *  pinned back to this session, so the human's message lands as a durable
- *  `user_message` row under the human's own identity (the session-scoped write
- *  records it in the execution transcript only) and the Agent skips its Chat
- *  Router. The id minted here is the one row both surfaces reconcile on.
- *  `undefined` = the session has no Chat binding, so the write below is its
- *  only path. */
+ *  A message typed in an execution view belongs to that session and to nothing
+ *  else: it is NOT mirrored into the Chat session the execution session is
+ *  bound to. The mirror is what used to force a delivery pin
+ *  (`for_execution_session`) so the copy written to the transcript would not be
+ *  re-routed into a NEW execution session; with the mirror gone this write is
+ *  the only path, and the id minted here is the one row it reconciles on. */
 export async function sendMessage(
   agentId: string,
   sessionId: string,
   content: string,
   command?: string,
-  pinnedChat?: { me: string; chatSessionId: string },
 ): Promise<string> {
   const messageId = newId()
-  if (pinnedChat) {
-    await req<void>('POST', '/api/intents/chat-message', {
-      chat_session_id: pinnedChat.chatSessionId,
-      from_user: pinnedChat.me,
-      text: content,
-      in_reply_to: '',
-      message_id: messageId,
-      for_execution_session: sessionId,
-      // ADR-100 D12: the Agent that owns this execution session. Only consulted
-      // when the bound chat is a group (a project group has several agents, so
-      // the Gateway cannot pick a target on its own); the Gateway verifies the
-      // claim against that chat's participants.
-      pinned_agent: agentId,
-      ...(command ? { command } : {}),
-    })
-    return messageId
-  }
   await req('POST', `/api/agents/${agentId}/sessions/${sessionId}/messages`, {
     content,
     message_id: messageId,
@@ -793,8 +773,8 @@ export const httpChatTransport: ChatTransport = {
     }
   },
 
-  async send(agentId, sessionId, content, command, pinnedChat) {
-    return sendMessage(agentId, sessionId, content, command, pinnedChat)
+  async send(agentId, sessionId, content, command) {
+    return sendMessage(agentId, sessionId, content, command)
   },
 
   async approval(agentId, sessionId, requestId, approved) {

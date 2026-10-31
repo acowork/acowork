@@ -81,7 +81,7 @@ impl AgentLoop {
     ///
     /// Read from the surface, never from `chat_writeback`: the card is a
     /// Chat obligation, the write-back is an agent-to-agent one, and
-    /// conflating them is what made a pinned turn's cards vanish (ADR-100
+    /// conflating them is what made an execution-surface turn's cards vanish (ADR-100
     /// follow-up).
     ///
     /// The card is recorded in `open_chat_cards` so its resolution can
