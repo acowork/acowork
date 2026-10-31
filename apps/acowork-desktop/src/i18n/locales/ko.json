@@ -1778,7 +1778,10 @@
       "loading": "로딩 중…",
       "dragHint": "카드를 드래그하여 상태 변경",
       "ariaColumn": "{{status}} 열",
-      "dropHint": "여기에 놓기"
+      "dropHint": "여기에 놓기",
+      "pagePrev": "이전 페이지",
+      "pageNext": "다음 페이지",
+      "pageRange": "전체 {{total}}개 중 {{start}}–{{end}}개"
     },
     "task": {
       "subtasks": "하위 작업",

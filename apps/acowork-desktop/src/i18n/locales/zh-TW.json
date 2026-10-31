@@ -1768,7 +1768,10 @@
       "loading": "載入中…",
       "dragHint": "拖曳卡片可在欄位間變更狀態",
       "ariaColumn": "{{status}} 欄",
-      "dropHint": "拖放到此處"
+      "dropHint": "拖放到此處",
+      "pagePrev": "上一頁",
+      "pageNext": "下一頁",
+      "pageRange": "{{start}}–{{end}} / 共 {{total}} 項"
     },
     "task": {
       "subtasks": "子任務",

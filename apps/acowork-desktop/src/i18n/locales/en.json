@@ -1817,6 +1817,9 @@
       "title": "Project Settings",
       "noProject": "Select a project to manage its members and settings.",
       "info": "Project Info",
+      "display": "Display",
+      "tasksPerPage": "Tasks per page",
+      "tasksPerPageHint": "Root tasks shown per board column page (subtasks follow their parent).",
       "members": "Members",
       "actions": "Project Actions",
       "service": "Service Status",
@@ -1839,6 +1842,7 @@
     "noDescription": "No description",
     "projectName": "Name",
     "projectRemark": "Remark",
+    "displaySettingsSaveFailed": "Failed to save display settings",
     "iconUpdated": "Project icon updated",
     "iconPicker": {
       "title": "Change project icon",
@@ -1889,7 +1893,10 @@
       "loading": "Loading…",
       "dragHint": "Drag cards between columns to change status",
       "ariaColumn": "{{status}} column",
-      "dropHint": "Drop here"
+      "dropHint": "Drop here",
+      "pagePrev": "Previous page",
+      "pageNext": "Next page",
+      "pageRange": "{{start}}–{{end}} of {{total}}"
     },
     "activity": {
       "title": "Submissions",

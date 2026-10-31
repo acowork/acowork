@@ -10,6 +10,7 @@
 import { useTranslation } from "../../i18n/useTranslation";
 import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { cn } from "../../lib/utils";
+import { parseBoardPageSize } from "../../lib/pm-board-settings";
 import { ProjectHeader } from "./ProjectHeader";
 import { KanbanBoard } from "./KanbanBoard";
 import type { PmProject } from "../../lib/pm-types";
@@ -85,7 +86,11 @@ export function ProjectBoard({
         </div>
       )}
       <div className="min-h-0 flex-1">
-        <KanbanBoard projectId={project.id} onOpenTask={openTask} />
+        <KanbanBoard
+          projectId={project.id}
+          pageSize={parseBoardPageSize(project.metadata)}
+          onOpenTask={openTask}
+        />
       </div>
     </main>
   );

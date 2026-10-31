@@ -1834,6 +1834,9 @@
       "title": "项目设置",
       "noProject": "选择一个项目以管理其成员与设置。",
       "info": "项目信息",
+      "display": "显示设置",
+      "tasksPerPage": "单页任务数量",
+      "tasksPerPageHint": "每列每页显示的根任务数（子任务随父任务一起显示）。",
       "members": "成员管理",
       "actions": "项目操作",
       "service": "服务状态",
@@ -1856,6 +1859,7 @@
     "noDescription": "暂无描述",
     "projectName": "名称",
     "projectRemark": "备注",
+    "displaySettingsSaveFailed": "保存显示设置失败",
     "iconUpdated": "项目图标已更新",
     "iconPicker": {
       "title": "更换项目图标",
@@ -1906,7 +1910,10 @@
       "loading": "加载中…",
       "dragHint": "拖动卡片可在列间流转状态",
       "ariaColumn": "{{status}} 列",
-      "dropHint": "拖放到此处"
+      "dropHint": "拖放到此处",
+      "pagePrev": "上一页",
+      "pageNext": "下一页",
+      "pageRange": "{{start}}–{{end}} / 共 {{total}} 项"
     },
     "activity": {
       "title": "提交记录",
