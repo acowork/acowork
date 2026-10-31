@@ -9,11 +9,25 @@
  * - 子任务计数（childrenOf）
  * - 阻塞标记（is_blocked → 🔒）
  * - dnd-kit useDraggable 作为拖拽源（T2-8 接线拖动流转）
+ *
+ * ⚠️ 源卡片不贴 dnd-kit 的 active transform。看板用 <DragOverlay> 画跟随指针的那
+ * 一份，而 ActiveDraggableContext 里的 transform 带 scaleX/scaleY
+ * （dnd-kit core 的 adjustScale：overRect / activeNodeRect），把它贴回源元素
+ * 会在指针进入目标列（over = 整列 rect）时把卡片放大好几倍、再被列的
+ * overflow-hidden 裁掉。over 还是自己时比值恰好是 1，所以“没离开源卡片时
+ * 看起来正常”。源卡片留在原位、只降不透明度，跟随的那份交给 DragOverlay。
+ *
+ * 卡片造型跟随全应用 ListBox 卡片语法（与右侧设置面板同一套）：
+ *   外壳  rounded-md + border-outer + bg-panel-block + overflow-hidden
+ *   标题条 panel-block 上的 header 行
+ *   正文  border-t border-border-divider + bg-panel-inset
+ * 标题与正文是两段（发丝线 + 一档底色差），不是一整块平铺 —— 只对齐底色
+ * 而不对齐分段，看上去就是两种卡片。待审核态把琥珀色放在边框 + 标题条上，
+ * 分段关系不变。
  */
 
 import { useState } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
-import { CSS } from "@dnd-kit/utilities";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -40,7 +54,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
 
   // 离线（healthy === false）时禁用拖拽源 —— 看板只读
   const draggableDisabled = healthy === false;
-  const { attributes, listeners, setNodeRef: setDragRef, transform, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef: setDragRef, isDragging } = useDraggable({
     id: task.id,
     data: { type: "task", taskId: task.id, status: task.status, projectId: task.project_id },
     disabled: draggableDisabled,
@@ -57,10 +71,6 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
     setDragRef(el);
     setDropRef(el);
   };
-
-  const style = transform
-    ? { transform: CSS.Transform.toString(transform) }
-    : undefined;
 
   const assigneeName = useActorLabel(task.assignee);
   const creatorName = useActorLabel(task.created_by);
@@ -87,7 +97,6 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
     <>
       <div
         ref={setRefs}
-        style={style}
         {...attributes}
         {...listeners}
         role="button"
@@ -100,13 +109,12 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           }
         }}
         className={cn(
-          "group w-full rounded-md border border-border-outer bg-card-surface px-2.5 py-2 text-left shadow-sm transition-colors",
-          "hover:border-zinc-300 hover:shadow dark:bg-zinc-800 dark:hover:border-zinc-600",
+          // 外壳 = ListBox 卡片：圆角 + 外发丝线 + panel-block，overflow-hidden
+          // 让子块（标题条/正文）不再各自圆角，与设置面板的卡片同一副骨架。
+          "group w-full overflow-hidden rounded-md border border-border-outer bg-panel-block text-left transition-colors",
+          "hover:border-zinc-300 dark:hover:border-zinc-600",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]",
-          task.status === "submitted" && "border-amber-300 bg-amber-50/60 dark:border-amber-700/60 dark:bg-amber-950/30",
-          // Agent 新建待批准：同样琥珀高亮（设计 D-2「review_status=pending 高亮」），
-          // 让待办列里待审批的任务一眼可辨
-          task.status === "pending" && task.review_status === "pending" && "border-amber-300 bg-amber-50/60 dark:border-amber-700/60 dark:bg-amber-950/30",
+          needsReview && "border-amber-300 dark:border-amber-700/60",
           isDragging && "opacity-40",
           dropOver && "ring-2 ring-[var(--color-accent)]",
           depth > 0 && "ml-4",
@@ -114,14 +122,23 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
         )}
         aria-label={task.title}
       >
-        <div className="flex items-start gap-1.5">
+        {/* 标题条 —— 对应 ListBox 卡片 header 行；待审核时整条撑琥珀底色，
+            at-a-glance 的语义不变。 */}
+        <div
+          className={cn(
+            "flex items-start gap-1.5 px-2.5 py-1.5",
+            needsReview && "bg-amber-50/70 dark:bg-amber-950/40",
+          )}
+        >
           <TaskTypeIcon type={task.type} className="mt-0.5 text-xs leading-none" />
           <span className="min-w-0 flex-1 text-xs font-medium leading-snug text-text ">
             {task.title}
           </span>
         </div>
 
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-10 text-text-tertiary ">
+        {/* 正文 —— border-t 发丝线 + panel-inset：与设置面板卡片的展开体
+            完全同一关系（两段之间是线 + 一档明度差）。 */}
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border-divider bg-panel-inset px-2.5 py-1.5 text-10 text-text-tertiary ">
           <PriorityBadge priority={task.priority} />
 
           {task.is_blocked && (
@@ -160,9 +177,9 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
         {/* 待审核卡片 —— 创建者 + 批准/拒绝 inline 操作。两种形态：
             submitted = Agent 交活等验收；pending + review_status=pending =
             Agent 刚建的任务等人类批准开工（批准后 status 仍留在待办列，
-            由 Agent 自己 pm_claim_task 推进）。 */}
+            由 Agent 自己 pm_claim_task 推进）。第三段同样是发丝线分隔。 */}
         {needsReview && (
-          <div className="mt-2 border-t border-amber-200/70 pt-1.5 dark:border-amber-800/40">
+          <div className="border-t border-amber-200/70 bg-panel-inset px-2.5 py-1.5 dark:border-amber-800/40">
             {creatorName && (
               <p className="mb-1.5 text-10 text-text-tertiary ">
                 {t("pm.review.createdByLabel")}{" "}

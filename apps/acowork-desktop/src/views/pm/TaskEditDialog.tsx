@@ -614,7 +614,7 @@ function Attachments({
           {attachments.map((att) => (
             <li
               key={att.id}
-              className="group relative overflow-hidden rounded-md border border-border-outer bg-card-surface"
+              className="group relative overflow-hidden rounded-md border border-border-outer bg-panel-block"
             >
               {att.kind === "image" ? (
                 <a href={attachmentUrl(att.id)} target="_blank" rel="noreferrer">
