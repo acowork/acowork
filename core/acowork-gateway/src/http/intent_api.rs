@@ -734,6 +734,10 @@ async fn chat_append(
     // append. It is what closes the request the Gateway opened when it delivered
     // the human's `user_message`.
     let answers_request = answered_request(&req.kind, &req.meta);
+    // Remember who wrote the row before `req` moves into the append: the
+    // writer's identity is the responder-side half of the activity stamp.
+    let writer = req.from.clone();
+    let chat_session_id = req.chat_session_id.clone();
     chat_client::append_message(
         port,
         &req.chat_session_id,
@@ -748,6 +752,31 @@ async fn chat_append(
     )
     .await
     .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    // Design 27 §5.5.1 scopes the sweeper's fallback receipt to "Runtime
+    // crashed / no event at all". A row the responder just wrote through
+    // this relay is the opposite of no event: its process is up and its
+    // turn is producing facts. Re-arm that responder's open requests in
+    // this Chat session so the response deadline measures silence, not
+    // wall-clock time since delivery — otherwise a long turn (approval
+    // cards, a long tool chain) is declared crashed while it is still
+    // working, and the Chat surface shows a `failed` beside a live session.
+    //
+    // Done after the append, never before: a row the store rejected is not
+    // evidence of anything, and the ordering discipline is the same one the
+    // `mark_answered` below already follows (§7.1 — close only once the
+    // answer is on the surface).
+    {
+        let gw = state.gateway_state.read().await;
+        if let Some(mb) = gw.intent_mailbox.as_deref()
+            && mb.touch_activity(&writer, &chat_session_id) > 0
+        {
+            tracing::debug!(
+                responder = %writer,
+                chat_session_id = %chat_session_id,
+                "intent request deadline re-armed by responder activity"
+            );
+        }
+    }
     // §7.1: close the request only now that the answer is on the surface — the
     // same ordering discipline as the Intent write-back, which learned that
     // closing before the append inverts the failure mode into a turn that never

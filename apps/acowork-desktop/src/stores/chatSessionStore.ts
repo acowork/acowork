@@ -87,6 +87,12 @@ export interface ChatMessageRow {
      *  claim/submit playbook is model-facing only, never on this row). */
     task_id?: string;
     notice_type?: string;
+    /** Design 27 §5.5.1: this row is the Gateway sweeper's fallback receipt —
+     *  the SYSTEM closing an unanswered request after the response deadline,
+     *  not the agent reporting its own outcome. Renders as a neutral system
+     *  line, never as an agent bubble claiming "my execution may have
+     *  crashed" in the agent's voice. */
+    fallback?: boolean;
     /** On an `interaction_resolved` notice: how the card's request ended —
      *  "answered"/"approved"/"rejected" (a human decided, on either surface)
      *  vs "timeout"/"cancelled"/"stopped"/"turn_ended"/"unanswerable"/

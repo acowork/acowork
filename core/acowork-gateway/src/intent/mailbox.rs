@@ -78,6 +78,22 @@ pub struct MailboxEntry {
     /// past the response deadline.
     #[serde(default)]
     pub answered_at: String,
+    /// RFC 3339 stamp of the last time the Gateway saw this request's
+    /// responder *do something* on the Chat surface — a routing pointer, a
+    /// decision card, any Runtime-owned row it appended to the request's
+    /// source Chat session. Empty until the first such event.
+    ///
+    /// This is the clock the response deadline is measured against (see
+    /// [`MailboxEntry::deadline_clock`]). `delivered_at` alone cannot
+    /// distinguish a crashed responder from a healthy one mid-turn: a
+    /// write-back is only produced at turn end, so any legitimately long
+    /// turn — one blocked on approval cards, one running a long tool chain —
+    /// crosses a wall-clock deadline while its responder is demonstrably
+    /// alive. Design 27 §5.5.1 scopes the fallback receipt to
+    /// "crashed / no event at all", and "no event" is exactly what this
+    /// stamp measures.
+    #[serde(default)]
+    pub last_activity_at: String,
     /// Design 27 §5.5.4: whether the source Chat session has a human who
     /// can answer a card — carried onto the response push so the
     /// initiator's turn sees the same answerability fact.
@@ -93,6 +109,22 @@ impl MailboxEntry {
     /// A request is closed once an answer (real or fallback) was emitted.
     pub fn answered(&self) -> bool {
         !self.answered_at.is_empty()
+    }
+
+    /// The timestamp the response deadline is measured against: the later
+    /// of delivery and the last responder activity the Gateway observed.
+    ///
+    /// RFC 3339 stamps from one UTC clock sort lexicographically, so `max`
+    /// is a plain string compare — the same trick `stale_unanswered` uses.
+    /// An entry with no recorded activity falls back to `delivered_at`, so
+    /// a responder that never touched the Chat surface keeps the pre-
+    /// activity-clock behaviour.
+    pub fn deadline_clock(&self) -> &str {
+        if self.last_activity_at.as_str() > self.delivered_at.as_str() {
+            &self.last_activity_at
+        } else {
+            &self.delivered_at
+        }
     }
 }
 
@@ -178,6 +210,14 @@ impl IntentMailbox {
             if merged.answered_at.is_empty() {
                 merged.answered_at = existing.answered_at.clone();
             }
+            // Activity is monotonic — and deliberately not the "fill in when
+            // empty" shape used above: a re-record of the same dispatch (the
+            // PM scanner reuses its identity across attempts) must never
+            // *rewind* the deadline clock, which would re-arm a request whose
+            // responder has since gone quiet. Keep the later of the two.
+            if existing.last_activity_at.as_str() > merged.last_activity_at.as_str() {
+                merged.last_activity_at = existing.last_activity_at.clone();
+            }
             *existing = merged;
             self.save_locked(&inner)?;
             return Ok(entry);
@@ -222,10 +262,15 @@ impl IntentMailbox {
         Ok(())
     }
 
-    /// Requests delivered before `older_than` (RFC3339 cutoff) that still
-    /// have no answer — the §7.1 crash-fallback candidates. Response
-    /// entries and undelivered attempts are never returned: an undelivered
-    /// request failed synchronously and its sender already has the error.
+    /// Requests whose deadline clock is older than `older_than` (RFC3339)
+    /// and that still have no answer — the §7.1 crash-fallback candidates.
+    /// Response entries and undelivered attempts are never returned: an
+    /// undelivered request failed synchronously and its sender already has
+    /// the error.
+    ///
+    /// The clock is `MailboxEntry::deadline_clock` — delivery refreshed by
+    /// observed responder activity — so a long turn that is still producing
+    /// Chat-surface events is not mistaken for a crashed one.
     ///
     /// The sweeper passes the more permissive of its two windows (response
     /// deadline, responder-liveness grace) and applies the exact cutoff per
@@ -241,10 +286,53 @@ impl IntentMailbox {
                     && e.delivered()
                     && !e.answered()
                     && !e.delivered_at.is_empty()
-                    && e.delivered_at.as_str() < older_than
+                    && e.deadline_clock() < older_than
             })
             .cloned()
             .collect()
+    }
+
+    /// Stamp "the responder is alive and working on this Chat session" and
+    /// return how many open requests it re-armed.
+    ///
+    /// Called on every Runtime-owned row the Gateway relays into a Chat
+    /// session: a routing pointer, a decision card, an echo. Each is proof
+    /// the responder's process is up and its turn has not been lost, which
+    /// is the fact the sweeper needs before it declares a crash (§7.1).
+    ///
+    /// Matched on `(responder, chat session)` rather than on the row's
+    /// `in_reply_to`, because only some row kinds carry the coordinate —
+    /// a decision card is frequently unthreaded, and a turn waiting on that
+    /// card is precisely the case this must not misfire on. A responder with
+    /// several queued requests in one Chat session re-arms all of them: the
+    /// Gateway cannot tell which one the current turn is serving, and
+    /// guessing would re-introduce the false receipt this exists to remove.
+    pub fn touch_activity(&self, responder: &str, chat_session_id: &str) -> usize {
+        if chat_session_id.is_empty() {
+            return 0;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut touched = 0usize;
+        for e in inner.entries.iter_mut() {
+            if e.kind == "response" || !e.delivered() || e.answered() {
+                continue;
+            }
+            if e.to_instance != responder || e.source_chat_session_id != chat_session_id {
+                continue;
+            }
+            // Only ever move forward — a stale relay retry must not rewind.
+            if e.last_activity_at.as_str() < now.as_str() {
+                e.last_activity_at = now.clone();
+                touched += 1;
+            }
+        }
+        if touched > 0
+            && let Err(err) = self.save_locked(&inner)
+        {
+            tracing::warn!(error = %err, "mailbox activity stamp not persisted");
+        }
+        touched
     }
 
     /// Look up one delivery fact by `message_id`.
@@ -279,6 +367,7 @@ impl IntentMailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn entry(id: &str, conv: &str) -> MailboxEntry {
         MailboxEntry {
@@ -294,7 +383,8 @@ mod tests {
             kind: "request".into(),
             status: String::new(),
             source_chat_session_id: String::new(),
-        answered_at: String::new(),
+            answered_at: String::new(),
+            last_activity_at: String::new(),
             has_human: None,
         }
     }
@@ -341,6 +431,226 @@ mod tests {
         mb.mark_answered("m-old").unwrap();
         mb.mark_answered("m-human").unwrap();
         assert!(mb.stale_unanswered(&cutoff).is_empty());
+    }
+
+    /// Design 27 §5.5.1 scopes the fallback receipt to "Runtime 崩溃 /
+    /// 无任何事件" — crashed, or **no event at all**. Measuring the deadline
+    /// from `delivered_at` alone broke that scope: a write-back is only
+    /// produced at turn *end*, so any legitimately long turn — one blocked
+    /// on approval cards, one running a long tool chain — crossed the
+    /// deadline while its responder was alive and working, and the Chat
+    /// surface got a red `failed` receipt beside a session that was still
+    /// running and had never errored.
+    #[test]
+    fn activity_rearm_keeps_a_live_long_turn_out_of_the_fallback_window() {
+        let mb = IntentMailbox::in_memory();
+        let deadline_cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+
+        let mut req = entry("m-long", "");
+        req.kind = "user_message".into();
+        req.source_chat_session_id = "cs-1".into();
+        // Delivered two hours ago — well past the response deadline...
+        req.delivered_at = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        // ...but the responder wrote a row through the chat-append relay a
+        // minute ago (a routing pointer, an approval card). That is an
+        // event, so "no event at all" is false and the request is not a
+        // fallback candidate.
+        req.last_activity_at = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        mb.record(req).unwrap();
+
+        assert!(
+            mb.stale_unanswered(&deadline_cutoff).is_empty(),
+            "a turn that is still producing events must not be declared crashed"
+        );
+    }
+
+    /// The other half of the fix: re-arming must not turn into the
+    /// permanent silence §3.3 forbids. A responder that produced nothing
+    /// after delivery is still swept on the original clock.
+    #[test]
+    fn a_request_with_no_activity_is_still_swept() {
+        let mb = IntentMailbox::in_memory();
+        let deadline_cutoff = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+
+        let mut req = entry("m-silent", "");
+        req.kind = "user_message".into();
+        req.source_chat_session_id = "cs-1".into();
+        req.delivered_at = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        mb.record(req).unwrap();
+
+        let stale = mb.stale_unanswered(&deadline_cutoff);
+        assert_eq!(
+            stale.len(),
+            1,
+            "no activity recorded must fall back to the delivery clock"
+        );
+        assert_eq!(stale[0].message_id, "m-silent");
+    }
+
+    /// `touch_activity` is scoped to (responder, chat session) over open
+    /// requests only. Re-arming someone else's request, or a request in
+    /// another conversation, would let any chatty agent mask a real crash.
+    #[test]
+    fn touch_activity_rearms_only_that_responder_s_open_requests_in_that_chat() {
+        let mb = IntentMailbox::in_memory();
+        let past = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+
+        let mut mine = entry("m-mine", "");
+        mine.to_instance = "b".into();
+        mine.source_chat_session_id = "cs-1".into();
+        mine.delivered_at = past.clone();
+
+        // Same responder, different Chat session.
+        let mut other_chat = entry("m-other-chat", "");
+        other_chat.to_instance = "b".into();
+        other_chat.source_chat_session_id = "cs-2".into();
+        other_chat.delivered_at = past.clone();
+
+        // Same Chat session, different responder.
+        let mut other_responder = entry("m-other-responder", "");
+        other_responder.to_instance = "z".into();
+        other_responder.source_chat_session_id = "cs-1".into();
+        other_responder.delivered_at = past.clone();
+
+        // Already answered — nothing to re-arm.
+        let mut closed = entry("m-closed", "");
+        closed.to_instance = "b".into();
+        closed.source_chat_session_id = "cs-1".into();
+        closed.delivered_at = past.clone();
+        closed.answered_at = past.clone();
+
+        for e in [mine, other_chat, other_responder, closed] {
+            mb.record(e).unwrap();
+        }
+
+        let touched = mb.touch_activity("b", "cs-1");
+        assert_eq!(touched, 1, "only this responder's open request here");
+        assert!(
+            !mb.get("m-mine").unwrap().last_activity_at.is_empty(),
+            "the matched request is stamped"
+        );
+        for id in ["m-other-chat", "m-other-responder", "m-closed"] {
+            assert!(
+                mb.get(id).unwrap().last_activity_at.is_empty(),
+                "{id} must not be re-armed"
+            );
+        }
+        // A chat-less send (cron, plain agent-to-agent) has no surface to
+        // observe activity on, so it must never be swept up by a stamp.
+        assert_eq!(mb.touch_activity("b", ""), 0);
+    }
+
+    /// A relay retry must not rewind the clock, and a re-`record` of the
+    /// same dispatch (the PM scanner reuses its identity across attempts)
+    /// must not clear it — otherwise a retry loop could reset the deadline
+    /// it is supposed to be measured against.
+    #[test]
+    fn activity_clock_never_rewinds_on_retry_or_re_record() {
+        let mb = IntentMailbox::in_memory();
+        let mut req = entry("m-retry", "");
+        req.kind = "user_message".into();
+        req.source_chat_session_id = "cs-1".into();
+        req.delivered_at = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        mb.record(req.clone()).unwrap();
+
+        mb.touch_activity("b", "cs-1");
+        let stamped = mb.get("m-retry").unwrap().last_activity_at.clone();
+        assert!(!stamped.is_empty(), "the touch stamped the clock");
+
+        // A re-record carrying an *older* activity stamp keeps the newer one.
+        let mut stale_retry = req;
+        stale_retry.delivered_at = stamped.clone();
+        stale_retry.last_activity_at =
+            (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(stale_retry.last_activity_at < stamped, "test premise: older");
+        mb.record(stale_retry).unwrap();
+        assert_eq!(
+            mb.get("m-retry").unwrap().last_activity_at,
+            stamped,
+            "a retry with a stale stamp must not rewind the deadline clock"
+        );
+
+        // A re-record carrying no stamp keeps it too.
+        let mut bare = entry("m-retry", "");
+        bare.kind = "user_message".into();
+        bare.source_chat_session_id = "cs-1".into();
+        bare.delivered_at = stamped.clone();
+        mb.record(bare).unwrap();
+        assert_eq!(mb.get("m-retry").unwrap().last_activity_at, stamped);
+    }
+
+    /// Replay of the incident this fix was made for, on the recorded
+    /// timestamps (chat session `44114713`, request `ab6ff18e`, responder
+    /// = the PM agent, `response_timeout_secs` = the 3600 s default).
+    ///
+    /// The human's message was delivered at 12:03:29Z. The turn was still
+    /// running — it raised an approval card at 12:56:17Z, that card timed
+    /// out at 13:01:17Z, and the session went on to finish at 13:30:07Z
+    /// without ever reporting an error. The sweeper ticked at 13:04:07Z,
+    /// 38 s past the wall-clock deadline, and wrote a `failed` receipt
+    /// claiming the execution "may have crashed or been lost" beside a
+    /// live, working session.
+    #[test]
+    fn replay_incident_ab6ff18e_is_not_declared_crashed() {
+        let mb = IntentMailbox::in_memory();
+        let zone = chrono::FixedOffset::east_opt(0).unwrap();
+        let stamp = |h: u32, m: u32, s: u32| -> String {
+            zone.with_ymd_and_hms(2026, 10, 31, h, m, s)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let cutoff = |at: &str, secs: i64| {
+            chrono::DateTime::parse_from_rfc3339(at)
+                .unwrap()
+                .with_timezone(&zone)
+                - chrono::Duration::seconds(secs)
+        };
+
+        let mut req = entry("ab6ff18e", "");
+        req.kind = "user_message".into();
+        req.source_chat_session_id = "44114713".into();
+        req.delivered_at = stamp(12, 3, 29);
+        mb.record(req).unwrap();
+
+        // The Gateway relayed the responder's rows: the routing pointer at
+        // 12:03:31, the approval card at 12:56:17, its timeout at 13:01:17.
+        // Each is a `touch_activity` on (responder, chat session); replay
+        // them as direct stamps so the assertion runs on the recorded
+        // clock rather than on the test runner's wall clock.
+        for at in [stamp(12, 3, 31), stamp(12, 56, 17), stamp(13, 1, 17)] {
+            let mut armed = mb.get("ab6ff18e").unwrap();
+            armed.last_activity_at = at;
+            mb.record(armed).unwrap();
+        }
+        // The clock now reads 13:01:17Z, not 12:03:29Z.
+        assert_eq!(
+            mb.get("ab6ff18e").unwrap().deadline_clock(),
+            stamp(13, 1, 17).as_str()
+        );
+
+        // The tick that fired in production: 13:04:07Z, deadline 3600 s —
+        // i.e. the cutoff the sweeper compared `delivered_at` against.
+        let deadline_cutoff = cutoff(&stamp(13, 4, 7), 3600).to_rfc3339();
+        assert!(
+            mb.stale_unanswered(&deadline_cutoff).is_empty(),
+            "the live turn must not have been swept at 13:04:07Z"
+        );
+        // It WAS swept before this fix: the old clock was `delivered_at`
+        // (12:03:29Z), which is older than this cutoff.
+        assert!(
+            stamp(12, 3, 29).as_str() < deadline_cutoff.as_str(),
+            "test premise: the delivery-time clock would have fired"
+        );
+
+        // And re-arming must not become permanent silence (§3.3): once 3600 s
+        // of genuine silence pass after the last event at 13:01:17Z, the
+        // request is a candidate again.
+        let after_silence = cutoff(&stamp(13, 1, 17), -3601).to_rfc3339();
+        assert_eq!(
+            mb.stale_unanswered(&after_silence).len(),
+            1,
+            "silence still ends the request"
+        );
     }
 
     #[test]

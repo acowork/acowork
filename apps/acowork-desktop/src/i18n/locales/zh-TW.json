@@ -253,6 +253,7 @@
       "timeout": "本輪執行逾時",
       "waiting": "本輪等待你回覆",
       "noAnswer": "本輪沒有產生回覆",
+      "systemFallback": "系統兜底：{{name}} 未在回應截止前回覆",
       "turnRoutedNew": "啟動新任務：{{task}}",
       "turnRoutedContinue": "繼續之前的任務：{{task}}"
     },

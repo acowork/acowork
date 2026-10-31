@@ -253,6 +253,7 @@
       "timeout": "이번 실행이 시간 초과되었습니다",
       "waiting": "답변을 기다리는 중입니다",
       "noAnswer": "이번 실행에서는 응답이 없었습니다",
+      "systemFallback": "시스템 영수증: {{name}} 응답이 기한 내에 도착하지 않았습니다",
       "turnRoutedNew": "새 작업 시작: {{task}}",
       "turnRoutedContinue": "이전 작업 계속: {{task}}"
     },

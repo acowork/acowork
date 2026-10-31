@@ -253,6 +253,7 @@
       "timeout": "この実行はタイムアウトしました",
       "waiting": "返信をお待ちしています",
       "noAnswer": "この実行から応答はありませんでした",
+      "systemFallback": "システムによる補完: {{name}} から応答期限までに返信がありませんでした",
       "turnRoutedNew": "新しいタスクを開始：{{task}}",
       "turnRoutedContinue": "前のタスクを続行：{{task}}"
     },

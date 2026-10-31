@@ -160,6 +160,7 @@
       "timeout": "This run timed out",
       "waiting": "Waiting for your reply",
       "noAnswer": "This run produced no reply",
+      "systemFallback": "System receipt: no reply from {{name}} before the response deadline",
       "turnRoutedNew": "Starting a new task: {{task}}",
       "turnRoutedContinue": "Continuing the previous task: {{task}}"
     },

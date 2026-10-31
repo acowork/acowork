@@ -98,6 +98,7 @@ fn entry(
         status: String::new(),
         source_chat_session_id: String::new(),
         answered_at: String::new(),
+        last_activity_at: String::new(),
         has_human: None,
     }
 }

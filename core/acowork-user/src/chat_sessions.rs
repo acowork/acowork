@@ -298,6 +298,18 @@ pub struct IntentMeta {
     /// [`SessionMessage::attachments`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exec_attachments: Vec<AttachmentLabel>,
+    /// Design 27 §5.5.1: this terminal `agent_message` is a **system
+    /// fallback receipt** — the Gateway sweeper wrote it on the responder's
+    /// behalf because its turn never produced a write-back. It is not the
+    /// responder reporting a failure of its own work.
+    ///
+    /// Declared here because undeclared meta keys are silently dropped at
+    /// this storage boundary (same trap as [`Self::task_id`] and
+    /// [`Self::resolution`]): the sweeper has always stamped `fallback`,
+    /// and every persisted row has always lost it, leaving the Chat surface
+    /// unable to tell "the agent failed" from "nobody is coming to answer".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<bool>,
 }
 
 /// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12).

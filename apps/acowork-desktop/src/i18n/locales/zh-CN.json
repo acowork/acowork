@@ -254,6 +254,7 @@
       "timeout": "本轮执行超时",
       "waiting": "本轮等待你回复",
       "noAnswer": "本轮没有产生回复",
+      "systemFallback": "系统兜底：{{name}} 未在响应截止前回复",
       "turnRoutedNew": "启动新任务：{{task}}",
       "turnRoutedContinue": "继续之前的任务：{{task}}"
     },

@@ -94,7 +94,7 @@ async fn sweep_once(state: &AppState) {
         .max(liveness_grace_cutoff().as_str())
         .to_string();
     for req in mailbox.stale_unanswered(&scan_cutoff) {
-        let past_deadline = req.delivered_at.as_str() < deadline_cutoff.as_str();
+        let past_deadline = req.deadline_clock() < deadline_cutoff.as_str();
         if past_deadline {
             emit_fallback_receipt(state, &mailbox, user_port, &req, FALLBACK_BODY).await;
             continue;

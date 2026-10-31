@@ -54,6 +54,23 @@ export function isFailureStatus(status?: string): boolean {
   return status === "failed" || status === "timeout";
 }
 
+/**
+ * Is this row the Gateway sweeper's §5.5.1 fallback receipt?
+ *
+ * The sweeper closes a request that never got a write-back by appending, on
+ * the responder's behalf, a terminal `agent_message` with `status=failed`.
+ * That shape is indistinguishable from a real failure by `status` alone — and
+ * reading it as one is wrong twice over: the agent never said it, and (since
+ * the activity-clock fix) a live long turn is no longer swept at all, so what
+ * reaches us here is the genuine "nobody is coming to answer" case. The
+ * `fallback` flag is the sweeper's own stamp, so the surface keys on it and
+ * renders a neutral system line instead of the agent's voice reporting a crash
+ * it did not report.
+ */
+export function isSystemFallback(row: ChatMessageRow): boolean {
+  return row.kind === "agent_message" && row.meta?.fallback === true;
+}
+
 /** i18n key for the centered outcome line of an empty terminal reply. */
 export function terminalNoticeKey(status?: string): string {
   switch (status) {
