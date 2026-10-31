@@ -58,6 +58,13 @@ pub struct DecisionRecord {
     /// Number of projected history rows (excluding the current message).
     #[serde(default)]
     pub history_len: usize,
+    /// Estimated tokens the projected history cost this turn — the number
+    /// `chat_router.history_max_tokens` is enforced against. Recorded next to
+    /// `history_len` because a row count alone cannot show whether the
+    /// budget was actually binding: 18 short acknowledgements and 18 long
+    /// reports log identically and cost wildly different context.
+    #[serde(default)]
+    pub history_tokens: usize,
     /// Attachments on the turn being routed (count only — the log never
     /// carries filenames or types; ADR-096). Additive: lines written before
     /// the router could see attachments deserialize as zero and are still
@@ -150,6 +157,7 @@ mod tests {
             prefix_hash: "9f2c1a7b".into(),
             anchor_seq: 40,
             history_len: 18,
+            history_tokens: 1_240,
             attachments: 0,
             refs: 0,
             attachment_only: false,
@@ -189,6 +197,7 @@ mod tests {
         let parsed: DecisionRecord = serde_json::from_str(line).unwrap();
         assert_eq!(parsed.anchor_seq, 0);
         assert_eq!(parsed.history_len, 0);
+        assert_eq!(parsed.history_tokens, 0);
         assert_eq!(parsed.prefix_hash, "");
         assert_eq!(parsed.info_rounds, None);
         // Written before the router could see attachments: reads as "none".

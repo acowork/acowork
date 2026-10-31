@@ -641,6 +641,8 @@
     "chatRouterModelDesc": "直接応答か実行セッションへの転送かを判断するルーター LLM ターンで使用されるモデルです。セッションで選択したチャットモデルには追随しません。「自動」のままにするとエージェントのコンパクトモデルチェーンを使用します。",
     "chatRouterTimeoutMs": "ルータータイムアウト（ms）",
     "chatRouterTimeoutMsDesc": "直接転送にフォールバックするまでの単一のルーター LLM 呼び出しのタイムアウト。範囲 1000–300000、デフォルト 60000。",
+    "chatRouterHistoryMaxTokens": "Chat 履歴のコンテキスト長",
+    "chatRouterHistoryMaxTokensDesc": "ルーティング判断の前にルーターが読み取れる会話履歴の長さ（トークン）。ウィンドウはメッセージ件数ではなくコンテキストサイズで切り詰められます。範囲 1000–64000、デフォルト 8000。",
     "chatRouterDisabledHint": "Chat ルーターが無効です。すべてのチャットメッセージはルーティングターンを経ずに処理されます。",
     "sectionAgentInfo": "Agent情報",
     "sectionSessionParams": "セッションパラメータ",

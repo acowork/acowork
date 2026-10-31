@@ -181,6 +181,9 @@ fn apply_field_patch(
         ConfigField::ChatRouterTimeoutMs => {
             chat_router(cfg).timeout_ms = patch_typed::<u64>(field, op);
         }
+        ConfigField::ChatRouterHistoryMaxTokens => {
+            chat_router(cfg).history_max_tokens = patch_typed::<usize>(field, op);
+        }
     }
 }
 
@@ -262,11 +265,12 @@ mod tests {
             Some(serde_json::json!("fast")), // chat_router_model -> Set
             Some(serde_json::json!(null)),   // chat_router_provider -> Clear
             None,                            // chat_router_timeout_ms absent -> skip
+            Some(serde_json::json!(12_000)), // chat_router_history_max_tokens -> Set
         );
 
         let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
             body.patches.iter().map(|p| (p.field, &p.op)).collect();
-        assert_eq!(fields.len(), 3, "two present + one clear, absent skipped");
+        assert_eq!(fields.len(), 4, "three present + one clear, absent skipped");
         assert!(fields.contains(&(
             ConfigField::ChatRouterEnabled,
             &FieldPatch::Set(serde_json::json!(true))
@@ -276,6 +280,10 @@ mod tests {
             &FieldPatch::Set(serde_json::json!("fast"))
         )));
         assert!(fields.contains(&(ConfigField::ChatRouterProvider, &FieldPatch::Clear)));
+        assert!(fields.contains(&(
+            ConfigField::ChatRouterHistoryMaxTokens,
+            &FieldPatch::Set(serde_json::json!(12_000))
+        )));
         assert!(
             !fields
                 .iter()
@@ -327,6 +335,20 @@ mod tests {
         );
         assert_eq!(cfg.chat_router.as_ref().unwrap().timeout_ms, Some(15000));
 
+        // The history token budget is a plain number, so it only has
+        // set / clear — no empty-string spelling of "default".
+        apply(
+            &mut cfg,
+            &[patch(
+                ConfigField::ChatRouterHistoryMaxTokens,
+                serde_json::json!(12000),
+            )],
+        );
+        let router = cfg.chat_router.as_ref().unwrap();
+        assert_eq!(router.history_max_tokens, Some(12000));
+        assert_eq!(router.history_max_tokens(), 12000);
+        assert_eq!(router.timeout_ms, Some(15000), "sibling preserved");
+
         // Provider round-trips the same way the model does: a value
         // sets it, an empty string clears it back to "whichever provider
         // serves the model", and neither touches the other sub-fields.
@@ -357,6 +379,17 @@ mod tests {
         let router = cfg.chat_router.as_ref().unwrap();
         assert_eq!(router.timeout_ms, None, "Clear nulls the target");
         assert_eq!(router.enabled, Some(false), "sibling preserved");
+
+        // Clearing the budget falls back to the design default rather than
+        // to "no history": a router turn with zero context routes worse than
+        // one paying the default price.
+        apply(&mut cfg, &[clear(ConfigField::ChatRouterHistoryMaxTokens)]);
+        let router = cfg.chat_router.as_ref().unwrap();
+        assert_eq!(router.history_max_tokens, None);
+        assert_eq!(
+            router.history_max_tokens(),
+            crate::agent_config::ChatRouterConfig::DEFAULT_HISTORY_MAX_TOKENS
+        );
     }
 }
 

@@ -640,6 +640,8 @@
     "chatRouterModelDesc": "用於路由 LLM 輪次的模型，該輪次決定直接回覆還是轉發到執行工作區。它不跟隨會話所選的聊天模型。保持「自動」即使用 agent 的精簡模型鏈。",
     "chatRouterTimeoutMs": "路由超時（毫秒）",
     "chatRouterTimeoutMsDesc": "單次路由 LLM 呼叫在回退為直接轉發前的超時時間。範圍 1000–300000，預設 60000。",
+    "chatRouterHistoryMaxTokens": "Chat 歷史上下文長度",
+    "chatRouterHistoryMaxTokensDesc": "路由判斷前可以讀取的聊天歷史長度（tokens）。視窗按上下文大小裁剪，而不是按訊息則數。範圍 1000–64000，預設 8000。",
     "chatRouterDisabledHint": "Chat 路由已關閉；每條聊天訊息都將不經路由輪次直接處理。",
     "sectionAgentInfo": "Agent 資訊",
     "sectionSessionParams": "會話參數",

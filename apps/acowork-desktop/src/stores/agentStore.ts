@@ -88,6 +88,12 @@ export interface AgentProfileSettings {
   /** ADR-099: router call timeout in ms (`chat_router.timeout_ms`).
    *  Undefined = built-in default (8000); clamped 1000–60000. */
   chatRouterTimeoutMs?: number;
+  /** ADR-099: chat-history context budget for a router turn
+   *  (`chat_router.history_max_tokens`), in estimated tokens.
+   *  This is how much of the conversation the router may read back —
+   *  the window is sized by context cost, not by a message count.
+   *  Undefined = built-in default (8000); clamped 1000–64000. */
+  chatRouterHistoryMaxTokens?: number;
   // ADR-094 note: `skillsAutoLoad` was removed from the profile
   // shape. Skill mode (Progressive / Manual) now lives entirely
   // on the `load_skill` tool entry in `agent_tools.json` and is
@@ -192,6 +198,15 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
       s.chatRouterTimeoutMs >= 1000 &&
       s.chatRouterTimeoutMs <= 60000
         ? Math.floor(s.chatRouterTimeoutMs)
+        : undefined,
+    // Range mirrors `ChatRouterConfig::history_max_tokens` (1,000–64,000) so
+    // a value the runtime would clamp is never silently dropped by the local
+    // normalizer — the panel shows what the runtime will actually use.
+    chatRouterHistoryMaxTokens:
+      typeof s.chatRouterHistoryMaxTokens === "number" &&
+      s.chatRouterHistoryMaxTokens >= 1000 &&
+      s.chatRouterHistoryMaxTokens <= 64000
+        ? Math.floor(s.chatRouterHistoryMaxTokens)
         : undefined,
   };
 }

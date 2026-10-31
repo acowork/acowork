@@ -137,6 +137,11 @@ pub enum ConfigField {
     /// `AgentConfig::chat_router.timeout_ms` — `Option<u64>`
     /// (clamped to 1,000–60,000 by [`ChatRouterConfig::timeout_ms`]).
     ChatRouterTimeoutMs,
+    /// `AgentConfig::chat_router.history_max_tokens` — `Option<usize>`.
+    /// The router turn's chat-history token budget: the primary sizing knob
+    /// for Block B (clamped to 1,000–64,000 by
+    /// [`ChatRouterConfig::history_max_tokens`]).
+    ChatRouterHistoryMaxTokens,
     // ADR-094 note: `ConfigField::SkillsAutoLoad` was removed.
     // Skill mode (Progressive / Manual) is now driven entirely by
     // `agent_tools.json::load_skill.enabled` — see
@@ -165,6 +170,7 @@ impl ConfigField {
             ConfigField::ChatRouterModel => "chat_router_model",
             ConfigField::ChatRouterProvider => "chat_router_provider",
             ConfigField::ChatRouterTimeoutMs => "chat_router_timeout_ms",
+            ConfigField::ChatRouterHistoryMaxTokens => "chat_router_history_max_tokens",
         }
     }
 }
@@ -234,6 +240,7 @@ impl PutAgentConfigBody {
         chat_router_model: Option<serde_json::Value>,
         chat_router_provider: Option<serde_json::Value>,
         chat_router_timeout_ms: Option<serde_json::Value>,
+        chat_router_history_max_tokens: Option<serde_json::Value>,
     ) -> Self {
         let mut patches = Vec::new();
         if let Some(v) = max_output_tokens {
@@ -315,6 +322,12 @@ impl PutAgentConfigBody {
         if let Some(v) = chat_router_timeout_ms {
             patches.push(ConfigFieldPatch {
                 field: ConfigField::ChatRouterTimeoutMs,
+                op: value_to_patch(&v),
+            });
+        }
+        if let Some(v) = chat_router_history_max_tokens {
+            patches.push(ConfigFieldPatch {
+                field: ConfigField::ChatRouterHistoryMaxTokens,
                 op: value_to_patch(&v),
             });
         }

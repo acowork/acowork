@@ -1,7 +1,7 @@
 # ADR-099：Chat Session 的 LLM 语义路由（Chat Router）
 
 - **编号**：ADR-099
-- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下。2026-10-23 修订：D8 降级语义——chat 来源的人类消息降级时**新建**执行会话，见 D8。2026-10-24 修订：**推翻 D1 的「执行层保留物理轮转」，T1/T2 轮转整体删除**——执行会话长命、压缩就地处理、开新会话只由语义决定，见「修订（2026-10-24）」。2026-10-28 修订：**推翻验收标准 1 的「复用时 seed 落到被路由到的会话」**——`session_config` 只是新建初值，路由到已存在的会话时一个字段都不应用，见「修订（2026-10-28）」）
+- **状态**：已接受（2026-10-22 修订：D3/D6 为 router 增加只读信息工具；D3 补充投递时锚定 + 执行侧 pending 队列投影，见下。2026-10-23 修订：D8 降级语义——chat 来源的人类消息降级时**新建**执行会话，见 D8。2026-10-24 修订：**推翻 D1 的「执行层保留物理轮转」，T1/T2 轮转整体删除**——执行会话长命、压缩就地处理、开新会话只由语义决定，见「修订（2026-10-24）」。2026-10-28 修订：**推翻验收标准 1 的「复用时 seed 落到被路由到的会话」**——`session_config` 只是新建初值，路由到已存在的会话时一个字段都不应用，见「修订（2026-10-28）」。2026-10-29 修订：**D5 的 Block B 窗口改按 token 预算裁剪**（原条数上限降级为传输上限），并作为 `chat_router.history_max_tokens` 暴露到 Agent Setup，见「修订（2026-10-29）」）
 - **日期**：2026-10-21
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊）、设计 29（Chat Session 上下文编排）、ADR-060（Prompt Cache 友好的上下文块重排）、ADR-063（包级 Prompt 覆盖）、ADR-066（Provider Cache Tokens）、ADR-076（多用户账号体系）、ADR-085（Agent 生命周期状态机）、ADR-092（用户消息身份与有界读取）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
@@ -102,7 +102,7 @@
 按 ADR-060 的 Block 模型落地到 chat 层：
 
 - Block A：router system prompt（基座 + persona + 场景段），逐字节稳定；
-- Block B：chat 历史按 seq 确定性投影，append-only；窗口锚点 `anchor_seq` 只在超过 `max_history + slack` 时批量前移；
+- Block B：chat 历史按 seq 确定性投影，append-only；窗口按 token 预算裁剪，锚点 `anchor_seq` 只在超过 `max_tokens + slack_tokens` 时批量前移（2026-10-29 修订，原为条数 `max_history + slack`）；
 - Block C：候选清单、draft config、当前时间等动态信息放在历史之后，变化只影响自身；
 - Anthropic 在 A/B 末尾各打一个 `cache_control: ephemeral` 断点；OpenAI/DeepSeek 依赖自动前缀缓存。
 
@@ -231,6 +231,16 @@ graph TD
 明确接受的代价：从 chat 面改 model / reasoning，若 router 判定复用旧会话，这一轮不生效，只对 chat 之后新开的会话生效。要改一条在跑的会话，去它自己的执行面——那里有 `apply_config`（ADR-047 唯一配置入口）与 `route_workspace_switch`（ADR-034 §8 唯一工作区入口），改的是它自己看得见的状态。
 
 不受影响的：`dispatch(target="new")` 仍是 draft 落地的显式通道；PM 任务 / agent↔agent 的确定性复用不变（键即任务身份），但其 seed 同样不再覆盖已存在的会话；`clamp_seed` 仍只在创建路径按应答方 provider 列表钳制 model/provider、按注册表丢弃未知 workspace。
+
+## 修订（2026-10-29）：Block B 窗口改按 token 预算裁剪，并暴露到 Agent Setup
+
+D5 的窗口尺寸从「条数」改为「上下文大小（tokens）」。原 `max_history + slack` / `retain` 三个条数常量退化为内部传输上限，主判据换成 `chat_router.history_max_tokens`（默认 8000，clamp 1000–64000），按 `crate::token::count_text` 统一口径估算。
+
+理由：固定条数对不同消息的上下文代价视而不见——一条「好的」和一份 2KB 的故障报告被当成同等成本。条数上限对闲聊型对话过于宽松（32 条短消息 ≈ 1.4k tokens），对信息密集的对话又过于苛刻，而旧实现的字节兜底 `max_history × per_row_cap` 允许的**最坏**情况反而高达约 18k tokens。改成一个数就能同时收紧最坏情况、放松常见情况。
+
+机制不变：仍是**锚点 + 批量裁剪**，超预算时一次性裁到 `retain_tokens`（默认预算的一半），不做逐条滑动——前缀缓存契约与 D5 一致。两处新增的边界：单条超长消息至少保留最新一条（宁可略超预算，也不能让 router 看不到用户刚说的话）；行数仍受网关单页 50 条约束，因此每轮按满页取历史、由 token 预算决定实际投影量；短消息碰不到预算时由行数上限兜底，且同样批量重建（48 → 24 条再逐轮追加），不做逐条滑动。
+
+配套：`PUT /agents/{id}/config` 新增扁平字段 `chat_router_history_max_tokens`（`ConfigField::ChatRouterHistoryMaxTokens`），Agent Setup 的 Chat Router 卡片改为可编辑（含 5 份 locale）；`chat_router.history_window` 保留但降级为条数上限、不上 UI；决策日志新增 `history_tokens`，与 `history_len` 并列——只记条数无法区分「18 条短确认」和「18 份长报告」。
 
 ## 测试
 
