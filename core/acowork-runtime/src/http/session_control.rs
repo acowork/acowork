@@ -417,6 +417,48 @@ pub(crate) async fn post_create_session(
     ))
 }
 
+/// Announce that `sid` is Active, and return the metadata a caller may want to
+/// echo back: `(status, model, provider, last_active_at)`.
+///
+/// ADR-038: activation is **broadcast, never polled** — another Desktop tab or
+/// the mobile client only learns that a session left disk from this event.
+/// Every path that can activate therefore announces, which is why the implicit
+/// reopen on the write path (`post_send_message`) goes through here too: that
+/// reopen is caused by a message, not by a client asking, so no client would
+/// otherwise hear about it.
+///
+/// Best-effort by contract: a failed publish is logged and never becomes a
+/// request error — the session really is Active either way.
+async fn announce_session_opened(
+    state: &HttpState,
+    sm: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    sid: &str,
+    outcome: crate::agent::session::SessionOpenOutcome,
+) -> (&'static str, Option<String>, Option<String>, Option<String>) {
+    let status = match outcome {
+        crate::agent::session::SessionOpenOutcome::AlreadyActive => "already_active",
+        crate::agent::session::SessionOpenOutcome::ResumedFromDisk => "resumed_from_disk",
+    };
+    let (model, provider, last_active_at) = sm
+        .lock()
+        .await
+        .session_metadata_summary(sid, &state.work_dir.join("conversations"));
+    if let Some(publisher) = lifecycle_publisher(state).await
+        && let Err(e) = publisher
+            .publish_session_opened(
+                sid,
+                status,
+                model.clone(),
+                provider.clone(),
+                last_active_at.clone(),
+            )
+            .await
+    {
+        tracing::warn!(session_id = %sid, error = %e, "failed to publish SessionOpened");
+    }
+    (status, model, provider, last_active_at)
+}
+
 /// `POST /sessions/{sid}/open` — activate a Closed session (ADR-038).
 ///
 /// ADR-076 §决策 4: **write**-gated, and only ever called by the session's
@@ -453,32 +495,13 @@ pub(crate) async fn post_open_session(
         // meta the manager recognizes — a real inconsistency, not a 404.
         .ok_or_else(|| err(StatusCode::NOT_FOUND, format!("session not found: {sid}")))?;
 
-    let status = match outcome {
-        crate::agent::session::SessionOpenOutcome::AlreadyActive => "already_active",
-        crate::agent::session::SessionOpenOutcome::ResumedFromDisk => "resumed_from_disk",
-    };
     // NOTE: `resume_session` already refreshed this session's retained
     // `SessionConfig` snapshot (so a stale `llm_availability` from the
     // startup race cannot keep the Desktop's "syncing LLM config" banner
     // up) — the invariant lives in the open state machine, not here.
 
-    let (model, provider, last_active_at) = sm
-        .lock()
-        .await
-        .session_metadata_summary(&sid, &state.work_dir.join("conversations"));
-    if let Some(publisher) = lifecycle_publisher(&state).await
-        && let Err(e) = publisher
-            .publish_session_opened(
-                &sid,
-                status,
-                model.clone(),
-                provider.clone(),
-                last_active_at.clone(),
-            )
-            .await
-    {
-        tracing::warn!(session_id = %sid, error = %e, "failed to publish SessionOpened");
-    }
+    let (status, model, provider, last_active_at) =
+        announce_session_opened(&state, &sm, &sid, outcome).await;
 
     Ok(Json(serde_json::json!({
         "session_id": sid,
@@ -773,13 +796,28 @@ pub(crate) async fn post_send_message(
     // nothing to write into), `Closed` is resumed from disk, `Active` is a
     // no-op.
     let sm = session_manager(&state).await?;
-    let active = {
+    let opened = {
         let mut guard = sm.lock().await;
         guard.ensure_session_active(&sid).await
     };
-    match active {
-        Ok(true) => {}
-        Ok(false) => return Err(not_found(&sid)),
+    match opened {
+        // ADR-038: activation is broadcast. This one nobody asked for — the
+        // human typed into a session the Runtime had already evicted — so
+        // without the announce every other client keeps reading the
+        // transcript as if the session were still on disk.
+        Ok(Some(crate::agent::session::SessionOpenOutcome::ResumedFromDisk)) => {
+            let _ = announce_session_opened(
+                &state,
+                &sm,
+                &sid,
+                crate::agent::session::SessionOpenOutcome::ResumedFromDisk,
+            )
+            .await;
+        }
+        // Already Active: nothing changed, and an event per message would be
+        // pure noise (the send itself is the fact the client is watching).
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(not_found(&sid)),
         Err(e) => {
             tracing::warn!(session_id = %sid, error = %e, "failed to resume session for send");
             return Err(err(

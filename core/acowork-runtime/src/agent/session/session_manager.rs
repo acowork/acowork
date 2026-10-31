@@ -2093,18 +2093,23 @@ impl SessionManager {
     /// has open says nothing about where the *next* chat message should go.
     /// Only `chat_dispatch(Target::Existing)` — a real routing decision —
     /// forgets the mirror.
-    pub async fn ensure_session_active(&mut self, session_id: &str) -> Result<bool> {
-        let work_dir = std::path::PathBuf::from(&self.core.config.work_dir);
-        match self.get_lifecycle_state(session_id, &work_dir) {
-            SessionLifecycleState::Active => return Ok(true),
-            SessionLifecycleState::NotFound => return Ok(false),
-            SessionLifecycleState::Closed => {}
-        }
-        match self.resume_session(session_id).await {
-            Ok(Some(_)) => Ok(true),
-            Ok(None) => Ok(false),
-            Err(e) => Err(e),
-        }
+    ///
+    /// `None` = this agent has no such session. `Some(outcome)` = the session
+    /// can take the turn, and the outcome says whether this call is what made
+    /// it possible (`ResumedFromDisk`) or it already could
+    /// (`AlreadyActive`) — the write path broadcasts the former (ADR-038:
+    /// activation is published, never polled), so the distinction is load
+    /// bearing, not decoration.
+    pub async fn ensure_session_active(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<SessionOpenOutcome>> {
+        // One probe: the open state machine already answers all three states
+        // (NotFound / no-op Active / reopen from disk) and refreshes the
+        // retained `SessionConfig` snapshot on the way through. Probing the
+        // lifecycle first and then resuming would just read the same state
+        // twice on the disk path.
+        self.resume_session(session_id).await
     }
 
     /// ADR-076 §决策 4: set the read visibility of a session.
@@ -6342,20 +6347,25 @@ mod tests {
             .await
             .unwrap();
 
-        // Active: a no-op that still answers "the turn can land".
-        assert!(
+        // Active: a no-op that still answers "the turn can land" — and says so
+        // with `AlreadyActive`, which is what keeps the write path from
+        // re-broadcasting an activation nobody caused.
+        assert_eq!(
             manager.ensure_session_active(&sid).await.unwrap(),
+            Some(SessionOpenOutcome::AlreadyActive),
             "an active session takes the turn"
         );
 
-        // Closed: reopened from disk, so the turn has a task to land in.
+        // Closed: reopened from disk, so the turn has a task to land in — and
+        // the outcome is the fact the caller broadcasts.
         manager.close_session(&sid).await.unwrap();
         assert!(
             manager.get_session(&sid).is_none(),
             "the closed session has no in-memory task"
         );
-        assert!(
+        assert_eq!(
             manager.ensure_session_active(&sid).await.unwrap(),
+            Some(SessionOpenOutcome::ResumedFromDisk),
             "a closed session is reopened for the turn"
         );
         assert!(
@@ -6364,8 +6374,9 @@ mod tests {
         );
 
         // NotFound: refused, never silently "opened".
-        assert!(
-            !manager.ensure_session_active("no-such-session").await.unwrap(),
+        assert_eq!(
+            manager.ensure_session_active("no-such-session").await.unwrap(),
+            None,
             "a session that does not exist is refused"
         );
     }
