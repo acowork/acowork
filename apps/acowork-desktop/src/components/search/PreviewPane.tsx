@@ -154,6 +154,12 @@ export function PreviewPane({ hit, tab, agentId, workspaceId, gitCommit }: Previ
 
 const PREVIEW_CONTEXT_LINES = 5;
 
+/** `path:line` for a content hit, plain `path` for a file-name hit —
+ *  a name hit has no line to point at. */
+function fileLocationLabel(hit: FileHit): string {
+    return hit.line === undefined ? hit.path : `${hit.path}:${hit.line}`;
+}
+
 function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: string; workspaceId?: string }) {
     const [state, setState] = useState<
         | { kind: "loading" }
@@ -161,6 +167,11 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
         | { kind: "binary"; mimeType: string; size: number; snippet: string }
         | { kind: "error"; message: string }
     >({ kind: "loading" });
+
+    // A file-name hit has no line to centre on. The preview then shows the
+    // head of the file instead of an arbitrary line — the user matched the
+    // name, so the name is what they want to see the file for.
+    const isNameHit = hit.kind === "name";
 
     useEffect(() => {
         // Reset state at the start of every effect run so the DOM doesn't
@@ -218,7 +229,7 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
                     return;
                 }
                 const lines = env.content.split(/\r?\n/);
-                setState({ kind: "ok", lines, matchedLine: hit.line });
+                setState({ kind: "ok", lines, matchedLine: hit.line ?? 1 });
             })
             .catch((e) => {
                 if (cancelled) return;
@@ -240,7 +251,7 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
             <PreviewEmpty
                 icon={FileText}
                 title={hit.title}
-                sub={`${hit.path}:${hit.line}`}
+                sub={fileLocationLabel(hit)}
                 snippet={hit.snippet}
                 footer={state.message}
             />
@@ -252,7 +263,7 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
             <PreviewEmpty
                 icon={FileText}
                 title={hit.title}
-                sub={`${hit.path}:${hit.line}`}
+                sub={fileLocationLabel(hit)}
                 snippet={state.snippet}
                 footer={`二进制文件 (${state.mimeType || "unknown"}, ${formatBytes(state.size)}) — 仅显示命中片段`}
             />
@@ -268,7 +279,7 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
             <PreviewEmpty
                 icon={FileText}
                 title={hit.title}
-                sub={`${hit.path}:${hit.line}`}
+                sub={fileLocationLabel(hit)}
                 snippet={hit.snippet}
                 footer="文件已无内容（0 字节），以下是命中片段"
             />
@@ -283,7 +294,7 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
     const start = Math.max(1, matchedClamped - PREVIEW_CONTEXT_LINES);
     const end = Math.min(totalLines, matchedClamped + PREVIEW_CONTEXT_LINES);
     const width = String(end).length;
-    const matchedOutOfRange = matchedClamped !== state.matchedLine;
+    const matchedOutOfRange = !isNameHit && matchedClamped !== state.matchedLine;
     // Reconstruct the rendered preview as plain text: "<line>: <content>"
     // per row, matching the gutter + content columns the user sees on
     // screen. Used by the header's Copy button.
@@ -298,7 +309,7 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
             <PreviewHeader
                 icon={FileText}
                 title={hit.title}
-                sub={`${hit.path}:${hit.line}`}
+                sub={fileLocationLabel(hit)}
                 copyText={copyText}
             />
             {matchedOutOfRange && (

@@ -328,6 +328,7 @@ pub(crate) async fn global_search(
             max_results: Some(limit),
             case_sensitive: false,
             whole_word: false,
+            match_file_names: true,
         };
         match svc.search_files(&search_params).await {
             Ok(resp) => {
@@ -344,6 +345,7 @@ pub(crate) async fn global_search(
                             "file": m.file,
                             "line": m.line,
                             "column": m.column,
+                            "kind": m.kind,
                         }),
                     })
                     .collect();

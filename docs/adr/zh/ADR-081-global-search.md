@@ -164,6 +164,27 @@ GET /search?q={query}&scopes=conversation,memory,file,git&limit=20&mode=hybrid&w
 - **file**：复用 `workspace_query::search_files`（ripgrep）+ `find_files`
 - **git**：**复用现有 commit 搜索能力，不做服务端 `--grep`**。全局 git tab 的检索语义与 workspace git banner 的 `CommitPicker` 保持一致（subject/author/hash 子串）；为支持"全部 agent / 跨 workspace"检索，`git_query::log` 仅需在**服务端补一个 `--all`（全仓库）或 keyword 预过滤参数作为可选增强**，P0 直接由 Desktop 复用 `/git/log` 分页 + client-side 过滤（与 CommitPicker 同逻辑），不新增后端复杂度
 
+> **已实现偏差（修订：file scope 的文件名匹配）**
+>
+> D2 规定 file scope = "ripgrep 全文 **+** 文件名 fuzzy"，但落地时 Desktop 的文件 tab 只调用了
+> `GET /workspaces/search`（纯内容搜索），从未调用 `/workspaces/find`（文件名 fuzzy）。
+> 结果：**按文件名搜索全局搜索永远 0 结果**，而右侧工作区的文件搜索（走 `/workspaces/find`）
+> 却能搜到 —— 两个入口对同一个查询给出不同答案。
+>
+> 修订方案：文件名匹配下沉到 `workspace_query::search_files` 本身，一次遍历同时产出
+> **内容命中**与**文件名命中**：
+>
+> - 新增查询参数 `match_file_names`（默认 `true`，传 `false` 回到旧的纯内容行为）；
+> - `SearchMatchDto` 新增 `kind` 字段（`content` / `name`）；文件名命中**没有行号**
+>   （`line` / `column` 为 `null`），客户端据此渲染与定位，不再用 `0` 之类的哨兵值；
+> - 排序：文件名命中在前（按 `find_files` 同一套 fuzzy 分数），内容命中在后（工作区顺序）；
+> - `case_sensitive` 对两半同时生效：文件名匹配的比较用查询与文件名的同一种大小写形态，
+>   开启后 `Foo` 不再命中 `foo.ts`（`/workspaces/find` 本身仍按契约恒为大小写不敏感）；
+> - 一次文件遍历同时服务两半，不额外扫盘；内容预算满后停止读文件体，但继续遍历以保证
+>   文件名命中完整。
+>
+> 由此，全局搜索的文件 tab 与工作区搜索对同一查询给出**一致**的结果集。
+
 Gateway 反代一行：`/api/agents/{id}/search` → Runtime `/search`（参照现有 `proxy_to_runtime` 模式，[proxy.rs:517](../../../core/acowork-gateway/src/http/proxy.rs#L517)）。
 
 ### 4.2 对话消息向量索引（新增，核心增量）

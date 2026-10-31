@@ -517,7 +517,7 @@ async fn proxy_find_files(
 
 /// Reverse-proxy `GET /api/agents/{id}/workspaces/search` to Runtime's
 /// `GET /workspaces/search`. Querystring keys: `q`, `workspace_id`, `include`,
-/// `max_results`, `case_sensitive`, `whole_word`.
+/// `max_results`, `case_sensitive`, `whole_word`, `match_file_names`.
 async fn proxy_search_files(
     State(state): State<AppState>,
     Path(id): Path<String>,
