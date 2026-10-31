@@ -983,51 +983,34 @@ async fn dispatch_inbound(
             // this funnel's: resuming a session reads its whole transcript
             // off disk, and this arm runs inline on the single MQTT/HTTP
             // dispatch loop — a disk-bound resume here would head-of-line
-            // block every other inbound message of this Runtime. So this
-            // check is deliberately cheap (`contains_key`).
+            // block every other inbound message of this Runtime. So the check
+            // below is deliberately cheap (`contains_key`).
             //
-            // A message that still finds no task — an idle eviction landed
-            // between the write path's open and this dequeue — publishes the
-            // same `session_not_opened` event the other session-scoped
-            // actions publish, so the Desktop can offer a "Reopen" affordance
-            // instead of leaving the human's words in a bubble that never
-            // becomes a turn.
+            // The check and the handoff share one lock on purpose: between two
+            // separate critical sections an idle eviction can land, and its
+            // only symptom would be a bare "Session not found" with no event —
+            // exactly the silent drop `session_not_opened` exists to prevent.
             {
-                let ok = session_manager.lock().await.is_session_active(&session_id);
-                if !ok {
-                    let reason = {
-                        let guard = session_manager.lock().await;
-                        match guard.get_lifecycle_state(&session_id, work_dir) {
-                            crate::agent::session::SessionLifecycleState::Closed => "session_closed",
-                            _ => "session_not_found",
-                        }
-                    };
+                let mut guard = session_manager.lock().await;
+                if !guard.is_session_active(&session_id) {
+                    let reason = not_opened_reason(&guard, &session_id, work_dir);
                     tracing::warn!(
                         session_id = %session_id,
                         reason,
                         "ChatMessage: session is not Active — forwarding SessionNotOpened"
                     );
-                    {
-                        let publisher = lifecycle_publisher.clone();
-                        let sid = session_id.clone();
-                        let reason = reason.to_string();
-                        tokio::spawn(async move {
-                            let _ = publisher
-                                .publish_session_not_opened(&sid, "chat_message", &reason)
-                                .await;
-                        });
-                    }
+                    spawn_session_not_opened(
+                        lifecycle_publisher,
+                        &session_id,
+                        "chat_message",
+                        reason,
+                    );
                     return Err(RuntimeError::Config(format!(
                         "session not Active ({}): {}",
                         reason, session_id
                     )));
                 }
-            }
-
-            session_manager
-                .lock()
-                .await
-                .send_to_session(
+                let sent = guard.send_to_session(
                     &session_id,
                     SessionMessage::ChatMessage {
                         content,
@@ -1051,8 +1034,31 @@ async fn dispatch_inbound(
                             None,
                         ),
                     },
-                )
-                .map_err(|e| RuntimeError::Config(format!("ChatMessage: {}", e)))
+                );
+                if let Err(e) = sent {
+                    // The task can also vanish between the check above and this
+                    // handoff. When that is what happened, the human's words are
+                    // gone either way — publish the same event so the client can
+                    // say so and offer a reopen instead of surfacing an error
+                    // that explains nothing.
+                    if !guard.is_session_active(&session_id) {
+                        let reason = not_opened_reason(&guard, &session_id, work_dir);
+                        tracing::warn!(
+                            session_id = %session_id,
+                            reason,
+                            "ChatMessage: session vanished before the handoff — forwarding SessionNotOpened"
+                        );
+                        spawn_session_not_opened(
+                            lifecycle_publisher,
+                            &session_id,
+                            "chat_message",
+                            reason,
+                        );
+                    }
+                    return Err(RuntimeError::Config(format!("ChatMessage: {}", e)));
+                }
+            }
+            Ok(())
         }
 
         // ── Legacy fallback (Phase 7: no longer produced by control path) ──
@@ -1536,6 +1542,46 @@ async fn route_intent_legacy(
     sent
 }
 
+/// Which lifecycle state to report in a `SessionNotOpened` payload.
+///
+/// ADR-038: `Closed` (on disk, not in memory) and `NotFound` (no session at
+/// all) get different toasts in the Desktop, so the two must not collapse into
+/// one string. Callers only ask after they failed to find an in-memory task.
+fn not_opened_reason(
+    manager: &crate::agent::session::SessionManager,
+    session_id: &str,
+    work_dir: &std::path::Path,
+) -> &'static str {
+    match manager.get_lifecycle_state(session_id, work_dir) {
+        crate::agent::session::SessionLifecycleState::Closed => "session_closed",
+        _ => "session_not_found",
+    }
+}
+
+/// Publish `SessionNotOpened` for a session-scoped message that found no task,
+/// so the client can offer a reopen affordance instead of leaving the human's
+/// words in a bubble that never becomes a turn.
+///
+/// Best-effort and detached: the callers run inline on the single inbound
+/// dispatch loop, so nobody may wait on the broker, and a failed publish must
+/// not change the error the caller already has.
+fn spawn_session_not_opened(
+    lifecycle_publisher: &crate::mqtt::MqttChunkPublisher,
+    session_id: &str,
+    attempted_command: &str,
+    reason: &str,
+) {
+    let publisher = lifecycle_publisher.clone();
+    let sid = session_id.to_string();
+    let cmd = attempted_command.to_string();
+    let reason = reason.to_string();
+    tokio::spawn(async move {
+        let _ = publisher
+            .publish_session_not_opened(&sid, &cmd, &reason)
+            .await;
+    });
+}
+
 /// Forward an `InboundMessage` to the session task's `agent_inbound_tx`.
 ///
 /// ADR-038: when the target session is not Active (Closed or NotFound
@@ -1563,10 +1609,7 @@ async fn forward_to_session_inbound(
         None => {
             // Determine reason: Closed (file exists on disk) vs NotFound
             // (no file) — the Desktop uses this to render the right toast.
-            let reason = match manager_guard.get_lifecycle_state(session_id, work_dir) {
-                crate::agent::session::SessionLifecycleState::Closed => "session_closed",
-                _ => "session_not_found",
-            };
+            let reason = not_opened_reason(&manager_guard, session_id, work_dir);
             tracing::warn!(
                 session_id = %session_id,
                 attempted_command = %attempted_command,
@@ -1574,15 +1617,7 @@ async fn forward_to_session_inbound(
                 "session not Active: forwarding SessionNotOpened",
             );
             // Best-effort publish — never block on the broker.
-            let publisher = lifecycle_publisher.clone();
-            let sid = session_id.to_string();
-            let cmd = attempted_command.to_string();
-            let reason_owned = reason.to_string();
-            tokio::spawn(async move {
-                let _ = publisher
-                    .publish_session_not_opened(&sid, &cmd, &reason_owned)
-                    .await;
-            });
+            spawn_session_not_opened(lifecycle_publisher, session_id, attempted_command, reason);
             return Err(RuntimeError::Config(format!(
                 "session not Active ({}): {}",
                 reason, session_id,
