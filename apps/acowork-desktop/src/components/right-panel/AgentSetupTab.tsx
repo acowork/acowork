@@ -92,7 +92,8 @@ type WiredField =
   | "chatRouterEnabled"
   | "chatRouterModel"
   | "chatRouterProvider"
-  | "chatRouterTimeoutMs";
+  | "chatRouterTimeoutMs"
+  | "chatRouterHistoryMaxTokens";
 
 const WIRE_FIELD: Record<WiredField, string> = {
   maxTokens: "max_output_tokens",
@@ -108,6 +109,7 @@ const WIRE_FIELD: Record<WiredField, string> = {
   chatRouterModel: "chat_router_model",
   chatRouterProvider: "chat_router_provider",
   chatRouterTimeoutMs: "chat_router_timeout_ms",
+  chatRouterHistoryMaxTokens: "chat_router_history_max_tokens",
   // ADR-094 note: `skillsAutoLoad` was removed from the
   // `WIRE_FIELD` table. Skill mode lives on the `load_skill`
   // tool entry in `agent_tools.json` (ADR-094 §4) — Toggling it
@@ -131,6 +133,7 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   chatRouterModel: FIELD_DEBOUNCE_MS,
   chatRouterProvider: FIELD_DEBOUNCE_MS,
   chatRouterTimeoutMs: FIELD_DEBOUNCE_MS,
+  chatRouterHistoryMaxTokens: FIELD_DEBOUNCE_MS,
   // ADR-094 note: `skillsAutoLoad` was removed from the debounce
   // table. Skill mode toggling goes through the Tools panel
   // (`load_skill` Switch) and uses the built-in tools debounce,
@@ -244,6 +247,14 @@ export function AgentSetupTab() {
   // model the router picks per conversation.
   const [chatRouterOpen, setChatRouterOpen] = useState(true);
 
+  // Draft text of the router's history-budget input while it is focused.
+  // Committing per keystroke would clamp "8" into "1000" and turn the next
+  // digit into "10000"; the field therefore keeps the raw text and commits
+  // the clamped value on blur (same pattern as the agent-name input).
+  const [routerHistoryDraft, setRouterHistoryDraft] = useState<string | null>(
+    null,
+  );
+
   // ADR-099: (provider, model) options for the router-model dropdown.
   // Same source as the Harness compact-model card and the distiller
   // model picker: vault keys define the selectable pairs, `/api/models`
@@ -338,6 +349,12 @@ export function AgentSetupTab() {
       })
       .finally(() => { if (!cancelled) setConfigLoading(false); });
     return () => { cancelled = true; };
+  }, [selectedAgentId]);
+
+  // The router-budget draft belongs to one agent: switching agents must not
+  // carry a half-typed number into the next agent's field.
+  useEffect(() => {
+    setRouterHistoryDraft(null);
   }, [selectedAgentId]);
 
   // Listen for global resource refresh events
@@ -1301,7 +1318,9 @@ export function AgentSetupTab() {
           Model override for the router LLM turn. The router does NOT
           follow the session's chat-model selection — by design it uses
           the agent's compact-model chain. This card lets the user pin
-          an explicit (provider, model) for it, plus the call timeout.
+          an explicit (provider, model) for it, the call timeout, and the
+          chat-history context budget (tokens — how much of the
+          conversation the router reads before deciding).
           The kill switch (`chat_router.enabled`) lives in the title row
           (default on, matching the `None = enabled` design default). */}
       <ListBox dividers={false}>
@@ -1364,6 +1383,55 @@ export function AgentSetupTab() {
               />
               <p className="text-9 text-text-tertiary ">
                 {t("agentSetup.chatRouterTimeoutMsDesc")}
+              </p>
+            </div>
+
+    {/* Chat history context budget — how much conversation the router reads */}
+            <div className="space-y-1">
+              <label className="block text-10 font-medium text-text-tertiary ">
+                {t("agentSetup.chatRouterHistoryMaxTokens")}
+              </label>
+              <div className="flex items-center gap-3">
+                <StyledInput
+                  type="number"
+                  min={1000}
+                  max={64000}
+                  step={1000}
+                  value={routerHistoryDraft ?? (profile.chatRouterHistoryMaxTokens ?? "")}
+                  onFocus={() =>
+                    setRouterHistoryDraft(
+                      String(profile.chatRouterHistoryMaxTokens ?? ""),
+                    )
+                  }
+                  onChange={(e) => setRouterHistoryDraft(e.target.value)}
+                  onBlur={() => {
+                    const raw = routerHistoryDraft;
+                    setRouterHistoryDraft(null);
+                    if (raw === null) return;
+                    const trimmed = raw.trim();
+                    // Empty -> omit the field (= runtime default). Same
+                    // clamp as `ChatRouterConfig::history_max_tokens`, so
+                    // the value committed is the value applied.
+                    const next =
+                      trimmed === ""
+                        ? undefined
+                        : Math.min(
+                            64000,
+                            Math.max(1000, parseInt(trimmed, 10) || 1000),
+                          );
+                    if (next !== profile.chatRouterHistoryMaxTokens) {
+                      saveField("chatRouterHistoryMaxTokens", next);
+                    }
+                  }}
+                  placeholder="8000"
+                  className="w-32 rounded-md"
+                />
+                <span className="text-10 text-text-tertiary ">
+                  {t("agentSetup.tokens")}
+                </span>
+              </div>
+              <p className="text-9 text-text-tertiary ">
+                {t("agentSetup.chatRouterHistoryMaxTokensDesc")}
               </p>
             </div>
 

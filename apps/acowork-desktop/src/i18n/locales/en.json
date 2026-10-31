@@ -160,6 +160,7 @@
       "timeout": "This run timed out",
       "waiting": "Waiting for your reply",
       "noAnswer": "This run produced no reply",
+      "systemFallback": "System receipt: no reply from {{name}} before the response deadline",
       "turnRoutedNew": "Starting a new task: {{task}}",
       "turnRoutedContinue": "Continuing the previous task: {{task}}"
     },
@@ -1039,6 +1040,8 @@
     "chatRouterModelDesc": "Model used for the router LLM turn that decides whether to reply directly or dispatch to an execution session. It does NOT follow the session's chat-model selection. Leave on Auto to use the agent's compact-model chain.",
     "chatRouterTimeoutMs": "Router timeout (ms)",
     "chatRouterTimeoutMsDesc": "Timeout for a single router LLM call before falling back to direct dispatch. Range 1000–300000, default 60000.",
+    "chatRouterHistoryMaxTokens": "Chat history context length",
+    "chatRouterHistoryMaxTokensDesc": "How much of the conversation the router may read before deciding, in tokens (the window is trimmed by context size, not by message count). Range 1000–64000, default 8000.",
     "chatRouterDisabledHint": "The chat router is off; every chat message is handled without a routing turn.",
     "resetTemperature": "Clear temperature override, revert to package default",
     "contextWindow": "Context Window",
@@ -1388,6 +1391,21 @@
     "previewDisabled": "Preview is not available for this file",
     "previewLoading": "Loading preview...",
     "previewDoubleClickHint": "Double-click to open in editor",
+    "imageViewer": {
+      "zoomIn": "Zoom in",
+      "zoomOut": "Zoom out",
+      "fit": "Fit to panel",
+      "cursorPoint": "x: {{x}}, y: {{y}}",
+      "cursorIdle": "—",
+      "selectionSize": "{{width}} × {{height}}",
+      "addPointToChat": "Add coordinates to Chat",
+      "addRegionToChat": "Add selection to Chat",
+      "clearSelection": "Clear selection",
+      "captureFailed": "Could not capture the selection",
+      "unavailable": "This file cannot be attached to the current chat",
+      "pointPrompt": "{{path}} @ ({{x}}, {{y}})",
+      "regionPrompt": "{{path}} region ({{x}}, {{y}}) – ({{x2}}, {{y2}}), {{width}}×{{height}}"
+    },
     "markdownLinkNotFound": "File not found in any workspace: {{href}}",
     "markdownImageClickHint": "Click to open preview",
     "loadingUrl": "Loading page...",
@@ -1438,6 +1456,10 @@
   "documentChip": {
     "uploadFailed": "Upload failed",
     "removeFile": "Remove {{filename}}"
+  },
+  "attachment": {
+    "zoomLabel": "View full size: {{filename}}",
+    "openFailed": "Cannot open 「{{filename}}」 — the file may have been deleted, or the service is unreachable"
   },
   "language": {
     "zhCN": "Chinese (Simplified)",
@@ -1795,6 +1817,9 @@
       "title": "Project Settings",
       "noProject": "Select a project to manage its members and settings.",
       "info": "Project Info",
+      "display": "Display",
+      "tasksPerPage": "Tasks per page",
+      "tasksPerPageHint": "Root tasks shown per board column page (subtasks follow their parent).",
       "members": "Members",
       "actions": "Project Actions",
       "service": "Service Status",
@@ -1817,6 +1842,7 @@
     "noDescription": "No description",
     "projectName": "Name",
     "projectRemark": "Remark",
+    "displaySettingsSaveFailed": "Failed to save display settings",
     "iconUpdated": "Project icon updated",
     "iconPicker": {
       "title": "Change project icon",
@@ -1867,7 +1893,22 @@
       "loading": "Loading…",
       "dragHint": "Drag cards between columns to change status",
       "ariaColumn": "{{status}} column",
-      "dropHint": "Drop here"
+      "dropHint": "Drop here",
+      "pagePrev": "Previous page",
+      "pageNext": "Next page",
+      "pageRange": "{{start}}–{{end}} of {{total}}"
+    },
+    "activity": {
+      "title": "Submissions",
+      "empty": "Nothing submitted yet",
+      "submitted": "Submitted",
+      "approved": "Approved",
+      "rejected": "Rejected",
+      "comment": "Reply",
+      "unknownActor": "Unknown",
+      "reply": "Reply",
+      "replyPlaceholder": "Reply to the submission…",
+      "sending": "Sending…"
     },
     "task": {
       "subtasks": "Subtasks",

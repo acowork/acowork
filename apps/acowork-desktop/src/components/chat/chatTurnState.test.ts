@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isFailureStatus,
   isEmptyTerminalReply,
+  isSystemFallback,
   isTerminalReply,
   isTurnRoutedNotice,
   opensAgentTurn,
@@ -177,5 +178,39 @@ describe("opensAgentTurn", () => {
 
   it("treats a whitespace-only recipient as no recipient", () => {
     expect(opensAgentTurn({ ...dm("u1"), to: "  " })).toBe(false);
+  });
+});
+
+describe("isSystemFallback", () => {
+  // The row shape the Gateway sweeper appends (§5.5.1): a terminal
+  // `agent_message` written ON the responder's behalf, carrying the fixed
+  // fallback wording as its body.
+  const fallbackRow = () =>
+    row(
+      "agent_message",
+      { message_id: "fallback-req1", in_reply_to: "req1", status: "failed", fallback: true },
+      "No answer received before the response deadline",
+    );
+
+  it("recognises the sweeper's receipt", () => {
+    expect(isSystemFallback(fallbackRow())).toBe(true);
+  });
+
+  it("does not claim an agent's own failure is a system receipt", () => {
+    // Same `status=failed`, no `fallback` stamp — this is the responder
+    // reporting its own outcome, and must keep painting red.
+    expect(isSystemFallback(row("agent_message", { status: "failed" }, "boom"))).toBe(false);
+  });
+
+  it("is not fooled by a non-agent row that carries the flag", () => {
+    expect(isSystemFallback(row("system_notice", { fallback: true }))).toBe(false);
+  });
+
+  it("needs its own branch because the receipt is not an empty terminal row", () => {
+    // Documents WHY the renderers cannot rely on `isEmptyTerminalReply`: the
+    // receipt has a body, so without an explicit branch it renders as an
+    // agent bubble.
+    expect(isEmptyTerminalReply(fallbackRow())).toBe(false);
+    expect(isTerminalReply(fallbackRow())).toBe(true);
   });
 });

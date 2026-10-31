@@ -536,7 +536,7 @@ mod tests {
     /// 人类批准一个 Agent 创建的任务（`review_status: pending → approved`）。
     /// Agent 侧任何"建完就 claim / 改状态"的测试都必须先过这一关，否则撞审批闸门。
     async fn approve_creation(store: &TreePmStore, tid: &str) {
-        store.review_task(&TaskId(tid.to_string()), true, "human").await.unwrap();
+        store.review_task(&TaskId(tid.to_string()), true, "human", None).await.unwrap();
     }
 
     /// 白名单 Agent 目录（测试桩）：仅当 agent_id 在白名单内才返回 true。
@@ -1825,7 +1825,7 @@ mod tests {
             .submit_task(&tid_a_typed, "done by agent", vec![], agent)
             .await
             .unwrap();
-        store.review_task(&tid_a_typed, true, "human").await.unwrap();
+        store.review_task(&tid_a_typed, true, "human", None).await.unwrap();
         let v = call_tool(&router, Some(agent), 71, "pm_get_task", json!({ "task_id": tid_a }))
             .await;
         assert_eq!(tool_text(&v)["status"], "done", "A should be done: {v}");

@@ -68,6 +68,7 @@ import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import {
   isFailureStatus,
   isEmptyTerminalReply,
+  isSystemFallback,
   isTurnRoutedNotice,
   pendingTurn,
   terminalNoticeKey,
@@ -455,6 +456,22 @@ const GroupRowView = memo(function GroupRowView({
   // above the bubble instead of split across top and bottom.
   const showRunChip =
     row.kind === "agent_message" && who.isAgent && !!execSid;
+
+  // §5.5.1: the sweeper's fallback receipt is a terminal `agent_message` the
+  // Gateway wrote ON the answering agent's behalf, so it carries the fixed
+  // wording as a body — `isEmptyTerminalReply` cannot catch it, and it would
+  // otherwise render as a bubble in that agent's voice reporting a crash it
+  // never reported. Keyed on the sweeper's own `fallback` stamp, which a real
+  // failure does not carry, rather than on `status`, which both do.
+  if (row.kind === "agent_message" && isSystemFallback(row)) {
+    return (
+      <ChatTurnStatusLine
+        className="px-4"
+        text={t("chatView.notice.systemFallback", { name: who.name })}
+        danger={false}
+      />
+    );
+  }
 
   // A terminal reply with nothing in it IS its outcome ("interrupted",
   // "failed"): paint the centered status line with the drill into the run,

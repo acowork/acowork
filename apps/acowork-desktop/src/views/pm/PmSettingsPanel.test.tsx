@@ -2,7 +2,7 @@
  * PmSettingsPanel smoke — the pm 视图右侧设置面板（齿轮轨唤出）。
  *
  * 覆盖计划钉住的三件事：
- *   1. 选中项目时渲染四个分区（项目信息 / 成员管理 / 项目操作 / 服务状态），
+ *   1. 选中项目时渲染各分区（项目信息 / 显示设置 / 成员管理 / 项目操作 / 服务状态），
  *      内容来自项目本身（标题）与内嵌的 MemberManagerSection；
  *   2. 未选中项目 → 空态提示，不渲染操作区；
  *   3. 删除按钮 → ConfirmDialog（级联语义）→ 确认后调用 deleteProject。
@@ -137,10 +137,11 @@ function renderPanel() {
 }
 
 describe("PmSettingsPanel", () => {
-  it("renders the four sections with the selected project's content", () => {
+  it("renders the settings cards with the selected project's content", () => {
     renderPanel();
 
     expect(screen.getByText("pm.settingsPanel.info")).toBeTruthy();
+    expect(screen.getByText("pm.settingsPanel.display")).toBeTruthy();
     expect(screen.getByText("pm.settingsPanel.members")).toBeTruthy();
     expect(screen.getByText("pm.settingsPanel.actions")).toBeTruthy();
     expect(screen.getByText("pm.settingsPanel.service")).toBeTruthy();
@@ -161,6 +162,23 @@ describe("PmSettingsPanel", () => {
     fireEvent.change(input, { target: { value: "Renamed" } });
     fireEvent.blur(input);
     expect(mocks.updateProjectMeta).toHaveBeenCalledWith("p-panel", { title: "Renamed" });
+  });
+
+  it("defaults the board page size to 20 and stores it without dropping metadata siblings", async () => {
+    const icon = { kind: "builtin", id: "icon-07" };
+    mocks.selected = projectFixture({ metadata: { icon } });
+    renderPanel();
+
+    const select = screen.getByLabelText("pm.settingsPanel.tasksPerPage") as HTMLSelectElement;
+    expect(select.value).toBe("20");
+
+    fireEvent.change(select, { target: { value: "50" } });
+    await waitFor(() => {
+      // metadata is replaced wholesale server-side → the icon must survive.
+      expect(mocks.updateProjectMeta).toHaveBeenCalledWith("p-panel", {
+        metadata: { icon, boardPageSize: 50 },
+      });
+    });
   });
 
   it("shows the empty state and hides actions when no project is selected", () => {
@@ -211,6 +229,9 @@ describe("PmSettingsPanel", () => {
       // …but not writable.
       expect((screen.getByLabelText("pm.projectName") as HTMLInputElement).disabled).toBe(true);
       expect((screen.getByLabelText("pm.projectRemark") as HTMLTextAreaElement).disabled).toBe(true);
+      expect(
+        (screen.getByLabelText("pm.settingsPanel.tasksPerPage") as HTMLSelectElement).disabled,
+      ).toBe(true);
       expect(screen.queryByText("pm.settingsPanel.actions")).toBeNull();
       expect(screen.queryByText("common.deleteProject")).toBeNull();
     } finally {

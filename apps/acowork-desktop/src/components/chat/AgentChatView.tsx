@@ -76,6 +76,7 @@ import { ReplyQuote, truncateQuote } from "./ReplyQuote";
 import { ChatEventText } from "./ChatEventText";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { detectPaste } from "./pasteDetect";
+import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
 import { ChatMarkdown } from "./ChatMarkdown";
 import {
   VirtualRowList,
@@ -91,6 +92,7 @@ import { AttachedContextChips } from "./AttachedContextChips";
 import {
   isFailureStatus,
   isEmptyTerminalReply,
+  isSystemFallback,
   isTurnRoutedNotice,
   pendingTurn,
   terminalNoticeKey,
@@ -257,6 +259,21 @@ const RowView = memo(function RowView({
     // Either way every agent message is drillable, finished or empty alike.
     const execSid =
       row.meta?.agent_session_id || row.meta?.sender_session_id || "";
+    // §5.5.1: the sweeper's fallback receipt is a terminal `agent_message`
+    // the Gateway wrote ON the responder's behalf, so it carries the fixed
+    // wording as a body — `isEmptyTerminalReply` cannot catch it, and it
+    // would otherwise render as an agent bubble reporting its own crash in
+    // the agent's voice. Keyed on the sweeper's own `fallback` stamp, not on
+    // `status`, which a real failure shares.
+    if (isSystemFallback(row)) {
+      return (
+        <ChatTurnStatusLine
+          className="px-4"
+          text={t("chatView.notice.systemFallback", { name: agentName })}
+          danger={false}
+        />
+      );
+    }
     // A terminal row with nothing in it IS its outcome ("interrupted",
     // "failed"): paint the centered status line with the drill into the run,
     // never an agent bubble announcing it in the agent's voice.
@@ -934,6 +951,23 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
 
   const removeAttachment = (id: string) =>
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
+
+  // ── Workspace panel → composer bridge ─────────────────────────────
+  // The image preview in the right-hand workspace panel fires
+  // `insertIntoChatComposer` / `attachImageToChatComposer` (see
+  // `lib/chatComposerBridge.ts`) when the user sends a coordinate point or a
+  // dragged region. Only one composer is mounted at a time, so no session id
+  // is needed; `useChatComposerBridge` handles the latest-closure plumbing.
+  useChatComposerBridge((request) => {
+    if (request.kind === "text") {
+      insertTextAtCaret(request.text);
+      return;
+    }
+    // Same path the paste handler's `image` branch takes: the bytes are
+    // already in the WebView, so they upload straight through the Chat
+    // session's `files/` route, no temp-file roundtrip.
+    void uploadFiles([request.file]);
+  });
 
   // Jump to the execution session behind a specific agent message — for a
   // resolved turn (finished, failed or empty). openSession cold-loads the exec

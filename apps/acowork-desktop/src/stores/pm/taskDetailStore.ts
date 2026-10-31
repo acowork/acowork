@@ -16,15 +16,24 @@
 import { create } from "zustand";
 import * as pmApi from "../../lib/pm-api";
 import { log } from "../../lib/logger";
-import type { PmAttachmentMeta, PmTaskResponse } from "../../lib/pm-types";
+import type { PmAttachmentMeta, PmTaskActivity, PmTaskResponse } from "../../lib/pm-types";
 
 interface PmTaskDetailState {
   taskId: string | null;
   detail: PmTaskResponse | null;
   attachments: PmAttachmentMeta[];
+  /**
+   * 任务活动历史（提交 / 审核 / 回复），服务端按时间升序。
+   *
+   * 与 `attachments` 同构：都是任务详情面上按需拉取的独立集合（PM 把它们
+   * 存在 `task.json` 之外，看板列表因此不会被提交正文撑大）。
+   */
+  activity: PmTaskActivity[];
   loading: boolean;
   /** 附件上传中（防止重复提交） */
   uploading: boolean;
+  /** 回复发送中（防止重复提交） */
+  replying: boolean;
   error: string | null;
 
   /**
@@ -58,6 +67,8 @@ interface PmTaskDetailState {
   uploadAttachment: (file: File) => Promise<PmAttachmentMeta | null>;
   /** 删除附件 → 成功从列表移除 */
   deleteAttachment: (aid: string) => Promise<boolean>;
+  /** 回复这条任务（写活动流，不动状态）→ 成功追加到 `activity` */
+  addReply: (text: string) => Promise<boolean>;
   updateDetail: (patch: Partial<PmTaskResponse>) => void;
   clear: () => void;
 }
@@ -65,12 +76,31 @@ interface PmTaskDetailState {
 /** The three faces of the one task dialog. */
 export type TaskDialogMode = "edit" | "create";
 
-export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
+export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => {
+  /**
+   * 拉活动历史。失败按空处理：任务面的其它部分（表单 / 附件 / 子任务）不该
+   * 因为读不到历史而打不开——对端是旧版 PM 服务时没有这个端点，也必须能用。
+   */
+  const loadActivity = (taskId: string) =>
+    pmApi.listTaskActivity(taskId).catch(() => [] as PmTaskActivity[]);
+
+  /**
+   * 活动流只追加、条目内容永不改写，所以"条目身份集合相等"就等于"内容相等"。
+   * 相等时保留旧数组引用：一次刷新不该让已经渲染的行重新挂载
+   * （AGENTS.md「Identity-preserving store updates」）。
+   */
+  const isSameActivity = (prev: PmTaskActivity[], next: PmTaskActivity[]) =>
+    prev.length === next.length &&
+    prev.every((e, i) => e.id === next[i].id && e.created_at === next[i].created_at);
+
+  return {
   taskId: null,
   detail: null,
   attachments: [],
+  activity: [],
   loading: false,
   uploading: false,
+  replying: false,
   error: null,
   mode: null,
   projectId: null,
@@ -88,11 +118,12 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
       error: null,
     });
     try {
-      const [detail, attachments] = await Promise.all([
+      const [detail, attachments, activity] = await Promise.all([
         pmApi.getTask(taskId),
         pmApi.listTaskAttachments(taskId).catch(() => [] as PmAttachmentMeta[]),
+        loadActivity(taskId),
       ]);
-      set({ detail, attachments, projectId: detail.project_id, loading: false, error: null });
+      set({ detail, attachments, activity, projectId: detail.project_id, loading: false, error: null });
     } catch (e) {
       set({ loading: false, error: e instanceof Error ? e.message : String(e) });
       log.warn("[pm:detail] openTask failed:", e);
@@ -107,8 +138,10 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
       taskId: null,
       detail: null,
       attachments: [],
+      activity: [],
       loading: false,
       uploading: false,
+      replying: false,
       error: null,
       mode: "create",
       projectId,
@@ -128,14 +161,19 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
   },
 
   refresh: async () => {
-    const taskId = get().taskId;
+    const { taskId, activity } = get();
     if (!taskId) return;
     try {
-      const [detail, attachments] = await Promise.all([
+      const [detail, attachments, nextActivity] = await Promise.all([
         pmApi.getTask(taskId),
         pmApi.listTaskAttachments(taskId).catch(() => [] as PmAttachmentMeta[]),
+        loadActivity(taskId),
       ]);
-      set({ detail, attachments });
+      set({
+        detail,
+        attachments,
+        activity: isSameActivity(activity, nextActivity) ? activity : nextActivity,
+      });
     } catch (e) {
       log.warn("[pm:detail] refresh failed:", e);
     }
@@ -173,6 +211,26 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
     }
   },
 
+  addReply: async (text) => {
+    const taskId = get().taskId;
+    if (!taskId || get().replying) return false;
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    set({ replying: true, error: null });
+    try {
+      const entry = await pmApi.addTaskActivity(taskId, trimmed);
+      set((s) => ({ activity: [...s.activity, entry], replying: false }));
+      return true;
+    } catch (e) {
+      set({
+        replying: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      log.warn("[pm:detail] addReply failed:", e);
+      return false;
+    }
+  },
+
   updateDetail: (patch) => {
     const detail = get().detail;
     if (!detail) return;
@@ -184,11 +242,14 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => ({
       taskId: null,
       detail: null,
       attachments: [],
+      activity: [],
       uploading: false,
+      replying: false,
       error: null,
       mode: null,
       projectId: null,
       createParentId: null,
       returnTo: null,
     }),
-}));
+  };
+});

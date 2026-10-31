@@ -1,7 +1,7 @@
 # ADR-099: LLM Semantic Routing for Chat Sessions (Chat Router)
 
 - **Number**: ADR-099
-- **Status**: Accepted (revised 2026-10-22: D3/D6 add read-only information tools to the router; D3 adds the routing-time delivery anchor and the execution-side pending queue, see below. Revised 2026-10-23: D8 fallback semantics — a degraded Chat-sourced human message now CREATES an execution session, see D8. Revised 2026-10-24: **D1's "the execution layer keeps physical rotation" is reversed — the T1/T2 rotation is deleted outright**; execution sessions are long-lived, compaction runs in place, and starting a new session is a semantic decision only, see the "Revision (2026-10-24)" section. Revised 2026-10-28: **acceptance criterion 1's "on a reuse the seed lands on the routed-to session" is reversed** — `session_config` is an initial value for creation only; nothing is applied when routing into an existing session, see "Revision (2026-10-28)")
+- **Status**: Accepted (revised 2026-10-22: D3/D6 add read-only information tools to the router; D3 adds the routing-time delivery anchor and the execution-side pending queue, see below. Revised 2026-10-23: D8 fallback semantics — a degraded Chat-sourced human message now CREATES an execution session, see D8. Revised 2026-10-24: **D1's "the execution layer keeps physical rotation" is reversed — the T1/T2 rotation is deleted outright**; execution sessions are long-lived, compaction runs in place, and starting a new session is a semantic decision only, see the "Revision (2026-10-24)" section. Revised 2026-10-28: **acceptance criterion 1's "on a reuse the seed lands on the routed-to session" is reversed** — `session_config` is an initial value for creation only; nothing is applied when routing into an existing session, see "Revision (2026-10-28)". Revised 2026-10-29: **D5's Block B window is trimmed by token budget** (the former row cap degrades to a transport ceiling) and is exposed to Agent Setup as `chat_router.history_max_tokens`, see "Revision (2026-10-29)")
 - **Date**: 2026-10-21
 - **Deciders**: ACowork Architecture Group
 - **Related**: Design 27 (Intent Messaging and Group Chat), Design 29 (Chat Session Context Orchestration), ADR-060 (Prompt-Cache-Friendly Context Block Reorganization), ADR-063 (Package-Level Prompt Override), ADR-066 (Provider Cache Tokens), ADR-076 (Multi-User Account System), ADR-085 (Agent Lifecycle State Machine), ADR-092 (User Message Identity and Bounded Reads), ADR-096 (No Full Session Reads), ADR-098 (Unified Standard Group Model)
@@ -102,7 +102,7 @@ The executor boundary is unchanged: the router has no execution tool, so no pack
 Apply the ADR-060 block model to the chat layer:
 
 - Block A: router system prompt (base + persona + scenario section), byte-stable;
-- Block B: chat history projected deterministically by seq, append-only; the window anchor `anchor_seq` moves forward in batches only when `max_history + slack` is exceeded;
+- Block B: chat history projected deterministically by seq, append-only; the window is trimmed by a token budget, and the anchor `anchor_seq` moves forward in batches only when `max_tokens + slack_tokens` is exceeded (2026-10-29 revision; previously the row count `max_history + slack`);
 - Block C: candidate list, draft config, current time and other dynamic information after the history, so changes only invalidate themselves;
 - Anthropic gets one `cache_control: ephemeral` breakpoint at the end of A and B; OpenAI/DeepSeek rely on automatic prefix caching.
 
@@ -231,6 +231,16 @@ The motive is coherence from the user's point of view. A Chat is one conversatio
 The cost, accepted deliberately: changing model / reasoning from the chat surface does not take effect on a turn the router reuses; it applies to the next session the chat opens. To change a live session, use that session's own execution surface, where `apply_config` (ADR-047, the single config entry point) and `route_workspace_switch` (ADR-034 §8, the single workspace entry point) change state the user can see.
 
 Unchanged: `dispatch(target="new")` remains the explicit channel through which a draft takes effect; the deterministic reuse of PM tasks and agent-to-agent intents stays (the routing key is the task identity), but its seed no longer overwrites an existing session either; `clamp_seed` still clamps model/provider against the responder's provider list and drops an unknown workspace, on the creation path only.
+
+## Revision (2026-10-29): the Block B window is trimmed by token budget, and exposed in Agent Setup
+
+D5's window is sized in **context (tokens)** instead of rows. The former `max_history + slack` / `retain` row constants degrade to internal transport ceilings; the criterion is now `chat_router.history_max_tokens` (default 8,000, clamped 1000–64000), estimated through the unified `crate::token::count_text`.
+
+Why: a fixed row count ignores how much context each message actually costs — a one-word "ok" and a 2 KB incident report are counted as equal. The row cap was too generous for chatty transcripts (32 short messages ≈ 1.4k tokens) and too tight for dense ones, while the old byte backstop (`max_history × per_row_cap`) let the *worst* case reach roughly 18k tokens. A single number now tightens the worst case and relaxes the common one.
+
+The mechanism is unchanged: still **anchor + batch trim**, cutting once down to `retain_tokens` (half the budget) when the budget trips, never one row per turn — the prefix-cache contract of D5 holds. Two new boundaries: a single oversized message never empties the window (the newest row is kept — slightly over budget beats a router that cannot see what the user just said); rows remain bounded by the Gateway's 50-row page, so each turn reads a full page and the token budget decides how much is projected; when a chatty transcript never reaches the budget the row ceiling bounds it — and it too rebuilds in a batch (48 → 24 rows, then appends again), never one row per turn.
+
+Supporting changes: `PUT /agents/{id}/config` gains the flat field `chat_router_history_max_tokens` (`ConfigField::ChatRouterHistoryMaxTokens`), the Agent Setup Chat Router card makes it editable (5 locales), `chat_router.history_window` survives as a row ceiling with no UI, and the decision log gains `history_tokens` next to `history_len` — a row count alone cannot distinguish 18 short acknowledgements from 18 long reports.
 
 ## Tests
 

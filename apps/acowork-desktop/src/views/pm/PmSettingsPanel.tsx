@@ -18,10 +18,16 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { ExpandableRow, ListBox } from "../../components/common/list";
+import { Dropdown } from "../../components/common/Dropdown";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { ProjectIconPicker } from "../../components/common/ProjectIconPicker";
 import { parseProjectIcon, type ProjectIconRef } from "../../lib/projectIcon";
+import {
+  BOARD_PAGE_SIZE_OPTIONS,
+  parseBoardPageSize,
+  withBoardPageSize,
+} from "../../lib/pm-board-settings";
 import { showToast } from "../../components/common/ToastProvider";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
@@ -81,6 +87,9 @@ export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPan
             <div className="space-y-2">
               <SettingsCard title={t("pm.settingsPanel.info")}>
                 <ProjectInfoSection project={project} canGovern={canGovern} />
+              </SettingsCard>
+              <SettingsCard title={t("pm.settingsPanel.display")}>
+                <DisplaySettingsSection project={project} canGovern={canGovern} />
               </SettingsCard>
               <SettingsCard title={t("pm.settingsPanel.members")}>
                 <MemberManagerSection project={project} />
@@ -225,6 +234,75 @@ function ProjectInfoSection({ project, canGovern }: { project: PmProject; canGov
           aria-label={t("pm.projectRemark")}
         />
       </div>
+    </div>
+  );
+}
+
+/**
+ * 显示设置 — 看板每列的单页任务数。
+ *
+ * 存 `metadata.boardPageSize`：偏好按项目走，随服务端同步；写入必须走
+ * [`withBoardPageSize`]（先合并旧 metadata），否则图标等兄弟字段会被
+ * 后端的整体替换语义清空。下拉先改本地草稿，请求失败再回滚。
+ */
+function DisplaySettingsSection({ project, canGovern }: { project: PmProject; canGovern: boolean }) {
+  const { t } = useTranslation();
+  const updateProjectMeta = usePmProjectStore((s) => s.updateProjectMeta);
+  const healthy = usePmHealthStore((s) => s.healthy);
+  const blocked = healthy === false || !canGovern;
+  const pageSize = parseBoardPageSize(project.metadata);
+
+  const [draft, setDraft] = useState(pageSize);
+  const [saving, setSaving] = useState(false);
+  // 服务端回写（或其他客户端修改）后，草稿跟真值对齐。
+  useEffect(() => {
+    setDraft(pageSize);
+  }, [project.id, pageSize]);
+
+  const handleChange = useCallback(
+    async (value: string) => {
+      const next = Number.parseInt(value, 10);
+      if (!Number.isFinite(next) || next === pageSize) {
+        setDraft(pageSize);
+        return;
+      }
+      // metadata 整体替换：合并旧字段（图标等）再回写。
+      setDraft(next);
+      setSaving(true);
+      const ok = await updateProjectMeta(project.id, {
+        metadata: withBoardPageSize(project.metadata, next),
+      });
+      setSaving(false);
+      if (!ok) {
+        setDraft(pageSize);
+        showToast({ type: "error", message: t("pm.displaySettingsSaveFailed") });
+      }
+    },
+    [pageSize, project.id, project.metadata, updateProjectMeta, t],
+  );
+
+  return (
+    <div className="space-y-1.5">
+      <label
+        htmlFor="pm-board-page-size"
+        className="block text-xs font-medium text-text-secondary"
+      >
+        {t("pm.settingsPanel.tasksPerPage")}
+      </label>
+      <Dropdown
+        id="pm-board-page-size"
+        value={String(draft)}
+        onChange={(v) => void handleChange(v)}
+        disabled={blocked || saving}
+        aria-label={t("pm.settingsPanel.tasksPerPage")}
+        options={BOARD_PAGE_SIZE_OPTIONS.map((n) => ({
+          value: String(n),
+          label: String(n),
+        }))}
+      />
+      <p className="text-10 text-text-tertiary">
+        {t("pm.settingsPanel.tasksPerPageHint")}
+      </p>
     </div>
   );
 }

@@ -2727,7 +2727,6 @@ mod tests {
                     status: String::new(),
                     has_human: None,
                     chat_attachment_ids: Vec::new(),
-                    for_execution_session: String::new(),
                 },
             )))
             .unwrap();

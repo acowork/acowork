@@ -111,7 +111,7 @@ interface SearchRunHandle {
 
 | Adapter | API 与适用条件 | signal / 单源限制 |
 |---|---|---|
-| File | `GET /api/agents/{id}/workspaces/search?q=&workspace_id=&max_results=20`；复用现 case/whole-word 参数 | 1 个 signal；无 agent 则 skipped；请求最多 20 条，与 ADR-093 UI 上限一致 |
+| File | `GET /api/agents/{id}/workspaces/search?q=&workspace_id=&max_results=20&match_file_names=true`；复用现 case/whole-word 参数 | 1 个 signal；无 agent 则 skipped；请求最多 20 条，与 ADR-093 UI 上限一致。`match_file_names` 让同一端点同时返回内容命中与文件名命中（ADR-081 D2） |
 | Git | 复用 `useGitStore.fetchLog(agentId, workspaceId, "", 100, 0)` + `filterGitCommits(query)` | 为现 `fetchLog` 的 `httpGet` 增加可选 `AbortSignal`；不改变已有 503 retry 行为，AbortError 直接退出 |
 | Doc | `searchDocs(query, 20, signal)` | 函数已有 signal 支持；匿名/user scope 按现有 Gateway API 权限处理 |
 | Project | `searchPm(query, 20, signal)` | 函数已有 signal 支持 |

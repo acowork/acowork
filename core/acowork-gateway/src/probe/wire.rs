@@ -22,10 +22,16 @@ pub const PROBE_TOOL_NAME: &str = "acowork_probe_echo";
 
 /// Token budget for the L1/L2 baseline call.
 ///
-/// One output token is enough to prove the endpoint answers in the Responses
-/// shape and to make `usage.output_tokens` a real number, and it keeps the
-/// probe's cost negligible (D10.4).
-const BASELINE_MAX_OUTPUT_TOKENS: u32 = 1;
+/// Not literally "minimal": the OpenAI Responses API rejects
+/// `max_output_tokens` below 16 outright (a 400 naming the field), and a
+/// budget that small can also be swallowed whole by the low-effort reasoning
+/// block the probe sends, leaving `usage.output_tokens` at zero. 64 sits
+/// above the known floor with headroom for vendor-specific minimums, and the
+/// probe still costs a fraction of a cent (D10.4). A provider that demands
+/// more than this surfaces as a plain `UnsupportedField`-style 400 in the
+/// verdict — which is actionable, unlike a probe that silently probes with an
+/// illegal value.
+const BASELINE_MAX_OUTPUT_TOKENS: u32 = 64;
 
 /// Token budget for the L3 call — it has to fit a `function_call` item.
 const ROUND_TRIP_MAX_OUTPUT_TOKENS: u32 = 128;
@@ -304,7 +310,9 @@ mod tests {
         let req = baseline_request("gpt-5", false);
         assert_eq!(req["model"], "gpt-5");
         assert_eq!(req["input"], "ping");
-        assert_eq!(req["max_output_tokens"], 1);
+        // Must clear the Responses API floor (OpenAI: >= 16) with headroom —
+        // see BASELINE_MAX_OUTPUT_TOKENS.
+        assert!(req["max_output_tokens"].as_u64().unwrap() >= 16);
         assert_eq!(req["stream"], false);
         assert_eq!(req["store"], false);
         // A probe must not leave a stored response behind (D10.4).

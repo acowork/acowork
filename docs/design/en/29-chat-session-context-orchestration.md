@@ -174,26 +174,31 @@ The guard test is "two projections of the same input are equal".
 
 ### 4.4 Window anchor and batch trimming
 
-The naive "last N messages" implementation drops the oldest message on every new one, shifting the whole array and changing the prefix hash — cache hits collapse to near zero. This design uses an **anchor + batch trim** to amortise rebuilds:
+The naive "last N messages" implementation drops the oldest message on every new one, shifting the whole array and changing the prefix hash — cache hits collapse to near zero. This design uses an **anchor + batch trim** to amortise rebuilds.
+
+The window is sized in **context (tokens)**, not in rows: a one-word "ok" and a 2 KB incident report are not the same amount of context, so a fixed row count is simultaneously too generous for chatty transcripts and too tight for dense ones. The trimming criterion is therefore `max_tokens`; rows are only a transport ceiling (one Gateway page).
 
 - `anchor_seq`: the front boundary of the window — the `seq` of the newest row already excluded; every returned row satisfies `seq > anchor_seq`;
-- `max_history`: default 32 (widened from 24 once the router gained information tools — the think/tool rounds a lookup spends inside one turn eat context, so a few more conversation rows must stay in view to judge relevance well);
-- `slack`: default 8;
-- `retain`: default 16.
+- `max_tokens`: default 8,000 tokens (configurable in the Agent Setup panel as `chat_router.history_max_tokens`, clamped 1000–64000), estimated through the unified `crate::token::count_text`. The Gateway's 32 KiB page byte cap is ≈ 9.1k tokens at the default 3.5 chars/token, so the default sits just inside the transport ceiling;
+- `slack_tokens`: default `max_tokens / 8` — how far the window may grow past the budget before it is rebuilt;
+- `retain_tokens`: default `max_tokens / 2` — the context kept after a rebuild;
+- `max_rows`: rows one Gateway page can carry (50 minus the margin for the current message and the anchor row). Transport-determined; a config may tighten it (`chat_router.history_window`, demoted to a row ceiling). A rebuild keeps `max_rows / 2` rows.
 
 Per turn:
 
 ```
 history = rows with seq > anchor_seq      // excluding the current message
-if len(history) > max_history + slack:
-    keep the newest retain rows             // trim the excess in one go
+if len(history) > max_rows:               // transport ceiling
+    keep the newest max_rows / 2 rows       // batch rebuild too, never one row per turn
     anchor_seq = seq of the newest dropped row
-if total_bytes(history) > max_bytes:        // backstop for extremely long messages
-    drop from the front until max_bytes fits
+if total_tokens(history) > max_tokens + slack_tokens:
+    walk back from the newest until retain_tokens is exceeded (keep >= 1 row)
     anchor_seq = seq of the newest dropped row
 ```
 
-In steady state `anchor_seq` is unchanged and Block B only grows at the tail; a batch rebuild happens roughly once every `slack + retain` turns. `anchor_seq` lives in ChatSessionManager memory; after a Runtime restart there is no persisted anchor, so the window is re-anchored to the newest page (one acceptable miss). `max_history` is capped below the Gateway's 50-row page so the whole window always fits in one page.
+In steady state `anchor_seq` is unchanged and Block B only grows at the tail; rebuilds are amortised over the gap between `retain_tokens` and `max_tokens + slack_tokens`, so one happens roughly every 0.6 of a budget worth of new content rather than once per message. A chatty transcript never reaches the token budget; the row ceiling bounds it with the same rhythm — 48 → 24 rows, then append up to 48 again — so the steady-state window sits between 25 and 48 rows (the retired design oscillated between 17 and 41). A single oversized row never empties the window — the newest row is always kept, because losing the message the user just sent hurts routing more than carrying one slightly over-budget row.
+
+`anchor_seq` lives in ChatSessionManager memory; after a Runtime restart there is no persisted anchor, so the window is re-anchored to the newest page (one acceptable miss). Because a token budget cannot be converted to a row count up front, each turn asks for the Gateway's full page (50 rows) and the token budget decides how much is actually projected; the Gateway's own page byte budget still backstops it.
 
 ### 4.5 Excluding the current message
 

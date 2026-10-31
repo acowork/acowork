@@ -75,6 +75,7 @@ pub fn validate_id_format(id: &str, prefix: &str, kind: &str) -> Result<()> {
 /// 即使 UUID 不会撞保留名，仍然校验作为第二道防线。
 pub const TASK_DIR_RESERVED: &[&str] = &[
     "task.json",
+    "activity.json",
     "attachments",
     "result.json",
     "notes.jsonl",

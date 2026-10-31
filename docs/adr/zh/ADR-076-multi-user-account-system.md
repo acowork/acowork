@@ -567,7 +567,7 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 
 注入点各一处：Gateway 只在 `auth_middleware`（真实请求）与 `runtime_scope_headers`（Runtime 反代）写这两个头，Runtime 只从 `SessionScope::from_headers` 读。
 
-**执行面的写路径才是真正的门**：执行视图发消息走的是 intent 的 pin 通道（`for_execution_session`，ADR-100 D12），**不经过** `is_writable_by`——那个谓词守的是 HTTP 控制面（open/close/delete/config）。所以在 `deliver_pinned_turn` 里补了同一条规则的第二道门：pin 只能指向**绑定到本 chat 且 initiator == 发送方**的 session。不满足就丢弃 pin 走普通路由（"hint 不是 gate"的既有契约），发送方照样能到达 agent，只是进的是自己的 session。没有这道门，单一发起方规则只活在 Desktop 那个被 disable 的输入框里——群成员手上都有本群 chat 行，读得到别人的 `agent_session_id`。
+**执行面的写路径就是那道门，而且只有一道**：执行视图发消息走 `POST /api/agents/{id}/sessions/{sid}/messages`，与 open / close / delete / config 共用同一条 `authorize_write` → `is_writable_by` 判定。ADR-100 Rev. 8 之前不是这样：那条消息走的是 intent 的 pin 通道（`for_execution_session`），绕开了这个谓词，于是不得不在 `deliver_pinned_turn` 里为同一条规则补第二道门（pin 只能指向**绑定到本 chat 且 initiator == 发送方**的 session，不满足就丢弃 pin 走普通路由）。镜像取消后那条通道整体删除，门回到一处，规则不再可能只在一侧生效。谁能应答本轮卡片同样来自服务端事实：Gateway 代理时核验过的 `x-user-id` scope 写进 `answerable_by`，不是客户端携带的提示。没有这道门，单一发起方规则只活在 Desktop 那个被 disable 的输入框里——群成员手上都有本群 chat 行，读得到别人的 `agent_session_id`。
 
 **候选列表在 speaker 未知时 fail-closed**：`is_own` 对"有 initiator 但不知道谁说"返回不可见（local 模式下 initiator 恒为空，走不到这一支），避免把别人的执行记录塞进 router 的候选。
 

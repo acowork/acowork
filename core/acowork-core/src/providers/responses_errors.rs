@@ -23,18 +23,28 @@
 
 use super::traits::{ProviderError, ProviderErrorType, StreamError};
 
-/// Request fields v1 is allowed to trim when the provider rejects them
-/// (ADR-103 D8: the whitelist is exactly one field, `reasoning`).
+/// Request fields the trim path is allowed to drop when the provider rejects
+/// them (ADR-103 D8, revised: the whitelist is `reasoning` + `temperature`).
 ///
 /// Widening this list requires an ADR change — every surviving entry is a
 /// silent behaviour change for the user, which is why the table is narrow.
-pub const TRIMMABLE_FIELDS: &[&str] = &["reasoning"];
+///
+/// `temperature` joined `reasoning` because reasoning models reject the
+/// parameter outright ("'temperature' is not supported with this model"),
+/// while the Runtime's fallback chain injects `DEFAULT_TEMPERATURE` even
+/// when the user never set one. For such a model the platform default is not
+/// user intent, and refusing to drop it made the model unusable with an
+/// error the user could not act on. An endpoint that accepts temperature is
+/// unaffected: the trim is evidence-gated per `(provider, model)` and only
+/// ever applies after that pair answered 400 naming the field.
+pub const TRIMMABLE_FIELDS: &[&str] = &["reasoning", "temperature"];
 
 /// Every field whose 400 mention is recognized as "this provider does not
 /// implement that field". Only [`TRIMMABLE_FIELDS`] may be trimmed; the rest
-/// are surfaced to the user so the model settings can be adjusted (D8 v1:
-/// `tool_choice` / `text.format` / `temperature` / `top_p` change model
-/// behaviour when dropped, so they are never compensated client-side).
+/// are surfaced to the user so the model settings can be adjusted (D8:
+/// `tool_choice` / `text.format` / `top_p` change model behaviour when
+/// dropped without an endpoint-side rejection to justify it, so they are
+/// never compensated client-side).
 pub const RECOGNIZED_FIELDS: &[&str] = &[
     "reasoning",
     "tool_choice",
@@ -393,8 +403,8 @@ mod tests {
         }
         assert_eq!(
             TRIMMABLE_FIELDS,
-            &["reasoning"],
-            "ADR-103 D8 pins the v1 whitelist to exactly one field"
+            &["reasoning", "temperature"],
+            "ADR-103 D8 pins the whitelist; widening it requires an ADR revision"
         );
     }
 }

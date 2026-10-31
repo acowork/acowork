@@ -174,26 +174,31 @@ router **不加载**：
 
 ### 4.4 窗口锚点与批量裁剪
 
-朴素实现「最近 N 条」会在每来一条新消息时丢掉最旧一条，导致整个 messages 数组左移、前缀 hash 全变——缓存命中率接近 0。本设计用**锚点 + 批量裁剪**摊销重建成本：
+朴素实现「最近 N 条」会在每来一条新消息时丢掉最旧一条，导致整个 messages 数组左移、前缀 hash 全变——缓存命中率接近 0。本设计用**锚点 + 批量裁剪**摊销重建成本。
+
+窗口按**上下文大小（tokens）**计量，而不是按条数：一条「好的」和一份 2KB 的故障报告不是同等量的上下文，固定条数对闲聊型对话过于宽松、对信息密集的对话又过于苛刻。因此裁剪判据是 `max_tokens`，条数只作为传输层上限（网关单页）。
 
 - `anchor_seq`：窗口前端边界——已排除的最新一条消息的 `seq`，返回的窗口全部满足 `seq > anchor_seq`；
-- `max_history`：默认 32 条（router 获得信息工具后从 24 放宽：一轮里用于查询的 think/工具轮会占用上下文，需要多留几轮对话才能判准相关性）；
-- `slack`：默认 8 条；
-- `retain`：默认 16 条。
+- `max_tokens`：默认 8000 tokens（Agent Setup 面板可配，`chat_router.history_max_tokens`，clamp 1000–64000），按 `crate::token::count_text` 统一口径估算；网关单页字节上限 32 KiB 在默认 3.5 chars/token 下约 9.1k tokens，因此默认值正好落在传输上限之内；
+- `slack_tokens`：默认 `max_tokens / 8`，即允许窗口超出预算的容忍量；
+- `retain_tokens`：默认 `max_tokens / 2`，即重建后保留的上下文量；
+- `max_rows`：网关单页可承载的行数（50 减去当前消息与锚点行的余量），仅由传输层决定，可在配置里进一步收紧（`chat_router.history_window`，已降级为条数上限）；重建后保留 `max_rows / 2` 条。
 
 每轮：
 
 ```
 history = seq > anchor_seq 的消息         // 不含当前消息
-if len(history) > max_history + slack:
-    保留最新 retain 条                     // 一次性裁掉多余部分
+if len(history) > max_rows:                // 传输层上限
+    保留最新的 max_rows / 2 条             // 同样是批量重建，不逐条滑动
     anchor_seq = 被裁掉的最新一条的 seq
-if total_bytes(history) > max_bytes:        // 兜底：极端长消息
-    从头部丢弃直到满足 max_bytes
+if total_tokens(history) > max_tokens + slack_tokens:
+    从最新往回保留，直到累计超过 retain_tokens（至少保留 1 条）
     anchor_seq = 被裁掉的最新一条的 seq
 ```
 
-稳态下 `anchor_seq` 不变，Block B 只在尾部追加；每隔约 `slack + retain` 轮才发生一次批量重建。`anchor_seq` 存在 ChatSessionManager 内存中，Runtime 重启后没有持久化的锚点，按最近一页重新锚定（可接受的一次 miss）。`max_history` 上限低于网关单页 50 条，保证整个窗口始终在一页之内。
+稳态下 `anchor_seq` 不变，Block B 只在尾部追加；重建按 `retain_tokens` 到 `max_tokens + slack_tokens` 之间的差额摊销，即大约每隔 0.6 个预算的增量才发生一次批量重建，而不是每条消息滑动一次。短消息的对话永远碰不到 token 预算，此时由行数上限兜底：满页时有「48 → 24 条 → 逐轮追加到 48」的同样节奏，稳态窗口在 25–48 条之间（旧实现是 17–41 条）。单条超长消息也不会把窗口清空——至少保留最新一条：丢掉用户刚说的话，比多带一条稍微超预算的消息对路由伤害更大。
+
+`anchor_seq` 存在 ChatSessionManager 内存中，Runtime 重启后没有持久化的锚点，按最近一页重新锚定（可接受的一次 miss）。因为预算无法预先折算成行数，每轮按网关单页上限取历史（50 条），由 token 预算决定实际投影多少；网关侧仍有页字节预算兜底。
 
 ### 4.5 当前消息的排除
 

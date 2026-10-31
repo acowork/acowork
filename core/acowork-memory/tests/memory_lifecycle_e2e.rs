@@ -432,6 +432,55 @@ async fn restatements_fold_into_one_recallable_node() {
     assert_eq!(result.funnel.verdict_merged, 2);
 }
 
+/// A merge that rewrites the statement must store an embedding for that exact
+/// text, not reuse the source episode's embedding.
+#[tokio::test]
+async fn merged_statement_and_embedding_stay_in_sync() {
+    let lc = Lifecycle::new();
+    let now = Utc::now();
+    lc.seed_legacy_episode(
+        "User prefers concise answers",
+        KnowledgeSubType::Preference,
+        now,
+        true,
+    );
+    lc.seed_legacy_episode(
+        "User prefers concise answers",
+        KnowledgeSubType::Preference,
+        now - ChronoDuration::days(1),
+        true,
+    );
+
+    let llm = RewriteStatementOnMerge;
+    let embedding_fn: acowork_memory::consolidation::EmbeddingFn =
+        Arc::new(acowork_memory::manager::procedural_embedding_fallback);
+    let result = DefaultEpisodicDistiller
+        .run(
+            lc.provider().as_ref(),
+            Some(&llm),
+            Some(&embedding_fn),
+            &DistillerConfig::default(),
+        )
+        .await
+        .expect("distiller run ok");
+
+    assert_eq!(result.funnel.projected, 1);
+    assert_eq!(result.funnel.verdict_merged, 1);
+    let (_, node) = lc
+        .store
+        .find_knowledge_by_subject("user", "user_prefers_concise_answers")
+        .expect("lookup ok")
+        .expect("merged node should remain addressable by its original slug");
+    assert_eq!(node.object, "Canonical merged statement");
+    let expected_embedding =
+        acowork_memory::manager::procedural_embedding_fallback("Canonical merged statement");
+    assert_eq!(
+        node.embedding.as_deref(),
+        Some(expected_embedding.as_slice()),
+        "the stored vector must be generated from the text written to the node"
+    );
+}
+
 /// The sediment is only worth having if `memory_recall` can surface it.
 #[tokio::test]
 async fn consolidated_sediment_is_recallable() {
@@ -835,6 +884,40 @@ impl acowork_memory::consolidation::ConsolidationLlm for FoldIntoFirstCandidate 
                 "target_id": target,
                 "statement": request["new_statement"],
                 "reasoning": "same preference restated",
+            })
+            .to_string(),
+            usage_tokens: None,
+            ..Default::default()
+        })
+    }
+}
+
+/// A model that rewrites the merged statement, exercising the embedding key
+/// change on the merge path.
+struct RewriteStatementOnMerge;
+
+#[async_trait::async_trait]
+impl acowork_memory::consolidation::ConsolidationLlm for RewriteStatementOnMerge {
+    async fn chat(
+        &self,
+        messages: Vec<acowork_memory::consolidation::LlmMessage>,
+    ) -> std::result::Result<acowork_memory::consolidation::LlmResponse, String> {
+        let user = messages
+            .iter()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str())
+            .ok_or("no user message")?;
+        let request: serde_json::Value =
+            serde_json::from_str(user).map_err(|e| format!("unparsable request: {e}"))?;
+        let target = request["candidates"][0]["id"]
+            .as_u64()
+            .ok_or("no candidates in the request")?;
+        Ok(acowork_memory::consolidation::LlmResponse {
+            content: serde_json::json!({
+                "action": "merge",
+                "target_id": target,
+                "statement": "Canonical merged statement",
+                "reasoning": "canonicalized restatement",
             })
             .to_string(),
             usage_tokens: None,

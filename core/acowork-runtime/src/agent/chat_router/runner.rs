@@ -327,7 +327,7 @@ async fn run_turn(
     let started = Instant::now();
     let chat_id = envelope.source_chat_session_id.clone();
     let chat_kind = chat_kind_of(envelope);
-    let budget = WindowBudget::from_history_window(cfg.history_window());
+    let budget = WindowBudget::new(cfg.history_max_tokens(), cfg.history_rows());
     let now_secs = chrono::Utc::now().timestamp();
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -514,6 +514,7 @@ async fn run_turn(
         prefix_hash: prefix_hash(&prepared.block_a, &tools_json, &block_b.messages),
         anchor_seq: block_b.anchor_seq as usize,
         history_len: block_b.messages.len(),
+        history_tokens: block_b.token_len,
         attachments: attachments.len(),
         refs: refs.len(),
         attachment_only: super::context::is_attachment_only(text, &attachments, &refs),
@@ -725,8 +726,8 @@ async fn run_turn(
                                 repo: envelope.repo.clone(),
                                 kind: envelope.kind.clone(),
                                 chat_attachment_ids: envelope.chat_attachment_ids.clone(),
-                                // Same arm the pinned path fills on its
-                                // `ChatMessage`: a workspace reference means one
+                                // Same arm the execution surface's own write
+                                // fills on its `ChatMessage`: a workspace reference means one
                                 // thing whichever transport carried the turn.
                                 attached_items: crate::agent::intent_turn::attached_items_from_params(
                                     &envelope.params,
@@ -1163,6 +1164,9 @@ struct TurnTrace<'a> {
     prefix_hash: String,
     anchor_seq: usize,
     history_len: usize,
+    /// Tokens the projected history cost — the number the configured budget
+    /// (`chat_router.history_max_tokens`) is enforced against.
+    history_tokens: usize,
     /// Attachments on the turn being routed — the count, not the metadata:
     /// the log holds routing metadata only (ADR-096). Zero was the invisible
     /// state: a turn carrying a file routed exactly like the same text with
@@ -1204,6 +1208,7 @@ impl TurnTrace<'_> {
             prefix_hash: self.prefix_hash.clone(),
             anchor_seq: self.anchor_seq,
             history_len: self.history_len,
+            history_tokens: self.history_tokens,
             attachments: self.attachments,
             refs: self.refs,
             attachment_only: self.attachment_only,
@@ -1307,7 +1312,6 @@ mod tests {
             status: String::new(),
             has_human: Some(true),
             chat_attachment_ids: Vec::new(),
-            for_execution_session: String::new(),
         }
     }
 

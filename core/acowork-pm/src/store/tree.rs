@@ -45,9 +45,10 @@ use tokio::fs;
 use crate::config::PmConfig;
 use crate::error::{PmError, Result};
 use crate::types::{
-    AttachmentId, AttachmentMeta, CreateProject, CreateTask, DependencyKind, MemberKind, Priority,
-    Project, ProjectId, ProjectMember, ProjectStatus, ReparentTask, ReviewStatus, Task, TaskFilter,
-    TaskId, TaskResult, TaskSort, TaskStatus, UpdateProject, UpdateTask,
+    ActivityKind, AttachmentId, AttachmentMeta, CreateProject, CreateTask, DependencyKind,
+    MemberKind, Priority, Project, ProjectId, ProjectMember, ProjectStatus, ReparentTask,
+    ReviewStatus, Task, TaskActivity, TaskFilter, TaskId, TaskResult, TaskSort, TaskStatus,
+    UpdateProject, UpdateTask,
 };
 
 use super::atomic::{
@@ -153,7 +154,27 @@ pub trait PmStore: Send + Sync {
         attachment_ids: Vec<AttachmentId>,
         actor: &str,
     ) -> Result<Task>;
-    async fn review_task(&self, id: &TaskId, approved: bool, reviewer: &str) -> Result<Task>;
+    /// 人类审核。`comment` 是审核正文（拒绝理由 / 批准附言），进活动流。
+    async fn review_task(
+        &self,
+        id: &TaskId,
+        approved: bool,
+        reviewer: &str,
+        comment: Option<&str>,
+    ) -> Result<Task>;
+
+    // ── Activity (submission history) ──────────────────────────────
+
+    /// 任务活动历史（提交 / 审核 / 回复），按时间升序。
+    async fn list_activity(&self, task_id: &TaskId) -> Result<Vec<TaskActivity>>;
+    /// 追加一条回复（`ActivityKind::Comment`）——人类在任务面上回复 Agent
+    /// 的提交，或 Agent 补充说明。
+    async fn add_task_comment(
+        &self,
+        task_id: &TaskId,
+        text: &str,
+        actor: &str,
+    ) -> Result<TaskActivity>;
 
     // ── Dependency graph ────────────────────────────────────────────
 
@@ -417,6 +438,66 @@ impl TreePmStore {
             .join(task_id.as_str())
     }
 
+    // ── Activity history（`{task_dir}/activity.json`）────────────────
+    //
+    // 活动是**只追加事件流**，与 `task.json` 这份**可变记录**分文件存放：
+    // 塞进记录里会让每次 PATCH 重写全部历史，并让看板列表响应（`find_tasks`
+    // 逐个序列化 `task.json`）随提交次数线性膨胀。
+    //
+    // 一致性：`commit_task_activity` 先写历史、再写记录，记录写失败时回滚
+    // 历史。顺序是刻意的——反过来会留下"状态已流转但读不到提交内容"，
+    // 那正是本次要修的缺陷形态。
+
+    /// 活动历史文件名（任务目录内，见 [`super::atomic::TASK_DIR_RESERVED`]）。
+    const ACTIVITY_FILE: &'static str = "activity.json";
+
+    /// 读取任务活动历史。
+    ///
+    /// `activity.json` 不存在时用 `record.result`（本功能上线前唯一留存的
+    /// 提交）补种一条 `Submitted`，让旧任务也能显示提交内容。补种**不落盘**，
+    /// 只有第一次真正追加时（[`Self::commit_task_activity`]）才固化。
+    async fn load_activity(&self, dir: &Path, record: &Task) -> Result<Vec<TaskActivity>> {
+        let path = dir.join(Self::ACTIVITY_FILE);
+        match fs::read(&path).await {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(seeded_activity(record))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 原子写整份活动历史（读-改-写：数组小，重写比增量 append 更容易保持
+    /// 与 [`super::atomic::atomic_write_json`] 的"无中间态"约定一致）。
+    async fn store_activity(&self, dir: &Path, entries: &[TaskActivity]) -> Result<()> {
+        atomic_write_json(&dir.join(Self::ACTIVITY_FILE), &entries).await
+    }
+
+    /// 把"一条活动 + 新的任务记录"作为一个逻辑单元落盘（submit / review 共用）。
+    async fn commit_task_activity(
+        &self,
+        dir: &Path,
+        record: &Task,
+        before: &Task,
+        activity: TaskActivity,
+    ) -> Result<()> {
+        let mut history = self.load_activity(dir, before).await?;
+        history.push(activity);
+        self.store_activity(dir, &history).await?;
+        if let Err(e) = atomic_write_json(&dir.join("task.json"), record).await {
+            history.pop();
+            if let Err(rollback) = self.store_activity(dir, &history).await {
+                tracing::warn!(
+                    task_id = %record.id,
+                    error = %rollback,
+                    "PM activity rollback failed; history carries one entry for a submission that did not land"
+                );
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// 计算项目目录。
     pub(crate) fn project_dir(&self, project_id: &ProjectId) -> PathBuf {
         self.projects_dir.join(project_id.as_str())
@@ -626,6 +707,23 @@ fn priority_rank(p: Priority) -> u8 {
         Priority::Normal => 2,
         Priority::Low => 3,
     }
+}
+
+/// 由 `task.result` 衍生出来的历史条目。
+///
+/// 提交历史这个能力上线前，`submit` 只把结果写进 `Task::result`（覆盖式，
+/// 仅最后一次）。那些存量任务不该在升级后变成"查无提交"，所以读历史时把
+/// `result` 补种成一条 `Submitted`。
+///
+/// ID 是**确定性**的（[`TaskActivity::seeded_id`]）：同一条 `result` 反复
+/// 读出来的身份不变，前端的列表 key 才不会因为刷新而重建 DOM。
+fn seeded_activity(record: &Task) -> Vec<TaskActivity> {
+    let Some(result) = record.result.as_ref() else {
+        return Vec::new();
+    };
+    let mut activity = TaskActivity::submitted(result);
+    activity.id = TaskActivity::seeded_id(&record.id);
+    vec![activity]
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1354,19 +1452,28 @@ impl PmStore for TreePmStore {
         let mut task: Task = read_json(&path).await?;
 
         validate_transition(task.status, TaskStatus::Submitted, id)?;
+        // 补种历史用的是**变更前**的记录（它的 `result` 是上一次提交），
+        // 所以先留一份快照。
+        let before = task.clone();
 
         let now = Utc::now();
-        task.status = TaskStatus::Submitted;
-        task.submitted_at = Some(now);
-        task.result = Some(TaskResult {
+        let result = TaskResult {
             text: text.to_string(),
             attachment_ids,
             // ADR-073: submitted_by 是 agent_instance_id（X-MCP-Actor 注入）
             submitted_by: actor.to_string(),
             submitted_at: now,
-        });
+        };
+        task.status = TaskStatus::Submitted;
+        task.submitted_at = Some(now);
         task.updated_at = now;
-        atomic_write_json(&path, &task).await?;
+        // `result` = 最后一次提交（MCP `pm_get_task` / Mobile 的既有契约），
+        // 与下面那条 `Submitted` 活动同批落盘，两者不会漂移。
+        let activity = TaskActivity::submitted(&result);
+        task.result = Some(result);
+
+        self.commit_task_activity(&entry.dir_path, &task, &before, activity)
+            .await?;
         self.refresh_entry(&entry, id, &task);
         Ok(task)
     }
@@ -1382,11 +1489,20 @@ impl PmStore for TreePmStore {
     /// "我建的任务批了吗"（manifest 工具语义），而人类操作面的 `status`
     /// 决定卡片落到哪一列。
     ///
+    /// `comment`（审核正文 / 拒绝理由）与审核结论一起进活动流——在此之前
+    /// 它只存在于请求体里，服务端直接丢弃，人类写下的理由从未落过盘。
+    ///
     /// 保持 `status=pending` 而非 `done` 很重要：审批只是**授权** Agent
     /// 开工，不代表工作完成——把它跳到 `done` 会让看板出现一个"从未
     /// claim、从未 submit 就已完成"的任务，也堵死了 Agent 自己的
     /// `pm_claim_task` 路径。
-    async fn review_task(&self, id: &TaskId, approved: bool, _reviewer: &str) -> Result<Task> {
+    async fn review_task(
+        &self,
+        id: &TaskId,
+        approved: bool,
+        reviewer: &str,
+        comment: Option<&str>,
+    ) -> Result<Task> {
         let entry = self
             .index
             .read()
@@ -1396,6 +1512,7 @@ impl PmStore for TreePmStore {
             .ok_or_else(|| PmError::TaskNotFound(id.to_string()))?;
         let path = entry.dir_path.join("task.json");
         let mut task: Task = read_json(&path).await?;
+        let before = task.clone();
 
         // 创建审批（status=pending）只动 review_status；结果审核才动 status。
         let to = if approved {
@@ -1414,15 +1531,78 @@ impl PmStore for TreePmStore {
             }
             task.status = to;
         }
-        task.review_status = if approved {
+        let new_review = if approved {
             ReviewStatus::Approved
         } else {
             ReviewStatus::Rejected
         };
+        // 幂等：同一结论重复审核（典型是 pending 任务被点了两次"批准"——
+        // 那条路径不动 `status`，状态机拦不住）既不重写记录，也不留下第二
+        // 条审核记录。
+        if before.status == task.status && before.review_status == new_review {
+            return Ok(task);
+        }
+        task.review_status = new_review;
         task.updated_at = Utc::now();
-        atomic_write_json(&path, &task).await?;
+
+        let activity = TaskActivity::new(
+            if approved {
+                ActivityKind::Approved
+            } else {
+                ActivityKind::Rejected
+            },
+            reviewer,
+            comment
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .unwrap_or_default(),
+        );
+        self.commit_task_activity(&entry.dir_path, &task, &before, activity)
+            .await?;
         self.refresh_entry(&entry, id, &task);
         Ok(task)
+    }
+
+    // ── Activity (submission history) ──────────────────────────────
+
+    async fn list_activity(&self, task_id: &TaskId) -> Result<Vec<TaskActivity>> {
+        let entry = self
+            .index
+            .read()
+            .by_id
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
+        let record: Task = read_json(&entry.dir_path.join("task.json")).await?;
+        self.load_activity(&entry.dir_path, &record).await
+    }
+
+    /// 追加一条回复。只写历史，不动 `task.json`——回复不是状态变更。
+    async fn add_task_comment(
+        &self,
+        task_id: &TaskId,
+        text: &str,
+        actor: &str,
+    ) -> Result<TaskActivity> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(PmError::BadRequest(
+                "comment text must not be empty".to_string(),
+            ));
+        }
+        let entry = self
+            .index
+            .read()
+            .by_id
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
+        let record: Task = read_json(&entry.dir_path.join("task.json")).await?;
+        let activity = TaskActivity::new(ActivityKind::Comment, actor, trimmed);
+        let mut history = self.load_activity(&entry.dir_path, &record).await?;
+        history.push(activity.clone());
+        self.store_activity(&entry.dir_path, &history).await?;
+        Ok(activity)
     }
 
     async fn closing_task_contexts(&self, task_id: &TaskId) -> Result<Vec<(ProjectId, Task)>> {
@@ -1841,7 +2021,7 @@ mod tests {
     /// 人类批准一个 Agent 创建的任务（`review_status: pending → approved`）。
     /// 测试里凡是"Agent 建了任务然后要 claim"的都必须先过这一关，否则撞审批闸门。
     async fn approve_creation(store: &TreePmStore, tid: &TaskId) {
-        store.review_task(tid, true, "human").await.unwrap();
+        store.review_task(tid, true, "human", None).await.unwrap();
     }
 
     #[tokio::test]
@@ -2020,7 +2200,7 @@ mod tests {
         );
 
         // 人类批准创建 → review_status=approved，**status 仍为 pending**（只是授权开工）
-        let approved = store.review_task(&t.id, true, "human").await.unwrap();
+        let approved = store.review_task(&t.id, true, "human", None).await.unwrap();
         assert_eq!(approved.review_status, ReviewStatus::Approved);
         assert_eq!(
             approved.status,
@@ -2038,9 +2218,265 @@ mod tests {
         assert_eq!(submitted.status, TaskStatus::Submitted);
 
         // 结果审核：这次才动 status
-        let reviewed = store.review_task(&t.id, true, "human").await.unwrap();
+        let reviewed = store.review_task(&t.id, true, "human", None).await.unwrap();
         assert_eq!(reviewed.status, TaskStatus::Done);
         assert_eq!(reviewed.review_status, ReviewStatus::Approved);
+    }
+
+    /// 提交历史的完整一轮：claim → submit → reject(带理由) → 重做 → 再
+    /// submit → approve。历史里必须留着**每一次**提交和**每一条**人类回复。
+    #[tokio::test]
+    async fn activity_records_submits_and_review_comments() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject {
+                    title: "P".into(),
+                    description: "".into(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, instance).await;
+        let t = store
+            .create_task(&p.id, create_task_input("t"), "human")
+            .await
+            .unwrap();
+
+        store.claim_task(&t.id, instance).await.unwrap();
+        store
+            .submit_task(&t.id, "第一版结果", vec![], instance)
+            .await
+            .unwrap();
+        store
+            .review_task(&t.id, false, "human", Some("少了回归测试"))
+            .await
+            .unwrap();
+
+        // 驳回后 Agent 重做并再次提交（设计 D-1 路径）
+        store.claim_task(&t.id, instance).await.unwrap();
+        store
+            .submit_task(&t.id, "第二版结果", vec![], instance)
+            .await
+            .unwrap();
+        store
+            .review_task(&t.id, true, "human", Some("可以了"))
+            .await
+            .unwrap();
+
+        let history = store.list_activity(&t.id).await.unwrap();
+        let kinds: Vec<_> = history.iter().map(|a| a.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ActivityKind::Submitted,
+                ActivityKind::Rejected,
+                ActivityKind::Submitted,
+                ActivityKind::Approved,
+            ],
+            "history must keep every submission and every review verdict"
+        );
+        assert_eq!(history[0].text, "第一版结果");
+        assert_eq!(history[0].actor, instance);
+        assert_eq!(history[0].actor_kind, MemberKind::Agent);
+        assert_eq!(history[1].text, "少了回归测试");
+        assert_eq!(
+            history[1].actor_kind,
+            MemberKind::User,
+            "the legacy `human` actor resolves to a User (ADR-076 §决策 10)"
+        );
+        assert_eq!(history[2].text, "第二版结果");
+        assert_eq!(history[3].text, "可以了");
+
+        // `result` 仍是"最后一次提交"，与最新那条 Submitted 活动一致。
+        let task = store.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(task.result.as_ref().unwrap().text, "第二版结果");
+    }
+
+    /// 提交历史这个能力上线前，`submit` 只写 `Task::result`。那些存量任务
+    /// 不能升级后变成"查无提交"，所以读历史时用 `result` 补种一条。
+    #[tokio::test]
+    async fn activity_seeds_from_legacy_result_and_idempotent_review() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject {
+                    title: "P".into(),
+                    description: "".into(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let t = store
+            .create_task(&p.id, create_task_input("legacy"), "human")
+            .await
+            .unwrap();
+        store.claim_task(&t.id, "human").await.unwrap();
+        let submitted = store
+            .submit_task(&t.id, "上线前的提交", vec![], "human")
+            .await
+            .unwrap();
+
+        // 抹掉历史文件，模拟"提交发生在功能上线之前"的存量任务。
+        let activity_file = store.task_dir(&p.id, &t.id).join("activity.json");
+        tokio::fs::remove_file(&activity_file).await.unwrap();
+        // 记录也退回"提交过、还没被审核"的那份（= `submit` 的返回值）。
+        atomic_write_json(&store.task_dir(&p.id, &t.id).join("task.json"), &submitted)
+            .await
+            .unwrap();
+
+        let seeded = store.list_activity(&t.id).await.unwrap();
+        assert_eq!(seeded.len(), 1);
+        assert_eq!(seeded[0].kind, ActivityKind::Submitted);
+        assert_eq!(seeded[0].text, "上线前的提交");
+        // 补种是只读的：读十遍也不该把文件写回去。
+        assert!(
+            !activity_file.exists(),
+            "seeding on read must not write activity.json"
+        );
+        let again = store.list_activity(&t.id).await.unwrap();
+        assert_eq!(
+            seeded[0].id, again[0].id,
+            "the seeded entry keeps a stable identity across reads"
+        );
+
+        // 审核时补种的历史会随新条目一起固化，顺序是"提交在前"。
+        store
+            .review_task(&t.id, true, "human", None)
+            .await
+            .unwrap();
+        let history = store.list_activity(&t.id).await.unwrap();
+        assert_eq!(
+            history.iter().map(|a| a.kind).collect::<Vec<_>>(),
+            vec![ActivityKind::Submitted, ActivityKind::Approved]
+        );
+        assert!(activity_file.exists());
+
+        // 同一结论重复审核：幂等，不再多记一条。用"创建审批"那条路径验证——
+        // 它不动 `status`，所以状态机拦不住重复批准，只有这里的幂等闸门拦得住。
+        // （结果审核的重复提交走 `submitted → done`，第二次会被状态机拒掉。）
+        let second = store
+            .create_task(&p.id, create_task_input("second"), "human")
+            .await
+            .unwrap();
+        store
+            .review_task(&second.id, true, "human", None)
+            .await
+            .unwrap();
+        store
+            .review_task(&second.id, true, "human", None)
+            .await
+            .unwrap();
+        let second_history = store.list_activity(&second.id).await.unwrap();
+        assert_eq!(
+            second_history.len(),
+            1,
+            "a repeated verdict must not append a second entry"
+        );
+        assert_eq!(second_history[0].kind, ActivityKind::Approved);
+    }
+
+    /// 人类回复（`Comment`）只进历史，不动任务记录——回复不是状态变更。
+    #[tokio::test]
+    async fn activity_comment_appends_without_touching_task() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject {
+                    title: "P".into(),
+                    description: "".into(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let t = store
+            .create_task(&p.id, create_task_input("t"), "human")
+            .await
+            .unwrap();
+
+        let entry = store
+            .add_task_comment(&t.id, "  请先补一下截图  ", "human")
+            .await
+            .unwrap();
+        assert_eq!(entry.text, "请先补一下截图");
+        assert_eq!(entry.kind, ActivityKind::Comment);
+        assert_eq!(entry.actor_kind, MemberKind::User);
+
+        let history = store.list_activity(&t.id).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, entry.id);
+
+        let after = store.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(after.status, t.status);
+        assert_eq!(after.updated_at, t.updated_at);
+
+        assert!(
+            matches!(
+                store.add_task_comment(&t.id, "   ", "human").await.unwrap_err(),
+                PmError::BadRequest(_)
+            ),
+            "an empty reply must be rejected, not stored"
+        );
+    }
+
+    /// 历史随任务目录一起迁移 / 删除：reparent 是 `mv`，活动文件必须跟着走。
+    #[tokio::test]
+    async fn activity_moves_with_reparent_and_dies_with_delete() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject {
+                    title: "P".into(),
+                    description: "".into(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let parent = store
+            .create_task(&p.id, create_task_input("parent"), "human")
+            .await
+            .unwrap();
+        let child = store
+            .create_task(&p.id, create_task_input("child"), "human")
+            .await
+            .unwrap();
+        store.claim_task(&child.id, "human").await.unwrap();
+        store
+            .submit_task(&child.id, "child result", vec![], "human")
+            .await
+            .unwrap();
+
+        store
+            .reparent_task(
+                &child.id,
+                ReparentTask {
+                    new_parent: Some(parent.id.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        let history = store.list_activity(&child.id).await.unwrap();
+        assert_eq!(history.len(), 1, "history survives a reparent");
+        assert_eq!(history[0].text, "child result");
+
+        store.delete_task(&child.id, false).await.unwrap();
+        assert!(
+            store
+                .list_activity(&child.id)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("task not found")
+        );
     }
 
     /// 人类**驳回**一个 Agent 新建的（从未开工的）任务 → `status=rejected`
@@ -2066,7 +2502,7 @@ mod tests {
             .await
             .unwrap();
 
-        let rejected = store.review_task(&t.id, false, "human").await.unwrap();
+        let rejected = store.review_task(&t.id, false, "human", None).await.unwrap();
         assert_eq!(rejected.status, TaskStatus::Rejected);
         assert_eq!(rejected.review_status, ReviewStatus::Rejected);
 
@@ -2168,7 +2604,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(submitted.status, TaskStatus::Submitted);
-        let reviewed = store.review_task(&t0.id, true, "human").await.unwrap();
+        let reviewed = store.review_task(&t0.id, true, "human", None).await.unwrap();
         assert_eq!(reviewed.status, TaskStatus::Done);
 
         let blocked_after = store.compute_blocked_by(&t1.id).await.unwrap();
@@ -2859,7 +3295,7 @@ mod tests {
         // 任务走完生命周期（claim → submit → review done）后可移除
         store.claim_task(&t.id, inst).await.unwrap();
         store.submit_task(&t.id, "done", vec![], inst).await.unwrap();
-        store.review_task(&t.id, true, "human").await.unwrap();
+        store.review_task(&t.id, true, "human", None).await.unwrap();
         let updated = store.remove_project_member(&p.id, inst).await.unwrap();
         // ADR-076 §决策 11: 移除 inst 后仅剩创建者（human）成员。
         assert!(

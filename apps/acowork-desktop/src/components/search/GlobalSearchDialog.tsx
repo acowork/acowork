@@ -25,7 +25,8 @@
  * queried on the owning Agent Runtime via the Gateway reverse proxy;
  * doc/pm are global sources queried via their Gateway reverse proxies.
  *
- * - 文件 tab  : GET /api/agents/{id}/workspaces/search (ripgrep) → openFile
+ * - 文件 tab  : GET /api/agents/{id}/workspaces/search (ripgrep 全文 + 文件名 fuzzy,
+ *               ADR-081 D2) → openFile
  * - git tab   : GET /api/agents/{id}/git/log + CommitPicker-style
  *               client-side subject/author/hash filter → virtual log file
  * - 文档 tab  : GET /api/doc/search (doc process) → DocEditor
@@ -77,11 +78,21 @@ import {
 
 export type Tab = "file" | "git" | "doc" | "project" | "conversation" | "memory";
 
+/** Which half of the file scope produced a match.
+ *  `content` = a line inside the file; `name` = the file name / path.
+ *  Mirrors `SearchMatchKind` in
+ *  `core/acowork-runtime/src/usecases/workspace_query.rs`. */
+export type SearchMatchKind = "content" | "name";
+
 export interface SearchMatch {
     file: string;
-    line: number;
-    column: number;
+    /** 1-based line number. Absent for a `name` hit — a file name has
+     *  no line. */
+    line?: number;
+    /** 1-based column number. Absent for a `name` hit. */
+    column?: number;
     text: string;
+    kind: SearchMatchKind;
 }
 
 export interface SearchResponse {
@@ -130,7 +141,11 @@ export interface FileHit extends SearchHit {
     agentId: string;
     workspaceId?: string;
     path: string;
-    line: number;
+    /** 1-based line number. `undefined` for a file-name hit — the row
+     *  matched the name, not a line inside the file. */
+    line?: number;
+    /** Which half of the file scope produced this row. */
+    kind: SearchMatchKind;
 }
 
 export interface DocHit extends SearchHit {
@@ -309,12 +324,28 @@ export function filterGitCommits(commits: GitCommitDto[], q: string): GitCommitD
     );
 }
 
+/**
+ * Map a Runtime file-scope match to a dialog row.
+ *
+ * Two match kinds share the file tab (ADR-081 D2 — "ripgrep full text **+**
+ * filename fuzzy"):
+ *
+ *   - `content` — a line inside the file. The row shows the matched line
+ *     and opens the file at that line.
+ *   - `name` — the file name matched. The row shows the name, and opening
+ *     it lands at the top of the file (no line to jump to).
+ *
+ * The id includes the kind so a file that matches both ways (its own name
+ * appears in its body) produces two distinct, independently focusable rows
+ * instead of one React key collision.
+ */
 export function toFileHits(agentId: string, workspaceId: string | undefined, matches: SearchMatch[]): FileHit[] {
     return matches.map((m) => {
         const fileName = m.file.split("/").pop() ?? m.file;
+        const kind: SearchMatchKind = m.kind ?? "content";
         return {
             type: "file",
-            id: `${m.file}:${m.line}`,
+            id: kind === "name" ? `${m.file}:name` : `${m.file}:${m.line ?? 0}`,
             title: fileName,
             snippet: m.text,
             sub: m.file,
@@ -322,6 +353,7 @@ export function toFileHits(agentId: string, workspaceId: string | undefined, mat
             workspaceId,
             path: m.file,
             line: m.line,
+            kind,
         };
     });
 }
@@ -750,6 +782,11 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                         if (caseSensitive) params.set("case_sensitive", "true");
                         if (wholeWord) params.set("whole_word", "true");
                         params.set("max_results", String(FILE_MAX_RESULTS));
+                        // ADR-081 D2: the file scope is "ripgrep full text
+                        // **+** filename fuzzy" — both halves answer the
+                        // same query, so a file whose name matches is
+                        // reachable even when no file body mentions it.
+                        params.set("match_file_names", "true");
                         const resp = await fetch(`${baseUrl}/api/agents/${agentId}/workspaces/search?${params}`, { signal });
                         if (!resp.ok) throw new Error(`status ${resp.status}`);
                         const data = (await resp.json()) as SearchResponse;
@@ -943,6 +980,8 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     /* ── Actions ────────────────────────────────────────────────────── */
     const openFileHit = useCallback(
         (h: FileHit) => {
+            // A file-name hit has no line — open the file at its top
+            // instead of jumping to an arbitrary line.
             void useFileEditorStore
                 .getState()
                 .openFile(h.agentId, h.workspaceId ?? "", h.path, h.line);

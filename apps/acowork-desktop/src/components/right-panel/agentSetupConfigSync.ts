@@ -43,6 +43,8 @@ export interface ServerConfigEnvelope {
       model?: string | null;
       provider?: string | null;
       timeout_ms?: number | null;
+      /** Chat-history token budget for a router turn. */
+      history_max_tokens?: number | null;
     } | null;
   } | null;
   model?: string | null;
@@ -144,6 +146,12 @@ export function buildProfilePatchFromServerConfig(
     }
     if (typeof router.timeout_ms === "number") {
       patch.chatRouterTimeoutMs = router.timeout_ms;
+    }
+    // A cleared budget comes back as an absent key, so absence simply means
+    // "keep the local value" — the number input already renders the default
+    // placeholder for `undefined`.
+    if (typeof router.history_max_tokens === "number") {
+      patch.chatRouterHistoryMaxTokens = router.history_max_tokens;
     }
   }
   return patch;

@@ -973,7 +973,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 | POST | `/api/agents/{id}/workspaces` | 添加工作区目录 | `/workspaces` |
 | GET | `/api/agents/{id}/workspaces/tree` | 目录树 | `/workspaces/tree` |
 | GET | `/api/agents/{id}/workspaces/find` | 按名查找文件 | `/workspaces/find` |
-| GET | `/api/agents/{id}/workspaces/search` | 按内容搜索（`include`、`max_results`、`case_sensitive`、`whole_word`） | `/workspaces/search` |
+| GET | `/api/agents/{id}/workspaces/search` | 按内容搜索（`include`、`max_results`、`case_sensitive`、`whole_word`、`match_file_names`） | `/workspaces/search` |
 | PUT | `/api/agents/{id}/workspaces/{ws_id}` | 更新工作区（别名、access 等） | `/workspaces/{ws_id}` |
 | DELETE | `/api/agents/{id}/workspaces/{ws_id}` | 删除工作区 | `/workspaces/{ws_id}` |
 | PUT | `/api/agents/{id}/workspaces/{ws_id}/prompt-file` | 设置注入 prompt 文件 | `/workspaces/{ws_id}/prompt-file` |

@@ -253,6 +253,7 @@
       "timeout": "本輪執行逾時",
       "waiting": "本輪等待你回覆",
       "noAnswer": "本輪沒有產生回覆",
+      "systemFallback": "系統兜底：{{name}} 未在回應截止前回覆",
       "turnRoutedNew": "啟動新任務：{{task}}",
       "turnRoutedContinue": "繼續之前的任務：{{task}}"
     },
@@ -640,6 +641,8 @@
     "chatRouterModelDesc": "用於路由 LLM 輪次的模型，該輪次決定直接回覆還是轉發到執行工作區。它不跟隨會話所選的聊天模型。保持「自動」即使用 agent 的精簡模型鏈。",
     "chatRouterTimeoutMs": "路由超時（毫秒）",
     "chatRouterTimeoutMsDesc": "單次路由 LLM 呼叫在回退為直接轉發前的超時時間。範圍 1000–300000，預設 60000。",
+    "chatRouterHistoryMaxTokens": "Chat 歷史上下文長度",
+    "chatRouterHistoryMaxTokensDesc": "路由判斷前可以讀取的聊天歷史長度（tokens）。視窗按上下文大小裁剪，而不是按訊息則數。範圍 1000–64000，預設 8000。",
     "chatRouterDisabledHint": "Chat 路由已關閉；每條聊天訊息都將不經路由輪次直接處理。",
     "sectionAgentInfo": "Agent 資訊",
     "sectionSessionParams": "會話參數",
@@ -1012,6 +1015,21 @@
     "showSource": "顯示原始碼",
     "previewLoading": "正在載入預覽...",
     "previewDoubleClickHint": "雙擊切換到編輯器",
+    "imageViewer": {
+      "zoomIn": "放大",
+      "zoomOut": "縮小",
+      "fit": "適應面板",
+      "cursorPoint": "x: {{x}}, y: {{y}}",
+      "cursorIdle": "—",
+      "selectionSize": "{{width}} × {{height}}",
+      "addPointToChat": "將座標傳送到對話",
+      "addRegionToChat": "將選取區域傳送到對話",
+      "clearSelection": "取消選取",
+      "captureFailed": "截取選取區域失敗",
+      "unavailable": "目前對話無法接收此檔案",
+      "pointPrompt": "{{path}} 座標 ({{x}}, {{y}})",
+      "regionPrompt": "{{path}} 區域 ({{x}}, {{y}}) – ({{x2}}, {{y2}})，{{width}}×{{height}}"
+    },
     "markdownLinkNotFound": "所有工作區都未找到檔案:{{href}}",
     "markdownImageClickHint": "點擊開啟預覽",
     "loadingUrl": "正在載入頁面...",
@@ -1062,6 +1080,10 @@
   "documentChip": {
     "uploadFailed": "上傳失敗",
     "removeFile": "移除 {{filename}}"
+  },
+  "attachment": {
+    "zoomLabel": "檢視大圖：{{filename}}",
+    "openFailed": "無法打開「{{filename}}」——檔案可能已被刪除或服務不可達"
   },
   "language": {
     "zhCN": "中文（簡體）",
@@ -1746,7 +1768,10 @@
       "loading": "載入中…",
       "dragHint": "拖曳卡片可在欄位間變更狀態",
       "ariaColumn": "{{status}} 欄",
-      "dropHint": "拖放到此處"
+      "dropHint": "拖放到此處",
+      "pagePrev": "上一頁",
+      "pageNext": "下一頁",
+      "pageRange": "{{start}}–{{end}} / 共 {{total}} 項"
     },
     "task": {
       "subtasks": "子任務",

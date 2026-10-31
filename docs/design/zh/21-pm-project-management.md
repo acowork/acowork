@@ -63,6 +63,7 @@ $HOME/.acowork/
             └── tasks/
                 └── {task_id}/         # 任务恒为目录（叶子任务也是目录）
                     ├── task.json      # 任务元数据
+                    ├── activity.json  # 提交历史（§3.7：只追加事件流，按需创建）
                     ├── attachments/   # 任务级附件目录（按需创建）
                     │   └── {att_id}/
                     │       ├── original.{ext}
@@ -211,6 +212,20 @@ mcp_http_path = "/api/pm/mcp"            # MCP HTTP 端点公开路径（含 /ap
 - **删除随任务**：`rm -rf` 任务目录时附件一并清理；归档到 `.trash/` 时附件也一并归档（不立即删，避免误删后无法恢复）。
 - **API**：`POST /api/pm/tasks/:id/attachments`（multipart）+ `GET /api/pm/attachments/:id`（`?download=1` 强制下载）。
 
+### 3.7 任务活动流（提交历史）
+
+任务面上必须读得到"Agent 交了什么、人类回了什么"。`task.json` 里的 `result` 是覆盖式的"最后一次提交"，承载不了这个需求（重做一次提交，上一版正文就没了），所以活动单独成一条**只追加事件流**。
+
+- **物理位置**：`{task_dir}/activity.json`，一个 JSON 数组，整份读-改-写（走 §10.1 的原子写）。
+- **为什么不塞进 `task.json`**：`Task` 是可变记录（每次 PATCH 全量重写），活动是只追加、无上限增长的事件流。合在一份里，每次改标题都要重写全部历史；而看板列表（`find_tasks` 逐个序列化 `task.json`）会随提交次数线性膨胀。附件同理（元数据在记录里，二进制在外面），只是这里连元数据都嫌大。
+- **条目结构**：`{ id, kind, actor, actor_kind, text, attachment_ids, created_at }`。`kind ∈ submitted | approved | rejected | comment`；`actor` 是 agent instance_id 或人类 user id（含遗留常量 `human`），`actor_kind` 按 ADR-076 §决策 10 判别，前端据此决定去 agent 目录还是账号解析显示名。
+- **与 `result` 的分工**：`result` 仍是"最后一次提交"（MCP `pm_get_task` 与 Mobile 的既有契约），与最新一条 `Submitted` 条目**同一次写入**落盘，字段来源同一个 `TaskResult`，不会漂移。历史全量以活动流为准。
+- **写入点只有三个**：`submit`（→ `submitted`）、`review`（→ `approved`/`rejected`，正文 = 请求里的 `_comment`，此前服务端收到就丢）、`POST /activity`（→ `comment`，人类回复）。**状态机自身的流转不进活动流**（拖动改 `status`、claim、取消由 `Task` 字段表达），否则同一事实两个真源。
+- **落盘顺序**：先写 `activity.json`，再写 `task.json`；后者失败时回滚前者。反过来会留下"状态已流转但读不到提交内容"——那正是这个能力要修的缺陷形态。
+- **幂等**：同一结论重复审核不产生第二条条目（`pending` 任务的创建审批不动 `status`，状态机拦不住重复批准）。
+- **存量数据补种**：本能力上线前的任务只有 `result`。读历史时若 `activity.json` 不存在，用 `result` 衍生一条 `submitted`（ID 确定性：`act-seed-{task_id 后缀}`，前端 key 因此稳定）。补种是只读的，第一次真正追加时才固化。
+- **随任务生命周期**：reparent 是 `mv` 目录 → 历史跟着走；删除任务 `rm -rf` → 历史一并清理。
+
 ---
 
 ## 4. 任务状态机
@@ -270,7 +285,9 @@ stateDiagram-v2
 | DELETE | `/api/pm/tasks/:id` | 删除任务（级联子树） | Desktop |
 | POST | `/api/pm/tasks/:id/claim` | **Agent 自领**（pending → in_progress） | Agent（x-actor） |
 | POST | `/api/pm/tasks/:id/submit` | **Agent 提交结果**（in_progress → submitted，body `{text, attachment_ids?}`） | Agent（x-actor） |
-| POST | `/api/pm/tasks/:id/review` | **人类审核**（body `{approved}`）：`pending` 时只翻 `review_status` / `pending → rejected`；`submitted` 时 `→ done/rejected` | Desktop |
+| POST | `/api/pm/tasks/:id/review` | **人类审核**（body `{approved, _comment?}`）：`pending` 时只翻 `review_status` / `pending → rejected`；`submitted` 时 `→ done/rejected`。`_comment`（拒绝理由 / 批准附言）落 §3.7 活动流 | Desktop |
+| GET | `/api/pm/tasks/:id/activity` | **提交历史**（§3.7：提交 / 审核结论 / 回复，按时间升序） | Desktop / Agent |
+| POST | `/api/pm/tasks/:id/activity` | **追加回复**（body `{text}`；只写活动流，不动状态） | Desktop |
 | PATCH | `/api/pm/tasks/:id/parent` | **移动任务到新父下**（`parent_id=null` 提升为根任务；DFS 防环） | Desktop |
 | GET | `/api/pm/tasks/:id/children` | 直接子任务列表 | Desktop |
 | GET | `/api/pm/tasks/:id/attachments` | 附件元数据列表 | Desktop / Agent |
@@ -313,6 +330,7 @@ stateDiagram-v2
 - `projects` 视图（替换 [AppLayout.tsx:897-903](../../../apps/acowork-desktop/src/components/layout/AppLayout.tsx#L897) 的 TODO）：
   - **左侧**：项目列表（新建/删除）。
   - **右侧**：项目详情 + **四列看板**（pending / in_progress / submitted / done），支持新建/编辑任务、指派 Agent、查看结果。
+  - **提交历史**：任务编辑界面内嵌 §3.7 活动流（Agent 提交正文 + 人类审核结论与回复），验收不需要去群聊里翻。
   - **待审核**：Agent 创建的任务 `review_status=pending` 高亮，人类 `review` approve/reject。
 - 数据获取：本地 React 组件经 Gateway 反向代理调用 REST API（`http://127.0.0.1:19876/api/pm/*`）。
 - 指派 Agent 下拉：数据源为 Gateway Agent 目录（`GET /api/agents` 等既有 Gateway 接口），不存在的 Agent 不可选（§9.1）。

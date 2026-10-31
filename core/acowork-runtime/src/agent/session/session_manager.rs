@@ -2059,6 +2059,59 @@ impl SessionManager {
         Ok(Some(outcome))
     }
 
+    /// Whether the session has an in-memory task that can take a turn.
+    ///
+    /// Deliberately cheap (`contains_key`, no disk probe): the dispatch
+    /// funnel calls it inline on the single inbound loop, where any I/O
+    /// would head-of-line block every other message. Use
+    /// [`Self::ensure_session_active`] on a per-request task when the
+    /// answer must be "reopen it if it is only on disk".
+    pub fn is_session_active(&self, session_id: &str) -> bool {
+        self.sessions.contains_key(session_id)
+    }
+
+    /// ADR-038 / ADR-100 Rev. 8: make sure a session can **take a turn**,
+    /// reopening it from disk when it is only `Closed`.
+    ///
+    /// The execution surface's only write path (`POST /sessions/{sid}/messages`)
+    /// needs this: `dispatch_inbound` hands the message to the in-memory
+    /// session task, and a session that is only on disk has no task — the
+    /// message would be dropped after a 202, silently.
+    ///
+    /// `Closed` is not an edge case: ADR-038's `Closed` means "on disk, not in
+    /// memory", and **every** session is `Closed` right after a Runtime
+    /// restart, and after an idle eviction. The human is looking at a
+    /// transcript and typing into it — reopening the session they are looking
+    /// at is the only honest answer.
+    ///
+    /// `NotFound` is refused: there is nothing to write into, and the caller
+    /// must hear so (a 404), never a 202 that loses the message.
+    ///
+    /// The terminal mirror (ADR-099 D5) is deliberately **not** touched here.
+    /// It records "this PM task is over, do not route here", and routing is
+    /// the Chat Router's business; a direct write into a session the human
+    /// has open says nothing about where the *next* chat message should go.
+    /// Only `chat_dispatch(Target::Existing)` — a real routing decision —
+    /// forgets the mirror.
+    ///
+    /// `None` = this agent has no such session. `Some(outcome)` = the session
+    /// can take the turn, and the outcome says whether this call is what made
+    /// it possible (`ResumedFromDisk`) or it already could
+    /// (`AlreadyActive`) — the write path broadcasts the former (ADR-038:
+    /// activation is published, never polled), so the distinction is load
+    /// bearing, not decoration.
+    pub async fn ensure_session_active(
+        &mut self,
+        session_id: &str,
+    ) -> Result<Option<SessionOpenOutcome>> {
+        // One probe: the open state machine already answers all three states
+        // (NotFound / no-op Active / reopen from disk) and refreshes the
+        // retained `SessionConfig` snapshot on the way through. Probing the
+        // lifecycle first and then resuming would just read the same state
+        // twice on the disk path.
+        self.resume_session(session_id).await
+    }
+
     /// ADR-076 §决策 4: set the read visibility of a session.
     ///
     /// Works whether the session is live or only on disk: a live session
@@ -6273,6 +6326,58 @@ mod tests {
         assert!(
             chunk_rx.try_recv().is_err(),
             "a NotFound open must not emit any chunk event"
+        );
+    }
+
+    /// ADR-038 / ADR-100 Rev. 8: the execution surface's only write path
+    /// (`POST /sessions/{sid}/messages`) needs an **Active** session, because
+    /// the turn goes to the in-memory session task.
+    ///
+    /// `Closed` is the ordinary state of every session right after a Runtime
+    /// restart and after an idle eviction — not an edge case — so the write
+    /// path must reopen the session the human is looking at instead of
+    /// dropping the message after a 202. `NotFound` must stay refused: there
+    /// is nothing to write into, and the caller has to hear it.
+    #[tokio::test]
+    async fn ensure_session_active_reopens_a_closed_session_and_refuses_a_missing_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut manager, _chunk_rx) = republish_test_manager(&dir);
+        let sid = manager
+            .create_frontend_session(None, None, None, None)
+            .await
+            .unwrap();
+
+        // Active: a no-op that still answers "the turn can land" — and says so
+        // with `AlreadyActive`, which is what keeps the write path from
+        // re-broadcasting an activation nobody caused.
+        assert_eq!(
+            manager.ensure_session_active(&sid).await.unwrap(),
+            Some(SessionOpenOutcome::AlreadyActive),
+            "an active session takes the turn"
+        );
+
+        // Closed: reopened from disk, so the turn has a task to land in — and
+        // the outcome is the fact the caller broadcasts.
+        manager.close_session(&sid).await.unwrap();
+        assert!(
+            manager.get_session(&sid).is_none(),
+            "the closed session has no in-memory task"
+        );
+        assert_eq!(
+            manager.ensure_session_active(&sid).await.unwrap(),
+            Some(SessionOpenOutcome::ResumedFromDisk),
+            "a closed session is reopened for the turn"
+        );
+        assert!(
+            manager.get_session(&sid).is_some(),
+            "the reopened session has a task again"
+        );
+
+        // NotFound: refused, never silently "opened".
+        assert_eq!(
+            manager.ensure_session_active("no-such-session").await.unwrap(),
+            None,
+            "a session that does not exist is refused"
         );
     }
 

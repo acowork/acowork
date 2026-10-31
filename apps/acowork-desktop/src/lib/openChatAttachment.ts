@@ -22,6 +22,7 @@
  */
 import { showToast } from "../components/common/ToastProvider";
 import { openImageLightbox } from "../components/common/ImageLightbox";
+import i18n from "../i18n";
 import {
   canPreviewAttachment,
   downloadChatAttachmentBySession,
@@ -89,7 +90,7 @@ export async function openChatAttachment(
     log.warn("[openChatAttachment] failed:", attachment.id, e);
     showToast({
       type: "error",
-      message: `无法打开「${attachment.filename}」——文件可能已被删除或服务不可达`,
+      message: i18n.t("attachment.openFailed", { filename: attachment.filename }),
     });
   }
 }

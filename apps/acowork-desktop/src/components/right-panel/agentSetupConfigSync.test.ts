@@ -113,6 +113,7 @@ describe("buildProfilePatchFromServerConfig", () => {
           model: "deepseek-flash",
           provider: "deepseek",
           timeout_ms: 12000,
+          history_max_tokens: 6000,
         },
       },
     };
@@ -121,6 +122,7 @@ describe("buildProfilePatchFromServerConfig", () => {
       chatRouterModel: "deepseek-flash",
       chatRouterProvider: "deepseek",
       chatRouterTimeoutMs: 12000,
+      chatRouterHistoryMaxTokens: 6000,
     });
   });
 
@@ -134,6 +136,9 @@ describe("buildProfilePatchFromServerConfig", () => {
     expect(p).toEqual({ chatRouterEnabled: true });
     expect(p.chatRouterModel).toBeUndefined();
     expect(p.chatRouterProvider).toBeUndefined();
+    // A cleared token budget (`null` on disk → absent on the wire) keeps the
+    // local value; the number input renders the default placeholder for it.
+    expect(p.chatRouterHistoryMaxTokens).toBeUndefined();
 
     // No chat_router block at all → nothing synced (never clobber the
     // optimistic local edit while the write is in flight).

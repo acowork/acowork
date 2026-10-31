@@ -34,11 +34,12 @@ pub struct SessionSummary {
     /// did not initiate (see `SessionInfo::can_write`). A `false` value means
     /// the execution view is read-only for this caller.
     pub can_write: bool,
-    /// Design 27 §8.2 / ADR-100 D12: the Chat session this execution
-    /// session was started from. An execution view's composer sends through
-    /// that Chat (`for_execution_session`) so the turn becomes a real Chat
-    /// message instead of a result with no trigger; `None` = a session that
-    /// never came from a Chat, which keeps the direct composer path.
+    /// Design 27 §8.2: the Chat session this execution session was started
+    /// from. It is where a turn's *output* goes — the interaction card the run
+    /// may stop on, and the terminal echo — never where its input came from:
+    /// a message typed in the execution view is a session-scoped write and is
+    /// not mirrored into that Chat (`None` = a session that never came from a
+    /// Chat, which gets neither card nor echo).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_session_id: Option<String>,
     /// Whether this session is currently loaded in the Runtime's in-memory

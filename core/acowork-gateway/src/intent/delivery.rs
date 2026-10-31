@@ -148,13 +148,6 @@ pub struct DeliveryRequest {
     pub has_human: Option<bool>,
     /// Chat attachment ids pinned to this user_message row.
     pub chat_attachment_ids: Vec<String>,
-    /// Design 27 §5.5.5 (ADR-100 D12): deliver straight to this execution
-    /// session instead of letting the receiving agent's Chat Router choose.
-    /// Set when the human typed the message while standing in that session's
-    /// own execution view. Advisory — the Runtime falls back to the normal
-    /// route when the session is not loaded, so a stale id costs latency,
-    /// never the message.
-    pub for_execution_session: String,
 }
 
 /// Wake-then-deliver one Intent, recording the delivery fact in the
@@ -187,6 +180,7 @@ pub async fn wake_and_deliver(
             status: req.status.clone(),
             source_chat_session_id: req.source_chat_session_id.clone(),
             answered_at: String::new(),
+            last_activity_at: String::new(),
             has_human: req.has_human,
         })
         .map_err(|e| DeliveryError::MailboxFailed(e.to_string()))?;
@@ -266,7 +260,6 @@ async fn deliver_inner(
         status: req.status.clone(),
         has_human_participant: req.has_human,
         chat_attachment_ids: req.chat_attachment_ids.clone(),
-        for_execution_session: req.for_execution_session.clone(),
     };
     let command = mqtt_proto::ControlCommand {
         instance_id: instance_id.clone(),
@@ -369,7 +362,6 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
-            for_execution_session: String::new(),
         }
     }
 

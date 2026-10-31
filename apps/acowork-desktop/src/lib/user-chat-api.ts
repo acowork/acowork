@@ -13,14 +13,14 @@
  * One exception to the plain-`fetch` rule: attachment *downloads* go
  * through the Rust command in `downloadChatAttachment` (the account
  * token comes from the Desktop's mirrored `GatewayAuth`, not this
- * module). See that function for why.
+ * module). The transfer body itself is shared with agent files — see
+ * `attachmentTransfer.ts`.
  */
 
 import { readError } from "./auth-api";
 import { getGatewayUrl } from "./config";
 import { isTextReadablePath } from "./monacoLanguage";
-import { Channel, invoke } from "@tauri-apps/api/core";
-import { save as showSaveDialog } from "@tauri-apps/plugin-dialog";
+import { saveUrlToDisk } from "./attachmentTransfer";
 import type {
   ChatAttachment,
   UserChatMessage,
@@ -214,13 +214,9 @@ export async function attachmentThumbText(
 
 /** Download an attachment to disk: OS save dialog, then the transfer.
  *
- *  The transfer happens in Rust (`download_attachment`), not here — the
- *  bytes must never travel over the Tauri IPC as an `invoke` argument,
- *  because a named `Uint8Array` is serialized into a JSON array of
- *  decimal numbers. That froze the WebView main thread for seconds on a
- *  multi-MB attachment and left the `invoke` promise unsettled (the
- *  button spun forever). Only the URL and the chosen path cross the
- *  bridge; Rust fetches with the account token and writes the file.
+ *  The transfer itself is the shared one in `attachmentTransfer.ts` — the
+ *  Rust-side rule (only the URL and the path cross the IPC, never the bytes)
+ *  is identical for a chat blob and for an agent file, so it is written once.
  *
  *  Returns `false` when the user cancelled the dialog (not an error).
  *
@@ -267,22 +263,7 @@ async function saveAttachmentFromUrl(
   attachment: ChatAttachment,
   onProgress?: (received: number) => void,
 ): Promise<boolean> {
-  const picked = await showSaveDialog({
-    defaultPath: attachment.filename,
-    filters: [{ name: attachment.filename, extensions: [extensionOf(attachment.filename)] }],
-  });
-  if (!picked) return false;
-  const progress = new Channel<number>();
-  if (onProgress) progress.onmessage = onProgress;
-  await invoke("download_attachment", { url, path: picked, onProgress: progress });
-  return true;
-}
-
-/** Extension without the dot, lowercased — used to seed the save
- *  dialog's filter so the picker preselects the right file type. */
-function extensionOf(filename: string): string {
-  const dot = filename.lastIndexOf(".");
-  return dot >= 0 ? filename.slice(dot + 1).toLowerCase() : "";
+  return saveUrlToDisk(url, attachment.filename, onProgress);
 }
 
 /**

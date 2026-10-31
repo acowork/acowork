@@ -283,8 +283,8 @@ pub struct AgentConfig {
     // ── Chat Router (ADR-099 / design 29) ────────────────────────────
     //
     // Layer 1 of the router config chain; `None` = the ADR-099 defaults
-    // (enabled, compact model, 8 s timeout, 24-message window, 10
-    // candidates). Every field is optional so an existing
+    // (enabled, compact model, 60 s timeout, 8,000-token history window,
+    // 10 candidates). Every field is optional so an existing
     // `agent_config.json` keeps working untouched, and tests can switch
     // the router off without touching a code path.
     /// Chat Router tuning knobs. `None` = design defaults.
@@ -317,7 +317,26 @@ pub struct ChatRouterConfig {
     /// Router call timeout in ms. `None` = 60,000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    /// Chat messages projected into the router context. `None` = 32.
+    /// Token budget for the chat history projected into the router
+    /// context (`Block B`). `None` = 8,000.
+    ///
+    /// This is the window's *primary* trimming criterion: what the router
+    /// may read back is bounded by how much context it costs, not by a
+    /// count of rows. A fixed row count treats one-word acknowledgements
+    /// and 2 KB incident reports as the same amount of context, so it is
+    /// simultaneously too generous for chatty transcripts and too tight
+    /// for dense ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_max_tokens: Option<usize>,
+    /// Row ceiling for the history window. `None` = the projection's own
+    /// page-derived ceiling (the Gateway serves at most one page, so the
+    /// window can never exceed it anyway).
+    ///
+    /// Deprecated as a *sizing* knob: [`Self::history_max_tokens`] is what
+    /// decides how much history the router reads. The field survives for
+    /// hand-edited configs that want a hard cap on rows (e.g. to keep the
+    /// per-turn Gateway read small) and is deliberately not on the
+    /// `PUT /agents/{id}/config` wire — no UI surface sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_window: Option<usize>,
     /// Maximum candidates shown to the router. `None` = 10.
@@ -327,7 +346,15 @@ pub struct ChatRouterConfig {
 
 impl ChatRouterConfig {
     pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
-    pub const DEFAULT_HISTORY_WINDOW: usize = 32;
+    /// Worst-case context the router turn may project as history. Matches
+    /// the pre-token-budget design's *upper* bound (32 rows × the 2 KB
+    /// per-row cap is ~18k tokens) while being a hard, single number.
+    ///
+    /// It also sits just under the transport ceiling: the Gateway serves at
+    /// most 32 KiB per history page (`intent_api.rs::MAX_BYTES`), which at
+    /// the default 3.5 chars/token ratio is ≈ 9.1k tokens — a larger budget
+    /// could not be filled from one page anyway.
+    pub const DEFAULT_HISTORY_MAX_TOKENS: usize = 8_000;
     pub const DEFAULT_MAX_CANDIDATES: usize = 10;
 
     /// Master switch, defaulting to on.
@@ -347,13 +374,20 @@ impl ChatRouterConfig {
             .clamp(1_000, 300_000)
     }
 
-    /// Clamped history window. The lower bound keeps enough turns for a
-    /// follow-up to be recognisable; the upper bound keeps one router turn
-    /// cheap regardless of what a hand-edited config says.
-    pub fn history_window(&self) -> usize {
-        self.history_window
-            .unwrap_or(Self::DEFAULT_HISTORY_WINDOW)
-            .clamp(4, 200)
+    /// Clamped history token budget. The lower bound keeps enough context
+    /// for a follow-up to be recognisable; the upper bound keeps one router
+    /// turn affordable regardless of what a hand-edited config says.
+    pub fn history_max_tokens(&self) -> usize {
+        self.history_max_tokens
+            .unwrap_or(Self::DEFAULT_HISTORY_MAX_TOKENS)
+            .clamp(1_000, 64_000)
+    }
+
+    /// Optional row ceiling for the window (`None` = no opinion — the
+    /// projection caps at what one Gateway page can hold). See
+    /// [`Self::history_window`].
+    pub fn history_rows(&self) -> Option<usize> {
+        self.history_window.map(|rows| rows.clamp(1, 500))
     }
 
     /// Clamped candidate count.
@@ -1549,8 +1583,13 @@ mod tests {
         assert!(cfg.is_enabled(), "the router is on unless explicitly disabled");
         assert_eq!(cfg.timeout_ms(), ChatRouterConfig::DEFAULT_TIMEOUT_MS);
         assert_eq!(
-            cfg.history_window(),
-            ChatRouterConfig::DEFAULT_HISTORY_WINDOW
+            cfg.history_max_tokens(),
+            ChatRouterConfig::DEFAULT_HISTORY_MAX_TOKENS
+        );
+        assert_eq!(
+            cfg.history_rows(),
+            None,
+            "no row ceiling unless the config asks for one"
         );
         assert_eq!(
             cfg.max_candidates(),
@@ -1560,26 +1599,31 @@ mod tests {
 
     #[test]
     fn chat_router_config_clamps_instead_of_drifting() {
-        // A zero timeout and an empty window would make every turn fall back;
-        // a 500-candidate prompt would be unaffordable. All three clamp.
+        // A zero timeout and an empty history budget would make every turn
+        // fall back; a 500-candidate prompt would be unaffordable. All three
+        // clamp.
         let cfg = ChatRouterConfig {
             timeout_ms: Some(0),
-            history_window: Some(1),
+            history_max_tokens: Some(1),
+            history_window: Some(0),
             max_candidates: Some(0),
             ..Default::default()
         };
         assert_eq!(cfg.timeout_ms(), 1_000);
-        assert_eq!(cfg.history_window(), 4);
+        assert_eq!(cfg.history_max_tokens(), 1_000);
+        assert_eq!(cfg.history_rows(), Some(1));
         assert_eq!(cfg.max_candidates(), 1);
 
         let cfg = ChatRouterConfig {
             timeout_ms: Some(u64::MAX),
+            history_max_tokens: Some(usize::MAX),
             history_window: Some(usize::MAX),
             max_candidates: Some(usize::MAX),
             ..Default::default()
         };
         assert_eq!(cfg.timeout_ms(), 300_000);
-        assert_eq!(cfg.history_window(), 200);
+        assert_eq!(cfg.history_max_tokens(), 64_000);
+        assert_eq!(cfg.history_rows(), Some(500));
         assert_eq!(cfg.max_candidates(), 50);
     }
 

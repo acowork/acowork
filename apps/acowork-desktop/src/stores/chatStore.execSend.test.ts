@@ -1,21 +1,24 @@
 /**
- * ADR-100 D12 — the execution composer sends through the Chat entry point when
- * its session came from a Chat.
+ * The execution composer writes into its OWN session, always.
  *
- * The rule pinned here is about *which* endpoint a send lands on, because that
- * is what decides whether the conversation has a real human turn in it:
- *  - a session bound to a Chat posts to `/api/intents/chat-message`, pinned
- *    back to itself (`for_execution_session`), so the durable `user_message`
- *    row is written under the caller's identity and the Agent skips its router;
- *  - an unbound session (or local mode, where there is no Chat surface at all)
- *    keeps the session-scoped write, which is its only path;
- *  - both paths send the SAME client-minted `message_id`, so the optimistic
- *    bubble reconciles with the chat row and with the execution session's own
- *    JSONL row instead of duplicating.
+ * A message typed in an execution view is a session-scoped write
+ * (`POST /api/agents/{id}/sessions/{sid}/messages`). It is not posted to the
+ * Chat channel, even when the session is bound to one: mirroring the human's
+ * words into the Chat transcript is what forced a delivery pin
+ * (`for_execution_session`) so the turn would not be re-routed into a *new*
+ * execution session by the very message written to describe it. Dropping the
+ * mirror removes the pin, and with it the only path by which a human utterance
+ * could reach the Chat Router's create branch.
  *
- * The turn facts the chat channel did not carry before (`command`,
- * `attached_items`) ride the pinned request as structured fields, so a pinned
- * send is not a capability regression against the session-scoped one.
+ * The invariant pinned here is therefore about *which* endpoint a send lands
+ * on and on nothing else:
+ *  - bound or unbound, signed-in or local mode, the session write is the path;
+ *  - `/api/intents/chat-message` is never touched from an execution view;
+ *  - the turn facts the session write carries (`command`, `attached_items`
+ *    inside `params_json`) still travel, so the deletion is not a capability
+ *    regression;
+ *  - the request names the id of the bubble already painted, so the server
+ *    copy reconciles instead of duplicating.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -25,14 +28,14 @@ vi.mock("../lib/logger", () => ({
   getLevel: () => "off" as const,
 }));
 
-// ── SUT ──────────────────────────────────────────────────────────────────
+// ── SUT ──────────────────────────────
 
 import { useChatStore } from "./chatStore";
 import { useAgentStore } from "./agentStore";
 import { useAuthStore } from "./authStore";
 import type { AttachedItem } from "../lib/types";
 
-const AGENT = "com.test.pinned_send";
+const AGENT = "com.test.exec_send";
 const SESSION = "sess-exec-1";
 const CHAT = "cs-1";
 const ME = "u-me";
@@ -124,7 +127,9 @@ const workspaceRef = {
   name: "src/main.rs",
 } as unknown as AttachedItem;
 
-describe("ADR-100 D12: the execution composer routes by the Chat binding", () => {
+const sessionBody = () => sentTo(`/sessions/${SESSION}/messages`)!.body;
+
+describe("the execution composer writes into its own session", () => {
   beforeEach(() => {
     stubFetch();
     useAuthStore.setState({ account: { user_id: ME } as never });
@@ -137,41 +142,26 @@ describe("ADR-100 D12: the execution composer routes by the Chat binding", () =>
     useAuthStore.setState({ account: null });
   });
 
-  it("posts to the chat channel, pinned to this session, when the session is bound", async () => {
+  it("does not post to the chat channel when the session is bound", async () => {
     seedSession(CHAT);
     await useChatStore.getState().sendMessage("run the tests again", AGENT);
 
-    const chat = sentTo("/api/intents/chat-message");
-    expect(chat).toBeTruthy();
-    expect(chat!.body).toMatchObject({
-      chat_session_id: CHAT,
-      from_user: ME,
-      text: "run the tests again",
-      for_execution_session: SESSION,
-      // The bound chat may be a project group (a PM task is dispatched from
-      // one), and a group has no single agent to deliver to — so the send has
-      // to name the instance that owns this execution session.
-      pinned_agent: AGENT,
-    });
-    // The session-scoped write is not also made — one send, one row.
-    expect(sentTo(`/sessions/${SESSION}/messages`)).toBeUndefined();
+    expect(sentTo(`/sessions/${SESSION}/messages`)).toBeTruthy();
+    // One send, one row: the Chat transcript is not a second home for the
+    // same words, so no chat-channel request is made at all.
+    expect(sentTo("/api/intents/chat-message")).toBeUndefined();
   });
 
-  it("keeps the session-scoped write when the session has no chat binding", async () => {
-    // A session created outside the Chat surface (first open, close-last-tab)
-    // has no conversation to file into; the pre-D12 path is still its only one.
+  it("writes to its own session when the session has no chat binding", async () => {
+    // A session created outside the Chat surface (first open, close-last-tab).
     seedSession(null);
     await useChatStore.getState().sendMessage("hello", AGENT);
 
     expect(sentTo("/api/intents/chat-message")).toBeUndefined();
-    expect(sentTo(`/sessions/${SESSION}/messages`)!.body).toMatchObject({
-      content: "hello",
-    });
+    expect(sessionBody()).toMatchObject({ content: "hello" });
   });
 
-  it("falls back to the session-scoped write in local mode, where there is no account", async () => {
-    // The chat channel is identity-bearing; without a signed-in caller the
-    // Gateway 401s it. Bound metadata must not buy a guaranteed failure.
+  it("writes to its own session in local mode, where there is no account", async () => {
     useAuthStore.setState({ account: null });
     seedSession(CHAT);
     await useChatStore.getState().sendMessage("hello", AGENT);
@@ -180,38 +170,33 @@ describe("ADR-100 D12: the execution composer routes by the Chat binding", () =>
     expect(sentTo(`/sessions/${SESSION}/messages`)).toBeTruthy();
   });
 
-  it("carries the skill name and the attached items the session write would have carried", async () => {
-    // A pinned send must not silently lose the turn facts: `attached_items`
-    // travels as structured entries (the session path sends them JSON-encoded
-    // inside `params_json`, which the chat channel has no reason to reuse).
+  it("carries the skill name and the attached items the turn was built with", async () => {
     seedSession(CHAT);
     await useChatStore.getState().sendMessage("look at this", AGENT, "/review", [workspaceRef]);
 
-    const chat = sentTo("/api/intents/chat-message")!;
-    expect(chat.body.command).toBe("/review");
-    // Forwarded exactly as the session-scoped write would have forwarded them
-    // inside `params_json` — including the `clientId` the optimistic chip is
-    // keyed on, which the Runtime echoes back so the chip settles.
-    expect(chat.body.attached_items).toMatchObject([
+    const body = sessionBody();
+    expect(body.command).toBe("/review");
+    // Attachments ride `params_json` as the ADR-046 union, including the
+    // `clientId` the optimistic chip is keyed on.
+    const params = JSON.parse(String(body.params_json));
+    expect(params.attached_items).toMatchObject([
       {
         type: "attached_file",
         absPath: "C:\\work\\project\\src\\main.rs",
         name: "src/main.rs",
       },
     ]);
-    expect(String(JSON.stringify(chat.body.attached_items))).toContain("src/main.rs");
   });
 
-  it("omits the empty optional fields instead of sending blanks", async () => {
+  it("sends an empty params_json when the turn carries no files", async () => {
     seedSession(CHAT);
     await useChatStore.getState().sendMessage("plain words", AGENT);
 
-    const body = sentTo("/api/intents/chat-message")!.body;
-    expect("command" in body).toBe(false);
-    expect("attached_items" in body).toBe(false);
+    const body = sessionBody();
+    expect(body.params_json).toBe("");
   });
 
-  it("sends the id of the bubble it already painted, so one row reconciles everywhere", async () => {
+  it("sends the id of the bubble it already painted, so one row reconciles", async () => {
     // The optimistic insert happens before the request; the request must name
     // that same id or the server copy would land as a second message.
     seedSession(CHAT);
@@ -220,9 +205,8 @@ describe("ADR-100 D12: the execution composer routes by the Chat binding", () =>
     const bubble = useChatStore
       .getState()
       .agentStates[AGENT]?.sessionStates[SESSION]?.messages.find((m) => m.type === "user");
-    const chat = sentTo("/api/intents/chat-message")!.body;
     expect(bubble).toBeTruthy();
-    expect(chat.message_id).toBe(bubble!.id);
-    expect(String(chat.message_id)).toMatch(/^msg-[0-9a-f-]{36}$/);
+    expect(sessionBody().message_id).toBe(bubble!.id);
+    expect(String(bubble!.id)).toMatch(/^msg-[0-9a-f-]{36}$/);
   });
 });

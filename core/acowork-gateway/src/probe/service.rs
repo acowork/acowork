@@ -6,7 +6,7 @@
 //! 1. **Snapshot** the provider row and its vault key while holding the
 //!    Gateway lock, then release it — probing is network I/O and MUST NOT
 //!    run under the state write lock (it would stall every other handler for
-//!    up to 20 s).
+//!    up to 90 s).
 //! 2. **Plan** the rows to probe ([`super::store::plan_probes`]) and run them
 //!    under a total budget, honouring the 24 h cache unless forced.
 //! 3. **Write back** the verdicts (plus D12.4 staleness) and re-publish, so the
@@ -39,7 +39,7 @@ use crate::probe::store::{apply_probe_outcome, mark_probes_stale, plan_probes};
 /// A provider may have many changed rows; the save response must not hang on
 /// them. Rows that do not get their turn are reported as `ProbeBudgetExceeded`
 /// and stay unprobed (→ the D1 gate keeps them on the default protocol).
-pub const PROBE_BATCH_BUDGET: Duration = Duration::from_secs(20);
+pub const PROBE_BATCH_BUDGET: Duration = Duration::from_secs(90);
 
 /// Upper bound on probes one save may trigger (D10.4 throttling).
 ///

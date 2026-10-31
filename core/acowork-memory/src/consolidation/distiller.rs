@@ -610,11 +610,24 @@ async fn consolidate_one(
         .filter(|s| !s.is_empty())
         .unwrap_or(text.as_str())
         .to_string();
+    let merged_embedding = if merged_text == text {
+        embedding.clone()
+    } else {
+        let Some(embed) = embedding_fn else {
+            return Ok(deferred_llm(
+                episode_id,
+                kind,
+                n,
+                "merge rewrote the statement but no embedding function is available".to_string(),
+            ));
+        };
+        Some(embed(&merged_text))
+    };
 
     let src = Source {
         episode_id,
         text: &merged_text,
-        embedding: embedding.as_ref(),
+        embedding: merged_embedding.as_ref(),
         importance: episode.importance,
     };
     let node_id = apply_merge(

@@ -48,6 +48,14 @@ vi.mock("../../lib/pm-api", () => ({
     updated_at: "2026-10-02T02:00:00Z",
   })),
   listTaskAttachments: vi.fn(async () => []),
+  listTaskActivity: vi.fn(async () => []),
+  addTaskActivity: vi.fn(async () => ({ id: "act-1" })),
+}));
+
+// The submission timeline has its own test file (TaskActivity.test.tsx); here
+// it is a seam — the close path does not care what the rows render.
+vi.mock("./TaskActivity", () => ({
+  TaskActivitySection: () => <div data-testid="activity-section" />,
 }));
 
 vi.mock("../../stores/pm/boardStore", () => ({

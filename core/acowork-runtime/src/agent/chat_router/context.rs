@@ -12,10 +12,13 @@
 //! cached prefix.
 //!
 //! Window anchoring: the manager keeps `anchor_seq` (the seq of the newest row
-//! *excluded* from the front of the window). While the window stays under
-//! `max_history + slack` the anchor never moves, so consecutive turns append
-//! one message each and reuse the whole prefix; once the threshold trips the
-//! window is rebuilt down to `retain` rows in one step.
+//! *excluded* from the front of the window). The window is sized in **tokens**
+//! — how much context the router spends on history — not in rows: one-word
+//! acknowledgements and 2 KB incident reports are not the same amount of
+//! context. While the window stays under `max_tokens + slack_tokens` the
+//! anchor never moves, so consecutive turns append one message each and reuse
+//! the whole prefix; once the budget trips, the window is rebuilt down to
+//! `retain_tokens` in one step.
 
 use std::collections::HashSet;
 
@@ -26,15 +29,10 @@ use serde_json::Value;
 
 use super::prompt::truncate_utf8;
 
-/// Default history window (design 29 §4.4). Widened past the original 24
-/// when the router gained information tools: a turn that spends part of its
-/// context on a lookup round needs a bit more conversation kept in view to
-/// route well.
-pub const DEFAULT_MAX_HISTORY: usize = 32;
-/// Extra rows tolerated before the window is rebuilt.
-pub const DEFAULT_SLACK: usize = 8;
-/// Rows kept after a rebuild.
-pub const DEFAULT_RETAIN: usize = 16;
+/// Rows that fit one Gateway page minus the current message and the anchor
+/// row — the hard ceiling on any window, enforced by the transport rather
+/// than by policy.
+pub const PAGE_ROWS: usize = GATEWAY_MAX_PAGE - 2;
 /// Rows the Gateway serves per `GET /api/intents/chat-history` call.
 pub const GATEWAY_MAX_PAGE: usize = 50;
 /// Per-row body cap (`max_message_bytes`).
@@ -135,53 +133,78 @@ pub fn parse_history(body: &Value) -> Result<Vec<ChatRow>, String> {
 
 // ── Window budget ─────────────────────────────────────────────────────
 
-/// Window + per-row caps, constructed from `agent_config.json`
-/// `chat_router` (already clamped by `ChatRouterConfig`).
+/// Window caps, constructed from `agent_config.json` `chat_router`
+/// (already clamped by `ChatRouterConfig`).
+///
+/// `max_tokens` is the primary criterion; `max_rows` is a transport ceiling
+/// (one Gateway page), not a sizing policy.
 #[derive(Debug, Clone, Copy)]
 pub struct WindowBudget {
-    pub max_history: usize,
-    pub slack: usize,
-    pub retain: usize,
-    pub max_message_bytes: usize,
+    /// Context the projected history may cost, in estimated tokens.
+    pub max_tokens: usize,
+    /// Row ceiling for one window.
+    pub max_rows: usize,
 }
 
 impl Default for WindowBudget {
     fn default() -> Self {
         Self {
-            max_history: DEFAULT_MAX_HISTORY,
-            slack: DEFAULT_SLACK,
-            retain: DEFAULT_RETAIN,
-            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+            // The single source of the default budget lives on the config
+            // type — the panel, the wire doc and this fallback must never
+            // disagree about what "default" means.
+            max_tokens: crate::agent_config::ChatRouterConfig::DEFAULT_HISTORY_MAX_TOKENS,
+            max_rows: PAGE_ROWS,
         }
     }
 }
 
 impl WindowBudget {
-    /// Build from the configured `history_window`.
+    /// Build from the configured token budget plus an optional row ceiling
+    /// (`chat_router.history_window`, a deprecated sizing knob).
     ///
-    /// `max_history` is capped below the Gateway page cap: the whole window
-    /// must fit in one page, otherwise the window silently falls off the
-    /// page's oldest end each turn — the prefix would shrink from the front
-    /// and every turn would miss the cache, exactly what the anchor exists
-    /// to prevent.
-    pub fn from_history_window(window: usize) -> Self {
-        let mut budget = Self::default();
-        let ceiling = GATEWAY_MAX_PAGE.saturating_sub(budget.slack + 2).max(1);
-        budget.max_history = window.clamp(1, ceiling);
-        budget.retain = budget.retain.min(budget.max_history);
-        budget
+    /// The row ceiling can never exceed [`PAGE_ROWS`]: the whole window has
+    /// to fit in one Gateway page, otherwise the window silently falls off
+    /// the page's oldest end each turn — the prefix would shrink from the
+    /// front and every turn would miss the cache, exactly what the anchor
+    /// exists to prevent.
+    pub fn new(max_tokens: usize, rows_ceiling: Option<usize>) -> Self {
+        Self {
+            max_tokens: max_tokens.max(1),
+            max_rows: rows_ceiling
+                .map(|rows| rows.clamp(1, PAGE_ROWS))
+                .unwrap_or(PAGE_ROWS),
+        }
     }
 
-    /// Rows requested per turn: the window, one turn of growth, and the
-    /// current message (which Block B excludes but the page still holds).
+    /// Tokens the window may grow past `max_tokens` before the batch rebuild
+    /// trips. Same shape as the retired row slack (1/8 of the cap): enough
+    /// headroom that a rebuild is amortised over several turns.
+    pub fn slack_tokens(&self) -> usize {
+        (self.max_tokens / 8).max(64)
+    }
+
+    /// Tokens kept after a rebuild — half the budget, so the next rebuild
+    /// lands after the window has grown by roughly half a budget again.
+    pub fn retain_tokens(&self) -> usize {
+        (self.max_tokens / 2).max(1)
+    }
+
+    /// Budget plus slack: the point where the window is rebuilt.
+    pub fn threshold_tokens(&self) -> usize {
+        self.max_tokens.saturating_add(self.slack_tokens())
+    }
+
+    /// Rows requested per turn: the row ceiling plus one turn of growth and
+    /// the current message (which Block B excludes but the page still holds).
     pub fn page_size(&self) -> usize {
-        (self.max_history + self.slack + 2).min(GATEWAY_MAX_PAGE)
+        (self.max_rows + 2).min(GATEWAY_MAX_PAGE)
     }
 
-    /// Total byte ceiling for Block B. `max_history` rows at the per-row cap
-    /// is the worst case; the byte pass only ever bites past it.
-    pub fn max_bytes(&self) -> usize {
-        self.max_history.saturating_mul(self.max_message_bytes).max(1024)
+    /// Rows kept after a row-ceiling rebuild — half the ceiling, the same
+    /// ratio the token budget uses, so the row pass amortises rebuilds the
+    /// same way instead of sliding one row per turn.
+    pub fn retain_rows(&self) -> usize {
+        (self.max_rows / 2).max(1)
     }
 }
 
@@ -196,8 +219,10 @@ pub struct BlockB {
     pub messages: Vec<ChatMessage>,
     /// True when the window was rebuilt (anchor moved) this turn.
     pub rebuilt: bool,
-    /// Sum of projected content lengths — approximate, for the log only.
-    pub byte_len: usize,
+    /// Estimated context this block costs, via the unified token counter —
+    /// this is the number the budget is enforced against, and the one the
+    /// decision log records.
+    pub token_len: usize,
 }
 
 /// Build Block B.
@@ -209,9 +234,12 @@ pub struct BlockB {
 ///   message and must not appear twice.
 /// - `agent_instance`: used only to role-map legacy `text` rows.
 ///
-/// Trimming order is count first, then bytes (design 29 §4.4). Both move the
-/// anchor to the seq of the last dropped row, so the boundary survives a
-/// restart as long as the caller persists it.
+/// Trimming is two passes (design 29 §4.4): the row ceiling (transport, one
+/// Gateway page) and then the token budget (policy). Both move the anchor to
+/// the seq of the last dropped row, so the boundary survives a restart as
+/// long as the caller persists it. Both drop in one batch — never a row per
+/// turn — because a window that slides one row at a time re-hashes the whole
+/// cached prefix every turn.
 pub fn build_block_b(
     rows: &[ChatRow],
     anchor_seq: u64,
@@ -228,36 +256,54 @@ pub fn build_block_b(
     let mut anchor = anchor_seq;
     let mut rebuilt = false;
 
-    let threshold = budget.max_history.saturating_add(budget.slack);
-    if window.len() > threshold {
-        let retain = budget.retain.min(window.len());
-        let drop_count = window.len() - retain;
+    // Row ceiling. This is a transport bound (one Gateway page), not the sizing
+    // policy — but it must still drop in a batch. A window that trims one row
+    // per turn re-hashes the whole cached prefix every turn, so once the page
+    // is full the row pass rebuilds down to `retain_rows` and the next turns
+    // append again.
+    if window.len() > budget.max_rows {
+        let keep = budget.retain_rows();
+        let drop_count = window.len() - keep;
+        anchor = window[drop_count - 1].seq.max(anchor);
+        window.drain(..drop_count);
+        rebuilt = true;
+    }
+
+    let mut projected: Vec<(u64, ChatMessage, usize)> = window
+        .iter()
+        .filter_map(|row| {
+            project_row(row, agent_instance).map(|m| {
+                let tokens = crate::token::count_text(&m.content);
+                (row.seq, m, tokens)
+            })
+        })
+        .collect();
+
+    // Token budget (policy). Past `max_tokens + slack`, keep the newest rows
+    // that fit `retain_tokens` — at least one, so a single oversized row can
+    // never empty the window.
+    let mut tokens: usize = projected.iter().map(|(_, _, t)| *t).sum();
+    if tokens > budget.threshold_tokens() {
+        let retain = budget.retain_tokens();
+        let mut keep = 0usize;
+        let mut kept_tokens = 0usize;
+        for (_, _, row_tokens) in projected.iter().rev() {
+            if keep > 0 && kept_tokens + row_tokens > retain {
+                break;
+            }
+            kept_tokens += row_tokens;
+            keep += 1;
+        }
+        let drop_count = projected.len().saturating_sub(keep);
         if drop_count > 0 {
-            anchor = window[drop_count - 1].seq.max(anchor);
-            window.drain(..drop_count);
+            anchor = anchor.max(projected[drop_count - 1].0);
+            tokens = kept_tokens;
+            projected.drain(..drop_count);
             rebuilt = true;
         }
     }
 
-    let mut projected: Vec<(u64, ChatMessage)> = window
-        .iter()
-        .filter_map(|row| project_row(row, agent_instance).map(|m| (row.seq, m)))
-        .collect();
-
-    // Byte backstop: drop from the front until the block fits. Rare (only
-    // very long rows), hence kept after the count pass so the common path
-    // never pays for it.
-    let mut bytes: usize = projected.iter().map(|(_, m)| m.content.len()).sum();
-    let mut dropped = 0usize;
-    while bytes > budget.max_bytes() && projected.len() - dropped > 1 {
-        bytes -= projected[dropped].1.content.len();
-        anchor = anchor.max(projected[dropped].0);
-        dropped += 1;
-        rebuilt = true;
-    }
-    projected.drain(..dropped);
-
-    let mut messages: Vec<ChatMessage> = projected.into_iter().map(|(_, m)| m).collect();
+    let mut messages: Vec<ChatMessage> = projected.into_iter().map(|(_, m, _)| m).collect();
     // Anthropic breakpoint at the end of the append-only prefix (design 29
     // §6.1). Providers with automatic prefix caching ignore the field.
     if let Some(last) = messages.last_mut() {
@@ -268,7 +314,7 @@ pub fn build_block_b(
         anchor_seq: anchor,
         messages,
         rebuilt,
-        byte_len: bytes,
+        token_len: tokens,
     }
 }
 
@@ -686,6 +732,13 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Tokens one projected row costs when its body is `body_len` chars —
+    /// the same number `build_block_b` charges against the budget, so the
+    /// assertions below can state their premises instead of guessing.
+    fn row_tokens(body_len: usize) -> usize {
+        crate::token::count_text(&format!("[user:u1] {}", "x".repeat(body_len)))
+    }
+
     #[test]
     fn projection_is_deterministic_and_tagged() {
         let rows = vec![
@@ -749,66 +802,152 @@ mod tests {
     }
 
     #[test]
-    fn anchor_stays_put_until_the_slack_threshold_trips() {
-        let budget = WindowBudget::default();
-        let threshold = budget.max_history + budget.slack;
-        let rows: Vec<ChatRow> = (1..=threshold as u64)
-            .map(|i| row(i, "user_message", "u1", "x"))
-            .collect();
+    fn anchor_stays_put_until_the_token_budget_trips() {
+        let budget = WindowBudget::new(1_000, None);
+        let per_row = row_tokens(100);
+        // Rows that still fit under budget + slack — the largest window that
+        // must NOT be rebuilt.
+        let fitting = budget.threshold_tokens() / per_row;
+        assert!(fitting >= 4, "test premise: window spans several rows");
+        let body = "x".repeat(100);
+        let rows_upto = |n: usize| -> Vec<ChatRow> {
+            (1..=n as u64)
+                .map(|i| row(i, "user_message", "u1", &body))
+                .collect()
+        };
+
         // At the threshold nothing is dropped, the anchor does not move.
-        let block = build_block_b(&rows, 0, &ids(&[]), "a1", &budget);
-        assert_eq!(block.messages.len(), threshold);
+        let block = build_block_b(&rows_upto(fitting), 0, &ids(&[]), "a1", &budget);
+        assert_eq!(block.messages.len(), fitting);
         assert_eq!(block.anchor_seq, 0);
         assert!(!block.rebuilt);
+        assert!(block.token_len <= budget.threshold_tokens());
 
-        // One more row trips the threshold: rebuild down to `retain` rows.
-        let rows: Vec<ChatRow> = (1..=threshold as u64 + 1)
-            .map(|i| row(i, "user_message", "u1", "x"))
-            .collect();
-        let block = build_block_b(&rows, 0, &ids(&[]), "a1", &budget);
-        assert_eq!(block.messages.len(), budget.retain);
-        assert_eq!(block.anchor_seq, threshold as u64 + 1 - budget.retain as u64);
+        // One more row trips the budget: rebuild down to `retain_tokens`.
+        let block = build_block_b(&rows_upto(fitting + 1), 0, &ids(&[]), "a1", &budget);
         assert!(block.rebuilt);
+        let kept = block.messages.len();
+        assert!(kept < fitting + 1);
+        assert!(
+            block.token_len <= budget.retain_tokens() + per_row,
+            "rebuilt window must land near the retain target, got {}",
+            block.token_len
+        );
+        assert_eq!(block.anchor_seq, (fitting + 1 - kept) as u64);
 
         // The next turn appends exactly one message on top of the rebuilt
         // window — the prefix is stable again.
-        let rows: Vec<ChatRow> = (1..=threshold as u64 + 2)
+        let next = build_block_b(&rows_upto(fitting + 2), block.anchor_seq, &ids(&[]), "a1", &budget);
+        assert_eq!(next.messages.len(), kept + 1);
+        assert_eq!(next.anchor_seq, block.anchor_seq);
+        assert!(!next.rebuilt);
+    }
+
+    #[test]
+    fn token_trim_keeps_the_newest_rows_and_moves_the_anchor_once() {
+        let budget = WindowBudget::new(1_000, None);
+        let body = "x".repeat(100);
+        let per_row = row_tokens(100);
+        let rows: Vec<ChatRow> = (1..=40)
+            .map(|i| row(i, "user_message", "u1", &body))
+            .collect();
+        assert!(
+            40 * per_row > budget.threshold_tokens(),
+            "test premise: 40 rows are over budget"
+        );
+
+        let block = build_block_b(&rows, 0, &ids(&[]), "a1", &budget);
+        assert!(block.rebuilt);
+        let kept = block.messages.len();
+        assert!(kept < 40);
+        // The window is the *newest* end of the history, in order.
+        assert!(block.messages.last().unwrap().content.ends_with(&body));
+        assert_eq!(block.anchor_seq, (40 - kept) as u64);
+
+        // Same rows, new anchor → identical window, anchor stays put. This is
+        // the anti-sliding guard: a rebuild must not happen twice per row.
+        let again = build_block_b(&rows, block.anchor_seq, &ids(&[]), "a1", &budget);
+        assert_eq!(again.messages.len(), kept);
+        assert_eq!(again.anchor_seq, block.anchor_seq);
+        assert!(!again.rebuilt);
+    }
+
+    #[test]
+    fn an_oversized_row_never_empties_the_window() {
+        // Budget far below one row's cost (a 2 KB body is ~570 tokens). The
+        // newest row is still kept: losing the follow-up entirely is worse
+        // for routing than carrying one row over budget.
+        let budget = WindowBudget::new(1, None);
+        let body = "x".repeat(2_000);
+        let rows: Vec<ChatRow> = (1..=3)
+            .map(|i| row(i, "user_message", "u1", &body))
+            .collect();
+        let block = build_block_b(&rows, 0, &ids(&[]), "a1", &budget);
+        assert_eq!(block.messages.len(), 1);
+        assert_eq!(block.anchor_seq, 2);
+        assert!(block.rebuilt);
+    }
+
+    #[test]
+    fn the_row_ceiling_still_caps_the_window() {
+        // `history_window` survives as a transport-side row cap (hand-edited
+        // configs only); it must still bound the window on its own.
+        let budget = WindowBudget::new(64_000, Some(4));
+        let rows: Vec<ChatRow> = (1..=10)
             .map(|i| row(i, "user_message", "u1", "x"))
             .collect();
-        let next = build_block_b(&rows, block.anchor_seq, &ids(&[]), "a1", &budget);
-        assert_eq!(next.messages.len(), budget.retain + 1);
-        assert_eq!(next.anchor_seq, block.anchor_seq);
-    }
-
-    #[test]
-    fn configured_window_always_fits_one_page() {
-        let budget = WindowBudget::from_history_window(200);
-        assert!(budget.page_size() >= budget.max_history);
-        assert!(budget.page_size() <= GATEWAY_MAX_PAGE);
-        assert_eq!(budget.retain, budget.max_history.min(DEFAULT_RETAIN));
-
-        let tiny = WindowBudget::from_history_window(1);
-        assert_eq!(tiny.max_history, 1);
-        assert_eq!(tiny.retain, 1);
-    }
-
-    #[test]
-    fn byte_budget_drops_from_the_front() {
-        let budget = WindowBudget {
-            max_history: 3,
-            slack: 3,
-            retain: 3,
-            max_message_bytes: 1000,
-        };
-        // Four 900-byte rows stay under the count threshold (4 <= 6) but
-        // exceed the 3000-byte ceiling, so only the byte pass can save us.
-        let body = "x".repeat(900);
-        let rows: Vec<ChatRow> = (1..=4).map(|i| row(i, "user_message", "u1", &body)).collect();
         let block = build_block_b(&rows, 0, &ids(&[]), "a1", &budget);
-        assert_eq!(block.messages.len(), 3);
-        assert_eq!(block.anchor_seq, 1);
+        assert_eq!(block.messages.len(), budget.retain_rows());
+        assert_eq!(block.anchor_seq, 10 - budget.retain_rows() as u64);
         assert!(block.rebuilt);
-        assert!(block.byte_len <= budget.max_bytes());
+    }
+
+    #[test]
+    fn a_full_page_does_not_slide_the_window_one_row_per_turn() {
+        // Short messages never reach the token budget, so the page ceiling is
+        // what bounds the window. It must rebuild in a batch: dropping one
+        // row per turn would re-hash the cached prefix on every single turn.
+        let budget = WindowBudget::default();
+        let body = "x";
+        let rows_upto = |n: usize| -> Vec<ChatRow> {
+            (1..=n as u64)
+                .map(|i| row(i, "user_message", "u1", body))
+                .collect()
+        };
+        let per_row = row_tokens(1);
+        assert!(
+            budget.page_size() * per_row < budget.threshold_tokens(),
+            "test premise: the token budget never binds here"
+        );
+
+        // The page is full: the row pass rebuilds once, down to `retain_rows`.
+        let block = build_block_b(&rows_upto(budget.max_rows + 1), 0, &ids(&[]), "a1", &budget);
+        assert!(block.rebuilt);
+        assert_eq!(block.messages.len(), budget.retain_rows());
+
+        // The next turns append — no rebuild — until the ceiling is reached
+        // again, exactly like the token pass.
+        let next = build_block_b(&rows_upto(budget.max_rows + 2), block.anchor_seq, &ids(&[]), "a1", &budget);
+        assert_eq!(next.messages.len(), budget.retain_rows() + 1);
+        assert_eq!(next.anchor_seq, block.anchor_seq);
+        assert!(!next.rebuilt);
+    }
+
+    #[test]
+    fn the_window_always_fits_one_page() {
+        let budget = WindowBudget::new(8_000, None);
+        assert_eq!(budget.max_rows, PAGE_ROWS);
+        assert_eq!(budget.page_size(), GATEWAY_MAX_PAGE);
+
+        // A configured ceiling below the page cap is honoured ...
+        let capped = WindowBudget::new(8_000, Some(10));
+        assert_eq!(capped.max_rows, 10);
+        assert_eq!(capped.page_size(), 12);
+
+        // ... and one above it is trimmed to what the transport can serve.
+        let huge = WindowBudget::new(8_000, Some(10_000));
+        assert_eq!(huge.max_rows, PAGE_ROWS);
+        assert_eq!(huge.page_size(), GATEWAY_MAX_PAGE);
     }
 
     #[test]

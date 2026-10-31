@@ -89,13 +89,12 @@ pub enum SessionMessage {
         /// When present, the agent loop constructs a ChatMessage::user_multimodal()
         /// instead of ChatMessage::user(), enabling image inputs to flow to the LLM.
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
-        /// ADR-100 D12 / follow-up: the Chat surface this turn owes its
-        /// visible behaviour to. A pinned turn (sent from the execution view
-        /// but written through the Chat entry point) brings the Chat session,
-        /// its own row id — so the terminal echo threads under it and the
-        /// turn's interactive cards have somewhere to land — the sender who
-        /// can answer them, and the Gateway's human-presence fact. A turn
-        /// composed straight against the execution surface brings none of it:
+        /// The Chat surface this turn owes its visible behaviour to. A turn
+        /// the Chat surface asked for brings the Chat session and its own row
+        /// id — so the terminal echo threads under it and the turn's
+        /// interactive cards have somewhere to land — the sender who can
+        /// answer them, and the Gateway's human-presence fact. A turn composed
+        /// in the execution view brings no row of its own:
         /// no row to answer, so no card, and the echo stays the standalone
         /// `exec:` keyed line (D9) in the chat the session is bound to.
         /// Produced by `TurnSurface::from_envelope`; see ADR-100 follow-up.
@@ -235,7 +234,7 @@ pub enum SessionMessage {
         kind: String,
         /// Chat attachment ids from a human Chat message. Runtime pulls from Gateway HTTP.
         chat_attachment_ids: Vec<String>,
-        /// ADR-100 D12: the ADR-046 attachment union the sender carried — for a
+        /// ADR-100: the ADR-046 attachment union the sender carried — for a
         /// human Chat turn, the workspace references ("Add to Chat") picked on
         /// the surface. Unlike `chat_attachment_ids` these need no pull: the
         /// path is node-local and this agent's own tools read it. Empty for
@@ -1163,14 +1162,14 @@ impl SessionTask {
                     // the chat turn with the same `ChunkEvent::Error` shape used
                     // by `agent_loop.run` failures below, so the frontend sees a
                     // consistent error surface regardless of which stage failed.
-                    // ADR-100 D12: the Chat surface this turn owes a terminal row
+                    // ADR-100: the Chat surface this turn owes a terminal row
                     // to, resolved once before the loop runs so every exit —
                     // success, empty answer, abort, attachment failure, loop
                     // error — can close the human's `user_message`. Own value, not
                     // a borrow: the agent loop takes `&mut` below.
                     // ADR-100 follow-up: the Chat this turn is accountable to.
-                    // A pinned turn says so itself; a turn composed straight
-                    // against the execution surface has no row of its own but
+                    // A turn the Chat surface asked for says so itself; a turn
+                    // composed in the execution view has no row of its own but
                     // may still sit in a chat-bound session, whose terminal
                     // echo lands there (D9) and whose interactive cards land
                     // there too (Rev. 6): the binding supplies the chat, the
@@ -1219,11 +1218,12 @@ impl SessionTask {
                                         "Failed to derive image content_parts from attached_items"
                                     );
                                     let (user_message, detail, error_type) = e.error_info();
-                                    // A pinned turn already has its question in
-                                    // the chat; saying nothing here would leave
-                                    // that round open with no way to close it. A
-                                    // local turn has no row to answer, so it stays
-                                    // as silent as it always was. The body is the
+                                    // A chat-surface turn already has its
+                                    // question in the transcript; saying nothing
+                                    // here would leave that round open with no way
+                                    // to close it. A turn composed in the
+                                    // execution view has no row to answer, so it
+                                    // stays as silent as it always was. The body is the
                                     // human-readable line only — detail and
                                     // error_type never enter a transcript.
                                     if let (Some(chat_id), Some(trigger)) = (
@@ -1348,7 +1348,7 @@ impl SessionTask {
                             // D9 deliberately left an ordinary empty answer with
                             // no row: a turn composed straight against the
                             // execution surface has no Chat question to close.
-                            // A pinned turn does (D12), so it owes a terminal row
+                            // A chat-surface turn does, so it owes a terminal row
                             // even when the model had nothing to say — otherwise
                             // the conversation stays "in progress" over a run that
                             // finished.
@@ -1379,7 +1379,7 @@ impl SessionTask {
                                 "SessionTask agent loop error"
                             );
                             let (user_message, detail, error_type) = e.error_info();
-                            // ADR-100 D12: a failed pinned turn still closes the
+                            // A failed chat-surface turn still closes the
                             // round it was asked in — the Intent arm has always
                             // written a `status=failed` terminal row, and now that
                             // the human's own row sits in the chat, silence here
@@ -1423,8 +1423,9 @@ impl SessionTask {
 
                     // ADR-100 follow-up: release this turn's Chat obligations
                     // (close its still-open cards, clear the surface) through
-                    // the same function the Intent arm uses — a pinned turn
-                    // writes cards now, so it needs their safety net too.
+                    // the same function the Intent arm uses — a turn composed in
+                    // the execution view writes cards now (ADR-100 Rev. 6), so
+                    // it needs their safety net too.
                     end_turn_obligations(&mut agent_loop).await;
                 }
                 Some(SessionMessage::Intent {
@@ -1619,7 +1620,7 @@ impl SessionTask {
                                 Some(items)
                             }
                         };
-                    // ADR-100 D12: the workspace references ("Add to Chat") join
+                    // ADR-100: the workspace references ("Add to Chat") join
                     // the pulled uploads. They need no pull — the path is
                     // node-local and this agent's own tools read it — so they
                     // arrive as parsed. One hint for the union, in the order the
@@ -2318,7 +2319,7 @@ async fn materialize_pulled_attachments(
     out
 }
 
-/// ADR-100 D9 / D12: write the terminal `agent_message` a chat-bound turn owes
+/// ADR-100 D9: write the terminal `agent_message` a chat-bound turn owes
 /// the Chat surface, through the Gateway relay.
 ///
 /// Extracted because the turn has more than one way to end — a finished answer,
@@ -2329,7 +2330,7 @@ async fn materialize_pulled_attachments(
 /// conversation displaying an in-progress round forever.
 ///
 /// `trigger` is the Chat row this turn answers: `Some` threads the echo under it
-/// (a pinned turn — the question is in the transcript), `None` keeps the
+/// (a chat-surface turn — the question is in the transcript), `None` keeps the
 /// standalone `exec:` shape a turn composed straight against the execution
 /// surface has always had. Idempotent by `meta.message_id`.
 ///
@@ -2377,7 +2378,7 @@ async fn echo_terminal_row(
 }
 
 /// Merge the two arms a routed Chat turn can arrive with into the one list the
-/// turn sees (ADR-100 D12). They are independent — uploads are pulled by Chat
+/// turn sees (ADR-100). They are independent — uploads are pulled by Chat
 /// attachment id, workspace references arrive already parsed — so either one
 /// alone must survive the merge, and `None` means this turn attached nothing.
 fn merge_intent_attachments(
@@ -2562,10 +2563,10 @@ mod tests {
         assert!(!json.contains("height"));
     }
 
-    /// ADR-100 D12: a routed Chat turn merges its two attachment arms, and
-    /// either one alone must survive the merge — on the Chat surface a workspace
-    /// reference arrives with no uploaded blob beside it (nothing pins the turn,
-    /// so `chat_attachment_ids` is empty).
+    /// ADR-100: a routed Chat turn merges its two attachment arms, and either
+    /// one alone must survive the merge — on the Chat surface a workspace
+    /// reference arrives with no uploaded blob beside it (a Chat-surface turn
+    /// carries no chat upload ids, so `chat_attachment_ids` is empty).
     #[test]
     fn test_merge_intent_attachments_keeps_either_arm() {
         use super::merge_intent_attachments;

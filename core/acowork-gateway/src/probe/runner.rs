@@ -32,9 +32,17 @@ use crate::probe::wire::{
     round_trip_request, truncate,
 };
 
-/// Per-request timeout (D10.1). The batch-level 20 s budget lives in the
+/// Per-request timeout (D10.1). The batch-level budget lives in the
 /// handler, because only the handler knows how many models are queued.
-pub const PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// 30 s, not the original 5 s: the probe body is minimal, but a reasoning
+/// model can spend well over 5 s on its first token (cold start + thinking
+/// block), and a timeout is classified as a transport failure — the verdict
+/// says "endpoint broken" when the truth is "endpoint slow". 5 s produced a
+/// false `Failed` for exactly that reason (observed: latency_ms=5001,
+/// tiers=[]). 30 s is generous for a ≤64-token completion while still
+/// bounding a genuinely dead endpoint.
+pub const PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Which tiers a probe run should attempt.
 ///
@@ -382,12 +390,20 @@ impl ProbeRunner {
         }
 
         let response = request.send().await.map_err(|e| {
-            let class = if e.is_timeout() {
-                "TransportTimeout"
+            if e.is_timeout() {
+                // reqwest's raw timeout message ("error sending request for
+                // url …") reads like "endpoint unreachable"; say the truth.
+                let secs = PROBE_REQUEST_TIMEOUT.as_secs();
+                ProbeFailure::new(
+                    "TransportTimeout",
+                    truncate(
+                        &format!("probe request timed out after {secs}s: {e}"),
+                        300,
+                    ),
+                )
             } else {
-                "TransportError"
-            };
-            ProbeFailure::new(class, truncate(&e.to_string(), 300))
+                ProbeFailure::new("TransportError", truncate(&e.to_string(), 300))
+            }
         })?;
 
         let status = response.status();
@@ -871,7 +887,9 @@ mod tests {
     #[tokio::test]
     async fn a_non_whitelisted_field_is_reported_not_trimmed() {
         let mut server = mockito::Server::new_async().await;
-        // `temperature` sits outside the D8 whitelist: exactly one request.
+        // `temperature` is not in the probe body, so the probe's trim path
+        // (which only knows `reasoning`) cannot apply: exactly one request.
+        // A 400 naming it is surfaced verbatim for the user to act on.
         server
             .mock("POST", "/responses")
             .with_status(400)

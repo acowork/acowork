@@ -48,6 +48,8 @@ import { Dropdown } from "../../components/common/Dropdown";
 import { showToast } from "../../components/common/ToastProvider";
 import { attachmentUrl, deleteTask } from "../../lib/pm-api";
 import { useActorLabel } from "./pmMembers";
+import { TaskActivitySection } from "./TaskActivity";
+import { formatBytes, formatDateTime } from "./taskFormatters";
 import { useTaskForm } from "./useTaskForm";
 import type { PmAttachmentMeta, TaskStatus } from "../../lib/pm-types";
 
@@ -79,23 +81,13 @@ const STATUS_I18N: Record<TaskStatus, string> = {
   cancelled: "pm.board.cancelled",
 };
 
-function formatDateTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   const mode = usePmTaskDetailStore((s) => s.mode);
   const detail = usePmTaskDetailStore((s) => s.detail);
   const attachments = usePmTaskDetailStore((s) => s.attachments);
+  const activity = usePmTaskDetailStore((s) => s.activity);
+  const replying = usePmTaskDetailStore((s) => s.replying);
+  const addReply = usePmTaskDetailStore((s) => s.addReply);
   const uploading = usePmTaskDetailStore((s) => s.uploading);
   const error = usePmTaskDetailStore((s) => s.error);
   const storeProjectId = usePmTaskDetailStore((s) => s.projectId);
@@ -426,9 +418,19 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
                 )}
               </Field>
 
-              {/* ── 以下三段需要已落盘的 task id ── */}
+              {/* ── 以下四段需要已落盘的 task id ── */}
               {hasRow && detail && (
                 <>
+                  {/* 提交历史排在附件之前：Agent 交上来的正文才是这个界面
+                      此刻唯一要看的东西（缺陷 t-80cf07ec）。 */}
+                  <SectionDivider label={t("pm.activity.title")} />
+                  <TaskActivitySection
+                    activity={activity}
+                    attachments={attachments}
+                    replying={replying}
+                    onReply={addReply}
+                  />
+
                   <SectionDivider label={t("pm.task.attachments")} />
                   <Attachments
                     attachments={attachments}
@@ -612,7 +614,7 @@ function Attachments({
           {attachments.map((att) => (
             <li
               key={att.id}
-              className="group relative overflow-hidden rounded-md border border-border-outer bg-card-surface"
+              className="group relative overflow-hidden rounded-md border border-border-outer bg-panel-block"
             >
               {att.kind === "image" ? (
                 <a href={attachmentUrl(att.id)} target="_blank" rel="noreferrer">

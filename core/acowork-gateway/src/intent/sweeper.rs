@@ -94,7 +94,7 @@ async fn sweep_once(state: &AppState) {
         .max(liveness_grace_cutoff().as_str())
         .to_string();
     for req in mailbox.stale_unanswered(&scan_cutoff) {
-        let past_deadline = req.delivered_at.as_str() < deadline_cutoff.as_str();
+        let past_deadline = req.deadline_clock() < deadline_cutoff.as_str();
         if past_deadline {
             emit_fallback_receipt(state, &mailbox, user_port, &req, FALLBACK_BODY).await;
             continue;
@@ -214,7 +214,6 @@ async fn emit_fallback_receipt(
             status: "failed".to_string(),
             has_human: req.has_human,
             chat_attachment_ids: Vec::new(),
-            for_execution_session: String::new(),
         };
         // A failed push does not undo the durable chat row; the initiator
         // can still read it via the Chat history surface.

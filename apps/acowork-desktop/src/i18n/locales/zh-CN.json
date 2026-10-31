@@ -254,6 +254,7 @@
       "timeout": "本轮执行超时",
       "waiting": "本轮等待你回复",
       "noAnswer": "本轮没有产生回复",
+      "systemFallback": "系统兜底：{{name}} 未在响应截止前回复",
       "turnRoutedNew": "启动新任务：{{task}}",
       "turnRoutedContinue": "继续之前的任务：{{task}}"
     },
@@ -709,6 +710,8 @@
     "chatRouterModelDesc": "用于路由 LLM 轮次的模型，该轮次决定是直接回复还是转发到执行会话。它不跟随会话所选的聊天模型。保持“自动”即使用 agent 的精简模型链。",
     "chatRouterTimeoutMs": "路由超时（毫秒）",
     "chatRouterTimeoutMsDesc": "单次路由 LLM 调用在回退为直接转发前的超时时间。范围 1000–300000，默认 60000。",
+    "chatRouterHistoryMaxTokens": "Chat 历史上下文长度",
+    "chatRouterHistoryMaxTokensDesc": "路由判断前可以读取的聊天历史长度（tokens）。窗口按上下文大小裁剪，而不是按消息条数。范围 1000–64000，默认 8000。",
     "chatRouterDisabledHint": "Chat 路由已关闭；每条聊天消息都将不经路由轮次直接处理。",
     "resetTemperature": "清除温度设置，使用包默认值",
     "contextWindow": "上下文窗口",
@@ -1104,6 +1107,21 @@
     "previewDisabled": "当前文件不支持预览",
     "previewLoading": "正在加载预览...",
     "previewDoubleClickHint": "双击切换到编辑器",
+    "imageViewer": {
+      "zoomIn": "放大",
+      "zoomOut": "缩小",
+      "fit": "适应面板",
+      "cursorPoint": "x: {{x}}, y: {{y}}",
+      "cursorIdle": "—",
+      "selectionSize": "{{width}} × {{height}}",
+      "addPointToChat": "将坐标发送到对话",
+      "addRegionToChat": "将选中区域发送到对话",
+      "clearSelection": "取消选择",
+      "captureFailed": "截取选中区域失败",
+      "unavailable": "当前对话无法接收该文件",
+      "pointPrompt": "{{path}} 坐标 ({{x}}, {{y}})",
+      "regionPrompt": "{{path}} 区域 ({{x}}, {{y}}) – ({{x2}}, {{y2}})，{{width}}×{{height}}"
+    },
     "markdownLinkNotFound": "所有工作区都未找到文件:{{href}}",
     "markdownImageClickHint": "点击打开预览",
     "loadingUrl": "正在加载页面...",
@@ -1154,6 +1172,10 @@
   "documentChip": {
     "uploadFailed": "上传失败",
     "removeFile": "移除 {{filename}}"
+  },
+  "attachment": {
+    "zoomLabel": "查看大图：{{filename}}",
+    "openFailed": "无法打开「{{filename}}」——文件可能已被删除或服务不可达"
   },
   "language": {
     "zhCN": "中文 (简体)",
@@ -1812,6 +1834,9 @@
       "title": "项目设置",
       "noProject": "选择一个项目以管理其成员与设置。",
       "info": "项目信息",
+      "display": "显示设置",
+      "tasksPerPage": "单页任务数量",
+      "tasksPerPageHint": "每列每页显示的根任务数（子任务随父任务一起显示）。",
       "members": "成员管理",
       "actions": "项目操作",
       "service": "服务状态",
@@ -1834,6 +1859,7 @@
     "noDescription": "暂无描述",
     "projectName": "名称",
     "projectRemark": "备注",
+    "displaySettingsSaveFailed": "保存显示设置失败",
     "iconUpdated": "项目图标已更新",
     "iconPicker": {
       "title": "更换项目图标",
@@ -1884,7 +1910,22 @@
       "loading": "加载中…",
       "dragHint": "拖动卡片可在列间流转状态",
       "ariaColumn": "{{status}} 列",
-      "dropHint": "拖放到此处"
+      "dropHint": "拖放到此处",
+      "pagePrev": "上一页",
+      "pageNext": "下一页",
+      "pageRange": "{{start}}–{{end}} / 共 {{total}} 项"
+    },
+    "activity": {
+      "title": "提交记录",
+      "empty": "还没有提交",
+      "submitted": "提交结果",
+      "approved": "已批准",
+      "rejected": "已拒绝",
+      "comment": "回复",
+      "unknownActor": "未知成员",
+      "reply": "回复",
+      "replyPlaceholder": "回复这次提交…",
+      "sending": "发送中…"
     },
     "task": {
       "subtasks": "子任务",

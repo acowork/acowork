@@ -253,6 +253,7 @@
       "timeout": "이번 실행이 시간 초과되었습니다",
       "waiting": "답변을 기다리는 중입니다",
       "noAnswer": "이번 실행에서는 응답이 없었습니다",
+      "systemFallback": "시스템 영수증: {{name}} 응답이 기한 내에 도착하지 않았습니다",
       "turnRoutedNew": "새 작업 시작: {{task}}",
       "turnRoutedContinue": "이전 작업 계속: {{task}}"
     },
@@ -641,6 +642,8 @@
     "chatRouterModelDesc": "직접 답변 여부 또는 실행 세션으로의 전달 여부를 결정하는 라우터 LLM 턴에 사용되는 모델입니다. 세션에서 선택한 채팅 모델을 따르지 않습니다. '자동'으로 두면 에이전트의 컴팩트 모델 체인을 사용합니다.",
     "chatRouterTimeoutMs": "라우터 시간 초과(ms)",
     "chatRouterTimeoutMsDesc": "직접 전달로 폴백하기까지 단일 라우터 LLM 호출의 시간 초과. 범위 1000–300000, 기본 60000.",
+    "chatRouterHistoryMaxTokens": "Chat 기록 컨텍스트 길이",
+    "chatRouterHistoryMaxTokensDesc": "라우팅 판단 전에 라우터가 읽을 수 있는 대화 기록의 길이(토큰). 윈도우는 메시지 개수가 아니라 컨텍스트 크기로 잘립니다. 범위 1000–64000, 기본 8000.",
     "chatRouterDisabledHint": "Chat 라우터가 꺼져 있습니다. 모든 채팅 메시지는 라우팅 턴 없이 처리됩니다.",
     "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
     "sectionAgentInfo": "Agent 정보",
@@ -1023,6 +1026,21 @@
     "showSource": "소스 보기",
     "previewLoading": "미리보기 로딩 중...",
     "previewDoubleClickHint": "더블클릭하여 에디터에서 열기",
+    "imageViewer": {
+      "zoomIn": "확대",
+      "zoomOut": "축소",
+      "fit": "패널에 맞추기",
+      "cursorPoint": "x: {{x}}, y: {{y}}",
+      "cursorIdle": "—",
+      "selectionSize": "{{width}} × {{height}}",
+      "addPointToChat": "좌표를 대화로 보내기",
+      "addRegionToChat": "선택 영역을 대화로 보내기",
+      "clearSelection": "선택 해제",
+      "captureFailed": "선택 영역을 잡지 못했습니다",
+      "unavailable": "현재 대화에 이 파일을 첨부할 수 없습니다",
+      "pointPrompt": "{{path}} 좌표 ({{x}}, {{y}})",
+      "regionPrompt": "{{path}} 영역 ({{x}}, {{y}}) – ({{x2}}, {{y2}}), {{width}}×{{height}}"
+    },
     "markdownLinkNotFound": "모든 워크스페이스에서 파일을 찾을 수 없음: {{href}}",
     "markdownImageClickHint": "클릭하여 미리보기 열기",
     "loadingUrl": "페이지 로딩 중...",
@@ -1073,6 +1091,10 @@
   "documentChip": {
     "uploadFailed": "업로드 실패",
     "removeFile": "{{filename}} 제거"
+  },
+  "attachment": {
+    "zoomLabel": "원본 보기: {{filename}}",
+    "openFailed": "「{{filename}}」을(를) 열 수 없습니다 — 파일이 삭제되었거나 서비스에 연결할 수 없습니다"
   },
   "language": {
     "zhCN": "중국어（간체）",
@@ -1756,7 +1778,10 @@
       "loading": "로딩 중…",
       "dragHint": "카드를 드래그하여 상태 변경",
       "ariaColumn": "{{status}} 열",
-      "dropHint": "여기에 놓기"
+      "dropHint": "여기에 놓기",
+      "pagePrev": "이전 페이지",
+      "pageNext": "다음 페이지",
+      "pageRange": "전체 {{total}}개 중 {{start}}–{{end}}개"
     },
     "task": {
       "subtasks": "하위 작업",

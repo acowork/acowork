@@ -26,8 +26,8 @@ use regex::Regex;
 
 use crate::usecases::workspace_query::{
     FindFilesParams, FindMatchDto, FindResponse, ListTreeParams, RawFileDto, ReadFileParams,
-    SearchFilesParams, SearchMatchDto, SearchResponse, TreeEntryDto, TreeResponse, WorkspaceError,
-    WorkspaceFileDto, WorkspaceQueryService, WorkspacesListResponse,
+    SearchFilesParams, SearchMatchDto, SearchMatchKind, SearchResponse, TreeEntryDto,
+    TreeResponse, WorkspaceError, WorkspaceFileDto, WorkspaceQueryService, WorkspacesListResponse,
 };
 
 // ── Constants (kept in sync with gateway workspaces.rs) ────────────────────
@@ -242,26 +242,76 @@ impl RuntimeWorkspaceQueryService {
     }
 
     // ── Filename scoring (mirrors gateway `score_match`) ───────────────
+}
 
-    fn score_match(name: &str, rel_path: &str, q_lower: &str, q_segments: &[&str]) -> Option<u32> {
-        if q_segments.is_empty() {
+/// The query prepared for the file-name half of the file scope.
+///
+/// One instance per request: the lowercasing and the segment split happen
+/// once, not once per file — the walk visits tens of thousands of files.
+struct FileNameQuery {
+    /// The comparison pattern: lowercased unless `case_sensitive`.
+    comparison: String,
+    /// `comparison` split on whitespace and path separators.
+    segments: Vec<String>,
+    case_sensitive: bool,
+}
+
+impl FileNameQuery {
+    /// Build from a raw pattern.
+    fn new(pattern: &str, case_sensitive: bool) -> Self {
+        let comparison = if case_sensitive {
+            pattern.to_string()
+        } else {
+            pattern.to_lowercase()
+        };
+        let segments = comparison
+            .split(|c: char| c.is_whitespace() || c == '/' || c == '\\')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        Self {
+            comparison,
+            segments,
+            case_sensitive,
+        }
+    }
+
+    /// Score a file name / relative path against this query.
+    ///
+    /// Ranking ladder (highest first): exact name → name prefix → word
+    /// boundary in the name → substring in the name → substring in the
+    /// relative path.
+    fn score(&self, name: &str, rel_path: &str) -> Option<u32> {
+        if self.segments.is_empty() {
             return None;
         }
-        let name_lower = name.to_lowercase();
-        if name_lower == *q_lower {
+        let name_cmp = if self.case_sensitive {
+            name.to_string()
+        } else {
+            name.to_lowercase()
+        };
+        if name_cmp == self.comparison {
             return Some(1000);
         }
-        if name_lower.starts_with(q_lower) {
+        if name_cmp.starts_with(&self.comparison) {
             return Some(800);
         }
-        if q_segments.iter().all(|seg| match_word_boundary(name, seg)) {
+        if self
+            .segments
+            .iter()
+            .all(|seg| match_word_boundary(name, seg, self.case_sensitive))
+        {
             return Some(600);
         }
-        if q_segments.iter().all(|seg| name_lower.contains(seg)) {
+        if self.segments.iter().all(|seg| name_cmp.contains(seg)) {
             return Some(400);
         }
-        let path_lower = rel_path.to_lowercase();
-        if q_segments.iter().all(|seg| path_lower.contains(seg)) {
+        let path_cmp = if self.case_sensitive {
+            rel_path.to_string()
+        } else {
+            rel_path.to_lowercase()
+        };
+        if self.segments.iter().all(|seg| path_cmp.contains(seg)) {
             return Some(200);
         }
         None
@@ -281,14 +331,22 @@ fn deepest_existing_ancestor(path: &Path) -> PathBuf {
 }
 
 /// Camel/snake/kebab-case word-boundary match — see gateway `match_word_boundary`.
-fn match_word_boundary(name: &str, seg: &str) -> bool {
+///
+/// `seg` is expected to already be in the same case as the haystack the
+/// caller searches (`case_sensitive` decides whether that is the raw name or
+/// its lowercase form).
+fn match_word_boundary(name: &str, seg: &str, case_sensitive: bool) -> bool {
     if seg.is_empty() {
         return true;
     }
     let name_bytes = name.as_bytes();
-    let name_lower = name.to_lowercase();
+    let name_cmp = if case_sensitive {
+        name.to_string()
+    } else {
+        name.to_lowercase()
+    };
     let mut start = 0usize;
-    while let Some(pos) = name_lower[start..].find(seg) {
+    while let Some(pos) = name_cmp[start..].find(seg) {
         let abs = start + pos;
         let at_word_start =
             abs == 0 || matches!(name_bytes[abs - 1], b'.' | b'_' | b' ' | b'-' | b'/');
@@ -630,6 +688,11 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
             .unwrap_or(DEFAULT_MAX_SEARCH_RESULTS)
             .min(ABSOLUTE_MAX_SEARCH_RESULTS);
         let include_glob = params.include.clone();
+        let match_file_names = params.match_file_names;
+        let case_sensitive = params.case_sensitive;
+        // Owned copy: `pattern` borrows `params`, which the closure below
+        // captures by move.
+        let pattern = pattern.to_string();
 
         let result = tokio::task::spawn_blocking(move || {
             run_search(
@@ -637,6 +700,9 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
                 &re,
                 include_glob.as_deref(),
                 max_results,
+                match_file_names,
+                &pattern,
+                case_sensitive,
             )
         })
         .await
@@ -674,11 +740,8 @@ fn normalised_root(workspace_root: &str) -> String {
 }
 
 fn run_filename_search(workspace_root: &str, pattern: &str, limit: usize) -> FindResponse {
-    let q_lower = pattern.to_lowercase();
-    let q_segments: Vec<&str> = q_lower
-        .split(|c: char| c.is_whitespace() || c == '/' || c == '\\')
-        .filter(|s| !s.is_empty())
-        .collect();
+    // `find_files` is case-insensitive by contract.
+    let query = FileNameQuery::new(pattern, false);
 
     let root_str = normalised_root(workspace_root);
 
@@ -724,9 +787,7 @@ fn run_filename_search(workspace_root: &str, pattern: &str, limit: usize) -> Fin
             .to_string_lossy()
             .replace('\\', "/");
 
-        let Some(score) =
-            RuntimeWorkspaceQueryService::score_match(name, &rel_path, &q_lower, &q_segments)
-        else {
+        let Some(score) = query.score(name, &rel_path) else {
             continue;
         };
 
@@ -756,15 +817,46 @@ fn run_filename_search(workspace_root: &str, pattern: &str, limit: usize) -> Fin
     }
 }
 
+/// Walk the workspace once and collect both halves of the file scope
+/// (ADR-081 D2): **content** matches (the ripgrep-style regex over file
+/// bodies) and **name** matches (the fuzzy file-name scorer).
+///
+/// Both halves share one filesystem walk on purpose — running the name
+/// matcher as a second walk would double the I/O cost of every global
+/// search, and the walk is the expensive part on a large workspace.
+///
+/// Ordering: name hits first (best fuzzy score first), then content hits in
+/// workspace order. A user who typed a file name wants the file, not the
+/// 200 lines that happen to mention it.
+///
+/// The walk always runs to the end so that name hits are complete, but
+/// file *contents* stop being read once the content budget is full. A
+/// directory-traversal step is far cheaper than reading and regexing every
+/// file, so this keeps the cost close to the old content-only search while
+/// still covering the whole tree for names.
+///
+/// `pattern` is the raw query. The name matcher treats it as a literal
+/// fuzzy string, not a regex — "context_compre" must find
+/// `context_compression.rs`, and a regex-only interpretation would treat
+/// `_` as a word character and still match, but `a.b` would not match
+/// `a_b.rs`. The regex remains the authority for content matching.
 fn run_search(
     workspace_root: &str,
     re: &Regex,
     include_glob: Option<&str>,
     max_results: usize,
+    match_file_names: bool,
+    pattern: &str,
+    case_sensitive: bool,
 ) -> SearchResponse {
-    let mut results: Vec<SearchMatchDto> = Vec::with_capacity(max_results);
+    let mut content_hits: Vec<SearchMatchDto> = Vec::new();
+    let mut name_hits: Vec<(u32, SearchMatchDto)> = Vec::new();
     let mut total_matches: usize = 0;
     let mut truncated = false;
+
+    // Name-matching inputs, mirroring `run_filename_search`. Prepared once
+    // per request so the walk does not re-lowercase the query per file.
+    let name_query = FileNameQuery::new(pattern, case_sensitive);
 
     let walker = WalkBuilder::new(workspace_root)
         .hidden(true)
@@ -773,7 +865,7 @@ fn run_search(
         .git_exclude(true)
         .build();
 
-    'outer: for entry in walker {
+    for entry in walker {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -808,15 +900,46 @@ fn run_search(
             }
         }
 
-        if RuntimeWorkspaceQueryService::is_binary_path(path) {
-            continue;
-        }
-
         let rel_path = path
             .strip_prefix(workspace_root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+
+        // ── Name half ──────────────────────────────────────────────────
+        // Evaluated before the binary bail-out: a binary file still has a
+        // name the user may be looking for (a `.png` named after the
+        // feature it illustrates), and the name match costs nothing.
+        if match_file_names {
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if let Some(score) = name_query.score(file_name, &rel_path) {
+                total_matches += 1;
+                name_hits.push((
+                    score,
+                    SearchMatchDto {
+                        file: rel_path.clone(),
+                        line: None,
+                        column: None,
+                        text: file_name.to_string(),
+                        kind: SearchMatchKind::Name,
+                    },
+                ));
+            }
+        }
+
+        if RuntimeWorkspaceQueryService::is_binary_path(path) {
+            continue;
+        }
+
+        // Content budget exhausted — stop reading bodies, but keep
+        // walking so the name half stays complete.
+        if content_hits.len() >= max_results {
+            truncated = true;
+            continue;
+        }
 
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
@@ -826,19 +949,40 @@ fn run_search(
         for (line_num, line) in content.lines().enumerate() {
             if let Some(m) = re.find(line) {
                 total_matches += 1;
-                if results.len() < max_results {
-                    results.push(SearchMatchDto {
-                        file: rel_path.clone(),
-                        line: line_num + 1,
-                        column: m.start() + 1,
-                        text: line.trim_end().to_string(),
-                    });
-                } else {
-                    truncated = true;
-                    break 'outer;
-                }
+                content_hits.push(SearchMatchDto {
+                    file: rel_path.clone(),
+                    line: Some(line_num + 1),
+                    column: Some(m.start() + 1),
+                    text: line.trim_end().to_string(),
+                    kind: SearchMatchKind::Content,
+                });
             }
         }
+    }
+
+    // Rank the name hits: best fuzzy score first, then shortest path, then
+    // path — the same order `find_files` uses, so the global search and the
+    // workspace search rank identical queries identically.
+    name_hits.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(a.1.file.len().cmp(&b.1.file.len()))
+            .then(a.1.file.cmp(&b.1.file))
+    });
+
+    let mut results: Vec<SearchMatchDto> = Vec::with_capacity(max_results);
+    for (_, hit) in name_hits {
+        if results.len() >= max_results {
+            truncated = true;
+            break;
+        }
+        results.push(hit);
+    }
+    for hit in content_hits {
+        if results.len() >= max_results {
+            truncated = true;
+            break;
+        }
+        results.push(hit);
     }
 
     SearchResponse {
@@ -1114,5 +1258,308 @@ mod tests {
             .await
             .expect_err("traversal must fail");
         assert_eq!(err.http_status(), 400);
+    }
+
+    // ── File scope: content + file-name matches (ADR-081 D2) ──────────
+
+    /// Build a workspace with:
+    ///   `src/context_compression.rs` — body mentions "needle"
+    ///   `docs/other.md`               — body mentions "needle"
+    ///   `assets/logo.png`             — binary, name only
+    fn workspace_with_mixed_files() -> tempfile::TempDir {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("assets")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/context_compression.rs"),
+            "fn main() { /* needle */ }\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("docs/other.md"), "a needle in the haystack\n").unwrap();
+        std::fs::write(tmp.path().join("assets/logo.png"), [0u8, 1, 2, 3]).unwrap();
+        tmp
+    }
+
+    /// The regression this fixes: a file whose **name** matches the query
+    /// but whose **body** does not was unreachable through the file scope.
+    /// The global search returned "no matches" while the workspace search
+    /// (a different endpoint) found it.
+    #[tokio::test]
+    async fn search_files_finds_files_by_name_when_the_body_does_not_match() {
+        let tmp = workspace_with_mixed_files();
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        let resp = svc
+            .search_files(&SearchFilesParams {
+                q: Some("context_compression".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: false,
+                whole_word: false,
+                match_file_names: true,
+            })
+            .await
+            .expect("search_files");
+
+        let name_hits: Vec<&SearchMatchDto> = resp
+            .matches
+            .iter()
+            .filter(|m| m.kind == SearchMatchKind::Name)
+            .collect();
+
+        assert!(
+            !name_hits.is_empty(),
+            "a file-name match must be reported even when no body mentions the name"
+        );
+        let hit = name_hits
+            .iter()
+            .find(|m| m.file == "src/context_compression.rs")
+            .expect("the named file must be among the hits");
+        assert_eq!(hit.kind, SearchMatchKind::Name);
+        assert_eq!(hit.line, None, "a name hit has no line");
+        assert_eq!(hit.column, None, "a name hit has no column");
+        assert_eq!(hit.text, "context_compression.rs");
+    }
+
+    /// The name half must not break the content half: a body match is
+    /// still reported, with its line and column, and the content hit keeps
+    /// its `Content` kind.
+    #[tokio::test]
+    async fn search_files_still_reports_content_matches_with_line_and_column() {
+        let tmp = workspace_with_mixed_files();
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        let resp = svc
+            .search_files(&SearchFilesParams {
+                q: Some("needle".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: false,
+                whole_word: false,
+                match_file_names: true,
+            })
+            .await
+            .expect("search_files");
+
+        let content_hits: Vec<&SearchMatchDto> = resp
+            .matches
+            .iter()
+            .filter(|m| m.kind == SearchMatchKind::Content)
+            .collect();
+        assert_eq!(content_hits.len(), 2, "both bodies mention 'needle'");
+        for hit in content_hits {
+            assert_eq!(hit.line, Some(1));
+            assert!(hit.column.is_some());
+        }
+    }
+
+    /// Name hits are ranked ahead of content hits and ordered by the same
+    /// fuzzy score `find_files` uses, so the two surfaces agree.
+    #[tokio::test]
+    async fn search_files_ranks_name_hits_before_content_hits() {
+        let tmp = workspace_with_mixed_files();
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        let resp = svc
+            .search_files(&SearchFilesParams {
+                q: Some("other".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: false,
+                whole_word: false,
+                match_file_names: true,
+            })
+            .await
+            .expect("search_files");
+
+        assert!(
+            !resp.matches.is_empty(),
+            "'other' matches the file name docs/other.md"
+        );
+        assert_eq!(
+            resp.matches[0].kind,
+            SearchMatchKind::Name,
+            "the name hit must come first"
+        );
+        assert_eq!(resp.matches[0].file, "docs/other.md");
+    }
+
+    /// The pre-ADR-081 content-only behaviour stays available: a caller
+    /// that opts out gets exactly the old result set.
+    #[tokio::test]
+    async fn search_files_can_opt_out_of_file_name_matching() {
+        let tmp = workspace_with_mixed_files();
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        let resp = svc
+            .search_files(&SearchFilesParams {
+                q: Some("context_compression".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: false,
+                whole_word: false,
+                match_file_names: false,
+            })
+            .await
+            .expect("search_files");
+
+        assert!(
+            resp.matches.is_empty(),
+            "with name matching off, a name-only query finds nothing"
+        );
+    }
+
+    /// The default is on: a query that only matches a file name must not
+    /// come back empty (the reported bug).
+    #[tokio::test]
+    async fn search_files_params_default_to_matching_file_names() {
+        let params = SearchFilesParams {
+            q: Some("x".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            params.match_file_names,
+            "file-name matching must default to on"
+        );
+    }
+
+    /// A binary file still has a name the user may be searching for — the
+    /// name half must be evaluated before the binary bail-out.
+    #[tokio::test]
+    async fn search_files_matches_the_name_of_a_binary_file() {
+        let tmp = workspace_with_mixed_files();
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        let resp = svc
+            .search_files(&SearchFilesParams {
+                q: Some("logo".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: false,
+                whole_word: false,
+                match_file_names: true,
+            })
+            .await
+            .expect("search_files");
+
+        assert!(
+            resp.matches
+                .iter()
+                .any(|m| m.file == "assets/logo.png" && m.kind == SearchMatchKind::Name),
+            "a binary file's name must still match"
+        );
+    }
+
+    /// The query is a fuzzy *string* for the name half, not a regex: a
+    /// dot must not act as "any character" and must not make the name
+    /// matcher fail to find `context_compression.rs`.
+    #[tokio::test]
+    async fn search_files_treats_the_query_as_a_literal_for_file_names() {
+        let tmp = workspace_with_mixed_files();
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        let resp = svc
+            .search_files(&SearchFilesParams {
+                q: Some("context_compression.rs".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: false,
+                whole_word: false,
+                match_file_names: true,
+            })
+            .await
+            .expect("search_files");
+
+        assert!(
+            resp.matches
+                .iter()
+                .any(|m| m.file == "src/context_compression.rs"),
+            "the exact file name must be found"
+        );
+    }
+
+    /// The `Aa` toggle must gate the name half too: a case-insensitive query
+    /// finds the file, the same query with `case_sensitive` does not.
+    #[tokio::test]
+    async fn search_files_honours_case_sensitive_for_file_names() {
+        let tmp = workspace_with_mixed_files();
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        // Lowercase query, case-insensitive → matches `context_compression.rs`.
+        let insensitive = svc
+            .search_files(&SearchFilesParams {
+                q: Some("CONTEXT_COMPRESSION".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: false,
+                whole_word: false,
+                match_file_names: true,
+            })
+            .await
+            .expect("search_files");
+        assert!(
+            insensitive
+                .matches
+                .iter()
+                .any(|m| m.file == "src/context_compression.rs"),
+            "case-insensitive name matching must find the file"
+        );
+
+        // Same query, case-sensitive → the name half must not match.
+        let sensitive = svc
+            .search_files(&SearchFilesParams {
+                q: Some("CONTEXT_COMPRESSION".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: true,
+                whole_word: false,
+                match_file_names: true,
+            })
+            .await
+            .expect("search_files");
+        assert!(
+            !sensitive
+                .matches
+                .iter()
+                .any(|m| m.file == "src/context_compression.rs"),
+            "case-sensitive name matching must not match a differently-cased name"
+        );
+
+        // Exact case, case-sensitive → matches again.
+        let exact = svc
+            .search_files(&SearchFilesParams {
+                q: Some("context_compression".to_string()),
+                workspace_id: None,
+                include: None,
+                max_results: Some(50),
+                case_sensitive: true,
+                whole_word: false,
+                match_file_names: true,
+            })
+            .await
+            .expect("search_files");
+        assert!(
+            exact
+                .matches
+                .iter()
+                .any(|m| m.file == "src/context_compression.rs"),
+            "case-sensitive name matching must match the exact case"
+        );
     }
 }

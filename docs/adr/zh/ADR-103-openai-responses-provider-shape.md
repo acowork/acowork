@@ -4,6 +4,7 @@
 - **状态**：✅ 已接受（v0.3 拍板 / v0.4–v0.6 修正，2026-11-XX；S1–S10 已实施，分支 `feature/response_api`）
 - **日期**：2026-11-XX
 - **修订**：
+  - **v0.7（2026-11-XX，实施后修正）**——**D8 裁剪白名单加入 `temperature`（白名单从 1 个字段扩到 2 个）**。动因：推理模型（OpenAI o 系语义、多家第三方实现）对 `temperature` 字段**本身**返 400（`'temperature' is not supported with this model`），而 Runtime 的 temperature 兜底链（`agent_config` → `manifest` → `DEFAULT_TEMPERATURE`）保证每个请求**必然携带**该字段——用户从未设置过 temperature，却收到「请调整模型设置」，而设置里根本没有 temperature 可调：错误上抛的路径对这类模型是死胡同。裁剪纪律不变：证据门控（400 点名该字段才裁）、按 `(provider, model)` 记入 `ResponsesCompat`、两次确认才固化、plain success 重置、命中必须 `warn!` 可见。原「静默改变采样行为」的不裁理由对这类端点不成立——端点已声明该字段无效，省略它不改变端点上任何可观察行为。`tool_choice` / `text.format` / `top_p` 维持不裁。
   - **v0.6（2026-11-XX，实施后修正）**——**reasoning effort 全链路收口**（新增 D13，D5 映射表、§3、§5、§7 同步）。三件事：① **`Off` 改为「不控制推理」= 省略 reasoning 参数**，两条线格式路径都不再发 `none`、也不发 `low`（旧的 completions `Off → "low"` 是缺陷：用户选「关闭」反而收到低档推理；`none` 则被 MiniMax M3.1-Flash 400）；② `ReasoningEffort` 补 `Minimal` / `XHigh`，`from_str_loose` 接受 catalog 的 `minimal`/`xhigh`/`x_high`/`default`/`none`（手改配置不再静默回落 `Auto`）；③ 档位集合改为**由模型自己声明**：`offline_providers.json` 的 `reasoning_options[].values` → `ModelInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts` → 前端档位菜单 + Runtime 裁剪，`None` = 未知（自定义模型）时前端给通用五档 `low/medium/high/xhigh/max`、Runtime 不裁剪。附带删掉 core 侧死代码 `ReasoningEffort::to_openai_str`（与 `openai_reasoning_str` 语义相反，是映射漂移的温床）。
   - **v0.5（2026-11-XX，实施后修正）**——**探测基线的 `reasoning.effort` 改用跨厂商合法值 `low`**（原为 `none`）。`none` 是 MiniMax M3.1-Flash 唯一拒绝的**值**（该模型**支持** `reasoning`，effort 可取 `low`/`medium`/`high`/`xhigh`/`max`），而 400 点名 `reasoning` 字段会被判成「字段不支持」→ 裁剪 → 对一个完全支持推理的模型谎报 `degraded` + 「reasoning 被省略」。§4.4 D8 裁剪规则与 `degraded` 语义不变，只是基线不再用「某厂商恰好拒绝的值」。（v0.6 起用户主动选 `Off` 也改为省略该字段，见 v0.6 / D13。）
   - **v0.4（2026-11-XX，实施后修正）**——**删除全局开关 `llm.responses_api_enabled`**（§4.4、R6 已同步）。理由：默认 `false` + 无 UI 入口 = 功能对绝大多数用户静默不可用（用户手选 Responses、点保存、探测被整体跳过、dialog 静默关闭，再次打开仍显示未启用）；而灰度本来就不需要它——D1 的 gate 已经是灰度（未手选 / 未探测 / 探测失败一律回落默认）。同时保留一条实施事实：保存响应里的探测结论（`probes`）必须传到 UI，否则「探测失败」与「什么都没发生」对用户不可区分。
@@ -328,9 +329,10 @@ flowchart LR
 | SSE `response.failed` | `InBandFailure{code,message}` | → `StreamEvent::Error`，MUST NOT 当空回答 |
 | 流断开且无终止事件 | `TruncatedStream` | → `StreamEvent::Error`，不重试（可能已产生副作用） |
 
-**裁剪白名单（ResponsesCompat，v0.2 收窄到 1 个字段）**：与 `CompatCache` 同纪律（**两次确认才固化**、TTL 租约、plain success 重置、错误分类门控、级别必须可见告警），但 v1 **只允许裁剪 `reasoning` 一个字段**，且**不复用 `openai.rs` 的 `StripProfile` 结构**（它是 completions 形状）：
+**裁剪白名单（ResponsesCompat，v0.2 收窄到 1 个字段；v0.7 扩到 2 个）**：与 `CompatCache` 同纪律（**两次确认才固化**、TTL 租约、plain success 重置、错误分类门控、级别必须可见告警），白名单为 **`reasoning` + `temperature`**（v0.7 前只有前者），且**不复用 `openai.rs` 的 `StripProfile` 结构**（它是 completions 形状）：
 
 - 端点对 `reasoning` **字段本身**返 400（body 指名该字段）→ 省略 `reasoning` 整块重试一次。裁剪后**语义损失可判定**——用户选的 effort 档位被降级，必须可见告警 + 记入探测状态。
+- **（v0.7 新增）** 端点对 `temperature` **字段本身**返 400（推理模型的常见行为：`'temperature' is not supported with this model`）→ 省略 `temperature` 重试一次，纪律同上。原「裁掉会静默改变采样」的不裁理由对这类端点不成立：端点已声明该字段无效，省略它不改变端点上任何可观察行为；而 Runtime 的兜底链保证请求**必然携带** `DEFAULT_TEMPERATURE`（用户从未设置过也会被注入），「上抛让用户调整」在设置里根本没有 temperature 开关，是死胡同。探测（D10）不发送 `temperature`，探测路径不受白名单扩大影响。
 
 - **v0.5 修正（实施后）**：这条规则原先写的是「`reasoning.effort: none` 触发 400 → 裁剪」，并把「值被拒」当成了「字段不被支持」。这产生了一个**假结论**：MiniMax M3.1-Flash **支持** `reasoning`（`effort` 可取 `low`/`medium`/`high`/`xhigh`/`max`，MiniMax 官方文档明文），它只是**不接受 `effort: none` 这个值**（返 400）。而 400 里点名了 `reasoning` 字段 → 错误分类判成 `UnsupportedField{reasoning}` → 裁剪 → 结论落成 `degraded` + `stripped_fields: ["reasoning"]`，于是在一个完全支持推理的模型上对用户宣称「该端点省略了 reasoning 参数」。**被拒的是值，不是字段。**
   - **约束（新增，v0.5）**：探测基线里的 `reasoning.effort` **MUST 取跨厂商合法值**（v1 取 `low`），MUST NOT 用「某个厂商恰好拒绝的值」当基线——否则探测会把「值非法」误判成「字段不支持」，产出假 `degraded`。端点若真的不实现 `reasoning` 字段，仍会 400 点名它，裁剪路径与 `degraded` 语义不变。
@@ -340,7 +342,7 @@ flowchart LR
 
 | 字段 | 不裁的理由 |
 |---|---|
-| `tool_choice` / `text.format` / `temperature` / `top_p` | 裁剪它们会**静默改变模型行为**（强制 `auto`、丢掉结构化输出、改掉采样），而这三项在 MiniMax 上的表现是「接受但不生效」而非报错——客户端补偿只会掩盖差异，不会消除（§1.4 差异表才是正解） |
+| `tool_choice` / `text.format` / `top_p` | 裁剪它们会**静默改变模型行为**（强制 `auto`、丢掉结构化输出、改掉采样），而这些在 MiniMax 上的表现是「接受但不生效」而非报错——客户端补偿只会掩盖差异，不会消除（§1.4 差异表才是正解）。`temperature` 原在此列，v0.7 起移入白名单（理由见上） |
 | `tools` | 工具是 agent 的能力面，剥掉等于静默关闭 function calling——正是 `compat.rs` 头部记录的 2026-09-05 事故 |
 
 **明确不做**：不做 4 步链式盲试；不做「试到 200 为止」。裁剪命中后 **MUST** `warn!`、在 debug panel 可见，并把该 provider-model 标记为 `ProbeState::Degraded`（D10），让 R 标签能表达「能通，但被裁过」。

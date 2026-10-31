@@ -247,7 +247,7 @@ pub struct FindResponse {
 }
 
 /// Querystring for `search_files` (content / regex search).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SearchFilesParams {
     /// Regex pattern to search for.
     #[serde(default)]
@@ -267,6 +267,52 @@ pub struct SearchFilesParams {
     /// Match whole words only — wraps pattern in `\b…\b`.
     #[serde(default)]
     pub whole_word: bool,
+    /// Include file-name matches in the result (ADR-081 D2: the file scope
+    /// is "ripgrep full text **+** filename fuzzy").
+    ///
+    /// Defaults to `true`: a filename that does not appear in any file body
+    /// is otherwise unreachable through the file scope, which is how
+    /// "search by file name" used to return nothing. Set `false` to get the
+    /// pre-ADR-081 content-only behaviour.
+    #[serde(default = "default_true")]
+    pub match_file_names: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// The manual `Default` keeps `match_file_names` **on**, matching the
+/// serde default above. A derived `Default` would silently disagree with
+/// the wire default and flip the behaviour depending on how the params were
+/// built — exactly the kind of drift that made this bug hard to see.
+impl Default for SearchFilesParams {
+    fn default() -> Self {
+        Self {
+            q: None,
+            workspace_id: None,
+            include: None,
+            max_results: None,
+            case_sensitive: false,
+            whole_word: false,
+            match_file_names: default_true(),
+        }
+    }
+}
+
+/// Which half of the file scope produced a match.
+///
+/// ADR-081 D2 defines the file scope as "ripgrep full text **+** filename
+/// fuzzy" — one scope, two match kinds. The kind rides the wire so the
+/// client renders a name hit (no line) differently from a content hit
+/// (line + column), instead of guessing from a sentinel line number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchMatchKind {
+    /// The match is a line inside the file.
+    Content,
+    /// The match is the file name / relative path.
+    Name,
 }
 
 /// Single match in a `search_files` response.
@@ -275,19 +321,31 @@ pub struct SearchFilesParams {
 pub struct SearchMatchDto {
     /// Relative file path within the workspace.
     pub file: String,
-    /// 1-based line number.
-    pub line: usize,
-    /// 1-based column number (byte offset of match start).
-    pub column: usize,
+    /// 1-based line number. `None` for a [`SearchMatchKind::Name`] hit —
+    /// a file name has no line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// 1-based column number (byte offset of match start). `None` for a
+    /// [`SearchMatchKind::Name`] hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    /// The matched text: the source line for a content hit, the file name
+    /// for a name hit.
     pub text: String,
+    /// Which half of the file scope produced this match.
+    pub kind: SearchMatchKind,
 }
 
 /// Response for `search_files`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResponse {
+    /// Matches in display order: name hits first (ranked by the fuzzy
+    /// score), then content hits (workspace order).
     pub matches: Vec<SearchMatchDto>,
+    /// Total number of matches found, name hits included.
     pub total_matches: usize,
+    /// True when matches were dropped because the response limit was hit.
     pub truncated: bool,
 }
 

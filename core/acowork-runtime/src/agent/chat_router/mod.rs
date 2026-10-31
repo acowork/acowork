@@ -302,7 +302,6 @@ mod tests {
                 status: String::new(),
                 has_human: Some(true),
                 chat_attachment_ids: Vec::new(),
-                for_execution_session: String::new(),
             }),
             designated_session_id: String::new(),
             node_token: String::new(),

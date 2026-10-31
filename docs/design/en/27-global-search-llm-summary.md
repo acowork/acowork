@@ -111,7 +111,7 @@ Do not replace each source API with a generic adapter framework. Six named tasks
 
 | Adapter | API and eligibility | Signal / per-source limit |
 |---|---|---|
-| File | `GET /api/agents/{id}/workspaces/search?q=&workspace_id=&max_results=20`; keep current case/whole-word options | One signal; skip without agent; at most 20 results, aligned with ADR-093 UI cap |
+| File | `GET /api/agents/{id}/workspaces/search?q=&workspace_id=&max_results=20&match_file_names=true`; keep current case/whole-word options | One signal; skip without agent; at most 20 results, aligned with ADR-093 UI cap. `match_file_names` makes the same endpoint return content hits and file-name hits together (ADR-081 D2) |
 | Git | Reuse `useGitStore.fetchLog(agentId, workspaceId, "", 100, 0)` + `filterGitCommits(query)` | Add optional `AbortSignal` to existing `fetchLog`/`httpGet`; AbortError exits without 503 retry |
 | Doc | `searchDocs(query, 20, signal)` | Signal already supported; identity/permissions remain as enforced by current Gateway API |
 | Project | `searchPm(query, 20, signal)` | Signal already supported |

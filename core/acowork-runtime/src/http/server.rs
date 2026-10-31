@@ -2452,6 +2452,7 @@ async fn put_agent_config(
         req.chat_router_model,
         req.chat_router_provider,
         req.chat_router_timeout_ms,
+        req.chat_router_history_max_tokens,
     );
     let svc = state
         .agent_config
@@ -2614,6 +2615,13 @@ struct UpdateAgentConfigRequest {
     /// at read time, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chat_router_timeout_ms: Option<serde_json::Value>,
+    /// Chat history token budget for the router turn
+    /// (`chat_router.history_max_tokens`) — how much context the router may
+    /// spend on the conversation it is routing. `null` clears the key (back
+    /// to the design default); values outside 1,000–64,000 are clamped by
+    /// `ChatRouterConfig::history_max_tokens` at read time, not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_router_history_max_tokens: Option<serde_json::Value>,
     // Note: `skills_auto_load` was deleted — the toggle now lives on
     // the `load_skill` entry of `agent_tools.json` (see ADR-094 §4:
     // `load_skill` is the toggle, full stop). Toggling it goes through
@@ -4575,7 +4583,7 @@ mod tests {
         );
         let client = reqwest::Client::new();
 
-        // 1. PUT the four Chat Router wire fields.
+        // 1. PUT the five Chat Router wire fields.
         let resp = client
             .put(&url)
             .json(&serde_json::json!({
@@ -4583,6 +4591,7 @@ mod tests {
                 "chat_router_model": "deepseek-flash",
                 "chat_router_provider": "deepseek",
                 "chat_router_timeout_ms": 12000,
+                "chat_router_history_max_tokens": 6000,
             }))
             .send()
             .await
@@ -4601,6 +4610,7 @@ mod tests {
         assert_eq!(router.model.as_deref(), Some("deepseek-flash"));
         assert_eq!(router.provider.as_deref(), Some("deepseek"));
         assert_eq!(router.timeout_ms, Some(12000));
+        assert_eq!(router.history_max_tokens, Some(6000));
 
         // 3. GET /config surfaces the nested block (the Setup panel read
         //    path — `agentSetupConfigSync` maps this back to the profile).
@@ -4617,6 +4627,10 @@ mod tests {
         assert_eq!(router_json["model"], serde_json::json!("deepseek-flash"));
         assert_eq!(router_json["provider"], serde_json::json!("deepseek"));
         assert_eq!(router_json["timeout_ms"], serde_json::json!(12000));
+        assert_eq!(
+            router_json["history_max_tokens"],
+            serde_json::json!(6000)
+        );
 
         // 4. Empty-string model clears ONLY the model (the panel's "auto");
         //    the block and its siblings survive (sub-field patch, not a
@@ -4643,6 +4657,11 @@ mod tests {
         assert_eq!(router.enabled, Some(true), "sibling preserved");
         assert_eq!(router.provider.as_deref(), Some("deepseek"), "sibling preserved");
         assert_eq!(router.timeout_ms, Some(12000), "sibling preserved");
+        assert_eq!(
+            router.history_max_tokens,
+            Some(6000),
+            "sibling preserved"
+        );
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
@@ -7033,6 +7052,46 @@ mod tests {
         let (dispatch_tx, mut dispatch_rx) =
             tokio::sync::mpsc::unbounded_channel::<(String, InboundMessage)>();
 
+        // ADR-038 / ADR-100 Rev. 8: `POST /messages` reopens a session that is
+        // only on disk before queueing the turn, so it needs the live
+        // SessionManager — the other six actions do not. The manager here has
+        // no in-memory sessions, so the `messages` case pays exactly the
+        // `Closed` path this test is meant to keep honest: resume from disk,
+        // then queue.
+        let manager_core = std::sync::Arc::new(crate::agent::agent_core::AgentCore::new(
+            crate::config::RuntimeConfig {
+                work_dir: temp_dir.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            acowork_core::AgentManifest::from_toml(
+                r#"
+                agent_id = "com.test.agent"
+                version = "1.0.0"
+                name = "Test session actions"
+                description = "Pin the owner gate and payloads of the HTTP session actions"
+                author = "test"
+                runtime_version = "0.1.0"
+
+                [llm]
+                provider = "mock"
+                model = "test-model"
+                "#,
+            )
+            .unwrap(),
+            std::sync::Arc::new(acowork_core::providers::mock::MockProvider::single_text("test")),
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = crate::agent::session::SessionManager::new(
+            manager_core,
+            crate::agent::session::session_manager::SessionManagerConfig::default(),
+        );
+        // A resumed session task stamps its workspace context on start; the
+        // resolver must be in place before that happens.
+        manager.set_resolver(new_test_workspace_resolver());
+        let session_manager = std::sync::Arc::new(tokio::sync::Mutex::new(manager));
+        let session_manager_slot: crate::http::server::SharedSessionManagerSlot =
+            std::sync::Arc::new(tokio::sync::RwLock::new(Some(session_manager)));
+
         let server = RuntimeHttpServer::start(
             temp_dir.clone(),
             temp_dir.clone(),
@@ -7055,7 +7114,7 @@ mod tests {
             std::sync::Arc::new(std::sync::RwLock::new(None)),
             std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             new_test_workspace_resolver(),
-            std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            session_manager_slot,
             std::sync::Arc::new(std::sync::RwLock::new(None)), // no AgentCore for basic tests
         )
         .await
