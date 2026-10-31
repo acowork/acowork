@@ -76,6 +76,7 @@ import { ReplyQuote, truncateQuote } from "./ReplyQuote";
 import { ChatEventText } from "./ChatEventText";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { detectPaste } from "./pasteDetect";
+import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
 import { ChatMarkdown } from "./ChatMarkdown";
 import {
   VirtualRowList,
@@ -934,6 +935,23 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
 
   const removeAttachment = (id: string) =>
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
+
+  // ── Workspace panel → composer bridge ─────────────────────────────
+  // The image preview in the right-hand workspace panel fires
+  // `insertIntoChatComposer` / `attachImageToChatComposer` (see
+  // `lib/chatComposerBridge.ts`) when the user sends a coordinate point or a
+  // dragged region. Only one composer is mounted at a time, so no session id
+  // is needed; `useChatComposerBridge` handles the latest-closure plumbing.
+  useChatComposerBridge((request) => {
+    if (request.kind === "text") {
+      insertTextAtCaret(request.text);
+      return;
+    }
+    // Same path the paste handler's `image` branch takes: the bytes are
+    // already in the WebView, so they upload straight through the Chat
+    // session's `files/` route, no temp-file roundtrip.
+    void uploadFiles([request.file]);
+  });
 
   // Jump to the execution session behind a specific agent message — for a
   // resolved turn (finished, failed or empty). openSession cold-loads the exec

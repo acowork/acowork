@@ -32,6 +32,8 @@ import {
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
 import { HtmlPreviewView } from "./HtmlPreviewView";
+import { ImageViewer } from "./ImageViewer";
+import type { ImagePoint, ImageRect } from "./imageViewerGeometry";
 import { GitVirtualNav } from "./GitVirtualNav";
 import { CommitPicker } from "./CommitPicker";
 import { MarkdownToolbar } from "../markdown/MarkdownToolbar";
@@ -44,6 +46,10 @@ import { Tooltip } from "../common/Tooltip";
 import { log } from "../../lib/logger";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { useAddToChatTarget, attachWorkspaceRef } from "../../lib/addToChat";
+import {
+    attachImageToChatComposer,
+    insertIntoChatComposer,
+} from "../../lib/chatComposerBridge";
 
 /**
  * Encode a UTF-8 text string to base64 in a way that survives non-ASCII
@@ -291,6 +297,44 @@ export function FileEditorPanel({ width }: { width: number }) {
         if (addToChatTarget === null) return readOnlySession ? "read-only-session" : "no-session";
         return null;
     })();
+
+    /** Same reason, phrased for the image viewer's context menu. `null` =
+     *  the gesture is live; a string = the item is disabled with this tooltip,
+     *  so the viewer never has to know WHY a composer is unreachable. */
+    const addToChatDisabledTitle = useMemo<string | null>(() => {
+        switch (addToChatDisabledReason) {
+            case null:
+                return null;
+            case "read-only-session":
+                return t("chatPanel.readOnlySession");
+            case "no-session":
+                return t("workspace.search.addToChatDisabled.no-session");
+            default:
+                // wrong-agent / wrong-workspace / no-file / url-preview: the
+                // tab is not addressable from the current session, which for
+                // an image preview is one condition worth one sentence.
+                return t("fileEditor.imageViewer.unavailable");
+        }
+    }, [addToChatDisabledReason, t]);
+
+    /**
+     * `data:` URL for the image-preview branch, or `null` while the bytes are
+     * still in flight (an empty `content` would otherwise render as a broken
+     * image first and load on the next tick).
+     *
+     * SVG arrives as raw XML text — the Gateway no longer lists it in
+     * `BINARY_EXTENSIONS` (see `workspace_query_impl::BINARY_EXTENSIONS`) — so
+     * it is re-encoded to base64 here, which is robust against the `#`, `<`,
+     * `>` characters that would need fragile percent-encoding in a utf8 data
+     * URI. Raster images already come back base64-encoded.
+     */
+    const activeImageSrc = useMemo<string | null>(() => {
+        if (!activeFile || activeFile.kind !== "file") return null;
+        if (activeFile.loading || !activeFile.mimeType?.startsWith("image/")) return null;
+        return activeFile.mimeType === "image/svg+xml"
+            ? `data:${activeFile.mimeType};base64,${encodeTextToBase64(activeFile.content)}`
+            : `data:${activeFile.mimeType};base64,${activeFile.content}`;
+    }, [activeFile]);
 
     const handleLocateInTree = useCallback(() => {
         if (!activeFile || locateDisabled || !selectedAgentId || !activeSessionId) return;
@@ -1040,6 +1084,49 @@ export function FileEditorPanel({ width }: { width: number }) {
         });
     }, [selectedAgentId, activeFile, selectionRange, addToChatTarget]);
 
+    // ── Image preview → chat ─────────────────────────────────────────
+    // The prompt text is built HERE, not in `ImageViewer`: it names the file
+    // the coordinates belong to, and only the panel knows the workspace-
+    // relative path the agent's own tools resolve. `relPath` (not the
+    // basename) because that is what those tools address.
+    const handleImageAddPointToChat = useCallback(
+        (point: ImagePoint) => {
+            if (!activeFile) return;
+            insertIntoChatComposer(
+                t("fileEditor.imageViewer.pointPrompt", {
+                    path: sourceRelPath(activeFile),
+                    x: point.x,
+                    y: point.y,
+                }),
+            );
+        },
+        [activeFile, t],
+    );
+
+    /**
+     * Cropped region: attach the pixels AND say where they came from. The crop
+     * alone would leave the agent unable to map what it sees back onto the
+     * source image it is asked to edit.
+     */
+    const handleImageAddRegionToChat = useCallback(
+        (file: File, region: ImageRect) => {
+            if (!activeFile) return;
+            attachImageToChatComposer(file);
+            insertIntoChatComposer(
+                t("fileEditor.imageViewer.regionPrompt", {
+                    path: sourceRelPath(activeFile),
+                    x: region.x,
+                    y: region.y,
+                    x2: region.x + region.width - 1,
+                    y2: region.y + region.height - 1,
+                    width: region.width,
+                    height: region.height,
+                }),
+            );
+        },
+        [activeFile, t],
+    );
+
     const handleEditorChange = useCallback((value: string | undefined) => {
         if (value === undefined) return;
         const currentId = useFileEditorStore.getState().activeFileId;
@@ -1768,41 +1855,37 @@ export function FileEditorPanel({ width }: { width: number }) {
                         }}
                     />
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
-                    // SVG preview branch. Raster images (png/jpg/gif/webp) never
-                    // reach here because `canPreview` in the tab context menu only
-                    // enables "Open Preview" for .md/.html?/.svg — see the regex
-                    // above. This means double-click-to-edit is a safe affordance:
-                    // the source we switch back to is always editable XML/text.
-                    //
-                    // `bg-editor-canvas` paints the wrapper with the same Monaco `vs` / `vs-dark`
-                    // background the source editor uses, so the right-hand preview column reads
-                    // as one "editor canvas" distinct from the left ChatPanel bg (`#FAFAFA` /
-                    // zinc-900). Previously this used zinc-50/zinc-900 (and then zinc-800),
-                    // which collapsed into the chat surface and made the image look unframed.
-                    // Token is registered in globals.css @theme + .dark block; keep it in sync
-                    // with Monaco — do not hard-code #FFFFFF / #1E1E1E here.
-                    <div
-                        className="flex h-full w-full items-center justify-center bg-editor-canvas"
-                        onDoubleClick={handleImagePreviewDoubleClick}
-                        title={t("fileEditor.previewDoubleClickHint")}
-                    >
-                        {/* SVG is delivered as raw XML text (the gateway no longer
-                            lists it in BINARY_EXTENSIONS, see
-                            workspace_query_impl::BINARY_EXTENSIONS). Re-encode to
-                            base64 here so the data URI is robust against `#`,
-                            `<`, `>`, etc. that would otherwise need fragile
-                            percent-encoding. Raster images come back already
-                            base64-encoded by the gateway. */}
-                        <img
-                            src={
+                    // Image preview (raster via the base64 the Gateway returns
+                    // for binary files, or SVG re-encoded from its XML text —
+                    // see `activeImageSrc`). `ImageViewer` owns the zoom /
+                    // coordinate / selection surface; the two chat hand-offs
+                    // below turn its gestures into a composer insertion. Both
+                    // `data:` URLs are same-origin for the canvas, so the
+                    // region crop can read the pixels back.
+                    activeImageSrc === null ? (
+                        <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            {t("fileEditor.previewLoading")}
+                        </div>
+                    ) : (
+                        <ImageViewer
+                            src={activeImageSrc}
+                            fileName={activeFile.fileName}
+                            // Double-click back to the source is only offered
+                            // for SVG: its source is editable XML. A raster
+                            // image's "source" is a base64 blob, and switching
+                            // to Monaco to show it is not an edit affordance.
+                            onOpenSource={
                                 activeFile.mimeType === "image/svg+xml"
-                                    ? `data:${activeFile.mimeType};base64,${encodeTextToBase64(activeFile.content)}`
-                                    : `data:${activeFile.mimeType};base64,${activeFile.content}`
+                                    ? handleImagePreviewDoubleClick
+                                    : undefined
                             }
-                            alt={activeFile.fileName}
-                            className="max-h-full max-w-full object-contain"
+                            openSourceHint={t("fileEditor.previewDoubleClickHint")}
+                            addToChatDisabledTitle={addToChatDisabledTitle}
+                            onAddPointToChat={handleImageAddPointToChat}
+                            onAddRegionToChat={handleImageAddRegionToChat}
                         />
-                    </div>
+                    )
                 ) : activeFile.mode === "preview" && activeFile.mimeType === "text/html" ? (
                     <HtmlPreviewView
                         content={activeFile.content}
