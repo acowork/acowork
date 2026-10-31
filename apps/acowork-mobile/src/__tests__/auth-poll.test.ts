@@ -366,9 +366,8 @@ describe('poll loop', () => {
     setChatTransport(okT)
     const ok = await useChatStore.getState().sendMessage('a1', 's1', 'hello')
     expect(ok).toBe(true)
-    // ADR-100 D12: the fifth argument is the Chat pin — `undefined` here
-    // because the seeded session has no `chat_session_id`, so this send must
-    // go down the session-scoped path.
+    // ADR-100 Rev. 8: one write only — the session endpoint, with the skill
+    // name as the fourth argument (empty here). There is no chat pin to pass.
     expect(okT.send).toHaveBeenCalledWith('a1', 's1', 'hello', '')
     expect(useChatStore.getState().agentStates.a1?.pendingSend).toBeNull()
     expect(useChatStore.getState().agentStates.a1?.messages.at(-1)?.content).toBe('hello')
