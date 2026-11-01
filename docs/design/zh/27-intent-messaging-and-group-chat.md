@@ -385,7 +385,7 @@ Chat session 里只有一类指向 execution session 内事件的 durable 行：
 
 | 行为 | 一对一（user-agent / agent-agent / user-user） | 群聊 |
 |---|---|---|
-| 触发 | 每条 `user_message` 都投递给 Agent 参与者 | 仅显式 @Agent 才投递（§5.3.1） |
+| 触发 | 每条 `user_message` 都投递给 Agent 参与者 | 显式 @Agent 时投给被 @ 者；未 @ 时投给群的 `default_responder`（未配置则仅归档，ADR-105 / §5.3.1） |
 | 目标解析 | 会话内唯一的 Agent 参与者，无需 @ | 客户端把 @ 解析成明确的 instance id 列表 |
 | 卡片可答者 | 会话内的人类参与者 | 触发该轮的那条人类消息的作者（§5.5.4） |
 
@@ -416,6 +416,7 @@ Chat session 里只有一类指向 execution session 内事件的 durable 行：
 | `target_agent_instance_id` | 必需 | 精确目标 Agent Runtime 实例，遵守 instance ID 寻址约定 |
 | `body` / `attachments` | 至少一个非空 | 给接收 Agent 的消息内容与附件（§4.2.1） |
 | `mentions` | 群聊 @ 时 | 被 @ 的目标 instance id 列表。一条 `user_message` 只落一行，多个目标写在同一行的 `mentions` 里（§5.3.1） |
+| `auto_routed_to` | 群聊未 @ 且该群配置了默认接收方时 | 自动接走这条消息的 agent instance id。与 `mentions` 分开：前者是人打的 @，渲染成 chip；后者是路由决策，只用来标记该行开启了 agent 回合（ADR-105） |
 | `repo` | 可选 | 本次工作涉及的代码仓库地址（规范化 remote URL）。项目有仓库时由系统在派发时自动注入；发送方不指定目标 Agent 的具体工作目录 |
 | `assignment_brief` | 仅 `pm_task` | PM 派发的唤醒 playbook（claim → 工作 → submit 契约）。**高信任信封字段**：只有系统生产者（task-dispatch 管线）可以填，Runtime 仅当轮次来源为 `pm_task` 时采纳并注入执行会话的系统块（Block A），不进渲染后的用户消息、不落 Chat 表面、不随会话历史持久化；对等 `intent_send` / 卡片应答等 agent 来源的 params 携带该键时，Gateway 在出口剥离、Runtime 在提取与消费两处各设一道来源门控（ADR-102 信任边界：高信任信封字段只认系统生产者） |
 | `session_config` | 可选 | model / provider / reasoning-effort / 工作目录的**初值建议**；新建 execution session 时作为 seed 应用（路由到已映射会话时一律不应用，见 §4.5.2 与 ADR-099「修订（2026-10-28）」），未提供的字段用目标 Agent 默认值。**不含 skills**——技能由模型自动加载，非 session 级初值，chat-message 通道也没有逐条指定技能的入口 |
@@ -605,6 +606,15 @@ sequenceDiagram
 **@ 只选 agent，router 选会话（v2.2）。**被 @ 的每个 Agent 在自己的 Runtime 内跑一次 Chat Router：候选集只含 `meta.chat_session_id` 指向本群聊的执行会话（含该群的 PM 任务会话）及"新建"选项，绝不列个人私聊会话或其他群的会话。多用户在同一群里发起不同话题时，router 倾向新建而非串进同一条链，多话题因此可并行；同一话题的追问则复用同一会话。群聊 router 没有 `ask_user_question`，需要澄清时只用文本发言（§5.4.5）。
 
 群聊场景下对话的 owner 是那条人类消息：Agent 的回复只写回群聊 Chat session 并渲染给人，**不 @ 任何人，因此不唤醒任何 Agent**。多个 Agent 之间的接力不由 Intent 完成，而由人决定是否 @ 下一个（§5.4.5 R5 的推论）。
+
+**未 @ 的消息交给群的默认接收方（ADR-105）。**"agent 刚说完话、人直接回一句"是最高频的交互，而按上面的规则它只归档、谁也不唤醒——用户必须 @ 一次重发。群 Chat session 因此带一个可选的 `default_responder`（该群的一个 agent 参与者）：
+
+- 群发只有一个入口 `POST /api/intents/mentions`。`targets: []` 是**正向指令**（"你决定"），不再是非法请求；有 @ 时按 `targets` 投递，无 @ 时投给 `default_responder`。
+- 未配置 `default_responder` 的群保持原行为：仅归档，响应 `{"routed": "archived", "results": []}`。纯人类群永远不需要配置。
+- 自动路由是行上的独立事实：`meta.mentions` 只记人打的 @ 名单，自动目标写 `meta.auto_routed_to`；等待行的判据（§5.5）据此开启，@ chip 不因自动路由出现。
+- 写入 owner-or-admin，目标必须是当下的 typed agent 参与者；成员被移除或 roster 重新同步时该字段自动清空，投递前再复核一次（`live_default_responder`），因此陈旧 id 只会退化为"未配置"，不会投进虚空。
+- 投递失败落一条 `system_notice`（`notice_type: "delivery_failed"`、`in_reply_to` 指向原人类行、body 为空，措辞由各面本地化），并且该收据结束等待行——失败必须可见。
+- 被选中的 agent 仍跑自己的 Chat Router（§5.4.1）：本机制只决定"第一接收人"，不决定进哪个执行会话。
 
 #### 5.3.2 群聊历史
 
@@ -824,7 +834,7 @@ execution session 中需要人决策的东西——`ask_user_question` 的选项
 
 **运行中：一条派生的等待行（不落盘）。**
 
-1. **判据**只有一条 durable 证据：**最新一条已向 agent 发出请求的 `user_message` 尚无终态回答**。"这条人类行是否真的惊动了 agent"本身就是行上的事实：`/api/intents/chat-message` 落的行 `to` 就是它投递的 agent（1:1、答卡都走这里），§5.3.1 的群 @ 群发只落一条广播行（`to` 空）而把被点名的 agent 放在 `meta.mentions`；除此之外（`user_user` 私聊、群里未 @ 的普通发言）走仅归档的写入口，`to` 为空、无 mentions，它谁也没唤醒。因此等待行只可能开在开启了 agent 回合的行上；**没有任何 agent 参与者的 chat（私聊、纯人类群）永不显示等待行**，连 `sending` 窗口也不——那里没有任何人会来回话（实测缺陷：私聊打开即在底部永久 shimmer）。前端不读 execution session 实时状态、不新增 MQTT 通道、不改会话列表 API。
+1. **判据**只有一条 durable 证据：**最新一条已向 agent 发出请求的 `user_message` 尚无终态回答**。"这条人类行是否真的惊动了 agent"本身就是行上的事实：`/api/intents/chat-message` 落的行 `to` 就是它投递的 agent（1:1、答卡都走这里），§5.3.1 的群 @ 群发只落一条广播行（`to` 空）而把被点名的 agent 放在 `meta.mentions`；群里未 @ 的发言走同一入口（ADR-105），配置了默认接收方时自动目标记在 `meta.auto_routed_to`，等待行据此开启；未配置默认接收方的群与 `user_user` 私聊则只归档，`to` 为空、无 mentions、无自动路由，它谁也没唤醒。因此等待行只可能开在开启了 agent 回合的行上；**没有任何 agent 参与者的 chat（私聊、纯人类群）永不显示等待行**，连 `sending` 窗口也不——那里没有任何人会来回话（实测缺陷：私聊打开即在底部永久 shimmer）。前端不读 execution session 实时状态、不新增 MQTT 通道、不改会话列表 API。
 2. **结束条件**：其后出现 answering 的终态 `agent_message`（`in_reply_to` 匹配）、一张未关闭的 `interaction_request`（球在人类手上）、或一条同样开启了 agent 回合的更新人类消息 → 立即消失。未 @ 的插话既不结束也不开启等待（它不是一回合的应答，也不取消另一条正在跑的任务）。发送本身还在 HTTP 在途（消息尚未落行）时同样显示（前提仍是该 chat 有 agent），否则"按下发送"到"消息落行"之间仍是空白。
 3. **文案一条，不分态**：只有"在处理"一种说法，不区分排队 / 开轮 / 工具执行——前端无法可靠区分它们，分了就是猜测。1:1 展示"{{agent 名}}正在处理…"，群聊不指名（多 agent 时点名会误导），展示"正在处理…"。带文字滚动闪烁动画（复用"正在执行工具"的 shimmer），给用户"有人在干活"的实感。
 4. **只在末尾显示**：窗口被 locate 定位到中段（后面还有未加载的新页）时没有"最新消息"可言，不显示。

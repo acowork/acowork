@@ -78,12 +78,18 @@ describe("useModelProtocolState", () => {
     expect(intent.model_base_urls).toEqual({ a: "https://proxy.test/v1" });
   });
 
-  it("offers the base_url input only for Responses", () => {
+  it("offers the base_url input for any explicit selection", () => {
+    // ADR-103 D14: the override belongs to the selection that produced it —
+    // Chat-Completions and Anthropic rows have endpoints too.
     const { result } = renderHook(() => useModelProtocolState());
     act(() => result.current.hydrate([model("a")]));
     expect(result.current.needsBaseUrl("a")).toBe(false);
+    act(() => result.current.setSelection("a", "openai"));
+    expect(result.current.needsBaseUrl("a")).toBe(true);
     act(() => result.current.setSelection("a", "responses"));
     expect(result.current.needsBaseUrl("a")).toBe(true);
+    act(() => result.current.setSelection("a", "follow"));
+    expect(result.current.needsBaseUrl("a")).toBe(false);
   });
 
   it("counts the requests the next save will send", () => {
@@ -155,11 +161,13 @@ describe("useModelProtocolState.verify", () => {
 
     let summary;
     await act(async () => {
-      summary = await result.current.verify("acme", "a");
+      summary = await result.current.verify("acme", "a", RESPONSES_PROTOCOL);
     });
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/providers/acme/probe?force=true");
+    // D14: the probe is dispatched **with the protocol the row selects** —
+    // the caller resolves it (selection, else the provider-level protocol).
     expect(JSON.parse(init.body)).toEqual({ model: "a", protocol: RESPONSES_PROTOCOL });
     expect(summary).toMatchObject({
       ok: true,
@@ -172,6 +180,31 @@ describe("useModelProtocolState.verify", () => {
       kind: "degraded",
       stripped: ["reasoning"],
     });
+  });
+
+  it("probes the selected protocol, never a hardcoded one", async () => {
+    // ADR-103 D14: re-verifying a `Chat Completions` override must hit
+    // `/chat/completions`. Probing `responses` instead would write a failed
+    // Responses verdict over the row's correct one and demote a live
+    // override — the click would break the very state it is meant to renew.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ state: "verified", tier_passed: ["L1", "L2", "L3"] }),
+    });
+    const { result } = renderHook(() => useModelProtocolState());
+    const m = model("a", {
+      protocol_selected: "openai",
+      provider_protocol: "anthropic",
+    });
+    act(() => result.current.hydrate([m]));
+
+    await act(async () => {
+      await result.current.verify("acme", "a", "openai");
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({ model: "a", protocol: "openai" });
   });
 
   it("reports a failed probe as blocked with its reason", async () => {
@@ -188,7 +221,7 @@ describe("useModelProtocolState.verify", () => {
     act(() => result.current.hydrate([m]));
 
     await act(async () => {
-      await result.current.verify("acme", "a");
+      await result.current.verify("acme", "a", RESPONSES_PROTOCOL);
     });
 
     expect(result.current.badgeFor(m)).toEqual({
@@ -205,7 +238,7 @@ describe("useModelProtocolState.verify", () => {
 
     let summary;
     await act(async () => {
-      summary = await result.current.verify("acme", "a");
+      summary = await result.current.verify("acme", "a", RESPONSES_PROTOCOL);
     });
     expect(summary).toMatchObject({ ok: false, state: "error", detail: "gateway unreachable" });
   });

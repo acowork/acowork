@@ -222,3 +222,40 @@ describe("UserGroupMembersPanel", () => {
     expect(screen.getByTestId("group-chat-prompt")).toBeTruthy();
   });
 });
+
+describe("UserGroupMembersPanel — default responder (ADR-105)", () => {
+  const withAgent = {
+    ...group,
+    // Carol owns it; ME is a plain member. `ag-1` is the only agent.
+    owner: "u-carol",
+    participants: [
+      { id: ME },
+      { id: "u-carol" },
+      { id: "u-bob" },
+      { id: "ag-1", identity: "agent" },
+    ],
+  } as unknown as ChatSessionInfo;
+
+  it("shows the card read-only to a plain member, with the agent members as options", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => ({
+        ok: true,
+        status: 200,
+        json: async () =>
+          String(url).endsWith("/responder")
+            ? { responder: "ag-1", editable: false }
+            : { content: "Prompt.", is_default: true, editable: true },
+      })),
+    );
+    useProjectGroupStore.setState({ removeMember: vi.fn() } as never);
+    await act(async () => {
+      render(<UserGroupMembersPanel group={withAgent} width={260} />);
+    });
+    const select = (await screen.findByTestId("group-responder-select")) as HTMLSelectElement;
+    // A plain member may READ who answers an un-addressed message, not change it.
+    expect(select.disabled).toBe(true);
+    expect(select.value).toBe("ag-1");
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["", "ag-1"]);
+  });
+});

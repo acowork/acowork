@@ -32,6 +32,7 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
 import { showToast } from "../common/ToastProvider";
 import { GroupChatPromptCard } from "./GroupChatPromptCard";
+import { GroupResponderCard } from "./GroupResponderCard";
 import { canGovern } from "../../views/pm/pmMembers";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
@@ -126,6 +127,17 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
       return { id, name: id.slice(0, 8), isAgent: false, avatarUrl: null, builtinAvatarId: null };
     };
   }, [agents, directory, account]);
+
+  /** Typed agent participants — "who answers" cannot be a human, and the
+   *  untyped legacy ids give no evidence of being an agent at all (the store
+   *  refuses those too). */
+  const agentCandidates = useMemo(
+    () =>
+      (group.participants ?? [])
+        .filter((p) => p.identity === "agent")
+        .map((p) => ({ id: p.id, name: nameOf(p.id).name || p.id.slice(0, 8) })),
+    [group.participants, nameOf],
+  );
 
   /** Map the store's thrown `"METHOD path -> STATUS "` to a localized toast;
    *  the backend's prose (English) stays a last-resort fallback. */
@@ -317,6 +329,12 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
               plain member gets no card at all — neither a read of the prompt
               nor an edit the backend would refuse. */}
           {governs && <GroupChatPromptCard sessionId={group.session_id} />}
+          {/* Default responder (ADR-105) — visible to every member (the read is
+              open to participants), writable only for owner-or-admin, which the
+              card mirrors from the server's `editable` answer. Candidates are
+              the session's typed agent participants, the exact set the store
+              validates a write against. */}
+          <GroupResponderCard sessionId={group.session_id} candidates={agentCandidates} />
         </div>
 
         {canManage && (

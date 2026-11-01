@@ -1,9 +1,10 @@
 # ADR-103: Supporting the OpenAI Responses API as a Provider Shape
 
 - **Number**: ADR-103
-- **Status**: Accepted (v0.3 decided / v0.4-v0.6 corrected, 2026-11-XX; S1-S10 implemented on `feature/response_api`)
+- **Status**: Accepted (v0.3 decided / v0.4-v0.8 corrected, 2026-11-XX; S1-S10 implemented on `feature/response_api`)
 - **Date**: 2026-11-XX
 - **Revisions**:
+  - **v0.8 (2026-11-01, corrected after an incident)** — **Every protocol override goes through the probe gate** (new D14; D1 / D12 / §3 updated). Motivation: `minimax-cn-coding-plan` (provider level `anthropic`, `base_url = .../anthropic/v1`) had a model row carrying a model-level `protocol_type: "openai"` override, while v0.3's D1 gate **only guarded `Responses`** — every other protocol's "explicit selection takes effect directly". The Gateway therefore resolved the effective protocol to `openai` with the Anthropic base URL, the Runtime sent `{base}/chat/completions`, MiniMax's endpoint serves only `/messages` → `404 page not found` → the generic 4xx bucket → the user saw "Invalid request. Check model/tool config." (**an endpoint problem worded as a parameter problem**). The root cause was not "someone wrote a wrong override" but that **the platform shipped a claim about an endpoint as if it were a configuration fact**. Three corrections: ① the **D1 gate generalises from "Responses only" to "any override"** — a model-level selection that disagrees with the provider level **MUST** have a passing verdict **about that protocol** before it takes effect; ② a verdict **MUST record which protocol it is about** (`ProtocolProbe.protocol`), so a verdict about protocol A cannot admit a selection of protocol B; ③ the **probe MUST be able to speak the selected protocol** — Chat Completions and Anthropic Messages join the probe with their own request body, envelope, tool-call shape and auth headers (Anthropic uses `x-api-key` + `anthropic-version`), and the probe shape follows the **selection** rather than the provider-level protocol. Knock-on changes: a model-level `base_url` override is no longer limited to `Responses` (but it is not delivered when the selection is rejected, which would otherwise pair "the provider-level protocol" with "the rejected selection's URL" — exactly the mismatched endpoint D14 removes); an `anthropic` provider-level protocol **hides** the protocol dropdown in the frontend (a read-only line instead); and the frontend's "will send N real requests" estimate now matches the Gateway's `plan_probes`.
   - **v0.7 (2026-11-XX, corrected after implementation)** — **The D8 trimming whitelist gains `temperature` (1 field → 2)**. Motivation: reasoning models answer 400 for the `temperature` **field itself** (`'temperature' is not supported with this model`, the OpenAI o-series semantics adopted by many third-party endpoints), while the Runtime's temperature fallback chain (`agent_config` → `manifest` → `DEFAULT_TEMPERATURE`) guarantees the field is **always present** in a request — a user who never set a temperature gets "adjust the model settings", and there is no temperature setting to adjust: propagating the error is a dead end for such models. The trim discipline is unchanged: evidence-gated (only a 400 naming the field triggers it), stored per `(provider, model)` in `ResponsesCompat`, two confirmations before persisting, plain-success reset, visible `warn!` on a hit. The old "silently changes sampling" objection does not hold against these endpoints: the endpoint has declared the field invalid, so omitting it changes no observable behaviour there. `tool_choice` / `text.format` / `top_p` stay untrimmed.
   - **v0.6 (2026-11-XX, corrected after implementation)** — **Reasoning effort closed end to end** (new D13; the D5 mapping table, §3, §5 and §7 updated). Three things: ① **`Off` now means "do not control reasoning" = omit the reasoning parameter** — neither wire path sends `none` any more, and neither sends `low` (the old completions `Off → "low"` was a defect: the user asked to switch reasoning *off* and still got low-depth reasoning; `none` is rejected by MiniMax M3.1-Flash with HTTP 400); ② `ReasoningEffort` gains `Minimal` / `XHigh`, and `from_str_loose` accepts the catalog spellings `minimal`/`xhigh`/`x_high`/`default`/`none` (a hand-edited config no longer falls back to `Auto` silently); ③ the level set is now **declared by the model itself**: `offline_providers.json`'s `reasoning_options[].values` → `ModelInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts` → the frontend level menu and Runtime clamping. `None` = unknown (custom model), in which case the frontend offers the generic five `low/medium/high/xhigh/max` and the Runtime does not clamp. Also removed the dead `ReasoningEffort::to_openai_str` in core (zero call sites, and semantically the opposite of `openai_reasoning_str`: one omits on `Off`, the other sent `low` — exactly the kind of duplicate that drifts).
   - **v0.5 (2026-11-XX, corrected after implementation)** — **The probe baseline's `reasoning.effort` now uses a cross-vendor legal value (`low`)** (it used `none`). `none` is the only *value* MiniMax M3.1-Flash rejects (that model *does* support `reasoning`, with `effort` in `low`/`medium`/`high`/`xhigh`/`max`), and a 400 naming the `reasoning` field gets classified as "the field is not implemented" → trimmed → a false `degraded` plus "reasoning was omitted" on a fully reasoning-capable model. The D8 trim rule and the `degraded` semantics are unchanged; the baseline simply no longer uses "a value one vendor happens to reject". (As of v0.6, a user-initiated `Off` also omits the field — see v0.6 / D13.)
@@ -145,7 +146,11 @@ The protocol is resolved at **(provider, model)** granularity. `protocol_type` r
 | `Responses` | `verified` or `degraded` | **`Responses`** |
 | `Responses` | `failed` / `stale` / absent (never probed) | npm-derived default (mostly `OpenAI` completions) |
 | No manual selection (`None`) | anything | npm-derived default |
-| Other manual values (Anthropic / Google / Ollama / OpenAI) | anything | the selected value (probing does not apply; no gate) |
+| Other manual values (Anthropic / Google / Ollama / OpenAI), agreeing with the provider level | anything | the selected value (status quo — the endpoint already serves it; no gate) |
+| Other manual values **overriding** the provider level | `verified` / `degraded` (and the protocol matches) | the selected value |
+| Other manual values (override) | `failed` / `stale` / absent (never probed) | npm-derived default |
+
+> **D14 revision (v0.8)**: v0.3's table put "other manual values" under "no gate needed", on the premise that a protocol is only a request format. That premise is wrong — a protocol selection is a **different route**, and whether a route exists is only knowable by asking. A model-level selection that overrides the provider-level protocol therefore goes through the same probe gate; the full table is in **D14**.
 
 **Why the gate lives at configuration time, not at runtime** (v0.3's core guardrail):
 
@@ -161,6 +166,7 @@ The protocol is resolved at **(provider, model)** granularity. `protocol_type` r
 
 - `resolve_protocol` is the single adjudication point (Gateway side); Runtime and the frontend only consume its result (§3 redline 1).
 - When `protocol_type = Responses` but the probe does not pass, return the default protocol; **MUST NOT** error, **MUST NOT** panic, **MUST NOT** guess.
+- **D14**: the same rule applies when a model-level selection **overrides** the provider-level protocol — an unverified override **MUST NOT** take effect (it is a claim about an endpoint).
 - Unknown `shape` values are ignored (hint layer only); unknown `protocol_probe` values are treated as "not passed".
 - A failed probe **MUST NOT** block saving (user intent is saved) and **MUST NOT** swallow the failure reason.
 
@@ -484,9 +490,11 @@ The three may all differ (e.g. MiniMax-M3: `shape=null`, user selected `protocol
 
 | Action | Probe scope |
 |---|---|
-| Save provider (`POST/PUT /api/providers`) | only models with `protocol_type == Responses` **among the changed rows**; unchanged rows reuse the cache |
+| Save provider (`POST/PUT /api/providers`) | only models **among the changed rows** whose effective selection is `Responses` **or** which **override the provider-level protocol**; unchanged rows reuse the cache |
 | Protocol dropdown switched to `Responses` (D11 location 3, submitted with the save) | that model |
 | The user clicks "Re-verify" / `?force=true` | the specified model or all Responses models of that provider |
+
+> **D14 revision (v0.8)**: the probe scope widens from "`protocol_type == Responses`" to "the effective selection is `Responses` **or** the row overrides the provider-level protocol". The latter are exactly the rows the D14 gate can reject — without a verdict for them, an override would bypass the gate and take effect. A selection that **agrees** with the provider-level protocol needs no verdict (the endpoint already serves it), so it is not probed.
 
 **Execution semantics**:
 
@@ -529,6 +537,68 @@ The three may all differ (e.g. MiniMax-M3: `shape=null`, user selected `protocol
 
 **Why not rewrite an unsupported level into a supported one in the Gateway**: the Gateway is the communication and resource boundary, not the owner of request semantics. The Runtime builds the actual request, so the user's choice, the model's support set and the final clamped value must be visible **in one place** (`build_chat_request`, next to the `default_reasoning_effort` resolution) for a single unit test to cover the whole rule.
 
+### D14 — Every protocol override goes through the probe gate (v0.8)
+
+**The facts (observed incident, 2026-11-01)**: the provider `minimax-cn-coding-plan` has a provider-level `protocol_type` of `anthropic` and a `base_url` of `https://api.minimax.cn/anthropic/v1`; one model row carried a model-level `protocol_type: "openai"` override. ADR-103 v0.3's D1 gate **only guarded `Responses`** — every other protocol's "explicit selection takes effect directly" — so:
+
+1. the Gateway resolved the model's effective protocol to `openai` (model level wins) while the `base_url` stayed the Anthropic one;
+2. the Runtime built an `OpenAIProvider` and sent the request to `{base}/chat/completions`;
+3. MiniMax's Anthropic endpoint serves only `/messages`, so the gateway's default handler answered `404 page not found`;
+4. that 404 landed in the generic 4xx bucket, and the user-facing text was "Invalid request. Check model/tool config." — **a parameter problem's wording for an endpoint problem**.
+
+The incident was not "someone wrote a wrong override". It was that **the platform treated a claim about an endpoint as a configuration fact and shipped it**. A protocol selection was never "change the request format" — it is "use a different route". Whether a route exists is only knowable by asking.
+
+**Decision**:
+
+1. **The D1 gate generalises from "Responses only" to "any override".** A model-level selection that **agrees** with the provider-level protocol is the status quo and needs no gate (the endpoint already serves it). A selection that **disagrees** overrides the provider-level protocol, and **MUST** have a passing verdict **about that protocol** before it takes effect; otherwise the effective protocol falls back to the provider-level one.
+
+   | Model-level selection | Agrees with provider level? | `protocol_probe` | Effective protocol |
+   |---|---|---|---|
+   | `Responses` | — | `verified` / `degraded` | `Responses` |
+   | `Responses` | — | `failed` / `stale` / `unverified` / absent | provider-level protocol |
+   | none (`None`) | — | any | provider-level protocol |
+   | known value | **yes** | any | that value (status quo, no gate) |
+   | known value | **no** | `verified` / `degraded` (and the protocol matches) | that value |
+   | known value | **no** | anything else | provider-level protocol |
+   | `Unknown` | — | any | provider-level protocol + `warn!` (never guess) |
+
+2. **A verdict MUST record which protocol it is about.** `ProtocolProbe` gains a `protocol` field. A verdict is a statement about **one route** ("this base URL's `/chat/completions` answers and completes a tool round-trip"); it says nothing about another route on the same host. A verdict about protocol A **MUST NOT** admit a selection of protocol B. A pre-D14 verdict (no field) reads as `Responses` — the only protocol it could have been about, so that is a fact, not a guess.
+
+3. **The probe MUST be able to speak the selected protocol.** Probing generalises from "Responses only" to three wire protocols, each with its own request body, response envelope, tool-call shape and auth headers:
+
+   | Protocol | Route | Request shape | Tool call | Auth |
+   |---|---|---|---|---|
+   | Responses | `{base}/responses` | `input` | `output[].function_call` | `Authorization: Bearer` |
+   | Chat Completions | `{base}/chat/completions` | `messages[]` | `choices[].message.tool_calls[]` | `Authorization: Bearer` |
+   | Anthropic Messages | `{base}/messages` | `messages[]` + top-level `system` | `content[]` `tool_use` block | `x-api-key` + `anthropic-version` |
+
+   The tier semantics (L1 endpoint exists / L2 usage shape / L3 tool round-trip) are identical to the Responses probe, so the verdict semantics and the D1 gate need no second mechanism. `Google` / `Ollama` / `Unknown` have **no** probe shape (the platform serves them through the OpenAI-compatible adapter and Ollama's own client, and an unknown wire value is never guessed), so those selections take no part in the override gate.
+
+4. **The probe shape follows the selection, not the provider-level protocol.** Each planned row is probed with the wire protocol of **that row's selection** — that is the route the Runtime would hit if the selection took effect. Probing with the provider-level protocol would produce a verdict about a different route and collapse the premise of D14.
+
+5. **Verdicts deduplicate per `(provider, protocol)`.** The L3 tool round-trip is a property of the `(provider, protocol)` pair, not of the model: exactly one representative row per protocol runs Deep, the rest run Standard and inherit the representative's L3 verdict. Inheritance **MUST NOT** cross protocols — a Chat-Completions round-trip verdict says nothing about an Anthropic row.
+
+6. **A model-level `base_url` override travels with the selection that produced it.** The override used to be delivered only for `Responses`; that was a by-product of the Responses-only gate, not a property of the override itself — an override exists precisely because a model's endpoint differs from the provider default, which is equally true of the Anthropic and Chat-Completions shapes. And when the gate **rejects** a selection, the override **MUST NOT** be delivered: the override describes the rejected selection, and pairing "the provider-level protocol" with "the rejected selection's URL" manufactures exactly the mismatched-endpoint failure D14 exists to remove.
+
+7. **A single-protocol provider has nothing to choose.** When the provider-level protocol is `anthropic`, it serves the Anthropic Messages shape only, so a model-level selection is meaningless → the frontend **MUST** hide the protocol dropdown (hidden, not disabled) and show a read-only "follows the provider" line. `google` / `ollama` are not in this set: the platform serves them through other adapters, and a model-level override is still a meaningful thing to express. The one exception is an **existing override row** (§4.2 item 6): when a model row still carries a selection inconsistent with the provider level, the dropdown **MUST** be rendered after all — otherwise that override is neither visible nor cleanable, and the "the fallback must be visible" requirement outranks this hiding rule.
+
+8. **The error text MUST separate "the endpoint does not exist" from "the parameters are wrong".** A `404` whose body is the gateway's default `404 page not found` / `unknown endpoint` → classify as `EndpointUnavailable`, **no retry**, and say "that endpoint does not exist" rather than "check your parameters". This does not depend on D14: D14 makes such incidents rarer, but a mistyped `base_url` can still happen, so the classification MUST stand on its own.
+
+**D14's amendment to D11 position 3**: the dropdown's option set widens to `follow the provider` / `Chat Completions` / `Responses` / `Anthropic Messages` (`google` / `ollama` are not offered — a model-level override has no expressive place for them), and the `base_url` override input appears for **any** explicit selection rather than only for Responses (D14.6). Read that row of D11's table accordingly.
+
+**Engineering constraints**:
+
+- The gate, the verdict and the `base_url` override delivery **MUST** all live in the Gateway (`resolve_protocol` is the only arbitration point; the Runtime consumes its result).
+- The frontend **MUST NOT** derive a protocol itself; the new `provider_protocol` field is projected by the Gateway and drives the dropdown's visibility.
+- The frontend's "this save will send N real requests" estimate **MUST** match the Gateway's `plan_probes` rule, or the UI would announce requests the save does not send.
+
+**Rejected alternatives**:
+
+- ❌ *Gate only the combinations that 404* (e.g. only gate an OpenAI selection on an Anthropic provider): the combinations are unbounded, so the rule degenerates into an enumeration table; and "a protocol selection is a claim about an endpoint" does not vary by provider.
+- ❌ *Fall back on the Runtime side* (revert to the provider-level protocol when the selection was wrong): the Runtime is a consumer and must receive an already-arbitrated result; letting it fall back copies the arbitration point into every Runtime.
+- ❌ *Refuse to save such selections*: the user's selection is a legitimate intent (perhaps they really want Chat Completions); the platform's job is to **verify** it, not to forbid it — and D1's existing semantics are "intent is kept, effect waits for verification".
+- ❌ *Let one probe vouch for every protocol*: a verdict is about one route (D14.2).
+
 ---
 
 ## 3. Contract and data-model changes
@@ -554,6 +624,15 @@ The three may all differ (e.g. MiniMax-M3: `shape=null`, user selected `protocol
 | Gateway | `models_api.rs` `ModelInfo` / `enrich_model_from_offline` | + `reasoning_efforts`, extracted from the catalog's `reasoning_options` (`type=="effort"`) (v0.6) | optional; stays `None` when the catalog does not declare it |
 | Desktop | `lib/types.ts:1043` `ModelInfo` | + `shape?: string` + `protocol_active?: string` + `protocol_probe?: ProbeState` | optional fields | + `reasoning_efforts?: string[]` | optional fields |
 | Desktop | `cacheHitRate.ts` | Responses joins the `"openai"` cache family | Design 23 §5.4 conclusion stands |
+| Domain struct | `protocol.rs` `ProtocolProbe` | **D14**: + `protocol: Option<ProtocolType>` (which protocol the verdict is about; absent reads as `Responses`) | `#[serde(default, skip_serializing_if)]`, old verdicts still readable |
+| Gateway data | `models_api.rs` `resolve_effective_protocol` | **D14**: the gate changes from "Responses only" to "any override" — agreeing with the provider level takes effect directly; disagreeing needs a passing verdict **about the same protocol** | Behaviour change, see D14 |
+| Gateway data | `models_api.rs` `resolve_protocol` | **D14**: a model-level `base_url` override is no longer limited to `Responses`; but it is **not delivered** when the gate rejects the selection | Behaviour change, see D14.6 |
+| Gateway data | `models_api.rs` `ModelInfo` | **D14**: + `provider_protocol: Option<String>` (the provider-level protocol, projected for the frontend's dropdown visibility) | New optional field |
+| Gateway probe | `probe/wire_protocols.rs` (new) | **D14**: request bodies, response-envelope assertions and tool-call extraction for Chat Completions / Anthropic Messages | New file; `probe/wire.rs` (Responses) unchanged |
+| Gateway probe | `probe/runner.rs` `ProbeProtocol` | **D14**: the probe dispatches route / request body / assertions / auth headers per protocol (Anthropic uses `x-api-key` + `anthropic-version`) | Internal refactor; Responses behaviour unchanged |
+| Gateway probe | `probe/store.rs` `plan_probes` | **D14**: the probe shape follows the **selection**; only rows the gate can reject are planned; L3 deduplicates per `(provider, protocol)` | Behaviour change, see D14.4/D14.5 |
+| Desktop | `lib/modelProtocol.ts` `showsProtocolDropdown` | **D14**: an `anthropic` provider-level protocol hides the protocol dropdown (read-only line instead); exception: a row that already carries an override still renders it (D14.7) | Frontend behaviour change |
+| Desktop | `lib/modelProtocol.ts` `estimateProbeRequests` | **D14**: the estimate rule matches the Gateway's `plan_probes` (override rows are billed, status-quo rows are not) | The estimate's numbers change |
 
 **Contract redlines**:
 
@@ -591,6 +670,10 @@ sequenceDiagram
 3. **Configuration change → `protocol_probe` marked `stale`** (whenever the provider's `base_url` / key / model list changes); the effective protocol stays on the default until a re-probe passes; **the next save re-probes automatically** (D12). v0.2's manual re-resolve entry is therefore removed — the save flow covers it.
 4. **Users upgrading to v0.3**: configurations where Responses was manually selected during the v0.2 period show a missing probe after upgrade → the effective protocol falls back to the default with a yellow "save again to verify" hint. **No migration script needed.**
 5. `provider_list.json` version increments keep using the existing `expected_version` optimistic-concurrency mechanism (`provider_api.rs:141`, ADR-059 §7.3); **MUST NOT** bypass it.
+6. **D14 (v0.8) — existing override rows**: on upgrade to v0.8, a row whose model-level selection **overrides** the provider-level protocol has either no `protocol_probe` or one written before D14 (which could only be a `Responses` verdict). Neither passes the new gate → the effective protocol falls back to the provider level → **the behaviour returns to what it was before the override**, until the user saves once (a passing probe restores it, a failing one keeps the fallback).
+   - This is **intentional**: that override was an untested assertion, and the 2026-11-01 incident is exactly what it looked like once it took effect.
+   - **MUST NOT** auto-probe the existing override rows (a probe is a real billed request, and a batch probe outside the save flow would break D12's "the only regular probe entry").
+   - In the UI those rows show the yellow "selected but not enabled" badge with a reason, like any other selection that failed the gate — the fallback is **visible**, not silent.
 
 ### 4.3 Rollout
 
@@ -673,6 +756,14 @@ sequenceDiagram
 - The golden request bodies of the existing OpenAI / Anthropic / Google / Ollama chains are unchanged.
 - `CompatCache` behaviour and key space are unchanged (D7.3).
 - Non-opted-in providers (including official `openai`) still hit `{base}/chat/completions`.
+
+**New cases for D14 (v0.8)**
+- **The gate**: a model-level selection that overrides the provider-level protocol, with no verdict → the effective protocol falls back to the provider level (**this is the 2026-11-01 incident's regression case**: an Anthropic provider with an `openai` override → the effective protocol stays `anthropic`).
+- **Verdict ↔ protocol binding**: a `verified` verdict about protocol A must not admit a selection of protocol B; a verdict without the field reads as `Responses`.
+- **Probe shape**: a Chat Completions selection probes `{base}/chat/completions`; an Anthropic selection probes `{base}/messages` with `x-api-key` + `anthropic-version`.
+- **The base URL follows the selection**: an override that took effect is delivered; one that was rejected is **not** (no "provider-level protocol + rejected selection's URL" mismatch).
+- **L3 inheritance does not cross protocols**: a Chat-Completions tool-round-trip verdict must not land on an Anthropic row.
+- **Frontend**: an `anthropic` provider-level protocol renders no protocol dropdown; the estimated N matches the Gateway's `plan_probes`.
 
 ---
 

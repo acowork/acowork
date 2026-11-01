@@ -87,6 +87,14 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/api/chat-sessions/{session_id}/chat-md",
             get(get_chat_md).put(put_chat_md).delete(delete_chat_md),
         )
+        // ADR-105: the group's default responder — the agent an un-addressed
+        // human message in this group is delivered to. Read: any participant
+        // (the panel needs the current value); write: owner-or-admin, the same
+        // gate as `chat-md`. `user_group` / `project_group` only.
+        .route(
+            "/api/chat-sessions/{session_id}/responder",
+            get(get_responder).put(put_responder),
+        )
         // Plan 5.2: non-default sessions are deletable; the default pair
         // session and project groups refuse in the storage layer. Shares
         // the `{participant}` pattern with the list GET because matchit
@@ -994,6 +1002,92 @@ async fn delete_chat_md(
     offload(move || chat_sessions::reset_chat_md(&dir, &session_id, &who, is_admin))
         .await
         .map(|()| StatusCode::NO_CONTENT)
+}
+
+// ── Group default responder (ADR-105) ─────────────────────────────────
+
+/// `GET`/`PUT /api/chat-sessions/{session_id}/responder` response.
+///
+/// `editable` is the same covenant `chat-md` offers: the read is open to every
+/// participant (a member should be able to see who answers an un-addressed
+/// message), but only owner-or-admin may change it, and the panel renders
+/// read-only rather than letting a plain member take the 403.
+#[derive(Debug, Serialize)]
+pub struct GroupResponderResponse {
+    /// The agent instance id, or `null` = un-addressed messages in this group
+    /// stay archive-only (the historical rule, and the default for a group of
+    /// humans).
+    pub responder: Option<String>,
+    pub editable: bool,
+}
+
+/// `PUT` body. Whole-value replace, like `session-config`: `{"responder":
+/// null}` (or `{}`) clears the role, which is how a group goes back to
+/// "agents only answer when @-mentioned".
+#[derive(Debug, Deserialize)]
+pub struct GroupResponderRequest {
+    #[serde(default)]
+    pub responder: Option<String>,
+}
+
+/// `GET /api/chat-sessions/{session_id}/responder` — the group's default
+/// responder (ADR-105). Participation is the read permission; a 1:1 kind has
+/// no such role and answers 422 (`not_a_group_session`), matching the write.
+async fn get_responder(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+) -> Result<Json<GroupResponderResponse>, ApiError> {
+    let dir = data_dir(&state)?;
+    let who = ctx.effective_user_id().to_string();
+    let is_admin = ctx.is_admin();
+    let resp = offload(move || {
+        let session = chat_sessions::load(&dir, &session_id)?;
+        if !session.participants.iter().any(|p| p.id == who) {
+            return Err("not_a_participant".to_string());
+        }
+        if !session.kind.is_group() {
+            return Err("not_a_group_session".to_string());
+        }
+        Ok(GroupResponderResponse {
+            editable: chat_sessions::can_govern_group(&session, &who, is_admin),
+            responder: session.default_responder,
+        })
+    })
+    .await?;
+    Ok(Json(resp))
+}
+
+/// `PUT /api/chat-sessions/{session_id}/responder` — set or clear the group's
+/// default responder. Every gate (participation, kind, owner-or-admin, "the
+/// named agent is an agent member right now") lives in the store and runs on
+/// the locked snapshot, so a concurrent member removal cannot slip a stale id
+/// past the validation.
+async fn put_responder(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(session_id): Path<String>,
+    Json(req): Json<GroupResponderRequest>,
+) -> Result<Json<GroupResponderResponse>, ApiError> {
+    let dir = data_dir(&state)?;
+    let who = ctx.effective_user_id().to_string();
+    let is_admin = ctx.is_admin();
+    let responder = req.responder;
+    let session = offload(move || {
+        chat_sessions::set_default_responder(
+            &dir,
+            &session_id,
+            responder.as_deref(),
+            &who,
+            is_admin,
+        )
+    })
+    .await?;
+    Ok(Json(GroupResponderResponse {
+        responder: session.default_responder,
+        // The caller just wrote it, so by construction they may govern it.
+        editable: true,
+    }))
 }
 
 // ── Attachments (§4.2.1, plan 3.5) ────────────────────────────────────
@@ -3606,5 +3700,129 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+    /// ADR-105 on the wire: the default responder is readable by every member
+    /// (`editable` tells the panel whether to offer a save), writable only by
+    /// the owner or an admin, hidden from a non-member, and refused (422) for a
+    /// value that is not an agent member.
+    #[tokio::test]
+    async fn group_responder_is_member_readable_owner_writable_and_validated() {
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+        let (_carol, carol_token) = make_user(&app, &admin, "carol").await;
+        // A non-account participant id is typed as an agent (design 27 §8.1).
+        let agent = "8b0b4d2e-0000-4000-8000-00000000a9e1";
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}","{agent}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+        let uri = format!("/api/chat-sessions/{session_id}/responder");
+
+        // Fresh group: unset, and the founder may set it.
+        let resp = app.clone().oneshot(req("GET", &uri, None, Some(&alice_token))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json(resp).await;
+        assert_eq!(body["responder"], serde_json::Value::Null);
+        assert_eq!(body["editable"].as_bool(), Some(true));
+
+        // A plain member reads (read-only) but cannot write.
+        let resp = app.clone().oneshot(req("GET", &uri, None, Some(&bob_token))).await.unwrap();
+        assert_eq!(json(resp).await["editable"].as_bool(), Some(false));
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &uri,
+                Some(&format!(r#"{{"responder":"{agent}"}}"#)),
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The owner sets it; the response and the next read agree.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &uri,
+                Some(&format!(r#"{{"responder":"{agent}"}}"#)),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json(resp).await["responder"].as_str(), Some(agent));
+        let resp = app.clone().oneshot(req("GET", &uri, None, Some(&bob_token))).await.unwrap();
+        assert_eq!(json(resp).await["responder"].as_str(), Some(agent));
+
+        // A human member is not a responder — 422, nothing stored.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                &uri,
+                Some(&format!(r#"{{"responder":"{bob}"}}"#)),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let resp = app.clone().oneshot(req("GET", &uri, None, Some(&alice_token))).await.unwrap();
+        assert_eq!(json(resp).await["responder"].as_str(), Some(agent), "rejected write changed nothing");
+
+        // A stranger gets the hidden 404 on both verbs.
+        let resp = app.clone().oneshot(req("GET", &uri, None, Some(&carol_token))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = app
+            .clone()
+            .oneshot(req("PUT", &uri, Some("{}"), Some(&carol_token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Clearing goes back to archive-only.
+        let resp = app
+            .clone()
+            .oneshot(req("PUT", &uri, Some(r#"{"responder":null}"#), Some(&alice_token)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json(resp).await["responder"], serde_json::Value::Null);
+
+        // A 1:1 session has no such role (the panel never asks, the API says no).
+        let pair_uri = {
+            let resp = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/api/chat-sessions",
+                    Some(&format!(
+                        r#"{{"kind":"user_agent","participants":["{alice}","{agent}"]}}"#
+                    )),
+                    Some(&alice_token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            let sid = json(resp).await["session_id"].as_str().unwrap().to_string();
+            format!("/api/chat-sessions/{sid}/responder")
+        };
+        let resp = app.clone().oneshot(req("GET", &pair_uri, None, Some(&alice_token))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

@@ -80,6 +80,10 @@ export interface ChatMessageRow {
      *  broadcast `user_message` carries it, and it is what marks the row as an
      *  opened agent turn (see `chatTurnState.opensAgentTurn`). */
     mentions?: string[];
+    /** ADR-105: the group's default responder that took an UN-addressed
+     *  message. Never rendered as a mention chip (the human typed no name) —
+     *  it is what marks the row as an opened agent turn. */
+    auto_routed_to?: string;
     status?: string;
     repo?: string;
     /** A PM task dispatch (`pm_task` origin): the task id, rendered as a
@@ -155,6 +159,10 @@ export interface ChatSessionInfo {
   /** Group owner for a `user_group` (ADR-098 governance) — the founder is
    *  the first owner; absent for every other kind. */
   owner?: string;
+  /** ADR-105: the agent instance an un-addressed message in this group is
+   *  delivered to; absent = such messages stay archive-only (the historical
+   *  behaviour, and the default for a group of humans). */
+  default_responder?: string;
   /** `participant_id -> unread count` (design 27 §4.6). Only the list
    *  endpoint carries it; reading a session's messages clears mine
    *  server-side. */
@@ -298,23 +306,16 @@ function sendChatMessage(
   });
 }
 
-/** Archive-only group message: one `user_message` row, no delivery.
- *  (Agents stay silent unless @-mentioned — design 27 §5.3.) */
-function postGroupMessage(
-  chatSessionId: string,
-  text: string,
-  attachmentIds?: string[],
-): Promise<void> {
-  return req<void>("POST", `/api/chat-sessions/${encodeURIComponent(chatSessionId)}/messages`, {
-    body: text,
-    to: "",
-    attachment_ids: attachmentIds ?? [],
-  });
-}
-
-/** @-fan-out in a group (design 27 §5.3.1): the Gateway writes the ONE
- *  `user_message` row carrying `mentions` and routes a turn to each
- *  target — so a mention send must NOT also post the message. */
+/** The group send entry (design 27 §5.3.1, ADR-105): the Gateway writes the
+ *  ONE `user_message` row and routes a turn per target — so a group send must
+ *  NOT also post the message.
+ *
+ *  An EMPTY `targets` is the "nobody was addressed" case, and it is a real
+ *  instruction, not a missing one: the Gateway resolves the group's default
+ *  responder (or archives the row when the group has none). That is why the
+ *  archive-only `POST /api/chat-sessions/{id}/messages` is no longer used by
+ *  this surface — routing an un-addressed message is a server decision, not a
+ *  client one, so every client inherits it. */
 function fanoutMentions(
   me: string,
   chatSessionId: string,
@@ -585,10 +586,12 @@ interface ChatSessionStore {
    *  doorbell `wake()` re-reads these windows too. */
   openGroupIds: Record<string, true>;
   openGroup(chatSessionId: string): Promise<void>;
-  /** Send into a group: @-targets fan out through the intent channel
-   *  (which writes the row); without targets the row is archive-only.
-   *  `inReplyTo` answers a card (routes through the 1:1 channel, which
-   *  the backend also accepts for group sessions). */
+  /** Send into a group: every send takes the intent channel, which writes the
+   *  row and fans out. `targets` = the agents the human @-ed; an EMPTY list is
+   *  a positive instruction since ADR-105 — the Gateway delivers to the group's
+   *  default responder, or archives when the group has none. `inReplyTo`
+   *  answers a card (routes through the 1:1 channel, which the backend also
+   *  accepts for group sessions). */
   sendGroupText(
     chatSessionId: string,
     text: string,
@@ -749,10 +752,12 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
         // Card replies never carry attachments (mirrors the 1:1 channel).
         if (attachmentIds?.length) throw new Error("card replies cannot include attachments");
         await sendChatMessage(me, chatSessionId, text, inReplyTo);
-      } else if (targets.length > 0) {
-        await fanoutMentions(me, chatSessionId, text, targets, attachmentIds);
       } else {
-        await postGroupMessage(chatSessionId, text, attachmentIds);
+        // Every group send takes the one entry: `targets` carries the @-ed
+        // agents, and an empty list asks the Gateway to apply the group's
+        // default responder (ADR-105) or archive. Splitting the two cases
+        // client-side is what used to make an un-addressed reply vanish.
+        await fanoutMentions(me, chatSessionId, text, targets, attachmentIds);
       }
       ok = true;
     } catch (e) {

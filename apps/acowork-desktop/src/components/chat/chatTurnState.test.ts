@@ -156,6 +156,25 @@ describe("pendingTurn", () => {
     expect(pendingTurn([fanout], false, none)).toBe(true);
   });
 
+  it("waits on an auto-routed group message (ADR-105)", () => {
+    const autoRouted = {
+      ...dm("u1"),
+      meta: { message_id: "u1", mentions: [], auto_routed_to: "ag" },
+    };
+    expect(pendingTurn([autoRouted], false, none)).toBe(true);
+    const notice = (inReplyTo: string) =>
+      row("system_notice", {
+        message_id: `dlv-failed:${inReplyTo}`,
+        notice_type: "delivery_failed",
+        in_reply_to: inReplyTo,
+      });
+    // The gateway could not reach the responder: the receipt is the outcome,
+    // so the wait must stop instead of promising an answer.
+    expect(pendingTurn([autoRouted, notice("u1")], false, none)).toBe(false);
+    // A failure notice about an EARLIER row does not close this turn.
+    expect(pendingTurn([autoRouted, notice("u0")], false, none)).toBe(true);
+  });
+
   it("agentReachable=false silences the line even while the send is in flight", () => {
     // A chat with no Agent participant has nobody working, so asserting a wait
     // is a lie at every moment, not only after the row lands.
@@ -178,6 +197,19 @@ describe("opensAgentTurn", () => {
 
   it("treats a whitespace-only recipient as no recipient", () => {
     expect(opensAgentTurn({ ...dm("u1"), to: "  " })).toBe(false);
+  });
+
+  it("opens a turn on the group's auto-routed row (ADR-105)", () => {
+    // The human typed no name, so the row is a broadcast with `mentions: []`;
+    // the Gateway's decision rides in `auto_routed_to`. Without this the wait
+    // line never appeared for the most common way to reply to an agent.
+    expect(
+      opensAgentTurn({ ...dm("u1"), meta: { message_id: "u1", mentions: [], auto_routed_to: "ag" } }),
+    ).toBe(true);
+    // No responder configured: still nobody to answer.
+    expect(
+      opensAgentTurn({ ...dm("u1"), meta: { message_id: "u1", mentions: [], auto_routed_to: "" } }),
+    ).toBe(false);
   });
 });
 

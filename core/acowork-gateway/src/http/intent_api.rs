@@ -1433,6 +1433,12 @@ pub struct MentionRequest {
     pub from_user: String,
     /// Explicit target agent instances (the client resolves @name to
     /// instance ids; the Gateway never parses free text — §5).
+    ///
+    /// **Empty is meaningful** (ADR-105): the human addressed nobody, so the
+    /// group's default responder answers — or, with no responder configured,
+    /// the message is stored and no agent wakes (§5.3.1's historical rule).
+    /// Empty therefore no longer means "not a fan-out"; it means "you decide".
+    #[serde(default)]
     pub targets: Vec<String>,
     /// The message text (already archived as a `user_message` row by
     /// the chat write entry; this endpoint only fans out Intents).
@@ -1488,14 +1494,19 @@ fn chat_delivery_params(
     params
 }
 
-/// `POST /api/intents/mentions` — @Agent fan-out in a group chat (§5):
-/// the human utterance is ONE `user_message` row carrying the mentioned
-/// targets in its `mentions` field (§5.3.1); each mentioned agent gets
-/// its own routed delivery (initiator role, §5.4.5) and its own
-/// write-back `agent_message` answering that row. The session's repo
-/// binding is injected server-side (§4.1). Ordinary (unmentioned) group
-/// messages never reach this endpoint — they are archive-only by
-/// construction.
+/// `POST /api/intents/mentions` — the group-chat send entry (§5): the human
+/// utterance is ONE `user_message` row carrying the agents the sender named in
+/// its `mentions` field (§5.3.1); each named agent gets its own routed
+/// delivery (initiator role, §5.4.5) and its own write-back `agent_message`
+/// answering that row. The session's repo binding is injected server-side
+/// (§4.1).
+///
+/// **Un-addressed messages come here too** (ADR-105). `targets: []` means the
+/// human named nobody, which is the overwhelmingly common way to answer an
+/// agent that just spoke — and which used to be handed to the plain chat write
+/// entry, where it was stored and forgotten. The group's configured default
+/// responder takes the turn; with none configured the row is archived exactly
+/// as before, and the response says so (`routed: "archived"`).
 async fn deliver_mentions(
     State(state): State<AppState>,
     auth: Option<axum::extract::Extension<crate::http::auth_middleware::AuthContext>>,
@@ -1515,11 +1526,12 @@ async fn deliver_mentions(
             "mention sender must match the authenticated user",
         ));
     }
-    // An @ mention may carry text, attachments, or both — but not neither.
-    // Targets stay mandatory (a mention with no target is not a fan-out).
-    if (req.text.trim().is_empty() && req.attachment_ids.is_empty()) || req.targets.is_empty() {
+    // A group message may carry text, attachments, or both — but not neither.
+    // Targets are optional since ADR-105: an empty list asks the Gateway to
+    // resolve the group's default responder (or archive, when it has none).
+    if req.text.trim().is_empty() && req.attachment_ids.is_empty() {
         return Err(ApiError::bad_request(
-            "a mention needs text and/or attachments and at least one target",
+            "a group message needs text and/or attachments",
         ));
     }
 
@@ -1543,17 +1555,27 @@ async fn deliver_mentions(
     // ADR-099: the surface travels with the delivery — the receiving router
     // picks its prompt variant from it and must never infer it.
     let chat_kind = session.kind.clone();
-    let repo = session.repo.unwrap_or_default();
+    let repo = session.repo.clone().unwrap_or_default();
 
-    let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
-        return Err(ApiError::internal("Gateway MQTT control plane is not available"));
+    // ── Routing (ADR-105) ───────────────────────────────────────────────
+    // An explicit @ is the human's own answer to "who handles this", so the
+    // targets are used as given. With no @ the group's default responder — if
+    // it has one and it is still a live agent member — answers instead; with
+    // neither, the message keeps the historical archive-only behaviour (§5.3.1
+    // before ADR-105): it is stored, no agent wakes, no error.
+    //
+    // Resolved BEFORE the row is written because the decision belongs on the
+    // row: `auto_routed_to` is a fact of that utterance ("this one went to X
+    // without being addressed to X"), not a separate event to reconcile later.
+    let auto_routed_to = if req.targets.is_empty() {
+        session.live_default_responder().map(str::to_string)
+    } else {
+        None
     };
-    let ctx = DeliveryContext {
-        state: &state.gateway_state,
-        registry,
-        node_control: node_control.as_ref(),
-        mqtt: Some(mqtt),
-        mailbox: mailbox.as_deref(),
+    let targets: Vec<String> = if req.targets.is_empty() {
+        auto_routed_to.iter().cloned().collect()
+    } else {
+        req.targets.clone()
     };
 
     // §5.3.1 (Wave 2B): one human utterance is ONE `user_message` row;
@@ -1561,12 +1583,25 @@ async fn deliver_mentions(
     // of the same text. 落库先于投递 (§5.1): if the row cannot be written
     // the whole fan-out is refused — the message would have no durable
     // address and no reply coordinate.
+    //
+    // `mentions` keeps its meaning — the agents the HUMAN named — so an
+    // auto-routed target never appears there (the transcript would draw a
+    // chip the sender never typed). The auto decision travels in
+    // `auto_routed_to`, which is also what the surfaces key the wait line on.
     let row_id = uuid::Uuid::new_v4().to_string();
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "message_id": row_id,
         "mentions": req.targets,
         "repo": repo,
     });
+    if let Some(responder) = auto_routed_to.as_deref()
+        && let Some(map) = meta.as_object_mut()
+    {
+        map.insert(
+            "auto_routed_to".to_string(),
+            serde_json::Value::String(responder.to_string()),
+        );
+    }
     // The stored row's attachment metadata (name / mime / size, re-read from
     // the session's `files/` dir by the store) rides along to every mentioned
     // agent, so its Chat Router sees what this turn actually carried. Ids still
@@ -1593,8 +1628,30 @@ async fn deliver_mentions(
         }
     };
 
+    // Archive-only: the row is the whole outcome. Reported explicitly so a
+    // caller can tell "nobody was asked" from "everybody was and they all
+    // failed" — the two used to be indistinguishable (and both silent).
+    if targets.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "message_id": row_id,
+            "routed": "archived",
+            "results": [],
+        })));
+    }
+
+    let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
+        return Err(ApiError::internal("Gateway MQTT control plane is not available"));
+    };
+    let ctx = DeliveryContext {
+        state: &state.gateway_state,
+        registry,
+        node_control: node_control.as_ref(),
+        mqtt: Some(mqtt),
+        mailbox: mailbox.as_deref(),
+    };
+
     let mut results = Vec::new();
-    for target in &req.targets {
+    for target in &targets {
         // Resolve + target-side permission view.
         let target_info = {
             let gw = state.gateway_state.read().await;
@@ -1606,6 +1663,14 @@ async fn deliver_mentions(
                 "target": target, "status": "failed",
                 "error_code": "target_not_installed",
             }));
+            append_delivery_failed_notice(
+                port,
+                &req.chat_session_id,
+                target,
+                &row_id,
+                "target_not_installed",
+            )
+            .await;
             continue;
         };
         if intent_enforce_permissions(&state).await
@@ -1629,6 +1694,14 @@ async fn deliver_mentions(
                 "target": target, "status": "failed",
                 "error_code": "not_authorized",
             }));
+            append_delivery_failed_notice(
+                port,
+                &req.chat_session_id,
+                target,
+                &row_id,
+                "not_authorized",
+            )
+            .await;
             continue;
         }
 
@@ -1679,21 +1752,82 @@ async fn deliver_mentions(
             acowork_core::timeout_config::constants::INTENT_DEFAULT,
         )
         .await;
-        results.push(match outcome {
-            Ok(()) => serde_json::json!({
+        let failed = match outcome {
+            Ok(()) => None,
+            Err(e) => Some((e.code(), e.to_string())),
+        };
+        results.push(match failed.as_ref() {
+            None => serde_json::json!({
                 "target": target, "message_id": message_id, "status": "delivered",
             }),
-            Err(e) => serde_json::json!({
+            Some((code, error)) => serde_json::json!({
                 "target": target, "message_id": message_id, "status": "failed",
-                "error_code": e.code(), "error": e.to_string(),
+                "error_code": code, "error": error,
             }),
         });
+        if let Some((code, _)) = failed {
+            append_delivery_failed_notice(port, &req.chat_session_id, target, &row_id, code).await;
+        }
     }
 
     Ok(Json(serde_json::json!({
         "message_id": row_id,
+        "routed": if auto_routed_to.is_some() { "responder" } else { "mentions" },
         "results": results,
     })))
+}
+
+/// Record a failed delivery in the transcript (ADR-105).
+///
+/// The endpoint's `results` array is read by no client — the chat surfaces post
+/// and forget — so a delivery that failed used to leave *no* trace at all: the
+/// message was addressed (by @ or by the group's responder), nobody answered,
+/// and the transcript looked exactly like a message nobody had picked up. That
+/// is the same defect ADR-105 removes on the routing side, so it gets the same
+/// treatment here: a durable `system_notice` threaded to the human row.
+///
+/// The row is written on the **target's** behalf (it is the party that did not
+/// receive the message). `system_notice` carries no writer-identity constraint
+/// beyond membership, so an uninstalled agent — still a session participant —
+/// is a legitimate author for its own receipt, and no new privileged writer
+/// identity is introduced.
+///
+/// Best-effort: a notice that cannot be written costs the receipt, never the
+/// send (the human row is already durable).
+async fn append_delivery_failed_notice(
+    port: u16,
+    chat_session_id: &str,
+    target: &str,
+    row_id: &str,
+    error_code: &str,
+) {
+    let notice_meta = serde_json::json!({
+        "message_id": format!("dlv-failed:{row_id}:{target}"),
+        "notice_type": "delivery_failed",
+        "in_reply_to": row_id,
+        "error_code": error_code,
+    });
+    if let Err(e) = chat_client::append_message(
+        port,
+        chat_session_id,
+        &chat_client::AppendMessage {
+            from: target.to_string(),
+            to: target.to_string(),
+            kind: "system_notice".to_string(),
+            body: String::new(),
+            meta: notice_meta,
+            attachment_ids: Vec::new(),
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            chat_id = %chat_session_id,
+            target = %target,
+            error = %e,
+            "delivery_failed notice row failed — non-fatal"
+        );
+    }
 }
 
 /// Body of `POST /api/intents/chat-message`.

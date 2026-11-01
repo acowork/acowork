@@ -1094,6 +1094,15 @@ export interface ModelInfo {
   // ── ADR-103 D11: protocol surfaces (Gateway-projected, never derived here) ──
   /** Offline data declaration for this model (`"responses"` / `"completions"`). */
   shape?: string;
+  /**
+   * The provider-level protocol (`"anthropic"` / `"openai"` / …).
+   *
+   * ADR-103 D14: a provider that speaks exactly one wire protocol has
+   * nothing to choose between per model, so the protocol dropdown is hidden
+   * for it. `undefined` = the provider is not configured yet — the dropdown
+   * is shown.
+   */
+  provider_protocol?: string;
   /** The protocol the user hand-picked (`undefined` = follow the data). */
   protocol_selected?: string;
   /** The protocol actually in effect (D1 gate result). */

@@ -320,17 +320,24 @@ describe("sendGroupText attachment passthrough (design 27 §4.2.1 / §5.3)", () 
     });
   });
 
-  it("archive-only group message forwards attachment_ids on the row write", async () => {
+  it("an un-@'d group message takes the mention entry with NO targets (ADR-105)", async () => {
+    // The routing decision is the server's: an empty `targets` list means "the
+    // Gateway applies the group's default responder, or archives". Keeping a
+    // client-side branch to the archive-only write entry is what made a plain
+    // reply to an agent vanish.
     const ok = await useChatSessionStore
       .getState()
       .sendGroupText("grp-1", "just a pic", [], undefined, ["att-1"]);
     expect(ok).toBe(true);
-    // The write POSTs to `/messages`; the §5.1 re-read GETs the same path,
-    // so pin the POST by method.
-    const post = calls("/messages").filter((c) => (c[1] as RequestInit)?.method === "POST");
+    const post = calls("/api/intents/mentions");
     expect(post.length).toBe(1);
     const body = JSON.parse((post[0]![1] as RequestInit).body as string);
-    expect(body).toMatchObject({ body: "just a pic", to: "", attachment_ids: ["att-1"] });
+    expect(body).toMatchObject({ chat_session_id: "grp-1", targets: [], text: "just a pic" });
+    expect(body.attachment_ids).toEqual(["att-1"]);
+    // And nothing went to the archive-only row write (its §5.1 re-read GETs
+    // the same path, so pin the POST by method).
+    const rowWrite = calls("/messages").filter((c) => (c[1] as RequestInit)?.method === "POST");
+    expect(rowWrite.length).toBe(0);
   });
 
   it("an attachment-only mention sends with empty text", async () => {

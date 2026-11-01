@@ -10,9 +10,11 @@
  * own waiting state from the transcript itself (see `chatTurnState`).
  *
  * What remains renderable: a receipt whose body is a genuine channel fact
- * (`delivery_failed`, `budget_exhausted`, …), and the `interaction_resolved`
- * notice of a decision made on the execution surface — the only chat-visible
- * record of that answer (see the branch below).
+ * (`budget_exhausted`, …), the bodyless `delivery_failed` receipt ADR-105 has
+ * the Gateway write (its wording belongs to the surface, like
+ * `router_fallback`), and the `interaction_resolved` notice of a decision made
+ * on the execution surface — the only chat-visible record of that answer (see
+ * the branches below).
  */
 
 import { ChatEventText } from "./ChatEventText";
@@ -37,6 +39,11 @@ interface ChatNoticeEventRowProps {
    *  their answer row already states the outcome, so the Runtime's duplicate
    *  resolution notice must stay silent. */
   chatAnswered?: Set<string>;
+  /** Display name of the party this row is about, when the surface knows it
+   *  (the group panels resolve it from the roster). Only the `delivery_failed`
+   *  receipt uses it: "the message never reached <name>" is actionable, while a
+   *  generic "not delivered" leaves the human guessing which agent to re-@. */
+  name?: string;
 }
 
 export function ChatNoticeEventRow({
@@ -44,6 +51,7 @@ export function ChatNoticeEventRow({
   className,
   answered,
   chatAnswered,
+  name,
 }: ChatNoticeEventRowProps) {
   const { t } = useTranslation();
   const noticeType = row.meta?.notice_type ?? "";
@@ -69,6 +77,20 @@ export function ChatNoticeEventRow({
   }
   // Retired milestones: history only.
   if (RETIRED_NOTICES.has(noticeType)) return null;
+  // A delivery that never reached its agent (ADR-105). Also keyed by
+  // notice_type: the Gateway writes a bodyless row (its prose would be
+  // server-side English plus an internal error code), so the surfaces own the
+  // wording. It MUST paint — this receipt exists precisely because the failure
+  // used to be invisible.
+  if (noticeType === "delivery_failed") {
+    return (
+      <ChatEventText
+        anchor="turn"
+        text={name ? t("chatView.deliveryFailed", { name }) : t("chatView.deliveryFailedNoTarget")}
+        className={className}
+      />
+    );
+  }
   // The router-fallback receipt is keyed by notice_type, not body: the
   // runtime writes a bodyless row and every surface owns the wording.
   // Both branches below are channel receipts — a fact about the channel, not

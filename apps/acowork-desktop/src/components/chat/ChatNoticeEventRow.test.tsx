@@ -3,9 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
-// `t` echoes the key so assertions read against the i18n vocabulary directly.
+// `t` echoes the key (plus its interpolated params) so assertions read against
+// the i18n vocabulary directly.
 vi.mock("../../i18n/useTranslation", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, unknown>) =>
+      options?.name ? `${key}:${String(options.name)}` : key,
+  }),
 }));
 
 function noticeRow(noticeType: string, body = ""): ChatMessageRow {
@@ -43,6 +47,21 @@ describe("ChatNoticeEventRow", () => {
     const { container } = render(<ChatNoticeEventRow row={noticeRow("router_fallback")} />);
     expect(container.textContent).toBe("chatView.routerFallback");
   });
+  it("paints a delivery_failed receipt even though the row is bodyless (ADR-105)", () => {
+    // The Gateway writes no body — the prose would be server-side English plus
+    // an internal error code — so the surface owns the wording. It MUST paint:
+    // the whole point of the row is that the failure stops being invisible.
+    const { container } = render(
+      <ChatNoticeEventRow row={noticeRow("delivery_failed")} name="Architect" />,
+    );
+    expect(container.textContent).toBe("chatView.deliveryFailed:Architect");
+  });
+
+  it("falls back to the unnamed wording when the surface cannot resolve the target", () => {
+    const { container } = render(<ChatNoticeEventRow row={noticeRow("delivery_failed")} />);
+    expect(container.textContent).toBe("chatView.deliveryFailedNoTarget");
+  });
+
   it("folds an interaction_resolved receipt into nothing (the card paints it)", () => {
     const { container } = render(<ChatNoticeEventRow row={noticeRow("interaction_resolved")} />);
     expect(container.innerHTML).toBe("");

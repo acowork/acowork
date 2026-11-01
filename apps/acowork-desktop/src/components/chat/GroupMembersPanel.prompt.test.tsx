@@ -108,3 +108,58 @@ describe("GroupMembersPanel — project group prompt card", () => {
     expect(screen.getByTestId("group-chat-prompt")).toBeTruthy();
   });
 });
+
+describe("GroupMembersPanel — project group default responder (ADR-105)", () => {
+  const withAgent = {
+    ...project,
+    members: [
+      { instance_id: ME, kind: "user", added_at: "2026-01-01T00:00:00Z" },
+      { instance_id: "ag-1", kind: "agent", added_at: "2026-01-01T00:00:00Z" },
+    ],
+  } as unknown as PmProject;
+
+  /** Route the responder GET separately from the prompt GET. */
+  function stubFetch(responder: string | null, editable: boolean) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => ({
+        ok: true,
+        status: 200,
+        json: async () =>
+          String(url).endsWith("/responder")
+            ? { responder, editable }
+            : { content: "Prompt.", is_default: true, editable: true },
+      })),
+    );
+  }
+
+  it("shows the card to a PLAIN member (the read is open) with the agent members as options", async () => {
+    usePmProjectStore.setState({ projects: [withAgent] } as never);
+    stubFetch(null, false);
+    loginAs(ME);
+    await act(async () => {
+      render(<GroupMembersPanel width={260} />);
+    });
+    const card = await screen.findByTestId("group-responder");
+    const select = screen.getByTestId("group-responder-select") as HTMLSelectElement;
+    // Read-only for a non-governor: the panel mirrors the server's answer
+    // instead of re-deriving the governance rule.
+    expect(select.disabled).toBe(true);
+    // Candidates are agent members only — "who answers" cannot be a human.
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values).toEqual(["", "ag-1"]);
+    expect(card).toBeTruthy();
+  });
+
+  it("renders the configured responder by name for the owner", async () => {
+    usePmProjectStore.setState({ projects: [withAgent] } as never);
+    stubFetch("ag-1", true);
+    loginAs(OWNER);
+    await act(async () => {
+      render(<GroupMembersPanel width={260} />);
+    });
+    const select = (await screen.findByTestId("group-responder-select")) as HTMLSelectElement;
+    expect(select.disabled).toBe(false);
+    expect(select.value).toBe("ag-1");
+  });
+});

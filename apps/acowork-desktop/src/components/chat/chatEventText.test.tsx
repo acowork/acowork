@@ -63,8 +63,10 @@ describe("event-text grammar at the call sites", () => {
       ts: 1,
       from: "sys",
       kind: "system_notice",
-      // The receipt's wording is whatever the runtime recorded in the body.
-      body: "delivery failed",
+      // ADR-105: the Gateway writes this receipt bodyless and every surface
+      // owns the wording, so the line paints from the notice type alone (a
+      // legacy body-bearing row is re-worded rather than quoted verbatim).
+      body: "",
       to: "u",
       meta: { notice_type: "delivery_failed" },
     };
@@ -72,7 +74,7 @@ describe("event-text grammar at the call sites", () => {
     const el = document.querySelector('[data-event-text="turn"]') as HTMLElement;
     expect(el.className).toContain("justify-center");
     expect(el.className).toContain("px-4"); // the surface gutter survives
-    expect(el.textContent).toContain("delivery failed");
+    expect(el.textContent).toContain("chatView.deliveryFailed");
   });
 
   it("a card closed without an answer is a row-tier line — it stays in the card's slot", () => {

@@ -136,6 +136,8 @@
   "chatView": {
     "empty": "No messages yet",
     "routerFallback": "Assigned automatically",
+    "deliveryFailed": "The message didn't reach {{name}} — retry, or @ the agent",
+    "deliveryFailedNoTarget": "The message wasn't delivered — retry, or @ the agent",
     "cardUnanswered": "Unanswered: {{question}}",
     "cardAnsweredNote": "Answered: {{answer}}",
     "cardAnsweredInExec": "Answered in the execution session",
@@ -1214,8 +1216,10 @@
       "protocol": "Wire protocol",
       "protocolFollowData": "Follow the data (default)",
       "protocolChatCompletions": "Chat Completions",
-      "protocolBaseUrl": "Responses base URL (optional)",
-      "protocolBaseUrlHint": "Leave empty to use the provider base URL. Only used when Responses is enabled.",
+      "protocolAnthropicMessages": "Anthropic Messages",
+      "protocolSingleProvider": "Single protocol (Anthropic) — follows the provider",
+      "protocolBaseUrl": "Base URL override (optional)",
+      "protocolBaseUrlHint": "Leave empty to use the provider base URL. Applies to the protocol selected on this row.",
       "shapeResponses": "Responses",
       "probeButton": "Re-verify",
       "probeRunning": "Verifying…",
@@ -1230,6 +1234,7 @@
       "probeBlockedReason_failed": "the verification request failed",
       "probeBlockedReason_stale": "the provider configuration changed after the last verification",
       "probeBlockedReason_unknown": "no usable verdict applies — re-verify",
+      "probeBlockedReason_otherProtocol": "the stored verdict is about a different protocol — re-verify this one",
       "saveProbeVerified": "Responses verified: {{models}}",
       "saveProbeDegraded": "Responses works, but this endpoint rejects {{fields}} so it is omitted — {{models}}",
       "saveProbeFailed": "Responses verification failed — {{details}}",
@@ -2226,6 +2231,16 @@
     "edit": "Edit",
     "restored": "Group chat prompt restored to default",
     "restoreFailed": "Restore failed"
+  },
+  "groupResponder": {
+    "title": "Default responder",
+    "valueNone": "Not set",
+    "hint": "A message in this group that @-mentions nobody goes to this agent. It then decides, on its own, whether to answer directly or hand the turn to a running task.",
+    "readOnlyHint": "A message in this group that @-mentions nobody goes to this agent. Only the group owner or an admin can change it.",
+    "none": "None (un-addressed messages are only archived)",
+    "saved": "Default responder updated",
+    "saveFailed": "Save failed",
+    "missing": "This agent has left the group"
   },
   "groupSettings": {
     "title": "Group settings"

@@ -54,13 +54,20 @@ pub const RECOGNIZED_FIELDS: &[&str] = &[
 ];
 
 /// Body hints that a 404 means "this endpoint does not exist here".
+///
+/// Delegates the protocol-agnostic hints (generic router 404s such as Go's
+/// "404 page not found") to [`crate::providers::error_patterns::is_missing_endpoint_body`]
+/// so the Responses path and the Chat-Completions / Anthropic path cannot
+/// classify the same body differently — a divergent pair is how one 404 ends
+/// up with two different user-facing messages depending on which provider
+/// implementation saw it.
+///
+/// The Responses-specific hint (`responses` named in the body) stays here: a
+/// body that names the route is a stronger signal, but it is only meaningful
+/// for this wire format.
 fn looks_like_missing_endpoint(body_lower: &str) -> bool {
     body_lower.contains("responses")
-        || body_lower.contains("unknown endpoint")
-        || body_lower.contains("endpoint not found")
-        || body_lower.contains("no such endpoint")
-        || body_lower.contains("unknown route")
-        || body_lower.contains("not_found_error")
+        || crate::providers::error_patterns::is_missing_endpoint_body(body_lower)
 }
 
 /// Body hints that a 400 is "the content itself is inconsistent".

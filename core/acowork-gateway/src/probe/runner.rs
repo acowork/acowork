@@ -31,6 +31,13 @@ use crate::probe::wire::{
     baseline_request, error_reason, find_function_call, round_trip_replay_request,
     round_trip_request, truncate,
 };
+use crate::probe::wire_protocols::{
+    anthropic_baseline_request, anthropic_replay_request, anthropic_round_trip_request,
+    assert_anthropic_envelope, assert_anthropic_usage, assert_chat_completions_envelope,
+    assert_chat_completions_usage, chat_completions_baseline_request,
+    chat_completions_replay_request, chat_completions_round_trip_request,
+    find_anthropic_function_call, find_chat_completions_function_call,
+};
 
 /// Per-request timeout (D10.1). The batch-level budget lives in the
 /// handler, because only the handler knows how many models are queued.
@@ -65,6 +72,74 @@ impl ProbeTier {
         match self {
             ProbeTier::Standard => "standard",
             ProbeTier::Deep => "deep",
+        }
+    }
+}
+
+/// Which wire protocol a probe speaks.
+///
+/// ADR-103 D14: the probe is no longer Responses-only. A gate can only ask
+/// about a protocol the probe can actually speak, so every selectable
+/// model-level protocol needs a probe shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProbeProtocol {
+    /// OpenAI Responses API — `POST {base}/responses`.
+    Responses,
+    /// OpenAI Chat Completions — `POST {base}/chat/completions`.
+    ChatCompletions,
+    /// Anthropic Messages — `POST {base}/messages`.
+    Anthropic,
+}
+
+impl ProbeProtocol {
+    /// The route this protocol's endpoint lives at, relative to the base URL.
+    pub fn route(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "chat/completions",
+            Self::Anthropic => "messages",
+        }
+    }
+
+    /// The wire label used in cache keys, verdicts and log lines.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "openai",
+            Self::Anthropic => "anthropic",
+        }
+    }
+
+    /// Map the domain protocol type onto the probe shape.
+    ///
+    /// `Google` / `Ollama` / `Unknown` have no probe shape: the platform
+    /// serves Gemini through the OpenAI-compatible adapter, Ollama through
+    /// its own native client, and an unknown wire value must never be
+    /// guessed. All three therefore return `None`.
+    pub fn from_protocol_type(
+        protocol: &acowork_core::protocol::ProtocolType,
+    ) -> Option<Self> {
+        use acowork_core::protocol::ProtocolType;
+        match protocol {
+            ProtocolType::Responses => Some(Self::Responses),
+            ProtocolType::OpenAI => Some(Self::ChatCompletions),
+            ProtocolType::Anthropic => Some(Self::Anthropic),
+            ProtocolType::Google | ProtocolType::Ollama | ProtocolType::Unknown => None,
+        }
+    }
+
+    /// The domain protocol type this probe shape speaks.
+    ///
+    /// The inverse of [`Self::from_protocol_type`] for the three protocols
+    /// that have a shape. A verdict records the domain protocol it is about
+    /// (ADR-103 D14), so the gate can compare it with the selection.
+    pub fn protocol_type(self) -> acowork_core::protocol::ProtocolType {
+        use acowork_core::protocol::ProtocolType;
+        match self {
+            Self::Responses => ProtocolType::Responses,
+            Self::ChatCompletions => ProtocolType::OpenAI,
+            Self::Anthropic => ProtocolType::Anthropic,
         }
     }
 }
@@ -210,8 +285,24 @@ impl ProbeRunner {
         api_key: Option<&str>,
         tier: ProbeTier,
     ) -> ProbeOutcome {
+        self.run_protocol(model, base_url, api_key, tier, ProbeProtocol::Responses)
+            .await
+    }
+
+    /// Run the probe against a specific wire protocol (ADR-103 D14).
+    ///
+    /// `api_key` is `None` for local/key-less providers; the `Authorization`
+    /// header is then omitted rather than sent empty.
+    pub async fn run_protocol(
+        &self,
+        model: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+        tier: ProbeTier,
+        protocol: ProbeProtocol,
+    ) -> ProbeOutcome {
         let base = base_url.trim().trim_end_matches('/');
-        let outcome = self.attempt(base, model, api_key, tier).await;
+        let outcome = self.attempt(base, model, api_key, tier, protocol).await;
 
         // D10.3: a 404 that names the Responses endpoint usually means the
         // configured base URL is missing its API-version suffix. Retry once
@@ -223,7 +314,9 @@ impl ProbeRunner {
             .is_some_and(|e| e.class == "EndpointUnavailable" && e.http_status == Some(404));
         if endpoint_missing && !base.ends_with("/v1") {
             let retry_base = format!("{base}/v1");
-            let retry = self.attempt(&retry_base, model, api_key, tier).await;
+            let retry = self
+                .attempt(&retry_base, model, api_key, tier, protocol)
+                .await;
             if retry.success {
                 return ProbeOutcome {
                     observed_base_url: Some(retry_base),
@@ -243,6 +336,7 @@ impl ProbeRunner {
         model: &str,
         api_key: Option<&str>,
         tier: ProbeTier,
+        protocol: ProbeProtocol,
     ) -> ProbeOutcome {
         let started = Instant::now();
         let mut outcome = ProbeOutcome {
@@ -257,18 +351,28 @@ impl ProbeRunner {
 
         // ── L1 + L2: one request, two verdicts ──────────────────────────
         //
-        // The baseline body carries a `reasoning` block on purpose: that is
-        // the only field D8 may trim, and probing with it is what lets a probe
-        // run report "works, but the field had to go" (D10.3) instead of only
-        // ever claiming a clean verify.
+        // The Responses baseline body carries a `reasoning` block on purpose:
+        // that is the only field D8 may trim, and probing with it is what
+        // lets a probe run report "works, but the field had to go" (D10.3)
+        // instead of only ever claiming a clean verify.
         //
         // The **value** inside must be one every vendor accepts
         // (`reasoning.effort: low` — see [`crate::probe::wire`]): a 400 that
         // names the field is indistinguishable from "the endpoint does not
         // implement `reasoning`", so an illegal value would be mis-read as an
         // unsupported field and would report a false `degraded`.
-        let url = format!("{base}/responses");
-        let baseline = match self.post(&url, api_key, baseline_request(model, false)).await {
+        //
+        // The Chat-Completions / Anthropic baselines carry no such field:
+        // `reasoning` is a Responses-only concept, and the other two
+        // protocols express reasoning through their own parameters, which the
+        // Runtime maps separately.
+        let url = format!("{base}/{}", protocol.route());
+        let baseline_body = match protocol {
+            ProbeProtocol::Responses => baseline_request(model, false),
+            ProbeProtocol::ChatCompletions => chat_completions_baseline_request(model),
+            ProbeProtocol::Anthropic => anthropic_baseline_request(model),
+        };
+        let baseline = match self.post(&url, api_key, baseline_body, protocol).await {
             Ok(body) => body,
             Err(failure) if failure.blames_trimmable_field("reasoning") => {
                 // D8: re-send **once** with the field omitted. No chain and no
@@ -279,7 +383,14 @@ impl ProbeRunner {
                     class = %failure.class,
                     "probe hit the D8 trim: provider rejects `reasoning` - retrying the baseline once without it"
                 );
-                match self.post(&url, api_key, baseline_request(model, true)).await {
+                let retry_body = match protocol {
+                    ProbeProtocol::Responses => baseline_request(model, true),
+                    // The other protocols never sent the field, so there is
+                    // nothing to strip — retry as-is.
+                    ProbeProtocol::ChatCompletions => chat_completions_baseline_request(model),
+                    ProbeProtocol::Anthropic => anthropic_baseline_request(model),
+                };
+                match self.post(&url, api_key, retry_body, protocol).await {
                     Ok(body) => {
                         outcome.stripped_fields = vec!["reasoning".to_string()];
                         body
@@ -301,14 +412,14 @@ impl ProbeRunner {
         // body the Runtime would send (i.e. without it).
         let trimmed = !outcome.stripped_fields.is_empty();
 
-        if let Err(msg) = assert_envelope(&baseline) {
+        if let Err(msg) = assert_envelope_for(protocol, &baseline) {
             outcome.error = Some(ProbeFailure::new("ShapeMismatch", msg));
             outcome.latency_ms = started.elapsed().as_millis() as u64;
             return outcome;
         }
         outcome.tier_passed.push("L1".to_string());
 
-        match assert_usage(&baseline) {
+        match assert_usage_for(protocol, &baseline) {
             Ok(usage) => {
                 outcome.tier_passed.push("L2".to_string());
                 outcome.usage = Some(usage);
@@ -327,7 +438,10 @@ impl ProbeRunner {
         }
 
         // ── L3: tool round-trip ─────────────────────────────────────────
-        if let Err(failure) = self.round_trip(base, model, api_key, trimmed).await {
+        if let Err(failure) = self
+            .round_trip(base, model, api_key, trimmed, protocol)
+            .await
+        {
             outcome.error = Some(failure);
             outcome.latency_ms = started.elapsed().as_millis() as u64;
             return outcome;
@@ -339,9 +453,9 @@ impl ProbeRunner {
         outcome
     }
 
-    /// L3: ask for a tool call, then replay it as `function_call_output`.
+    /// L3: ask for a tool call, then replay it with the tool result.
     ///
-    /// Both halves must work. A provider that emits `function_call` but rejects
+    /// Both halves must work. A provider that emits a tool call but rejects
     /// the matching output cannot run the Runtime's tool loop, which is the
     /// only reason L3 exists.
     async fn round_trip(
@@ -350,24 +464,31 @@ impl ProbeRunner {
         model: &str,
         api_key: Option<&str>,
         trimmed: bool,
+        protocol: ProbeProtocol,
     ) -> Result<ProbeFunctionCall, ProbeFailure> {
-        let url = format!("{base}/responses");
-        let body = self
-            .post(&url, api_key, round_trip_request(model, trimmed))
-            .await?;
-        assert_envelope(&body)
+        let url = format!("{base}/{}", protocol.route());
+        let round_trip_body = match protocol {
+            ProbeProtocol::Responses => round_trip_request(model, trimmed),
+            ProbeProtocol::ChatCompletions => chat_completions_round_trip_request(model),
+            ProbeProtocol::Anthropic => anthropic_round_trip_request(model),
+        };
+        let body = self.post(&url, api_key, round_trip_body, protocol).await?;
+        assert_envelope_for(protocol, &body)
             .map_err(|msg| ProbeFailure::new("ShapeMismatch", msg))?;
-        let call = find_function_call(&body).map_err(|msg| {
+        let call = find_function_call_for(protocol, &body).map_err(|msg| {
             ProbeFailure::new(
                 "RoundTripFailed",
                 format!("{msg} (probe tool: {PROBE_TOOL_NAME})"),
             )
         })?;
 
-        let replay = self
-            .post(&url, api_key, round_trip_replay_request(model, &call, trimmed))
-            .await?;
-        assert_envelope(&replay).map_err(|msg| {
+        let replay_request = match protocol {
+            ProbeProtocol::Responses => round_trip_replay_request(model, &call, trimmed),
+            ProbeProtocol::ChatCompletions => chat_completions_replay_request(model, &call),
+            ProbeProtocol::Anthropic => anthropic_replay_request(model, &call),
+        };
+        let replay = self.post(&url, api_key, replay_request, protocol).await?;
+        assert_envelope_for(protocol, &replay).map_err(|msg| {
             ProbeFailure::new("RoundTripFailed", format!("replay response: {msg}"))
         })?;
         Ok(call)
@@ -383,10 +504,21 @@ impl ProbeRunner {
         url: &str,
         api_key: Option<&str>,
         body: Value,
+        protocol: ProbeProtocol,
     ) -> Result<Value, ProbeFailure> {
         let mut request = self.client.post(url).json(&body);
         if let Some(key) = api_key.filter(|k| !k.is_empty()) {
-            request = request.bearer_auth(key);
+            request = match protocol {
+                // Anthropic authenticates with `x-api-key`, not a Bearer
+                // token, and requires the version header (the Runtime sends
+                // exactly these two — see `providers/anthropic.rs`). Probing
+                // with the wrong auth shape would report `Auth` for a key
+                // that works, i.e. a false negative.
+                ProbeProtocol::Anthropic => request
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01"),
+                ProbeProtocol::Responses | ProbeProtocol::ChatCompletions => request.bearer_auth(key),
+            };
         }
 
         let response = request.send().await.map_err(|e| {
@@ -428,6 +560,46 @@ impl ProbeRunner {
                 status.as_u16(),
             )
         })
+    }
+}
+
+/// L1 envelope assertion, dispatched on the protocol under test.
+///
+/// Each protocol has its own envelope: the Responses API returns an object
+/// with `object: "response"`, Chat Completions a `choices` array, Anthropic a
+/// `content` array. Asserting the wrong one would make every probe of a
+/// non-Responses protocol fail on a shape that is actually correct.
+fn assert_envelope_for(protocol: ProbeProtocol, body: &Value) -> Result<(), String> {
+    match protocol {
+        ProbeProtocol::Responses => assert_envelope(body),
+        ProbeProtocol::ChatCompletions => assert_chat_completions_envelope(body),
+        ProbeProtocol::Anthropic => assert_anthropic_envelope(body),
+    }
+}
+
+/// L2 usage assertion, dispatched on the protocol under test.
+///
+/// The counter *names* differ per protocol (`prompt_tokens` /
+/// `completion_tokens` vs `input_tokens` / `output_tokens`), and each probe
+/// accepts only its own names — accepting the other protocol's aliases would
+/// hide exactly the shape drift the probe exists to catch.
+fn assert_usage_for(protocol: ProbeProtocol, body: &Value) -> Result<ProbeUsage, String> {
+    match protocol {
+        ProbeProtocol::Responses => assert_usage(body),
+        ProbeProtocol::ChatCompletions => assert_chat_completions_usage(body),
+        ProbeProtocol::Anthropic => assert_anthropic_usage(body),
+    }
+}
+
+/// L3 tool-call extraction, dispatched on the protocol under test.
+fn find_function_call_for(
+    protocol: ProbeProtocol,
+    body: &Value,
+) -> Result<ProbeFunctionCall, String> {
+    match protocol {
+        ProbeProtocol::Responses => find_function_call(body),
+        ProbeProtocol::ChatCompletions => find_chat_completions_function_call(body),
+        ProbeProtocol::Anthropic => find_anthropic_function_call(body),
     }
 }
 

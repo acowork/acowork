@@ -37,6 +37,13 @@ export interface ProtocolProbe {
   state: ProtocolProbeState;
   /** Tiers that passed, e.g. `["L1","L2","L3"]`. */
   tier_passed?: string[];
+  /**
+   * The protocol this verdict is about (ADR-103 D14). Absent on verdicts
+   * written before D14, which could only ever be about `Responses` — the
+   * read side mirrors `ProtocolProbe::protocol()` and treats `None` as
+   * `Responses` rather than guessing.
+   */
+  protocol?: string;
   /** Failure reason shown by the yellow badge (D11). */
   reason?: string;
   /** Base URL the probe actually hit, when it differs from the default. */
@@ -68,7 +75,10 @@ export type ProtocolBlockedReason =
   | "unverified"
   | "failed"
   | "stale"
-  | "unknown";
+  | "unknown"
+  /** D14: the stored verdict is about a *different* protocol, so it says
+   *  nothing about this selection — the override stays gated off. */
+  | "otherProtocol";
 
 export type ProtocolBadge =
   | { kind: "verified" }
@@ -82,23 +92,95 @@ export type ProtocolBadge =
 export const RESPONSES_PROTOCOL = "responses";
 
 /**
+ * The protocols the Gateway probe can speak (ADR-103 D14.3).
+ *
+ * These are exactly the `ProbeProtocol` variants on the Rust side: a wire
+ * shape exists to be asked about. `google` / `ollama` overrides take no part
+ * in the gate (the platform serves them through the compatible adapters), so
+ * they are never probed and never billed.
+ */
+export const PROBEABLE_PROTOCOLS = ["responses", "openai", "anthropic"] as const;
+
+export function isProbeableProtocol(protocol?: string): boolean {
+  return (
+    protocol !== undefined &&
+    (PROBEABLE_PROTOCOLS as readonly string[]).includes(protocol)
+  );
+}
+
+/**
+ * The provider-level protocols that speak exactly one wire shape, so a
+ * per-model protocol choice is meaningless for them (ADR-103 D14).
+ *
+ * `anthropic` is the case that matters: the Anthropic Messages API is the
+ * only shape an Anthropic provider serves, so offering a dropdown whose only
+ * other options are `Chat Completions` and `Responses` would be offering a
+ * choice the endpoint cannot honour — the selection would then be rejected
+ * by the D14 probe (or, worse, drive the Runtime to a route that does not
+ * exist).
+ *
+ * `google` and `ollama` are deliberately **not** listed: the platform
+ * serves them through other adapters, and the per-model override is still a
+ * meaningful thing to express for them.
+ */
+export const SINGLE_PROTOCOL_PROVIDERS = ["anthropic"] as const;
+
+/**
  * The protocol dropdown options (D11 red line: **always** offered).
  *
  * The option list is deliberately data-independent. Hiding `Responses` for
  * models the offline data did not tag would hide the only path to it for
  * DeepSeek / MiniMax / custom gateways, which no dataset covers (§1.1).
+ *
+ * ADR-103 D14: `anthropic` is offered too — the probe now speaks the Messages
+ * shape, so selecting it on a non-Anthropic provider is a verifiable claim,
+ * not an untestable wish.
  */
-export const PROTOCOL_OPTIONS = ["follow", "openai", "responses"] as const;
+export const PROTOCOL_OPTIONS = [
+  "follow",
+  "openai",
+  "responses",
+  "anthropic",
+] as const;
 export type ProtocolOption = (typeof PROTOCOL_OPTIONS)[number];
+
+/**
+ * Should the per-model protocol dropdown be shown at all?
+ *
+ * ADR-103 D14: a provider that speaks exactly one wire protocol has nothing
+ * to choose between per model, so the dropdown is hidden for it and the
+ * protocol is simply the provider's.
+ *
+ * `providerProtocol` is the Gateway-projected provider-level protocol
+ * (`undefined` = the provider is not configured yet, e.g. while browsing the
+ * catalog) — in that case the dropdown stays visible, because there is no
+ * fact to base a decision on.
+ *
+ * `hasStoredOverride` is the escape hatch (§4.2 item 6): a row that already
+ * carries a model-level selection differing from the provider-level protocol
+ * must stay editable — hiding the dropdown there would leave the incident
+ * configuration visible nowhere and clearable by nothing.
+ */
+export function showsProtocolDropdown(
+  providerProtocol?: string,
+  hasStoredOverride?: boolean,
+): boolean {
+  if (hasStoredOverride) return true;
+  if (!providerProtocol) return true;
+  return !(SINGLE_PROTOCOL_PROVIDERS as readonly string[]).includes(
+    providerProtocol,
+  );
+}
 
 /** Map a stored selection to the dropdown option value. */
 export function protocolOptionOf(selected?: string): ProtocolOption {
   if (!selected) return "follow";
   if (selected === RESPONSES_PROTOCOL) return "responses";
   if (selected === "openai") return "openai";
-  // Any other explicit protocol (anthropic / google / ollama / an unknown wire
-  // value) is not offered by this dropdown; show it as "follow" rather than
-  // silently pretending the selection is one of our three options.
+  if (selected === "anthropic") return "anthropic";
+  // Any other explicit protocol (google / ollama / an unknown wire value) is
+  // not offered by this dropdown; show it as "follow" rather than silently
+  // pretending the selection is one of our four options.
   return "follow";
 }
 
@@ -130,33 +212,29 @@ export function showsResponsesMark(badge: ProtocolBadge): boolean {
 /**
  * Project the Gateway's four fields into one badge.
  *
- * `protocol_active` is the D1 verdict and therefore the only trustworthy
- * statement about what the model is doing right now: when it says `responses`
- * the selection passed the gate, and when it says anything else while the
- * selection is `responses`, the stored probe verdict is why.
+ * `protocol_active` is the gate's verdict and therefore the only trustworthy
+ * statement about what the model is doing right now. ADR-103 D14 widened the
+ * gate from `Responses`-only to *any* override of the provider-level
+ * protocol — so "selected but not enabled" is now a statement about whichever
+ * protocol the row carries, and the yellow badge MUST appear for every
+ * selection the gate rejected, not only for `Responses` (a fallback the user
+ * cannot see is the silent failure v0.3 removed).
  */
 export function deriveProtocolBadge(m: ModelProtocolFields): ProtocolBadge {
-  const selected = m.protocol_selected === RESPONSES_PROTOCOL;
-  const active = m.protocol_active === RESPONSES_PROTOCOL;
+  const selection = m.protocol_selected;
+  const active = m.protocol_active;
   const declared = m.shape === RESPONSES_PROTOCOL;
   const probe = m.protocol_probe;
 
-  if (selected) {
-    if (active) {
-      // Gate passed. `degraded` means it passed only after a D8 field trim —
-      // usable, but the user deserves to know (S7 renders the stripped list).
-      return probe?.state === "degraded"
-        ? {
-            kind: "degraded",
-            tiers: probe.tier_passed,
-            stripped: probe.stripped_fields ?? [],
-          }
-        : { kind: "verified" };
+  if (selection && selection !== active) {
+    // Selected but NOT enabled — the fallback is visible for every protocol.
+    // A verdict is about one route: if it speaks another protocol it says
+    // nothing about this selection, and "re-verify this one" is the fix.
+    // A verdict without a `protocol` field predates D14 and can only have
+    // been about `Responses` — mirror the Rust read side.
+    if (probe && (probe.protocol ?? RESPONSES_PROTOCOL) !== selection) {
+      return { kind: "blocked", reason: "otherProtocol", detail: probe.reason };
     }
-    // Selected but not enabled. The reason comes from the verdict. A passing
-    // verdict that still did not become active means the projection and the
-    // verdict disagree, which is not something the UI can explain — fall back
-    // to "no usable verdict" rather than inventing a cause.
     switch (probe?.state) {
       case "failed":
         return {
@@ -169,13 +247,31 @@ export function deriveProtocolBadge(m: ModelProtocolFields): ProtocolBadge {
       case "verified":
       case "degraded":
       case "unknown":
+        // A passing verdict that still did not become active means the
+        // projection and the verdict disagree, which is not something the UI
+        // can explain — fall back to "no usable verdict" rather than
+        // inventing a cause.
         return { kind: "blocked", reason: "unknown" };
       default:
         return { kind: "blocked", reason: "unverified" };
     }
   }
 
-  // No selection: the only thing left to say is what the offline data claims.
+  if (selection === RESPONSES_PROTOCOL) {
+    // Gate passed. `degraded` means it passed only after a D8 field trim —
+    // usable, but the user deserves to know (S7 renders the stripped list).
+    return probe?.state === "degraded"
+      ? {
+          kind: "degraded",
+          tiers: probe.tier_passed,
+          stripped: probe.stripped_fields ?? [],
+        }
+      : { kind: "verified" };
+  }
+
+  // No selection, or a non-Responses selection that took effect: the only
+  // thing left to say is what the offline data claims (the `R` chip speaks
+  // `Responses`, so a live Chat-Completions/Anthropic row shows nothing).
   return declared ? { kind: "declared" } : { kind: "none" };
 }
 
@@ -189,6 +285,15 @@ export interface ProbeEstimateInput {
   isNew?: boolean;
   /** A change that invalidates earlier verdicts for the whole provider. */
   configChanged?: boolean;
+  /**
+   * The provider-level protocol (`undefined` = not configured yet).
+   *
+   * ADR-103 D14: a row whose effective selection equals the provider-level
+   * protocol is the status quo and is never probed, so it must not be
+   * counted here either — otherwise the UI would announce real requests the
+   * save will not send.
+   */
+  providerProtocol?: string;
 }
 
 export interface ProbeEstimate {
@@ -201,20 +306,45 @@ export interface ProbeEstimate {
 /**
  * How many real requests a save will send (D12 / D11 save-button hint).
  *
- * D12 probes only the `responses` rows this write changed, and runs L3 once per
- * (provider, protocol) — the first such row pays for it. Measured against the
- * probe runner, the deep tier = L1 + L3 + one `function_call_output` replay
- * (3 requests), every other row = L1 only.
+ * D12 probes the rows this write changed whose effective selection the gate
+ * can reject, and D12.3 (as revised by D14) runs L3 once per
+ * **(provider, protocol)** — one deep representative *per protocol*. Measured
+ * against the probe runner, the deep tier = L1 + L3 + one
+ * `function_call_output` replay (3 requests), every other row = L1 only.
+ * So the total is `models + 2 × distinct probeable protocols`.
+ *
+ * ADR-103 D14 mirrors the Gateway's planning rule exactly:
+ * - a row whose selection **equals** the provider-level protocol is the
+ *   status quo → not probed;
+ * - a `responses` row is probed even when it matches (the D11 badge and the
+ *   D10 verdicts depend on it);
+ * - any other row that **overrides** the provider-level protocol is probed,
+ *   because the D14 gate has to verify the override before it takes effect;
+ * - a row whose effective selection has **no probe shape** (`google` /
+ *   `ollama`) is never planned, so it is never counted (D14.3).
  */
 export function estimateProbeRequests(rows: ProbeEstimateInput[]): ProbeEstimate {
   let models = 0;
+  const protocols = new Set<string>();
   for (const row of rows) {
-    if (row.nextSelected !== RESPONSES_PROTOCOL) continue;
+    const selected = row.nextSelected;
+    if (!selected || !isProbeableProtocol(selected)) continue;
+    const overridesProviderLevel =
+      row.providerProtocol !== undefined && selected !== row.providerProtocol;
+    const isResponses = selected === RESPONSES_PROTOCOL;
+    // The status quo needs no verdict; `responses` always does; an override
+    // does too (that is the D14 gate).
+    if (!overridesProviderLevel && !isResponses) continue;
     const changed =
       row.isNew ||
       row.configChanged === true ||
       row.previousSelected !== row.nextSelected;
-    if (changed) models += 1;
+    if (changed) {
+      models += 1;
+      // One deep representative per protocol (D12.3/D14) — the extra two
+      // requests are charged once per distinct protocol, not once per model.
+      protocols.add(selected);
+    }
   }
-  return { models, requests: models + (models > 0 ? 2 : 0) };
+  return { models, requests: models + protocols.size * 2 };
 }

@@ -1,9 +1,10 @@
 # ADR-103：支持 OpenAI Responses API 作为 provider shape
 
 - **编号**：ADR-103
-- **状态**：✅ 已接受（v0.3 拍板 / v0.4–v0.6 修正，2026-11-XX；S1–S10 已实施，分支 `feature/response_api`）
+- **状态**：✅ 已接受（v0.3 拍板 / v0.4–v0.8 修正，2026-11-XX；S1–S10 已实施，分支 `feature/response_api`）
 - **日期**：2026-11-XX
 - **修订**：
+  - **v0.8（2026-11-01，事故后修正）**——**协议覆盖一律走探测门控**（新增 D14，D1 / D12 / §3 同步）。动因：`minimax-cn-coding-plan`（provider 级 `anthropic`，`base_url = .../anthropic/v1`）的一个模型行带着模型级 `protocol_type: "openai"` 覆盖，而 v0.3 的 D1 gate **只卡 `Responses`**——其余协议「显式选择直接生效」。于是 Gateway 判出生效协议 `openai` + Anthropic 的 base_url，Runtime 打 `{base}/chat/completions`，MiniMax 那个端点只有 `/messages` → `404 page not found` → 4xx 通档 → 用户看到「Invalid request. Check model/tool config.」（**端点问题被说成参数问题**）。根因不是「覆盖写错了」，而是**平台把一句关于端点的断言当配置事实直接下发**。修正三件事：① **D1 gate 从「Responses 专用」推广为「覆盖专用」**——模型级选择与 provider 级不一致时，**MUST** 有一条**关于该协议**的通过判定才生效；② **判定 MUST 记录它关于哪个协议**（`ProtocolProbe.protocol`），A 协议的判定不得放行 B 协议的选择；③ **探测器 MUST 能说所选的协议**——新增 Chat Completions / Anthropic Messages 两种线协议形状（各自的请求体 / 包络 / 工具调用 / 鉴权头，Anthropic 用 `x-api-key` + `anthropic-version`），探测按**选择**选形状而非按 provider 级协议。连带：模型级 `base_url` 覆盖不再限 `Responses`（但选择被拒时不下发，避免「provider 级协议 + 被拒选择的 URL」这种错配端点）；provider 级协议为 `anthropic` 时前端**隐藏**协议下拉（只读文案）；前端「将发送 N 次真实请求」估算与 Gateway `plan_probes` 对齐。
   - **v0.7（2026-11-XX，实施后修正）**——**D8 裁剪白名单加入 `temperature`（白名单从 1 个字段扩到 2 个）**。动因：推理模型（OpenAI o 系语义、多家第三方实现）对 `temperature` 字段**本身**返 400（`'temperature' is not supported with this model`），而 Runtime 的 temperature 兜底链（`agent_config` → `manifest` → `DEFAULT_TEMPERATURE`）保证每个请求**必然携带**该字段——用户从未设置过 temperature，却收到「请调整模型设置」，而设置里根本没有 temperature 可调：错误上抛的路径对这类模型是死胡同。裁剪纪律不变：证据门控（400 点名该字段才裁）、按 `(provider, model)` 记入 `ResponsesCompat`、两次确认才固化、plain success 重置、命中必须 `warn!` 可见。原「静默改变采样行为」的不裁理由对这类端点不成立——端点已声明该字段无效，省略它不改变端点上任何可观察行为。`tool_choice` / `text.format` / `top_p` 维持不裁。
   - **v0.6（2026-11-XX，实施后修正）**——**reasoning effort 全链路收口**（新增 D13，D5 映射表、§3、§5、§7 同步）。三件事：① **`Off` 改为「不控制推理」= 省略 reasoning 参数**，两条线格式路径都不再发 `none`、也不发 `low`（旧的 completions `Off → "low"` 是缺陷：用户选「关闭」反而收到低档推理；`none` 则被 MiniMax M3.1-Flash 400）；② `ReasoningEffort` 补 `Minimal` / `XHigh`，`from_str_loose` 接受 catalog 的 `minimal`/`xhigh`/`x_high`/`default`/`none`（手改配置不再静默回落 `Auto`）；③ 档位集合改为**由模型自己声明**：`offline_providers.json` 的 `reasoning_options[].values` → `ModelInfo.reasoning_efforts` → MQTT `ModelCapabilities.reasoning_efforts` → 前端档位菜单 + Runtime 裁剪，`None` = 未知（自定义模型）时前端给通用五档 `low/medium/high/xhigh/max`、Runtime 不裁剪。附带删掉 core 侧死代码 `ReasoningEffort::to_openai_str`（与 `openai_reasoning_str` 语义相反，是映射漂移的温床）。
   - **v0.5（2026-11-XX，实施后修正）**——**探测基线的 `reasoning.effort` 改用跨厂商合法值 `low`**（原为 `none`）。`none` 是 MiniMax M3.1-Flash 唯一拒绝的**值**（该模型**支持** `reasoning`，effort 可取 `low`/`medium`/`high`/`xhigh`/`max`），而 400 点名 `reasoning` 字段会被判成「字段不支持」→ 裁剪 → 对一个完全支持推理的模型谎报 `degraded` + 「reasoning 被省略」。§4.4 D8 裁剪规则与 `degraded` 语义不变，只是基线不再用「某厂商恰好拒绝的值」。（v0.6 起用户主动选 `Off` 也改为省略该字段，见 v0.6 / D13。）
@@ -145,7 +146,11 @@
 | `Responses` | `verified` 或 `degraded` | **`Responses`** |
 | `Responses` | `failed` / `stale` / 缺失（未探测） | npm 推导默认（多为 `OpenAI` completions） |
 | 未手选（`None`） | 任意 | npm 推导默认 |
-| 其他手选值（Anthropic / Google / Ollama / OpenAI） | 任意 | 按手选值（探测不适用，无需 gate） |
+| 其他手选值（Anthropic / Google / Ollama / OpenAI） | 与 provider 级一致 | 按手选值（现状，端点本就在服务它，无需 gate） |
+| 其他手选值（与 provider 级**不一致** = 覆盖） | `verified` / `degraded`（且协议匹配） | 按手选值 |
+| 其他手选值（覆盖） | `failed` / `stale` / 缺失（未探测） | npm 推导默认 |
+
+> **D14 修订（v0.8）**：v0.3 的表把「其他手选值」整体划为「无需 gate」，其前提是「协议只是请求格式」。这个前提是错的——协议选择是**换一条路由**，路由存不存在只有问过才知道。覆盖 provider 级协议的模型级选择因此**同样走探测门控**，完整判定表见 **D14**。
 
 **为什么 gate 放在配置期，而不是运行期**（v0.3 的核心护栏）：
 
@@ -161,6 +166,7 @@
 
 - `resolve_protocol` 是生效协议的唯一裁决点（Gateway 侧），Runtime 与前端只消费结果（§3 红线 1）。
 - `protocol_type = Responses` 但 probe 不通过时，返回默认协议，**MUST NOT** 报错、**MUST NOT** panic、**MUST NOT** 猜测。
+- **D14**：模型级选择**覆盖** provider 级协议时，返回默认协议的条件同样适用——**MUST NOT** 让未经验证的覆盖生效（这是一条关于端点的断言）。
 - 未知 `shape` 值忽略（仅提示层）；未知 `protocol_probe` 值按「不通过」处理。
 - 探测失败 **MUST NOT** 阻塞保存（保存用户意图），**MUST NOT** 静默吞掉失败原因。
 
@@ -482,9 +488,11 @@ flowchart LR
 
 | 动作 | 探测范围 |
 |---|---|
-| 保存 provider（`POST/PUT /api/providers`） | 仅**本次变更行**中 `protocol_type == Responses` 的模型；未变更行沿用缓存 |
+| 保存 provider（`POST/PUT /api/providers`） | 仅**本次变更行**中生效选择为 `Responses`、或**覆盖了 provider 级协议**的模型；未变更行沿用缓存 |
 | 模型协议下拉切换为 `Responses`（D11 位置 3，随保存提交） | 该模型 |
 | 用户点「重新验证」/ `?force=true` | 指定模型或该 provider 下全部 Responses 模型 |
+
+> **D14 修订（v0.8）**：探测范围从「`protocol_type == Responses`」扩为「生效选择为 `Responses` **或** 覆盖了 provider 级协议」。后者正是 D14 gate 能拒绝的行——不给它们判定，覆盖就会绕过 gate 直接生效。与 provider 级协议**一致**的选择不需要判定（端点本就在服务它），故不探测。
 
 **执行语义**：
 
@@ -527,6 +535,68 @@ flowchart LR
 
 **为什么不在 Gateway 侧把非法档位改写成合法值**：Gateway 是通信与资源边界，不是请求语义的持有者；真正构造线上请求的是 Runtime，它必须在**同一个地方**（`build_chat_request`，与 `default_reasoning_effort` 解析同处）看到用户选择 + 模型支持集 + 最终裁剪结果，才能被一条单测完整覆盖。
 
+### D14 — 协议覆盖一律走探测门控（v0.8）
+
+**问题事实（2026-11-01 实测事故）**：provider `minimax-cn-coding-plan` 的 provider 级 `protocol_type` 是 `anthropic`、`base_url` 是 `https://api.minimax.cn/anthropic/v1`；某个模型行上带着模型级 `protocol_type: "openai"` 覆盖。ADR-103 v0.3 的 D1 gate **只对 `Responses` 设卡**，其余协议「显式选择直接生效」，于是：
+
+1. Gateway 把该模型的生效协议判成 `openai`（模型级优先），`base_url` 仍是 Anthropic 那个；
+2. Runtime 构造 `OpenAIProvider`，把请求发到 `{base}/chat/completions`；
+3. MiniMax 的 Anthropic 端点只有 `/messages`，网关默认 handler 回 `404 page not found`；
+4. 该 404 落进 4xx 通档，用户看到的文案是「Invalid request. Check model/tool config.」——**一个参数问题的说法，指向一个端点问题**。
+
+事故的本质不是「有个覆盖写错了」，而是**平台把一句关于端点的断言当成了配置事实直接下发**。协议选择从来不是「换个请求格式」，而是「换一条路由」；路由存不存在，只有问过才知道。
+
+**决策**：
+
+1. **D1 gate 从「Responses 专用」推广为「覆盖专用」**。判定改为：模型级选择**与 provider 级协议一致** → 现状，无需 gate（端点本来就在服务它）；**不一致** → 该选择是对 provider 级协议的覆盖，**MUST** 有一条**关于该协议**的通过判定才生效，否则回落 provider 级协议。
+
+   | 模型级选择 | 与 provider 级一致？ | `protocol_probe` | 生效协议 |
+   |---|---|---|---|
+   | `Responses` | — | `verified` / `degraded` | `Responses` |
+   | `Responses` | — | `failed` / `stale` / `unverified` / 缺失 | provider 级协议 |
+   | 未手选（`None`） | — | 任意 | provider 级协议 |
+   | 已知值 | **是** | 任意 | 该值（现状，无 gate） |
+   | 已知值 | **否** | `verified` / `degraded`（且协议匹配） | 该值 |
+   | 已知值 | **否** | 其他 | provider 级协议 |
+   | `Unknown` | — | 任意 | provider 级协议 + `warn!`（不猜） |
+
+2. **判定必须记录它关于哪个协议**。`ProtocolProbe` 新增 `protocol` 字段。一个判定是关于**一条路由**的陈述（"这个 base URL 的 `/chat/completions` 能应答且能完成工具往返"），对同一台机器上的另一条路由什么也没说。**MUST NOT** 用 A 协议的判定放行 B 协议的选择。字段缺失的历史判定按 `Responses` 读——那是它唯一可能关于的协议（D14 之前探测器只会说 Responses），这是事实不是猜测。
+
+3. **探测器 MUST 能说所选的协议**。探测从「只会 Responses」推广到三种线协议，各自有自己的请求体 / 响应包络 / 工具调用形状 / 鉴权头：
+
+   | 协议 | 路由 | 请求形状 | 工具调用 | 鉴权 |
+   |---|---|---|---|---|
+   | Responses | `{base}/responses` | `input` | `output[].function_call` | `Authorization: Bearer` |
+   | Chat Completions | `{base}/chat/completions` | `messages[]` | `choices[].message.tool_calls[]` | `Authorization: Bearer` |
+   | Anthropic Messages | `{base}/messages` | `messages[]` + 顶层 `system` | `content[]` 的 `tool_use` 块 | `x-api-key` + `anthropic-version` |
+
+   档位语义（L1 端点存在 / L2 用量形状 / L3 工具往返）与 `Responses` 探测完全一致，所以判定语义与 D1 gate 不需要为新协议另立一套。`Google` / `Ollama` / `Unknown` **没有**探测形状（平台分别走 OpenAI 兼容适配器与 Ollama 原生客户端，未知线格式永不猜），这三种选择**不参与**覆盖门控（它们不是对 provider 级协议的常见覆盖，且没有可验证的端点形状）。
+
+4. **探测按选择选形状，不按 provider 级协议**。`plan_probes` 的每行用**该行选择**对应的线协议去探测——因为那正是「若选择生效，Runtime 会打的那条路由」。若按 provider 级协议探测，判定的就是另一条路由，D14 的整个前提又塌了。
+
+5. **判定在 D12 层面按 `(provider, protocol)` 去重**。L3 工具往返是 `(provider, protocol)` 的属性，不是模型的属性：每种协议只有**一个**代表行跑 Deep，其余行跑 Standard 并继承代表的 L3 结论。**MUST NOT** 跨协议继承——Chat Completions 的工具往返结论对 Anthropic 行什么也没说。
+
+6. **模型级 `base_url` 覆盖跟着它的选择走**。覆盖过去只在 `Responses` 生效时下发，那是「Responses 专用 gate」的副产物，不是覆盖本身的属性——覆盖存在的理由就是「这个模型的端点和 provider 默认不一样」，这对三种线协议同样成立。同时：**选择被 gate 拒绝时，覆盖 MUST NOT** 下发（覆盖描述的是被拒的那个选择；把「provider 级协议」和「被拒选择的 URL」拼在一起，正好造出 D14 要消灭的那种错配端点）。
+
+7. **单一协议 provider 不需要选择**。provider 级协议是 `anthropic` 时，它只服务 Anthropic Messages 一条线格式，模型级选择无从谈起 → 前端 **MUST** 隐藏协议下拉（不是置灰，是隐藏），只读展示「跟随 provider」。`google` / `ollama` 不在此列：平台用别的适配器服务它们，模型级覆盖仍有表达意义。唯一的例外是**存量覆盖行**（§4.2 第 6 条）：模型行上仍带着与 provider 级不一致的选择时，下拉 **MUST** 照常渲染——否则那句覆盖既看不见也无从清理，「回落可见」的要求优先于本条的隐藏要求。
+
+8. **错误文案 MUST 区分「端点不存在」与「参数不对」**。`404` 且响应体是网关默认的 `404 page not found` / `unknown endpoint` 之类 → 归类 `EndpointUnavailable`，**不重试**，文案说「该端点不存在」而不是「检查参数」。这条不依赖 D14：D14 让这类事故更少发生，但**端点拼错 base_url 依然可能发生**，分类必须独立成立。
+
+**D14 对 D11 位置 3 的修订**：协议下拉的选项集扩为`跟随 provider` / `Chat Completions` / `Responses` / `Anthropic Messages`（`google` / `ollama` 不作为可选项——它们没有模型级覆盖的表达位置）；base_url 覆盖输入框的出现条件从「仅选 Responses」改为「有任何显式选择」（D14.6）。D11 表格里的那一行按此理解。
+
+**工程约束**：
+
+- 门控、判定、base_url 覆盖的下发 **MUST** 全在 Gateway（`resolve_protocol` 是唯一裁决点，Runtime 只消费结果）。
+- 前端 **MUST NOT** 自己推导协议；新增 `provider_protocol` 字段由 Gateway 投影，下拉显隐据此决定。
+- 前端的「将发送 N 次真实请求」估算 **MUST** 与 Gateway 的 `plan_probes` 规则一致，否则界面会预告 save 不会发的请求。
+
+**被否决的替代方案**：
+
+- ❌ *只对「会 404 的组合」设卡*（例如只在 Anthropic provider 上卡 OpenAI 选择）：组合是无限的，规则会退化成一张枚举表；且「协议选择 = 端点断言」这个事实不因 provider 而异。
+- ❌ *在 Runtime 侧兜底*（选错协议时自动回退到 provider 级协议）：Runtime 是消费端，它拿到的应当是已裁决的结果；让它自己兜底等于把裁决点复制一份到每个 Runtime。
+- ❌ *拒绝保存这类选择*：用户的选择是合法意图（也许他就是要用 Chat Completions），平台该做的是**验证**而不是**禁止**；且 D1 的既有语义是「意图保留、生效待验证」。
+- ❌ *用一次探测结果给所有协议背书*：判定是关于一条路由的（D14.2）。
+
 ---
 
 ## 3. 接口契约与数据模型变更汇总
@@ -552,6 +622,15 @@ flowchart LR
 | Gateway | `models_api.rs` `ModelInfo` / `enrich_model_from_offline` | + `reasoning_efforts`，从 catalog 的 `reasoning_options`（`type=="effort"`）提取（v0.6） | 可选字段；catalog 无该字段时保持 `None` |
 | Desktop | `lib/types.ts:1043` `ModelInfo` | + `shape?: string` + `protocol_active?: string` + `protocol_probe?: ProbeState` + `reasoning_efforts?: string[]` | 可选字段 |
 | Desktop | `cacheHitRate.ts` | Responses 归入 `"openai"` 缓存族 | 设计 23 §5.4 结论沿用 |
+| 域结构 | `protocol.rs` `ProtocolProbe` | **D14**：+ `protocol: Option<ProtocolType>`（该判定关于哪个协议；缺失按 `Responses` 读） | `#[serde(default, skip_serializing_if)]`，旧判定可读 |
+| Gateway 数据 | `models_api.rs` `resolve_effective_protocol` | **D14**：判定从「Responses 专用」改为「覆盖专用」——与 provider 级一致 → 直接生效；不一致 → 需**协议匹配**的通过判定 | 行为变更，见 D14 |
+| Gateway 数据 | `models_api.rs` `resolve_protocol` | **D14**：模型级 `base_url` 覆盖不再限 `Responses`；但选择被 gate 拒绝时**不下发**覆盖 | 行为变更，见 D14.6 |
+| Gateway 数据 | `models_api.rs` `ModelInfo` | **D14**：+ `provider_protocol: Option<String>`（provider 级协议的投影，前端据此隐藏下拉） | 新增可选字段 |
+| Gateway 探测 | `probe/wire_protocols.rs`（新） | **D14**：Chat Completions / Anthropic Messages 的探测请求体、响应包络断言、工具调用提取 | 新文件；`probe/wire.rs`（Responses）不动 |
+| Gateway 探测 | `probe/runner.rs` `ProbeProtocol` | **D14**：探测器按协议分发路由 / 请求体 / 断言 / 鉴权头（Anthropic 用 `x-api-key` + `anthropic-version`） | 内部重构，Responses 行为不变 |
+| Gateway 探测 | `probe/store.rs` `plan_probes` | **D14**：按**选择**选探测形状；只规划「gate 能拒绝的行」；L3 按 `(provider, protocol)` 去重 | 行为变更，见 D14.4/D14.5 |
+| Desktop | `lib/modelProtocol.ts` `showsProtocolDropdown` | **D14**：provider 级协议为 `anthropic` → 隐藏协议下拉（只读文案）；例外：存量覆盖行仍渲染（D14.7） | 前端行为变更 |
+| Desktop | `lib/modelProtocol.ts` `estimateProbeRequests` | **D14**：估算规则与 Gateway `plan_probes` 对齐（覆盖行计费、现状行不计费） | 估算数字变化 |
 
 **契约红线**：
 
@@ -589,6 +668,10 @@ sequenceDiagram
 3. **配置变更 → `protocol_probe` 标 `stale`**（provider 的 `base_url` / key / 模型列表任一变更），生效协议在重测通过前保持默认；**下一次保存即自动重测**（D12）。v0.2 的「手动 re-resolve 入口」因此删除——保存流程已覆盖该需求。
 4. **升级到 v0.3 的存量用户**：v0.2 期间人工选过 Responses 的配置，升级后 probe 缺失 → 生效回落默认 + 黄标提示「重新保存以验证」；**无需数据迁移脚本**。
 5. `provider_list.json` 的 `version` 递增沿用现有 `expected_version` 乐观并发机制（`provider_api.rs:141` ADR-059 §7.3），MUST NOT 绕过。
+6. **D14（v0.8）存量覆盖行的处理**：升级到 v0.8 时，**模型级选择覆盖了 provider 级协议**的行，其 `protocol_probe` 要么缺失、要么是 D14 之前写的（只可能是 `Responses` 判定）。两种情况在新的门控下都**不通过** → 生效协议回落 provider 级 → **行为回到「覆盖之前」的样子**，直到用户保存一次（探测通过则恢复，不通过则保持回落）。
+   - 这是**有意的**：那条覆盖本来就是一句未经检验的断言，2026-11-01 的事故正是它生效之后的样子。
+   - **MUST NOT** 为存量覆盖行自动补一次探测（探测是真实计费请求，且批量探测的时机不在保存流程里会破坏 D12 的「唯一常规探测入口」）。
+   - UI 上这些行显示黄标「已选择但未启用」+ 原因，与其他未通过门控的选择一致——回落是**可见**的，不是静默的。
 
 ### 4.3 灰度
 
@@ -673,6 +756,14 @@ sequenceDiagram
 - 现有 OpenAI / Anthropic / Google / Ollama 四条链路的 golden 请求体不变。
 - `CompatCache` 行为与键空间不变（D7.3）。
 - 未 opt-in 的 provider（含官方 `openai`）请求 URL 仍是 `{base}/chat/completions`。
+
+**D14（v0.8）新增用例**
+- **门控**：模型级选择覆盖 provider 级协议时，无判定 → 生效协议回落 provider 级（**这就是 2026-11-01 事故的回归用例**：Anthropic provider + `openai` 覆盖 → 生效协议仍是 `anthropic`）。
+- **判定与协议绑定**：A 协议的 `verified` 判定不得放行 B 协议的选择；判定缺失按 `Responses` 读。
+- **探测形状**：Chat Completions 选择 → 探测打 `{base}/chat/completions`；Anthropic 选择 → 探测打 `{base}/messages` 且带 `x-api-key` + `anthropic-version`。
+- **base_url 跟随选择**：覆盖生效 → 下发；覆盖被拒 → **不下发**（防止「provider 级协议 + 被拒选择的 URL」的错配端点）。
+- **L3 继承不跨协议**：Chat Completions 的工具往返结论不得落到 Anthropic 行上。
+- **前端**：provider 级协议为 `anthropic` → 协议下拉不渲染；估算的 N 与 Gateway `plan_probes` 一致。
 
 ---
 

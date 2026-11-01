@@ -30,9 +30,12 @@ pub mod runner;
 pub mod service;
 pub mod store;
 pub mod wire;
+pub mod wire_protocols;
 
 pub use cache::{PROBE_CACHE_TTL, ProbeCache};
-pub use runner::{PROBE_REQUEST_TIMEOUT, ProbeFailure, ProbeOutcome, ProbeRunner, ProbeTier};
+pub use runner::{
+    PROBE_REQUEST_TIMEOUT, ProbeFailure, ProbeOutcome, ProbeProtocol, ProbeRunner, ProbeTier,
+};
 pub use service::{PROBE_BATCH_BUDGET, ProbeReport, is_probeable, probe_one, run_save_time_probes};
 pub use store::{ProbePlanItem, apply_probe_outcome, mark_probes_stale, plan_probes};
 /// Fixtures shared by the probe module's unit tests.

@@ -9,7 +9,12 @@ import { ModelCapEditor } from "./ModelCapEditor";
 import { ModelProtocolEditor } from "./ModelProtocolEditor";
 import { ProtocolChip } from "./ProtocolChip";
 import { useTranslation } from "../../i18n/useTranslation";
-import { protocolOptionOf } from "../../lib/modelProtocol";
+import {
+  isProbeableProtocol,
+  protocolOfOption,
+  protocolOptionOf,
+  showsProtocolDropdown,
+} from "../../lib/modelProtocol";
 import type { ModelProtocolState } from "./useModelProtocolState";
 
 /** A capability filter chip toggle. */
@@ -396,6 +401,20 @@ export function ModelMultiSelect({
               // A caps-only card without capability data has nothing to show.
               if (!modelCaps && !protocols) return null;
               const badge = protocols && mi ? protocols.badgeFor(mi) : undefined;
+              const option =
+                protocols?.selections[modelId] ?? protocolOptionOf(mi?.protocol_selected);
+              // ADR-103 D14: a re-verify must probe the route the row's
+              // effective selection claims — the explicit choice, else the
+              // provider-level protocol when the row follows the data.
+              const verifyProtocol =
+                protocolOfOption(option) ?? mi?.provider_protocol;
+              // An incident row (stored override of a single-protocol provider)
+              // must stay visible and clearable, so the dropdown is not hidden
+              // while such an override exists.
+              const hasStoredOverride = Boolean(
+                mi?.protocol_selected &&
+                  mi.protocol_selected !== mi.provider_protocol,
+              );
               return (
                 <ModelCapEditor
                   key={modelId}
@@ -406,21 +425,32 @@ export function ModelMultiSelect({
                     protocols ? (
                       <ModelProtocolEditor
                         modelId={modelId}
-                        selection={
-                          protocols.selections[modelId] ?? protocolOptionOf(mi?.protocol_selected)
-                        }
+                        selection={option}
                         onSelectionChange={(next) => protocols.setSelection(modelId, next)}
                         baseUrl={protocols.baseUrls[modelId] ?? ""}
                         onBaseUrlChange={(next) => protocols.setBaseUrl(modelId, next)}
                         showBaseUrl={protocols.needsBaseUrl(modelId)}
+                        showProtocolDropdown={showsProtocolDropdown(
+                          mi?.provider_protocol,
+                          hasStoredOverride,
+                        )}
                         badge={badge ?? { kind: "none" }}
                         probe={mi?.protocol_probe}
                         outcome={protocols.outcomes[modelId]}
                         verifying={protocols.verifying === modelId}
-                        canVerify={Boolean(protocolProviderId)}
+                        // A protocol with no probe shape cannot be verified —
+                        // the button is disabled, not silently downgraded.
+                        canVerify={
+                          Boolean(protocolProviderId) &&
+                          isProbeableProtocol(verifyProtocol)
+                        }
                         onVerify={() => {
-                          if (protocolProviderId) {
-                            void protocols.verify(protocolProviderId, modelId);
+                          if (protocolProviderId && verifyProtocol) {
+                            void protocols.verify(
+                              protocolProviderId,
+                              modelId,
+                              verifyProtocol,
+                            );
                           }
                         }}
                       />

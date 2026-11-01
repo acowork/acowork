@@ -132,6 +132,20 @@ pub struct ModelInfo {
     /// participates in the D1 gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
+    /// The **provider-level** protocol of this provider: `"anthropic"`,
+    /// `"openai"`, `"responses"`, `"google"`, `"ollama"`.
+    ///
+    /// ADR-103 D14: the UI needs this to know whether a per-model protocol
+    /// dropdown is meaningful at all. A provider that speaks exactly one wire
+    /// protocol (Anthropic) has nothing to choose between, so the dropdown is
+    /// hidden for it.
+    ///
+    /// It is a **projection**, not a derivation: the frontend MUST NOT
+    /// re-derive it from offline data (D11 red line). `None` = the provider
+    /// is not configured yet (catalog browsing), in which case the frontend
+    /// shows the dropdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_protocol: Option<String>,
     /// The protocol the user hand-picked for this model (`provider_list.json`
     /// `models[].protocol_type`). `None` = "follow the data" (no selection).
     ///
@@ -1726,15 +1740,37 @@ fn derive_protocol_type(npm: Option<&str>) -> acowork_core::protocol::ProtocolTy
 /// re-probes, and network flapping cannot flip a model's protocol
 /// mid-conversation.
 ///
-/// Decision table (D1):
+/// Decision table (D1 + ADR-103 D14):
 ///
-/// | `choice` | `probe` | result |
-/// |---|---|---|
-/// | `Responses` | `verified` / `degraded` | `Responses` |
-/// | `Responses` | `failed` / `stale` / `unverified` / absent | `npm_default` |
-/// | `None` | any | `npm_default` |
-/// | other known value | any | the chosen value (no gate needed) |
-/// | `Unknown` (unrecognized wire value) | any | `npm_default` + warn (never guess) |
+/// | `choice` | differs from `npm_default`? | `probe` | result |
+/// |---|---|---|---|
+/// | `Responses` | — | `verified` / `degraded` | `Responses` |
+/// | `Responses` | — | `failed` / `stale` / `unverified` / absent | `npm_default` |
+/// | `None` | — | any | `npm_default` |
+/// | known value | **no** (same as default) | any | the chosen value (no gate needed) |
+/// | known value | **yes** | `verified` / `degraded` | the chosen value |
+/// | known value | **yes** | `failed` / `stale` / `unverified` / absent | `npm_default` |
+/// | `Unknown` (unrecognized wire value) | — | any | `npm_default` + warn (never guess) |
+///
+/// **Why a *differing* selection needs a probe (ADR-103 D14).** The gate used
+/// to apply only to `Responses`, on the assumption that the other protocols
+/// are "just wire formats" that any provider can speak. That assumption is
+/// false, and the failure is silent: an Anthropic provider whose base URL is
+/// `https://api.minimax.cn/anthropic/v1` has no `/chat/completions` route at
+/// all. Selecting `Chat Completions` on that model produced a 404 from the
+/// gateway's default handler — "404 page not found" — which the error
+/// classifier reported as "the request was malformed", sending the user
+/// hunting for a parameter that was never wrong.
+///
+/// A protocol selection is therefore a **claim about an endpoint**, and the
+/// only way to know whether the claim holds is to ask the endpoint. The probe
+/// is that question, and it is the same question the `Responses` gate already
+/// asked — which is why D14 generalises the gate instead of adding a second
+/// mechanism.
+///
+/// A selection that *matches* the provider-level protocol needs no probe: it
+/// is the status quo, the endpoint already serves it, and probing would bill
+/// every unchanged row for a verdict that cannot differ.
 ///
 /// There is deliberately **no global switch** in front of this gate: the
 /// selection is the user's own explicit act, and the probe is what confirms
@@ -1753,25 +1789,6 @@ pub fn resolve_effective_protocol(
     };
 
     match chosen {
-        ProtocolType::Responses => {
-            match probe {
-                // Probe verdict written by the save/probe path (D12) and
-                // still fresh: enable Responses.
-                Some(p) if p.gates_responses() => ProtocolType::Responses,
-                // Failed / stale / unverified / absent / unrecognized →
-                // fall back to the default. The fallback itself is visible
-                // via the UI yellow badge (D11); it is NOT a silent fallback.
-                other => {
-                    tracing::info!(
-                        probe_state = ?other.map(|p| &p.state),
-                        "resolve_protocol: 'responses' selected but probe does not pass the gate; \
-                         falling back to the npm-derived default '{}'",
-                        npm_default
-                    );
-                    npm_default
-                }
-            }
-        }
         // An unrecognized wire value: never guess a concrete protocol from
         // it — fall back to the npm-derived default (D1 MUST).
         ProtocolType::Unknown => {
@@ -1782,24 +1799,80 @@ pub fn resolve_effective_protocol(
             );
             npm_default
         }
-        // Anthropic / Google / Ollama / OpenAI: explicit selections take
-        // effect directly (probe does not apply, no gate).
-        other => other.clone(),
+        other => {
+            // The selection agrees with the provider-level protocol: this is
+            // the status quo, so no gate applies.
+            if *other == npm_default {
+                return other.clone();
+            }
+
+            // Protocols with no probe shape (`Google` / `Ollama`) take no
+            // part in the override gate (ADR-103 D14.3): the Runtime serves
+            // them through the compatible adapters, and there is no new
+            // route to ask about. Gating them anyway would make the override
+            // *permanently* unreachable — a silent fallback the ADR forbids.
+            if !crate::probe::is_probeable(other) {
+                return other.clone();
+            }
+
+            // The selection overrides the provider-level protocol. That is a
+            // claim about an endpoint, so it must be verified before it
+            // takes effect — by a verdict about **that** protocol (D14): a
+            // `Chat Completions` verdict says nothing about the Anthropic
+            // route.
+            match probe {
+                Some(p) if p.gates_protocol(other) => other.clone(),
+                verdict => {
+                    tracing::info!(
+                        selected = %other,
+                        npm_default = %npm_default,
+                        probe_state = ?verdict.map(|p| &p.state),
+                        probe_protocol = ?verdict.map(|p| p.protocol()),
+                        "resolve_protocol: model-level protocol selection overrides the \
+                         provider-level protocol but the probe does not pass the gate; \
+                         falling back to the provider-level default '{}'",
+                        npm_default
+                    );
+                    npm_default
+                }
+            }
+        }
     }
 }
 
-/// ADR-103 D2 — resolve the effective protocol (and per-model base URL
-/// override, when the Responses shape is in effect) for one model of a
-/// cached provider entry.
+/// ADR-103 D2/D14 — resolve the effective protocol (and per-model base URL
+/// override) for one model of a cached provider entry.
 ///
 /// `npm_default` is the provider-level `protocol_type` already derived from
 /// offline models.dev data when the provider entry was built. The
 /// per-model `protocol_type` / `protocol_probe` fields carry the user's
 /// selection and the Gateway probe verdict.
 ///
-/// Returns `(effective_protocol, model_base_url_override)`; the override is
-/// `Some` only when the effective protocol is `Responses` AND the model
-/// entry carries a non-empty `base_url`.
+/// Returns `(effective_protocol, model_base_url_override)`.
+///
+/// **ADR-103 D14 — when the override is delivered.** The override belongs to
+/// the *selection* that produced it, so it travels with that selection and
+/// only with it:
+///
+/// - the model has **no** explicit selection → the effective protocol is the
+///   provider-level one, and the override is the user's URL for *that*
+///   protocol → deliver it;
+/// - the model has an explicit selection and it **took effect** → the
+///   override is the URL for the selected protocol → deliver it;
+/// - the model has an explicit selection and the D1/D14 gate **rejected** it
+///   → the effective protocol is the provider-level one, but the override
+///   still describes the rejected selection → **do not** deliver it. Handing
+///   the Runtime the provider-level protocol *and* the rejected selection's
+///   URL would produce exactly the mismatched-endpoint 404 this ADR exists
+///   to prevent — the URL would come from one protocol and the request path
+///   from another.
+///
+/// The override used to be delivered only for `Responses`. That was tied to
+/// the Responses-only gate, not to any property of the override itself: a
+/// model-level `base_url` exists precisely because a model's endpoint
+/// differs from the provider default, which is true of the Anthropic and
+/// Chat-Completions shapes too (MiniMax's Responses endpoint is `/v1` while
+/// its Anthropic endpoint is `/anthropic/v1`).
 pub fn resolve_protocol(
     provider: &acowork_core::protocol::ProviderListItem,
     model_id: &str,
@@ -1807,8 +1880,6 @@ pub fn resolve_protocol(
     acowork_core::protocol::ProtocolType,
     Option<String>,
 ) {
-    use acowork_core::protocol::ProtocolType;
-
     let npm_default = provider.protocol_type.clone();
     let Some(model) = provider.models.iter().find(|m| m.id == model_id) else {
         // Model entry not found: fall back to provider level, never guess (D2).
@@ -1825,7 +1896,15 @@ pub fn resolve_protocol(
         model.protocol_probe.as_ref(),
         npm_default,
     );
-    let base_url = if effective == ProtocolType::Responses {
+
+    // The override travels with the selection that produced it (D14).
+    let selection_took_effect = match model.protocol_type.as_ref() {
+        Some(selection) => *selection == effective,
+        // No explicit selection: the effective protocol is the provider-level
+        // one, and the override was written for it.
+        None => true,
+    };
+    let base_url = if selection_took_effect {
         model
             .base_url
             .as_deref()
@@ -1862,6 +1941,10 @@ pub fn project_model_protocol(
     };
     model.protocol_selected = entry.protocol_type.as_ref().map(|p| p.to_string());
     model.protocol_probe = entry.protocol_probe.clone();
+    // ADR-103 D14: the provider-level protocol, so the UI can tell whether a
+    // per-model protocol dropdown is meaningful (a single-protocol provider
+    // has nothing to choose between).
+    model.provider_protocol = Some(provider.protocol_type.to_string());
     let (effective, _) = resolve_protocol(provider, &model.id);
     model.protocol_active = Some(effective.to_string());
 }
@@ -2450,6 +2533,20 @@ mod adr103_resolve_tests {
         ProtocolProbe {
             state,
             tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
+            protocol: Some(ProtocolType::Responses),
+            reason: None,
+            observed_base_url: None,
+            stripped_fields: Vec::new(),
+            probed_at: None,
+        }
+    }
+
+    /// A verdict about a specific protocol (ADR-103 D14).
+    fn probe_for(protocol: ProtocolType, state: ProbeState) -> ProtocolProbe {
+        ProtocolProbe {
+            state,
+            tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
+            protocol: Some(protocol),
             reason: None,
             observed_base_url: None,
             stripped_fields: Vec::new(),
@@ -2533,14 +2630,85 @@ mod adr103_resolve_tests {
 
     #[test]
     fn other_known_choices_take_effect_directly() {
-        // Non-Responses selections are not gated (D1 table row 4).
+        // ADR-103 D14: a selection that agrees with the provider-level
+        // protocol is the status quo — no gate applies, whatever the probe
+        // says.
         for p in [ProtocolType::Anthropic, ProtocolType::Google, ProtocolType::Ollama, ProtocolType::OpenAI] {
             assert_eq!(
-                resolve_effective_protocol(Some(&p), None, ProtocolType::OpenAI),
+                resolve_effective_protocol(Some(&p), None, p.clone()),
                 p.clone(),
                 "choice {p}"
             );
         }
+    }
+
+    #[test]
+    fn protocols_without_a_probe_shape_are_never_gated() {
+        // ADR-103 D14.3: `Google` / `Ollama` have no probe shape — they are
+        // never planned, never verified, so running them through the override
+        // gate would make them *permanently* rejected. The docs say they take
+        // no part in the gate; the code must agree, even with no verdict on
+        // the row.
+        for p in [ProtocolType::Google, ProtocolType::Ollama] {
+            assert_eq!(
+                resolve_effective_protocol(Some(&p), None, ProtocolType::Anthropic),
+                p.clone(),
+                "unprobeable override {p} takes effect ungated"
+            );
+            // A stale/failed verdict about another protocol cannot unmake a
+            // selection the gate never consulted.
+            let verdict = probe_for(ProtocolType::Responses, ProbeState::Failed);
+            assert_eq!(
+                resolve_effective_protocol(Some(&p), Some(&verdict), ProtocolType::Anthropic),
+                p.clone(),
+                "unprobeable override {p} ignores unrelated verdicts"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selection_that_overrides_the_provider_protocol_needs_a_passing_probe() {
+        // ADR-103 D14: the bug this closes. An Anthropic provider whose base
+        // URL has no `/chat/completions` route must not be driven down the
+        // Chat-Completions path on the strength of the selection alone — the
+        // selection is a claim about an endpoint, and the probe is the check.
+        let anthropic = ProtocolType::Anthropic;
+        let openai = ProtocolType::OpenAI;
+
+        // No verdict at all → fall back to the provider-level protocol.
+        assert_eq!(
+            resolve_effective_protocol(Some(&openai), None, anthropic.clone()),
+            anthropic,
+            "an unprobed selection must not take effect"
+        );
+
+        // A verdict about a *different* protocol must not enable it either:
+        // the two probes hit different routes on the same host.
+        let wrong_protocol = ProtocolProbe {
+            state: ProbeState::Verified,
+            tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
+            protocol: Some(ProtocolType::Anthropic),
+            reason: None,
+            observed_base_url: None,
+            stripped_fields: Vec::new(),
+            probed_at: None,
+        };
+        assert_eq!(
+            resolve_effective_protocol(Some(&openai), Some(&wrong_protocol), anthropic.clone()),
+            anthropic,
+            "a verdict about another protocol must not enable this selection"
+        );
+
+        // A verdict about the right protocol enables it.
+        let right_protocol = ProtocolProbe {
+            protocol: Some(ProtocolType::OpenAI),
+            ..wrong_protocol.clone()
+        };
+        assert_eq!(
+            resolve_effective_protocol(Some(&openai), Some(&right_protocol), anthropic),
+            ProtocolType::OpenAI,
+            "a matching, passing verdict enables the selection"
+        );
     }
 
     #[test]
@@ -2552,7 +2720,7 @@ mod adr103_resolve_tests {
     }
 
     #[test]
-    fn resolve_protocol_base_override_only_for_effective_responses() {
+    fn resolve_protocol_base_override_travels_with_the_selection_that_produced_it() {
         let url = "https://api.minimax.io/v1";
         // Effective Responses + non-empty override → Some.
         let p = cached(
@@ -2562,7 +2730,8 @@ mod adr103_resolve_tests {
         let (proto, base) = resolve_protocol(&p, "gpt-5");
         assert_eq!(proto, ProtocolType::Responses);
         assert_eq!(base.as_deref(), Some(url));
-        // A failed probe → the default protocol → override is NOT carried.
+        // A failed probe → the default protocol → override is NOT carried:
+        // the URL belongs to the rejected selection.
         let failed = cached(
             entry(Some(ProtocolType::Responses), Some(probe(ProbeState::Failed)), Some(url)),
             ProtocolType::Anthropic,
@@ -2578,6 +2747,26 @@ mod adr103_resolve_tests {
         let (proto, base) = resolve_protocol(&p2, "gpt-5");
         assert_eq!(proto, ProtocolType::Responses);
         assert_eq!(base, None);
+    }
+
+    #[test]
+    fn resolve_protocol_carries_the_override_for_a_non_responses_selection() {
+        // ADR-103 D14: the override is a property of the *selection*, not of
+        // the Responses shape. A Chat-Completions selection on an Anthropic
+        // provider with its own base URL must deliver that URL — otherwise
+        // the probe and the Runtime would hit different endpoints.
+        let url = "https://api.minimax.cn/v1";
+        let p = cached(
+            entry(
+                Some(ProtocolType::OpenAI),
+                Some(probe_for(ProtocolType::OpenAI, ProbeState::Verified)),
+                Some(url),
+            ),
+            ProtocolType::Anthropic,
+        );
+        let (proto, base) = resolve_protocol(&p, "gpt-5");
+        assert_eq!(proto, ProtocolType::OpenAI);
+        assert_eq!(base.as_deref(), Some(url));
     }
 
     #[test]
@@ -2616,6 +2805,7 @@ mod adr103_projection_tests {
         ProtocolProbe {
             state,
             tier_passed: vec!["L1".into(), "L2".into(), "L3".into()],
+            protocol: Some(ProtocolType::Responses),
             reason: reason.map(|r| r.to_string()),
             observed_base_url: None,
             stripped_fields: Vec::new(),

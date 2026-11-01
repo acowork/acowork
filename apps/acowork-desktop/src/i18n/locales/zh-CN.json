@@ -230,6 +230,8 @@
   "chatView": {
     "empty": "该聊天暂无消息",
     "routerFallback": "已自动分配任务",
+    "deliveryFailed": "消息未能送达 {{name}}，请重试或 @ 该 Agent",
+    "deliveryFailedNoTarget": "消息未能送达，请重试或 @ 该 Agent",
     "cardUnanswered": "未获应答：{{question}}",
     "cardAnsweredNote": "已应答：{{answer}}",
     "cardAnsweredInExec": "已在执行会话应答",
@@ -869,8 +871,10 @@
       "protocol": "线协议",
       "protocolFollowData": "跟随数据（默认）",
       "protocolChatCompletions": "Chat Completions",
-      "protocolBaseUrl": "Responses 端点地址（可选）",
-      "protocolBaseUrlHint": "留空则使用 provider 的地址；仅在启用 Responses 时生效。",
+      "protocolAnthropicMessages": "Anthropic Messages",
+      "protocolSingleProvider": "单一协议（Anthropic）— 跟随 provider",
+      "protocolBaseUrl": "端点地址覆盖（可选）",
+      "protocolBaseUrlHint": "留空则使用 provider 的地址；作用于当前行显式选择的协议。",
       "shapeResponses": "Responses",
       "probeButton": "重新验证",
       "probeRunning": "验证中…",
@@ -885,6 +889,7 @@
       "probeBlockedReason_failed": "验证请求失败",
       "probeBlockedReason_stale": "上次验证之后 provider 配置已变更",
       "probeBlockedReason_unknown": "没有可用的验证结果，请重新验证",
+      "probeBlockedReason_otherProtocol": "已有的验证结论针对的是其他协议 —— 请重新验证当前协议",
       "saveProbeVerified": "Responses 验证通过：{{models}}",
       "saveProbeDegraded": "Responses 可用，但该端点拒绝 {{fields}}，已省略后重试成功 — {{models}}",
       "saveProbeFailed": "Responses 验证失败 — {{details}}",
@@ -2243,6 +2248,16 @@
     "edit": "编辑",
     "restored": "群聊提示词已恢复默认",
     "restoreFailed": "恢复失败"
+  },
+  "groupResponder": {
+    "title": "默认接收 Agent",
+    "valueNone": "未指定",
+    "hint": "群里没有 @ 任何 Agent 的消息，会交给这个 Agent 处理。它再按自己的判定决定是直接回答，还是转给正在执行的任务。",
+    "readOnlyHint": "群里没有 @ 任何 Agent 的消息，会交给这个 Agent 处理。仅群主或管理员可以修改。",
+    "none": "不指定（不 @ 时只存档）",
+    "saved": "默认接收 Agent 已更新",
+    "saveFailed": "保存失败",
+    "missing": "该 Agent 已不在群里"
   },
   "groupSettings": {
     "title": "群设置"

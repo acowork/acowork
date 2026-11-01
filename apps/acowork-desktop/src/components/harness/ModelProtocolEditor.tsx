@@ -25,8 +25,16 @@ interface ModelProtocolEditorProps {
   /** base_url override (empty = inherit the provider's). */
   baseUrl: string;
   onBaseUrlChange: (next: string) => void;
-  /** Whether the base_url input is relevant (only for Responses). */
+  /** Whether the base_url input is relevant (row has an explicit selection). */
   showBaseUrl: boolean;
+  /**
+   * Whether the protocol dropdown is meaningful (ADR-103 D14).
+   *
+   * A provider that speaks exactly one wire protocol (Anthropic) has nothing
+   * to choose between per model, so the dropdown is hidden and the protocol
+   * is simply the provider's.
+   */
+  showProtocolDropdown: boolean;
   /** Badge projected from the stored fields + this dialog's pending choice. */
   badge: ProtocolBadge;
   /** Stored probe verdict, for the "last verified" line. */
@@ -52,6 +60,7 @@ export function ModelProtocolEditor({
   baseUrl,
   onBaseUrlChange,
   showBaseUrl,
+  showProtocolDropdown,
   badge,
   probe,
   outcome,
@@ -65,22 +74,41 @@ export function ModelProtocolEditor({
   return (
     <div className="mt-1.5 border-t border-border-divider pt-1.5" data-model-id={modelId}>
       <div className="flex gap-2">
-        <div className="flex-1">
-          <label className="mb-0.5 block text-xs text-text-tertiary">
-            {t("harness.protocol")}
-          </label>
-          <Dropdown
-            value={selection}
-            onChange={(v) => onSelectionChange(v as ProtocolOption)}
-            options={[
-              // D11 red line: `Responses` is offered for every model, whether
-              // or not the offline data tagged it.
-              { value: "follow", label: t("harness.protocolFollowData") },
-              { value: "openai", label: t("harness.protocolChatCompletions") },
-              { value: "responses", label: t("harness.shapeResponses") },
-            ]}
-          />
-        </div>
+        {showProtocolDropdown ? (
+          <div className="flex-1">
+            <label className="mb-0.5 block text-xs text-text-tertiary">
+              {t("harness.protocol")}
+            </label>
+            <Dropdown
+              value={selection}
+              onChange={(v) => onSelectionChange(v as ProtocolOption)}
+              options={[
+                // D11 red line: `Responses` is offered for every model, whether
+                // or not the offline data tagged it.
+                { value: "follow", label: t("harness.protocolFollowData") },
+                { value: "openai", label: t("harness.protocolChatCompletions") },
+                { value: "responses", label: t("harness.shapeResponses") },
+                // D14: the probe speaks the Messages shape too, so this is a
+                // verifiable claim, not an untestable wish.
+                { value: "anthropic", label: t("harness.protocolAnthropicMessages") },
+              ]}
+            />
+          </div>
+        ) : (
+          // ADR-103 D14: a single-protocol provider (Anthropic) has nothing to
+          // choose between. The dropdown is replaced by a read-only label, so
+          // the row does not look like it lost a control by mistake. (A row
+          // that still carries a stored override renders the dropdown instead
+          // — the override must stay visible and clearable.)
+          <div className="flex-1">
+            <label className="mb-0.5 block text-xs text-text-tertiary">
+              {t("harness.protocol")}
+            </label>
+            <p className="rounded border border-border-divider px-2 py-1 text-xs text-text-secondary">
+              {t("harness.protocolSingleProvider")}
+            </p>
+          </div>
+        )}
         <div className="flex items-end">
           <button
             type="button"

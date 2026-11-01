@@ -19,6 +19,7 @@ function renderEditor(overrides: Partial<Parameters<typeof ModelProtocolEditor>[
     baseUrl: "",
     onBaseUrlChange: vi.fn(),
     showBaseUrl: false,
+    showProtocolDropdown: true,
     badge: { kind: "none" } as const,
     verifying: false,
     onVerify: vi.fn(),
@@ -85,5 +86,29 @@ describe("ModelProtocolEditor", () => {
     const { props } = renderEditor();
     fireEvent.click(screen.getByRole("button", { name: i18n.t("harness.probeButton") }));
     expect(props.onVerify).toHaveBeenCalledTimes(1);
+  });
+
+  // ADR-103 D14: a single-protocol provider has nothing to choose between,
+  // so the dropdown is replaced by a read-only statement.
+  it("hides the dropdown for a single-protocol provider", () => {
+    renderEditor({ showProtocolDropdown: false });
+    expect(screen.queryByText(i18n.t("harness.shapeResponses"))).toBeNull();
+    expect(screen.getByText(i18n.t("harness.protocolSingleProvider"))).toBeTruthy();
+    // The re-verify action stays — the provider-level protocol (Anthropic)
+    // has a probe shape of its own. Which protocol to probe is decided by the
+    // caller (`ModelMultiSelect`), not here.
+    expect(screen.getByRole("button", { name: i18n.t("harness.probeButton") })).toBeTruthy();
+  });
+
+  it("keeps the dropdown when the provider protocol is unknown", () => {
+    renderEditor({ showProtocolDropdown: true });
+    expect(screen.getByText(i18n.t("harness.shapeResponses"))).toBeTruthy();
+  });
+
+  it("offers the Anthropic Messages option", () => {
+    // ADR-103 D14: the probe speaks the Messages shape, so the UI can select
+    // it — an untestable claim would leave the new probe line unreachable.
+    renderEditor();
+    expect(screen.getByText(i18n.t("harness.protocolAnthropicMessages"))).toBeTruthy();
   });
 });

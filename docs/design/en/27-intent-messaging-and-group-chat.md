@@ -370,7 +370,7 @@ The difference between one-to-one and group conversations is in **behaviour, not
 
 | Behaviour | One-to-one (user-Agent / Agent-Agent / user-user) | Group chat |
 |---|---|---|
-| Trigger | Every `user_message` is delivered to the Agent participant | Delivered only on an explicit @Agent (§5.3.1) |
+| Trigger | Every `user_message` is delivered to the Agent participant | Delivered to the @-mentioned agents; an un-addressed message goes to the group's `default_responder` (archive-only when none is configured — ADR-105 / §5.3.1) |
 | Target resolution | The single Agent participant in the session; no @ needed | The client resolves @ into an explicit list of instance ids |
 | Who can answer a card | The human participants of the session | The author of the human message that triggered the turn (§5.5.4) |
 
@@ -589,6 +589,15 @@ Mention parsing must produce an explicit list of target Agent instances, rather 
 
 In the group-chat case the conversation owner is that human message: an Agent's response is written back to the group Chat session and rendered to people, **and it @mentions nobody, so it wakes no Agent**. Hand-off between Agents is not performed by Intent — a human decides whether to @ the next one (the corollary of §5.4.5 R5).
 
+**An un-addressed message goes to the group's default responder (ADR-105).** "The agent just spoke and the human answers it" is the most frequent interaction of all, and under the rule above it was archive-only — nobody was woken and the human had to re-send with an @. The group Chat session therefore carries an optional `default_responder` (one agent participant of that group):
+
+- A group send has exactly one entry, `POST /api/intents/mentions`. `targets: []` is a **positive instruction** ("you decide"), no longer a malformed request: with @ targets are delivered as given, with none the message goes to `default_responder`.
+- A group with no `default_responder` keeps the original behaviour: archive only, answering `{"routed": "archived", "results": []}`. A group of humans never needs one.
+- Auto-routing is an independent fact on the row: `meta.mentions` keeps recording only the names the human typed, and the automatic target goes into `meta.auto_routed_to`. The wait line (§5.5) keys on it, so no @ chip appears because of a routing decision.
+- The write is owner-or-admin and the target must be a current typed agent participant; the field is cleared when that member leaves or the roster is re-synced, and re-validated before every delivery (`live_default_responder`), so a stale id degrades to "not configured" instead of routing into the void.
+- A failed delivery lands a `system_notice` (`notice_type: "delivery_failed"`, `in_reply_to` naming the human row, empty body — each surface owns the wording), and that receipt ends the wait line: the failure must be visible.
+- The chosen agent still runs its own Chat Router (§5.4.1): this mechanism names the first receiver only, never the execution session.
+
 #### 5.3.2 Group-Chat History
 
 A project group chat records:
@@ -805,7 +814,7 @@ Between sending a message and the Agent's reply being stored there can be severa
 
 **While running: one derived wait line (never persisted).**
 
-1. **The test** is the only durable evidence there is: **the newest `user_message` that actually asked an agent something has no terminal answer yet**. "Did this row wake an agent" is itself a fact on the row: a row written by `/api/intents/chat-message` carries in `to` the agent it was delivered to (1:1 and a card answer ride it), and the §5.3.1 group fan-out writes ONE broadcast row (`to` empty) naming the mentioned agents in `meta.mentions`; everything else — a `user_user` DM, an un-@'d group remark — goes through the archive-only write entry, whose `to` is empty and which carries no mentions and wakes nobody. So the line can only open on a row that opened an agent turn, and **a chat with no Agent participant at all (a DM, a humans-only group) never shows it**, not even inside `sending` — nobody is coming back with an answer (the live defect this closes: a DM shimmering at the bottom forever from the moment it was opened). The frontend reads no live execution state, adds no MQTT channel, and changes no session-list API.
+1. **The test** is the only durable evidence there is: **the newest `user_message` that actually asked an agent something has no terminal answer yet**. "Did this row wake an agent" is itself a fact on the row: a row written by `/api/intents/chat-message` carries in `to` the agent it was delivered to (1:1 and a card answer ride it), and the §5.3.1 group fan-out writes ONE broadcast row (`to` empty) naming the mentioned agents in `meta.mentions`; an un-@'d group remark takes the same entry (ADR-105) and, when the group has a default responder, records the automatic target in `meta.auto_routed_to`, which is what opens the wait line — while a group with no responder, and every `user_user` DM, is archive-only: `to` empty, no mentions, no auto-route, nobody woken. So the line can only open on a row that opened an agent turn, and **a chat with no Agent participant at all (a DM, a humans-only group) never shows it**, not even inside `sending` — nobody is coming back with an answer (the live defect this closes: a DM shimmering at the bottom forever from the moment it was opened). The frontend reads no live execution state, adds no MQTT channel, and changes no session-list API.
 2. **It ends** when an answering terminal `agent_message` (`in_reply_to` match), an OPEN `interaction_request` (the ball is with the human), or a newer human message that opens an agent turn of its own appears after it. An un-@'d aside neither ends nor opens the wait — it is no turn's answer, and it does not cancel a task still running. It also shows while the send itself is still in flight over HTTP (the row has not landed yet) — provided the chat has an agent — otherwise there would still be a blank between "press send" and "row lands".
 3. **One wording, no states.** There is only "working on it" — queued / round-open / tool-running are not distinguishable from the frontend, and distinguishing them would be guessing. Single chat shows "{{name}} is working on it…"; group chat does not name an Agent (naming would mislead with several of them) and shows "Working on it…". It carries the same scrolling text shimmer as "running tool", so the user feels someone is working.
 4. **Only at the tail**: when a locate has parked the window mid-history (newer pages exist) there is no "newest message" to speak of, so nothing renders.

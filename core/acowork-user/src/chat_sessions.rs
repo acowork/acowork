@@ -122,6 +122,16 @@ impl SessionKind {
             SessionKind::AgentAgent => "agent_agent",
         }
     }
+
+    /// The multi-party kinds — the ones with a group prompt, group
+    /// governance and (ADR-105) a default responder.
+    ///
+    /// `user_user` is deliberately **not** one of them: a two-human chat has
+    /// no agent to hand an un-addressed message to, so it has nothing to
+    /// configure.
+    pub fn is_group(self) -> bool {
+        matches!(self, SessionKind::UserGroup | SessionKind::ProjectGroup)
+    }
 }
 
 /// Identity type of a session participant (design 27 §8.1). The single
@@ -267,6 +277,22 @@ pub struct IntentMeta {
     /// fan-out is a field, not extra rows). Empty = no mentions.
     #[serde(default)]
     pub mentions: Vec<String>,
+    /// The group's **default responder** this `user_message` was routed to
+    /// without being addressed (ADR-105, design 27 §5.3.1 revision).
+    ///
+    /// Deliberately *not* folded into [`Self::mentions`]: `mentions` is what
+    /// the human typed, and the transcript draws a chip per entry — an
+    /// auto-routed target there would put a name in the sender's mouth. This
+    /// field is the separate fact "the group's responder took this one", which
+    /// is exactly what the Chat surface keys the in-flight wait line on: a
+    /// `user_message` with no mentions otherwise opens no turn at all (see the
+    /// desktop's `opensAgentTurn`), so the wait line — and with it any sign
+    /// that the message was picked up — never appeared.
+    ///
+    /// Declared here because undeclared meta keys are silently dropped at this
+    /// storage boundary (same trap as [`Self::task_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_routed_to: Option<String>,
     /// For a `system_notice`: which notice this is. `system_notice` is
     /// legacy-only now (ADR-100 revision stopped writing routing milestones);
     /// `interaction_resolved` and the older dispatch/start/fallback values
@@ -448,6 +474,25 @@ pub struct ChatSession {
     /// legacy row deserialises without an owner rather than failing to load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// The group's **default responder** (ADR-105 / design 27 §5.3.1 revision):
+    /// the agent instance an un-addressed human message in this group is
+    /// delivered to when nobody was @-mentioned.
+    ///
+    /// A group message without an @ used to be archive-only, so a human who
+    /// simply answered the agent that had just spoken got silence. This field
+    /// is that missing rule's only state: `Some(agent_instance_id)` = deliver
+    /// there, `None` = keep the archive-only behaviour (the historical rule, and
+    /// the only sane default for a group of humans).
+    ///
+    /// It is *not* a router and *not* a second session — it names one existing
+    /// agent participant. The chosen agent then runs its own Chat Router, so
+    /// "who answers" stays a per-agent semantic decision (ADR-099). Group kinds
+    /// only; governed like every other group mutation (owner-or-admin), written
+    /// through [`set_default_responder`], and cleared when the named agent
+    /// leaves the group ([`remove_participant`]) or the roster is re-synced
+    /// without it ([`sync_group`]) so a stale id can never route into the void.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_responder: Option<String>,
     /// The Chat surface's last seed pick, persisted server-side (design 27
     /// §4.5). `None` = the user never chose one on this pair's surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -593,7 +638,7 @@ pub const MAX_CHAT_MD_BYTES: usize = acowork_core::chat_prompt::MAX_CHAT_PROMPT_
 /// Kinds whose chat surface carries a group prompt file. 1:1 kinds do not:
 /// a DM uses the agent's own package `prompts/chat.md` (debug panel).
 fn carries_chat_md(kind: SessionKind) -> bool {
-    matches!(kind, SessionKind::UserGroup | SessionKind::ProjectGroup)
+    kind.is_group()
 }
 
 /// Load a group session's `chat.md` from disk, reading at most
@@ -853,6 +898,7 @@ fn write_new(
         participants: participants.to_vec(),
         title: title.to_string(),
         owner: owner.map(str::to_string),
+        default_responder: None,
         session_config: None,
         project_id: project_id.map(str::to_string),
         repo: None,
@@ -1337,6 +1383,82 @@ pub fn transfer_owner(
     session.owner = Some(new_owner.to_string());
     save(&dir, &session)?;
     Ok(session)
+}
+
+/// Set (or clear) a group's default responder — the agent an un-addressed
+/// human message is delivered to (ADR-105, design 27 §5.3.1 revision).
+///
+/// `None` restores the historical archive-only behaviour: the group's agents
+/// stay quiet unless someone @-mentions them.
+///
+/// Validation is the point of this function, so all of it happens on the
+/// locked snapshot, in one place, for every caller (HTTP surface and any
+/// future internal path):
+///
+/// - participation first — a non-member gets `not_a_participant` (the HTTP
+///   layer turns that into the hidden 404, never a 403);
+/// - group kinds only — a `user_agent`/`user_user`/`agent_agent` session has
+///   no group surface to configure and answers with `not_a_group_session`;
+/// - owner-or-admin governance, same gate as every other group mutation
+///   ([`can_govern_group`], ADR-098);
+/// - the named agent must be a **typed agent participant** right now. A human
+///   id, an untyped legacy row, or an id that is not in the roster is refused
+///   rather than stored: this field is the whole routing table for a message
+///   nobody addressed, so an unvalidated value is a message that goes nowhere.
+///
+/// Writing the same value again is idempotent but still saves nothing — the
+/// caller gets the session row back either way, so the panel can adopt the
+/// server's copy as the source of truth.
+pub fn set_default_responder(
+    data_dir: &Path,
+    session_id: &str,
+    responder: Option<&str>,
+    who: &str,
+    is_admin: bool,
+) -> Result<ChatSession, String> {
+    validate_session_id(session_id)?;
+    let wanted = responder.map(str::trim).filter(|r| !r.is_empty());
+    if wanted.is_some_and(|r| r.contains('/') || r.contains('\\')) {
+        return Err("responder id is not a valid identifier".to_string());
+    }
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let mut session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    if !session.kind.is_group() {
+        return Err("not_a_group_session".to_string());
+    }
+    if !can_govern_group(&session, who, is_admin) {
+        return Err("not_authorized".to_string());
+    }
+    if let Some(agent) = wanted
+        && !is_agent_participant(&session, agent)
+    {
+        return Err("the default responder must be an agent member of this group".to_string());
+    }
+    if session.default_responder.as_deref() == wanted {
+        return Ok(session);
+    }
+    session.default_responder = wanted.map(str::to_string);
+    save(&dir, &session)?;
+    Ok(session)
+}
+
+/// Is `id` a **typed** agent participant of this session?
+///
+/// Typed is load-bearing: `ParticipantIdentity::Agent` is the only evidence a
+/// row carries that the id is an agent instance rather than a human account or
+/// an untyped legacy id. The default responder needs that evidence (ADR-105) —
+/// "who answers" cannot be a human, and guessing from an untyped row is exactly
+/// the kind of heuristic that silently routes a message to the wrong party.
+fn is_agent_participant(session: &ChatSession, id: &str) -> bool {
+    session
+        .participants
+        .iter()
+        .any(|p| p.id == id && p.identity == Some(ParticipantIdentity::Agent))
 }
 
 /// Pair index file: sorted participant-pair key → agent-agent session id.
@@ -2436,13 +2558,23 @@ pub fn sync_group(
         }
     }
     let roster_changed = s.participants != before;
+    // ADR-105: a roster sync that drops the default responder's agent clears
+    // the role in the same write (same rule as `remove_participant`). PM owns
+    // the roster, so this is the path a project member leaves by.
+    let responder_cleared = s
+        .default_responder
+        .as_deref()
+        .is_some_and(|r| !s.participants.iter().any(|p| p.id == r));
+    if responder_cleared {
+        s.default_responder = None;
+    }
     // PM re-asserts the project owner on the same call, so a transfer that
     // leaves the roster intact (the old owner stays on as a member) still
     // reaches the chat domain — otherwise the new owner would keep reading
     // `editable: false` on their own group prompt.
     let owner_changed = set_owner_if_changed(&mut s, owner);
     let title_changed = set_title_if_changed(&mut s, title);
-    if roster_changed || owner_changed || title_changed {
+    if roster_changed || responder_cleared || owner_changed || title_changed {
         save(&dir, &s)?;
         if roster_changed {
             reindex(data_dir, &s.session_id, Some(&before), &s.participants)?;
@@ -2564,6 +2696,14 @@ pub fn remove_participant(
     s.participants.retain(|p| p.id != participant_id);
     if s.participants.len() < min_participants {
         return Err("a group must keep at least two members".to_string());
+    }
+    // ADR-105: the responder is a *member* by construction, so removing the
+    // member removes the role in the same write. Leaving the id behind would
+    // keep a surface pointing at somebody who is no longer in the group; the
+    // Gateway re-validates before every delivery, but the stored fact must not
+    // outlive the membership it names.
+    if s.default_responder.as_deref() == Some(participant_id) {
+        s.default_responder = None;
     }
     save(&dir, &s)?;
     reindex(data_dir, session_id, Some(&before), &s.participants)?;
@@ -4998,5 +5138,139 @@ mod tests {
         let mut rows = vec![load(&dir, &g.session_id).unwrap()];
         attach_group_previews(&dir, &mut rows);
         assert_eq!(rows[0].last_message_preview.as_deref(), Some("second tail"));
+    }
+    /// ADR-105: the default responder is a validated *role on a member*, not a
+    /// free-form id. Pins the four gates — group kind, participant, governance,
+    /// typed agent — plus the two lifecycle edges that could otherwise leave a
+    /// stale id behind (member removal, PM roster sync).
+    #[test]
+    fn default_responder_is_validated_and_cleared_with_its_member() {
+        let dir = temp_dir();
+        let members = [
+            Participant::new("u-a", ParticipantIdentity::Human),
+            Participant::new("agent-1", ParticipantIdentity::Agent),
+            Participant::new("agent-2", ParticipantIdentity::Agent),
+        ];
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &members,
+            "G",
+            Some("u-a"),
+            None,
+            1,
+        )
+        .expect("group");
+        assert_eq!(g.default_responder, None, "unset by default");
+
+        // Owner sets it; the stored row is the response.
+        let set = set_default_responder(&dir, &g.session_id, Some("agent-1"), "u-a", false)
+            .expect("owner sets the responder");
+        assert_eq!(set.default_responder.as_deref(), Some("agent-1"));
+        assert_eq!(
+            load(&dir, &g.session_id).unwrap().default_responder.as_deref(),
+            Some("agent-1"),
+            "durable, not a response-only echo"
+        );
+
+        // A plain member may read but not govern.
+        assert_eq!(
+            set_default_responder(&dir, &g.session_id, Some("agent-2"), "agent-1", false)
+                .unwrap_err(),
+            "not_authorized"
+        );
+        // An admin may (ADR-098 governance) — but still only from inside the
+        // group: participation is the entry permission on every group route, a
+        // stranger gets the hidden 404 even with the admin role.
+        assert_eq!(
+            set_default_responder(&dir, &g.session_id, Some("agent-2"), "u-x", true).unwrap_err(),
+            "not_a_participant"
+        );
+        add_participant(
+            &dir,
+            &g.session_id,
+            &Participant::new("u-admin", ParticipantIdentity::Human),
+            1,
+        )
+        .expect("invite admin");
+        assert!(set_default_responder(&dir, &g.session_id, Some("agent-2"), "u-admin", true).is_ok());
+
+        // A human member is not a responder; neither is a stranger, and both
+        // are refused on the snapshot rather than stored.
+        assert!(set_default_responder(&dir, &g.session_id, Some("u-a"), "u-a", false).is_err());
+        assert!(
+            set_default_responder(&dir, &g.session_id, Some("ghost"), "u-a", false).is_err()
+        );
+        // A non-member learns nothing about existence.
+        assert_eq!(
+            set_default_responder(&dir, &g.session_id, None, "stranger", false).unwrap_err(),
+            "not_a_participant"
+        );
+
+        // 1:1 kinds have no group surface to configure.
+        let pair = pair_session(&dir);
+        assert_eq!(
+            set_default_responder(&dir, &pair.session_id, Some("agent-1"), "human-1", false)
+                .unwrap_err(),
+            "not_a_group_session"
+        );
+
+        // A legacy untyped participant is not evidence of an agent.
+        let legacy = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u-b", ParticipantIdentity::Human),
+                Participant::untyped("agent-legacy"),
+            ],
+            "L",
+            Some("u-b"),
+            None,
+            1,
+        )
+        .unwrap();
+        assert!(
+            set_default_responder(&dir, &legacy.session_id, Some("agent-legacy"), "u-b", false)
+                .is_err(),
+            "untyped ids cannot be proven to be agents"
+        );
+
+        // Removing the responder's member clears the role in the same write.
+        set_default_responder(&dir, &g.session_id, Some("agent-1"), "u-a", false).unwrap();
+        let after = remove_participant(&dir, &g.session_id, "agent-1", 2, false, Some(("u-a", false)))
+            .expect("owner removes a member");
+        assert_eq!(after.default_responder, None);
+        assert_eq!(load(&dir, &g.session_id).unwrap().default_responder, None);
+
+        // PM's roster sync is the other path a member leaves by.
+        let proj = sync_group(
+            &dir,
+            "proj-resp",
+            &[
+                Participant::new("u-a", ParticipantIdentity::Human),
+                Participant::new("agent-1", ParticipantIdentity::Agent),
+            ],
+            "P",
+            Some("u-a"),
+            1,
+        )
+        .unwrap();
+        set_default_responder(&dir, &proj.session_id, Some("agent-1"), "u-a", false).unwrap();
+        let synced = sync_group(
+            &dir,
+            "proj-resp",
+            &[Participant::new("u-a", ParticipantIdentity::Human)],
+            "P",
+            Some("u-a"),
+            2,
+        )
+        .unwrap();
+        assert_eq!(synced.default_responder, None, "roster sync clears the role");
+
+        // Clearing explicitly is the documented way back to archive-only.
+        let g2 = set_default_responder(&dir, &g.session_id, Some("agent-2"), "u-a", false).unwrap();
+        assert_eq!(g2.default_responder.as_deref(), Some("agent-2"));
+        let cleared = set_default_responder(&dir, &g.session_id, Some("  "), "u-a", false).unwrap();
+        assert_eq!(cleared.default_responder, None, "blank means clear");
     }
 }
