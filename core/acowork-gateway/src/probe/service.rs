@@ -31,7 +31,9 @@ use chrono::Utc;
 
 use crate::http::routes::{ApiError, AppState};
 use crate::probe::cache::ProbeCache;
-use crate::probe::runner::{ProbeFailure, ProbeOutcome, ProbeRunner, ProbeTier, log_probe_audit};
+use crate::probe::runner::{
+    ProbeFailure, ProbeOutcome, ProbeProtocol, ProbeRunner, ProbeTier, log_probe_audit,
+};
 use crate::probe::store::{apply_probe_outcome, mark_probes_stale, plan_probes};
 
 /// Total wall-clock budget for one save's probe batch (D10.1).
@@ -177,7 +179,9 @@ pub async fn run_save_time_probes(
         plan.truncate(MAX_PROBES_PER_SAVE);
     }
     let mut reports: Vec<ProbeReport> = Vec::with_capacity(plan.len());
-    let mut verdicts: Vec<(String, ProbeOutcome)> = Vec::with_capacity(plan.len());
+    // (model, protocol the verdict is about, outcome) — the protocol is part
+    // of the verdict (ADR-103 D14): a verdict is about one wire protocol.
+    let mut verdicts: Vec<(String, ProbeProtocol, ProbeOutcome)> = Vec::with_capacity(plan.len());
     let deadline = Instant::now() + PROBE_BATCH_BUDGET;
 
     let runner = ProbeRunner::new();
@@ -193,10 +197,10 @@ pub async fn run_save_time_probes(
         .await;
 
         log_probe_audit(provider_id, &item.model, &outcome);
-        verdicts.push((item.model.clone(), outcome.clone()));
+        verdicts.push((item.model.clone(), item.protocol, outcome.clone()));
         reports.push(ProbeReport {
             model: item.model.clone(),
-            protocol: "responses".to_string(),
+            protocol: item.protocol.as_str().to_string(),
             tier: item.tier,
             outcome,
             cached,
@@ -225,12 +229,19 @@ pub async fn probe_one(
     tier: ProbeTier,
     force: bool,
 ) -> Result<ProbeOutcome, ApiError> {
-    if protocol != "responses" {
-        return Err(ApiError::bad_request(&format!(
-            "protocol '{}' has no probe implementation (supported: responses)",
-            protocol
-        )));
-    }
+    // ADR-103 D14: the probe speaks every protocol the platform can select.
+    // A protocol with no probe shape is rejected with 400 rather than
+    // silently probing something else.
+    let probe_protocol = match protocol {
+        "responses" => ProbeProtocol::Responses,
+        "openai" => ProbeProtocol::ChatCompletions,
+        "anthropic" => ProbeProtocol::Anthropic,
+        other => {
+            return Err(ApiError::bad_request(&format!(
+                "protocol '{other}' has no probe implementation (supported: responses, openai, anthropic)"
+            )));
+        }
+    };
 
     let ctx = probe_context(state, provider_id).await?;
     let entry = ctx
@@ -264,7 +275,7 @@ pub async fn probe_one(
             )
         })?;
 
-    let key = ProbeCache::key(provider_id, model, "responses");
+    let key = ProbeCache::key(provider_id, model, probe_protocol.as_str());
     let outcome = match state.probe_cache.get(&key, force) {
         Some(cached) => cached,
         None => {
@@ -279,7 +290,7 @@ pub async fn probe_one(
             }
             let runner = ProbeRunner::new();
             let outcome = runner
-                .run(model, &base_url, ctx.api_key.as_deref(), tier)
+                .run_protocol(model, &base_url, ctx.api_key.as_deref(), tier, probe_protocol)
                 .await;
             state.probe_cache.insert(&key, outcome.clone());
             outcome
@@ -287,7 +298,13 @@ pub async fn probe_one(
     };
 
     log_probe_audit(provider_id, model, &outcome);
-    write_back(state, provider_id, &[(model.to_string(), outcome.clone())], false).await;
+    write_back(
+        state,
+        provider_id,
+        &[(model.to_string(), probe_protocol, outcome.clone())],
+        false,
+    )
+    .await;
     Ok(outcome)
 }
 
@@ -303,7 +320,7 @@ async fn probe_planned_item(
     item: &crate::probe::store::ProbePlanItem,
     deadline: Instant,
 ) -> (ProbeOutcome, bool) {
-    let key = ProbeCache::key(provider_id, &item.model, "responses");
+    let key = ProbeCache::key(provider_id, &item.model, item.protocol.as_str());
     if let Some(cached) = state.probe_cache.get(&key, false) {
         return (cached, true);
     }
@@ -325,7 +342,7 @@ async fn probe_planned_item(
         );
     }
 
-    // No target URL: probing `/responses` on an empty host would report a
+    // No target URL: probing an endpoint on an empty host would report a
     // transport error that says nothing about the provider.
     let Some(base_url) = item.base_url.as_deref() else {
         return (
@@ -345,7 +362,11 @@ async fn probe_planned_item(
         );
     }
 
-    match tokio::time::timeout(remaining, runner.run(&item.model, base_url, api_key, item.tier)).await
+    match tokio::time::timeout(
+        remaining,
+        runner.run_protocol(&item.model, base_url, api_key, item.tier, item.protocol),
+    )
+    .await
     {
         Ok(outcome) => {
             state.probe_cache.insert(&key, outcome.clone());
@@ -367,44 +388,63 @@ async fn probe_planned_item(
 /// response shows), so the UI and the on-disk verdict never disagree.
 fn inherit_round_trip_verdict(
     plan: &[crate::probe::store::ProbePlanItem],
-    verdicts: &mut [(String, ProbeOutcome)],
+    verdicts: &mut [(String, ProbeProtocol, ProbeOutcome)],
     reports: &mut [ProbeReport],
 ) {
-    let Some(deep_idx) = plan.iter().position(|i| i.tier == ProbeTier::Deep) else {
-        return;
-    };
-    let Some(deep) = verdicts.get(deep_idx).map(|(_, o)| o.clone()) else {
-        return;
-    };
-    // A representative that never reached L1/L2 tells us nothing about L3 for
-    // its siblings — leave them as they are.
+    // D12.3 + ADR-103 D14: the round-trip verdict is a property of the
+    // `(provider, protocol)` pair, so it may only be inherited by siblings
+    // that speak the *same* protocol. A Chat-Completions round-trip says
+    // nothing about an Anthropic row — inheriting across protocols would
+    // hand a model a green light for a tool loop nobody tested.
     let passed_l1_l2 = |o: &ProbeOutcome| {
         o.tier_passed.iter().any(|t| t == "L1") && o.tier_passed.iter().any(|t| t == "L2")
     };
-    if !passed_l1_l2(&deep) {
-        return;
-    }
-    let l3_ok = deep.tier_passed.iter().any(|t| t == "L3");
 
-    for (idx, (_, outcome)) in verdicts.iter_mut().enumerate() {
-        if idx == deep_idx || outcome.tier_passed.iter().any(|t| t == "L3") {
+    // One representative per protocol — the plan marks exactly one deep row
+    // per protocol (D12.3).
+    let mut representatives: Vec<(ProbeProtocol, usize)> = Vec::new();
+    for (idx, item) in plan.iter().enumerate() {
+        if item.tier == ProbeTier::Deep && !representatives.iter().any(|(p, _)| *p == item.protocol)
+        {
+            representatives.push((item.protocol, idx));
+        }
+    }
+
+    for (protocol, deep_idx) in representatives {
+        let Some(deep) = verdicts.get(deep_idx).map(|(_, _, o)| o.clone()) else {
+            continue;
+        };
+        // A representative that never reached L1/L2 tells us nothing about L3
+        // for its siblings — leave them as they are.
+        if !passed_l1_l2(&deep) {
             continue;
         }
-        if !passed_l1_l2(outcome) {
-            continue;
-        }
-        if l3_ok {
-            outcome.tier_passed.push("L3".to_string());
-            outcome.success = true;
-            outcome.error = None;
-        } else {
-            // Same failure class as the representative: the endpoint speaks the
-            // shape but cannot complete a tool round-trip.
-            outcome.success = false;
-            outcome.error = deep.error.clone();
-        }
-        if let Some(report) = reports.get_mut(idx) {
-            report.outcome = outcome.clone();
+        let l3_ok = deep.tier_passed.iter().any(|t| t == "L3");
+
+        for (idx, (_, _, outcome)) in verdicts.iter_mut().enumerate() {
+            // Only siblings of the *same* protocol inherit.
+            if plan.get(idx).map(|i| i.protocol) != Some(protocol) {
+                continue;
+            }
+            if idx == deep_idx || outcome.tier_passed.iter().any(|t| t == "L3") {
+                continue;
+            }
+            if !passed_l1_l2(outcome) {
+                continue;
+            }
+            if l3_ok {
+                outcome.tier_passed.push("L3".to_string());
+                outcome.success = true;
+                outcome.error = None;
+            } else {
+                // Same failure class as the representative: the endpoint speaks
+                // the shape but cannot complete a tool round-trip.
+                outcome.success = false;
+                outcome.error = deep.error.clone();
+            }
+            if let Some(report) = reports.get_mut(idx) {
+                report.outcome = outcome.clone();
+            }
         }
     }
 }
@@ -417,7 +457,7 @@ fn inherit_round_trip_verdict(
 async fn write_back(
     state: &AppState,
     provider_id: &str,
-    verdicts: &[(String, ProbeOutcome)],
+    verdicts: &[(String, ProbeProtocol, ProbeOutcome)],
     probe_stale: bool,
 ) {
     if verdicts.is_empty() && !probe_stale {
@@ -450,8 +490,14 @@ async fn write_back(
     }
 
     let probed_at = Utc::now().to_rfc3339();
-    for (model, outcome) in verdicts {
-        apply_probe_outcome(entry, model, outcome, probed_at.clone());
+    for (model, protocol, outcome) in verdicts {
+        apply_probe_outcome(
+            entry,
+            model,
+            outcome,
+            probed_at.clone(),
+            protocol.protocol_type(),
+        );
     }
 
     let data_dir = crate::http::provider_api::get_data_dir_from_gw(&gw);
@@ -484,8 +530,13 @@ fn failure_outcome(class: &str, detail: &str) -> ProbeOutcome {
 }
 
 /// Is this protocol one the probe can verify at all?
+///
+/// ADR-103 D14: the probe speaks every protocol the platform can select and
+/// that has a wire shape — Responses, Chat Completions and Anthropic
+/// Messages. Protocols without a shape (Google, Ollama) cannot be probed, so
+/// the gate never enables an override that selects one of them.
 pub fn is_probeable(protocol: &ProtocolType) -> bool {
-    matches!(protocol, ProtocolType::Responses)
+    ProbeProtocol::from_protocol_type(protocol).is_some()
 }
 
 #[cfg(test)]
@@ -499,9 +550,12 @@ mod tests {
     }
 
     #[test]
-    fn only_responses_is_probeable() {
+    fn probeable_protocols_are_the_ones_with_a_wire_shape() {
         assert!(is_probeable(&ProtocolType::Responses));
-        assert!(!is_probeable(&ProtocolType::OpenAI));
+        assert!(is_probeable(&ProtocolType::OpenAI));
+        assert!(is_probeable(&ProtocolType::Anthropic));
+        assert!(!is_probeable(&ProtocolType::Google));
+        assert!(!is_probeable(&ProtocolType::Ollama));
         assert!(!is_probeable(&ProtocolType::Unknown));
     }
 
@@ -516,9 +570,18 @@ mod tests {
     }
 
     fn plan_item(model: &str, tier: ProbeTier) -> crate::probe::store::ProbePlanItem {
+        plan_item_with(model, tier, ProbeProtocol::Responses)
+    }
+
+    fn plan_item_with(
+        model: &str,
+        tier: ProbeTier,
+        protocol: ProbeProtocol,
+    ) -> crate::probe::store::ProbePlanItem {
         crate::probe::store::ProbePlanItem {
             model: model.to_string(),
             tier,
+            protocol,
             base_url: Some("https://api.acme.test/v1".to_string()),
         }
     }
@@ -555,23 +618,23 @@ mod tests {
             plan_item("c", ProbeTier::Standard),
         ];
         let mut verdicts = vec![
-            ("a".to_string(), outcome(&["L1", "L2", "L3"], None)),
-            ("b".to_string(), outcome(&["L1", "L2"], None)),
-            ("c".to_string(), outcome(&["L1", "L2"], None)),
+            ("a".to_string(), ProbeProtocol::Responses, outcome(&["L1", "L2", "L3"], None)),
+            ("b".to_string(), ProbeProtocol::Responses, outcome(&["L1", "L2"], None)),
+            ("c".to_string(), ProbeProtocol::Responses, outcome(&["L1", "L2"], None)),
         ];
         let mut reports = vec![
-            report("a", verdicts[0].1.clone()),
-            report("b", verdicts[1].1.clone()),
-            report("c", verdicts[2].1.clone()),
+            report("a", verdicts[0].2.clone()),
+            report("b", verdicts[1].2.clone()),
+            report("c", verdicts[2].2.clone()),
         ];
 
         inherit_round_trip_verdict(&plan, &mut verdicts, &mut reports);
 
         for idx in 1..3 {
-            assert_eq!(verdicts[idx].1.tier_passed, vec!["L1", "L2", "L3"]);
-            assert!(verdicts[idx].1.success);
-            assert_eq!(verdicts[idx].1.state(), ProbeState::Verified);
-            assert_eq!(reports[idx].outcome, verdicts[idx].1, "report must agree");
+            assert_eq!(verdicts[idx].2.tier_passed, vec!["L1", "L2", "L3"]);
+            assert!(verdicts[idx].2.success);
+            assert_eq!(verdicts[idx].2.state(), ProbeState::Verified);
+            assert_eq!(reports[idx].outcome, verdicts[idx].2, "report must agree");
         }
     }
 
@@ -588,19 +651,19 @@ mod tests {
             unsupported_field: None,
         };
         let mut verdicts = vec![
-            ("a".to_string(), outcome(&["L1", "L2"], Some(failure.clone()))),
-            ("b".to_string(), outcome(&["L1", "L2"], None)),
+            ("a".to_string(), ProbeProtocol::Responses, outcome(&["L1", "L2"], Some(failure.clone()))),
+            ("b".to_string(), ProbeProtocol::Responses, outcome(&["L1", "L2"], None)),
         ];
         let mut reports = vec![
-            report("a", verdicts[0].1.clone()),
-            report("b", verdicts[1].1.clone()),
+            report("a", verdicts[0].2.clone()),
+            report("b", verdicts[1].2.clone()),
         ];
 
         inherit_round_trip_verdict(&plan, &mut verdicts, &mut reports);
 
-        assert!(!verdicts[1].1.success);
-        assert_eq!(verdicts[1].1.state(), ProbeState::Failed);
-        assert_eq!(verdicts[1].1.error, Some(failure));
+        assert!(!verdicts[1].2.success);
+        assert_eq!(verdicts[1].2.state(), ProbeState::Failed);
+        assert_eq!(verdicts[1].2.error, Some(failure));
     }
 
     #[test]
@@ -614,6 +677,7 @@ mod tests {
         let mut verdicts = vec![
             (
                 "a".to_string(),
+                ProbeProtocol::Responses,
                 outcome(
                     &[],
                     Some(ProbeFailure {
@@ -624,19 +688,19 @@ mod tests {
                     }),
                 ),
             ),
-            ("b".to_string(), outcome(&["L1", "L2"], None)),
+            ("b".to_string(), ProbeProtocol::Responses, outcome(&["L1", "L2"], None)),
         ];
         let mut reports = vec![
-            report("a", verdicts[0].1.clone()),
-            report("b", verdicts[1].1.clone()),
+            report("a", verdicts[0].2.clone()),
+            report("b", verdicts[1].2.clone()),
         ];
 
         inherit_round_trip_verdict(&plan, &mut verdicts, &mut reports);
 
-        assert_eq!(verdicts[1].1.tier_passed, vec!["L1", "L2"]);
+        assert_eq!(verdicts[1].2.tier_passed, vec!["L1", "L2"]);
         // No L3, so no positive verdict — and no inherited failure either.
-        assert_eq!(verdicts[1].1.state(), ProbeState::Failed);
-        assert!(verdicts[1].1.error.is_none());
+        assert_eq!(verdicts[1].2.state(), ProbeState::Failed);
+        assert!(verdicts[1].2.error.is_none());
     }
 
     #[test]
@@ -649,8 +713,15 @@ mod tests {
         ]);
         p.protocol_type = ProtocolType::Responses;
         let plan = plan_probes(&p, None, false);
-        assert_eq!(plan.len(), 1);
+        // m1 inherits the provider-level Responses → planned (D12 always
+        // probes Responses rows). m2 explicitly selects Chat Completions,
+        // which overrides the provider-level Responses → planned too, and
+        // probed with the Chat-Completions shape.
+        assert_eq!(plan.len(), 2);
         assert_eq!(plan[0].model, "m1");
+        assert_eq!(plan[0].protocol, ProbeProtocol::Responses);
         assert_eq!(plan[0].base_url.as_deref(), Some("https://api.acme.test/v1"));
+        assert_eq!(plan[1].model, "m2");
+        assert_eq!(plan[1].protocol, ProbeProtocol::ChatCompletions);
     }
 }

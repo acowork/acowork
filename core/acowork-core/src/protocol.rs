@@ -334,6 +334,19 @@ pub struct ProtocolProbe {
     /// Probe tiers that passed, e.g. `["L1","L2","L3"]` (D10.2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tier_passed: Vec<String>,
+    /// The protocol this verdict is about (ADR-103 D14).
+    ///
+    /// A verdict is a statement about *one* wire protocol at *one* endpoint:
+    /// "the `/chat/completions` route of this base URL answers and completes a
+    /// tool round-trip". It says nothing about any other route, so the gate
+    /// MUST know which one it holds before it can let a selection through.
+    ///
+    /// `None` = a verdict written before D14 (Responses-only probes). Such a
+    /// verdict is treated as being about `Responses`, which is the only
+    /// protocol it could have been about — the read side never guesses a
+    /// protocol it was not told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<ProtocolType>,
     /// Failure reason shown by the yellow "selected but not enabled" badge
     /// (D11). Only meaningful when `state == Failed` / `Unknown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,6 +372,29 @@ impl ProtocolProbe {
     /// Convenience: gate check on the verdict state.
     pub fn gates_responses(&self) -> bool {
         self.state.gates_responses()
+    }
+
+    /// The protocol this verdict is about.
+    ///
+    /// A verdict written before ADR-103 D14 carries no protocol field; it can
+    /// only have been about `Responses`, because that was the only protocol the
+    /// probe could speak. Reading it as `Responses` is therefore a fact, not a
+    /// guess.
+    pub fn protocol(&self) -> ProtocolType {
+        self.protocol.clone().unwrap_or(ProtocolType::Responses)
+    }
+
+    /// Does this verdict let `selected` take effect (ADR-103 D14)?
+    ///
+    /// Two conditions, both required:
+    /// - the verdict state passed the gate (D1), and
+    /// - the verdict is about **the same protocol** as the selection.
+    ///
+    /// The second condition is what stops a `Chat Completions` verdict from
+    /// enabling an `Anthropic` selection: the two probes hit different routes
+    /// on the same host, and only one of them was ever tested.
+    pub fn gates_protocol(&self, selected: &ProtocolType) -> bool {
+        self.state.gates_responses() && self.protocol() == *selected
     }
 }
 
@@ -2947,6 +2983,46 @@ mod adr103_tests {
         let st: ProbeState = serde_json::from_str("\"telepathic\"").unwrap();
         assert_eq!(st, ProbeState::Unknown);
         assert!(!st.gates_responses());
+    }
+
+    #[test]
+    fn verdict_without_protocol_field_reads_as_responses() {
+        // ADR-103 D14 §7 MUST-test: old `provider_list.json` verdicts carry no
+        // `protocol` — they predate the multi-protocol probe and can only
+        // have been about `Responses`. The read side treats the absence as
+        // that fact, never as a protocol it was not told.
+        let p: ProtocolProbe = serde_json::from_str(r#"{"state":"verified"}"#).unwrap();
+        assert_eq!(p.protocol, None);
+        assert_eq!(p.protocol(), ProtocolType::Responses);
+        // Such a verdict still gates a `Responses` selection…
+        assert!(p.gates_protocol(&ProtocolType::Responses));
+        // …and must never enable any other protocol.
+        for other in [
+            ProtocolType::OpenAI,
+            ProtocolType::Anthropic,
+            ProtocolType::Google,
+        ] {
+            assert!(!p.gates_protocol(&other), "legacy verdict gates {other}");
+        }
+        // Serialization keeps the field absent — no on-disk churn for
+        // verdicts the Gateway never rewrote.
+        let out = serde_json::to_string(&p).unwrap();
+        assert!(!out.contains("\"protocol\""), "{out}");
+    }
+
+    #[test]
+    fn gates_protocol_requires_matching_protocol_and_passing_state() {
+        // The D14 invariant one probe cannot vouch for another route.
+        let v = ProtocolProbe {
+            state: ProbeState::Verified,
+            protocol: Some(ProtocolType::OpenAI),
+            ..Default::default()
+        };
+        assert!(v.gates_protocol(&ProtocolType::OpenAI));
+        assert!(!v.gates_protocol(&ProtocolType::Responses));
+        // A passing protocol match with a non-passing state gates off too.
+        let stale = ProtocolProbe { state: ProbeState::Stale, ..v.clone() };
+        assert!(!stale.gates_protocol(&ProtocolType::OpenAI));
     }
 
     #[test]

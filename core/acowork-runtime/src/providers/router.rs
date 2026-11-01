@@ -571,6 +571,7 @@ mod adr103_router_tests {
         m.protocol_probe = Some(ProtocolProbe {
             state: ProbeState::Failed,
             tier_passed: vec![],
+            protocol: Some(ProtocolType::Responses),
             reason: None,
             observed_base_url: None,
             probed_at: None,

@@ -553,8 +553,11 @@ async fn explicit_probe_rejects_a_protocol_without_an_implementation() {
     .await
     .expect("save");
 
+    // ADR-103 D14: `responses`, `openai` and `anthropic` all have a probe
+    // shape now. A protocol outside that set is still rejected with 400
+    // rather than silently probing something else.
     let request: ProbeProviderRequest =
-        serde_json::from_value(json!({"model": MODEL, "protocol": "anthropic"}))
+        serde_json::from_value(json!({"model": MODEL, "protocol": "ollama"}))
             .expect("valid probe request");
     let err = probe_provider(
         State(state.clone()),
@@ -563,9 +566,9 @@ async fn explicit_probe_rejects_a_protocol_without_an_implementation() {
         Json(request),
     )
     .await
-    .expect_err("anthropic has no probe implementation");
+    .expect_err("ollama has no probe implementation");
     assert_eq!(err.code, 400);
-    assert!(err.error.contains("anthropic"), "{}", err.error);
+    assert!(err.error.contains("ollama"), "{}", err.error);
 }
 
 #[tokio::test]
@@ -706,4 +709,193 @@ fn probe_modules_do_not_touch_usage_accounting() {
             );
         }
     }
+}
+// ── ADR-103 D14: the gate covers every protocol override ──────────────
+//
+// The regression this file exists for: an Anthropic provider
+// (`base_url = .../anthropic/v1`) whose model row carried an explicit
+// `openai` selection was resolved to the Chat-Completions protocol while
+// keeping the Anthropic base URL. The Runtime then asked for
+// `{base}/chat/completions`, the gateway answered `404 page not found`, and
+// the error was reported to the user as "check model/tool config" — a
+// parameter problem for what was really an endpoint problem.
+//
+// D14 closes it in two places: the gate rejects an override that no probe
+// vouched for, and the probe can now speak the protocol that was selected.
+
+/// A fake Anthropic endpoint: `/messages` answers, `/chat/completions` does
+/// not exist (the real MiniMax shape).
+fn mount_anthropic_only(server: &mut mockito::ServerGuard) {
+    server
+        .mock("POST", "/messages")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "pong"}],
+                "usage": {"input_tokens": 7, "output_tokens": 1},
+            })
+            .to_string(),
+        )
+        .create();
+    server
+        .mock("POST", "/chat/completions")
+        .with_status(404)
+        .with_header("content-type", "text/plain")
+        .with_body("404 page not found")
+        .create();
+}
+
+/// The provider row for the regression: an Anthropic provider whose model
+/// row selects Chat Completions.
+fn anthropic_provider_with_openai_override(
+    base_url: &str,
+) -> AddProviderRequest {
+    serde_json::from_value(json!({
+        "provider": PROVIDER,
+        "key": "sk-test",
+        "custom": true,
+        "base_url": base_url,
+        "models": [MODEL],
+        // The provider-level protocol is Anthropic …
+        "protocol": "anthropic",
+        // … and the model row overrides it with Chat Completions.
+        "model_protocols": { MODEL: "openai" },
+    }))
+    .expect("valid add request")
+}
+
+#[tokio::test]
+async fn an_unprobed_protocol_override_does_not_take_effect() {
+    // ADR-103 D14: the selection is a claim about an endpoint. With no
+    // verdict for it, the effective protocol stays the provider-level one, so
+    // the Runtime keeps using the route that exists.
+    let dir = temp_dir("d14-unprobed");
+    let state = state_with(&dir).await;
+    let mut server = mockito::Server::new_async().await;
+    mount_anthropic_only(&mut server);
+
+    let _ = add_provider(
+        State(state.clone()),
+        Json(anthropic_provider_with_openai_override(&server.url())),
+    )
+    .await
+    .expect("save");
+
+    let mut models =
+        crate::http::models_api::resolve_provider_models(&state, PROVIDER)
+            .await
+            .expect("model list resolves")
+            .models;
+    crate::http::models_api::annotate_protocol_fields(&state, PROVIDER, &mut models).await;
+
+    let row = models.iter().find(|m| m.id == MODEL).expect("model row");
+    assert_eq!(
+        row.protocol_selected.as_deref(),
+        Some("openai"),
+        "the intent is recorded as the user expressed it"
+    );
+    assert_eq!(
+        row.protocol_active.as_deref(),
+        Some("anthropic"),
+        "ADR-103 D14: the override is rejected without a matching verdict, so the \
+         provider-level protocol stays in effect — the Runtime keeps using the \
+         route that exists"
+    );
+}
+
+#[tokio::test]
+async fn a_protocol_override_is_probed_with_its_own_wire_shape() {
+    // ADR-103 D14: the probe must speak the *selected* protocol. A
+    // Chat-Completions selection on an Anthropic provider is probed against
+    // `/chat/completions` — the route the Runtime would hit if the selection
+    // took effect — and the 404 it gets there is what gates the selection.
+    let dir = temp_dir("d14-probed");
+    let state = state_with(&dir).await;
+    let mut server = mockito::Server::new_async().await;
+    mount_anthropic_only(&mut server);
+
+    let _ = add_provider(
+        State(state.clone()),
+        Json(anthropic_provider_with_openai_override(&server.url())),
+    )
+    .await
+    .expect("save");
+
+    let row = persisted_provider(&dir);
+    let probe = row.models[0].protocol_probe.as_ref().expect("a verdict");
+    assert_eq!(
+        probe.state,
+        ProbeState::Failed,
+        "the Chat-Completions route does not exist, so the selection cannot be enabled"
+    );
+    assert_eq!(
+        probe.protocol,
+        Some(ProtocolType::OpenAI),
+        "the verdict records which protocol it is about"
+    );
+}
+
+#[tokio::test]
+async fn a_verdict_about_another_protocol_does_not_enable_the_selection() {
+    // ADR-103 D14: a verdict is a statement about ONE route. The row holds a
+    // `verified` verdict about Responses; switching its selection to
+    // `Anthropic` — a claim about `/messages`, which nobody tested — must
+    // NOT let the Responses verdict enable it. The effective protocol stays
+    // the provider-level one, and the stale verdict stays on disk
+    // untouched (nothing re-probed).
+    let dir = temp_dir("d14-mismatch");
+    let state = state_with(&dir).await;
+    let mut server = mockito::Server::new_async().await;
+    mount_healthy(&mut server);
+
+    // Save with a Responses selection → a real, passing Responses verdict.
+    let _ = add_provider(
+        State(state.clone()),
+        Json(add_body(&server.url(), &[MODEL], &[MODEL])),
+    )
+    .await
+    .expect("save");
+    let row = persisted_provider(&dir);
+    let saved = row.models[0].protocol_probe.as_ref().expect("responses verdict");
+    assert_eq!(saved.state, ProbeState::Verified);
+    assert_eq!(saved.protocol, Some(ProtocolType::Responses));
+
+    // Replace ONLY the selection, in place — no save, so no new probe. This
+    // is the stored shape of the incident: a verdict about protocol A with a
+    // selection of protocol B.
+    {
+        let mut gw = state.gateway_state.write().await;
+        let entry = gw
+            .resource_cache
+            .provider_list
+            .providers
+            .iter_mut()
+            .find(|p| p.id == PROVIDER)
+            .expect("provider row");
+        entry
+            .models
+            .iter_mut()
+            .find(|m| m.id == MODEL)
+            .expect("model row")
+            .protocol_type = Some(ProtocolType::Anthropic);
+    }
+
+    let mut models =
+        crate::http::models_api::resolve_provider_models(&state, PROVIDER)
+            .await
+            .expect("model list resolves")
+            .models;
+    crate::http::models_api::annotate_protocol_fields(&state, PROVIDER, &mut models).await;
+    let row = models.iter().find(|m| m.id == MODEL).expect("model row");
+    assert_eq!(
+        row.protocol_active.as_deref(),
+        Some("openai"),
+        "the Responses verdict cannot vouch for the `/messages` route, so the \
+         Anthropic selection stays gated off and the provider-level protocol \
+         remains in effect"
+    );
 }

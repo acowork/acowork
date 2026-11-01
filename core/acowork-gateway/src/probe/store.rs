@@ -18,37 +18,54 @@
 
 use acowork_core::protocol::{ProtocolProbe, ProtocolType, ProviderListItem, ProbeState};
 
-use crate::probe::runner::{ProbeOutcome, ProbeTier};
+use crate::probe::runner::{ProbeOutcome, ProbeProtocol, ProbeTier};
 
 /// One model queued for probing by [`plan_probes`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbePlanItem {
     pub model: String,
     pub tier: ProbeTier,
+    /// The wire protocol to probe with — the protocol this row's *selection*
+    /// names. A row that selects `Chat Completions` is probed with the
+    /// Chat-Completions shape, not with the Responses one (ADR-103 D14).
+    pub protocol: ProbeProtocol,
     /// The base URL to hit — model override when present, otherwise the
     /// provider default. `None` means "provider has no base URL configured"
     /// (the built-in default resolution happens at request time, D7).
     pub base_url: Option<String>,
 }
 
-/// Which models of `provider` must be probed on this save (D12.2/D12.3).
+/// Which models of `provider` must be probed on this save (D12.2/D12.3 +
+/// ADR-103 D14).
 ///
 /// `previous` is the provider entry as it was stored *before* the save;
-/// `None` means "newly added provider", in which case every `Responses` row is
+/// `None` means "newly added provider", in which case every probeable row is
 /// changed by definition.
 ///
 /// `probe_inputs_changed` says the *probe target itself* moved (provider
 /// `base_url` or API key). Every existing verdict is then a statement about a
-/// host/credential pair that no longer holds, so every `Responses` row is
+/// host/credential pair that no longer holds, so every probeable row is
 /// re-probed even though its own row is byte-identical.
 ///
-/// A row is planned when *both*:
-/// - its **selected** protocol is `Responses` — the model's explicit choice,
-///   or the provider-level default when the model has none. This is the
-///   *intent*, not the gate-resolved effective protocol: probing reads the
-///   intent, and the gate is what the resulting verdict feeds (D1).
+/// A row is planned when *all* of:
+/// - its **effective selection** is probeable — the model's explicit choice,
+///   or the provider-level default when the model has none. `Google` /
+///   `Ollama` have no probe shape and are skipped.
+/// - the **gate can reject it** — i.e. the row carries an explicit
+///   model-level selection that differs from the provider-level protocol, or
+///   its effective selection is `Responses` (ADR-103 D12 always probes
+///   Responses rows; the D11 badge and the D10 verdicts depend on it).
+///   A selection that *matches* the provider-level protocol is the status
+///   quo: the endpoint already serves it, so probing it would bill a real
+///   request for a verdict that cannot change anything.
 /// - it is **changed**: new, its `protocol_type` / `base_url` differs from the
 ///   stored row, or `probe_inputs_changed`.
+///
+/// ADR-103 D14: the row's *selection* decides the probe shape, not the
+/// provider-level protocol. A model that selects `Chat Completions` on an
+/// Anthropic provider is exactly the case this ADR exists for — it must be
+/// probed against `/chat/completions`, because that is the endpoint the
+/// Runtime would hit if the selection took effect.
 pub fn plan_probes(
     provider: &ProviderListItem,
     previous: Option<&ProviderListItem>,
@@ -61,7 +78,18 @@ pub fn plan_probes(
             .protocol_type
             .clone()
             .unwrap_or_else(|| provider.protocol_type.clone());
-        if selected != ProtocolType::Responses {
+        let Some(protocol) = ProbeProtocol::from_protocol_type(&selected) else {
+            continue;
+        };
+
+        // Only rows the gate can actually reject need a verdict. A selection
+        // that agrees with the provider-level protocol is the status quo.
+        let overrides_provider_level = model
+            .protocol_type
+            .as_ref()
+            .is_some_and(|s| *s != provider.protocol_type);
+        let is_responses = selected == ProtocolType::Responses;
+        if !overrides_provider_level && !is_responses {
             continue;
         }
 
@@ -80,14 +108,22 @@ pub fn plan_probes(
         plan.push(ProbePlanItem {
             model: model.id.clone(),
             tier: ProbeTier::Standard,
+            protocol,
             base_url: probe_base_url(model.base_url.as_deref(), &provider.base_url),
         });
     }
 
-    // D12.3: one deep probe per (provider, protocol) — every row in this plan
-    // shares provider + Responses, so exactly the first row goes deep.
-    if let Some(first) = plan.first_mut() {
-        first.tier = ProbeTier::Deep;
+    // D12.3: one deep probe per (provider, protocol) — the tool round-trip
+    // is a property of the (provider, protocol) pair, not of the model. So
+    // exactly one row *per protocol* goes deep; the rest run the cheap tier
+    // and inherit the representative's L3 verdict.
+    let mut seen_protocols: Vec<ProbeProtocol> = Vec::new();
+    for item in &mut plan {
+        if seen_protocols.contains(&item.protocol) {
+            continue;
+        }
+        seen_protocols.push(item.protocol);
+        item.tier = ProbeTier::Deep;
     }
 
     plan
@@ -130,11 +166,17 @@ pub fn mark_probes_stale(provider: &mut ProviderListItem) -> usize {
 /// Returns `false` when the provider no longer carries that model — possible
 /// when a concurrent save removed it while the probe was in flight; the
 /// verdict is then simply dropped rather than resurrecting the row.
+///
+/// The verdict records **which protocol** it is about (ADR-103 D14), so a
+/// later gate check can tell "verified against `/chat/completions`" from
+/// "verified against `/messages`". Without that, a verdict for one protocol
+/// would gate a selection of another.
 pub fn apply_probe_outcome(
     provider: &mut ProviderListItem,
     model_id: &str,
     outcome: &ProbeOutcome,
     probed_at: String,
+    protocol: ProtocolType,
 ) -> bool {
     let Some(model) = provider.models.iter_mut().find(|m| m.id == model_id) else {
         tracing::warn!(
@@ -148,6 +190,7 @@ pub fn apply_probe_outcome(
     model.protocol_probe = Some(ProtocolProbe {
         state: outcome.state(),
         tier_passed: outcome.tier_passed.clone(),
+        protocol: Some(protocol),
         reason: outcome.error.as_ref().map(|e| e.message.clone()),
         observed_base_url: outcome.observed_base_url.clone(),
         stripped_fields: outcome.stripped_fields.clone(),
@@ -254,13 +297,31 @@ mod tests {
     }
 
     #[test]
-    fn non_responses_rows_are_never_planned() {
-        let p = provider(vec![
-            model("a", Some(ProtocolType::Anthropic), None),
+    fn a_selection_matching_the_provider_protocol_is_never_planned() {
+        // ADR-103 D14: a selection that agrees with the provider-level
+        // protocol is the status quo — the endpoint already serves it, so a
+        // probe would bill a real request for a verdict that cannot change
+        // anything.
+        let mut p = provider(vec![
+            model("a", Some(ProtocolType::OpenAI), None),
             model("b", Some(ProtocolType::OpenAI), None),
             model("c", None, None),
         ]);
+        p.protocol_type = ProtocolType::OpenAI;
         assert!(plan_probes(&p, None, false).is_empty());
+    }
+
+    #[test]
+    fn a_selection_that_overrides_the_provider_protocol_is_planned() {
+        // ADR-103 D14: this is the row the gate can reject, so it needs a
+        // verdict — probed with the *selected* protocol's shape, not the
+        // provider-level one.
+        let mut p = provider(vec![model("a", Some(ProtocolType::OpenAI), None)]);
+        p.protocol_type = ProtocolType::Anthropic;
+        let plan = plan_probes(&p, None, false);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].model, "a");
+        assert_eq!(plan[0].protocol, ProbeProtocol::ChatCompletions);
     }
 
     #[test]
@@ -283,6 +344,7 @@ mod tests {
             m.protocol_probe = Some(ProtocolProbe {
                 state: ProbeState::Verified,
                 tier_passed: vec!["L1".into()],
+                protocol: Some(ProtocolType::Responses),
                 reason: None,
                 observed_base_url: None,
                 stripped_fields: Vec::new(),
@@ -319,7 +381,8 @@ mod tests {
             &mut p,
             "a",
             &outcome,
-            "2025-06-01T12:00:00Z".into()
+            "2025-06-01T12:00:00Z".into(),
+            ProtocolType::Responses
         ));
         let probe = p.models[0].protocol_probe.as_ref().unwrap();
         assert_eq!(probe.state, ProbeState::Verified);
@@ -345,7 +408,13 @@ mod tests {
             }),
             stripped_fields: Vec::new(),
         };
-        assert!(apply_probe_outcome(&mut p, "a", &outcome, "t".into()));
+        assert!(apply_probe_outcome(
+            &mut p,
+            "a",
+            &outcome,
+            "t".into(),
+            ProtocolType::Responses
+        ));
         let probe = p.models[0].protocol_probe.as_ref().unwrap();
         assert_eq!(probe.state, ProbeState::Failed);
         assert_eq!(
@@ -372,7 +441,7 @@ mod tests {
             }),
             stripped_fields: Vec::new(),
         };
-        apply_probe_outcome(&mut p, "a", &outcome, "t".into());
+        apply_probe_outcome(&mut p, "a", &outcome, "t".into(), ProtocolType::Responses);
         let probe = p.models[0].protocol_probe.as_ref().unwrap();
         assert_eq!(
             probe.state,
@@ -397,7 +466,7 @@ mod tests {
             error: None,
             stripped_fields: vec!["reasoning".into()],
         };
-        apply_probe_outcome(&mut p, "a", &outcome, "t".into());
+        apply_probe_outcome(&mut p, "a", &outcome, "t".into(), ProtocolType::Responses);
         let probe = p.models[0].protocol_probe.as_ref().unwrap();
         assert_eq!(probe.state, ProbeState::Degraded);
         assert!(probe.state.gates_responses(), "D10.3: degraded is still usable");
@@ -417,7 +486,13 @@ mod tests {
             error: None,
             stripped_fields: Vec::new(),
         };
-        assert!(!apply_probe_outcome(&mut p, "gone", &outcome, "t".into()));
+        assert!(!apply_probe_outcome(
+            &mut p,
+            "gone",
+            &outcome,
+            "t".into(),
+            ProtocolType::Responses
+        ));
         assert!(p.models[0].protocol_probe.is_none());
     }
 }
