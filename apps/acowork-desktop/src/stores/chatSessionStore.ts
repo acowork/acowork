@@ -159,6 +159,12 @@ export interface ChatSessionInfo {
   /** Group owner for a `user_group` (ADR-098 governance) — the founder is
    *  the first owner; absent for every other kind. */
   owner?: string;
+  /** Unix seconds when the backing PM project was archived. Only a
+   *  `project_group` can carry it, and it is the whole "项目群聊只能在项目
+   *  删除之后删除" precondition: PM stamps it when it deletes the project
+   *  (there is nothing left to re-create the channel), and until then the
+   *  delete is refused server-side. */
+  project_deleted_at?: number;
   /** ADR-105: the agent instance an un-addressed message in this group is
    *  delivered to; absent = such messages stay archive-only (the historical
    *  behaviour, and the default for a group of humans). */

@@ -88,6 +88,7 @@ import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { ChatUsageIcon } from "./ChatUsageIcon";
 import { AttachedContextChips } from "./AttachedContextChips";
 import {
   isFailureStatus,
@@ -1315,6 +1316,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             data-toolbar-cluster="right"
             className="flex shrink-0 items-center gap-1"
           >
+            {/* Per-chat ledger read (plan §4.6 phase two): the pair's
+                router spend lives on this one agent. */}
+            <ChatUsageIcon agentIds={[agentId]} chatSessionId={sessionId} />
             <Tooltip content={t("chatPanel.attach")} variant="plain">
               <button
                 className={cn(toolbarIconButton, uploading && "opacity-50")}

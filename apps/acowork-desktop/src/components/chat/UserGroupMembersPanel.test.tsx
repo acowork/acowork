@@ -223,6 +223,48 @@ describe("UserGroupMembersPanel", () => {
   });
 });
 
+describe("UserGroupMembersPanel — delete group (ADR-098 governance)", () => {
+  it("offers the owner a delete button that confirms before deleting", async () => {
+    const deleteGroup = vi.fn(async () => {});
+    useProjectGroupStore.setState({ deleteGroup } as never);
+    await act(async () => {
+      render(<UserGroupMembersPanel group={{ ...group, owner: ME }} width={260} />);
+    });
+    // Two steps, because this one takes the history with it: the button opens
+    // the shared ConfirmDialog, and only its confirm calls the store.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete group" }));
+    });
+    expect(deleteGroup).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("alertdialog");
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    });
+    expect(deleteGroup).toHaveBeenCalledWith("ug-1");
+  });
+
+  it("hides the delete button from a plain member (owner/admin only)", async () => {
+    const deleteGroup = vi.fn(async () => {});
+    useProjectGroupStore.setState({ deleteGroup } as never);
+    await act(async () => {
+      render(<UserGroupMembersPanel group={{ ...group, owner: "u-bob" }} width={260} />);
+    });
+    expect(screen.queryByRole("button", { name: "Delete group" })).toBeNull();
+    // The member still has their own way out.
+    expect(screen.getByRole("button", { name: "Leave group" })).toBeTruthy();
+    expect(deleteGroup).not.toHaveBeenCalled();
+  });
+
+  it("shows the delete button to an admin who is not the owner", async () => {
+    useAuthStore.setState((s) => ({ account: { ...s.account!, role: "admin" } }));
+    useProjectGroupStore.setState({ deleteGroup: vi.fn(async () => {}) } as never);
+    await act(async () => {
+      render(<UserGroupMembersPanel group={{ ...group, owner: "u-bob" }} width={260} />);
+    });
+    expect(screen.getByRole("button", { name: "Delete group" })).toBeTruthy();
+  });
+});
+
 describe("UserGroupMembersPanel — default responder (ADR-105)", () => {
   const withAgent = {
     ...group,

@@ -414,6 +414,21 @@
     "error": "搜索失败",
     "jumpToLatest": "回到最新"
   },
+  "chatUsage": {
+    "ariaLabel": "会话用量",
+    "title": "会话用量",
+    "close": "关闭",
+    "llmCalls": "LLM 调用",
+    "totalInput": "累计输入",
+    "totalOutput": "累计输出",
+    "cacheRead": "累计缓存读取",
+    "cacheWrite": "累计缓存写入",
+    "estCost": "估算成本",
+    "byModel": "按模型",
+    "byAgent": "按 Agent",
+    "unknownModel": "未知模型",
+    "noData": "本会话尚无 LLM 用量"
+  },
   "contextUsage": {
     "ariaLabel": "上下文用量",
     "title": "上下文用量",
@@ -2232,7 +2247,11 @@
     "transferSaved": "已转移群主",
     "transferFailed": "群主转移失败",
     "mustTransferBeforeLeave": "请先转移群主再退出",
-    "governForbidden": "只有群主或管理员可以执行此操作"
+    "governForbidden": "只有群主或管理员可以执行此操作",
+    "delete": "删除群聊",
+    "deleteTitle": "删除群聊？",
+    "deleteConfirm": "删除「{{name}}」及其全部聊天记录？此操作不可撤销。",
+    "deleteSaved": "群聊已删除"
   },
   "groupChatPrompt": {
     "title": "群聊提示词 (chat.md)",

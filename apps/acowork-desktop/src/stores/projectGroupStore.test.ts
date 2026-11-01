@@ -217,3 +217,35 @@ describe("renameGroup / transferOwner (ADR-098 governance)", () => {
     expect(useProjectGroupStore.getState().groups[0].owner).toBe("u-bob");
   });
 });
+
+describe("deleteGroup", () => {
+  it("DELETEs the session, drops the row and releases the pane", async () => {
+    useProjectGroupStore.setState({
+      groups: [
+        session({ session_id: "ug-1", kind: "user_group", owner: ME }),
+        session({ session_id: "ug-2", kind: "user_group", owner: ME }),
+      ],
+      activeGroupId: "ug-1",
+    });
+    // 204: no body to parse — the store must not try to read JSON.
+    stubFetch({ "DELETE /api/chat-sessions/ug-1": () => jsonResp(null, 204) });
+    await useProjectGroupStore.getState().deleteGroup("ug-1");
+    expect(useProjectGroupStore.getState().groups.map((g) => g.session_id)).toEqual(["ug-2"]);
+    expect(useProjectGroupStore.getState().activeGroupId).toBeNull();
+  });
+
+  it("keeps the pane on another group and propagates a backend refusal", async () => {
+    useProjectGroupStore.setState({
+      groups: [session({ session_id: "pg-1", kind: "project_group", project_id: "p-1", owner: ME })],
+      activeGroupId: "ug-other",
+    });
+    // The backend owns the gates (owner-or-admin, project archived first), so
+    // a refusal must leave every local row exactly as it was.
+    stubFetch({
+      "DELETE /api/chat-sessions/pg-1": () => jsonResp({ error: "forbidden" }, 403),
+    });
+    await expect(useProjectGroupStore.getState().deleteGroup("pg-1")).rejects.toThrow(/403/);
+    expect(useProjectGroupStore.getState().groups.map((g) => g.session_id)).toEqual(["pg-1"]);
+    expect(useProjectGroupStore.getState().activeGroupId).toBe("ug-other");
+  });
+});

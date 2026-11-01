@@ -14,13 +14,14 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { Plus, Search, Trash2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { ListBox, ExpandableRow } from "../common/list";
 import {
   MemberAvatar,
+  canGovern,
   canGovernProject,
   useLocalMode,
   useResolvedMembers,
@@ -34,6 +35,9 @@ import { GroupResponderCard } from "./GroupResponderCard";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { useAuthStore } from "../../stores/authStore";
 import { UserGroupMembersPanel } from "./UserGroupMembersPanel";
+import type { UserAccount } from "../../lib/types";
+import { ConfirmDialog } from "../common/ConfirmDialog";
+import { showToast } from "../common/ToastProvider";
 
 // `withOwner` lives in `pmMembers` (shared with `MemberManagerDialog`, which
 // this panel imports — a direct import back would form a cycle). Re-exported
@@ -103,6 +107,14 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
   // gate the project itself. Owner-or-admin only (ADR-098).
   const localMode = useLocalMode();
   const canSeePrompt = canGovernProject(project, self, localMode);
+  // The channel is deletable only once its project is archived (design 27
+  // §4.4) — while the project lives, PM's `ensure_group` would just re-create
+  // it, so the backend refuses and this button stays away. `group.owner` is the
+  // gate, not `project`: after the archive the project is no longer in the PM
+  // list, so `project` is null exactly when the button is allowed to appear.
+  const deleteGroup = useProjectGroupStore((s) => s.deleteGroup);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const canDelete = canDeleteProjectGroup(group, self, localMode);
   // Agent members only: "who answers" cannot be a human (the store refuses a
   // non-agent id too — this just keeps the picker honest).
   const agentCandidates = useMemo(
@@ -213,13 +225,68 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
             <GroupResponderCard sessionId={group.session_id} candidates={agentCandidates} />
           )}
         </div>
+
+        {/* Destructive action, owner-or-admin only — a project's channel is
+            the project's history, so this is the one thing in this panel that
+            cannot be undone. Only offered once PM archived the project. */}
+        {canDelete && group && (
+          <div className="flex shrink-0 items-center border-t border-border-divider p-3">
+            <button
+              type="button"
+              onClick={() => setDeleteOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-red-300/70 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-800/70 dark:text-red-400 dark:hover:bg-red-950/40"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {t("groupMembers.delete")}
+            </button>
+          </div>
+        )}
       </div>
+
+      {canDelete && group && (
+        <ConfirmDialog
+          open={deleteOpen}
+          title={t("groupMembers.deleteTitle")}
+          message={t("groupMembers.deleteConfirm", { name: group.title })}
+          confirmLabel={t("common.delete")}
+          destructive
+          onConfirm={() => {
+            setDeleteOpen(false);
+            void deleteGroup(group.session_id)
+              .then(() => showToast({ type: "success", message: t("groupMembers.deleteSaved") }))
+              .catch((e: unknown) =>
+                showToast({
+                  type: "error",
+                  message: e instanceof Error ? e.message : String(e),
+                }),
+              );
+          }}
+          onCancel={() => setDeleteOpen(false)}
+        />
+      )}
 
       {managerOpen && project && (
         <MemberManagerDialog project={project} onClose={() => setManagerOpen(false)} />
       )}
     </div>
   );
+}
+
+/** Whether the project-channel delete button may render.
+ *
+ * Two conditions, both server-owned facts mirrored here only so the button is
+ * not offered for a request the backend would refuse: PM archived the project
+ * (`project_deleted_at` — while it lives, `ensure_group` would just re-create
+ * the channel), and the caller governs the group (ADR-098; a project channel's
+ * `owner` is the project's owner, pushed by PM). Pure, so the rule is testable
+ * without the store graph.
+ */
+export function canDeleteProjectGroup(
+  group: { owner?: string; project_deleted_at?: number } | null | undefined,
+  self: UserAccount | null,
+  localMode: boolean,
+): boolean {
+  return !!group?.project_deleted_at && canGovern(group.owner, self, localMode);
 }
 
 function MemberTile({ member }: { member: ResolvedMember }) {

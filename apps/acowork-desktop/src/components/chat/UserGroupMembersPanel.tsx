@@ -22,11 +22,12 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, Crown, LogOut, Pencil, Plus, Search, X } from "lucide-react";
+import { Check, Crown, LogOut, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ListBox, ExpandableRow } from "../common/list";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
@@ -66,11 +67,13 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
   const removeMember = useProjectGroupStore((s) => s.removeMember);
   const renameGroup = useProjectGroupStore((s) => s.renameGroup);
   const transferOwner = useProjectGroupStore((s) => s.transferOwner);
+  const deleteGroup = useProjectGroupStore((s) => s.deleteGroup);
   const [directory, setDirectory] = useState<DirectoryUser[]>([]);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -165,6 +168,21 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
       await transferOwner(group.session_id, pid);
       showToast({ type: "success", message: t("groupMembers.transferSaved") });
     } catch (e) {
+      showToast({ type: "error", message: governError(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doDelete = async () => {
+    setDeleteOpen(false);
+    setBusy(me);
+    try {
+      await deleteGroup(group.session_id);
+      showToast({ type: "success", message: t("groupMembers.deleteSaved") });
+    } catch (e) {
+      // The backend re-checks everything (owner-or-admin), so the failure a
+      // user actually meets here is a stale role, not a hidden button.
       showToast({ type: "error", message: governError(e) });
     } finally {
       setBusy(null);
@@ -338,7 +356,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
         </div>
 
         {canManage && (
-          <div className="shrink-0 border-t border-border-divider p-3">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border-divider p-3">
             {/* Global accent button (`.btn-accent`), same as the clone/publish
                 agent dialog primary action. The owner cannot leave their own
                 group — the backend refuses until ownership moves, so the button
@@ -353,6 +371,20 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
               <LogOut className="h-3.5 w-3.5" />
               {t("groupMembers.leave")}
             </button>
+            {/* Delete the group outright — owner-or-admin only (the backend
+                re-checks; a plain member has no such button and no such right).
+                Destructive outline, same style as the PM panel's "delete
+                project", because this one takes the history with it. */}
+            {governs && (
+              <button
+                type="button"
+                onClick={() => setDeleteOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-md border border-red-300/70 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-800/70 dark:text-red-400 dark:hover:bg-red-950/40"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {t("groupMembers.delete")}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -364,6 +396,16 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
           onClose={() => setInviteOpen(false)}
         />
       )}
+
+      <ConfirmDialog
+        open={deleteOpen}
+        title={t("groupMembers.deleteTitle")}
+        message={t("groupMembers.deleteConfirm", { name: group.title })}
+        confirmLabel={t("common.delete")}
+        destructive
+        onConfirm={() => void doDelete()}
+        onCancel={() => setDeleteOpen(false)}
+      />
 
       {renameOpen && (
         <RenameDialog

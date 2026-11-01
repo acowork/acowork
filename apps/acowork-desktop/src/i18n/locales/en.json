@@ -320,6 +320,21 @@
     "error": "Search failed",
     "jumpToLatest": "Jump to latest"
   },
+  "chatUsage": {
+    "ariaLabel": "Chat usage",
+    "title": "Chat Usage",
+    "close": "Close",
+    "llmCalls": "LLM calls",
+    "totalInput": "Total input",
+    "totalOutput": "Total output",
+    "cacheRead": "Cache read",
+    "cacheWrite": "Cache write",
+    "estCost": "Est. cost",
+    "byModel": "By model",
+    "byAgent": "By agent",
+    "unknownModel": "Unknown model",
+    "noData": "No LLM usage recorded for this chat yet"
+  },
   "contextUsage": {
     "ariaLabel": "Context usage",
     "title": "Context Usage",
@@ -2215,7 +2230,11 @@
     "transferSaved": "Ownership transferred",
     "transferFailed": "Ownership transfer failed",
     "mustTransferBeforeLeave": "Transfer the owner role before leaving",
-    "governForbidden": "Only the group owner or an admin can do this"
+    "governForbidden": "Only the group owner or an admin can do this",
+    "delete": "Delete group",
+    "deleteTitle": "Delete group chat",
+    "deleteConfirm": "Delete \"{{name}}\" and its entire message history? This cannot be undone.",
+    "deleteSaved": "Group chat deleted"
   },
   "groupChatPrompt": {
     "title": "Group chat prompt (chat.md)",

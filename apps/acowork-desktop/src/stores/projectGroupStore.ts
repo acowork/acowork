@@ -78,6 +78,8 @@ async function authRequest<T>(method: string, path: string, body?: unknown): Pro
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!resp.ok) throw new Error(`${method} ${path} -> ${resp.status}`);
+  // 204 (a delete) carries no body — reading it as JSON would throw on success.
+  if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
 }
 
@@ -118,6 +120,12 @@ interface ProjectGroupStore {
   /** Transfer a `user_group`'s ownership to another (human) member — same
    *  gate; backfills the local row's `owner`. */
   transferOwner: (sessionId: string, newOwner: string) => Promise<void>;
+  /** Delete a group chat outright (hard delete: the session dir and its
+   *  history go). The backend owns the gate — owner-or-admin, and for a
+   *  `project_group` its project must already be archived — so a caller that
+   *  skipped the check just gets an error back. Drops the row locally and
+   *  releases the pane, exactly like leaving a group. */
+  deleteGroup: (sessionId: string) => Promise<void>;
   clearSelection: () => void;
 }
 
@@ -262,6 +270,16 @@ export const useProjectGroupStore = create<ProjectGroupStore>((set, get) => ({
     );
     set((st) => ({
       groups: st.groups.map((g) => (g.session_id === sessionId ? { ...g, owner: s.owner } : g)),
+    }));
+  },
+
+  deleteGroup: async (sessionId) => {
+    await authRequest<void>("DELETE", `/api/chat-sessions/${encodeURIComponent(sessionId)}`);
+    // Gone for everyone, so the row leaves every list and the pane it may
+    // have been filling is released (the same two-step as a self-removal).
+    set((st) => ({
+      groups: st.groups.filter((g) => g.session_id !== sessionId),
+      activeGroupId: st.activeGroupId === sessionId ? null : st.activeGroupId,
     }));
   },
 }));

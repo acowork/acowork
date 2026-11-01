@@ -59,6 +59,7 @@ import { ViewRunButton } from "./ViewRunButton";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { ChatUsageIcon } from "./ChatUsageIcon";
 import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { ReplyQuote, truncateQuote } from "./ReplyQuote";
@@ -1668,6 +1669,14 @@ export function GroupChatPanel() {
                 data-toolbar-cluster="right"
                 className="flex shrink-0 items-center gap-1"
               >
+                {/* Per-chat ledger read (plan §4.6 phase two): one row per
+                    agent participant, merged client-side. A human-only DM
+                    has no agent roster and the button hides itself. */}
+                <ChatUsageIcon
+                  agentIds={agentParticipants.map((p) => p.id)}
+                  chatSessionId={activeGroupId ?? ""}
+                  resolveName={(id) => nameOf(id).name}
+                />
                 <Tooltip content={t("chatPanel.attach")} variant="plain">
                   <button
                     className={cn(toolbarIconButton, uploading && "opacity-50")}
