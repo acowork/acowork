@@ -4,8 +4,11 @@
 //! things:
 //!
 //!   1. a per-model dropdown value (D11 position 3),
-//!   2. a per-model `base_url` override (only meaningful for Responses),
+//!   2. a per-model `base_url` override (only for rows with an explicit
+//!      selection — the override belongs to the selection that produced it),
 //!   3. a "re-verify" action against `POST /api/providers/{id}/probe` (D10),
+//!      issued **with the protocol the row selects** (ADR-103 D14: a verdict
+//!      is about one route, so probing the wrong one would corrupt the gate),
 //!   4. the wire payload for the next save (`model_protocols` /
 //!      `model_base_urls`), which must express "leave untouched" and
 //!      "clear the selection" as different things.
@@ -58,7 +61,8 @@ export interface ModelProtocolState {
 
   /** Badge to render for one model, from the latest known fields. */
   badgeFor: (model: ModelInfo) => ProtocolBadge;
-  /** Whether the base_url input should be shown for this model. */
+  /** Whether the base_url input should be shown for this model (an explicit
+   *  selection exists — the override belongs to the selected protocol). */
   needsBaseUrl: (modelId: string) => boolean;
 
   /**
@@ -76,8 +80,19 @@ export interface ModelProtocolState {
   /** How many real requests the next save will send (D12 / save hint). */
   estimate: (models: ModelInfo[]) => ProbeEstimate;
 
-  /** Re-run the probe for one model, bypassing the 24 h cache. */
-  verify: (providerId: string, modelId: string) => Promise<ProbeOutcomeSummary>;
+  /**
+   * Re-run the probe for one model, bypassing the 24 h cache.
+   *
+   * ADR-103 D14: the caller passes the protocol the row *selects* (falling
+   * back to the provider-level protocol when it follows the data). Probing a
+   * different route than the selection would write a verdict that cannot
+   * enable — or actively demotes — the stored one.
+   */
+  verify: (
+    providerId: string,
+    modelId: string,
+    protocol: string,
+  ) => Promise<ProbeOutcomeSummary>;
 }
 
 function initialSelections(models: ModelInfo[]): Record<string, ProtocolOption> {
@@ -149,7 +164,9 @@ export function useModelProtocolState(): ModelProtocolState {
   }, []);
 
   const needsBaseUrl = useCallback(
-    (modelId: string) => selections[modelId] === RESPONSES_PROTOCOL,
+    // The override describes the *selection* that produced it (D14): show it
+    // for any explicit protocol, not just `Responses`.
+    (modelId: string) => protocolOfOption(selections[modelId] ?? "follow") !== null,
     [selections],
   );
 
@@ -158,27 +175,34 @@ export function useModelProtocolState(): ModelProtocolState {
       const selection = selections[model.id] ?? protocolOptionOf(model.protocol_selected);
       const selectedWire = protocolOfOption(selection);
       const outcome = outcomes[model.id];
-      // Before the save the Gateway's fields describe the *stored* state; the
-      // dialog overlays the user's not-yet-saved choice so the badge answers
-      // "what happens if I save now".
-      const fields = {
-        shape: model.shape,
-        protocol_selected: selectedWire ?? undefined,
-        protocol_active:
-          selectedWire === (model.protocol_selected ?? null)
-            ? model.protocol_active
-            : // Pending change: nothing is enabled until the save probes it.
-              (outcome?.ok ? RESPONSES_PROTOCOL : "openai"),
-        protocol_probe: model.protocol_probe,
-      };
-      if (selectedWire === RESPONSES_PROTOCOL && outcome) {
+      // A manual re-verify in this dialog answers for the current selection,
+      // whichever protocol that is — it overrides the (possibly older) stored
+      // projection until the save re-plans the probe.
+      if (selectedWire && outcome) {
         if (!outcome.ok) {
           return { kind: "blocked", reason: "failed", detail: outcome.detail };
         }
-        return outcome.state === "degraded"
-          ? { kind: "degraded", stripped: outcome.strippedFields }
-          : { kind: "verified" };
+        if (selectedWire === RESPONSES_PROTOCOL) {
+          return outcome.state === "degraded"
+            ? { kind: "degraded", stripped: outcome.strippedFields }
+            : { kind: "verified" };
+        }
+        // A passing non-Responses verdict enables the override; the `R` chip
+        // means "Responses", so no chip visual applies here.
+        return { kind: "none" };
       }
+      // Before the save the Gateway's fields describe the *stored* state; the
+      // dialog overlays the user's not-yet-saved choice so the badge answers
+      // "what happens if I save now".
+      const pendingChange = selectedWire !== (model.protocol_selected ?? null);
+      const fields = {
+        shape: model.shape,
+        protocol_selected: selectedWire ?? undefined,
+        protocol_active: pendingChange
+          ? undefined // Pending change: nothing is enabled until the save probes it.
+          : model.protocol_active,
+        protocol_probe: model.protocol_probe,
+      };
       return deriveProtocolBadge(fields);
     },
     [selections, outcomes],
@@ -205,19 +229,31 @@ export function useModelProtocolState(): ModelProtocolState {
   const estimate = useCallback(
     (models: ModelInfo[]): ProbeEstimate =>
       estimateProbeRequests(
-        models.map((m) => ({
-          previousSelected: m.protocol_selected,
-          nextSelected:
-            protocolOfOption(selections[m.id] ?? protocolOptionOf(m.protocol_selected)) ??
-            undefined,
-          isNew: m.protocol_selected === undefined,
-        })),
+        models.map((m) => {
+          const option = selections[m.id] ?? protocolOptionOf(m.protocol_selected);
+          const explicit = protocolOfOption(option);
+          // The **effective** selection: an explicit choice, or the
+          // provider-level protocol when the row follows the data. The
+          // estimate has to mirror the Gateway's planning rule, and that rule
+          // is stated over the effective selection (ADR-103 D14).
+          const effective = explicit ?? m.provider_protocol ?? undefined;
+          return {
+            previousSelected: m.protocol_selected,
+            nextSelected: effective,
+            isNew: m.protocol_selected === undefined,
+            providerProtocol: m.provider_protocol,
+          };
+        }),
       ),
     [selections],
   );
 
   const verify = useCallback(
-    async (providerId: string, modelId: string): Promise<ProbeOutcomeSummary> => {
+    async (
+      providerId: string,
+      modelId: string,
+      protocol: string,
+    ): Promise<ProbeOutcomeSummary> => {
       const url = `${getGatewayUrl()}/api/providers/${encodeURIComponent(
         providerId,
       )}/probe?force=true`;
@@ -228,7 +264,9 @@ export function useModelProtocolState(): ModelProtocolState {
         const resp = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: modelId, protocol: RESPONSES_PROTOCOL }),
+          // D14: probe the route the selection actually claims, and write the
+          // verdict back about *that* protocol.
+          body: JSON.stringify({ model: modelId, protocol }),
         });
         const body = await resp.json().catch(() => undefined);
         const summary = summarizeProbeResponse(body, resp.status);

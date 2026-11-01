@@ -16,8 +16,10 @@ import {
   RESPONSES_PROTOCOL,
   deriveProtocolBadge,
   estimateProbeRequests,
+  isProbeableProtocol,
   protocolOfOption,
   protocolOptionOf,
+  showsProtocolDropdown,
   showsResponsesMark,
 } from "./modelProtocol";
 
@@ -27,20 +29,64 @@ describe("protocol options", () => {
     // untagged providers (DeepSeek / MiniMax / custom gateways) can never be
     // switched to Responses.
     expect(PROTOCOL_OPTIONS).toContain(RESPONSES_PROTOCOL);
-    expect([...PROTOCOL_OPTIONS]).toEqual(["follow", "openai", "responses"]);
+    expect([...PROTOCOL_OPTIONS]).toEqual([
+      "follow",
+      "openai",
+      "responses",
+      "anthropic",
+    ]);
   });
 
   it("maps the stored selection to and from the dropdown option", () => {
     expect(protocolOptionOf(undefined)).toBe("follow");
     expect(protocolOptionOf("responses")).toBe("responses");
     expect(protocolOptionOf("openai")).toBe("openai");
+    // D14: the probe speaks the Messages shape, so `anthropic` is an option.
+    expect(protocolOptionOf("anthropic")).toBe("anthropic");
     // An explicit protocol this dropdown does not offer is shown as "follow"
-    // rather than mislabelled as one of our three options.
-    expect(protocolOptionOf("anthropic")).toBe("follow");
+    // rather than mislabelled as one of our four options.
+    expect(protocolOptionOf("google")).toBe("follow");
 
     expect(protocolOfOption("follow")).toBeNull();
     expect(protocolOfOption("responses")).toBe("responses");
     expect(protocolOfOption("openai")).toBe("openai");
+    expect(protocolOfOption("anthropic")).toBe("anthropic");
+  });
+
+  it("knows which protocols the probe can speak", () => {
+    // Mirrors `ProbeProtocol::from_protocol_type` on the Rust side.
+    expect(isProbeableProtocol("responses")).toBe(true);
+    expect(isProbeableProtocol("openai")).toBe(true);
+    expect(isProbeableProtocol("anthropic")).toBe(true);
+    expect(isProbeableProtocol("google")).toBe(false);
+    expect(isProbeableProtocol("ollama")).toBe(false);
+    expect(isProbeableProtocol(undefined)).toBe(false);
+  });
+});
+
+describe("showsProtocolDropdown", () => {
+  // ADR-103 D14: a provider that speaks exactly one wire protocol has
+  // nothing to choose between per model, so the dropdown is hidden for it.
+  it("hides the dropdown for an Anthropic provider", () => {
+    expect(showsProtocolDropdown("anthropic")).toBe(false);
+  });
+
+  it("keeps the dropdown for a multi-protocol provider", () => {
+    expect(showsProtocolDropdown("openai")).toBe(true);
+    expect(showsProtocolDropdown("responses")).toBe(true);
+  });
+
+  it("keeps the dropdown when the provider protocol is unknown", () => {
+    // No fact to base a decision on — showing the control is the safe default.
+    expect(showsProtocolDropdown(undefined)).toBe(true);
+    expect(showsProtocolDropdown("")).toBe(true);
+  });
+
+  it("keeps the dropdown while a stored override exists", () => {
+    // §4.2 item 6: hiding it on an incident row would leave the override
+    // visible nowhere and clearable by nothing.
+    expect(showsProtocolDropdown("anthropic", true)).toBe(true);
+    expect(showsProtocolDropdown("anthropic", false)).toBe(false);
   });
 });
 
@@ -171,6 +217,49 @@ describe("deriveProtocolBadge", () => {
     });
     expect(badge).toEqual({ kind: "declared" });
   });
+
+  // ADR-103 D14: the gate no longer speaks only `Responses`, so "selected but
+  // not enabled" must show the yellow badge for *any* rejected override —
+  // a fallback the user cannot see is the silent failure v0.3 removed.
+  it("marks a rejected non-Responses override as blocked", () => {
+    const badge = deriveProtocolBadge({
+      protocol_selected: "openai",
+      protocol_active: "anthropic",
+    });
+    expect(badge).toEqual({ kind: "blocked", reason: "unverified" });
+    expect(showsResponsesMark(badge)).toBe(false);
+  });
+
+  it("says so when the stored verdict is about another protocol", () => {
+    // The 2026-11-01 incident shape: a `Responses` verdict on the row while
+    // the row selects `openai`. The verdict cannot enable it — and must not
+    // read as if there were no verdict at all.
+    const badge = deriveProtocolBadge({
+      protocol_selected: "openai",
+      protocol_active: "anthropic",
+      protocol_probe: { state: "verified", protocol: "responses" },
+    });
+    expect(badge).toEqual({ kind: "blocked", reason: "otherProtocol" });
+  });
+
+  it("treats a verdict without a protocol field as a Responses verdict", () => {
+    // Mirrors `ProtocolProbe::protocol()` on the Rust read side: pre-D14
+    // verdicts can only have been about `Responses`.
+    expect(
+      deriveProtocolBadge({
+        protocol_selected: "responses",
+        protocol_active: "openai",
+        protocol_probe: { state: "verified" },
+      }),
+    ).toEqual({ kind: "blocked", reason: "unknown" });
+    expect(
+      deriveProtocolBadge({
+        protocol_selected: "openai",
+        protocol_active: "anthropic",
+        protocol_probe: { state: "verified" },
+      }),
+    ).toEqual({ kind: "blocked", reason: "otherProtocol" });
+  });
 });
 
 describe("estimateProbeRequests", () => {
@@ -210,6 +299,64 @@ describe("estimateProbeRequests", () => {
     // Clearing a selection probes nothing: there is no endpoint to verify.
     expect(
       estimateProbeRequests([{ previousSelected: "responses", nextSelected: undefined }]),
+    ).toEqual({ models: 0, requests: 0 });
+  });
+
+  // ADR-103 D14: the estimate has to mirror the Gateway's planning rule, or
+  // the UI announces real requests the save will not send.
+  it("counts an override of the provider protocol and skips the status quo", () => {
+    // A Chat-Completions selection on an Anthropic provider overrides the
+    // provider protocol → the D14 gate has to verify it → one deep probe.
+    expect(
+      estimateProbeRequests([
+        {
+          previousSelected: undefined,
+          nextSelected: "openai",
+          providerProtocol: "anthropic",
+        },
+      ]),
+    ).toEqual({ models: 1, requests: 3 });
+
+    // The same selection on an OpenAI provider is the status quo → no probe.
+    expect(
+      estimateProbeRequests([
+        {
+          previousSelected: undefined,
+          nextSelected: "openai",
+          providerProtocol: "openai",
+        },
+      ]),
+    ).toEqual({ models: 0, requests: 0 });
+  });
+
+  it("charges the deep tier once per protocol, not once per batch", () => {
+    // D12.3 (revised by D14): one deep representative *per protocol*. A
+    // batch spanning two protocols pays 3 + 3, not 3 + 1.
+    expect(
+      estimateProbeRequests([
+        { isNew: true, nextSelected: "responses", providerProtocol: "google" },
+        { isNew: true, nextSelected: "openai", providerProtocol: "google" },
+      ]),
+    ).toEqual({ models: 2, requests: 6 });
+
+    // Many rows of one protocol still share the one deep tier.
+    expect(
+      estimateProbeRequests([
+        { isNew: true, nextSelected: "responses" },
+        { isNew: true, nextSelected: "responses" },
+        { isNew: true, nextSelected: "responses" },
+      ]),
+    ).toEqual({ models: 3, requests: 5 });
+  });
+
+  it("never counts a row whose protocol has no probe shape", () => {
+    // D14.3: `google` / `ollama` overrides take no part in the gate — the
+    // Gateway never plans them, so the UI must not announce their cost.
+    expect(
+      estimateProbeRequests([
+        { isNew: true, nextSelected: "google", providerProtocol: "anthropic" },
+        { isNew: true, nextSelected: "ollama", providerProtocol: "anthropic" },
+      ]),
     ).toEqual({ models: 0, requests: 0 });
   });
 });
