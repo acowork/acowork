@@ -34,6 +34,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AcoworkError, Result};
+use crate::providers::traits::UsageInfo;
 
 /// Default maximum pruned-after-pick when pruning is disabled.
 pub const PRUNE_DISABLED: usize = 0;
@@ -121,6 +122,113 @@ pub struct SessionTokens {
     pub last_cache_write: u64,
     pub total_cache_read: u64,
     pub total_cache_write: u64,
+}
+
+// ── Fold primitives (ADR-027 / ADR-066) ─────────────────────────────────
+//
+// The single owner of the rules that fold one LLM call's provider-reported
+// `usage` into cumulative counters. The session totals (`SessionTokens`),
+// the per-model breakdown (`ModelUsageEntry` map), and the Chat usage
+// ledger (`chat_token_usage`) all fold through these functions — the
+// "Σ detail == totals" invariant holds because there is exactly one gate
+// implementation, not three copies that can drift apart.
+
+/// Gated deltas of one call: `(input, output, cache_read, cache_write)`.
+///
+/// ADR-027 zero-skip: `prompt_tokens == 0` means the provider did not
+/// report a reliable input count (fallback path); the input side then
+/// contributes 0 instead of polluting the running total. ADR-066:
+/// `cache_read` shares that gate (when input is unreliable the cache
+/// breakdown is unreliable too); `output` and `cache_write` always
+/// accumulate — a zero completion is usually a true zero (aborted
+/// stream), and an Anthropic cache write with zero regular input is
+/// still a real, billable event.
+pub fn gated_call_deltas(usage: &UsageInfo) -> (u64, u64, u64, u64) {
+    let (d_in, d_cr) = if usage.prompt_tokens > 0 {
+        (usage.prompt_tokens, usage.cache_read_tokens)
+    } else {
+        (0, 0)
+    };
+    (d_in, usage.completion_tokens, d_cr, usage.cache_write_tokens)
+}
+
+impl SessionTokens {
+    /// Fold one call into the running totals and overwrite the `last_*`
+    /// snapshot with the raw Provider values, including zeros — the
+    /// snapshot honestly reflects what the Provider returned (ADR-027).
+    pub fn folded_with_call(&self, usage: &UsageInfo) -> SessionTokens {
+        let (d_in, d_out, d_cr, d_cw) = gated_call_deltas(usage);
+        SessionTokens {
+            last_input: usage.prompt_tokens,
+            last_output: usage.completion_tokens,
+            total_input: self.total_input.saturating_add(d_in),
+            total_output: self.total_output.saturating_add(d_out),
+            last_cache_read: usage.cache_read_tokens,
+            last_cache_write: usage.cache_write_tokens,
+            total_cache_read: self.total_cache_read.saturating_add(d_cr),
+            total_cache_write: self.total_cache_write.saturating_add(d_cw),
+        }
+    }
+
+    /// Fold the totals only, preserving the `last_*` snapshot. For meta
+    /// calls (compaction, title generation): their prompt size is
+    /// unrepresentative of the session's next turn, so overwriting
+    /// `last_input` would inflate the displayed context usage until the
+    /// next dialog call recalibrates it.
+    pub fn folded_totals_preserving_last(&self, usage: &UsageInfo) -> SessionTokens {
+        let mut next = self.folded_with_call(usage);
+        next.last_input = self.last_input;
+        next.last_output = self.last_output;
+        next.last_cache_read = self.last_cache_read;
+        next.last_cache_write = self.last_cache_write;
+        next
+    }
+}
+
+/// Fold one call into the per-model detail map under `key` (built by
+/// [`model_usage_key`]).
+///
+/// Mirrors [`gated_call_deltas`] exactly, so Σ detail entries == the
+/// cumulative totals at every persist point — the store's upsert diff
+/// maintains the agent-level `token_stats` aggregate against that
+/// invariant. Cost folds poison-on-unknown: a fresh bucket takes the
+/// call's `cost_delta` (which may be `None`), an existing bucket only
+/// keeps a running cost while both sides are known; the first `None`
+/// contribution flips the bucket's cost to `None` permanently (until
+/// `rebuild_token_stats` or a corrected attribution — "宁可 miss 也不估计").
+pub fn fold_model_usage_entry(
+    map: &mut std::collections::BTreeMap<String, ModelUsageEntry>,
+    key: &str,
+    usage: &UsageInfo,
+    cost_delta: Option<f64>,
+) {
+    let (d_in, d_out, d_cr, d_cw) = gated_call_deltas(usage);
+    if d_in == 0 && d_out == 0 && d_cr == 0 && d_cw == 0 && cost_delta.is_none() {
+        return;
+    }
+    use std::collections::btree_map::Entry;
+    match map.entry(key.to_string()) {
+        Entry::Vacant(v) => {
+            v.insert(ModelUsageEntry {
+                input: d_in,
+                output: d_out,
+                cache_read: d_cr,
+                cache_write: d_cw,
+                cost: cost_delta,
+            });
+        }
+        Entry::Occupied(mut o) => {
+            let e = o.get_mut();
+            e.input = e.input.saturating_add(d_in);
+            e.output = e.output.saturating_add(d_out);
+            e.cache_read = e.cache_read.saturating_add(d_cr);
+            e.cache_write = e.cache_write.saturating_add(d_cw);
+            e.cost = match (e.cost, cost_delta) {
+                (Some(prev), Some(delta)) => Some(prev + delta),
+                _ => None,
+            };
+        }
+    }
 }
 
 /// Per-session LLM performance accumulator (speed / responsiveness).

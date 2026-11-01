@@ -133,8 +133,10 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// 7 = drop `last_compaction_summary` (its only reader, the retired intent
 /// rotation handoff, is gone); 8 = rename `sessions.user_id` to `initiator`
 /// (ADR-076 §决策 4 — the column is the session's initiator, and `user_id`
-/// belongs to the account system).
-pub const SCHEMA_VERSION: i64 = 8;
+/// belongs to the account system); 9 = `chat_token_usage` ledger table
+/// (Chat Router token accounting — one aggregate row per Chat session,
+/// no conversation state).
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -248,6 +250,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         8,
         "ALTER TABLE sessions RENAME COLUMN user_id TO initiator;",
+    ),
+    // Chat Router token accounting (design 29 / ADR-099 follow-up): one
+    // aggregate row per Chat session for the router's own LLM spend. A Chat
+    // session is NOT an execution session — the row carries no conversation
+    // state, only cumulative counters in the same shape as `sessions`
+    // (token_* columns + `model_usage` breakdown keyed "{provider}|{model}",
+    // folded by the shared ADR-027/066 primitives in acowork-core). The
+    // breakdown feeds the agent-scoped `token_stats` aggregate through the
+    // same same-transaction diff as session rows, so the model-share panel
+    // accounts for chat-side spend without the sessions table gaining a
+    // fake-session entity.
+    (
+        9,
+        "CREATE TABLE IF NOT EXISTS chat_token_usage ( \n             chat_session_id          TEXT PRIMARY KEY, \n             chat_kind                TEXT, \n             created_at               INTEGER NOT NULL, \n             last_active_at           INTEGER NOT NULL, \n             llm_call_count           INTEGER NOT NULL DEFAULT 0, \n             token_last_input         INTEGER NOT NULL DEFAULT 0, \n             token_last_output        INTEGER NOT NULL DEFAULT 0, \n             token_total_input        INTEGER NOT NULL DEFAULT 0, \n             token_total_output       INTEGER NOT NULL DEFAULT 0, \n             token_last_cache_read    INTEGER NOT NULL DEFAULT 0, \n             token_last_cache_write   INTEGER NOT NULL DEFAULT 0, \n             token_total_cache_read   INTEGER NOT NULL DEFAULT 0, \n             token_total_cache_write  INTEGER NOT NULL DEFAULT 0, \n             model_usage              TEXT \n         ); \n         CREATE INDEX IF NOT EXISTS idx_chat_token_usage_last_active \n             ON chat_token_usage(last_active_at DESC);",
     ),
 ];
 

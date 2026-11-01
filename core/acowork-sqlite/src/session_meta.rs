@@ -200,7 +200,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     })
 }
 
-fn ms_to_rfc3339(ms: i64) -> String {
+pub(crate) fn ms_to_rfc3339(ms: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string())
@@ -208,11 +208,11 @@ fn ms_to_rfc3339(ms: i64) -> String {
 
 /// Convert the SQLite crate's local error into the workspace-wide
 /// `AcoworkError`. Centralised so the trait impl stays one-line per call.
-fn to_acowork(e: SqliteError) -> AcoworkError {
+pub(crate) fn to_acowork(e: SqliteError) -> AcoworkError {
     AcoworkError::Memory(e.to_string())
 }
 
-fn to_acowork_sqlite(e: rusqlite::Error) -> AcoworkError {
+pub(crate) fn to_acowork_sqlite(e: rusqlite::Error) -> AcoworkError {
     AcoworkError::Memory(format!("sqlite: {e}"))
 }
 
@@ -455,13 +455,16 @@ impl SessionMetaStore for SqliteSessionMetaStore {
         // Repair path (disposable derived index, ADR-082 pattern): drop the
         // aggregate and re-derive it from the per-session breakdowns. Cost
         // follows the same poison rule as the incremental diff — any entry
-        // without a known price makes the row's cost NULL.
+        // without a known price makes the row's cost NULL. The Chat ledger
+        // contributes through the same fold (schema v9): the aggregate's
+        // source of truth is `sessions.model_usage` UNION
+        // `chat_token_usage.model_usage`, matching `token_stats_consistent`.
         let mut conn = self.store.lock();
         let result: SqliteResult<()> = (|| {
             let tx = conn.transaction()?;
             tx.execute("DELETE FROM token_stats", [])?;
             let mut stmt =
-                tx.prepare("SELECT model_usage FROM sessions WHERE model_usage IS NOT NULL")?;
+                tx.prepare("SELECT model_usage FROM sessions WHERE model_usage IS NOT NULL \n                 UNION ALL \n                 SELECT model_usage FROM chat_token_usage WHERE model_usage IS NOT NULL")?;
             let jsons: Vec<String> = stmt
                 .query_map([], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -500,8 +503,12 @@ impl SessionMetaStore for SqliteSessionMetaStore {
 
     fn token_stats_consistent(&self) -> AcoworkResult<bool> {
         // One pass over each side, no row transport: the aggregate's column
-        // sums vs a `json_each` fold of every session's `model_usage`
-        // breakdown. Cheap enough to run on every token-stats read.
+        // sums vs a `json_each` fold of every session's AND every Chat
+        // ledger row's `model_usage` breakdown (schema v9 — the ledger
+        // feeds the aggregate through the same diff as sessions, so it
+        // must count on the detail side too, or the check would fail on
+        // the first router turn). Cheap enough to run on every token-stats
+        // read.
         //
         // Cost is not compared token-style: the aggregate poisons a row's
         // cost to NULL when any contribution is unpriced, and that NULL
@@ -533,15 +540,30 @@ impl SessionMetaStore for SqliteSessionMetaStore {
                     (SELECT COALESCE(SUM(total_cache_write), 0) FROM token_stats),
                     (SELECT SUM(total_cost) FROM token_stats),
                     (SELECT COALESCE(SUM(json_extract(j.value, '$.input')), 0)
-                     FROM sessions s, json_each(s.model_usage) j),
+                     FROM (SELECT model_usage FROM sessions WHERE model_usage IS NOT NULL
+                           UNION ALL
+                           SELECT model_usage FROM chat_token_usage WHERE model_usage IS NOT NULL) u,
+                          json_each(u.model_usage) j),
                     (SELECT COALESCE(SUM(json_extract(j.value, '$.output')), 0)
-                     FROM sessions s, json_each(s.model_usage) j),
+                     FROM (SELECT model_usage FROM sessions WHERE model_usage IS NOT NULL
+                           UNION ALL
+                           SELECT model_usage FROM chat_token_usage WHERE model_usage IS NOT NULL) u,
+                          json_each(u.model_usage) j),
                     (SELECT COALESCE(SUM(json_extract(j.value, '$.cache_read')), 0)
-                     FROM sessions s, json_each(s.model_usage) j),
+                     FROM (SELECT model_usage FROM sessions WHERE model_usage IS NOT NULL
+                           UNION ALL
+                           SELECT model_usage FROM chat_token_usage WHERE model_usage IS NOT NULL) u,
+                          json_each(u.model_usage) j),
                     (SELECT COALESCE(SUM(json_extract(j.value, '$.cache_write')), 0)
-                     FROM sessions s, json_each(s.model_usage) j),
+                     FROM (SELECT model_usage FROM sessions WHERE model_usage IS NOT NULL
+                           UNION ALL
+                           SELECT model_usage FROM chat_token_usage WHERE model_usage IS NOT NULL) u,
+                          json_each(u.model_usage) j),
                     (SELECT SUM(json_extract(j.value, '$.cost'))
-                     FROM sessions s, json_each(s.model_usage) j),
+                     FROM (SELECT model_usage FROM sessions WHERE model_usage IS NOT NULL
+                           UNION ALL
+                           SELECT model_usage FROM chat_token_usage WHERE model_usage IS NOT NULL) u,
+                          json_each(u.model_usage) j),
                     (SELECT COUNT(*) FROM token_stats)"#,
                 [],
                 |r| {
@@ -609,7 +631,7 @@ FROM sessions";
 /// 0 on read — silent data loss. Saturating at the storage ceiling keeps the
 /// value monotone instead. Ceiling: ~9.2e18 tokens; the upgrade path is a
 /// `TEXT` column, not worth it for counters that move in the thousands.
-fn token_to_i64(v: u64) -> i64 {
+pub(crate) fn token_to_i64(v: u64) -> i64 {
     v.min(i64::MAX as u64) as i64
 }
 
@@ -726,14 +748,14 @@ fn upsert_row(
 /// Decode the `model_usage` JSON column. Corrupt JSON reads as "no
 /// breakdown": the column is derived-adjacent state and a hand-edited row
 /// must not fail the whole listing (same lenience as `visibility`).
-fn parse_model_usage(json: Option<&str>) -> ModelUsageMap {
+pub(crate) fn parse_model_usage(json: Option<&str>) -> ModelUsageMap {
     json.and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default()
 }
 
 /// Encode a breakdown. The empty map is stored as NULL so a session that
 /// never made an LLM call is indistinguishable from a pre-feature row.
-fn serialize_model_usage(map: Option<&ModelUsageMap>) -> Option<String> {
+pub(crate) fn serialize_model_usage(map: Option<&ModelUsageMap>) -> Option<String> {
     map.filter(|m| !m.is_empty())
         .and_then(|m| serde_json::to_string(m).ok())
 }
@@ -752,7 +774,7 @@ fn serialize_model_usage(map: Option<&ModelUsageMap>) -> Option<String> {
 /// `total_cost` to NULL, where it stays until [`Self::rebuild_token_stats`]
 /// re-derives from rows that individually know their cost. A fabricated 0
 /// would read as "free".
-fn apply_stats_delta(
+pub(crate) fn apply_stats_delta(
     conn: &Connection,
     old: &ModelUsageMap,
     new: &ModelUsageMap,
