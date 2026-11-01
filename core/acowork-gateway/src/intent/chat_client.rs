@@ -209,6 +209,25 @@ pub async fn ensure_group(
     read_json(resp).await
 }
 
+/// `POST /internal/chat-sessions/group/deleted` — PM archived the project, so
+/// its group chat is now deletable by its owner (design 27 §4.4). Stamps
+/// `project_deleted_at` on the session row; `None` when the project never had
+/// a group chat (the response body is `null`).
+pub async fn mark_project_deleted(
+    port: u16,
+    project_id: &str,
+) -> Result<Option<SessionInfo>, String> {
+    let resp = client()
+        .post(format!(
+            "http://127.0.0.1:{port}/internal/chat-sessions/group/deleted"
+        ))
+        .json(&serde_json::json!({ "project_id": project_id }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    read_json(resp).await
+}
+
 /// `POST /internal/chat-sessions/messages` — append one system row.
 /// The store dedups on `meta.message_id` (§8), so a retried delivery
 /// never double-writes the chat log.

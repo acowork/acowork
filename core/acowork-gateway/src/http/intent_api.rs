@@ -112,6 +112,12 @@ pub fn intent_routes() -> Router<AppState> {
         // Design 27 §8.3: PM member add / remove re-syncs the group's
         // participant set; removal revokes the bound execution sessions.
         .route("/api/intents/project-group/sync", post(sync_project_group))
+        // Design 27 §4.4: PM archived the project, so its group chat may now
+        // be deleted by its owner — the chat domain cannot see PM's tree.
+        .route(
+            "/api/intents/project-group/deleted",
+            post(mark_project_group_deleted),
+        )
         .route("/api/intents/task-dispatch", post(dispatch_task))
         .route("/api/intents/task-close", post(close_task_context))
         .route("/api/intents/{message_id}", get(intent_status))
@@ -209,6 +215,44 @@ async fn sync_project_group(
     Ok(Json(serde_json::json!({
         "session_id": session.session_id,
         "participants": session.participants,
+    })))
+}
+
+/// `POST /api/intents/project-group/deleted` — PM archived the project; stamp
+/// its group chat so the owner's delete is legal (design 27 §4.4). Same
+/// internal-service auth as ensure / sync (PM acts with the node token). The
+/// chat is *not* deleted here: the history belongs to its members until a
+/// human decides, and PM deleting someone's chat history as a side effect of
+/// archiving a project is not a decision this layer gets to make.
+async fn mark_project_group_deleted(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !token_presents_node(&state, &headers).await {
+        return Err(ApiError::unauthorized(
+            "project group deletion requires a valid node token",
+        ));
+    }
+    let project_id = req
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if project_id.is_empty() {
+        return Err(ApiError::bad_request("project_id is required"));
+    }
+    let gw = state.gateway_state.read().await;
+    let user_port = gw.user_process.as_ref().filter(|p| p.ready).map(|p| p.port);
+    drop(gw);
+    let port = user_port
+        .ok_or_else(|| ApiError::service_unavailable("project groups require the user service"))?;
+    let session = chat_client::mark_project_deleted(port, &project_id)
+        .await
+        .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    Ok(Json(serde_json::json!({
+        "session_id": session.as_ref().map(|s| s.session_id.clone()),
     })))
 }
 
@@ -2742,5 +2786,87 @@ mod chat_params_tests {
         assert_eq!(params[CHAT_ATTACHMENTS_PARAM], serde_json::json!([]));
         // An absent `chat.md` override keeps its pre-existing wire shape.
         assert_eq!(params["chat_prompt"], serde_json::Value::Null);
+    }
+}
+
+/// `POST /api/intents/project-group/deleted` — the PM's delete-stamp push
+/// (design 27 §4.4). The PM now retries these verdicts within a warm-up
+/// window, so the three refusals are contract-relevant, not trivia: 401
+/// means "wrong credential" (retrying cannot help), 400 means "malformed
+/// body" (never heals), and 503 is exactly the cold-start case the retry
+/// window exists to ride out. Pinning all three keeps the retry design
+/// honest: a refactor that swaps 503 for a permanent code would silently
+/// turn a warm-up miss into a permanently undeletable group chat.
+#[cfg(test)]
+mod project_group_deleted_route_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use crate::gateway::state::GatewayState;
+    use crate::http::auth::HttpAuth;
+    use tower::ServiceExt;
+
+    fn state(user_ready: bool) -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-intent-deleted-{}",
+            std::process::id()
+        ));
+        let mut gw = GatewayState::new(&dir.to_string_lossy());
+        // A configured service token fails closed on callers that present
+        // nothing — local no-token mode would skip the check entirely.
+        gw.internal_service_token = Some("svc-token".to_string());
+        gw.user_process = user_ready.then_some(crate::lifecycle::user_supervisor::UserProcessState {
+            pid: 0,
+            port: 1,
+            ready: true,
+        });
+        AppState::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(gw)),
+            std::sync::Arc::new(HttpAuth::new(false)),
+        )
+    }
+
+    async fn post(state: AppState, body: serde_json::Value, bearer: Option<&str>) -> StatusCode {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/intents/project-group/deleted")
+            .header("content-type", "application/json");
+        if let Some(t) = bearer {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        intent_routes()
+            .with_state(state)
+            .oneshot(req.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn missing_credential_is_401() {
+        let status = post(state(true), serde_json::json!({ "project_id": "p-1" }), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn empty_project_id_is_400() {
+        let status = post(
+            state(true),
+            serde_json::json!({ "project_id": "  " }),
+            Some("svc-token"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn user_service_not_ready_is_503() {
+        let status = post(
+            state(false),
+            serde_json::json!({ "project_id": "p-1" }),
+            Some("svc-token"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }

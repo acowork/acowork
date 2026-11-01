@@ -51,8 +51,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 
 use crate::http::auth_middleware::AuthContext;
-use crate::http::proxy::{is_hop_by_hop_header, runtime_http_client};
+use crate::http::proxy::{is_hop_by_hop_header, resolve_node_token, runtime_http_client};
 use crate::http::routes::AppState;
+use crate::intent::chat_client;
 
 /// The user service's public surface, all of it proxy-owned.
 ///
@@ -66,8 +67,11 @@ pub fn user_proxy_routes() -> Router<AppState> {
         "/api/users",
         "/api/user",
         // Design 27: the Chat session store lives in the user service;
-        // the Gateway only forwards (the `/internal/*` system surface is
+        // the Gateway forwards (the `/internal/*` system surface is
         // deliberately NOT proxied — it is Gateway-to-user-service only).
+        // The one non-transparent case: a session DELETE triggers the
+        // best-effort Chat token ledger forget fan-out (see
+        // [`spawn_chat_usage_forget`], design 27 §4.4).
         "/api/chat-sessions",
     ] {
         router = router
@@ -113,6 +117,18 @@ async fn user_proxy_handler(
         return response;
     };
 
+    // Design 27 §4.4 delete-side ledger symmetry: a Chat session DELETE
+    // invalidates the per-agent Chat token ledger (schema v9), which the
+    // user service can never touch (it is Runtime-private). The roster must
+    // be read BEFORE the forward — after the 204 the row is gone. A failed
+    // pre-read simply skips the fan-out: the chat domain already refused or
+    // performed the delete; a stale ledger row is repaired by the next
+    // attempt and `rebuild_token_stats`.
+    let forget = match chat_session_delete_id(&method, uri.path()) {
+        Some(session_id) => Some((session_id.to_string(), agent_participants(port, session_id).await)),
+        None => None,
+    };
+
     // The prefix is preserved, so the public URI *is* the target path.
     let path_and_query = uri
         .path_and_query()
@@ -137,6 +153,16 @@ async fn user_proxy_handler(
         Ok(response) => {
             let status = StatusCode::from_u16(response.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            // The delete landed (2xx): hand the chat id to every agent
+            // participant's Runtime so each one nets its ledger copy out of
+            // `token_stats`. Fire-and-forget like every other wake-up here —
+            // the user-service answer is already the client's.
+            if status.is_success()
+                && let Some((chat_id, agents)) = forget
+                && !agents.is_empty()
+            {
+                spawn_chat_usage_forget(state, agents, chat_id);
+            }
             // Strip hop-by-hop headers (RFC 7230 §6.1) exactly as the
             // request path above does. The response side was previously a
             // blind copy of every upstream header, which forwarded
@@ -218,6 +244,97 @@ fn build_trusted_headers(headers: &HeaderMap, auth: Option<&AuthContext>) -> Hea
     out
 }
 
+/// The session id of a Chat session DELETE (`DELETE /api/chat-sessions/{id}`,
+/// the delete surface of design 27 §4.4), `None` for anything else.
+///
+/// Sub-path DELETEs (`/{id}/participants/{pid}`, `/chat-md`, `/files/…`)
+/// remove content or membership, never the session — they must not fire the
+/// ledger forget fan-out, hence the single-segment rule.
+fn chat_session_delete_id<'a>(method: &Method, path: &'a str) -> Option<&'a str> {
+    if *method != Method::DELETE {
+        return None;
+    }
+    let rest = path.strip_prefix("/api/chat-sessions/")?;
+    (!rest.is_empty() && !rest.contains('/')).then_some(rest)
+}
+
+/// The agent participants of one chat session, read from the internal
+/// surface before the delete erases the row. A failed lookup degrades to an
+/// empty list — the delete response stands on its own, the ledger fan-out
+/// is the repairable side of the pair.
+async fn agent_participants(port: u16, session_id: &str) -> Vec<String> {
+    match chat_client::load_session(port, session_id).await {
+        Ok(session) => session
+            .participants
+            .iter()
+            .filter(|p| p.is_agent())
+            .map(|p| p.id().to_string())
+            .collect(),
+        Err(e) => {
+            tracing::debug!(session_id, error = %e, "chat ledger forget: roster pre-read failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Tell each agent participant's Runtime to forget the deleted chat's token
+/// ledger (`DELETE {runtime}/chat-usage/{id}`, wired in the Runtime's HTTP
+/// server). Best-effort per agent: a Runtime that is not registered (off,
+/// restarting, another node mid-handoff) keeps its row until the next
+/// attempt — never a failure back to the client whose delete already
+/// succeeded. The id travels only to the chat's own agents, same discipline
+/// as the message delivery path.
+fn spawn_chat_usage_forget(state: AppState, agents: Vec<String>, chat_id: String) {
+    tokio::spawn(async move {
+        let Some(registry) = state.runtime_http_registry.clone() else {
+            return;
+        };
+        for agent in agents {
+            let endpoint = {
+                let reg = registry.read().await;
+                reg.get_endpoint(&agent)
+            };
+            let Some(endpoint) = endpoint else {
+                tracing::debug!(
+                    agent = %agent,
+                    chat_id = %chat_id,
+                    "chat ledger forget: runtime not registered — its ledger keeps the row"
+                );
+                continue;
+            };
+            let mut req =
+                runtime_http_client().delete(format!("{endpoint}/chat-usage/{chat_id}"));
+            // Same node-token path the reverse proxy and the card-answer
+            // forward use (ADR-055): with no token store (local mode) this
+            // resolves to `None` and the loopback call stands.
+            if let Some(node_token) = resolve_node_token(&state, &agent).await {
+                req = req.header("X-ACowork-Node-Token", node_token);
+            }
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::debug!(
+                        agent = %agent,
+                        chat_id = %chat_id,
+                        "chat ledger forget delivered"
+                    );
+                }
+                Ok(resp) => tracing::warn!(
+                    agent = %agent,
+                    chat_id = %chat_id,
+                    status = %resp.status(),
+                    "chat ledger forget rejected by the Runtime"
+                ),
+                Err(e) => tracing::warn!(
+                    agent = %agent,
+                    chat_id = %chat_id,
+                    error = %e,
+                    "chat ledger forget forward failed"
+                ),
+            }
+        }
+    });
+}
+
 /// Copy upstream response headers, dropping the ones that describe *this*
 /// hop rather than the message.
 ///
@@ -251,7 +368,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
     use axum::response::Response;
-    use axum::routing::get;
+    use axum::routing::{delete, get};
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
@@ -259,7 +376,9 @@ mod tests {
 
     use crate::gateway::state::GatewayState;
     use crate::http::auth::HttpAuth;
-    use super::{build_trusted_headers, forwardable_response_headers, AuthContext};
+    use super::{
+        build_trusted_headers, chat_session_delete_id, forwardable_response_headers, AuthContext,
+    };
     use crate::http::auth_middleware::{AUTH_AS_USER_HEADER, AUTH_ROLE_HEADER, AUTH_USER_HEADER};
     use crate::http::routes::{AppState, build_router};
     use crate::lifecycle::user_supervisor::UserProcessState;
@@ -450,6 +569,103 @@ mod tests {
         let out = build_trusted_headers(&headers, None);
         assert!(!out.contains_key(AUTH_USER_HEADER));
         assert!(!out.contains_key(AUTH_ROLE_HEADER));
+    }
+
+    /// The forget fan-out fires ONLY for the session-delete surface
+    /// (`DELETE /api/chat-sessions/{id}`): membership, chat-md and file
+    /// DELETEs remove content, not the session, and must leave the ledger.
+    #[test]
+    fn only_the_bare_session_delete_matches() {
+        use axum::http::Method;
+        let get = Method::GET;
+        assert_eq!(chat_session_delete_id(&Method::DELETE, "/api/chat-sessions/c-1"), Some("c-1"));
+        assert_eq!(chat_session_delete_id(&get, "/api/chat-sessions/c-1"), None);
+        assert_eq!(chat_session_delete_id(&Method::DELETE, "/api/chat-sessions/c-1/participants/u-1"), None);
+        assert_eq!(chat_session_delete_id(&Method::DELETE, "/api/chat-sessions/c-1/chat-md"), None);
+        assert_eq!(chat_session_delete_id(&Method::DELETE, "/api/chat-sessions/"), None);
+        assert_eq!(chat_session_delete_id(&Method::DELETE, "/api/users/u-1"), None);
+    }
+
+    /// Design 27 §4.4 delete-side ledger symmetry, end to end through the
+    /// proxy: a successful session DELETE pre-reads the roster over the
+    /// internal surface and fans `DELETE {runtime}/chat-usage/{id}` out to
+    /// the AGENT participants only — the user service never touches the
+    /// Runtime-private ledger itself.
+    #[tokio::test]
+    async fn session_delete_fans_out_the_ledger_forget_to_agent_participants() {
+        let dir = temp_dir();
+
+        // Fake runtime: records the forget calls it receives.
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen_route = seen.clone();
+        let runtime_app = Router::new().route(
+            "/chat-usage/{chat_id}",
+            delete(move |axum::extract::Path(chat_id): axum::extract::Path<String>| {
+                let seen = seen_route.clone();
+                async move {
+                    seen.lock().unwrap().push(chat_id);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let rt_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rt_port = rt_listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(rt_listener, runtime_app).await.unwrap() });
+
+        // Fake user service: roster on the internal surface, 204 DELETE.
+        let svc = Router::new()
+            .route(
+                "/internal/chat-sessions/{id}",
+                get(|| async {
+                    axum::Json(serde_json::json!({
+                        "session_id": "c-1",
+                        "kind": "project_group",
+                        "participants": [
+                            { "id": "com.test.agent", "identity": "agent" },
+                            { "id": "u-1", "identity": "human" },
+                        ],
+                    }))
+                }),
+            )
+            .route(
+                "/api/chat-sessions/{id}",
+                delete(|| async { StatusCode::NO_CONTENT }),
+            );
+        let svc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let svc_port = svc_listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(svc_listener, svc).await.unwrap() });
+
+        let mut st = state(&dir, Some(svc_port));
+        let registry = crate::http::proxy::new_shared_registry();
+        registry
+            .write()
+            .await
+            .register("com.test.agent", &format!("http://127.0.0.1:{rt_port}"));
+        st.runtime_http_registry = Some(registry);
+        let router = build_router(st);
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(axum::http::Method::DELETE)
+                    .uri("/api/chat-sessions/c-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "the proxied delete answer stands");
+
+        // The fan-out is spawned fire-and-forget — poll for its arrival.
+        let mut arrived = Vec::new();
+        for _ in 0..50 {
+            arrived = seen.lock().unwrap().clone();
+            if !arrived.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(arrived, vec!["c-1".to_string()], "the agent participant's Runtime is told to forget");
     }
 
     #[test]

@@ -187,6 +187,14 @@ pub fn proxy_routes() -> Router<AppState> {
         )
         .route("/api/agents/{id}/latest-session", get(proxy_latest_session))
         .route("/api/agents/{id}/token-stats", get(proxy_token_stats))
+        // Per-chat token ledger read (plan §4.6 phase two): the desktop
+        // usage view fans this out per agent participant of a chat. Pure
+        // statistics, Runtime-side store, transparent proxy like
+        // `token-stats` — no Gateway-side filesystem access (redline).
+        .route(
+            "/api/agents/{id}/chat-usage/{chat_id}",
+            get(proxy_chat_usage),
+        )
         .route(
             "/api/agents/{id}/sessions/{sid}/messages",
             get(proxy_get_messages).post(proxy_post_message),
@@ -825,6 +833,22 @@ async fn proxy_token_stats(
     headers: HeaderMap,
 ) -> Response {
     proxy_to_runtime(&state, &id, "/sessions/token-stats", "", &headers).await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/chat-usage/{chat_id}` to Runtime's
+/// `GET /chat-usage/{chat_id}` (one chat's ledger row on that agent).
+///
+/// The chat id rides to the agent that is a participant of exactly that
+/// chat — the same privacy discipline as the delete fan-out (design 27
+/// §4.4): a lookup is only meaningful to someone who already holds the
+/// session id, and the row carries spend totals, no content.
+async fn proxy_chat_usage(
+    State(state): State<AppState>,
+    Path((id, chat_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/chat-usage/{chat_id}");
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/health` to Runtime's `GET /health`.
