@@ -242,6 +242,20 @@ D5 的窗口尺寸从「条数」改为「上下文大小（tokens）」。原 `
 
 配套：`PUT /agents/{id}/config` 新增扁平字段 `chat_router_history_max_tokens`（`ConfigField::ChatRouterHistoryMaxTokens`），Agent Setup 的 Chat Router 卡片改为可编辑（含 5 份 locale）；`chat_router.history_window` 保留但降级为条数上限、不上 UI；决策日志新增 `history_tokens`，与 `history_len` 并列——只记条数无法区分「18 条短确认」和「18 份长报告」。
 
+## 修订（2026-11-01）：Router 自身的 token 消耗入账（Chat 台账）
+
+D2 说 router turn 无状态——这指的是**对话状态**；它的 token 消耗是真实的计费支出，此前却只落观测面（决策日志 + trace），不进任何统计：不写 `sessions` 表、不进 agent 原子计数器（ADR-028/066）、不在 `token_stats` 聚合里。一个活跃群聊每轮 Block B 预算默认 8000 tokens，router 是 Runtime 里唯一成规模、未记账的 LLM 消耗面，agent 级用量因此系统性低报。
+
+本修订补上记账，形态是**台账而非会话**：
+
+- **schema v9 `chat_token_usage` 表**：每个 Chat session 一行纯聚合（`token_*` 平铺列 + `model_usage` 明细 JSON，键 `"{provider}|{model}"` 与 `sessions.model_usage` 同构）。Chat session 不是执行会话——行里没有对话状态，router 的无状态契约（D2）不变。否决过的替代形态：伪会话行（污染 `list_sessions` / 懒恢复 / `prune_to` / visibility 语义）、Gateway 聚合（违反 Gateway 边界红线）。
+- **逐次调用记账**：一个轮次的每次成功模型调用（首调、每个信息轮、dispatch 重试）各记一条，折叠规则复用 ADR-027/066 的单一实现（`acowork_core::session_meta` 的 fold 原语，sessions 与台账共用，「Σ 明细 == 总量」不变量因此结构性成立）。决策日志仍只记末次调用的口径（观测面），并补 `completion_tokens` 字段对齐。
+- **两个归属**：每次调用同时进 agent 原子计数器（live `context_usage` 推送即刻含 chat）与台账行（持久化真源）；SQLite store 不可用时计数器照常累加（统计缺失不成为丢账）。
+- **恢复与一致性（缺一即失真）**：`list_sessions` 的盘扫描把台账合计并入 `merge_token_totals`（否则重启后 agent 总量永久低报 chat 部分）；`token_stats_consistent` / `rebuild_token_stats` 的明细源改为 `sessions.model_usage ∪ chat_token_usage.model_usage`（否则 router 第一次记账就触发不一致告警与无谓重建）。
+- **读取面**：agent 级 `token_stats`（桌面模型用量环）零改动自动修正。per-chat 明细端点与 UI 为后续阶段。
+
+顺带修正同类漏账：搜索摘要（`POST` search-summary）的 LLM 调用补进 agent 计数器（它不属于任何 chat 或会话，计数器是其唯一归属）。
+
 ## 测试
 
 - 单元：候选过滤、dispatch 解析、prompt 分层、工具可见性（含 router 侧 GET-only schema 与运行时强制）、上下文投影确定性与前缀稳定性、降级、信息工具轮次（工具失败作为 tool result 回馈、超长结果边界截断）；队列不变量（单 drainer、FIFO、drainer 收尾时到达的消息不滞留、空闲队列回收）；kill switch 下不排队且内联投递；router 交还控制权（`PassThrough`/`Fallback`）时消息仍被投递且 `Handled` 不重复投递；`session_config` 在两条复用分支（目标是当前映射会话 / 目标是另一活会话）都生效；chat 绑定优先于请求体里的 `visibility`。决策日志记录 `info_rounds`（本轮信息工具轮数），为「该转的没转 / 不该转的转了」提供审计面。

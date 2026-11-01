@@ -385,7 +385,9 @@ Remote or local Runtime processes, PM, and Desktop operate on chat history throu
 ### 4.4 Project Group Chat Lifecycle
 
 - Every project must create one associated project group chat at creation, and a project can have only one such group chat.
-- The project group chat cannot be deleted independently. The association between project lifecycle and group-chat archive, deletion, and retention is **out of scope for this phase** and will be decided separately.
+- **While the project lives, its group chat cannot be deleted independently**: `ensure_group` would re-create it on the next touch, so a delete would only cost the history for nothing (the same reason the default pair session is undeletable).
+- **Once the project is deleted (PM archives it into `.trash`), the group owner or an admin may delete that group chat.** The precondition is expressed by a PM-owned fact: after `DELETE /projects/{pid}` succeeds, PM stamps `project_deleted_at` on the session row through `POST /api/intents/project-group/deleted`, and the chat domain allows the delete from then on (it cannot see PM's project tree, and should not).
+- The delete is a **hard delete** (session directory + message log + indexes) on the same path as the existing `DELETE /api/chat-sessions/{id}`; governance matches every other group write (ADR-098: owner or admin, with participation still the entry permission, so a non-member gets the hidden 404). **PM never deletes a group chat on a human's behalf** — archiving a project does not destroy its chat history; whether it goes is a human decision.
 - `project_id` is stably associated with the project group chat; PM dispatches and Agent replies use it as the source / reply address.
 
 ### 4.5 The Intent Field Model
