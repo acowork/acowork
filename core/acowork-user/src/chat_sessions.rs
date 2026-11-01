@@ -497,6 +497,18 @@ pub struct ChatSession {
     /// §4.5). `None` = the user never chose one on this pair's surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_config: Option<SeedConfig>,
+    /// When the backing PM project was deleted / archived, in unix seconds
+    /// (`None` = a live project, or no project at all). PM stamps it through
+    /// [`mark_project_deleted`] on the same best-effort push every other
+    /// project fact travels on.
+    ///
+    /// It is the whole "a project channel may only be deleted after its
+    /// project is" precondition: while the project lives, PM's `ensure_group`
+    /// re-creates the channel on the next touch, so deleting it would only lose
+    /// the history and hand back an empty group (the same reasoning that keeps
+    /// the default pair session undeletable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_deleted_at: Option<i64>,
     /// Project binding for `project_group` sessions — the idempotency key
     /// for "one project, exactly one group chat".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -900,6 +912,7 @@ fn write_new(
         owner: owner.map(str::to_string),
         default_responder: None,
         session_config: None,
+        project_deleted_at: None,
         project_id: project_id.map(str::to_string),
         repo: None,
         created_at: now,
@@ -1149,12 +1162,28 @@ pub fn mark_read(data_dir: &Path, session_id: &str, who: &str) -> Result<(), Str
 }
 
 /// Delete a Chat session (plan 5.2: non-default sessions are deletable).
-/// Guards: participants only; the default pair session (the entry the pair
-/// index resolves) and a project-bound group (§4.4) refuse — deleting them
-/// would only re-create an empty one on next entry and silently lose the
-/// history, which is exactly the "no session to type into" problem §6.1
-/// rules out.
-pub fn delete_session(data_dir: &Path, session_id: &str, caller: &str) -> Result<(), String> {
+///
+/// Guards, in the order they fire (all under the session lock, on a freshly
+/// loaded row, so a concurrent `transfer_owner` cannot flip a gate mid-check):
+///
+/// 1. participation — a non-member gets the hidden 404 (§5.3);
+/// 2. governance ([`can_govern_group`], ADR-098) — a **group** is deleted by
+///    its owner or an admin only; a plain member's way out is
+///    [`remove_participant`], which leaves the history for the rest;
+/// 3. a `project_group` needs its project **already deleted**
+///    ([`ChatSession::project_deleted_at`]) — while the project lives PM would
+///    just re-create the channel on the next touch, so the delete would buy an
+///    empty group and a lost history;
+/// 4. the default pair session (the entry the pair index resolves) refuses —
+///    same "no session to type into" problem §6.1 rules out.
+///
+/// Returns the deleted row so the HTTP layer can doorbell its humans.
+pub fn delete_session(
+    data_dir: &Path,
+    session_id: &str,
+    caller: &str,
+    is_admin: bool,
+) -> Result<ChatSession, String> {
     validate_session_id(session_id)?;
     let dir = session_dir(data_dir, session_id);
     let tlock = session_lock(&dir);
@@ -1165,8 +1194,12 @@ pub fn delete_session(data_dir: &Path, session_id: &str, caller: &str) -> Result
         // must not learn the session exists.
         return Err("chat session not found".to_string());
     }
-    if session.project_id.is_some() {
-        return Err("the project group session cannot be deleted".to_string());
+    if session.kind.is_group() && !can_govern_group(&session, caller, is_admin) {
+        return Err("not_authorized".to_string());
+    }
+    if session.project_id.is_some() && session.project_deleted_at.is_none() {
+        return Err("the project group session cannot be deleted while its project exists"
+            .to_string());
     }
     {
         let _g = lock(&PAIRS_LOCK);
@@ -1188,7 +1221,7 @@ pub fn delete_session(data_dir: &Path, session_id: &str, caller: &str) -> Result
     // be leaked memory.
     let _ = lock(&LINE_INDEXES).remove(&dir);
     reindex(data_dir, session_id, Some(&session.participants), &[])?;
-    Ok(())
+    Ok(session)
 }
 
 // ── Attachments (design 27 §4.2.1, plan 3.5) ──────────────────────────
@@ -2603,6 +2636,44 @@ pub fn sync_group(
     Ok(s)
 }
 
+/// PM deleted (archived) a project: stamp its group chat so its owner may now
+/// delete the channel itself ([`delete_session`]).
+///
+/// PM is the authority for "this project is gone" — it moved the project out
+/// of `projects/` — and this is the same best-effort push the roster / owner /
+/// title travel on: the chat row caches a fact PM owns, nothing more. Stamping
+/// rather than deleting is deliberate — the history is the members' to keep
+/// until a human decides otherwise, and the flag is what keeps the delete
+/// button off a live project's channel.
+///
+/// Resolves through the project index, so a project that never got a group
+/// chat is a no-op (`Ok(None)`); an already-stamped row is not rewritten (PM
+/// retries this like every other push).
+pub fn mark_project_deleted(
+    data_dir: &Path,
+    project_id: &str,
+    now: i64,
+) -> Result<Option<ChatSession>, String> {
+    let Some(existing_id) = read_projects_index(data_dir).get(project_id).cloned() else {
+        return Ok(None);
+    };
+    let dir = session_dir(data_dir, &existing_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    // A stale index row (the group was already deleted) is not an error: there
+    // is nothing left to stamp, and `create_session` re-points the entry if the
+    // project ever comes back.
+    let Ok(mut session) = load(data_dir, &existing_id) else {
+        return Ok(None);
+    };
+    if session.project_deleted_at.is_some() {
+        return Ok(Some(session));
+    }
+    session.project_deleted_at = Some(now);
+    save(&dir, &session)?;
+    Ok(Some(session))
+}
+
 /// Design 27 §8.3: add a participant to an existing Chat session.
 /// Idempotent — an already-listed id (by identity too) is left as-is and
 /// the session is returned unchanged. This is the participant-relation
@@ -3244,8 +3315,9 @@ mod tests {
         let pair = ensure_pair(&dir, human.clone(), agent.clone(), SessionKind::UserAgent, 100)
             .expect("pair");
         // The default pair session refuses (§6.1: it is the landing view).
-        assert!(delete_session(&dir, &pair.session_id, "human-1").is_err());
-        // A second same-pair session is deletable by a member.
+        assert!(delete_session(&dir, &pair.session_id, "human-1", false).is_err());
+        // A second same-pair session is deletable by a member (1:1 kinds carry
+        // no owner, so the ADR-098 governance gate does not apply to them).
         let extra = create_session(
             &dir,
             SessionKind::UserAgent,
@@ -3256,34 +3328,154 @@ mod tests {
             101,
         )
         .expect("create");
-        delete_session(&dir, &extra.session_id, "human-1").expect("delete");
+        delete_session(&dir, &extra.session_id, "human-1", false).expect("delete");
         assert!(load(&dir, &extra.session_id).is_err());
-        // A project-bound group refuses (§4.4 fixed group).
+        // A project-bound group refuses while its project lives (§4.4) — even
+        // for its owner: PM would re-create it on the next touch.
         let grp = create_session(
             &dir,
             SessionKind::ProjectGroup,
             &[human.clone(), Participant::untyped("u2")],
             "proj",
-            None,
+            Some("human-1"),
             Some("p-1"),
             102,
         )
         .expect("group");
-        assert!(delete_session(&dir, &grp.session_id, "human-1").is_err());
-        // An ordinary group: outsider refused (hidden), member deletes.
+        let err = delete_session(&dir, &grp.session_id, "human-1", false).expect_err("live project");
+        assert!(err.contains("while its project exists"), "{err}");
+        // An ordinary group: outsider refused (hidden), a plain member is
+        // refused too, the owner deletes.
         let free = create_session(
             &dir,
             SessionKind::UserGroup,
             &[human.clone(), Participant::untyped("u2")],
             "team",
-            None,
+            Some("u2"),
             None,
             103,
         )
         .expect("free");
-        assert!(delete_session(&dir, &free.session_id, "stranger").is_err());
+        assert!(delete_session(&dir, &free.session_id, "stranger", false).is_err());
         assert!(load(&dir, &free.session_id).is_ok(), "outsider must not delete");
-        delete_session(&dir, &free.session_id, "human-1").expect("member delete");
+        assert_eq!(
+            delete_session(&dir, &free.session_id, "human-1", false).unwrap_err(),
+            "not_authorized",
+            "a plain member cannot delete the group"
+        );
+        assert!(load(&dir, &free.session_id).is_ok(), "member must not delete");
+        delete_session(&dir, &free.session_id, "u2", false).expect("owner delete");
+        assert!(load(&dir, &free.session_id).is_err());
+    }
+
+    /// ADR-098 governance on the delete path: owner or admin, nothing else.
+    /// A plain member's way out of a group is `remove_participant`, which
+    /// leaves the history for everybody else.
+    #[test]
+    fn delete_session_group_governance_is_owner_or_admin() {
+        let dir = temp_dir();
+        let roster = [
+            Participant::new("u-owner", ParticipantIdentity::Human),
+            Participant::new("u-member", ParticipantIdentity::Human),
+        ];
+        let group = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &roster,
+            "team",
+            Some("u-owner"),
+            None,
+            200,
+        )
+        .expect("group");
+        assert_eq!(
+            delete_session(&dir, &group.session_id, "u-owner", false)
+                .expect("owner deletes")
+                .session_id,
+            group.session_id
+        );
+        // An admin may delete someone else's group.
+        let other = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &roster,
+            "team2",
+            Some("u-owner"),
+            None,
+            201,
+        )
+        .expect("group");
+        delete_session(&dir, &other.session_id, "u-member", true).expect("admin deletes");
+        // A plain member is refused, and the row survives.
+        let third = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &roster,
+            "team3",
+            Some("u-owner"),
+            None,
+            202,
+        )
+        .expect("group");
+        assert_eq!(
+            delete_session(&dir, &third.session_id, "u-member", false).unwrap_err(),
+            "not_authorized"
+        );
+        assert!(load(&dir, &third.session_id).is_ok());
+    }
+
+    /// The project-group precondition: PM's stamp is the only thing that flips
+    /// a project channel from "not deletable" to "deletable". A later
+    /// `mark_project_deleted` for the same project is a clean no-op because
+    /// its stale projects-index entry fails to `load` (the session dir is
+    /// gone) — the index file itself is only written on create/backfill, so
+    /// nothing is re-stamped.
+    #[test]
+    fn delete_project_group_only_after_project_is_deleted() {
+        let dir = temp_dir();
+        let roster = [Participant::new("u-owner", ParticipantIdentity::Human)];
+        let group = create_session(
+            &dir,
+            SessionKind::ProjectGroup,
+            &roster,
+            "proj",
+            Some("u-owner"),
+            Some("p-42"),
+            300,
+        )
+        .expect("group");
+
+        // Live project: refused, and the refusal names the reason.
+        let err = delete_session(&dir, &group.session_id, "u-owner", false).unwrap_err();
+        assert!(err.contains("while its project exists"), "{err}");
+        assert!(load(&dir, &group.session_id).is_ok());
+
+        // PM archives the project → stamped, and the stamp is not churned by
+        // a retry.
+        let stamped = mark_project_deleted(&dir, "p-42", 301)
+            .expect("stamp")
+            .expect("project has a group");
+        assert_eq!(stamped.project_deleted_at, Some(301));
+        assert_eq!(
+            mark_project_deleted(&dir, "p-42", 302)
+                .expect("idempotent")
+                .expect("still there")
+                .project_deleted_at,
+            Some(301),
+            "a retry must not churn the stamp"
+        );
+        // A project that never had a group chat is a no-op.
+        assert!(mark_project_deleted(&dir, "p-none", 303).expect("no-op").is_none());
+
+        // Now the owner may delete it; the index entry goes with it.
+        delete_session(&dir, &group.session_id, "u-owner", false).expect("deleted");
+        assert!(load(&dir, &group.session_id).is_err());
+        assert!(mark_project_deleted(&dir, "p-42", 304).expect("no-op").is_none());
+        assert!(
+            list_project_groups(&dir)
+                .iter()
+                .all(|g| g.session_id != group.session_id)
+        );
     }
 
     #[test]
@@ -3319,7 +3511,8 @@ mod tests {
             .expect("search");
         assert_eq!(hits.len(), 1);
 
-        delete_session(&dir, &extra.session_id, "human-1").expect("delete with a live search handle");
+        delete_session(&dir, &extra.session_id, "human-1", false)
+            .expect("delete with a live search handle");
         assert!(!session_dir(&dir, &extra.session_id).exists());
         assert!(load(&dir, &extra.session_id).is_err());
     }

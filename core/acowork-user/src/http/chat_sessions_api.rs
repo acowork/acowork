@@ -153,6 +153,12 @@ pub fn chat_session_routes() -> Router<AppState> {
         // Design 27 §8.3: PM member add / remove re-syncs the group's
         // participant set to exactly the project's current members.
         .route("/internal/chat-sessions/group/sync", post(system_sync_group))
+        // Design 27 §4.4: PM archived the project — stamp its group chat so
+        // the owner may delete the channel now that nothing would re-create it.
+        .route(
+            "/internal/chat-sessions/group/deleted",
+            post(system_mark_project_deleted),
+        )
         .route("/internal/chat-sessions/repo", post(system_set_repo))
         // Design 27 §8.2/§8.3: the Gateway's scope-injection read (session
         // ids for a participant) and the participant-relation mutations
@@ -664,8 +670,12 @@ fn search_messages_guarded(
     )
 }
 
-/// Plan 5.2: delete a non-default Chat session. Guards (default pair
-/// session, project group, non-participant) live in the storage layer.
+/// Plan 5.2: delete a Chat session. Guards live in the storage layer
+/// ([`chat_sessions::delete_session`]): participation (hidden 404),
+/// owner-or-admin for a **group** (403), a `project_group` only once its
+/// project is deleted (422), and never the default pair session (422).
+/// On success every human participant gets a doorbell so their sidebar drops
+/// the row — the session they were reading is gone, not just renamed.
 async fn delete_session_route(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -673,9 +683,17 @@ async fn delete_session_route(
 ) -> Result<StatusCode, ApiError> {
     let dir = data_dir(&state)?;
     let who = ctx.effective_user_id().to_string();
-    offload(move || chat_sessions::delete_session(&dir, &session_id, &who))
-        .await
-        .map(|()| StatusCode::NO_CONTENT)
+    let is_admin = ctx.is_admin();
+    let session =
+        offload(move || chat_sessions::delete_session(&dir, &session_id, &who, is_admin)).await?;
+    for p in session
+        .participants
+        .iter()
+        .filter(|p| p.identity != Some(ParticipantIdentity::Agent))
+    {
+        crate::mqtt_publisher::notify_chat_changed(&p.id);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// P1 (design 27 §8.3, the user-managed half): invite members to a
@@ -1427,6 +1445,45 @@ async fn system_sync_group(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SystemProjectDeletedRequest {
+    pub project_id: String,
+}
+
+/// `POST /internal/chat-sessions/group/deleted` — PM archived the project, so
+/// its group chat is now deletable by its owner (design 27 §4.4). Stamps
+/// `project_deleted_at`; `null` when the project never had a group chat.
+///
+/// This is the one project fact the chat domain cannot derive on its own:
+/// `delete_session` refuses a `project_group` while the project lives, and
+/// nothing else in this process can see PM's project tree.
+async fn system_mark_project_deleted(
+    State(state): State<AppState>,
+    Json(req): Json<SystemProjectDeletedRequest>,
+) -> Result<Json<Option<ChatSession>>, ApiError> {
+    if req.project_id.trim().is_empty() {
+        return Err(ApiError::unprocessable_entity("project_id is required"));
+    }
+    let dir = data_dir_any(&state).await;
+    let session = offload(move || {
+        chat_sessions::mark_project_deleted(&dir, &req.project_id, now_unix())
+    })
+    .await?;
+    // Doorbell the members: the stamp is what makes the panel's delete button
+    // appear, and the sidebar only re-reads on a signal. Same fire-and-forget
+    // rule as `sync_group` (agents have no listener, so they are skipped).
+    if let Some(s) = &session {
+        for p in s
+            .participants
+            .iter()
+            .filter(|p| p.identity != Some(ParticipantIdentity::Agent))
+        {
+            crate::mqtt_publisher::notify_chat_changed(&p.id);
+        }
+    }
+    Ok(Json(session))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SystemRepoRequest {
     pub session_id: String,
     /// `None` / absent clears the binding.
@@ -1842,6 +1899,178 @@ mod tests {
         let page = json(resp).await;
         assert_eq!(page["total"].as_u64(), Some(1));
         assert_eq!(page["messages"][0]["body"].as_str(), Some("hello team"));
+    }
+
+    /// The delete route's whole gate, end to end: a plain member is refused
+    /// (403, the ADR-098 owner-or-admin rule), the owner's delete lands (204)
+    /// and the row is gone for every member afterwards.
+    #[tokio::test]
+    async fn delete_group_route_is_owner_or_admin_gated() {
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // A member that is not the owner: refused, and the group survives.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{bob}"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let listed = json(resp).await;
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["session_id"].as_str() == Some(&session_id)),
+            "the refused delete must not remove the group"
+        );
+
+        // The owner: deleted, and gone from the listing.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{alice}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let listed = json(resp).await;
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["session_id"].as_str() != Some(&session_id)),
+            "a deleted session must leave the sidebar"
+        );
+    }
+
+    /// `POST /internal/chat-sessions/group/deleted` — PM's project-archived
+    /// stamp. Answers `null` for a project without a group chat, and the
+    /// stamped row otherwise; the row is what makes the owner's delete legal.
+    #[tokio::test]
+    async fn internal_project_deleted_stamps_the_group() {
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/group",
+                Some(&format!(
+                    r#"{{"project_id":"p-1","title":"proj","participants":["{alice}"],"owner":"{alice}"}}"#
+                )),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // Live project: the owner cannot delete it yet.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Unknown project: no-op, null body.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/group/deleted",
+                Some(r#"{"project_id":"p-unknown"}"#),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(json(resp).await.is_null());
+
+        // PM archived the project → stamped, and now the delete lands.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/group/deleted",
+                Some(r#"{"project_id":"p-1"}"#),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(json(resp).await["project_deleted_at"].is_number());
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
