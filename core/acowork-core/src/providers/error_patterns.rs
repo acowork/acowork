@@ -11,6 +11,44 @@
 use crate::error::AcoworkError;
 use crate::providers::traits::{ProviderErrorType, StreamError};
 
+/// Check if a 404 body means "this endpoint does not exist here".
+///
+/// **Protocol-agnostic** on purpose: the same body shape is produced by every
+/// common HTTP stack when a route is missing ("404 page not found" is Go's
+/// `net/http` default, and MiniMax's Anthropic endpoint answers exactly that
+/// for `POST /chat/completions` and `POST /responses`).
+///
+/// ADR-103 D8 already had a Responses-specific version of this check
+/// (`responses_errors::looks_like_missing_endpoint`); it only matched bodies
+/// that *name* the missing route, so a generic router 404 fell through to
+/// [`ProviderError::from_status_code`] → `ClientError`, and the user was told
+/// "Invalid request. Check model/tool config." — pointing at the wrong thing
+/// entirely when the real fault is the protocol/URL pairing (the model was
+/// routed to a wire protocol its endpoint does not serve).
+///
+/// The two are kept in one place on purpose: the Responses-specific hints
+/// (`responses`, `unknown endpoint`, …) are a superset of the generic ones,
+/// and a divergent pair is how the same 404 ends up with two different
+/// classifications depending on which provider implementation saw it.
+pub fn is_missing_endpoint_body(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    const HINTS: &[&str] = &[
+        // Generic router 404s ("404 page not found" — Go's net/http default).
+        "404 page not found",
+        "page not found",
+        // Explicit route-missing wording.
+        "unknown endpoint",
+        "endpoint not found",
+        "no such endpoint",
+        "unknown route",
+        "route not found",
+        "not_found_error",
+        "cannot post",
+        "cannot get",
+    ];
+    HINTS.iter().any(|hint| lower.contains(hint))
+}
+
 /// Check if an error message indicates a context window / token limit overflow.
 ///
 /// Covers patterns from Anthropic, OpenAI, MiniMax, DeepSeek, Ollama,
@@ -319,5 +357,30 @@ mod tests {
         let err = classify_stream_error("some unknown transient error");
         assert_eq!(err.error_type, ProviderErrorType::Unknown);
         assert!(!err.retryable);
+    }
+
+    #[test]
+    fn test_is_missing_endpoint_body_recognizes_generic_router_404() {
+        // The exact body MiniMax's Anthropic endpoint answers for
+        // `POST /chat/completions` — Go's net/http default.
+        assert!(is_missing_endpoint_body("404 page not found"));
+        assert!(is_missing_endpoint_body("404 Page Not Found"));
+        assert!(is_missing_endpoint_body("page not found"));
+        // Explicit route-missing wording.
+        assert!(is_missing_endpoint_body("unknown endpoint"));
+        assert!(is_missing_endpoint_body("endpoint not found"));
+        assert!(is_missing_endpoint_body("no such endpoint"));
+        assert!(is_missing_endpoint_body("unknown route"));
+    }
+
+    #[test]
+    fn test_is_missing_endpoint_body_rejects_other_bodies() {
+        // A 404 that names a *resource* (not a route) is not a protocol
+        // fault — it must keep the generic classification.
+        assert!(!is_missing_endpoint_body("model not found"));
+        assert!(!is_missing_endpoint_body("{\"error\":\"invalid api key\"}"));
+        assert!(!is_missing_endpoint_body(""));
+        // A 400 body is never a missing endpoint.
+        assert!(!is_missing_endpoint_body("invalid request: temperature not supported"));
     }
 }

@@ -10,7 +10,7 @@ pub mod url_resolve;
 pub use aliases::{canonical_provider_id, vault_key_candidates};
 pub use error_patterns::{
     classify_stream_error, is_balance_exhausted, is_context_overflow, is_minimax_balance_code,
-    is_retryable, is_stream_decode_error,
+    is_missing_endpoint_body, is_retryable, is_stream_decode_error,
 };
 pub use mock::{MockProvider, MockResponse};
 pub use responses_errors::{classify_http_error, in_band_failure, truncated_stream};

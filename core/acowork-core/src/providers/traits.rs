@@ -115,7 +115,11 @@ impl ProviderError {
                 "Response timeout.".to_string()
             }
             ProviderErrorType::EndpointUnavailable => {
-                "This provider does not support the selected protocol. Switch the model                  protocol back to Chat Completions in model settings."
+                // Protocol-agnostic on purpose: this class now also covers a
+                // generic router 404 on the Chat-Completions / Anthropic
+                // paths, so naming "Chat Completions" as the way back would
+                // be wrong for every provider that is not OpenAI-shaped.
+                "This provider does not serve the selected protocol at this URL. Check the model protocol and base URL in model settings."
                     .to_string()
             }
             ProviderErrorType::UnsupportedField => {
@@ -268,6 +272,29 @@ impl ProviderError {
             message,
             status_code: Some(402),
             error_type: ProviderErrorType::PaymentRequired,
+            retryable: false,
+            retry_after_ms: None,
+        }
+    }
+
+    /// Convenience constructor for "this endpoint does not exist here".
+    ///
+    /// NOT retryable: re-issuing the same request to the same URL cannot
+    /// succeed — the *protocol/URL pairing* is wrong, and only a configuration
+    /// change (different base URL, different wire protocol) can fix it.
+    ///
+    /// This is the class a generic router 404 belongs to: "404 page not found"
+    /// (Go's `net/http` default, and what MiniMax's Anthropic endpoint
+    /// answers for `POST /chat/completions`) means the route does not exist,
+    /// **not** that the request body was malformed. Classifying it as
+    /// `ClientError` told the user to "check model/tool config" while the
+    /// actual fault was the protocol the model was routed with.
+    pub fn endpoint_unavailable(message: String) -> Self {
+        Self {
+            user_message: Self::compute_user_message(&ProviderErrorType::EndpointUnavailable, None),
+            message,
+            status_code: Some(404),
+            error_type: ProviderErrorType::EndpointUnavailable,
             retryable: false,
             retry_after_ms: None,
         }
