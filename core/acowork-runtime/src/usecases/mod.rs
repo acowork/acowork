@@ -7,6 +7,7 @@ pub mod agent_config;
 pub mod agent_token;
 pub mod agent_tools;
 pub mod attachment;
+pub mod chat_usage;
 pub mod debug_service;
 pub mod git_query;
 pub mod mcp_recommendation;
@@ -30,6 +31,7 @@ pub use agent_tools::{
 pub use attachment::{
     AttachmentError, AttachmentService, MAX_UPLOAD_BYTES, UploadFileParams, UploadedFileResponse,
 };
+pub use chat_usage::ChatUsageService;
 pub use debug_service::DebugService;
 pub use git_query::{
     GitCommitDto, GitDiffKind, GitDiffParams, GitDiffResponse, GitError, GitIndexStatus,
@@ -47,6 +49,7 @@ pub mod agent_config_impl;
 pub mod agent_token_impl;
 pub mod agent_tools_impl;
 pub mod attachment_impl;
+pub mod chat_usage_impl;
 pub mod debug_service_impl;
 pub mod git_query_impl;
 pub mod session_config_impl;

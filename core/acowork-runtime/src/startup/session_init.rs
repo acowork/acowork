@@ -788,6 +788,10 @@ pub(crate) async fn phase_b_init_session(
     // on the production path) — declared without an initializer so the
     // compiler can prove it is set before the Phase B use at the bottom.
     let session_config_impl: Option<Arc<crate::usecases::RuntimeSessionConfigService>>;
+    // Hoisted like `session_config_impl`: the resume step below needs the
+    // same instance the metadata service holds, to fold the Chat ledger into
+    // the agent counters on startup (design 29 §4.4).
+    let chat_usage_service: Arc<dyn crate::usecases::ChatUsageService>;
     {
         let core_clone = Arc::clone(&core);
         if let Ok(mut slot) = ctx.agent_core_shared.write() {
@@ -800,11 +804,19 @@ pub(crate) async fn phase_b_init_session(
         let agent_token: Arc<dyn crate::usecases::AgentTokenService> =
             Arc::new(crate::usecases::RuntimeAgentTokenService::new(core_clone));
 
+        // Build the ChatUsageService (Chat Router token ledger funnel).
+        // The same `Arc<AgentCore>` backs both services: the ledger feeds
+        // the agent counters through it.
+        let chat_usage: Arc<dyn crate::usecases::ChatUsageService> =
+            crate::usecases::chat_usage_impl::RuntimeChatUsageService::new(Arc::clone(&core));
+        chat_usage_service = Arc::clone(&chat_usage);
+
         // Build the SessionMetadataService.
         let session_metadata: Arc<dyn crate::usecases::SessionMetadataService> =
             Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
                 work_dir_path.to_path_buf(),
                 agent_token,
+                chat_usage,
                 ctx.session_snapshots.clone(),
                 ctx.latest_session.clone(),
             ));
@@ -904,6 +916,25 @@ pub(crate) async fn phase_b_init_session(
     // mistaken 404-read ("no session" while the scan was still
     // running, or while the slot was unfilled) left behind an orphan
     // session the user never sees.
+
+    // ── Chat ledger → agent counters ─────────────────────────────────
+    // The Chat Router's spend never lands in a session row — it lives in
+    // the ledger (design 29). Folding it at startup keeps the two recovery
+    // paths equal: `GET /sessions` merges sessions + ledger, so the first
+    // `context_usage` push of a restart must too, or agent_total reports
+    // below what the panel is about to show. It is agent-scoped, so it runs
+    // whether or not a session resumes, and idempotent — `merge_token_totals`
+    // is a max-merge, so the later list scan summing the same ledger is a no-op.
+    let (chat_in, chat_out, chat_cr, chat_cw) = chat_usage_service.ledger_totals();
+    if chat_in | chat_out | chat_cr | chat_cw != 0 {
+        session_manager.core().merge_token_totals((
+            Some(chat_in),
+            Some(chat_out),
+            Some(chat_cr),
+            Some(chat_cw),
+        ));
+    }
+
     if let Some(conv) = conversation_session {
         // ADR-028 / ADR-066: merge the resumed session's persisted token
         // totals into the AgentCore counters so the live context_usage

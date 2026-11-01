@@ -74,17 +74,33 @@ const INFO_RESULT_MAX_BYTES: usize = 8 * 1024;
 
 /// Everything a turn needs from the Runtime process, snapshotted once so the
 /// `SessionManager` lock is not held across the HTTP/LLM calls.
-#[derive(Debug, Clone)]
 pub struct RouterDeps {
     /// This agent's instance id — the `sender` the Gateway attributes rows to.
     pub instance_id: String,
     pub gateway_host: String,
     pub node_token: String,
     pub work_dir: String,
+    /// Token ledger for this router's own LLM spend (design 29 follow-up).
+    /// Every successful model call of a turn is recorded here — the router
+    /// is the only LLM consumer in the Runtime outside a session, and an
+    /// un-counted one skews the agent totals and the model-share panel.
+    pub chat_usage: Arc<dyn crate::usecases::ChatUsageService>,
+}
+
+impl std::fmt::Debug for RouterDeps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RouterDeps")
+            .field("instance_id", &self.instance_id)
+            .field("gateway_host", &self.gateway_host)
+            .field("node_token", &"[redacted]")
+            .field("work_dir", &self.work_dir)
+            .field("chat_usage", &"<ChatUsageService>")
+            .finish()
+    }
 }
 
 impl RouterDeps {
-    pub fn from_core(core: &AgentCore, node_token: &str) -> Self {
+    pub fn from_core(core: &Arc<AgentCore>, node_token: &str) -> Self {
         let cfg = &core.config;
         let token = if node_token.trim().is_empty() {
             cfg.mqtt_password.clone().unwrap_or_default()
@@ -101,6 +117,9 @@ impl RouterDeps {
                 .unwrap_or_else(|| "127.0.0.1".to_string()),
             node_token: token,
             work_dir: cfg.work_dir.clone(),
+            chat_usage: crate::usecases::chat_usage_impl::RuntimeChatUsageService::new(
+                core.clone(),
+            ),
         }
     }
 }
@@ -522,7 +541,17 @@ async fn run_turn(
         info_rounds: 0,
     };
 
-    let mut response = match call_model(&prepared.provider, request.clone(), cfg.timeout_ms()).await {
+    let calls = ModelCalls {
+        deps,
+        chat_id: &chat_id,
+        chat_kind: &chat_kind,
+        provider: &prepared.provider,
+        provider_label: &prepared.provider_label,
+        model: &prepared.model,
+        timeout_ms: cfg.timeout_ms(),
+    };
+
+    let mut response = match calls.call(request.clone()).await {
         Ok(r) => r,
         Err(reason) => {
             trace.write("fallback", None, "error", Some(reason.clone()), None);
@@ -578,7 +607,7 @@ async fn run_turn(
             .await;
             request.messages.push(ChatMessage::tool(call.id.clone(), result));
         }
-        response = match call_model(&prepared.provider, request.clone(), cfg.timeout_ms()).await {
+        response = match calls.call(request.clone()).await {
             Ok(r) => r,
             Err(reason) => {
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
@@ -605,7 +634,7 @@ async fn run_turn(
                     call.id.clone(),
                     format!("Error: {}", err.message()),
                 ));
-                match call_model(&prepared.provider, request.clone(), cfg.timeout_ms()).await {
+                match calls.call(request.clone()).await {
                     Ok(retry) => {
                         response = retry;
                         if let Some(second) = dispatch_call(&response) {
@@ -656,7 +685,7 @@ async fn run_turn(
             .await;
             match sent {
                 Ok(()) => {
-                    trace.write("reply", None, "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.cache_read_tokens, u.cache_write_tokens)));
+                    trace.write("reply", None, "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
                 Err(e) => {
@@ -780,7 +809,7 @@ async fn run_turn(
                             "routing reaction row failed — non-fatal"
                         );
                     }
-                    trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.cache_read_tokens, u.cache_write_tokens)));
+                    trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
                 (Ok(_), Err(e)) => {
@@ -869,7 +898,47 @@ fn router_llm(core: &AgentCore, cfg: &ChatRouterConfig) -> (Arc<dyn Provider>, S
     (provider, model)
 }
 
-async fn call_model(
+/// The one path from a turn to the provider: make the call, then book it.
+///
+/// Accounting belongs to the call, not to the caller — "every successful model
+/// call is billable spend" is a property of the call itself, and a turn makes
+/// 1–3 of them (first answer, information rounds, one dispatch retry). Keeping
+/// the booking at each call site is how a later site silently under-bills the
+/// chat, so `run_turn` builds one `ModelCalls` and every provider round goes
+/// through [`ModelCalls::call`].
+///
+/// A Provider that reported no usage at all folds as "no measurement" —
+/// skipped, never fabricated (ADR-027). The ledger is the chat's own row; the
+/// agent totals are fed even when the ledger store is unavailable.
+struct ModelCalls<'a> {
+    deps: &'a RouterDeps,
+    chat_id: &'a str,
+    chat_kind: &'a str,
+    provider: &'a Arc<dyn Provider>,
+    provider_label: &'a str,
+    model: &'a str,
+    timeout_ms: u64,
+}
+
+impl ModelCalls<'_> {
+    async fn call(&self, request: ChatRequest) -> Result<ChatResponse, String> {
+        let response = call_provider(self.provider, request, self.timeout_ms).await?;
+        if let Some(usage) = response.usage.as_ref() {
+            self.deps.chat_usage.record_chat_llm_usage(
+                self.chat_id,
+                self.chat_kind,
+                usage,
+                self.provider_label,
+                self.model,
+            );
+        }
+        Ok(response)
+    }
+}
+
+/// Transport only — timeouts, error shaping, think-block sanitizing. Billing
+/// lives in [`ModelCalls::call`], which is the only caller production code has.
+async fn call_provider(
     provider: &Arc<dyn Provider>,
     request: ChatRequest,
     timeout_ms: u64,
@@ -1190,7 +1259,7 @@ impl TurnTrace<'_> {
         target_session_id: Option<&str>,
         outcome: &str,
         fallback_reason: Option<String>,
-        usage: Option<(u64, u64, u64)>,
+        usage: Option<(u64, u64, u64, u64)>,
     ) {
         let record = DecisionRecord {
             ts: chrono::Utc::now().to_rfc3339(),
@@ -1214,8 +1283,9 @@ impl TurnTrace<'_> {
             attachment_only: self.attachment_only,
             info_rounds: (self.info_rounds > 0).then_some(self.info_rounds),
             prompt_tokens: usage.map(|u| u.0),
-            cache_read_tokens: usage.map(|u| u.1),
-            cache_write_tokens: usage.map(|u| u.2),
+            completion_tokens: usage.map(|u| u.1),
+            cache_read_tokens: usage.map(|u| u.2),
+            cache_write_tokens: usage.map(|u| u.3),
         };
         tracing::info!("{}", record.summary());
         if let Err(e) = append_decision(std::path::Path::new(&self.deps.work_dir), &record) {
@@ -1275,10 +1345,10 @@ mod tests {
     use acowork_core::providers::mock::{MockProvider, MockResponse};
 
     #[tokio::test]
-    async fn call_model_strips_inline_think_tags() {
+    async fn call_provider_strips_inline_think_tags() {
         // Chat-surface leak (2026-10-24): a compat endpoint inlined its think
         // block into `content` on the non-streaming path; the router posted it
-        // verbatim to the chat. call_model must sanitize every response.
+        // verbatim to the chat. call_provider must sanitize every response.
         let open = "<\u{74}hink>";
         let close = "</\u{74}hink>";
         let provider: Arc<dyn Provider> = Arc::new(MockProvider::new(vec![MockResponse::Text {
@@ -1293,8 +1363,90 @@ mod tests {
             reasoning_effort: None,
             thinking_mode: None,
         };
-        let response = call_model(&provider, request, 5_000).await.unwrap();
+        let response = call_provider(&provider, request, 5_000).await.unwrap();
         assert_eq!(response.content, "现在是 19:37。");
+    }
+
+    /// Counts what the turn books, so "one successful model call = one ledger
+    /// record" is asserted instead of re-derived by reading the call sites.
+    #[derive(Default)]
+    struct CountingChatUsage {
+        records: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::usecases::chat_usage::ChatUsageService for CountingChatUsage {
+        fn record_chat_llm_usage(
+            &self,
+            chat_session_id: &str,
+            chat_kind: &str,
+            _usage: &acowork_core::providers::traits::UsageInfo,
+            provider_label: &str,
+            model_id: &str,
+        ) {
+            self.records.lock().unwrap().push(format!(
+                "{chat_session_id}|{chat_kind}|{provider_label}|{model_id}"
+            ));
+        }
+
+        fn forget_chat(&self, _chat_session_id: &str) -> bool {
+            false
+        }
+
+        fn get_chat(&self, _chat_session_id: &str) -> Option<acowork_sqlite::ChatUsageRow> {
+            None
+        }
+
+        fn ledger_totals(&self) -> acowork_core::session_meta::SessionTotals {
+            Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn every_successful_model_call_is_booked_once_per_call() {
+        // Design 29: a turn is 1–3 model calls and every one of them is
+        // billable. Booking lives in `ModelCalls::call`, so the count must
+        // track the calls — not the turn, and not the final response only.
+        let ledger = Arc::new(CountingChatUsage::default());
+        let mut d = deps();
+        d.chat_usage = ledger.clone();
+        let ok: Arc<dyn Provider> = Arc::new(MockProvider::with_usage("ok", 120, 8));
+        let request = || ChatRequest {
+            model: "mock-model".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            reasoning_effort: None,
+            thinking_mode: None,
+        };
+        fn calls<'a>(provider: &'a Arc<dyn Provider>, d: &'a RouterDeps) -> ModelCalls<'a> {
+            ModelCalls {
+                deps: d,
+                chat_id: "cs-1",
+                chat_kind: "group",
+                provider,
+                provider_label: "mock|mock-model",
+                model: "mock-model",
+                timeout_ms: 5_000,
+            }
+        }
+
+        calls(&ok, &d).call(request()).await.unwrap();
+        calls(&ok, &d).call(request()).await.unwrap();
+        assert_eq!(
+            ledger.records.lock().unwrap().as_slice(),
+            [
+                "cs-1|group|mock|mock-model|mock-model".to_string(),
+                "cs-1|group|mock|mock-model|mock-model".to_string()
+            ]
+        );
+
+        // A failed call is not spend: it must not add a record.
+        let failing: Arc<dyn Provider> = Arc::new(MockProvider::new(vec![MockResponse::Error {
+            message: "boom".into(),
+        }]));
+        assert!(calls(&failing, &d).call(request()).await.is_err());
+        assert_eq!(ledger.records.lock().unwrap().len(), 2);
     }
 
     fn envelope(kind: &str, chat_id: &str, params: Value) -> IntentEnvelope {
@@ -1783,6 +1935,7 @@ mod tests {
             gateway_host: "127.0.0.1".into(),
             node_token: String::new(),
             work_dir: ".".into(),
+            chat_usage: Arc::new(crate::usecases::chat_usage_impl::NoopChatUsageService),
         }
     }
 

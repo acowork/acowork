@@ -2373,56 +2373,12 @@ impl ConversationSession {
     /// meta write. See that method for the persistence invariant.
     fn apply_llm_usage(&self, usage: &UsageInfo) {
         if let Ok(mut guard) = self.tokens.lock() {
-            // ADR-027: zero-skip on the input side.  A Provider fallback
-            // returns `prompt_tokens == 0`; treating that as a real call
-            // would overwrite an established baseline.
-            //
-            // ADR-066: cache_read shares that zero-skip gate — when a
-            // Provider reports a reliable input count, the cache breakdown
-            // is also reliable; when input is 0 the cache fields are 0 too
-            // (don't let a half-reported usage pollute the running total).
-            let total_input = if usage.prompt_tokens > 0 {
-                guard
-                    .as_ref()
-                    .map(|t| t.total_input)
-                    .unwrap_or(0)
-                    .saturating_add(usage.prompt_tokens)
-            } else {
-                guard.as_ref().map(|t| t.total_input).unwrap_or(0)
-            };
-            let total_cache_read = if usage.prompt_tokens > 0 {
-                guard
-                    .as_ref()
-                    .map(|t| t.total_cache_read)
-                    .unwrap_or(0)
-                    .saturating_add(usage.cache_read_tokens)
-            } else {
-                guard.as_ref().map(|t| t.total_cache_read).unwrap_or(0)
-            };
-            let total_output = guard
-                .as_ref()
-                .map(|t| t.total_output)
-                .unwrap_or(0)
-                .saturating_add(usage.completion_tokens);
-            // cache_write is part of the input cost (Anthropic charges
-            // 1.25× for `cache_creation_input_tokens`) but does NOT share
-            // the zero-skip gate: an Anthropic cache write with zero
-            // regular input tokens is still a real, billable event.
-            let total_cache_write = guard
-                .as_ref()
-                .map(|t| t.total_cache_write)
-                .unwrap_or(0)
-                .saturating_add(usage.cache_write_tokens);
-            *guard = Some(SessionTokens {
-                last_input: usage.prompt_tokens,
-                last_output: usage.completion_tokens,
-                total_input,
-                total_output,
-                last_cache_read: usage.cache_read_tokens,
-                last_cache_write: usage.cache_write_tokens,
-                total_cache_read,
-                total_cache_write,
-            });
+            // ADR-027 / ADR-066: the fold rules (zero-skip on input +
+            // cache_read, `last_*` overwritten with raw Provider values)
+            // live in `SessionTokens::folded_with_call` — the single owner
+            // shared with the per-model detail fold and the Chat ledger.
+            let prev = guard.clone().unwrap_or_default();
+            *guard = Some(prev.folded_with_call(usage));
         }
     }
 
@@ -2442,42 +2398,15 @@ impl ConversationSession {
     /// flips the bucket's cost to `None` permanently (until
     /// `rebuild_token_stats` / a corrected attribution — "宁可 miss 也不估计").
     fn apply_model_usage(&self, usage: &UsageInfo, attribution: &ModelUsageAttribution<'_>) {
-        // Fold the same gated deltas as apply_llm_usage.
-        let (d_in, d_cr) = if usage.prompt_tokens > 0 {
-            (usage.prompt_tokens, usage.cache_read_tokens)
-        } else {
-            (0, 0)
-        };
-        let d_out = usage.completion_tokens;
-        let d_cw = usage.cache_write_tokens;
-        if d_in == 0 && d_out == 0 && d_cr == 0 && d_cw == 0 && attribution.cost_delta.is_none() {
-            return;
-        }
         let key = model_usage_key(attribution.provider_id, attribution.model_id);
         if let Ok(mut guard) = self.model_usage.lock() {
             let map = guard.get_or_insert_with(Default::default);
-            match map.entry(key) {
-                std::collections::btree_map::Entry::Vacant(v) => {
-                    v.insert(ModelUsageEntry {
-                        input: d_in,
-                        output: d_out,
-                        cache_read: d_cr,
-                        cache_write: d_cw,
-                        cost: attribution.cost_delta,
-                    });
-                }
-                std::collections::btree_map::Entry::Occupied(mut o) => {
-                    let e = o.get_mut();
-                    e.input = e.input.saturating_add(d_in);
-                    e.output = e.output.saturating_add(d_out);
-                    e.cache_read = e.cache_read.saturating_add(d_cr);
-                    e.cache_write = e.cache_write.saturating_add(d_cw);
-                    e.cost = match (e.cost, attribution.cost_delta) {
-                        (Some(prev), Some(delta)) => Some(prev + delta),
-                        _ => None,
-                    };
-                }
-            }
+            acowork_core::session_meta::fold_model_usage_entry(
+                map,
+                &key,
+                usage,
+                attribution.cost_delta,
+            );
         }
     }
 
@@ -2513,57 +2442,11 @@ impl ConversationSession {
     ) {
         self.apply_model_usage(usage, attribution);
         if let Ok(mut guard) = self.tokens.lock() {
-            let prev_last_input = guard.as_ref().map(|t| t.last_input).unwrap_or(0);
-            let prev_last_output = guard.as_ref().map(|t| t.last_output).unwrap_or(0);
-            // ADR-066: cache breakdown must NOT overwrite the per-turn
-            // `last_cache_*` snapshot — the compaction LLM call was given
-            // the full pre-compaction history as input, so its cache
-            // figures are unrepresentative of the post-compaction
-            // session state (same rationale as `last_input` preservation).
-            let prev_last_cache_read = guard.as_ref().map(|t| t.last_cache_read).unwrap_or(0);
-            let prev_last_cache_write = guard.as_ref().map(|t| t.last_cache_write).unwrap_or(0);
-            let total_input = if usage.prompt_tokens > 0 {
-                guard
-                    .as_ref()
-                    .map(|t| t.total_input)
-                    .unwrap_or(0)
-                    .saturating_add(usage.prompt_tokens)
-            } else {
-                guard.as_ref().map(|t| t.total_input).unwrap_or(0)
-            };
-            // ADR-066: cache_read follows the input zero-skip gate (see
-            // `accumulate_llm_usage` rationale).
-            let total_cache_read = if usage.prompt_tokens > 0 {
-                guard
-                    .as_ref()
-                    .map(|t| t.total_cache_read)
-                    .unwrap_or(0)
-                    .saturating_add(usage.cache_read_tokens)
-            } else {
-                guard.as_ref().map(|t| t.total_cache_read).unwrap_or(0)
-            };
-            let total_output = guard
-                .as_ref()
-                .map(|t| t.total_output)
-                .unwrap_or(0)
-                .saturating_add(usage.completion_tokens);
-            // cache_write does NOT share the zero-skip gate (see
-            // `accumulate_llm_usage` rationale).
-            let total_cache_write = guard
-                .as_ref()
-                .map(|t| t.total_cache_write)
-                .unwrap_or(0)
-                .saturating_add(usage.cache_write_tokens);
-            *guard = Some(SessionTokens {
-                last_input: prev_last_input,
-                last_output: prev_last_output,
-                total_input,
-                total_output,
-                last_cache_read: prev_last_cache_read,
-                last_cache_write: prev_last_cache_write,
-                total_cache_read,
-                total_cache_write,
-            });
+            // ADR-066: the `last_*` snapshot (and the cache breakdown that
+            // belongs to it) is preserved — the fold primitive is the
+            // single owner of that rule plus the totals gates.
+            let prev = guard.clone().unwrap_or_default();
+            *guard = Some(prev.folded_totals_preserving_last(usage));
         }
         self.write_meta();
         self.notify_state_change();

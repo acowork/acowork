@@ -20,6 +20,10 @@ use crate::usecases::session_metadata::{
 pub struct RuntimeSessionMetadataService {
     work_dir: PathBuf,
     agent_token: Arc<dyn AgentTokenService>,
+    /// Chat Router token ledger — its totals join the disk scan in the
+    /// ADR-066 merge so router spend survives a process restart in the
+    /// agent counters exactly like session spend.
+    chat_usage: Arc<dyn crate::usecases::ChatUsageService>,
     session_snapshots: SharedSessionSnapshots,
     latest_session: SharedLatestSession,
 }
@@ -28,12 +32,14 @@ impl RuntimeSessionMetadataService {
     pub fn new(
         work_dir: PathBuf,
         agent_token: Arc<dyn AgentTokenService>,
+        chat_usage: Arc<dyn crate::usecases::ChatUsageService>,
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
     ) -> Self {
         Self {
             work_dir,
             agent_token,
+            chat_usage,
             session_snapshots,
             latest_session,
         }
@@ -89,11 +95,18 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         // are intentionally NOT echoed into the HTTP response —
         // agent totals belong on the live `context_usage` push path
         // only (regression t-83afab47).
+        //
+        // The Chat ledger rides the same scan: router spend is persisted
+        // in `chat_token_usage`, not in the session metas the join reads,
+        // so without this term a restart would drop every chat token the
+        // pre-restart counters held (the live counter starts at zero;
+        // `merge_token_totals` can only recover what the scan sees).
+        let (chat_in, chat_out, chat_cr, chat_cw) = self.chat_usage.ledger_totals();
         self.agent_token.merge_token_totals((
-            Some(disk_in),
-            Some(disk_out),
-            Some(disk_cache_read),
-            Some(disk_cache_write),
+            Some(disk_in.saturating_add(chat_in)),
+            Some(disk_out.saturating_add(chat_out)),
+            Some(disk_cache_read.saturating_add(chat_cr)),
+            Some(disk_cache_write.saturating_add(chat_cw)),
         ));
 
         let page_sessions: Vec<SessionSummary> = sessions

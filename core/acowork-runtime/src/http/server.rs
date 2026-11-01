@@ -632,6 +632,17 @@ impl RuntimeHttpServer {
             // `/sessions/{sid}` param route, so it never shadows a real
             // session id.
             .route("/sessions/token-stats", get(get_token_stats))
+            // Chat Router token ledger (design 27 §4.4, plan §4.6 phase two):
+            // GET reads one chat's cumulative row for the per-chat usage
+            // view; DELETE is the Gateway's fan-out of a chat deletion, so
+            // the ledger's spend leaves the `token_stats` aggregate together
+            // with the chat history — the same delete-side symmetry session
+            // rows have. Idempotent 204: an agent that never routed this
+            // chat simply has nothing to drop.
+            .route(
+                "/chat-usage/{chat_id}",
+                get(get_chat_usage).delete(forget_chat_usage),
+            )
             // NEW: panel-4 endpoint, merges meta.json + live state snapshot.
             .route(
                 "/sessions/{sid}",
@@ -1214,6 +1225,65 @@ async fn get_token_stats(
         serde_json::to_value(resp)
             .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?,
     ))
+}
+
+/// `GET /chat-usage/{chat_id}` — one Chat session's ledger row (cumulative
+/// tokens, call count, per-`(provider, model)` breakdown), read straight
+/// off this agent's private ledger (plan §4.6 phase two; backend for the
+/// Gateway-proxied `GET /api/agents/{id}/chat-usage/{chat_id}`).
+///
+/// `404` when this agent never recorded a router call for the chat — a
+/// legitimate empty answer (human-only traffic), which the per-chat view
+/// renders as "no spend attributed here". The read is pure statistics:
+/// the loopback surface is Gateway-facing only, same trust model as
+/// [`forget_chat_usage`].
+async fn get_chat_usage(
+    State(state): State<HttpState>,
+    Path(chat_id): Path<String>,
+) -> Result<Json<acowork_sqlite::ChatUsageRow>, StatusCode> {
+    // Same shape guard as the delete arm (server-side ids are UUIDs).
+    if chat_id.trim().is_empty() || chat_id.len() > 128 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let Some(core) = state.agent_core.read().ok().and_then(|g| g.clone()) else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let svc: Arc<dyn crate::usecases::ChatUsageService> =
+        crate::usecases::chat_usage_impl::RuntimeChatUsageService::new(core);
+    svc.get_chat(&chat_id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// `DELETE /chat-usage/{chat_id}` — drop one Chat session's ledger row and
+/// net its breakdown out of `token_stats` (`SqliteChatUsageStore::forget`).
+///
+/// The chat domain (user service) owns the deletion decision; the Gateway
+/// only relays it to the agent participants of the deleted session (design
+/// 27 §4.4). Nothing here re-checks membership: the Runtime's loopback HTTP
+/// surface is Gateway-facing only, and the ledger is pure statistics — the
+/// worst a forged call buys is an under-counted chat, never lost history.
+///
+/// `204` on every successful attempt, row existed or not (idempotent — a
+/// replayed delete must not flip the Gateway's fan-out to a failure).
+async fn forget_chat_usage(
+    State(state): State<HttpState>,
+    Path(chat_id): Path<String>,
+) -> StatusCode {
+    // Server-side ids are UUIDs; a pathological path segment is a client
+    // bug, not a miss to swallow.
+    if chat_id.trim().is_empty() || chat_id.len() > 128 {
+        return StatusCode::BAD_REQUEST;
+    }
+    let Some(core) = state.agent_core.read().ok().and_then(|g| g.clone()) else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    // Same funnel the router records through: one Arc clone, the ledger
+    // store resolves off the core's open SQLite handle.
+    let svc: Arc<dyn crate::usecases::ChatUsageService> =
+        crate::usecases::chat_usage_impl::RuntimeChatUsageService::new(core);
+    svc.forget_chat(&chat_id);
+    StatusCode::NO_CONTENT
 }
 
 /// Query parameters for `GET /sessions/{sid}/messages`.
@@ -3872,6 +3942,7 @@ mod tests {
         Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
             work_dir.to_path_buf(),
             Arc::new(crate::usecases::agent_token_impl::NoopAgentTokenService),
+            Arc::new(crate::usecases::chat_usage_impl::NoopChatUsageService),
             snapshots,
             latest,
         ))
