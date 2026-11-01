@@ -150,6 +150,53 @@ impl GatewayClient {
         tracing::info!(project_id, "project group participants synced");
     }
 
+    /// Tell the chat domain that the project was archived, so its group chat
+    /// is now deletable by its owner (design 27 §4.4). The chat channel is
+    /// **not** deleted here — the history stays until a human removes it, and
+    /// only a project with nothing left to re-create the channel may be
+    /// deleted at all; that precondition lives in the user service and this
+    /// push is what satisfies it.
+    ///
+    /// Returns whether the Gateway accepted the stamp. The caller retries on
+    /// `false` ([`crate::api::projects::mark_group_deleted`]): unlike
+    /// provisioning, a lost stamp is not a missing convenience but a hard
+    /// gate — the group chat stays undeletable for every account (the
+    /// project-alive check is identity-blind), and no live project will
+    /// ever push the mark again.
+    pub async fn mark_group_deleted(&self, project_id: &str) -> bool {
+        let mut req = self.client.post(format!(
+            "{}/api/intents/project-group/deleted",
+            self.gateway_url
+        ));
+        if let Some(token) = &self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = match req
+            .json(&serde_json::json!({ "project_id": project_id }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, project_id, "project group delete-mark unreachable");
+                return false;
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                project_id,
+                %status,
+                body = %body,
+                "project group delete-mark rejected by Gateway"
+            );
+            return false;
+        }
+        tracing::info!(project_id, "project group marked deletable");
+        true
+    }
+
     /// Dispatch a PM task as a group-chat Intent (design 27 §5.4.2 / §9):
     /// the Gateway keys the execution context on
     /// `task:{project_id}:{task_id}`, writes the `intent_request` row into
