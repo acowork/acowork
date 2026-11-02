@@ -1,20 +1,29 @@
-//! Intent → execution-session routing (design doc 27 §4.2.3).
+//! Intent → execution-session routing (design doc 27 §4.2.3, ADR-106 D6/D11).
 //!
-//! The wire addresses an **intent context** (a `conversation_id`, or a Chat
-//! session for group chats), not an execution session — "which execution
-//! session answers this" is the receiving agent's private decision (the
-//! Gateway must not carry agent-private state across the boundary). This
-//! module keeps that mapping: an in-memory table backed by a small JSON file
-//! under the runtime work dir (`intent-sessions.json`), so a runtime restart
-//! can still route a follow-up turn to the session that holds the
-//! conversation, instead of silently opening a fresh one.
+//! The wire addresses an **intent context** (a `conversation_id`), not an
+//! execution session — "which execution session answers this" is the receiving
+//! agent's private decision (the Gateway must not carry agent-private state
+//! across the boundary). This module derives that context's key; the key →
+//! session mapping itself lives in the session's own row (`intent_key`,
+//! ADR-106 D11), read and written through the session-meta store. There is no
+//! side file any more: `intent-sessions.json` and `terminal-sessions.json` were
+//! a second durable truth that could fall out of step with the session it
+//! named.
 //!
-//! Keys are namespaced by kind so a chat-session id and a conversation id can
-//! never collide: `chat:{chat_session_id}` / `conv:{conversation_id}` /
-//! `task:{project}:{task}:{agent}`. The entry is exactly that pair: a
-//! long-lived execution session stays mapped until its context is explicitly
-//! closed (`remove` on a PM task's terminal state) or the Chat Router points
-//! the key at another session.
+//! Keys are namespaced so a conversation id and a message id can never
+//! collide: `conv:{conversation_id}` / `msg:{message_id}`. A PM task's
+//! conversation (`task:{project}:{task}`) is therefore `conv:task:{project}:{task}`,
+//! which is exactly [`acowork_core::intent::task_routing_key`] — one execution
+//! session per task even when the task lives in a shared project group chat
+//! (design 27 §6.2).
+//!
+//! **A Chat is not an intent context here** (ADR-106 D6). The former
+//! `chat:{chat_session_id}:{initiator}` branch — "continue whatever this chat
+//! ran last" — is deleted: it was a silent verdict on a guess, and it needed a
+//! pointer the Runtime had to keep in step with sessions it does not own.
+//! Chat turns address a session through the binding on the session's row
+//! instead (`SessionMeta::chat_session_id`, D11), and the deterministic route
+//! only reuses one when the chat has exactly one candidate for this speaker.
 //!
 //! There is no rotation. The former T1 (idle) / T2 (post-compaction) triggers
 //! were machine rules from before an LLM decided routing (design 27 §2.1/§4.1,
@@ -25,189 +34,19 @@
 //! always an explicit decision: the router's `target="new"`, the PM task
 //! lifecycle, or the user.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-use acowork_core::intent::{is_task_conversation, TurnOrigin};
-use serde::{Deserialize, Serialize};
-
-use crate::error::Result;
-
-/// One routing entry: the execution session currently holding this context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IntentSessionEntry {
-    pub key: String,
-    pub session_id: String,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct FileShape(HashMap<String, IntentSessionEntry>);
-
-/// In-memory map + JSON file mirror. Single-writer semantics are not needed
-/// beyond the process lock: writes are tiny and rare (one per new context).
-pub struct IntentSessionMap {
-    path: PathBuf,
-    entries: HashMap<String, IntentSessionEntry>,
-}
-
-impl IntentSessionMap {
-    /// Load from `dir/intent-sessions.json`; a missing or corrupt file starts
-    /// empty (the file is a routing hint, never a source of truth — a stale
-    /// entry only costs one session re-open attempt).
-    pub fn load(dir: &Path) -> Self {
-        let path = dir.join("intent-sessions.json");
-        let entries = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<FileShape>(&b).ok())
-            .map(|f| f.0)
-            .unwrap_or_default();
-        Self { path, entries }
-    }
-
-    pub fn get(&self, key: &str) -> Option<&IntentSessionEntry> {
-        self.entries.get(key)
-    }
-
-    /// Every live mapping. Used by the Chat Router to read the routing table
-    /// backwards: which session the chat currently points at, and which
-    /// sessions belong to a PM task chain (`origin` in the candidate list).
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &IntentSessionEntry)> {
-        self.entries.iter()
-    }
-
-    pub fn insert(&mut self, key: String, session_id: String) -> Result<()> {
-        self.entries
-            .insert(key.clone(), IntentSessionEntry { key, session_id });
-        self.flush()
-    }
-
-    /// Drop a mapping (PM task reached a terminal state → the logical
-    /// execution context is closed, design 27 §6.2).
-    pub fn remove(&mut self, key: &str) -> Result<()> {
-        if self.entries.remove(key).is_some() {
-            return self.flush();
-        }
-        Ok(())
-    }
-
-    fn flush(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let shape = FileShape(self.entries.clone());
-        let json = serde_json::to_string(&shape)
-            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))?;
-        // Atomic rewrite (temp + rename), same contract as the mailbox.
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)
-            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))
-    }
-}
-
-/// One execution session whose PM task reached a terminal state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminalSession {
-    pub session_id: String,
-    /// RFC3339 close stamp.
-    pub closed_at: String,
-}
-
-/// Cap on the persisted list. A terminal id only ever costs one candidate
-/// slot, so the cap exists to keep the file cheap to read on every router
-/// turn — an id old enough to fall off is long past any follow-up that could
-/// name it.
-const MAX_TERMINAL_SESSIONS: usize = 200;
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct TerminalFile {
-    #[serde(default)]
-    sessions: Vec<TerminalSession>,
-}
-
-/// Session ids whose PM task reached a terminal state (design 27 §6.2,
-/// ADR-099 D5): the Chat Router's candidate list must never offer a finished
-/// task again — routing a follow-up into a closed context answers into a
-/// conversation nobody reads.
+/// Derive the routing key from an inbound intent envelope.
 ///
-/// Written by `SessionManager::close_intent_context`, which the Gateway calls
-/// exactly once on the task's terminal transition; read by the candidate
-/// builder. The PM service stays the authority on task status — this file
-/// only mirrors the one event the Runtime observes. A missing or corrupt file
-/// starts empty: a stale id costs one candidate slot, never a wrong route.
-///
-/// A `chat:` / `conv:` key is never recorded here: closing a conversation
-/// context is not a completion, and under the no-rotation model nothing else
-/// drops those mappings.
-pub struct TerminalSessions {
-    path: PathBuf,
-    sessions: Vec<TerminalSession>,
-}
-
-impl TerminalSessions {
-    /// Load from `dir/terminal-sessions.json`; absent / corrupt starts empty.
-    pub fn load(dir: &Path) -> Self {
-        let path = dir.join("terminal-sessions.json");
-        let sessions = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<TerminalFile>(&b).ok())
-            .map(|f| f.sessions)
-            .unwrap_or_default();
-        Self { path, sessions }
-    }
-
-    pub fn contains(&self, session_id: &str) -> bool {
-        self.sessions.iter().any(|s| s.session_id == session_id)
-    }
-
-    /// Set form for the candidate query.
-    pub fn ids(&self) -> std::collections::HashSet<String> {
-        self.sessions.iter().map(|s| s.session_id.clone()).collect()
-    }
-
-    /// Record a terminal session. Idempotent and bounded (oldest dropped
-    /// first).
-    pub fn record(&mut self, session_id: &str) -> Result<()> {
-        if session_id.is_empty() || self.contains(session_id) {
-            return Ok(());
-        }
-        self.sessions.push(TerminalSession {
-            session_id: session_id.to_string(),
-            closed_at: chrono::Utc::now().to_rfc3339(),
-        });
-        if self.sessions.len() > MAX_TERMINAL_SESSIONS {
-            let excess = self.sessions.len() - MAX_TERMINAL_SESSIONS;
-            self.sessions.drain(0..excess);
-        }
-        self.flush()
-    }
-
-    /// Drop an id that came back to life (a task reopened by the PM service).
-    pub fn forget(&mut self, session_id: &str) -> Result<()> {
-        let before = self.sessions.len();
-        self.sessions.retain(|s| s.session_id != session_id);
-        if self.sessions.len() == before {
-            return Ok(());
-        }
-        self.flush()
-    }
-
-    fn flush(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let shape = TerminalFile {
-            sessions: self.sessions.clone(),
-        };
-        let json = serde_json::to_string(&shape)
-            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))?;
-        // Atomic rewrite (temp + rename), same contract as the routing table.
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)
-            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| crate::error::RuntimeError::Config(e.to_string()))
+/// A turn that names its conversation continues that conversation; a turn that
+/// names none is a one-shot (`msg:`), keyed by its own message id so it is
+/// never re-keyed onto somebody else's session. Human Chat messages carry no
+/// `conversation_id` (design 27 §4.2: a human-initiated round never counts
+/// against the R4 budget) and so never land here — they are addressed through
+/// their chat binding (ADR-106 D6/D11).
+pub fn routing_key(conversation_id: &str, message_id: &str) -> String {
+    if conversation_id.is_empty() {
+        format!("msg:{message_id}")
+    } else {
+        format!("conv:{conversation_id}")
     }
 }
 
@@ -342,123 +181,29 @@ impl SessionSeed {
     }
 }
 
-/// Derive the routing key from an inbound intent envelope. Preference:
-/// task-scoped conversation (§6.2: one execution session per PM task, even
-/// when the task lives in a shared project group chat) > Chat session
-/// (group chats address one session per chat) > conversation (C/S
-/// follow-ups) > message id (one-shot, never re-keyed).
-///
-/// The task branch is driven by the stamped origin
-/// ([`TurnOrigin::PmTask`]), with the conversation-coordinate test kept as
-/// the mixed-version fallback: an older Gateway still sends
-/// `kind="request"` on a `task:` conversation, and mis-keying it onto the
-/// group's chat session would break §6.2 for the whole task.
-pub fn routing_key(
-    kind: &str,
-    chat_session_id: &str,
-    initiator: &str,
-    conversation_id: &str,
-    message_id: &str,
-) -> String {
-    if TurnOrigin::parse(kind) == TurnOrigin::PmTask || is_task_conversation(conversation_id) {
-        format!("conv:{}", conversation_id)
-    } else if !chat_session_id.is_empty() {
-        chat_key(chat_session_id, initiator)
-    } else if !conversation_id.is_empty() {
-        format!("conv:{}", conversation_id)
-    } else {
-        format!("msg:{}", message_id)
-    }
-}
-
-/// The routing key for a Chat-surface turn: `chat:{chat_session_id}:{initiator}`.
-///
-/// The initiator is part of the key because an execution session has exactly
-/// one initiator (ADR-076 §决策 4). Two people addressing the same agent in
-/// the same group chat are two different pieces of work, and without the
-/// suffix the second one would land inside the first one's session — the
-/// multi-user session the design forbids. Empty initiator keeps the 2-part
-/// form (local mode / legacy callers), which is also what old mappings on
-/// disk look like.
-///
-/// Upgrade consequence, deliberate: a group's execution session that was
-/// keyed before this change (`chat:{csid}`) is not found by the new 3-part
-/// key, so the first mention after the upgrade opens a fresh session. The
-/// old one stays in the session list as history. Falling back to the 2-part
-/// key would re-open a session whose initiator may be somebody else — the
-/// exact bug this key exists to prevent.
-pub fn chat_key(chat_session_id: &str, initiator: &str) -> String {
-    let initiator = initiator.trim();
-    if initiator.is_empty() {
-        format!("chat:{chat_session_id}")
-    } else {
-        format!("chat:{chat_session_id}:{initiator}")
-    }
-}
-
-/// Recover the Chat session id from a [`chat_key`], old (2-part) or new
-/// (3-part) form.
-pub fn chat_id_from_key(key: &str) -> Option<&str> {
-    let rest = key.strip_prefix("chat:")?;
-    match rest.split_once(':') {
-        Some((chat_id, _initiator)) => Some(chat_id),
-        None => Some(rest),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn keys_are_namespaced_by_preference() {
+        // A named conversation is continued; the PM task's coordinate is just
+        // such a conversation id, so it keys as `conv:task:…` (= the key the
+        // Gateway's task close calls with).
         assert_eq!(
-            routing_key("user_message", "cs1", "u-1", "c1", "m1"),
-            "chat:cs1:u-1".to_string(),
-            "chat session wins"
-        );
-        assert_eq!(routing_key("", "", "u-1", "c1", "m1"), "conv:c1".to_string());
-        assert_eq!(routing_key("", "", "u-1", "", "m1"), "msg:m1".to_string());
-    }
-
-    #[test]
-    fn task_conversation_beats_the_chat_binding() {
-        // §6.2: one execution session per (task, agent) even inside the
-        // project group chat. Origin-stamped dispatch:
-        assert_eq!(
-            routing_key("pm_task", "cs1", "u-1", "task:p1:t1", "m1"),
+            routing_key("task:p1:t1", "m1"),
             "conv:task:p1:t1".to_string()
         );
-        // Mixed-version fallback — an older Gateway still sends
-        // `kind="request"` on the task conversation; the coordinate keeps
-        // the key correct either way:
-        assert_eq!(
-            routing_key("request", "cs1", "u-1", "task:p1:t1", "m1"),
-            "conv:task:p1:t1".to_string()
-        );
+        assert_eq!(routing_key("c1", "m1"), "conv:c1".to_string());
+        assert_eq!(routing_key("", "m1"), "msg:m1".to_string());
     }
 
     #[test]
-    fn map_round_trips_through_the_file() {
-        let dir = std::env::temp_dir().join(format!("intent-map-{}", uuid::Uuid::new_v4()));
-        {
-            let mut m = IntentSessionMap::load(&dir);
-            m.insert("conv:c1".into(), "s-1".into()).unwrap();
-        }
-        let m2 = IntentSessionMap::load(&dir);
-        assert_eq!(m2.get("conv:c1").unwrap().session_id, "s-1");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn remove_drops_the_mapping() {
-        let dir = std::env::temp_dir().join(format!("intent-map-{}", uuid::Uuid::new_v4()));
-        let mut m = IntentSessionMap::load(&dir);
-        m.insert("conv:c9".into(), "s-9".into()).unwrap();
-        m.remove("conv:c9").unwrap();
-        assert!(m.get("conv:c9").is_none());
-        assert!(IntentSessionMap::load(&dir).get("conv:c9").is_none());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn an_unkeyed_turn_never_borrows_another_contexts_session() {
+        // A Chat message carries no conversation id, so its key is its own
+        // message id: two such turns can never collide on a mapping (D6 — the
+        // deterministic route has no "default to the last session" any more).
+        assert_ne!(routing_key("", "m1"), routing_key("", "m2"));
     }
 
     #[test]
@@ -560,48 +305,5 @@ mod tests {
             SessionSeed::from_json(r#"{"reasoning_effort":"turbo"}"#).is_none(),
             "unparseable effort must not reach the session"
         );
-    }
-
-    #[test]
-    fn terminal_sessions_persist_dedupe_and_forget() {
-        let dir = std::env::temp_dir().join(format!("intent-terminal-{}", uuid::Uuid::new_v4()));
-        let mut terminal = TerminalSessions::load(&dir);
-        assert!(terminal.ids().is_empty(), "absent file starts empty");
-
-        terminal.record("s-1").unwrap();
-        terminal.record("s-2").unwrap();
-        terminal.record("s-1").unwrap(); // idempotent
-        assert!(terminal.contains("s-1"));
-        assert!(terminal.contains("s-2"));
-        assert_eq!(terminal.ids().len(), 2);
-
-        // The mirror survives a restart — that is the point of the file.
-        let reloaded = TerminalSessions::load(&dir);
-        assert!(reloaded.contains("s-1") && reloaded.contains("s-2"));
-
-        // A task that comes back must leave the list again.
-        terminal.forget("s-1").unwrap();
-        assert!(!terminal.contains("s-1"));
-        assert!(!TerminalSessions::load(&dir).contains("s-1"));
-        assert!(TerminalSessions::load(&dir).contains("s-2"));
-
-        // An empty id is a no-op, not an entry that swallows every warning.
-        terminal.record("").unwrap();
-        assert_eq!(terminal.ids().len(), 1);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn terminal_sessions_drop_the_oldest_beyond_the_cap() {
-        let dir = std::env::temp_dir().join(format!("intent-termcap-{}", uuid::Uuid::new_v4()));
-        let mut terminal = TerminalSessions::load(&dir);
-        for i in 0..(MAX_TERMINAL_SESSIONS + 5) {
-            terminal.record(&format!("s-{i}")).unwrap();
-        }
-        assert_eq!(terminal.ids().len(), MAX_TERMINAL_SESSIONS);
-        assert!(!terminal.contains("s-0"), "oldest dropped first");
-        assert!(terminal.contains(&format!("s-{}", MAX_TERMINAL_SESSIONS + 4)));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

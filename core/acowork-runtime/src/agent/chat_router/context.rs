@@ -567,8 +567,6 @@ pub fn truncate_body(body: &str, max: usize) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateLine {
     pub alias: String,
-    /// The session currently bound to this chat.
-    pub current: bool,
     /// `working` / `idle` / `errored` / `closed` (ADR-099 §5.2 vocabulary —
     /// coarser than `SessionStatus` on purpose).
     pub status: String,
@@ -582,9 +580,8 @@ pub struct CandidateLine {
 impl CandidateLine {
     fn render(&self) -> String {
         format!(
-            "{:<3}  {:<7}  {:<8}  {:<4}  {:<5}  {}",
+            "{:<3}  {:<8}  {:<4}  {:<5}  {}",
             self.alias,
-            if self.current { "current" } else { "" },
             self.status,
             self.age,
             self.origin,
@@ -1148,7 +1145,6 @@ mod tests {
         let candidates = vec![
             CandidateLine {
                 alias: "S1".into(),
-                current: true,
                 status: "working".into(),
                 age: "2m".into(),
                 origin: "chat".into(),
@@ -1156,7 +1152,6 @@ mod tests {
             },
             CandidateLine {
                 alias: "S2".into(),
-                current: false,
                 status: "idle".into(),
                 age: "3h".into(),
                 origin: "task".into(),
@@ -1186,11 +1181,10 @@ mod tests {
             .take_while(|l| !l.is_empty())
             .collect();
         assert_eq!(candidate_lines.len(), 2);
+        // No `current` column: a chat has no single active session anymore
+        // (ADR-106 D11) — continuity lives in the transcript's reference rows.
         let s1: Vec<&str> = candidate_lines[0].split_whitespace().collect();
-        assert_eq!(
-            s1,
-            vec!["S1", "current", "working", "2m", "chat", "Fix", "login", "redirect"]
-        );
+        assert_eq!(s1, vec!["S1", "working", "2m", "chat", "Fix", "login", "redirect"]);
         let s2: Vec<&str> = candidate_lines[1].split_whitespace().collect();
         assert_eq!(s2, vec!["S2", "idle", "3h", "task", "Review", "ADR-098"]);
         assert!(text.ends_with("\n[user message]\n继续弄一下登录"));

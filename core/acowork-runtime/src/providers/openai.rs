@@ -1706,10 +1706,10 @@ mod tests {
         // builds its own tools array and this adapter reads flat top-level
         // fields. A shape drift (e.g. the OpenAI nested wrapper) silently
         // turned every router tool into `name = "unknown"` with an empty
-        // schema — the model could never call `dispatch`. Neither side's
+        // schema — the model could never call an act. Neither side's
         // own unit tests cross this boundary; this one does.
         use crate::agent::chat_router::tool::{
-            memory_recall_tool_name, router_tools, DISPATCH_TOOL, HTTP_REQUEST_TOOL,
+            memory_recall_tool_name, router_tools, HTTP_REQUEST_TOOL, NEW_TASK_TOOL, PROPOSE_TOOL,
         };
         let memory_tool = memory_recall_tool_name();
         let tools = router_tools(Some(&memory_tool), true);
@@ -1717,15 +1717,15 @@ mod tests {
         let names: Vec<&str> = native.iter().map(|t| t.function.name.as_str()).collect();
         assert_eq!(
             names,
-            vec![DISPATCH_TOOL, memory_tool.as_str(), HTTP_REQUEST_TOOL]
+            vec![NEW_TASK_TOOL, PROPOSE_TOOL, memory_tool.as_str(), HTTP_REQUEST_TOOL]
         );
-        // Parameters must survive too — `dispatch` with an empty schema is
-        // just as uncallable as a misnamed one.
+        // Parameters must survive too — an act with an empty schema is just as
+        // uncallable as a misnamed one.
         assert_eq!(
             native[0].function.parameters["required"],
-            serde_json::json!(["target"])
+            serde_json::json!(["message"])
         );
-        assert!(native[0].function.parameters["properties"]["target"].is_object());
+        assert!(native[0].function.parameters["properties"]["message"].is_object());
         assert!(!native[0].function.description.is_empty());
     }
 }

@@ -34,7 +34,7 @@ use rusqlite::{Connection, params};
 
 use acowork_core::error::{AcoworkError, Result as AcoworkResult};
 use acowork_core::session_meta::{
-    ModelUsageEntry, SessionMeta, SessionMetaStore, SessionVisibility, TokenStatsRow,
+    IntentBinding, ModelUsageEntry, SessionMeta, SessionMetaStore, SessionVisibility, TokenStatsRow,
     last_active_at_ms, split_model_usage_key,
 };
 
@@ -598,6 +598,95 @@ impl SessionMetaStore for SqliteSessionMetaStore {
         Ok(tokens_ok && cost_ok)
     }
 
+    // ── intent routing (ADR-106 D11) ──────────────────────────────────
+    //
+    // `upsert_row` deliberately does not list `intent_key` / `intent_closed` in
+    // its `ON CONFLICT DO UPDATE SET`, so these statements are the only writers
+    // and a session's own meta write is never in their way.
+
+    fn intent_lookup(&self, key: &str) -> AcoworkResult<Option<String>> {
+        let conn = self.store.lock();
+        // Newest holder wins: a reopened task can bind a second session to the
+        // same context, and the older one stays on disk as history.
+        match conn.query_row(
+            "SELECT session_id FROM sessions \n             WHERE intent_key = ?1 AND intent_closed = 0 \n             ORDER BY last_active_at DESC LIMIT 1",
+            params![key],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(sid) => Ok(Some(sid)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(to_acowork_sqlite(e)),
+        }
+    }
+
+    fn intent_bind(&self, session_id: &str, key: &str) -> AcoworkResult<()> {
+        let conn = self.store.lock();
+        conn.execute(
+            "UPDATE sessions SET intent_key = ?2 WHERE session_id = ?1",
+            params![session_id, key],
+        )
+        .map_err(to_acowork_sqlite)?;
+        Ok(())
+    }
+
+    fn intent_close(&self, key: &str) -> AcoworkResult<Vec<String>> {
+        let conn = self.store.lock();
+        // Read the ids first, then mark: the caller closes exactly the sessions
+        // it reports, so a row that changed under the statement can never be
+        // announced as closed while it still reads open.
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id FROM sessions \n                 WHERE intent_key = ?1 AND intent_closed = 0",
+            )
+            .map_err(to_acowork_sqlite)?;
+        let ids: Vec<String> = stmt
+            .query_map(params![key], |r| r.get::<_, String>(0))
+            .map_err(to_acowork_sqlite)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(to_acowork_sqlite)?;
+        drop(stmt);
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        conn.execute(
+            "UPDATE sessions SET intent_closed = 1 WHERE intent_key = ?1",
+            params![key],
+        )
+        .map_err(to_acowork_sqlite)?;
+        Ok(ids)
+    }
+
+    fn intent_reopen(&self, session_id: &str) -> AcoworkResult<()> {
+        let conn = self.store.lock();
+        conn.execute(
+            "UPDATE sessions SET intent_closed = 0 WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(to_acowork_sqlite)?;
+        Ok(())
+    }
+
+    fn intent_bindings(&self) -> AcoworkResult<Vec<IntentBinding>> {
+        let conn = self.store.lock();
+        // Only bound rows are of interest: every unbound session is invisible to
+        // the routing index, so this stays proportional to task/conv contexts,
+        // not to the session count (ADR-096).
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, intent_key, intent_closed FROM sessions \n                 WHERE intent_key IS NOT NULL",
+            )
+            .map_err(to_acowork_sqlite)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(IntentBinding {
+                    session_id: r.get(0)?,
+                    intent_key: r.get(1)?,
+                    closed: r.get::<_, i64>(2)? != 0,
+                })
+            })
+            .map_err(to_acowork_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(to_acowork_sqlite)
+    }
 }
 
 // ── SQL building blocks ───────────────────────────────────────────────

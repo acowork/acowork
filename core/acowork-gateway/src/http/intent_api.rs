@@ -55,7 +55,7 @@ use axum::{
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
-use acowork_core::protocol::{ChatAttachmentMeta, CHAT_ATTACHMENTS_PARAM};
+use acowork_core::protocol::{ChatAttachmentMeta, CHAT_ATTACHMENTS_PARAM, TARGET_SESSION_PARAM};
 
 use crate::http::routes::{ApiError, AppState};
 use crate::intent::chat_client;
@@ -715,7 +715,7 @@ struct ChatAppendRequest {
 /// second, staler answer in the transcript. `user_message` is never a
 /// Runtime-owned kind (the human surface writes it).
 fn chat_append_kind_allowed(kind: &str) -> bool {
-    matches!(kind, "execution_round" | "system_notice" | "agent_message")
+    acowork_core::intent::chat_kinds::is_appendable(kind)
 }
 
 /// The mailbox request a Runtime-owned chat row closes, if any (ADR-100).
@@ -730,7 +730,7 @@ fn chat_append_kind_allowed(kind: &str) -> bool {
 /// An echo with no `in_reply_to` is a locally-composed turn (D9), which never
 /// opened a request to answer.
 fn answered_request(kind: &str, meta: &serde_json::Value) -> Option<String> {
-    if kind != "agent_message" {
+    if kind != acowork_core::intent::chat_kinds::AGENT_MESSAGE {
         return None;
     }
     meta.get("in_reply_to")
@@ -1487,9 +1487,35 @@ pub struct MentionRequest {
     /// Empty therefore no longer means "not a fan-out"; it means "you decide".
     #[serde(default)]
     pub targets: Vec<String>,
+    /// ADR-106 D7's second-level `@`: which execution session the human named,
+    /// per mentioned agent (`agent instance id → session id`). An address is a
+    /// fact the human supplied, so it is never re-decided: it routes at D6 level
+    /// 2 and the turn never reaches the Chat Router. A key that is not in
+    /// `targets` is refused rather than ignored — dropping an address the human
+    /// typed would silently turn "continue that session" into "guess one".
+    #[serde(default)]
+    pub target_sessions: std::collections::HashMap<String, String>,
+    /// ADR-106 D6 level 5's cheap escape: "continue nothing, this is new work".
+    /// It is always offered next to a `propose_existing` confirmation, and here
+    /// it takes the ladder's continuation branch away (level 3 is skipped) while
+    /// the new session's brief still comes from the Chat Router.
+    #[serde(default)]
+    pub force_new: bool,
     /// The message text (already archived as a `user_message` row by
     /// the chat write entry; this endpoint only fans out Intents).
     pub text: String,
+    /// ADR-106 D6 level 1: the id of the chat row this message answers. When
+    /// that row is an `execution_round` reference, the message is addressed to
+    /// the round's execution session and the turn never reaches the Chat
+    /// Router — replying to a block is addressing, not a guess.
+    ///
+    /// Empty, or a row that is not a reference, means "not addressed": the
+    /// ladder continues at its next level and the sender's `@` (or the group's
+    /// default responder) decides. A reply to a block therefore outranks an
+    /// `@` typed into the same composer, which is the honest precedence — the
+    /// human pointed at a specific round of work.
+    #[serde(default)]
+    pub in_reply_to: String,
     /// Optional conversation continuation (empty → new conversation).
     #[serde(default)]
     pub conversation_id: Option<String>,
@@ -1519,12 +1545,36 @@ pub struct MentionRequest {
 /// `attachments` is the **stored** metadata (the user service re-reads it from
 /// the session's `files/` dir), never a client claim; ids travel separately on
 /// the envelope, and the bytes never travel at all (design 27 §4.2.1).
+///
+/// `address` is ADR-106 D6/D7's explicit addressing: the execution session the
+/// human named (by replying to that round's block, or by picking the session in
+/// the second-level `@`), whether the agent was addressed at all, and whether
+/// continuation was refused. The session rides `params` under
+/// [`TARGET_SESSION_PARAM`] so addressing needs no wire change, and the Runtime
+/// reads it **before** the Chat Router — an addressed turn is never guessed at.
+/// What one Chat delivery was addressed to (ADR-106 D6/D7). Grouped into one
+/// argument because the three facts always travel together: an address, whether
+/// the human named the agent at all, and whether they refused continuation.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeliveryAddress<'a> {
+    /// Execution session named by a reply to its block (D6 level 1) or by the
+    /// second level of the `@` (level 2).
+    session: Option<&'a str>,
+    /// The agent was explicitly named by the human. With no address this is what
+    /// lets the Runtime apply level 3 ("exactly one routable session → deliver"),
+    /// a rule that must never fire for a message nobody addressed.
+    explicit_mention: bool,
+    /// The human asked for new work, so no session may be continued.
+    force_new: bool,
+}
+
 fn chat_delivery_params(
     text: &str,
     attachment_ids: &[String],
     attachments: &[ChatAttachmentMeta],
     chat_kind: &str,
     chat_prompt: Option<&str>,
+    address: DeliveryAddress<'_>,
 ) -> serde_json::Value {
     let mut params = serde_json::json!({
         "message": text,
@@ -1538,7 +1588,47 @@ fn chat_delivery_params(
         // `Vec<ChatAttachmentMeta>` has no map keys to fail on; degrade to
         // "no attachments" rather than to a broken params object.
         .unwrap_or(serde_json::Value::Null);
+    // Absent rather than empty: an empty session id is not "addressed at
+    // nothing", it is malformed, and the Runtime's reader must be able to tell
+    // the two apart.
+    if let Some(sid) = address.session.map(str::trim).filter(|s| !s.is_empty()) {
+        params[TARGET_SESSION_PARAM] = serde_json::Value::String(sid.to_string());
+    }
+    // Written only when true: the two flags are routing opinions, and a params
+    // object full of `false` noise would put them in the model's prompt for
+    // every turn that never had one.
+    if address.explicit_mention {
+        params[acowork_core::protocol::EXPLICIT_MENTION_PARAM] = serde_json::Value::Bool(true);
+    }
+    if address.force_new {
+        params[acowork_core::protocol::FORCE_NEW_PARAM] = serde_json::Value::Bool(true);
+    }
     params
+}
+
+/// ADR-106 D6 level 1: replying to a block IS addressing.
+///
+/// The `execution_round` reference row names the execution session and the agent
+/// instance that owns it, so a reply to that row can be delivered without asking
+/// a model what it was about. Returns `(agent instance, execution session)` when
+/// the fetched row is a reference row carrying both coordinates; anything else
+/// (a card, a plain utterance, a row that is not in this session) yields `None`
+/// and the caller keeps its own path.
+///
+/// Scope is what makes this safe rather than convenient: the row was read
+/// through a participant-checked fetch **inside this chat session**, so a
+/// reference cannot be smuggled in from another chat (acceptance 9).
+fn addressed_execution_round(row: Option<&serde_json::Value>) -> Option<(String, String)> {
+    let row = row?;
+    if row["kind"].as_str() != Some(acowork_core::intent::chat_kinds::EXECUTION_ROUND) {
+        return None;
+    }
+    let meta = &row["meta"];
+    let agent = meta["agent_instance_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())?;
+    let session = meta["agent_session_id"].as_str().filter(|s| !s.is_empty())?;
+    Some((agent.to_string(), session.to_string()))
 }
 
 /// `POST /api/intents/mentions` — the group-chat send entry (§5): the human
@@ -1614,16 +1704,55 @@ async fn deliver_mentions(
     // Resolved BEFORE the row is written because the decision belongs on the
     // row: `auto_routed_to` is a fact of that utterance ("this one went to X
     // without being addressed to X"), not a separate event to reconcile later.
-    let auto_routed_to = if req.targets.is_empty() {
-        session.live_default_responder().map(str::to_string)
-    } else {
+    //
+    // ADR-106 D6: the ladder's first rung is checked first. A reply to a block
+    // names both the agent and the execution session, so it resolves the target
+    // the same way an `@` does — from a durable row, never from a guess.
+    let replied_round = if req.in_reply_to.trim().is_empty() {
         None
-    };
-    let targets: Vec<String> = if req.targets.is_empty() {
-        auto_routed_to.iter().cloned().collect()
     } else {
-        req.targets.clone()
+        chat_client::message_by_id(port, &req.chat_session_id, &req.from_user, req.in_reply_to.trim())
+            .await
+            .ok()
+            .flatten()
     };
+    let addressed = addressed_execution_round(replied_round.as_ref());
+    let (auto_routed_to, targets): (Option<String>, Vec<String>) = match &addressed {
+        // The session the reply named travels in `addressed` itself, which the
+        // fan-out reads per target — it is not this decision's business.
+        Some((agent, _)) => (Some(agent.clone()), vec![agent.clone()]),
+        None => {
+            let responder = if req.targets.is_empty() {
+                session.live_default_responder().map(str::to_string)
+            } else {
+                None
+            };
+            let targets: Vec<String> = if req.targets.is_empty() {
+                responder.iter().cloned().collect()
+            } else {
+                req.targets.clone()
+            };
+            (responder, targets)
+        }
+    };
+
+    // ADR-106 D7: `target_sessions` is an address, and an address that cannot be
+    // attached to a target of this message must not be dropped — dropping one
+    // silently turns "continue the session the human named" into "let a model
+    // guess one", which is the failure D6 exists to remove. So a stray key or an
+    // empty session id is a client bug and answers with 400.
+    for (target, sid) in &req.target_sessions {
+        if sid.trim().is_empty() {
+            return Err(ApiError::bad_request(&format!(
+                "`target_sessions`['{target}'] is empty — an address must name a session"
+            )));
+        }
+        if !targets.iter().any(|t| t == target) {
+            return Err(ApiError::bad_request(&format!(
+                "`target_sessions` names '{target}', which this message does not deliver to"
+            )));
+        }
+    }
 
     // §5.3.1 (Wave 2B): one human utterance is ONE `user_message` row;
     // the mentioned targets are a field on it (`mentions`), not N copies
@@ -1641,6 +1770,13 @@ async fn deliver_mentions(
         "mentions": req.targets,
         "repo": repo,
     });
+    // ADR-106 D6 level 1: the block this utterance answers, so the transcript
+    // can render the reply inside that block instead of beside it. Recorded
+    // whatever the resolution concluded — an `in_reply_to` at a row that is not
+    // a reference is still a quote the human made.
+    if !req.in_reply_to.trim().is_empty() {
+        meta["in_reply_to"] = serde_json::Value::String(req.in_reply_to.trim().to_string());
+    }
     if let Some(responder) = auto_routed_to.as_deref()
         && let Some(map) = meta.as_object_mut()
     {
@@ -1757,24 +1893,50 @@ async fn deliver_mentions(
         // row it answers is the shared `user_message` above (`in_reply_to`
         // → recorded as `result_ref`, read back by `deliver_response`).
         let message_id = uuid::Uuid::new_v4().to_string();
+        // This target's place on the ladder (ADR-106 D6/D7). A level-1 reply
+        // names the round's own session; a level-2 pick names the session the
+        // human chose for this agent. `force_new` is dropped wherever an address
+        // exists: the Runtime must never read "continue exactly this session"
+        // and "start a new one" in one turn.
+        let address = match &addressed {
+            Some((agent, sid)) if agent == target => DeliveryAddress {
+                session: Some(sid.as_str()),
+                explicit_mention: true,
+                force_new: false,
+            },
+            _ => {
+                let picked = req.target_sessions.get(target).map(String::as_str);
+                DeliveryAddress {
+                    session: picked,
+                    // Per-target on purpose: in a fan-out the human may have @-ed
+                    // two agents while a third arrives as the group's default
+                    // responder (ADR-105). Auto-routing is configuration, not an
+                    // address, so level 3 must not fire for it.
+                    explicit_mention: req.targets.iter().any(|t| t == target),
+                    force_new: picked.is_none() && req.force_new,
+                }
+            }
+        };
+        let params = chat_delivery_params(
+            &req.text,
+            &req.attachment_ids,
+            &chat_attachments,
+            &chat_kind,
+            session.chat_prompt.as_deref(),
+            address,
+        );
         let dreq = delivery::DeliveryRequest {
             message_id: message_id.clone(),
             // §4.2: a human-initiated round carries no agent conversation
-            // — it never counts against the R4 budget; continuity lives
-            // in the Chat session (`routing_key` → `chat:{session}`).
+            // — it never counts against the R4 budget; continuity lives in the
+            // Chat transcript's reference rows and the addressing ladder
+            // (ADR-106 D6), not in a conversation id.
             conversation_id: String::new(),
             from_instance: req.from_user.clone(),
             from_session_id: String::new(),
             target_instance: target.clone(),
             action: "chat".to_string(),
-            params_json: chat_delivery_params(
-                &req.text,
-                &req.attachment_ids,
-                &chat_attachments,
-                &chat_kind,
-                session.chat_prompt.as_deref(),
-            )
-            .to_string(),
+            params_json: params.to_string(),
             source_chat_session_id: req.chat_session_id.clone(),
             repo: repo.clone(),
             session_config_json: String::new(),
@@ -1892,7 +2054,16 @@ pub struct ChatMessageRequest {
     /// turn. Empty = a plain message (or a quote of a non-card row).
     #[serde(default)]
     pub in_reply_to: String,
-    /// Design 27 §4.5: the initiator's `session_config` suggestion carried
+    /// ADR-106 D7's second-level `@`, 1:1 form: the execution session the human
+    /// picked for this message. With one agent in the chat the first level is
+    /// degenerate, so the picker opens straight on sessions. Empty = no address
+    /// (and a plain DM message is therefore a level-5 turn, not a continuation).
+    #[serde(default)]
+    pub target_session: Option<String>,
+    /// ADR-106 D6's cheap escape from continuation — "new work, continue
+    /// nothing". Consulted only when this message carries no session address.
+    #[serde(default)]
+    pub force_new: bool,
     /// on a chat message that opens a new execution turn (model / workspace
     /// / reasoning-effort chosen on the Chat surface before sending). Only
     /// a shape-checked object of string values; the Runtime clamps it to the
@@ -1973,16 +2144,11 @@ fn is_affirmative(answer: &str) -> bool {
 async fn resolve_card_answer(
     state: &AppState,
     port: u16,
-    chat_session_id: &str,
     from_user: &str,
     card_id: &str,
+    card: &serde_json::Value,
     answer: &str,
 ) -> bool {
-    let Ok(Some(card)) =
-        chat_client::message_by_id(port, chat_session_id, from_user, card_id).await
-    else {
-        return false;
-    };
     if card["kind"].as_str() != Some("interaction_request") {
         return false; // an `in_reply_to` at a plain row is a quote, not an answer
     }
@@ -2204,6 +2370,27 @@ async fn deliver_chat_message(
     if !session.participants.iter().any(|p| p.id() == req.from_user) {
         return Err(ApiError::forbidden("sender is not a participant"));
     }
+    // §5.5.4 answer channel / ADR-106 D6 level 1: whatever this message replies
+    // to is read once, server-side, and the same row answers every question
+    // asked of it — which agent a group answer belongs to, whether it resolves
+    // a live card, whether it addresses a block. Fetching twice would let those
+    // answers disagree.
+    let replied = if req.in_reply_to.trim().is_empty() {
+        None
+    } else {
+        chat_client::message_by_id(
+            port,
+            &req.chat_session_id,
+            &req.from_user,
+            req.in_reply_to.trim(),
+        )
+        .await
+        .ok()
+        .flatten()
+    };
+    // Level 1: a reply to a round's reference row names its execution session and
+    // the agent that owns it, so no model has to work out what it was about.
+    let addressed = addressed_execution_round(replied.as_ref());
     let target: String = match session.kind.as_str() {
         "user_agent" => session
             .participants
@@ -2211,27 +2398,27 @@ async fn deliver_chat_message(
             .map(|p| p.id().to_string())
             .find(|id| id != &req.from_user)
             .ok_or_else(|| ApiError::not_found("no agent participant in this session"))?,
-        // Group surfaces reuse this channel ONLY to answer a pending card
-        // (§5.5.4): the card names its own agent, so groups need no target
-        // resolution rule. Plain group messages are archive-only via the
-        // chat write entry; @-fan-out goes to `/api/intents/mentions`.
+        // Group surfaces reuse this channel ONLY to answer something that names
+        // its own agent — a pending card (§5.5.4) or a round's block (D6 level
+        // 1). Plain group messages are archive-only via the chat write entry;
+        // @-fan-out goes to `/api/intents/mentions`.
         "project_group" | "user_group" => {
-            if req.in_reply_to.is_empty() {
+            if let Some((agent, _)) = addressed.as_ref() {
+                agent.clone()
+            } else if req.in_reply_to.trim().is_empty() {
                 // Which agent answers is not the Gateway's guess: it is the
-                // card the human is answering or an @-mention. A bare group
-                // message has no target, so it fails here rather than picking
-                // one.
+                // card or the block the human is answering, or an @-mention. A
+                // bare group message has no target, so it fails here rather than
+                // picking one.
                 return Err(ApiError::bad_request(
-                    "chat-message in a group answers a card only; plain group messages post to /api/chat-sessions/{id}/messages and @-fan-out goes to /api/intents/mentions",
+                    "chat-message in a group answers a card or a block only; plain group messages post to /api/chat-sessions/{id}/messages and @-fan-out goes to /api/intents/mentions",
                 ));
             } else {
-                let card = chat_client::message_by_id(port, &req.chat_session_id, &req.from_user, &req.in_reply_to)
-                    .await
-                    .ok()
-                    .flatten()
+                let card = replied
+                    .as_ref()
                     .filter(|c| c["kind"].as_str() == Some("interaction_request"))
                     .ok_or_else(|| {
-                        ApiError::bad_request("group answer must reply to an interaction_request card in this session")
+                        ApiError::bad_request("group answer must reply to an interaction_request card or an execution_round block in this session")
                     })?;
                 card["from"]
                     .as_str()
@@ -2246,6 +2433,12 @@ async fn deliver_chat_message(
             )));
         }
     };
+    // The addressed session travels only when it belongs to the agent taking
+    // this turn. A reference row naming another agent is a different
+    // conversation, and explicit addressing is never re-interpreted.
+    let addressed_session = addressed
+        .filter(|(agent, _)| agent == &target)
+        .map(|(_, session)| session);
     let repo = session.repo.unwrap_or_default();
 
     let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
@@ -2309,14 +2502,15 @@ async fn deliver_chat_message(
     // execution side's pending request and the Agent's current turn
     // continues — no new turn is delivered. A stale/unknown card falls
     // through: the answer delivers as a plain human message and opens a
-    // fresh turn.
-    if !req.in_reply_to.is_empty()
+    // fresh turn. A round's block is never a card, so a reply to one always
+    // takes the delivery path — with its session already addressed.
+    if let Some(card) = replied.as_ref()
         && resolve_card_answer(
             &state,
             port,
-            &req.chat_session_id,
             &req.from_user,
             &req.in_reply_to,
+            card,
             &req.text,
         )
         .await
@@ -2336,12 +2530,31 @@ async fn deliver_chat_message(
     // `attached_items` is the Intent's attachment arm: the workspace
     // references the composer carried ride it into whichever execution session
     // takes the turn.
+    // ADR-106 D7: in a 1:1 the first level of the `@` is degenerate, so a session
+    // pick arrives as `target_session` — that is level 2. A plain DM message is
+    // NOT an address: D6 puts 单聊 at level 5, where the Router may only answer or
+    // open new work. `explicit_mention` therefore stays false here, so the
+    // deterministic level-3 shortcut never swallows a DM's first "hi".
+    let picked = req
+        .target_session
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let address = DeliveryAddress {
+        session: addressed_session.as_deref().or(picked),
+        explicit_mention: false,
+        // Meaningless beside an address: the human already chose. Carrying both
+        // would let the Runtime read "continue exactly this session" and
+        // "continue nothing" out of one turn.
+        force_new: addressed_session.is_none() && picked.is_none() && req.force_new,
+    };
     let mut params = chat_delivery_params(
         &req.text,
         &req.attachment_ids,
         &chat_attachments,
         &session.kind,
         session.chat_prompt.as_deref(),
+        address,
     );
     {
         let object = params.as_object_mut().expect("chat params are an object");
@@ -2759,7 +2972,14 @@ mod chat_params_tests {
             size: 12_288,
         }];
 
-        let params = chat_delivery_params("look at this", &ids, &stored, "user_agent", Some("custom"));
+        let params = chat_delivery_params(
+            "look at this",
+            &ids,
+            &stored,
+            "user_agent",
+            Some("custom"),
+            DeliveryAddress::default(),
+        );
 
         assert_eq!(params["message"], "look at this");
         assert_eq!(params["chat_attachment_ids"][0], "att-1");
@@ -2789,10 +3009,132 @@ mod chat_params_tests {
     /// only one of them survives a future `params` round-trip comparison.
     #[test]
     fn a_turn_without_files_still_carries_an_empty_list() {
-        let params = chat_delivery_params("just text", &[], &[], "user_group", None);
+        let params =
+            chat_delivery_params("just text", &[], &[], "user_group", None, DeliveryAddress::default());
         assert_eq!(params[CHAT_ATTACHMENTS_PARAM], serde_json::json!([]));
         // An absent `chat.md` override keeps its pre-existing wire shape.
         assert_eq!(params["chat_prompt"], serde_json::Value::Null);
+    }
+
+    /// ADR-106 D6 level 1: replying to a block is addressing, so the reference
+    /// row must yield both coordinates the delivery needs — the agent to wake
+    /// and the session to continue.
+    #[test]
+    fn a_reply_to_a_reference_row_addresses_that_round() {
+        let row = serde_json::json!({
+            "kind": acowork_core::intent::chat_kinds::EXECUTION_ROUND,
+            "from": "inst-a",
+            "meta": {"message_id": "round:r:m-1", "round_id": "r:m-1",
+                     "agent_session_id": "s-9", "agent_instance_id": "inst-a"},
+        });
+        assert_eq!(
+            addressed_execution_round(Some(&row)),
+            Some(("inst-a".to_string(), "s-9".to_string()))
+        );
+    }
+
+    /// Everything that is not a reference row resolves to *nothing*, and the
+    /// caller then falls to the next rung of the ladder. A decision card is
+    /// answered through the §5.5.4 channel; a plain utterance is a quote; a
+    /// reference missing either coordinate names no session, because a
+    /// half-known address is not an address — delivering on it would put the
+    /// human's words in a session nobody chose.
+    #[test]
+    fn only_a_complete_reference_row_addresses_a_session() {
+        let card = serde_json::json!({"kind": "interaction_request",
+            "meta": {"agent_session_id": "s-9", "agent_instance_id": "inst-a"}});
+        assert_eq!(addressed_execution_round(Some(&card)), None);
+        let plain = serde_json::json!({"kind": "user_message", "meta": {"message_id": "m-1"}});
+        assert_eq!(addressed_execution_round(Some(&plain)), None);
+        let torn = serde_json::json!({"kind": acowork_core::intent::chat_kinds::EXECUTION_ROUND,
+            "meta": {"agent_session_id": "", "agent_instance_id": "inst-a"}});
+        assert_eq!(addressed_execution_round(Some(&torn)), None);
+        assert_eq!(addressed_execution_round(None), None);
+    }
+
+    /// The addressed session is the whole difference between "the human pointed
+    /// at a round" and "a model guessed one", so its absence must be literal:
+    /// an unaddressed turn carries no key at all, and a blank id must not
+    /// smuggle in an empty session the Runtime would have to re-parse.
+    #[test]
+    fn an_addressed_turn_carries_the_session_and_an_unaddressed_one_does_not() {
+        let addressed = chat_delivery_params(
+            "go on",
+            &[],
+            &[],
+            "user_agent",
+            None,
+            DeliveryAddress {
+                session: Some("s-9"),
+                ..DeliveryAddress::default()
+            },
+        );
+        assert_eq!(addressed[TARGET_SESSION_PARAM], "s-9");
+        let free = chat_delivery_params(
+            "go on",
+            &[],
+            &[],
+            "user_agent",
+            None,
+            DeliveryAddress::default(),
+        );
+        assert!(free.get(TARGET_SESSION_PARAM).is_none());
+        let blank = chat_delivery_params(
+            "go on",
+            &[],
+            &[],
+            "user_agent",
+            None,
+            DeliveryAddress {
+                session: Some("  "),
+                ..DeliveryAddress::default()
+            },
+        );
+        assert!(blank.get(TARGET_SESSION_PARAM).is_none());
+        // One constant, two sides: the Runtime reads this exact spelling.
+        assert_eq!(TARGET_SESSION_PARAM, "target_session_id");
+    }
+
+    /// The two routing flags are written only when they are true, and the keys
+    /// are read by name across a process boundary the compiler cannot check: a
+    /// rename on one side silently disables level 3 (every addressed turn pays an
+    /// LLM) or re-enables continuation after the human refused it.
+    #[test]
+    fn the_routing_flags_are_written_under_the_agreed_keys() {
+        let mentioned = chat_delivery_params(
+            "go on",
+            &[],
+            &[],
+            "user_agent",
+            None,
+            DeliveryAddress {
+                explicit_mention: true,
+                ..DeliveryAddress::default()
+            },
+        );
+        assert_eq!(
+            mentioned[acowork_core::protocol::EXPLICIT_MENTION_PARAM],
+            serde_json::Value::Bool(true)
+        );
+        assert!(mentioned.get(acowork_core::protocol::FORCE_NEW_PARAM).is_none());
+        let fresh = chat_delivery_params(
+            "new thing",
+            &[],
+            &[],
+            "user_agent",
+            None,
+            DeliveryAddress {
+                force_new: true,
+                ..DeliveryAddress::default()
+            },
+        );
+        assert_eq!(
+            fresh[acowork_core::protocol::FORCE_NEW_PARAM],
+            serde_json::Value::Bool(true)
+        );
+        assert!(fresh.get(acowork_core::protocol::EXPLICIT_MENTION_PARAM).is_none());
+        assert_eq!(acowork_core::protocol::EXPLICIT_MENTION_PARAM, "explicit_mention");
+        assert_eq!(acowork_core::protocol::FORCE_NEW_PARAM, "force_new");
     }
 }
 

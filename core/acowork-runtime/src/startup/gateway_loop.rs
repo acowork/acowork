@@ -1114,6 +1114,86 @@ async fn route_intent_inbound(
         ));
     };
 
+    // ADR-106 D6 level 1: the human replied to one of the round reference rows
+    // in this chat, so the Gateway already resolved *which* execution session
+    // that round ran in and stamped it on the envelope. Explicit addressing is
+    // not a routing question, so it is answered before the router is consulted:
+    // no queue hop, no model call, and no later stage may re-decide it. A
+    // session bound to another chat is refused downstream rather than re-bound
+    // (D11) — an address that cannot be served is never answered with a
+    // different one.
+    if let Some(session_id) = crate::agent::chat_router::runner::addressed_session(&env)
+        && !env.source_chat_session_id.is_empty()
+    {
+        return route_intent_addressed(session_manager, &session_id, env).await;
+    }
+
+    // ADR-106 D6 level 3: the human addressed this agent and the chat has exactly
+    // one session it may continue, so the follow-up is settled by the bindings
+    // (D11) rather than by a model — same no-queue-hop, no-LLM property as level 1.
+    //
+    // Several candidates are a different case: choosing between them is a
+    // decision, so the Runtime asks (a choice card) and delivers nothing. The
+    // human's row is already durable, so answering the card is a normal second-level
+    // `@` and no turn is lost; zero candidates leave nothing to continue and the
+    // ladder falls through to levels 4-5.
+    if crate::agent::chat_router::runner::is_chat_turn(&env)
+        && !env.source_chat_session_id.is_empty()
+        && crate::agent::chat_router::runner::explicit_mention(&env)
+        && !crate::agent::chat_router::runner::force_new(&env)
+    {
+        let chat = env.source_chat_session_id.clone();
+        let initiator = Some(env.from.as_str()).filter(|s| !s.is_empty());
+        let surface = chat_surface(&env);
+        let to = env.from.clone();
+        let in_reply_to = env.in_reply_to.clone();
+        let message_id = env.message_id.clone();
+        let candidates = session_manager
+            .lock()
+            .await
+            .chat_continuations(&chat, initiator, surface);
+        match candidates.as_slice() {
+            [] => {}
+            [only] => {
+                return route_intent_addressed(session_manager, &only.session_id, env).await;
+            }
+            many => {
+                let asked = {
+                    let guard = session_manager.lock().await;
+                    guard
+                        .emit_session_choice(
+                            &chat,
+                            &to,
+                            &in_reply_to,
+                            &message_id,
+                            "session_choice",
+                            many.iter().map(|c| c.choice_option()).collect(),
+                        )
+                        .await
+                };
+                match asked {
+                    Ok(()) => {
+                        tracing::debug!(
+                            chat_id = %chat,
+                            options = many.len(),
+                            "chat level-3 choice card written — the message waits on the answer"
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        // A question that could not be asked must not swallow the
+                        // message: degrade to the router, which can still answer it.
+                        tracing::warn!(
+                            chat_id = %chat,
+                            error = %e,
+                            "session choice card failed — falling through to the router"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // A router turn is an LLM call plus a couple of HTTP hops. Running it here
     // would stop this agent from receiving *anything* — including a `Stop` —
     // for as long as it takes, so it is queued and this loop keeps reading
@@ -1315,10 +1395,159 @@ async fn route_intent_legacy(
     env: Box<crate::agent::inbound::IntentEnvelope>,
     fresh: bool,
 ) -> crate::error::Result<()> {
+    let target = resolve_legacy_route(session_manager, designated_session_id, &env, fresh).await?;
+    deliver_intent_turn(session_manager, target, env).await
+}
+
+/// ADR-106 D6 level 1: deliver an explicitly addressed turn into that session.
+///
+/// The chat's reference row named the execution session and the Gateway read
+/// the address off it, so this path decides nothing about *which* session runs
+/// the work — it only checks that the session still exists (reopening a closed
+/// one) and that it belongs to this chat. `chat_dispatch` owns both checks and
+/// the D11 refusal, so the address is validated by exactly the same code the
+/// router's own `dispatch(existing)` runs through; the two paths must not grow
+/// two different notions of a valid address.
+async fn route_intent_addressed(
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    session_id: &str,
+    env: Box<crate::agent::inbound::IntentEnvelope>,
+) -> crate::error::Result<()> {
+    let chat_session_id = env.source_chat_session_id.clone();
+    let initiator = env.from.clone();
+    // Guard released before the delivery: `send_to_session` takes the same
+    // lock, and a tokio Mutex is not reentrant.
+    let target = {
+        let mut guard = session_manager.lock().await;
+        guard
+            .chat_dispatch(
+                &chat_session_id,
+                crate::agent::chat_router::tool::Target::Existing(session_id.to_string()),
+                crate::agent::session::intent_routing::SessionSeed::from_json(
+                    &env.session_config_json,
+                ),
+                Some(initiator.as_str()),
+            )
+            .await?
+    };
+    deliver_intent_turn(session_manager, target, env).await
+}
+
+/// Which execution session the deterministic route delivers into, and whether
+/// this call created it (`opened_new`, ADR-106 D3).
+async fn resolve_legacy_route(
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    designated_session_id: &str,
+    env: &crate::agent::inbound::IntentEnvelope,
+    fresh: bool,
+) -> crate::error::Result<(String, bool)> {
+    use crate::agent::session::intent_routing::routing_key;
+
+    let origin = acowork_core::intent::TurnOrigin::parse(&env.kind);
+    // Candidate session: the designated one for responses, registry otherwise.
+    if origin == acowork_core::intent::TurnOrigin::AgentResponse
+        && !designated_session_id.is_empty()
+    {
+        let guard = session_manager.lock().await;
+        if guard.get_session(designated_session_id).is_some() {
+            return Ok((designated_session_id.to_string(), false));
+        }
+    }
+    // The initiator's session-config suggestion (§4) is consumed on whichever
+    // branch the routing takes: at creation here, or applied to the session the
+    // message was routed into (ADR-099).
+    let seed = crate::agent::session::intent_routing::SessionSeed::from_json(
+        &env.session_config_json,
+    );
+    let is_chat_human =
+        origin.policy().router_eligible && !env.source_chat_session_id.is_empty();
+    if is_chat_human {
+        // ADR-106 D6/D11: a Chat turn never consults the intent-context
+        // registry. Its whole address space is the sessions bound to this chat,
+        // and it continues one only when there is exactly one to choose from.
+        // The retired `chat:{csid}:{initiator}` mapping used to answer "whatever
+        // this chat last ran", which is a guess about intent dressed up as a
+        // fact about address; several candidates now means a new session of this
+        // turn's own — the same call the router's `dispatch(new)` makes.
+        let mut guard = session_manager.lock().await;
+        // `fresh` is the degraded-router case: the router read the conversation
+        // and failed to decide, so nothing here may continue old work.
+        let continuation = if fresh {
+            None
+        } else {
+            guard.chat_continuation(
+                &env.source_chat_session_id,
+                Some(env.from.as_str()).filter(|s| !s.is_empty()),
+                chat_surface(env),
+            )
+        };
+        let target = match continuation {
+            Some(session_id) => crate::agent::chat_router::tool::Target::Existing(session_id),
+            None => crate::agent::chat_router::tool::Target::New,
+        };
+        guard
+            .chat_dispatch(
+                &env.source_chat_session_id,
+                target,
+                seed,
+                Some(env.from.as_str()),
+            )
+            .await
+    } else {
+        session_manager
+            .lock()
+            .await
+            .route_intent_session(
+                &routing_key(&env.conversation_id, &env.message_id),
+                seed,
+                // ADR-099: a PM task dispatched from a group chat binds
+                // that session to the group, so follow-ups there can find
+                // it. Empty for agent-to-agent and cron intents.
+                Some(env.source_chat_session_id.as_str()),
+                // ADR-076 §决策 4: the session's initiator is the
+                // envelope's `from` — the human who sent the message,
+                // or the agent instance that started the work. Never
+                // the account this Runtime happens to be carrying.
+                Some(env.from.as_str()),
+            )
+            .await
+    }
+}
+
+/// Which Chat surface an envelope came from. The Gateway stamps the kind on the
+/// delivery (ADR-099) — the Runtime must not infer it — and the deterministic
+/// route needs it because the candidate filter differs per surface: a group only
+/// ever offers the speaker's own sessions.
+fn chat_surface(
+    env: &crate::agent::inbound::IntentEnvelope,
+) -> crate::agent::session::chat_candidates::CandidateSurface {
+    use crate::agent::session::chat_candidates::CandidateSurface;
+
+    let kind = env
+        .params
+        .get("chat_kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if crate::agent::chat_router::prompt::is_group_surface(kind) {
+        CandidateSurface::Group
+    } else {
+        CandidateSurface::Direct
+    }
+}
+
+/// Hand one intent to the session the routing stage chose.
+///
+/// Split out of [`route_intent_legacy`] so the addressed path (D6 level 1) and
+/// the registry path (levels 4–5) share one delivery — and therefore one
+/// pending-queue record, one [`TurnSurface`], and one `opened_new` stamp.
+async fn deliver_intent_turn(
+    session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
+    target: (String, bool),
+    env: Box<crate::agent::inbound::IntentEnvelope>,
+) -> crate::error::Result<()> {
     use crate::agent::inbound::IntentEnvelope;
     use crate::agent::intent_turn::render_intent_message;
     use crate::agent::session::SessionMessage;
-    use crate::agent::session::intent_routing::routing_key;
 
     let IntentEnvelope {
         from,
@@ -1328,7 +1557,7 @@ async fn route_intent_legacy(
         conversation_id,
         source_chat_session_id,
         repo,
-        session_config_json,
+        session_config_json: _,
         kind,
         in_reply_to,
         status,
@@ -1336,8 +1565,6 @@ async fn route_intent_legacy(
         chat_attachment_ids,
     } = *env;
 
-    let origin = acowork_core::intent::TurnOrigin::parse(&kind);
-    let is_response = origin == acowork_core::intent::TurnOrigin::AgentResponse;
     // A PM dispatch's wake-up playbook is model-facing and ephemeral: it
     // bypasses the rendered message and history entirely, injected into
     // the turn's system block (see `ContextBuilder::set_task_brief`).
@@ -1357,64 +1584,6 @@ async fn route_intent_legacy(
         &status,
     );
 
-    // Candidate session: the designated one for responses, registry otherwise.
-    let mut target: Option<String> = None;
-    if is_response && !designated_session_id.is_empty() {
-        let guard = session_manager.lock().await;
-        if guard.get_session(designated_session_id).is_some() {
-            target = Some(designated_session_id.to_string());
-        }
-    }
-    let target = match target {
-        Some(t) => (t, false),
-        None => {
-            // The initiator's session-config suggestion (§4) is consumed on
-            // whichever branch the routing takes: at creation here, or applied
-            // to the session the message was routed into (ADR-099).
-            let seed =
-                crate::agent::session::intent_routing::SessionSeed::from_json(&session_config_json);
-            let is_chat_human = origin.policy().router_eligible && !source_chat_session_id.is_empty();
-            if fresh && is_chat_human {
-                // Degraded router turn: fresh session, bound to the same
-                // chat, mapping re-pointed — the same creation path the
-                // router's own `dispatch(new)` uses.
-                let mut guard = session_manager.lock().await;
-                guard
-                    .chat_dispatch(
-                        &source_chat_session_id,
-                        crate::agent::chat_router::tool::Target::New,
-                        seed,
-                        Some(from.as_str()),
-                    )
-                    .await?
-            } else {
-                let key = routing_key(
-                    &kind,
-                    &source_chat_session_id,
-                    &from,
-                    &conversation_id,
-                    &message_id,
-                );
-                session_manager
-                    .lock()
-                    .await
-                    .route_intent_session(
-                        &key,
-                        seed,
-                        // ADR-099: a PM task dispatched from a group chat binds
-                        // that session to the group, so follow-ups there can find
-                        // it. Empty for agent-to-agent and cron intents.
-                        Some(source_chat_session_id.as_str()),
-                        // ADR-076 §决策 4: the session's initiator is the
-                        // envelope's `from` — the human who sent the message,
-                        // or the agent instance that started the work. Never
-                        // the account this Runtime happens to be carrying.
-                        Some(from.as_str()),
-                    )
-                    .await?
-            }
-        }
-    };
     // §5.5.5 pending queue: which intents must be shown in the execution
     // side's pending list while that session is busy. A Chat-sourced turn that
     // owes its chat a write-back is exactly that set. ADR-106 retired the

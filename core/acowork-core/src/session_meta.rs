@@ -825,6 +825,54 @@ pub trait SessionMetaStore: Send + Sync {
             "token_stats not supported by this backend".to_string(),
         ))
     }
+
+    // ── intent routing (ADR-106 D11) ──────────────────────────────────
+    //
+    // Which execution session owns which intent context, and which of those
+    // contexts have ended. This used to live in `intent-sessions.json` and
+    // `terminal-sessions.json` inside the agent's work dir — a second durable
+    // statement of facts the session row already carries, which could (and
+    // did) disagree with the binding after a half-completed routing. The row is
+    // the truth; these are the only writes that touch `intent_key` /
+    // `intent_closed`, and the session's own meta upsert never lists those two
+    // columns, so a `write_meta()` can not erase a routing decision and a
+    // routing decision can not erase a title.
+
+    /// The **open** session owning this intent context, newest first. `None`
+    /// means nothing owns it (never bound, or every holder closed).
+    fn intent_lookup(&self, key: &str) -> Result<Option<String>>;
+
+    /// Bind a session to an intent context. Writing-once-by-convention: a
+    /// session's context is decided when it is created, and rebinding one that
+    /// already answers another context is the bug D11 exists to kill.
+    fn intent_bind(&self, session_id: &str, key: &str) -> Result<()>;
+
+    /// Mark every open binding of `key` closed, returning the session ids it
+    /// changed so the caller can end their execution contexts. Idempotent: a
+    /// second close changes nothing and reports nothing.
+    fn intent_close(&self, key: &str) -> Result<Vec<String>>;
+
+    /// Re-open a session's context mark after its task was reopened: the
+    /// session is live again, so it is routable again.
+    fn intent_reopen(&self, session_id: &str) -> Result<()>;
+
+    /// Every binding, for the Chat Router's candidate filter (the derived index
+    /// D11 replaces the mapping file with). Metadata only, never a transcript.
+    fn intent_bindings(&self) -> Result<Vec<IntentBinding>>;
+}
+
+/// One session's intent-routing binding (ADR-106 D11).
+///
+/// The routing facts a session must state about itself: which intent context it
+/// owns (`conv:task:{project}:{task}` for a PM task, `conv:{conversation_id}`
+/// for an agent-to-agent conversation), and whether that context has ended. A
+/// closed binding is never offered as a routing candidate — routing a follow-up
+/// into a finished task answers into a conversation nobody reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentBinding {
+    pub session_id: String,
+    pub intent_key: String,
+    pub closed: bool,
 }
 
 /// Converts `last_active_at` (RFC3339 string) to the epoch-ms `i64` the

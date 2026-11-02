@@ -778,6 +778,39 @@ pub struct ChatAttachmentMeta {
 /// exact blindness the field exists to remove. One constant, two sides.
 pub const CHAT_ATTACHMENTS_PARAM: &str = "chat_attachments";
 
+/// Delivery-params key carrying the execution session a Chat turn was
+/// **addressed to** by a human (ADR-106 D6 levels 1–2).
+///
+/// Same one-constant-two-sides rule as [`CHAT_ATTACHMENTS_PARAM`]: the Gateway
+/// writes it when it resolved a reply-to-block or an explicit session pick, and
+/// the Runtime reads it before the Chat Router is consulted. A dropped key is
+/// silent on both sides and costs the human their addressing — the turn lands on
+/// whatever the router guesses — so it must never be spelled ad hoc.
+///
+/// It travels in `params` rather than on the envelope on purpose: `params` is
+/// the chat layer's own free-form payload (and a human turn renders `params.message`
+/// to the model, not this key), so explicit addressing needs no wire change.
+pub const TARGET_SESSION_PARAM: &str = "target_session_id";
+
+/// Delivery-params key marking a Chat turn whose agent was **named by the
+/// human** (`@agent`, ADR-106 D6 level 3).
+///
+/// Level 3 is a deterministic rule — one routable session means deliver to it
+/// without asking a model — and it must only ever fire on a message somebody
+/// actually addressed. Without this flag the Runtime cannot tell `@agent, carry
+/// on` from a line of idle chatter in a group where the agent happens to be a
+/// member, and the chatter would start execution work.
+pub const EXPLICIT_MENTION_PARAM: &str = "explicit_mention";
+
+/// Delivery-params key telling the Runtime that a Chat turn may **not**
+/// continue an existing execution session (ADR-106 D6, the cheap escape hatch).
+///
+/// A card offers "new task" next to every "continue that session" suggestion
+/// precisely so the human can always refuse the guess; this key is how that
+/// refusal survives into the routing decision. It skips the deterministic
+/// continuation and lets the router open a session with its own brief.
+pub const FORCE_NEW_PARAM: &str = "force_new";
+
 /// Legacy — replaced by `AttachedItem` (ADR-046). Retained for
 /// deserialization of old `attached_context` payloads during transition.
 /// Will be removed after all frontend clients ship `attached_items`.

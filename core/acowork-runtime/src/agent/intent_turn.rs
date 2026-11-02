@@ -456,6 +456,66 @@ pub fn execution_round_meta(
     meta
 }
 
+/// The `meta` of a Chat choice card (ADR-106 D6 levels 3 and 5).
+///
+/// A card is the Chat's own question, so it rides the already-appendable
+/// `system_notice` kind with its `meta` doing the talking: no new write entry,
+/// no new kind, no whitelist change. Two notice types share this shape —
+/// `session_choice` (several sessions could continue, which one?) and
+/// `confirm_continue` (the router proposes one, yes or no?) — and both carry
+/// `options` plus `allow_new_task`, because D6 requires the cheap escape to sit
+/// beside every suggestion: "new task" is always offered, so a question can be
+/// answered with one click and never traps the human in a context they did not
+/// choose.
+///
+/// The idempotency key is the notice type plus the inbound message it answers,
+/// so a redelivered turn re-asks one question rather than stacking cards.
+pub fn session_choice_meta(
+    notice_type: &str,
+    in_reply_to: &str,
+    request_message_id: &str,
+    options: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": format!("{notice_type}:{request_message_id}"),
+        "notice_type": notice_type,
+        "in_reply_to": in_reply_to,
+        "options": options,
+        "allow_new_task": true,
+    })
+}
+
+/// POST a Chat choice card (see [`session_choice_meta`]).
+///
+/// Body is empty by contract: the row is a question whose text is the options,
+/// and the surfaces localise `notice_type` rather than rendering a
+/// Runtime-authored sentence into a human transcript.
+#[allow(clippy::too_many_arguments)] // positional row shape; a struct here is boilerplate
+pub async fn emit_session_choice(
+    instance_id: &str,
+    gateway_host: &str,
+    node_token: &str,
+    chat_session_id: &str,
+    to: &str,
+    in_reply_to: &str,
+    request_message_id: &str,
+    notice_type: &str,
+    options: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let meta = session_choice_meta(notice_type, in_reply_to, request_message_id, options);
+    append_chat_row(
+        instance_id,
+        gateway_host,
+        node_token,
+        chat_session_id,
+        acowork_core::intent::chat_kinds::SYSTEM_NOTICE,
+        to,
+        "",
+        meta,
+    )
+    .await
+}
+
 /// POST the responder's final output back through the Gateway write entry
 /// (`POST /api/intents/{request_id}/response`). The Gateway verifies the
 /// caller is the recorded target, appends the `intent_response` chat row,

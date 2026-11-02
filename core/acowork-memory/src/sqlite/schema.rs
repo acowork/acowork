@@ -135,8 +135,10 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// (ADR-076 §决策 4 — the column is the session's initiator, and `user_id`
 /// belongs to the account system); 9 = `chat_token_usage` ledger table
 /// (Chat Router token accounting — one aggregate row per Chat session,
-/// no conversation state).
-pub const SCHEMA_VERSION: i64 = 9;
+/// no conversation state); 10 = `sessions.intent_key` / `intent_closed`
+/// (ADR-106 D11 — the intent context a session owns, and that context's
+/// terminal mark, both on the session's own row instead of a side file).
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -264,6 +266,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         9,
         "CREATE TABLE IF NOT EXISTS chat_token_usage ( \n             chat_session_id          TEXT PRIMARY KEY, \n             chat_kind                TEXT, \n             created_at               INTEGER NOT NULL, \n             last_active_at           INTEGER NOT NULL, \n             llm_call_count           INTEGER NOT NULL DEFAULT 0, \n             token_last_input         INTEGER NOT NULL DEFAULT 0, \n             token_last_output        INTEGER NOT NULL DEFAULT 0, \n             token_total_input        INTEGER NOT NULL DEFAULT 0, \n             token_total_output       INTEGER NOT NULL DEFAULT 0, \n             token_last_cache_read    INTEGER NOT NULL DEFAULT 0, \n             token_last_cache_write   INTEGER NOT NULL DEFAULT 0, \n             token_total_cache_read   INTEGER NOT NULL DEFAULT 0, \n             token_total_cache_write  INTEGER NOT NULL DEFAULT 0, \n             model_usage              TEXT \n         ); \n         CREATE INDEX IF NOT EXISTS idx_chat_token_usage_last_active \n             ON chat_token_usage(last_active_at DESC);",
+    ),
+    // ADR-106 D11: the intent-routing binding stops living in a side file with a
+    // competing truth (`intent-sessions.json` / `terminal-sessions.json`) and
+    // moves onto the session's own row. `intent_key` is the intent context the
+    // session owns (`conv:task:{project}:{task}` for a PM task); `intent_closed`
+    // is that context's terminal mark, so a finished task is never offered as a
+    // routing candidate again. Both are NULL/0 on every pre-existing row, which
+    // reads as "bound to nothing" — the routing table they replace was itself a
+    // hint, and a lost binding costs one fresh session, never a wrong route.
+    // Written only by `SessionMetaStore::intent_*`, never by the session's own
+    // meta upsert, so the two writers can never erase each other.
+    (
+        10,
+        "ALTER TABLE sessions ADD COLUMN intent_key TEXT; \n         ALTER TABLE sessions ADD COLUMN intent_closed INTEGER NOT NULL DEFAULT 0; \n         CREATE INDEX IF NOT EXISTS idx_sessions_intent_key \n             ON sessions(intent_key);",
     ),
 ];
 

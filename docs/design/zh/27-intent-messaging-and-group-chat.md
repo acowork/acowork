@@ -605,13 +605,13 @@ sequenceDiagram
 
 @Agent 解析必须转成明确的目标 Agent 实例列表，而不是让每个 Runtime 自行从正文猜目标。**一条人类发言只落一行 `user_message`**，多个被 @ 的目标记在该行的 `mentions` 字段里；不得为每个目标另写一条正文相同的行——那会让同一段文字在同一个 session 里出现多次，前端必须去重才能正确渲染，且 `seq` 与计数全部虚增。各目标分别路由、各自维护 execution session；Agent 的回复作为各自的 `agent_message` 写入同一个 Chat session，用 `in_reply_to` 指回那条人类消息。
 
-**@ 只选 agent，router 选会话（v2.2）。**被 @ 的每个 Agent 在自己的 Runtime 内跑一次 Chat Router：候选集只含 `meta.chat_session_id` 指向本群聊的执行会话（含该群的 PM 任务会话）及"新建"选项，绝不列个人私聊会话或其他群的会话。多用户在同一群里发起不同话题时，router 倾向新建而非串进同一条链，多话题因此可并行；同一话题的追问则复用同一会话。群聊 router 没有 `ask_user_question`，需要澄清时只用文本发言（§5.4.5）。
+**寻址先走确定性阶梯，阶梯走完才跑 router（ADR-106 D6/D7，本节改写原“@ 只选 agent，router 选会话”）。**第一级 `@` 选 agent，第二级 `@` 选它的执行会话。被 @ 的每个 Agent 先在自己的 Runtime 内走前几级的确定性规则：回复某个执行轮块（`in_reply_to` 指向 `execution_round` 引用行）⇒ 续投该会话；`@` 指名会话 ⇒ 投给指名会话；`@` 未指名且该 agent 在本 chat 只有一个可投会话 ⇒ 直投，多个 ⇒ 回一张 `session_choice` 卡（`system_notice` + `meta.options[]`，卡上"新建任务"永远并列），零 ⇒ 落到 router。候选集仍只含 `meta.chat_session_id` 指向本群聊且权限允许的执行会话，绝不列个人私聊或其他群的会话。router 的 act 空间收缩为 `new_task(brief)` / `propose_existing(alias, why)` / 纯文本发言：它**不再拥有静默投递旧会话的权力**，提议只能落成 `confirm_continue` 卡由人确认（别名表不再向模型开放投递，只是提议的句柄）。群聊 router 没有 `ask_user_question`，需要澄清时只用文本发言（§5.4.5）。
 
 群聊场景下对话的 owner 是那条人类消息：Agent 的回复只写回群聊 Chat session 并渲染给人，**不 @ 任何人，因此不唤醒任何 Agent**。多个 Agent 之间的接力不由 Intent 完成，而由人决定是否 @ 下一个（§5.4.5 R5 的推论）。
 
 **未 @ 的消息交给群的默认接收方（ADR-105）。**"agent 刚说完话、人直接回一句"是最高频的交互，而按上面的规则它只归档、谁也不唤醒——用户必须 @ 一次重发。群 Chat session 因此带一个可选的 `default_responder`（该群的一个 agent 参与者）：
 
-- 群发只有一个入口 `POST /api/intents/mentions`。`targets: []` 是**正向指令**（"你决定"），不再是非法请求；有 @ 时按 `targets` 投递，无 @ 时投给 `default_responder`。
+- 群发只有一个入口 `POST /api/intents/mentions`。`targets: []` 是**正向指令**（"你决定"），不再是非法请求；有 @ 时按 `targets` 投递，无 @ 时投给 `default_responder`。两级 `@` 同走这一入口：请求体新增 `target_sessions`（agent → 指名会话）与 `force_new`（拒绝续投），所寻地址以 delivery `params` 键（`target_session_id` / `explicit_mention` / `force_new`）抵达 Runtime，零 proto 变更。
 - 未配置 `default_responder` 的群保持原行为：仅归档，响应 `{"routed": "archived", "results": []}`。纯人类群永远不需要配置。
 - 自动路由是行上的独立事实：`meta.mentions` 只记人打的 @ 名单，自动目标写 `meta.auto_routed_to`；等待行的判据（§5.5）据此开启，@ chip 不因自动路由出现。
 - 写入 owner-or-admin，目标必须是当下的 typed agent 参与者；成员被移除或 roster 重新同步时该字段自动清空，投递前再复核一次（`live_default_responder`），因此陈旧 id 只会退化为"未配置"，不会投进虚空。

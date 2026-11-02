@@ -1,19 +1,37 @@
-//! Router-turn tools (ADR-099 D3).
+//! Router-turn tools (ADR-099 D3, shrunk by ADR-106 D6).
 //!
-//! `dispatch` is the routing tool: one call covers both routable actions —
-//! continue an existing execution session (`target = "S3"`) or start a new
-//! one (`target = "new"`). **Not calling the tool** is the third action — a
-//! plain chat answer. Alongside it the router exposes read-only information
-//! tools (`memory_recall`, `http_request` narrowed to GET) so answering a
-//! factual question does not require handing the message to an execution
-//! session. The executor boundary is unchanged: no execution tool is ever
-//! visible here, so a package cannot talk the router into doing work —
-//! lookups read information, they never change anything.
+//! The router has two delivery acts and neither of them silently moves a human
+//! message into an execution context:
 //!
-//! The alias form (`S1`, `S2`, …) is deliberate. Candidate ids are runtime
-//! state; a model that only ever sees short aliases cannot invent a
-//! plausible-looking session id and cannot leak one into the chat log. The
-//! runtime owns the alias → session-id table for the duration of one turn.
+//! - `new_task(brief)` — open a fresh execution session. This is the only
+//!   delivery a model may perform, because a new session belongs to nobody's
+//!   prior context, so nothing can be contaminated by a wrong guess;
+//! - `propose_existing(alias, why)` — say "this looks like a continuation of
+//!   that one" and hand the human a confirmation card. It delivers nothing: a
+//!   proposal is acted on only when the person who typed the message confirms it.
+//!
+//! **`dispatch(target = <existing alias>)` is deleted** (ADR-106 D6: "LLM 失去
+//! 静默投递权"). Continuing a session is addressing, and addressing belongs to
+//! the human — the transcript's reference rows (level 1), the second level of
+//! the `@` (level 2), or the deterministic sole-candidate rule (level 3). A
+//! model that happens to guess the session the human meant was still guessing.
+//!
+//! **Not calling either tool** is the third act — a plain chat answer, which is
+//! also how the router asks a clarifying question (`ask_human` in the ADR's act
+//! list needs no separate tool: a chat answer addressed to the human *is* the
+//! question). Alongside the acts sit read-only information tools
+//! (`memory_recall`, `http_request` narrowed to GET) so answering a factual
+//! question does not require touching an execution session at all. The executor
+//! boundary is unchanged: no execution tool is ever visible here, so a package
+//! cannot talk the router into doing work — lookups read information, they never
+//! change anything.
+//!
+//! The alias form (`S1`, `S2`, …) survives, with a narrowed purpose: it is the
+//! proposal vocabulary. Candidate ids are runtime state; a model that only ever
+//! sees short aliases cannot invent a plausible-looking session id, cannot leak
+//! one into the chat log, and cannot aim a proposal at a session the permission
+//! filter did not admit. The runtime owns the alias → session-id table for the
+//! duration of one turn.
 
 use std::collections::HashMap;
 
@@ -21,8 +39,10 @@ use serde_json::{json, Value};
 
 use crate::agent::session::intent_routing::SessionSeed;
 
-/// Tool name, fixed across turns — it is part of the cached prefix.
-pub const DISPATCH_TOOL: &str = "dispatch";
+/// Tool names, fixed across turns — they are part of the cached prefix.
+pub const NEW_TASK_TOOL: &str = "new_task";
+/// The proposal act: name a candidate, ask the human to confirm the continue.
+pub const PROPOSE_TOOL: &str = "propose_existing";
 /// MCP server name the official memory service registers under (ADR-101).
 pub const MEMORY_SERVER_NAME: &str = "memory";
 /// The recall tool the memory service exposes (ADR-101 §MCP).
@@ -47,23 +67,23 @@ pub fn memory_recall_tool_name() -> String {
 /// Alias → real session id for one router turn.
 pub type AliasTable = HashMap<String, String>;
 
-/// The fixed tool schema. Field order and wording are part of the cached
-/// prefix (design 29 §6.2): never make them depend on turn state.
-pub fn dispatch_tool_spec() -> Value {
+/// The `new_task` schema: a brief, and an optional configuration for the
+/// session it opens. There is no `target` — this tool cannot address anything,
+/// it only ever starts something (ADR-106 D6).
+///
+/// Field order and wording are part of the cached prefix (design 29 §6.2):
+/// never make them depend on turn state.
+pub fn new_task_tool_spec() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "target": {
-                "type": "string",
-                "description": "Either a candidate alias from the [candidates] block (S1, S2, …) to continue that execution session, or \"new\" to start a new one."
-            },
             "message": {
                 "type": "string",
-                "description": "Task brief for a NEW execution session (target=\"new\"); REQUIRED there, because the session starts with no history. With an existing session omit it: the user's own message is forwarded verbatim and a `message` here is discarded."
+                "description": "REQUIRED, non-empty task brief. The new execution session starts with no history, so this IS its only context: write a self-contained instruction that states the user's goal plus the background from this conversation it needs."
             },
             "session_config": {
                 "type": "object",
-                "description": "Only meaningful with target=\"new\": optional session configuration for the new execution session.",
+                "description": "Optional configuration for the new execution session. Only what the user explicitly asked for.",
                 "properties": {
                     "model": { "type": "string" },
                     "provider": { "type": "string" },
@@ -72,33 +92,61 @@ pub fn dispatch_tool_spec() -> Value {
                 }
             }
         },
-        "required": ["target"]
+        "required": ["message"]
     })
 }
 
-/// The `dispatch` entry of the router `tools` array. See
-/// [`router_tools`] for the full request array.
+/// The `propose_existing` schema: which candidate, and the one sentence the
+/// human reads before deciding. `why` is required because a card that names a
+/// session without a reason asks the human to do the routing work the proposal
+/// was supposed to save them.
+pub fn propose_existing_tool_spec() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "target": {
+                "type": "string",
+                "description": "A candidate alias from the [candidates] block (S1, S2, …). This is a PROPOSAL only: nothing is delivered until the human confirms the card this call produces."
+            },
+            "why": {
+                "type": "string",
+                "description": "One short sentence for the human explaining why this session looks like the right one. Shown verbatim."
+            }
+        },
+        "required": ["target", "why"]
+    })
+}
+
+/// The two acts of the router `tools` array. See [`router_tools`] for the full
+/// request array.
 ///
 /// Flat `name` / `description` / `parameters` at the top level — the same
 /// `ChatRequest.tools` shape a serialized `ToolSpec` produces. The provider
 /// adapters (`convert_tools` in `providers/openai.rs` and
 /// `providers/anthropic.rs`) read these fields at the top level; handing
 /// them the OpenAI nested form made every router tool arrive at the model
-/// as `name = "unknown"` with an empty schema, so `dispatch` could never be
+/// as `name = "unknown"` with an empty schema, so no act could ever be
 /// called and no execution session was ever created.
-pub fn dispatch_tools() -> Vec<Value> {
-    vec![json!({
-        "name": DISPATCH_TOOL,
-        "description": "Route this conversation turn to an execution session. Call at most once.",
-        "parameters": dispatch_tool_spec(),
-    })]
+pub fn act_tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": NEW_TASK_TOOL,
+            "description": "Start a new execution session for this turn's work. Call at most once.",
+            "parameters": new_task_tool_spec(),
+        }),
+        json!({
+            "name": PROPOSE_TOOL,
+            "description": "Ask the human whether this turn continues one of the listed sessions. Delivers nothing by itself - the human confirms or refuses a card.",
+            "parameters": propose_existing_tool_spec(),
+        }),
+    ]
 }
 
 /// Router-facing memory-recall definition. A deliberate subset of the
 /// service's full schema (ADR-099 D3): keyword/time query, read-only.
 /// `tool_name` is the resolved MCP wrapper name so the model calls the tool
 /// under the same name the executor resolves. Flat shape — see
-/// [`dispatch_tools`].
+/// [`act_tools`].
 pub fn memory_recall_router_spec(tool_name: &str) -> Value {
     json!({
         "name": tool_name,
@@ -131,7 +179,7 @@ pub fn memory_recall_router_spec(tool_name: &str) -> Value {
 /// or `content_type`: the router can read the web, never write to it. The
 /// runner additionally forces `method = "GET"` at execution time so a
 /// hallucinated mutating argument cannot reach the tool either. Flat shape —
-/// see [`dispatch_tools`].
+/// see [`act_tools`].
 pub fn http_request_router_spec() -> Value {
     json!({
         "name": HTTP_REQUEST_TOOL,
@@ -154,13 +202,14 @@ pub fn http_request_router_spec() -> Value {
     })
 }
 
-/// Assemble the request's `tools` array from `dispatch` plus the enabled
-/// information tools (order fixed: dispatch, memory recall, http_request).
+/// Assemble the request's `tools` array from the two acts plus the enabled
+/// information tools (order fixed: new_task, propose_existing, memory recall,
+/// http_request).
 ///
 /// `memory_tool` is `None` when the catalog has no official memory server —
 /// the router then simply has no memory tool for that turn (ADR-101).
 pub fn router_tools(memory_tool: Option<&str>, http_enabled: bool) -> Vec<Value> {
-    let mut tools = dispatch_tools();
+    let mut tools = act_tools();
     if let Some(name) = memory_tool {
         tools.push(memory_recall_router_spec(name));
     }
@@ -170,124 +219,141 @@ pub fn router_tools(memory_tool: Option<&str>, http_enabled: bool) -> Vec<Value>
     tools
 }
 
-/// The action a router turn decided on.
+/// The delivery vocabulary of `SessionManager::chat_dispatch`.
+///
+/// It outlives the router's own `dispatch` tool: the addressing ladder uses it
+/// (levels 1–3 address an existing session from a durable fact), and the
+/// dispatcher needs both arms to stamp the chat binding correctly. A router
+/// model may only ever cause `New`; `Existing` arrives through an address a
+/// human supplied, never through a tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// Continue the execution session behind this alias.
+    /// Continue the execution session a human addressed.
     Existing(String),
     /// Start a fresh execution session.
     New,
 }
 
-/// A validated `dispatch` call.
+/// The act a router turn decided on. `Not calling either tool` is the third
+/// arm of the decision (`Answer`, in the runner's `Outcome`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct DispatchArgs {
-    pub target: Target,
-    /// The router's task brief. Kept for both targets because the runtime
-    /// only learns whether the turn opens a physical session once the target
-    /// is resolved (an `Existing` alias can point at a session that is gone);
-    /// `runner::dispatch_content` decides whether the brief or the user's own
-    /// message is delivered. `None` = forward the user's message verbatim.
-    pub message: Option<String>,
-    /// Applied only with `Target::New`; already clamped downstream.
+pub enum Act {
+    /// Open a new execution session and deliver the turn to it.
+    NewTask(NewTaskArgs),
+    /// Offer the human a continuation of one candidate session.
+    Propose(ProposeArgs),
+}
+
+/// A validated `new_task` call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewTaskArgs {
+    /// The task brief. Required: the session this opens has no history, so a
+    /// turn with no brief would receive nothing but the raw user text.
+    pub message: String,
+    /// Already clamped downstream.
     pub seed: Option<SessionSeed>,
 }
 
-/// Why a `dispatch` call was rejected. The message is fed back to the model
-/// for exactly one retry (ADR-099 §5); a second failure degrades the turn to
-/// the legacy routing path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispatchError {
-    MissingTarget,
-    UnknownAlias(String),
-    EmptyMessage,
-    /// `target="new"` without a contextual `message` — the fresh session
-    /// would receive only the raw user text with no background.
-    MissingContextForNew,
+/// A validated `propose_existing` call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProposeArgs {
+    /// The alias the model used — kept alongside the resolved id so the
+    /// decision log reads the way the model wrote it.
+    pub alias: String,
+    /// The session behind that alias. Resolved here, not in the runner: an
+    /// alias that is not in this turn's table is a validation error the model
+    /// gets one retry on, never a session id invented downstream.
+    pub session_id: String,
+    /// The one sentence shown on the confirmation card.
+    pub why: String,
 }
 
-impl DispatchError {
+/// Why an act call was rejected. The message is fed back to the model for
+/// exactly one retry (ADR-099 §5); a second failure degrades the turn to the
+/// deterministic routing path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActError {
+    MissingBrief,
+    MissingTarget,
+    UnknownAlias(String),
+    MissingWhy,
+}
+
+impl ActError {
     /// Model-facing text. Deliberately names the valid forms so a retry can
     /// succeed without a second round of guessing.
     pub fn message(&self) -> String {
         match self {
-            Self::MissingTarget => {
-                "dispatch requires `target`: a candidate alias (S1, S2, …) or \"new\"".to_string()
-            }
-            Self::UnknownAlias(alias) => format!(
-                "unknown candidate alias `{alias}` — use one of the aliases from the [candidates] block, or \"new\""
-            ),
-            Self::EmptyMessage => {
-                "`message` was empty — omit it to forward the user's message verbatim".to_string()
-            }
-            Self::MissingContextForNew => {
-                "`target=\"new\"` requires a non-empty `message` with task context for the new session — \
-                 the execution agent has no prior history, so your message IS its only starting context. \
-                 Write a self-contained instruction summarising the user's goal and relevant background."
+            Self::MissingBrief => {
+                "`new_task` requires a non-empty `message` — the execution agent starts with no \
+                 history, so your brief IS its only starting context. Write a self-contained \
+                 instruction summarising the user's goal and the background it needs."
                     .to_string()
             }
+            Self::MissingTarget => format!(
+                "`{PROPOSE_TOOL}` requires `target`: one of the aliases from the [candidates] block"
+            ),
+            Self::UnknownAlias(alias) => format!(
+                "unknown candidate alias `{alias}` — use one of the aliases from the [candidates] block"
+            ),
+            Self::MissingWhy => format!(
+                "`{PROPOSE_TOOL}` requires a non-empty `why` — the human is deciding on your \
+                 reason, so say in one sentence what makes this session the right one"
+            ),
         }
     }
 }
 
-/// Parse and validate one `dispatch` call against the turn's alias table.
+/// Parse and validate one `new_task` call.
 ///
-/// Validation rules (all model-facing, never panics):
-/// - `target` is required; `"new"` (case-insensitive) is the new-session
-///   sentinel, anything else must be a known alias;
-/// - `message` is optional, but a present-and-blank value is rejected — an
-///   empty instruction reads as "replace the user's message with nothing";
-/// - `message` is kept for `Existing` targets as well: whether this turn ends
-///   up in a session that already has history is settled by `chat_dispatch`,
-///   not here;
-/// - `session_config` is parsed with the same `SessionSeed` parser as the
-///   inbound envelope (unknown keys ignored, malformed values dropped) and
-///   is ignored for `Existing` targets: an existing session keeps its own
-///   configuration (ADR-099: a config change alone is not a new task).
-pub fn parse_dispatch(args: &Value, aliases: &AliasTable) -> Result<DispatchArgs, DispatchError> {
+/// Validation is model-facing and never panics. A blank brief is rejected
+/// rather than dropped: an empty instruction would open a session with nothing
+/// to work on, and the human would read that as the agent ignoring them.
+pub fn parse_new_task(args: &Value) -> Result<NewTaskArgs, ActError> {
+    let message = args
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(ActError::MissingBrief)?
+        .to_string();
+    let seed = match args.get("session_config") {
+        Some(cfg) if !cfg.is_null() => SessionSeed::from_json(&cfg.to_string()),
+        _ => None,
+    };
+    Ok(NewTaskArgs { message, seed })
+}
+
+/// Parse and validate one `propose_existing` call against the turn's alias
+/// table.
+///
+/// The alias must be a known candidate (case-insensitive, as before). The
+/// table is built from the permission-filtered candidate list, so an invented
+/// or out-of-scope alias is refused here and never reaches a card — the human
+/// is only ever offered sessions the filter admitted.
+pub fn parse_propose(args: &Value, aliases: &AliasTable) -> Result<ProposeArgs, ActError> {
     let target = args
         .get("target")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or(DispatchError::MissingTarget)?;
-
-    let target = if target.eq_ignore_ascii_case("new") {
-        Target::New
-    } else {
-        let alias = target.to_ascii_uppercase();
-        match aliases.get(&alias) {
-            Some(sid) => Target::Existing(sid.clone()),
-            None => return Err(DispatchError::UnknownAlias(target.to_string())),
-        }
-    };
-
-    let message = match args.get("message").and_then(Value::as_str) {
-        Some(m) => {
-            let trimmed = m.trim();
-            if trimmed.is_empty() {
-                return Err(DispatchError::EmptyMessage);
-            }
-            Some(trimmed.to_string())
-        }
-        None => None,
-    };
-
-    // Enforce: target="new" MUST have a message (the fresh session has no
-    // prior context — forwarding raw text alone starves the agent).
-    if matches!(target, Target::New) && message.is_none() {
-        return Err(DispatchError::MissingContextForNew);
-    }
-
-    let seed = match (&target, args.get("session_config")) {
-        (Target::New, Some(cfg)) if !cfg.is_null() => SessionSeed::from_json(&cfg.to_string()),
-        _ => None,
-    };
-
-    Ok(DispatchArgs {
-        target,
-        message,
-        seed,
+        .ok_or(ActError::MissingTarget)?;
+    let alias = target.to_ascii_uppercase();
+    let session_id = aliases
+        .get(&alias)
+        .ok_or_else(|| ActError::UnknownAlias(target.to_string()))?
+        .clone();
+    let why = args
+        .get("why")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(ActError::MissingWhy)?
+        .to_string();
+    Ok(ProposeArgs {
+        alias,
+        session_id,
+        why,
     })
 }
 
@@ -303,110 +369,85 @@ mod tests {
     }
 
     #[test]
-    fn existing_alias_maps_to_the_real_session_id() {
-        let args = json!({ "target": "S2" });
-        let parsed = parse_dispatch(&args, &aliases()).expect("valid alias");
-        assert_eq!(parsed.target, Target::Existing("sess-2".into()));
-        assert_eq!(parsed.message, None);
-        assert!(parsed.seed.is_none());
-    }
-
-    #[test]
-    fn alias_match_is_case_insensitive() {
-        let parsed = parse_dispatch(&json!({ "target": "s1" }), &aliases()).unwrap();
-        assert_eq!(parsed.target, Target::Existing("sess-1".into()));
-    }
-
-    #[test]
-    fn new_is_the_sentinel_and_carries_a_seed() {
+    fn new_task_carries_the_brief_and_a_seed() {
         let args = json!({
-            "target": "NEW",
             "message": "  pick this up  ",
             "session_config": { "model": "m1", "provider": "p1" }
         });
-        let parsed = parse_dispatch(&args, &aliases()).unwrap();
-        assert_eq!(parsed.target, Target::New);
-        assert_eq!(parsed.message.as_deref(), Some("pick this up"));
+        let parsed = parse_new_task(&args).unwrap();
+        assert_eq!(parsed.message, "pick this up");
         let seed = parsed.seed.expect("seed parsed");
         assert_eq!(seed.model.as_deref(), Some("m1"));
         assert_eq!(seed.provider.as_deref(), Some("p1"));
     }
 
+    /// The regression this pins: a brief-less `new_task` used to be legal for an
+    /// `Existing` target (`message` was optional because the user's own words
+    /// were forwarded). Now the only act that delivers must state the task, or a
+    /// fresh session opens on raw text with no context.
     #[test]
-    fn session_config_is_ignored_for_existing_targets() {
-        // ADR-099: an existing session keeps its configuration; a config
-        // suggestion alone is never a reason to abandon it.
-        let args = json!({ "target": "S1", "session_config": { "model": "m1" } });
-        let parsed = parse_dispatch(&args, &aliases()).unwrap();
-        assert!(parsed.seed.is_none());
+    fn a_new_task_without_a_brief_is_rejected() {
+        for args in [json!({}), json!({ "message": "   " }), json!({ "message": null })] {
+            assert_eq!(parse_new_task(&args), Err(ActError::MissingBrief));
+        }
     }
 
     #[test]
-    fn unknown_alias_and_blank_message_are_rejected() {
+    fn a_proposal_resolves_its_alias_and_keeps_the_reason() {
+        // Case-insensitive alias match is unchanged: the model has no reason to
+        // know the table is uppercase-keyed.
+        let parsed = parse_propose(&json!({ "target": "s1", "why": "same login bug" }), &aliases())
+            .unwrap();
+        assert_eq!(parsed.session_id, "sess-1");
+        assert_eq!(parsed.alias, "S1");
+        assert_eq!(parsed.why, "same login bug");
+    }
+
+    /// An alias that is not a candidate of this turn is refused rather than
+    /// fuzzy-matched to a title: a card that names the wrong session is the
+    /// silent-misdelivery this whole change exists to remove.
+    #[test]
+    fn an_unknown_alias_or_a_missing_reason_is_rejected() {
         assert_eq!(
-            parse_dispatch(&json!({ "target": "S9" }), &aliases()),
-            Err(DispatchError::UnknownAlias("S9".into()))
+            parse_propose(&json!({ "target": "S9", "why": "x" }), &aliases()),
+            Err(ActError::UnknownAlias("S9".into()))
         );
         assert_eq!(
-            parse_dispatch(&json!({ "target": "   " }), &aliases()),
-            Err(DispatchError::MissingTarget)
+            parse_propose(&json!({ "why": "x" }), &aliases()),
+            Err(ActError::MissingTarget)
         );
         assert_eq!(
-            parse_dispatch(&json!({ "target": "S1", "message": "   " }), &aliases()),
-            Err(DispatchError::EmptyMessage)
+            parse_propose(&json!({ "target": "S1" }), &aliases()),
+            Err(ActError::MissingWhy)
+        );
+        assert_eq!(
+            parse_propose(&json!({ "target": "S1", "why": "  " }), &aliases()),
+            Err(ActError::MissingWhy)
         );
     }
 
+    /// The act schemas are part of the cached prefix — pin the shape so an
+    /// accidental edit shows up as a failing test, not a cache miss. Flat form
+    /// (name/description/parameters at the top level) is the `ChatRequest.tools`
+    /// convention every provider adapter reads; the OpenAI nested wrapper must
+    /// NOT appear here (regression: it made the adapters emit `name = "unknown"`
+    /// and killed router dispatch). And `new_task` must never grow a `target`
+    /// again: naming a session is the delivery right ADR-106 D6 took away.
     #[test]
-    fn new_target_without_message_is_rejected() {
-        // The whole point: a fresh session cannot function on raw user text
-        // alone — the router MUST provide a contextual message.
-        assert_eq!(
-            parse_dispatch(&json!({ "target": "new" }), &aliases()),
-            Err(DispatchError::MissingContextForNew)
-        );
-        // With a message it passes:
-        let parsed = parse_dispatch(
-            &json!({ "target": "new", "message": "Refactor login per earlier discussion" }),
-            &aliases(),
-        )
-        .unwrap();
-        assert_eq!(parsed.target, Target::New);
-    }
-
-    #[test]
-    fn a_brief_for_an_existing_alias_survives_parsing() {
-        // The runtime, not the parser, decides what the session receives: an
-        // `Existing` target whose session has vanished opens a fresh one, and
-        // that one still needs the brief. Dropping it here would silently
-        // starve that path (see `runner::dispatch_content`).
-        let parsed = parse_dispatch(
-            &json!({ "target": "S1", "message": "commit the batch we just finished" }),
-            &aliases(),
-        )
-        .unwrap();
-        assert_eq!(parsed.target, Target::Existing("sess-1".into()));
-        assert_eq!(
-            parsed.message.as_deref(),
-            Some("commit the batch we just finished")
-        );
-    }
-
-    #[test]
-    fn tool_schema_is_stable_and_dispatch_first() {
-        // The schema is part of the cached prefix — pin the shape so an
-        // accidental edit shows up as a failing test, not a cache miss.
-        // Flat form (name/description/parameters at the top level) is the
-        // ChatRequest.tools convention every provider adapter reads; the
-        // OpenAI nested wrapper must NOT appear here (regression: it made
-        // the adapters emit `name = "unknown"` and killed router dispatch).
-        let tools = dispatch_tools();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], DISPATCH_TOOL);
+    fn the_act_schemas_are_stable_and_carry_no_delivery_address() {
+        let tools = act_tools();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], NEW_TASK_TOOL);
+        assert_eq!(tools[1]["name"], PROPOSE_TOOL);
         assert!(tools[0].get("function").is_none());
-        let params = &tools[0]["parameters"];
-        assert_eq!(params["required"], json!(["target"]));
-        assert_eq!(params["properties"]["target"]["type"], "string");
+        let new_params = &tools[0]["parameters"];
+        assert_eq!(new_params["required"], json!(["message"]));
+        assert!(
+            new_params["properties"].get("target").is_none(),
+            "`new_task` must not be able to name a session"
+        );
+        let propose_params = &tools[1]["parameters"];
+        assert_eq!(propose_params["required"], json!(["target", "why"]));
     }
 
     #[test]
@@ -417,14 +458,17 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec![DISPATCH_TOOL, memory.as_str(), HTTP_REQUEST_TOOL]);
+        assert_eq!(
+            names,
+            vec![NEW_TASK_TOOL, PROPOSE_TOOL, memory.as_str(), HTTP_REQUEST_TOOL]
+        );
         // The router-side http schema must not offer a way to mutate anything.
-        let http_params = &all[2]["parameters"];
+        let http_params = &all[3]["parameters"];
         assert!(!http_params["properties"].as_object().unwrap().contains_key("method"));
         assert!(!http_params["properties"].as_object().unwrap().contains_key("body"));
         assert_eq!(http_params["required"], json!(["url"]));
-        // With nothing enabled the array is exactly the pre-tool-router one.
-        assert_eq!(router_tools(None, false).len(), 1);
+        // With nothing enabled the array is exactly the two acts.
+        assert_eq!(router_tools(None, false).len(), 2);
         // Deterministic bytes for a fixed enablement set (cached prefix).
         assert_eq!(
             serde_json::to_string(&all).unwrap(),
@@ -442,8 +486,6 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec![DISPATCH_TOOL, HTTP_REQUEST_TOOL]);
+        assert_eq!(names, vec![NEW_TASK_TOOL, PROPOSE_TOOL, HTTP_REQUEST_TOOL]);
     }
 }
-
-
