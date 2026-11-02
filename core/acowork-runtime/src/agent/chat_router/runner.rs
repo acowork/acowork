@@ -555,7 +555,7 @@ async fn run_turn(
         Ok(r) => r,
         Err(reason) => {
             trace.write("fallback", None, "error", Some(reason.clone()), None);
-            return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
+            return degrade(deps, envelope, &chat_id, reason, &rows).await;
         }
     };
 
@@ -611,7 +611,7 @@ async fn run_turn(
             Ok(r) => r,
             Err(reason) => {
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
+                return degrade(deps, envelope, &chat_id, reason, &rows).await;
             }
         };
     }
@@ -646,14 +646,14 @@ async fn run_turn(
                                         again.message()
                                     );
                                     trace.write("fallback", None, "error", Some(reason.clone()), None);
-                                    return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
+                                    return degrade(deps, envelope, &chat_id, reason, &rows).await;
                                 }
                             }
                         }
                     }
                     Err(reason) => {
                         trace.write("fallback", None, "error", Some(reason.clone()), None);
-                        return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
+                        return degrade(deps, envelope, &chat_id, reason, &rows).await;
                     }
                 }
             }
@@ -666,7 +666,7 @@ async fn run_turn(
             let body = response.content.trim().to_string();
             if body.is_empty() {
                 trace.write("fallback", None, "error", Some("empty reply".into()), None);
-                return degrade(deps, envelope, &chat_id, "empty reply".to_string(), &rows, true).await;
+                return degrade(deps, envelope, &chat_id, "empty reply".to_string(), &rows).await;
             }
             let sent = post_intent_response(
                 &deps.instance_id,
@@ -690,7 +690,7 @@ async fn run_turn(
                 }
                 Err(e) => {
                     trace.write("fallback", None, "error", Some(e.clone()), None);
-                    degrade(deps, envelope, &chat_id, format!("reply write-back failed: {e}"), &rows, false).await
+                    degrade(deps, envelope, &chat_id, format!("reply write-back failed: {e}"), &rows).await
                 }
             }
         }
@@ -746,7 +746,7 @@ async fn run_turn(
                                 message_id: envelope.message_id.clone(),
                                 surface: crate::agent::intent_turn::TurnSurface::new(
                                     chat_id.clone(),
-                                    envelope.message_id.clone(),
+                                    &envelope.message_id,
                                     &envelope.from,
                                     envelope.has_human,
                                 ),
@@ -767,6 +767,11 @@ async fn run_turn(
                                 // turns (policy.router_eligible); a PM
                                 // dispatch's brief never arrives here.
                                 assignment_brief: String::new(),
+                                // ADR-106 D3: the routing's own verdict, carried
+                                // to the round's reference row because the loop
+                                // cannot see it — it replaces the retired
+                                // `turn_routed` reaction row.
+                                opened_new: Some(opened_new),
                             },
                         );
                         (Ok((session_id, opened_new)), sent)
@@ -775,52 +780,25 @@ async fn run_turn(
                 }
             };
             match delivered {
-                (Ok((session_id, opened_new)), Ok(())) => {
-                    // ADR-100 D11: the routing reaction. The dispatch/start
-                    // *progress* milestones stay runtime-only (D10) — what is
-                    // written here is the one conversational fact the Chat
-                    // turn owes immediately: "your message went to a new task
-                    // / continues task X". It lands the moment the target is
-                    // resolved, minutes or hours before the answer, and it is
-                    // durable because "which task handled this message" is a
-                    // fact of the conversation, not of the progress bar.
-                    // Best-effort: a lost row costs the reaction, never the
-                    // delivery (the turn runs regardless).
-                    if let Err(e) = crate::agent::intent_turn::append_chat_row(
-                        &deps.instance_id,
-                        &deps.gateway_host,
-                        &deps.node_token,
-                        &chat_id,
-                        "system_notice",
-                        &envelope.from,
-                        "",
-                        crate::agent::intent_turn::turn_routed_meta(
-                            &envelope.message_id,
-                            &session_id,
-                            opened_new,
-                        ),
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            chat_id = %chat_id,
-                            message_id = %envelope.message_id,
-                            error = %e,
-                            "routing reaction row failed — non-fatal"
-                        );
-                    }
+                (Ok((session_id, _opened_new)), Ok(())) => {
+                    // ADR-106 D3: no reaction row is written here. "Your message
+                    // went to a new task / continues task X" is now stated by the
+                    // round's reference row (`opened_new` on it), which the
+                    // runtime writes when the round actually opens — before that
+                    // the message is only queued, and a reaction claiming a round
+                    // that has not started would be a promise, not a fact.
                     trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
                 (Ok(_), Err(e)) => {
                     let reason = format!("dispatch delivery failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows, true).await
+                    degrade(deps, envelope, &chat_id, reason, &rows).await
                 }
                 (Err(e), _) => {
                     let reason = format!("dispatch target resolution failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows, true).await
+                    degrade(deps, envelope, &chat_id, reason, &rows).await
                 }
             }
         }
@@ -1135,16 +1113,19 @@ fn task_label(conversation_id: &str) -> Option<String> {
 /// `rows` are the chat rows this turn had already read (empty when history
 /// itself failed): they become a bounded excerpt the caller attaches to the
 /// degraded route's first message, so a fresh session is not left with raw
-/// text alone. `notify` posts the one conversational fact the degraded turn
-/// owes the human — the router could not decide and the message was
-/// forwarded automatically — best-effort like the routing reaction row.
+/// text alone.
+///
+/// ADR-106: no receipt row is written for the degradation. The fallback route
+/// runs a round, and that round's reference row is the record the human needs;
+/// a `system_notice` announcing "the router could not decide" is a progress
+/// fact about a component, not a channel fact, and it used to key off the
+/// retired `rf:` prefix.
 async fn degrade(
     deps: &RouterDeps,
     envelope: &IntentEnvelope,
     chat_id: &str,
     reason: String,
     rows: &[ChatRow],
-    notify: bool,
 ) -> Outcome {
     tracing::warn!(
         chat_id = %chat_id,
@@ -1152,25 +1133,6 @@ async fn degrade(
         reason = %reason,
         "chat router degraded to the deterministic route"
     );
-    if notify
-        && let Err(e) = crate::agent::intent_turn::append_chat_row(
-            &deps.instance_id,
-            &deps.gateway_host,
-            &deps.node_token,
-            chat_id,
-            "system_notice",
-            &envelope.from,
-            "",
-            crate::agent::intent_turn::router_fallback_meta(&envelope.message_id),
-        )
-        .await
-    {
-        tracing::warn!(
-            chat_id = %chat_id,
-            error = %e,
-            "router fallback receipt row failed — non-fatal"
-        );
-    }
     Outcome::Fallback {
         reason,
         chat_excerpt: chat_tail_excerpt(rows, &deps.instance_id),

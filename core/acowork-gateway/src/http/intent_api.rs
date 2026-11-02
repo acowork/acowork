@@ -688,12 +688,12 @@ struct ChatAppendRequest {
     /// The agent instance writing the row — a participant of the session.
     pub from: String,
     pub chat_session_id: String,
-    /// `"interaction_request"` | `"system_notice"` | `"agent_message"`.
-    /// The first two are cards and turn pointers; `agent_message` is a
-    /// chat-bound execution session echoing a locally-composed turn's output
-    /// back to the chat it was started from (ADR-100 D9). A routed turn's
-    /// answer still goes through the response write-back; `user_message` stays
-    /// on the human surface — this relay exists for Runtime-owned kinds only.
+    /// `"execution_round"` | `"system_notice"` | `"agent_message"`.
+    /// The first is the contentless reference row a Runtime writes when one of
+    /// its rounds belongs to this chat (ADR-106 D3); `agent_message` is a
+    /// chat-native answer (the router's own reply, an agent-to-agent reply).
+    /// `user_message` stays on the human surface — this relay exists for
+    /// Runtime-owned kinds only.
     pub kind: String,
     #[serde(default)]
     pub to: String,
@@ -704,15 +704,18 @@ struct ChatAppendRequest {
     pub meta: serde_json::Value,
 }
 
-/// Kinds the Runtime may write through the chat-append relay (D4 same-source).
-/// Decision cards (§5.5.4), the terminal `agent_message` a chat-bound execution
-/// session echoes for a locally-composed turn (ADR-100 D9) — and `system_notice`
-/// only for legacy rows: since the ADR-100 revision no new dispatch/start/fallback
-/// notice is written, because intermediate milestones are runtime state, not
-/// history. `user_message` is never a Runtime-owned kind (the human surface
-/// writes it).
+/// Kinds the Runtime may write through the chat-append relay (ADR-106 D1).
+/// `execution_round` is the reference row a round of execution work opens in the
+/// chat — the only `exec → chat` write that remains — `agent_message` is a
+/// chat-native answer (the router replying itself, an agent answering a peer),
+/// and `system_notice` is a channel fact (`delivery_failed` /
+/// `budget_exhausted` / `truncated` / `unavailable`). Decision cards and the
+/// terminal echo of an execution turn are no longer chat rows at all: their
+/// content lives in the round's projection, so copying them here would put a
+/// second, staler answer in the transcript. `user_message` is never a
+/// Runtime-owned kind (the human surface writes it).
 fn chat_append_kind_allowed(kind: &str) -> bool {
-    matches!(kind, "interaction_request" | "system_notice" | "agent_message")
+    matches!(kind, "execution_round" | "system_notice" | "agent_message")
 }
 
 /// The mailbox request a Runtime-owned chat row closes, if any (ADR-100).
@@ -751,7 +754,7 @@ async fn chat_append(
     verify_sender_identity(&state, &headers, &req.from).await?;
     if !chat_append_kind_allowed(&req.kind) {
         return Err(ApiError::unprocessable_entity(
-            "chat-append accepts interaction_request, system_notice and agent_message only",
+            "chat-append accepts execution_round, system_notice and agent_message only",
         ));
     }
     if req.meta.get("message_id").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
@@ -2514,7 +2517,11 @@ mod card_answer_tests {
         // must never be Runtime-writable.
         assert!(chat_append_kind_allowed("agent_message"));
         assert!(chat_append_kind_allowed("system_notice"));
-        assert!(chat_append_kind_allowed("interaction_request"));
+        assert!(chat_append_kind_allowed("execution_round"));
+        assert!(
+            !chat_append_kind_allowed("interaction_request"),
+            "a card is the round's state, not a chat row (ADR-106 D8)"
+        );
         assert!(!chat_append_kind_allowed("user_message"));
         assert!(!chat_append_kind_allowed("intent_request"));
     }

@@ -412,23 +412,20 @@ impl AgentLoop {
                                         request_id: request_id.clone(),
                                     },
                                 );
-                                // §5.5.4 (plan 3.1): the approval is also a
-                                // Chat-session card. Summary only — tool
+                                // ADR-106 D8: the approval is recorded on the round
+                                // so the Chat block can show what it is stalled on.
+                                // Summary only — tool
                                 // name + risk reason, never the command line
                                 // or tool payload (§2.2); the answer resolves
                                 // the same request id through either surface.
-                                self.write_interaction_card(
-                                    serde_json::json!({
-                                        "kind": "approval",
-                                        "request_id": request_id.clone(),
-                                        "question": format!(
-                                            "Approve `{}`? {}",
-                                            req.tool_name, req.reason
-                                        ),
-                                    }),
-                                    &format!("Tool approval: {}", req.tool_name),
-                                )
-                                .await;
+                                self.track_interaction(serde_json::json!({
+                                    "kind": "approval",
+                                    "request_id": request_id.clone(),
+                                    "question": format!(
+                                        "Approve `{}`? {}",
+                                        req.tool_name, req.reason
+                                    ),
+                                }));
                                 // First in-flight approval starts the
                                 // 5-minute approval deadline; subsequent
                                 // concurrent approvals share it.
@@ -502,11 +499,6 @@ impl AgentLoop {
                                 let reason =
                                     "Inbound channel closed; approval can never be answered"
                                         .to_string();
-                                let ids: Vec<String> = self
-                                    .pending_approvals
-                                    .keys()
-                                    .cloned()
-                                    .collect();
                                 for (_, tx) in self.pending_approvals.drain() {
                                     let _ = tx.send(ApprovalDecision {
                                         approved: false,
@@ -514,12 +506,9 @@ impl AgentLoop {
                                         reason: Some(reason.clone()),
                                     });
                                 }
-                                // §5.5.4: the chat card for a request that can
-                                // never be answered must not stay open.
-                                for id in ids {
-                                    self.close_chat_card("approval", &id, "unanswerable")
-                                        .await;
-                                }
+                                // §5.5.4: an approval that can never be answered
+                                // must not stay recorded as an open interaction.
+                                self.forget_interactions_of_kind(&["approval"]);
                                 tracing::warn!(
                                     count = count,
                                     "Inbound channel closed; auto-rejected pending approvals"
@@ -550,11 +539,11 @@ impl AgentLoop {
                                 reason: Some(reason.clone()),
                             });
                         }
-                        // §5.5.4: a timed-out approval is resolved — close its
-                        // chat card, otherwise it renders forever as an
-                        // answerable request in a session that has moved on.
+                        // §5.5.4: a timed-out approval is resolved — it must not
+                        // stay recorded as an open interaction in a session that
+                        // has moved on.
                         for id in ids {
-                            self.close_chat_card("approval", &id, "timeout").await;
+                            self.forget_interaction("approval", &id);
                         }
                         tracing::warn!(
                             count = count,
@@ -638,11 +627,11 @@ impl AgentLoop {
                         reason: Some(reason.clone()),
                     });
                 }
-                // §5.5.4: the requests are gone, so their chat cards must go
+                // §5.5.4: the requests are gone, so their interactions must go
                 // too — this is the site that fires when a stop lands while an
                 // approval dialog is still unanswered.
                 for id in ids {
-                    self.close_chat_card("approval", &id, "turn_ended").await;
+                    self.forget_interaction("approval", &id);
                 }
                 // Let a reconnecting Desktop know no stale dialogs remain.
                 let _ = self.session_core.try_send_chunk(

@@ -77,9 +77,10 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 - **为什么是确定性派生而不是入口铸造 UUID**（本条为落地时对原决策的修正）：① **零协议变更**——不需要给 proto `Intent` 加字段、不需要 Gateway 与 Runtime 同批发版；② **保住既有的重投递去重**——MQTT 重投同一 `message_id` 时，现状正是用它去重（`exec:{message_id}`），随机 UUID 会把这条性质丢掉；③ 唯一性由铸造者（消息 id 的生成方）保证，与 UUID 等价。
 - **落盘**：该轮产出的**所有**条目（user / assistant / tool / attachment 等）metadata 都带同一 `round_id`。注入点是写入漏斗 `append_message_with_id`（[conversation.rs](../../../core/acowork-runtime/src/conversation.rs)）——全部 JSONL 写入都经它，因此不需要逐个调用点传参，也不会漏。写时同步 upsert D4 的轮次派生索引。
 - **答卡续跑不铸造**：上一回合以 `waiting` 结束（`pause` 卡片仍开着）时，本轮**延续**活跃轮——判据是「上一回合 outcome 为 `waiting`，或会话仍有未闭合的 `pause` 卡片」且活跃轮未闭合。进程重启后活跃轮状态丢失 ⇒ 退化成一个新轮，可自愈（D4 的崩溃修复把未闭合记录补成终态），不会留下永久的"进行中"。
+- **入站 id 与活跃轮都没有时，本轮不开轮**（落地时对 D2 的补条）：`mint_round_id("")` 会兜底成随机 UUID，而随机 id 意味着一个谁也无法再寻址、chat 里那条引用行也永远指向不出来的轮——写下去就是一个幻影块。宁缺毋滥：这种回合整轮**不带 stamp**（行照样 durable 进转录，只是不进任何轮次索引、不投影成块）。每个传输都提供入站 id，所以这是退化分支，不是兜底分支；`TurnSurface::new` 与 `run` 两处都守住同一个判据，防止有人在边界之外"补一个 id"。
 - **禁止由顺序推断**，四个反例：上下文压缩（ADR-010/032/061 改写进入的表示）、强制加塞开新轮（pending 队列插队）、DevMode resume/step 重放**同一**轮（ADR-013；`replay` 不开新轮，且重放的条目仍落在原 `round_id` 的 stamp 之下）、`append_message_with_id` 的幂等重投（同 id ⇒ 同 `round_id`，索引 fold 取末次记录，天然覆盖）。任何一条都能让"相邻消息即同轮"的推断错位。
 - **重放共用回合边界**（第 3 个反例的落地点）：`AgentLoop::replay` 与 `run` 用同一对开/闭动作。重放不带 stamp 写行等于把该轮的 `answer` 坐标冻结在暂停前那一行，而那一轮往往已经终态、会被缓存，于是 resume 跑出的真答案在 chat 里永远看不见且无自愈路径。轮 id 优先取写者仍持有的活跃轮（延续轮的 id 不是本次 message_id 的函数），取不到时由 message_id 派生，两者都没有才让这批行不带轮次。
-- **`TurnSurface` 随之收缩**为 `{ chat_session_id, round_id, answerable_by, has_human }`——ADR-100 Rev.6 的"运行时从会话绑定补齐 chat 坐标"这段补丁逻辑保留，但 `trigger_message_id` 消失（引用行自己就是锚点，不需要反向指向触发行）。
+- **`TurnSurface` 随之收缩**为 `{ chat_session_id, round_id, answerable_by, has_human }`——ADR-100 Rev.6 的"运行时从会话绑定补齐 chat 坐标"这段补丁逻辑保留，但 `trigger_message_id` 从 surface 上消失（引用行自己就是锚点，呈现层不需要反向指向触发行）。**落地修正**：这个事实并没有从系统里消失——D3 的行形状一直要求 `in_reply_to`，所以它改由 `TurnReference` 供应（与 `opened_new` / `assignment_brief` 同一位）。消失的是**镜像写入用它做幂等键 / 做线程指向**的用途，不是它本身。
 
 ### D3 — `execution_round` 是 chat 唯一的"工作"落盘单位
 
@@ -95,6 +96,8 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 - **一致性等级显式化**：引用行是**前置型**（写成功才允许投递；失败即返回错误，人类消息退回未投递状态，不产生"投了但看不见"的轮）。通道回执与人类消息行同为前置型。exec→chat 方向不再有第三种，因为不再有写。
 - **`turn_routed` 退役**：它的对话事实（"你的消息去了哪里 / 新任务还是继续"）由引用行本身表达（有引用行 = 去了某会话；`opened_new` = 新/续）。ADR-100 Rev.3 恢复这一行的动机（"有来有回"）由 D9 的块呈现满足，而且比一条空正文通知更诚实。
 - **写入者是 Runtime**，走 Gateway 的唯一 chat 写入口；不新增写入口，不触 ADR-009 §5 的 fs 红线（`dev/ci.sh` 的 `run_gateway_fs_redline` 仍绿）。
+- **唯一写入点在 `AgentLoop::run` 的轮边界，不在传输层**（落地确认，"六站点收敛为一站"的确切落点）：引用行必须写在这一轮即将使用的 `round_id` 之下，而 D2 的答卡续跑规则让那个 id **不再是本轮入站消息的函数**——只有轮边界知道自己正要开哪一轮，传输层写就必然在续跑分支上指错轮。传输层因此只供事实（`TurnReference{trigger_message_id, opened_new, assignment_brief}`），不写行。Runtime 侧 `append_chat_row` 的调用点全仓只有这一处，这是"写入站点从 6 个变 1 个"的可验证形式。
+- **前置失败即拒绝开轮**：引用行写失败、或执行会话连自己的 `session_id` 都没有（引用行的形状要求 `agent_session_id`，一个读者解析不出的引用不如不存在）时，回合在第一个 token 花出去之前就返回 `Err`——既不铸造轮，也不落 user 行。"投了但看不见"在这一层就是不可构造的。
 
 ### D4 — 读时投影：Runtime 拥有"一轮"的计算，暴露轮次读接口
 
@@ -232,8 +235,8 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 ## 影响
 
 - **数据**：exec 侧新增 `round_id` metadata + `{sid}.jsonl.rounds` 可重建侧表（**随会话一起消亡**：`delete_session` 删掉它，`prune_excess_sessions` 把它转录一起归档，不留孤儿索引）；chat 侧新增 `execution_round` kind + `rounds.sqlite` 可弃侧表；`intent-sessions.json` / `terminal-sessions.json` 退役。**不考虑兼容**：旧行按现状渲染（历史 `agent_message` echo / `interaction_request` 保留在盘上，渲染层按既有 `RETIRED_NOTICES` 风格隐藏或降级为块外的静态行，二选一在实施时定），不做迁移。旧会话无 `round_id` ⇒ 无轮次索引 ⇒ 投影 404 ⇒ 块降级为空洞（而非谎言）。
-- **协议**：新增 `GET /sessions/{sid}/rounds/{round_id}`（Runtime）、`GET /api/chat-blocks/{chat_id}`（Gateway，**新顶层前缀**）、`GET`/`PUT /internal/chat-sessions/{id}/rounds`（user internal）；`/api/intents/chat-append` 的 kind 白名单从 `interaction_request|system_notice|agent_message` 改为 `execution_round|system_notice|agent_message`（`agent_message` 仅剩 Router 自答与 agent↔agent 的对话回答）；`mentions` 新增 `target_sessions`。**`round_id` 不需要 proto 变更**（D2 的确定性派生以入站 `message_id` 为唯一输入）；`Intent.for_execution_session` 的删除仍按 Rev.8 已做的形状，`trigger_message_id` 语义位在 P4 随引用行一起退役。
-- **删除**：Runtime 的 `exec_echo_meta` / `turn_routed_meta` / `router_fallback_meta` / 三站点 `echo_terminal_row` / `write_interaction_card` / `close_chat_card*` / surface 补齐补丁；Gateway 的 `resolve_card_answer` / `mark_answered` / 答案行写入 / sweeper 的 chat 失败行（改为通知）；前端整个 `chatTurnState.ts`、`ChatNoticeEventRow` 的 `RETIRED_NOTICES`、`closedCards` 簿记。
+- **协议**：新增 `GET /sessions/{sid}/rounds/{round_id}`（Runtime）、`GET /api/chat-blocks/{chat_id}`（Gateway，**新顶层前缀**）、`GET`/`PUT /internal/chat-sessions/{id}/rounds`（user internal）；`/api/intents/chat-append` 的 kind 白名单从 `interaction_request|system_notice|agent_message` 改为 `execution_round|system_notice|agent_message`（`agent_message` 仅剩 Router 自答与 agent↔agent 的对话回答）；`mentions` 新增 `target_sessions`。**`round_id` 不需要 proto 变更**（D2 的确定性派生以入站 `message_id` 为唯一输入）；`Intent.for_execution_session` 的删除仍按 Rev.8 已做的形状；`trigger_message_id` 作为 `TurnSurface` 字段与镜像幂等键在 P4 退役，但同一事实作为引用行的 `in_reply_to` 保留（由 `TurnReference` 供应，见 D2/D3）。
+- **删除**：Runtime 的 `exec_echo_meta` / `turn_routed_meta` / `router_fallback_meta` / 三站点 `echo_terminal_row` / `write_interaction_card` / `close_chat_card*` / surface 补齐补丁（**P4 已全部落地**：Runtime 侧 chat 写入口只剩引用行一处）；Gateway 的 `resolve_card_answer` / `mark_answered` / 答案行写入 / sweeper 的 chat 失败行（改为通知）与前端整个 `chatTurnState.ts`、`ChatNoticeEventRow` 的 `RETIRED_NOTICES`、`closedCards` 簿记（**P6 删**——卡片归块与回答直投同批才有可答路径）。
 - **性能**：exec→chat 方向的跨进程 HTTP 写从"每回合 1–3 次（含超时 15 s 预算）"降到 **0**；首屏读一次 `GET /api/chat-blocks`（批量 refs），命中即本地；跨机读只在 miss 时发生。列表/搜索路径仍零投影读（ADR-096 守住）。
 - **隐私与保留**：`rounds.sqlite` 是执行会话正文的一份派生拷贝，必须与 chat 主存同等加密/保留策略，并随 chat 删除一并删除（目录级）。这一点必须写进 module-design 的存储清单。
 - **回滚**：本 ADR 不提供平滑层（四端 + Runtime 协议同批变更）。回滚 = 恢复镜像写入与 pin 机制。
@@ -245,7 +248,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 | P1 | `round_id` 地基：回合边界铸造 + 写入漏斗 metadata 注入 + `{sid}.jsonl.rounds` 侧表 + 终态闭合与崩溃修复 | 单测固定四个反例（压缩后 / 加塞后 / 重放同轮 / 幂等重投）轮次边界不错位；未闭合记录在会话加载后变终态；铸造器永不产出一个不可寻址的 `round_id`（过长或字符集不合 ⇒ 在稳定摘要上哈希折叠）；重放写出的行仍落在它所恢复的那一轮之下 |
 | P2 | 投影读接口：`GET /sessions/{sid}/rounds/{round_id}` + 轮次侧表 fold / 首触重建（写者与**读路径都是**）+ 有界性（无全量扫） | ADR-096 红线测试；`Closed` 会话可读；跨 node 手工验证（ADR-055）；坐标失效/转录缺失一律显式空洞（404 / `found: false`），绝不端出别人的行——包括附件窗内的行 |
 | P3 | 缓存与聚合端点：`rounds.sqlite` + `GET /api/chat-blocks` + `/internal` 写回 + 降级形状 | 删缓存只导致重拉；Runtime 停机时块有空洞而非谎言；缓存命中首屏无跨机 RTT；`remove_dir_all` 在 Windows 通过 |
-| P4 | chat 写侧切换：新 kind `execution_round`、删 `chat-append` 的内容类 kind、删六类写入站点 | chat 转录里 `agent_message`（exec 来源）计数归零；fs 红线仍绿 |
+| P4 | chat 写侧切换：新 kind `execution_round`、删 `chat-append` 的内容类 kind、删六类写入站点 | chat 转录里 `agent_message`（exec 来源）计数归零；fs 红线仍绿。**已落地**：`chat-append` 白名单为 `execution_round|system_notice|agent_message`；Runtime 全仓只剩 `AgentLoop::run` 一处 chat 写（自然键 `round:{round_id}`，空正文，前置型）；执行面引用行由 `TurnReference` 供事实。未盖到：D12 的 agent↔agent `agent_message` 请求/响应行仍在 Gateway 侧（它需要 D11 的绑定单一真相，随 P5），D8 的卡片回答随 P6 |
 | P5 | 路由重做：寻址阶梯、两级 `@`、act 空间收缩、`propose_existing` 确认卡 | 静默 `dispatch(existing)` 计数恒为 0；无 @ 的单聊默认闲聊率与确认率可观测 |
 | P6 | 卡片归块 + 回答直投 exec；前端 `chatTurnState` 退役；块渲染器（Desktop 两视图 + Mobile） | 等待态只由引用行 + `terminal=false` 决定；旧派生逻辑无引用 |
 

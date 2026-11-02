@@ -8413,6 +8413,73 @@ mod tests {
         assert_eq!(fold_round_count(session.rounds_index_path()), 2);
     }
 
+    /// A round parked on a card is **not** closed, and the turn that answers it
+    /// continues the same round (ADR-106 D2) — otherwise one logical execution
+    /// would split across two Chat blocks. This drives the funnel exactly the way
+    /// `AgentLoop::run` does it: a non-terminal snapshot, a re-arm with the id the
+    /// writer still holds, then one explicit close.
+    #[tokio::test]
+    async fn a_waiting_round_continues_in_the_same_block() {
+        let session = make_test_session();
+        session.begin_round("r:m-1");
+        session.append_message_with_id("user", "改一下分页", None, Some("m-1".to_string()));
+        session.append_message("assistant", "需要确认范围", None);
+        session.snapshot_round(
+            "waiting",
+            Some(serde_json::json!({ "kind": "pause", "request_id": "r:m-1" })),
+        );
+        session.flush_pending().await.unwrap();
+
+        let rec = crate::rounds::read_record(session.rounds_index_path(), "r:m-1")
+            .unwrap()
+            .expect("the parked round is described");
+        assert!(!rec.terminal, "a parked round is not closed");
+        assert_eq!(rec.status.as_deref(), Some("waiting"));
+        assert_eq!(rec.card.as_ref().unwrap()["kind"], "pause");
+        assert_eq!(fold_round_count(session.rounds_index_path()), 1);
+
+        // The answering turn re-arms the round the writer holds rather than
+        // minting one after its own inbound id — which is why the reference row
+        // is written at the turn boundary and not at the transport.
+        assert_eq!(session.active_round_id().as_deref(), Some("r:m-1"));
+        session.begin_round("r:m-1");
+        session.append_message_with_id("user", "就按 A 方案", None, Some("m-2".to_string()));
+        session.append_message("assistant", "已完成", None);
+        session.end_round("completed", None);
+        session.flush_pending().await.unwrap();
+
+        let rec = crate::rounds::read_record(session.rounds_index_path(), "r:m-1")
+            .unwrap()
+            .expect("the round survives its own answer");
+        assert!(rec.terminal);
+        assert_eq!(rec.status.as_deref(), Some("completed"));
+        assert_eq!(rec.user, 0, "the block keeps the user row it opened on");
+        assert_eq!(rec.answer, Some(3), "a round's answer is its latest assistant row");
+        assert_eq!(rec.card, None, "a closed round must not come back asking");
+        assert_eq!(fold_round_count(session.rounds_index_path()), 1, "one round, not two");
+    }
+
+    /// A turn with neither an inbound id nor a parked round runs **unstamped**.
+    /// `mint_round_id("")` falls back to a random UUID, and a round nobody can
+    /// re-address (and no Chat row can ever reference) is worse than no round, so
+    /// `run` opens nothing. The writer's half of that guard: unstamped rows create
+    /// no round record at all.
+    #[tokio::test]
+    async fn an_unstamped_turn_writes_no_round() {
+        let session = make_test_session();
+        session.append_message("user", "no id on this transport", None);
+        session.append_message("assistant", "still answered", None);
+        session.flush_pending().await.unwrap();
+
+        assert!(
+            crate::rounds::fold(session.rounds_index_path())
+                .unwrap()
+                .is_empty(),
+            "a turn outside a round must not invent one"
+        );
+        assert_eq!(session.active_round_id(), None);
+    }
+
     /// How many rounds the side table describes.
     fn fold_round_count(path: &Path) -> usize {
         crate::rounds::fold(path).unwrap().len()
