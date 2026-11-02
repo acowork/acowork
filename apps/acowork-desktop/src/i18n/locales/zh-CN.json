@@ -430,6 +430,7 @@
   "chatUsage": {
     "ariaLabel": "会话用量",
     "title": "会话用量",
+    "titleAgent": "会话用量（本 Agent）",
     "close": "关闭",
     "llmCalls": "LLM 调用",
     "totalInput": "累计输入",

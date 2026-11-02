@@ -336,6 +336,7 @@
   "chatUsage": {
     "ariaLabel": "Chat usage",
     "title": "Chat Usage",
+    "titleAgent": "Chat usage (this agent)",
     "close": "Close",
     "llmCalls": "LLM calls",
     "totalInput": "Total input",
