@@ -1,7 +1,7 @@
 <h1 align="center">ACowork — AI Agents Collaboration Platform</h1>
 
 <p align="center">
-  <img src="assets/brand-mark.svg" alt="ACowork" width="360">
+  <img src="assets/brand-mark.svg" alt="ACowork" width="331">
 </p>
 
 <p align="center">

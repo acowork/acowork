@@ -1041,9 +1041,11 @@
   text-align: center;
 }
 .boot-logo {
-  /* Shared brand wordmark (assets/brand-mark.svg, 396x96). Rendered as an
-   * <img>, so it keeps the SVG's own colors — no tint square. */
-  width: 200px;
+  /* Shared brand wordmark (assets/brand-mark.svg, 364.25x96 — the artwork plus
+   * a uniform 6px gutter). Rendered as an <img>, so it keeps the SVG's own
+   * colors — no tint square. 184 keeps the mark at the size it had at the old
+   * 200px width, back when the frame still carried dead space on the right. */
+  width: 184px;
   height: auto;
   display: block;
 }
