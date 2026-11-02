@@ -383,6 +383,73 @@ pub async fn read_messages(
     read_json(resp).await
 }
 
+/// `GET /internal/chat-sessions/{id}/rounds?refs=&who=` — the disposable
+/// per-chat round-projection cache (ADR-106 D5).
+///
+/// `Ok(None)` is the user service's hidden 404: this caller is not a
+/// participant of that Chat session. The orchestrating handler then answers
+/// 404 itself rather than fetching around the denial — a non-participant must
+/// not be able to warm or read a cache they cannot see.
+///
+/// `Err` means the cache could not be consulted at all, which is a different
+/// thing from "no": the handler treats it as every ref missing and serves the
+/// request from the source of truth. A broken side table is never an outage.
+pub async fn rounds_read(
+    port: u16,
+    session_id: &str,
+    who: &str,
+    refs: &[String],
+) -> Result<Option<Vec<serde_json::Value>>, String> {
+    let resp = client()
+        .get(format!(
+            "http://127.0.0.1:{port}/internal/chat-sessions/{session_id}/rounds"
+        ))
+        .query(&[("who", who), ("refs", &refs.join(","))])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("round cache read {status}: {body}"));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(Some(v.get("rounds").and_then(|r| r.as_array()).cloned().unwrap_or_default()))
+}
+
+/// `PUT /internal/chat-sessions/{id}/rounds` — write back freshly fetched
+/// projections. Best-effort by contract: the caller of this function logs and
+/// carries on, because failing to cache costs a re-fetch and nothing else.
+/// `Ok(None)` is the same hidden 404 as [`rounds_read`].
+pub async fn rounds_write(
+    port: u16,
+    session_id: &str,
+    who: &str,
+    rounds: &[serde_json::Value],
+) -> Result<Option<usize>, String> {
+    let resp = client()
+        .put(format!(
+            "http://127.0.0.1:{port}/internal/chat-sessions/{session_id}/rounds"
+        ))
+        .json(&serde_json::json!({ "who": who, "rounds": rounds }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("round cache write {status}: {body}"));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(v.get("stored").and_then(|s| s.as_u64()).map(|s| s as usize))
+}
+
 async fn read_json<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, String> {
     let status = resp.status();
     if !status.is_success() {

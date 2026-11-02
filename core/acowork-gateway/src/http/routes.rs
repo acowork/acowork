@@ -301,6 +301,11 @@ pub fn build_router(state: AppState) -> Router {
         // the Gateway's only Intent ingress; Runtimes POST here instead
         // of publishing to the control topic.
         .merge(crate::http::intent_api::intent_routes())
+        // ADR-106 D5/D9: the Chat surface's execution-block read. Gateway-owned
+        // rather than proxied, because serving one block means composing two
+        // reads (this chat's projection cache + the hosting Runtime) and neither
+        // of those is something the Desktop should have to sequence.
+        .merge(crate::http::chat_blocks::chat_block_routes())
         .merge(crate::http::models_api::models_routes())
         .merge(crate::http::memory_api::memory_routes())
         .merge(crate::http::skills_api::skills_routes())
