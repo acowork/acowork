@@ -14,12 +14,19 @@
  *      which hands over a cropped PNG `File` (canvas is stubbed — jsdom has no
  *      2-D context; what matters here is that the region reaches the crop);
  *   5. an unreachable composer disables both chat items instead of silently
- *      dropping the gesture.
+ *      dropping the gesture;
+ *   6. a transparent bitmap still shows its edges: the stage paints the
+ *      checkerboard backdrop and a hairline frame, and (the part that is easy
+ *      to get wrong) neither of them perturbs the `natural × scale` box the
+ *      readout and the crop divide by.
  *
  * Geometry itself is covered by `imageViewerGeometry.test.ts`; this file is
  * about the wiring between the DOM and those functions.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ImageViewer, type ImageViewerProps } from "./ImageViewer";
 
@@ -276,5 +283,56 @@ describe("ImageViewer source toggle", () => {
     );
     fireEvent.doubleClick(screen.getByTestId("image-viewer-image"));
     expect(onOpenSource).toHaveBeenCalledTimes(1);
+  });
+});
+describe("ImageViewer bitmap boundary", () => {
+  // The preview surface is Monaco's own `#FFFFFF` / `#1E1E1E`, so a bitmap
+  // whose background is transparent had no edge at all — it dissolved into the
+  // canvas. The stage now paints a checkerboard plus a hairline frame.
+  const stageOf = () => screen.getByTestId("image-viewer-stage") as HTMLElement;
+  const css = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "../../styles/globals.css"),
+    "utf8",
+  );
+
+  it("paints the transparency board and the hairline frame on the stage", () => {
+    renderViewer();
+    const cls = stageOf().className;
+    expect(cls).toContain("image-checkerboard");
+    // One device-independent hair of grey in both themes — faint, but enough
+    // to show where the bitmap ends.
+    expect(cls).toMatch(/\bring-1\b/);
+    expect(cls).toContain("ring-zinc-300/60");
+    expect(cls).toContain("dark:ring-zinc-600/60");
+  });
+
+  it("leaves the natural × scale box untouched by the decoration", () => {
+    renderViewer();
+    const stage = stageOf();
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    // 800 × 600 at 125%. A `border`/padding here would render the bitmap 2px
+    // smaller than this box, and every readout/crop derived from it would skew.
+    expect(stage.style.width).toBe("1000px");
+    expect(stage.style.height).toBe("750px");
+    expect(stage.className).not.toMatch(/\bborder(-|\b)/);
+    expect(stage.className).not.toMatch(/\bp[xytrbl]?-/);
+  });
+
+  it("keeps the checkerboard in screen space and theme-driven", () => {
+    const start = css.indexOf("@utility image-checkerboard");
+    expect(start).toBeGreaterThan(-1);
+    const body = css.slice(start, css.indexOf("}", start) + 1);
+    expect(body).toContain("repeating-conic-gradient");
+    // Fixed px cells: the board must not scale with the image (it would start
+    // reading as image content), and `scale` must stay a geometry-module number.
+    expect(body).toContain("background-size: 16px 16px");
+    expect(body).not.toContain("scale");
+    expect(body).toContain("var(--color-image-checker-a)");
+    expect(body).toContain("var(--color-image-checker-b)");
+
+    // Cell B is the only visible half, so both themes must actually define it.
+    const tones = [...css.matchAll(/--color-image-checker-b:\s*([^;]+);/g)].map((m) => m[1].trim());
+    expect(tones).toHaveLength(2);
+    expect(tones[0]).not.toBe(tones[1]);
   });
 });
