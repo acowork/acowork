@@ -1,6 +1,8 @@
 # Chat Session Context Orchestration Design (Chat Router)
 
-> Version: v1.0 | Updated: 2026-10-21
+> Version: v1.1 | Updated: 2026-11-03
+>
+> v1.1: chat kind vocabulary synced with [ADR-106](../../adr/en/ADR-106-chat-execution-reference-projection.md) — `execution_round` reference rows are not projected into the router context, and `interaction_request` / `turn_started` / `router_fallback` keep a projection only for historical rows (no longer written after P4 / P6).
 >
 > Related: [ADR-099](../../adr/en/ADR-099-chat-session-llm-router.md) (Chat Router decision), [ADR-060](../../adr/en/ADR-060-prompt-cache-friendly-context-block-reorg.md) (stable prefix + append at the tail), [ADR-063](../../adr/en/ADR-063-package-level-prompt-override.md) (package-level prompt overrides), [ADR-066](../../adr/en/ADR-066-llm-provider-cache-tokens.md) (cache token accounting), Design 27 (Intent Messaging and Group Chat)
 
@@ -132,8 +134,9 @@ Each chat message becomes one `ChatMessage`:
 |---|---|---|
 | `user_message` | user | `[user:<from>] <body>` |
 | `agent_message` | assistant | `[agent:<from>] <body>` |
-| `interaction_request` | user | `[card] <title>` + options (fixed format) |
+| `interaction_request` | user | `[card] <title>` + options (fixed format). **No longer written after P6**, the projection stays only for old transcripts (ADR-106 D8 / D14) |
 | `system_notice` | user | `[system] <fixed text>` (see §4.3) |
+| `execution_round` | — | **Not projected**: it is an empty-body pointer, not a sentence worth reading. The round's content is the `user_message` beneath the reference row, and that is what the router reads (ADR-106 D3) |
 
 Attachments are never inlined; only fixed-format metadata is appended:
 
@@ -171,6 +174,8 @@ The guard test is "two projections of the same input are equal".
 | `router_fallback` | `[system] Routed automatically` |
 
 `<sid8>` comes from the message meta and never changes after write, so the projection is stable.
+
+`turn_started` / `router_fallback` have the same status as `interaction_request` in the table above: **after P4 / P6 nothing writes them any more**, the projection is kept only so an old history still reads byte-for-byte the same (§4.2 determinism, and ADR-106 D14 — the presentation layer hides them, the context does not). The `notice_type` values written today are `session_choice` / `confirm_continue` (the addressing questions of ADR-106 D6). They do enter the context, because that is a question put in front of the human — but through the generic arm of `notice_text`, `[system] Notice: {notice_type}`, not a line of the fixed-text table above; the table lists the legacy arms and the channel facts that still have dedicated text.
 
 ### 4.4 Window anchor and batch trimming
 

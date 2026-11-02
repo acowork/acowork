@@ -1,6 +1,8 @@
 # Chat Session 上下文编排设计（Chat Router）
 
-> 版本：v1.0 | 更新日期：2026-10-21
+> 版本：v1.1 | 更新日期：2026-11-03
+>
+> v1.1：按 [ADR-106](../../adr/zh/ADR-106-chat-execution-reference-projection.md) 同步 chat kind 词表——`execution_round` 引用行不进 Router 上下文，`interaction_request` / `turn_started` / `router_fallback` 只为历史行保留投影（P4 / P6 后不再新增）。
 >
 > 关联：[ADR-099](../../adr/zh/ADR-099-chat-session-llm-router.md)（Chat Router 决策）、[ADR-060](../../adr/zh/ADR-060-prompt-cache-friendly-context-block-reorg.md)（稳定前缀 + 末尾追加）、[ADR-063](../../adr/zh/ADR-063-package-level-prompt-override.md)（包级 Prompt 覆盖）、[ADR-066](../../adr/zh/ADR-066-llm-provider-cache-tokens.md)（Cache Token 统计）、设计 27（Intent 消息与群聊）
 
@@ -132,8 +134,9 @@ router **不加载**：
 |---|---|---|
 | `user_message` | user | `[user:<from>] <body>` |
 | `agent_message` | assistant | `[agent:<from>] <body>` |
-| `interaction_request` | user | `[card] <title>` + 选项（固定格式） |
+| `interaction_request` | user | `[card] <title>` + 选项（固定格式）。**P6 后不再新增**，仅为旧转录保留投影（ADR-106 D8 / D14） |
 | `system_notice` | user | `[system] <固定文案>`（见 §4.3） |
+| `execution_round` | —— | **不进上下文**：它是空正文指针，不是可读的一句话；本轮的内容在引用行下方的 `user_message` 里，Router 读那一条（ADR-106 D3） |
 
 附件不内联字节，只在正文末尾追加固定格式的元数据：
 
@@ -169,6 +172,8 @@ router **不加载**：
 | `truncated` | `[system] Response truncated` |
 | `unavailable` | `[system] Agent unavailable` |
 | `router_fallback` | `[system] Routed automatically` |
+
+`turn_started` / `router_fallback` 两行与上表的 `interaction_request` 同理：**P4 / P6 后不再有生产者**，投影留着只为了让旧历史逐字节读起来不变（§4.2 确实定性与 ADR-106 D14：呈现层隐藏，上下文不隐藏）。今天仍在写入的寻址类 `notice_type` 是 `session_choice` / `confirm_continue`（ADR-106 D6），它们进上下文，因为那就是摆在人类面前的一个问题——但走的是 `notice_text` 的兜底臂 `[system] Notice: {notice_type}`，不是上表里的固定文案；上表列的是遗留臂与仍有专属文案的通道事实。
 
 `<sid8>` 来自消息 meta，写入后不再变化，因此投影稳定。
 
