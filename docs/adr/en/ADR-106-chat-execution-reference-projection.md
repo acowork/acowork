@@ -1,0 +1,274 @@
+# ADR-106: Redrawing the chat / execute Boundary — References, Not Copies
+
+- **Number**: ADR-106
+- **Status**: Proposed (pending architecture review) — **the foundation has landed**: P1 (`round_id` minting + the round side table + interval closure), P2 (the projection read endpoint), P3 (`rounds.sqlite` cache + `GET /api/chat-blocks`). P4–P6 (switching the chat write side to reference rows, the addressing ladder and two-level `@`, cards moving into blocks plus the frontend block renderer) are **not implemented**, so every retirement this ADR lists is still in force.
+- **Date**: 2026-11-02
+- **Deciders**: ACowork Architecture Group
+- **Related**: ADR-100 (this ADR supersedes its Decisions 2/8/9/10/11/12 and restates the boundary of D1/D3), ADR-099 (shrinks its `dispatch` authority), ADR-105 (supersedes the mirroring-based evidence of D4/D5), ADR-097 (the direct precedent for the disposable side-table), ADR-096 (write-time derived state / no full reads), ADR-092 (per-session single writer, bounded reads), ADR-084 (chat storage belongs to acowork-user), ADR-055 (cross-machine reachability is a pillar of this design), ADR-076 (single initiator), ADR-046 (attachment discriminated union), ADR-102 (the TurnOrigin policy table still applies)
+
+## Summary
+
+Today the execute session's messages are **copied** into the chat session (terminal echoes, routing reaction rows, interaction cards, failure receipts), which turns the chat into a joint transcript of two sessions: six write sites, eight idempotency-key prefix conventions, best-effort writes whose failure means "lies forever", and a frontend that infers state from the *absence* of a row. ADR-100 spent Rev.2 through Rev.8 patching that mirror.
+
+This ADR removes the mirror itself, in three moves:
+
+1. **Introduce `round` as the single cross-model primary key** — minted deterministically by the Runtime at the turn boundary, durable, stamped on the metadata of every entry the round produces in the execution session. It does not exist in the code today.
+2. **The chat stores no copies of execute messages, only one `execution_round` reference row** (no body). Block content is **projected at read time** from the execution session, and the projection lands in a **disposable side table owned by acowork-user** (same shape as ADR-097): pulled on first render, persisted, served locally afterwards.
+3. **chat → execute delivery becomes an explicit addressing ladder**: `@` carries two levels of meaning (agent addressing, then session selection); no `@` means chitchat by default; the LLM may only **propose** a target, never deliver silently.
+
+Net effect: cross-process durable writes drop from six classes to one, and the exec → chat direction has **zero writes**. The chance of a lie moves from "a network call failed" to "a local index can be rebuilt".
+
+## Background (all verified against the code)
+
+### 1. The mirror is the only source of the write-back complexity
+
+A turn's obligations toward the chat are spread over six write sites today: `post_intent_response` (router answering itself; the terminal state of a chat-routed turn), `echo_terminal_row` (three sites in [session_task.rs](../../../core/acowork-runtime/src/agent/session/session_task.rs): attachment parse failure / turn end including `aborted` / loop `Err`), `write_interaction_card` + `close_chat_card` ([loop_interaction.rs](../../../core/acowork-runtime/src/agent/loop_interaction.rs)), the `turn_routed` reaction row (two sites: [chat_router/runner.rs](../../../core/acowork-runtime/src/agent/chat_router/runner.rs) and [gateway_loop.rs](../../../core/acowork-runtime/src/startup/gateway_loop.rs)), `router_fallback`, plus Gateway-side `delivery_failed`, the §6.5 R4 receipt and the sweeper's `fallback-` timeout rows. Idempotency keys are an informal string-prefix convention (`exec:` / `tr:` / `rf:` / `card:` / `ir:` / `resp-` / `dlv-failed:` / `fallback-`) with no type-level constraint.
+
+The consequence is not "complexity", it is **lying**: every one of these writes is best-effort (failure only `warn`s), while the pending-row predicate in [chatTurnState.ts](../../../apps/acowork-desktop/src/components/chat/chatTurnState.ts) is exactly "the latest human row has no terminal answer". A failed terminal write means that round stays "in progress" in the chat forever.
+
+### 2. The reason for the mirror was already removed
+
+"Making the chat context more complete" was the only motive for copying — the router needed to see what was happening in the execution sessions in order to route. Once the router no longer holds the power to *guess an old session and deliver silently* (Decision 6), it needs none of the execute content: chitchat reads only the chat's own rows, and dispatch reads only candidate metadata ([chat_candidates.rs](../../../core/acowork-runtime/src/agent/session/chat_candidates.rs) already reads metadata only, per ADR-096). **The consumer of the mirror is gone.**
+
+### 3. The Rev.4–7 pin retrospective: projection repays Rev.8's cost for free
+
+Rev.4 moved the execution view's composer to the chat entry precisely so that *the human's own sentence typed against an execution session would appear in the chat transcript*; Rev.6 and Rev.7 kept patching the pin; Rev.8 finally cancelled the requirement and recorded the price honestly: "the chat transcript cannot show that question; the round leaves only an interaction card and a standalone echo in the chat".
+
+Under references + projection that price is repaid automatically: the block renders the execution session's own transcript, **both sides of the exchange coming from the single source of truth** — no proxied write, no exception to the identity model, no pin.
+
+### 4. D1's real boundary is narrower than its wording
+
+ADR-100 D1 deleted `ExecSessionStatusCard` — projecting the execution session's **state machine** (busy / idle / which step) into the chat transcript *and treating it as a durable fact*. Volatile state and an immutable log can never line up; that conclusion of D1 stands.
+
+This ADR projects the execution session's **durable transcript slice** (one round's user message + reply). There are not two truths, because there is only one copy and it is a cache, not a source of truth. D1 therefore needs restating precisely as: **no second *durable* truth; never project the execution session's *state machine* as a fact.** The block's "in progress" appearance is derived by the positive-evidence rule of Decision 9, not by polling a state machine.
+
+### 5. Group and direct chats are the same predicament projected twice
+
+Group: `@agent` addresses explicitly; without `@`, ADR-105's `default_responder` is needed as a fallback. Direct: one agent, but N execution sessions, so an unspecified input has to be guessed by an LLM. Both lack the same thing — **an addressing model with an explicit fallback semantic**. Today the group uses `mentions` + `auto_routed_to` and the direct chat uses the router's `dispatch(existing)`: two mechanisms doing one job.
+
+### 6. Two foundational facts verified
+
+- **The `round` key does not exist.** `round_id` has zero hits repo-wide (one unrelated test name only); execution storage is the flat `append_message(role, content, metadata)` stream of [conversation.rs](../../../core/acowork-runtime/src/conversation.rs), paginated by ADR-050 **physical entry offsets**, with no notion of a round. → Decision 2 is the first piece of work.
+- **Cross-machine reads already work.** The Runtime publishes a retained `acowork/agents/{id}/http_endpoint` whose value is `{node proxy base}/agents/{id}` ([agent_init.rs](../../../core/acowork-runtime/src/startup/agent_init.rs), re-published on network change per §6.3.3); `proxy_to_runtime` builds the target URL straight from it and attaches `X-ACowork-Node-Token` ([proxy.rs](../../../core/acowork-gateway/src/http/proxy.rs)). `GET /sessions/{sid}/messages` reads through the UseCase layer's file access and **does not require the session to be Active** — an ADR-038 `Closed` session (on disk, not resident) is readable, consistent with Rev.7. So as long as **the Runtime process is up**, the transcript of any session on any node is readable. Process down → `agent_not_running` / `503` → which is exactly why Decision 5's cache must exist.
+
+## Decisions
+
+### Decision 1 — The chat's kind vocabulary converges to four, with four invariants
+
+| kind | producer | carries |
+| --- | --- | --- |
+| `user_message` | the human, written by the Gateway under the token identity | the **only** input of a chat |
+| `agent_message` | the chat session itself (chitchat / triage answer) | output ①: conversation |
+| `execution_round` | the Runtime, when it hands a round of work to an execution session | output ②: a **reference**, no body |
+| `system_notice` | channel facts (`delivery_failed` / `budget_exhausted` / `truncated` / `unavailable`) | unrelated to exec |
+
+`interaction_request` / `interaction_resolved` **leave the chat vocabulary** (Decision 8). The legacy `text` and the `intent_request` / `intent_response` normalisation stay.
+
+- **I1 (single container)** — a chat stores only its own utterances plus references to work.
+- **I2 (two identities)** — anything the chat knows about exec exists either as a durable **reference fact** (carrying no content) or as a volatile **projection cache** (disposable, rebuildable). Neither is a second source of truth.
+- **I3 (addressing first)** — delivery authority follows: explicit addressing > propose-and-confirm > chitchat by default. The LLM has no silent delivery right.
+- **I4 (one key)** — one round = one `round_id`, the only join key across the two models, minted deterministically by the Runtime at the turn boundary, never inferred from ordering.
+
+### Decision 2 — `round_id`: minted deterministically by the Runtime at the turn boundary, durable, never inferred
+
+- **Minting point**: **the execution session's turn boundary**, exactly one place — entry and exit of `AgentLoop::run` ([loop_.rs](../../../core/acowork-runtime/src/agent/loop_.rs)), through which every turn shape passes (chat delivery, the execution-surface composer, intent and PM dispatch). The Gateway entry does not mint it.
+- **Shape**: `round_id = "r:{inbound_message_id}"` — a deterministic derivation of the round's inbound message id; opaque string, ≤ 128 bytes. That id already exists for every turn-creating entry (chat delivery carries the chat message id; the composer carries the frontend-generated `msg-{uuid}`; an intent carries the protocol's message_id). **An id that is too long, or whose character set cannot be addressed, is hash-folded** to `r:{digest}-{len}`: the string goes straight into a URL path, a file name inside the conversations directory and a SQL bind, so the character set the next hop accepts and the one the upstream can produce must be **the same predicate** (`is_addressable`) — otherwise a round is born unreadable; and the fold must stay a deterministic function of unbounded input, or a re-delivery would mint two rounds.
+- **The fold's digest must be a stable digest** (SHA-256, first 8 bytes as implemented), not a standard-library hasher whose algorithm is an implementation detail: this string is not an in-memory key. It is written into every row of the round, into Decision 4's side table, and from P4 on it is the reference row's idempotency key `round:{round_id}` — an identity that has to stay stable forever. A toolchain upgrade that changed the digest would mint a second round for a message that was already delivered (a duplicate block, a duplicate run), and nothing could detect it.
+- **Why a deterministic derivation rather than a UUID minted at the entry** (this clause is a correction made while validating the implementation): ① **no protocol change** — no new field on proto `Intent`, no lockstep release of Gateway and Runtime; ② **it preserves the existing re-delivery dedup** — MQTT re-delivering the same `message_id` is deduplicated by exactly that id today (`exec:{message_id}`), and a random UUID would throw that property away; ③ uniqueness is guaranteed by whoever generates the message id, which is the same guarantee a UUID would give.
+- **Persistence**: **every** entry the round produces (user / assistant / tool / attachment) carries the same `round_id` in its metadata. The injection point is the write funnel `append_message_with_id` ([conversation.rs](../../../core/acowork-runtime/src/conversation.rs)) — all JSONL writes go through it, so no call site has to thread a parameter and none can be forgotten. The Decision 4 round index is upserted at the same time.
+- **Answering a card does not mint**: when the previous turn ended `waiting` (a `pause` card still open) this turn **continues** the active round — the predicate is "the previous turn's outcome was `waiting`, or the session still holds an unclosed `pause` card" together with an unclosed active round. After a process restart the active-round state is gone ⇒ the turn degrades into a new round, which self-heals (Decision 4's crash repair closes the stale record), so no permanent "in progress" is left behind.
+- **Ordering inference is forbidden**, on four counter-examples: context compaction (ADR-010/032/061 rewrite the representation of what came in), forced pre-emption opening a new round (pending queue), DevMode resume/step **replaying the same round** (ADR-013 — `replay` opens no round, and replayed entries still land under the original `round_id` stamp), and the idempotent re-post of `append_message_with_id` (same id ⇒ same `round_id`; the index folds to the last record per id, so a re-delivery simply overwrites). Any one of them breaks "adjacent messages are the same round".
+- **A replay shares the turn boundary** (the landing point of the third counter-example): `AgentLoop::replay` uses the same open/close pair as `run`. Replaying rows with no stamp freezes that round's `answer` coordinate on the row written before the pause — and that round has usually already reached terminal, so it gets cached: the real answer produced by resume would then never appear in the chat, with nothing to heal it. The round id comes first from the active round the writer still holds (a continued round is not named after this message id), then from the message id, and only if neither exists do these rows carry no round.
+- **`TurnSurface` shrinks** accordingly to `{ chat_session_id, round_id, answerable_by, has_human }`. The ADR-100 Rev.6 patch (the runtime back-filling the chat coordinate from the session binding) stays; `trigger_message_id` disappears, because the reference row is itself the anchor.
+
+### Decision 3 — `execution_round` is the chat's only durable unit of work
+
+```json
+{ "kind": "execution_round",
+  "in_reply_to": "<the user_message id that triggered it>",
+  "meta": { "round_id": "…", "agent_session_id": "…", "agent_instance_id": "…",
+            "opened_new": true, "assignment_brief": "… (optional, only for new)" } }
+```
+
+- **No `body`**: a reference row carries no execution content. The task name shown by the presentation layer comes from the Decision 4 projection (plus the session title).
+- **The idempotency key is the natural key**: `meta.message_id = "round:{round_id}"`. Uniqueness is guaranteed by the minter, so a re-delivery deduplicates by construction. **The prefix-key family convention (`exec:` / `tr:` / `card:` / `resp-`) retires entirely, leaving this single rule.**
+- **Consistency classes become explicit**: the reference row is **prepositive** (delivery is only allowed after the write succeeded; on failure the human message returns to undelivered, and no "delivered but invisible" round is created). Channel receipts and human message rows are prepositive too. There is no third class in the exec → chat direction, because there is no write in that direction any more.
+- **`turn_routed` retires**: the conversational fact it recorded ("your message went to a session / new task vs continuation") is expressed by the reference row itself (a reference row exists = the message went somewhere; `opened_new` = new or continued). Rev.3's motive for restoring that row ("a chat must have turns") is satisfied by the block presentation of Decision 9, which is more honest than an empty-body notice.
+- **The writer is the Runtime**, through the Gateway's single chat write entry. No second write entry, and the ADR-009 §5 filesystem redline stays intact (`run_gateway_fs_redline` in `dev/ci.sh` remains green).
+
+### Decision 4 — Read-time projection: the Runtime owns the computation "what a round is"
+
+- **New endpoint**: `GET /sessions/{sid}/rounds/{round_id}` (Runtime loopback, Gateway-proxied), returning the **conversation-visible projection** of that round: `{ user: {body, attachments, ts}, answer: {body, status, ts}, card: {kind, request_id, prompt, options} | null, terminal: bool }`.
+- **"What a round is" is defined by the execution session, not by the chat** — this is the core of the boundary. Tool calls, thinking and streaming do not enter the projection (ADR-100 D3's "execution details never enter the chat" becomes "never enter the projection": same semantic, now stricter — they don't need to be persisted at all).
+- **A round derived index is mandatory**, otherwise this endpoint scans the JSONL on the request path and violates the ADR-096 redline (`run_session_full_read_redline`).
+- **Index location**: `{conversations_dir}/{session_id}.jsonl.rounds` — the session's own append-only side table, sibling of the JSONL main store, **the same shape as ADR-097's disposable side table** (fold on read, first-touch rebuild, corruption means rebuild). The name is a suffix on the transcript's own name and must not be `{session_id}.rounds.jsonl`: inside the conversations directory the `.jsonl` extension **is session identity** (the conversation index enumerates sessions by extension and reconciles them by `{sid}.jsonl`), so that name would be swept forever as a session whose lines never parse, and could never be reconciled away. Not a SQLite table: a session holds tens to hundreds of round records, a JSONL side table gets "disposable" with zero new dependencies, and the writer of it is already the JSONL's single writer thread (ADR-092) — no second writer and no cross-crate schema dependency.
+- **Record shape**: `{ round_id, user, answer?, card?, terminal, status?, ts }`. `user` / `answer` are **ADR-050 data-index coordinates**, noted by the write funnel as it commits those lines (O(1)), so a projection reads exactly two lines plus one **bounded small window** after the user row (to fold attachment entries) — never a full scan.
+- **Maintained by the single writer**: the writer switches rounds when an entry's `metadata.round_id` differs from the active one; a record with `terminal=true` **is never rewritten afterwards** — the property the cache's whole design (Decision 5) rests on.
+- **A coordinate counts only while the row itself vouches for it**: the Decision 5 cache has **no invalidation path**, so a stale coordinate served as content would be frozen permanently as "what this block says". The projection therefore checks the two rows it fetched: right role, and the row's own `metadata.round_id` equal to the round asked for. A missing transcript, an out-of-range coordinate and a coordinate that lands on another round's row are all an **explicit hole** (404 on the single read, `found: false` on the batch) — never someone else's message, and never a 500 (only a genuine read failure returns `Err`, so a caller can still tell a retryable outage apart from a permanent hole).
+- **A bounded window must be vouched for too**: a window is a *range*, and a range is the one thing this projection may not trust — a round cut off before it answered (crash, interrupt) has no `answer` coordinate to close the window, so the window would run on into the next round. Rows inside it therefore also need their own stamp to equal the round asked for, or they do not belong to this block. On the writer's path an attachment row goes through the same funnel as the user row (`append_message_with_id`) and already carries the stamp, so this check costs no real attachment.
+- **The read path rebuilds too**: "first touch" must not mean only the writer opening the session. When the side table is empty (lost, or never produced) and the transcript exists, the read rebuilds it from the transcript, persists the records and then projects — otherwise a session whose side table was cleaned up would answer holes forever while every fact it needs is still in the transcript. Where records already exist, it does **not** rebuild (a rebuild would bypass the `card` a terminal snapshot carries and the cache layer accepts).
+- **Crash repair**: when a session loads, any record still marked `terminal=false` gets a closing `terminal=true, status="interrupted"` record appended. "In progress" therefore cannot stay stuck because the process was killed — the property ADR-100 D10's absence-based inference lacked.
+- **An open round**: `terminal=false`. The projection is read from disk only (the side table's latest snapshot plus the flushed transcript lines), **never from in-memory state** — which is why an active round is still readable when the session is not resident and after a process restart, at the price that it is only current as of the last flush. The client MUST NOT cache it, and that is enforced by the cache layer refusing the write itself (Decision 5) rather than by the orchestrator remembering to filter.
+
+### Decision 5 — The projection cache lives in acowork-user, is orchestrated by the Gateway, and is built as a disposable side table per ADR-097
+
+- **Storage**: `{data_dir}/chat-sessions/{sid}/rounds.sqlite`, one per chat, sibling of and modelled on `search.sqlite` (ADR-097). Keyed by `(agent_instance_id, agent_session_id, round_id)`, value = the Decision 4 projection + `fetched_at` + `terminal`. **A terminal round is immutable ⇒ there is no invalidation problem**: that is the property making this whole cache design sound, and why there is no TTL, no version number and no change notification.
+- **Why acowork-user, and not the Gateway or the frontend**: ① lifecycle — deleting a chat must take this copy of execution content with it (privacy), and directory-level cleanup is only free on the same side as the chat store (ADR-084 puts chat storage in acowork-user); ② a frontend cache violates "the Desktop app is presentation only, with no state persistence"; ③ the Gateway owns no transcript data, and hosting one there invites filesystem overreach. **This copy is a derived artefact of the chat, in the same family as `lines.index` and `search.sqlite`.**
+- **Who fetches**: the Gateway. It is the only process that can reach every Runtime (`proxy_to_runtime` + the node reverse proxy + the node token). acowork-user must not call a Runtime in reverse — its `/internal/*` surface only accepts writes from the Gateway.
+- **Read path**: `GET /api/chat-blocks/{chat_id}?refs=…` — a **new top-level prefix**; it cannot hang under `/api/chat-sessions/*`, because that prefix is wholesale forwarded to acowork-user by [user_proxy.rs](../../../core/acowork-gateway/src/http/user_proxy.rs) and the route is already owned. Flow: batch-look-up the side table for the requested refs (`GET /internal/chat-sessions/{id}/rounds`) → serve anything hit and `terminal` → for the rest, **group the refs by `(agent_instance_id, agent_session_id)` and make one batched `?ids=` request per execution session** (≤ 64 ids per upstream request, ≤ 200 refs per render, more than that is a 422) → write back only the `terminal=true` projections via `PUT /internal/chat-sessions/{id}/rounds` → answer **in request order**, each ref in one of four states: `ok` / `pending` / `not_found` / `unreachable`. A ref is **never silently dropped** — dropping one lets the frontend invent a row for it. `X-Error-Origin` semantics follow ADR-055 §6.17.
+- **Two guards on refs**: refs arrive from the client, so ① **shape validation** — the triple `instance|session|r:round`, each segment restricted to `[A-Za-z0-9_.-]`, with no leading `.` and no `:` in a session or instance id, because those values go straight into a URL path, a query string and a SQL bind; ② **the binding guard** — the Runtime stamps every projection with the execution session's own `chat_session_id` (read off the session meta, never from a request header), and the Gateway serves and caches only projections **bound to the chat being read**, turning anything else into `not_found` plus a `warn`. Without the second guard, a member of two chats could pour the other chat's execution content into this chat's cache and have it survive as history.
+- **Three predicates, one set — and this layer may only be narrower**: the minting predicate (`is_addressable`), the cache key predicate (`rounds_cache::valid_id`) and the Gateway's segment check must be the same character set, and all three must refuse `..`. A token waved through here but rejected downstream fails **the whole batch** there (a cache read answers a single bad token with a 422 over the page), and the Gateway reads any non-2xx as "cache unreadable ⇒ every ref missed" — so one bad token would permanently disable the cache for that page and make every render pay a full cross-host refetch. That is Decision 9's "one broken ref must not contaminate" violated from the other direction.
+- **Shape validation does not contaminate**: a token that fails ① does **not** reject the request with a 422; it is answered in its own response slot as `not_found`, with the token echoed back. A 422 would let one broken transcript row make every *other* block in the page unreadable, while silently dropping the token would let the surface invent a row for it — Decision 9's "never silently drop" cuts both ways. The 422 is reserved for genuine request-level errors: nothing asked for, and more than `MAX_REFS`. Same rule on the Runtime side: a malformed `round_id` in a batch read answers `found: false` (the single read still 400s, because there is only one answer there).
+- **A retryable fault must not masquerade as a permanent hole**: the batch read records "this round exists but its rows could not be read" on that item as `found: false` **plus** `error`, and the Gateway must map that item to `unreachable` (with a retry affordance), not to `not_found`. The difference between the two is exactly Decision 9's first invariant: rendering a disk hiccup as "this round never happened" leaves the surface with no reason to retry, and Decision 5's cache has no invalidation path to rescue it.
+- **Disposable and self-healing** (ADR-097 D3/D4 adopted clause by clause): a cache write failure only `warn`s and never affects the response; a corrupt / missing / lying side table degrades to "re-fetch" and never taints chat reads or writes; byte and row caps with LRU eviction; **ordering contract**: release the handle before `remove_dir_all` (on Windows a SQLite file without `FILE_SHARE_DELETE` turns "a disposable side table" into "a chat that cannot be deleted"), and the cache read and write must happen **inside** the per-chat `session_lock` — the same lock `delete_session` takes — because `connect()` does `create_dir_all(parent)`, so an open landing outside the lock resurrects a chat mid-deletion and strands a live handle behind it. That is not only a stuck delete: it is a privacy leak, a copy of execution content outliving the chat it came from.
+- **Degradation shape**: Runtime unreachable (`agent_not_running` / `session_not_ready` / node offline) and no cached copy → the block renders "work record temporarily unreachable (node offline / session deleted)", with the last known state and a retry affordance. That is an **explicit, readable hole**, not a lie. With a cache hit the history stays fully readable offline — which is where the "no remote RTT on first paint" promise is kept.
+- **What is never cached**: open rounds — and that is enforced by the cache layer itself (the write entry `warn`s and skips any row marked `terminal=false`), not by the orchestrator remembering to filter; a cached row that is `terminal=false` or whose payload is not an object is distrusted and treated as a miss, because the correct response to a lying row in a disposable cache is "ask again", never "believe the side table"; and anything beyond the block's own content (tools / thinking are outside the projection, so they are outside the cache too).
+
+### Decision 6 — An addressing ladder replaces the router's single guess; the LLM loses silent delivery
+
+Priority high → low, first match wins:
+
+| level | trigger | behaviour | LLM |
+| --- | --- | --- | --- |
+| 1 | `in_reply_to` points at an `execution_round` (the human replied to that block) | deterministic continuation into that session's next round | none |
+| 2 | `@agent` + a named session (second `@` level) | deliver to the named session | none |
+| 3 | `@agent`, exactly one deliverable session for that agent in this chat | deliver directly; several → a session-picker card | none |
+| 4 | group, no `@` → `default_responder` (ADR-105 D1–D3 retained) | enters that agent's chat session, continue at level 5 | — |
+| 5 | no `@` (direct chat, or after the fallback) | **chitchat by default**; `new_task(brief)` only on a clear new-task intent; `propose_existing` **plus a confirmation card** when it looks like a continuation | proposal only |
+| 6 | PM `task-dispatch` | machine-form explicit addressing (the `conv:task` key) | none |
+
+- **Level 1 is the correct answer for the highest-frequency continuity case**: "the agent just reported progress and I reply to it" needs no LLM guess — replying to the block *is* the addressing act. That empties most of level 5's guessing workload, so the cost of a confirmation is never spread over every message.
+- **Level 5's confirmation must have a cheap escape**: propose only when the deliverable candidate set (Decision 7) is non-empty; otherwise silently take `new_task` or chitchat. "Start a new task" is always the sibling option on the confirmation card, escapable in one click.
+- **The silent `dispatch(target=existing)` right is deleted**, and with it Block C's `S1..S10` alias table (addressing moves from "the LLM cites an alias" to "a human names it"). The router's act space: `answer` / `new_task(brief)` / `propose_existing(session, why)` / `ask_human(question)`.
+- **`route_intent_legacy`'s `routing_key` guess chain** (`conv:task` > `chat:{csid}:{initiator}` > `conv` > `msg`) keeps only the `task:` branch and "named by a reference row / `@`"; the `chat:csid:initiator` "go back to the last session by default" branch is deleted — it is the high-error class.
+- ADR-099's layering (D1), stateless router + per-chat queue (D2), candidate isolation (D4), three-block context orchestration (D5), strict chat/execute prompt separation (D6) and failure degradation (D8) **all stand**; degradation no longer needs a machine-assembled chat excerpt, because the default target at level 5 is chitchat, not some session.
+
+### Decision 7 — Two levels of `@`: agent addressing, then session selection
+
+- **Level 1 (agent)**: candidates are the chat's agent participants. A direct chat has exactly one agent ⇒ this level degenerates and the UI skips it, going straight to level 2. This is where "group and direct chat share one logic" lands: **a direct chat is the special case of a group with agent count = 1**.
+- **Level 2 (session)**: candidate set = **permission** (reusing [chat_candidates.rs](../../../core/acowork-runtime/src/agent/session/chat_candidates.rs) unchanged: 1:1 lists sessions bound to this chat plus sessions the human started by hand; a group lists only sessions *I* initiated; kinds never mix; `has_human=false` agent↔agent pairs never enter the list). Displayed set = candidates ∩ (`working` ∪ `idle` with `last_active < T`, default `T = 7d`). `Errored` is kept ("you should go back and look" is a useful signal); terminal / `Closed` sessions are not listed.
+- **`@` selects a destination, it does not create a binding**: session ownership is still decided by the single truth of Decision 11; "the seed only applies on creation" is unchanged, and because naming no longer depends on a mapping table the "seed silently ignored" branch disappears.
+- **Both levels use one entry point** (`POST /api/intents/mentions`, `targets` plus a new `target_sessions`); the client no longer forks on "with @ / without @" — ADR-105 removed the first fork, this removes the second.
+
+### Decision 8 — Interaction cards move into the block; answers go straight to the execution session
+
+- `ask_user_question` / permission approval **no longer write an `interaction_request` row into the chat**. A card is an execution-side fact about "what this round is waiting for"; the Decision 4 projection surfaces it as the `card` field and it renders inside the block.
+- **Answering uses the execution session's own write entry** (`POST /api/agents/{id}/sessions/{sid}/…`, with ADR-076 §Decision 4 second-wave identity checks), and the Gateway additionally verifies the caller is the round's `answerable_by` (the initiator) and a participant of the chat. `resolve_card_answer`, `mark_answered`, the end-of-turn safety net and `chatTurnState.closedCards` all retire.
+- **The change in group visibility was argued to be no worse than today** (Decision 10): D9's echo already surfaced that round's output to the whole group; under the new model participants still see the block and its card (read), and only the initiator can answer (write).
+- **`has_human == Some(false)`** (agent↔agent) needs no "skip writing the card" special case any more — nothing is written to the chat at all.
+
+### Decision 9 — "In progress" is a presentation state, proven by positive evidence
+
+- The single durable predicate for a block showing "in progress": an `execution_round` reference row exists **and** the **live** projection for that `round_id` (`source=runtime`) reports `terminal=false`. A cached `terminal=false` cannot exist (Decision 5's forced refusal), so "in progress" can never be sourced from a stale side-table snapshot.
+- **Unreachable is not in progress**: when the Runtime cannot be consulted and nothing is cached, that ref is answered `unreachable` (with a retry affordance) and renders "temporarily unreachable", never "still running" — showing an outage as in progress lets a stopped node rewrite what happened.
+- This is **positive evidence** (a reference row exists ⇒ a round is running), not ADR-100 D10's negative evidence ("no terminal row ⇒ still running"). The absence-derived pending row (`opensAgentTurn` reading three kinds of evidence — `to` / `auto_routed_to` / `mentions` — plus `answeredAfter` closing on `delivery_failed`) retires wholesale.
+- **Streaming text and tool progress remain presentation-only**: they reuse the existing `session_state` / chunk MQTT push (ADR-036/049/035), subscribed only for sessions behind blocks in the viewport, and they **never enter storage, never enter context building, never enter unread counts**. D1's constraint bites here precisely: no reading the state machine to *assert* a historical fact.
+- An empty-body terminal still renders as a centred status row (`aborted` / `failed` / `timeout` / `waiting`) — `terminal.status` comes from the projection, so no chat row is needed for it. Rev.3's avatar invariant is retained.
+
+### Decision 10 — Three permission layers; chat membership is the authorization basis for block content
+
+| what you want to see | authorization basis | enforced at |
+| --- | --- | --- |
+| the existence of a reference row | chat participant | acowork-user (the existing `not_a_participant`) |
+| block content (the projection) | **a participant of this chat** (the new layer added here) | Gateway `GET /api/chat-blocks/*`: verify participation first, fetch from the Runtime with the service credential, re-verify before serving |
+| pressing a button inside a block | the round's `answerable_by` (initiator, ADR-076) | the execution session's existing owner check on its write entry |
+
+- The execution session's own `authorize_read` stays owner-only. Block projection is **not** a loosening of exec read rights; it is one authorized read on the chat data plane: the Gateway fetches with the node token (a machine credential, ADR-055 Phase 5a) and then decides, from chat membership, whether to serve it. That the session is bound to the chat (the single truth of Decision 11) is the precondition for this layer to exist at all.
+- A group member who is not the initiator sees content (read) but not control (write). This equals today's behaviour (D9's echo rows were already visible group-wide), so it is not a privacy loosening.
+- A `user_user` 1:1 chat with no agent never produces a block.
+
+### Decision 11 — One truth for the binding: retire `intent-sessions.json`
+
+- The only durable truth of a chat binding is **the execution session's meta `chat_session_id`** (ADR-100 D9 already used it as the basis for "a session permanently belongs to a chat"); "which sessions does this chat have" is answered by a derived index over session metadata, reading metadata only (ADR-096).
+- `IntentSessionMap` (`intent-sessions.json`) in [intent_routing.rs](../../../core/acowork-runtime/src/agent/session/intent_routing.rs) retires, taking with it the double-write of "re-point the mapping + stamp" inside `chat_dispatch(Target::Existing)` and the ownership question of the `TerminalSessions` mirror. Three coexisting truths (mapping file / session meta / the Gateway mailbox's `source_chat_session_id`) collapse to one meta plus one derived index; the mailbox field is a **delivery fact**, not a binding fact, and stays.
+- **May one execution session be referenced by several chats?** No. The binding stays unique, so block ownership and `@` permissions do not re-complicate. Reaching work from another chat uses the "view execution" jump, not a copied reference. This is an explicit scope boundary, not an oversight.
+
+### Decision 12 — agent↔agent and PM dispatch collapse into the same reference
+
+- An agent↔agent intent no longer writes `agent_message` request/response rows into the chat (the `resp-` family); it writes **one `execution_round` reference row on the chat the target session is bound to** — it always was a round of work. `ensure_pair(agent_agent)` stays (the pair chat remains the transcript container) but stops carrying content.
+- PM `task-dispatch` no longer writes a `user_message` row (that message lives in the execution session and is naturally visible through the projection); it writes a reference row. Task-key routing stays (Decision 6 level 6).
+- "Who writes to the chat" therefore has exactly two producers: **the Gateway (human `user_message`)** and **the Runtime (`execution_round` / `agent_message` / `system_notice`)** — and the exec → chat direction has no producer at all.
+
+### Decision 13 — Re-assigning search, previews, unread counts and titles
+
+- **List preview / optimistic title**: the reference row's `assignment_brief` (or a one-line summary of the first round, produced once by the Runtime when writing the reference row and never rewritten) is enough. Rendering a list must never read the projection (ADR-096).
+- **Global search / in-chat search** (ADR-097 / ADR-081): `search.sqlite` indexes the chat's own rows plus each reference row's `assignment_brief`; **it does not index the projection cache** — that would feed one disposable copy into another disposable index, turn deletion into a two-hop problem, and exec content is already searchable through the conversation index (ADR-082 / ADR-095). Cross-session body search goes to the exec index, hits "a round of a session", and the jump path already exists ("view execution").
+- **Unread**: counts the chat's own rows only. A block's "waiting for a human" state is a separate badge (from `card != null` in the projection) and never mixes into unread counts.
+
+### Decision 14 — Supersession and retention list
+
+| Treatment | Items |
+| --- | --- |
+| **Superseded** | ADR-100 D2 (the two pointer rows), D8 (the durable source of `turn_mode` and its two-state copy), D9 (writing an execution session's local turns back to the chat), D10 (stop writing intermediate states + frontend-derived pending row + `aborted` row on local stop), D11 (`turn_routed` as the single reaction row), D12 (the pin / `for_execution_session` mechanism and every Rev.4–7 revision of it); ADR-105 D4 (`auto_routed_to` as pending-row evidence) and the chat-row shape of D5 (`delivery_failed` becomes a plain `system_notice`; "failure must be visible" survives); the silent `dispatch(target=existing)` right of ADR-099 D3 |
+| **Retained** | ADR-100 D1 (with the boundary restated in Background §4), D3 (execution details never enter the chat / projection), D4 ("view execution" jump), D5 (cards answerable in place — now inside the block), D6 (transient frontend send placeholder), D7 (turn reactions presented as the agent's owned reaction — the block does this), Rev.3's avatar invariant, Rev.8's "execution-surface messages never enter the chat channel" invariant; ADR-099 D1/D2/D4/D5/D6/D8; ADR-102's TurnOrigin policy table; ADR-105 D1/D2/D3/D6/D7 (the default responder itself, its four write gates, lifecycle, and the refusal of group-level LLM routing) |
+| **Amended** | ADR-097's description of the search scope (Decision 13); ADR-096's write-time derived-state inventory gains the round index (Decision 4) |
+
+## Presentation contract (the block is the conversation-scale sibling of an explore block)
+
+An explore block in the execution view folds one round of "tool calls + thinking"; a block in the chat folds a round of "user message + reply + whatever card it is waiting on". Same folding grammar, different payload density.
+
+- **Header**: agent avatar + name + task name (session title first, else `assignment_brief`, else the truncated triggering body — ADR-100 D8's task-name resolution moves verbatim into the presentation layer) + status word (in progress / done / interrupted / failed / waiting for you).
+- **Expanded**: the last **2** rounds by default (long-lived sessions after the rotation removal run to dozens of rounds; expanding all is unreadable), older rounds page in through further projection reads.
+- **One bubble per round**: a round inside a block carries one avatar / name / jump affordance (D7's "one bubble per round" survives, its carrier changes from "two folded rows" to "one section of the block").
+- **Jump**: the block header and every round keep "view execution" (ADR-100 D4), best-effort opening that session.
+- Mobile folds the block into one line plus a jump, with card actions in the bottom sheet, per ADR-100 D5.
+
+## Rejected alternatives
+
+| Alternative | Why rejected |
+| --- | --- |
+| Continue the hygiene work (a typed `ChatWrite`, unified idempotency keys, best-effort writes moved into an outbox with retry) | It treats symptoms: the root cause is six write sites becoming one. An outbox still has to handle the whole class of "cross-process write into storage that is not yours" |
+| One reference row **per execution session** instead of per round | The timeline would lie: a session advancing across days would leave its block parked at its first appearance. "A session as a whole" is a **rendering** goal (group by session), not a **storage** unit (store per round) |
+| Redundantly storing a final-answer excerpt in the reference row (a "light mirror") | Straight back to mirroring: an excerpt must be updated, an update is a cross-process write, a failed write is a lie. The list preview is satisfied by the one-shot `assignment_brief`, which never needs updating and never claims to be the transcript |
+| The cache in the Gateway's own data directory | Deletion decouples from the chat lifecycle (a privacy residue), and it tempts the Gateway into owning transcript data. ADR-084 already assigns the chat data plane to acowork-user |
+| The cache in the frontend (IndexedDB / localStorage) | Violates "the Desktop app is presentation only, no state persistence", and every surface would keep its own copy |
+| No cache: fetch remotely on every render | N blocks on first paint = N cross-machine RTTs; a Runtime restart turns every block into a hole; offline and weak networks become unreadable |
+| The round index storing the answer body instead of only the coordinates | Not taken: the side table stores `data_index` coordinates and the body comes from the JSONL main store. A redundant body is one more disposable copy, and since a projection reads two lines there is no performance case for it; worse, it would turn ADR-096's "derived at write time" into a second writable source of content |
+| Letting the LLM judge continuity and silently deliver to an old session | That is the origin of the Rev.4–7 pin saga and of "one extra empty execution session per message". A high-error choice must be revocable, i.e. confirmed |
+| A dedicated new live channel for the projection | `session_state` / chunk pushes already exist; adding a channel would create the second live truth D1 was written to kill |
+
+## Impact
+
+- **Data**: exec side gains `round_id` metadata plus the rebuildable `{sid}.jsonl.rounds` side table (**it dies with the session**: `delete_session` removes it, `prune_excess_sessions` archives it together with its transcript, so no orphaned index is left naming a session the list no longer has); the chat side gains the `execution_round` kind plus the disposable `rounds.sqlite`; `intent-sessions.json` / `terminal-sessions.json` retire. **No compatibility work**: historical rows stay on disk and are either hidden or degraded to static rows outside blocks by the renderer (chosen at implementation time), with no migration. A pre-`round_id` session has no round index ⇒ the projection 404s ⇒ its block degrades to an explicit hole, not a lie.
+- **Protocol**: new `GET /sessions/{sid}/rounds/{round_id}` (Runtime), `GET /api/chat-blocks/{chat_id}` (Gateway, **new top-level prefix**), `GET` / `PUT /internal/chat-sessions/{id}/rounds` (user internal surface). The `/api/intents/chat-append` kind whitelist changes from `interaction_request|system_notice|agent_message` to `execution_round|system_notice|agent_message` (`agent_message` remaining only for the router's own answers and agent↔agent conversational replies). `mentions` gains `target_sessions`. **`round_id` needs no protocol change** — Decision 2's derivation takes the inbound `message_id` as its only input; `Intent.for_execution_session` is already gone per Rev.8 and the `trigger_message_id` semantic slot retires with the mirror writes in P4.
+- **Deleted code**: Runtime's `exec_echo_meta` / `turn_routed_meta` / `router_fallback_meta`, the three `echo_terminal_row` sites, `write_interaction_card` / `close_chat_card*`, the surface back-fill patch; Gateway's `resolve_card_answer` / `mark_answered` / answer-row writes / the sweeper's chat failure row (becomes a notice); the whole frontend `chatTurnState.ts`, `ChatNoticeEventRow`'s `RETIRED_NOTICES`, the `closedCards` bookkeeping.
+- **Performance**: cross-process HTTP writes in the exec → chat direction go from "1–3 per turn, each with a 15 s write budget" to **0**; first paint issues one `GET /api/chat-blocks` (batched refs) and hits locally afterwards; cross-machine reads happen only on a miss. List and search paths still do zero projection reads (ADR-096 upheld).
+- **Privacy and retention**: `rounds.sqlite` is a derived copy of execution-session bodies. It must carry the same encryption and retention policy as the chat main store and must be deleted with the chat (directory level). This belongs in the module-design storage inventory.
+- **Rollback**: none is offered. Four surfaces plus the Runtime protocol change in one batch; rolling back means restoring both the mirroring writes and the pin mechanism.
+
+## Phased implementation (each phase independently verifiable; no compatibility layer)
+
+| Phase | Content | Verification |
+| --- | --- | --- |
+| P1 | The `round_id` foundation: minting at the turn boundary, metadata injection at the write funnel, the `{sid}.jsonl.rounds` side table, terminal closure and crash repair | Unit tests pin all four counter-examples of Decision 2: boundaries stay correct after compaction / pre-emption / replay / idempotent re-post; an unclosed record becomes terminal once the session reloads; the minter never emits an id that cannot be addressed (too long, or outside the addressable character set ⇒ hash-folded, on a stable digest); the rows a replay writes stay under the round it resumed |
+| P2 | The projection read endpoint `GET /sessions/{sid}/rounds/{round_id}` + the round side-table fold / first-touch rebuild (for the **read path as much as for the writer**) + boundedness | ADR-096 redline test; `Closed` sessions readable; manual cross-node verification (ADR-055); a lost coordinate or a missing transcript is an explicit hole (404 / `found: false`) and never another round's row — including the rows inside the attachment window |
+| P3 | Cache and aggregation endpoint: `rounds.sqlite`, `GET /api/chat-blocks`, the `/internal` write-back, the degradation shape | Deleting the cache only causes re-fetch; a stopped Runtime yields an explicit hole, never a lie; a cache hit means no cross-machine RTT on first paint; `remove_dir_all` passes on Windows |
+| P4 | The chat write side flips: the new kind, the content kinds removed from `chat-append`, the six write sites deleted | The count of exec-sourced `agent_message` rows in a chat transcript reaches zero; the fs redline stays green |
+| P5 | Routing redone: the addressing ladder, two-level `@`, the shrunk act space, the `propose_existing` confirmation card | Silent `dispatch(existing)` count is permanently zero; the no-@ chitchat rate and the confirmation rate are observable |
+| P6 | Cards move into blocks, answers go straight to exec, the frontend `chatTurnState` retires, the block renderer lands (both Desktop views + Mobile) | In-progress state is decided solely by "reference row + `terminal=false`"; the old derivation logic has no remaining references |
+
+## Acceptance (pinned by tests, not by convention)
+
+1. **Zero write-back**: one chat-routed turn plus one execution-surface local turn must add exactly `{user_message, execution_round}` and `{execution_round}` to chat storage — asserting no write whatsoever in the exec → chat direction (the invariant behind `chatStore.execSend.test.ts` continues under its new shape).
+2. **Natural-key dedup**: delivering the same `round_id` twice (replay / reconnect) produces one reference row.
+3. **Lies are unconstructible**: cut the Gateway→Runtime projection read and the block must show unreachable; no path can leave "in progress" stuck forever, because the write that could fail does not exist.
+4. **Disposability**: deleting, corrupting or tampering with `rounds.sqlite` only causes a re-fetch; chat reads, writes and pagination are untouched.
+5. **Rounds are not inferable**: the four counter-examples of Decision 2.
+6. **Addressing priority**: levels 1 and 2 never reach the LLM; a level-5 proposal produces a confirmation card and does not deliver.
+7. **Redlines**: `run_gateway_fs_redline` and `run_session_full_read_redline` are simultaneously green; the `/api/chat-blocks` read path never performs a full exec JSONL scan.
+8. **The three permission layers**: a non-participant reading a block gets 404; a participant may read; a non-initiator pressing a button is refused.
+9. **Cross-chat poisoning is impossible**: a ref naming another chat's execution session yields neither content nor a cache write (it becomes `not_found`); forging a chat-scope header cannot rewrite the projection's `chat_session_id`, because the binding is read off the session meta on disk.
+10. **A wrong coordinate never becomes content, and a bad ref does not contaminate**: when the transcript changed after the side table noted its coordinates (a line rewritten, a transcript absent), the projection must answer a hole because the row's own `round_id` stamp does not match, and must never return whatever sits at that position; one malformed ref or `round_id` spoils only its own slot, while every other block in the same request is served normally. A round with no `answer` coordinate must not fold the next round's attachments into its block.
+11. **A momentary read fault is not "it never happened"**: a batch item carrying `found: false` plus `error` surfaces as `unreachable` (retryable), which keeps it distinguishable from a permanent `not_found`.
+
+## References
+
+- [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) — the complete disposable side-table pattern: write-time incrementals, warn-only failures, watermark/first-touch rebuild, the Windows handle ordering contract. Decision 5 adopts it clause by clause.
+- [ADR-096](./ADR-096-no-full-session-reads.md) — write-time derived state and bounded reads; Decision 4's index is its direct payoff.
+- [ADR-100](./ADR-100-chat-event-log.md) — see Decision 14 for what is superseded and what is kept; the boundary restatement in Background §4.
+- [ADR-099](./ADR-099-chat-session-llm-router.md) — the router layering and candidate isolation stand; delivery authority shrinks.
+- [ADR-055](./ADR-055-remote-runtime-node-topology.md) — §6.3 / §6.4 / §6.17: cross-machine reachability and `X-Error-Origin` are the premises Decision 5 rests on.
+- [ADR-076](./ADR-076-multi-user-account-system.md) — the single initiator and the `authorize_read` / `authorize_write` split: Decision 10's third layer.
+- [ADR-084](./ADR-084-user-standalone-process.md) / [ADR-092](./ADR-092-user-message-identity-and-bounded-reads.md) — chat data ownership and the per-session single writer: the reason Decision 5's cache sits where it does.
+- Design docs 27 §5.5 / §6 and 29 (Chat Router context orchestration).
+- [HTTP protocol §4.17 / §5.7](../../protocols/en/http.md) — the recorded wire contract: `GET /api/chat-blocks/{chat_id}` ref shape and four states, the `/internal/chat-sessions/{id}/rounds` cache endpoints, and the Runtime round-projection read.

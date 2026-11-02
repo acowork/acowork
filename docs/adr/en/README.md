@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 96 / 96 documents translated.
+**Coverage**: 97 / 97 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -19,6 +19,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | How the control plane and the data plane are split | [ADR-034](./ADR-034-mqtt-http-boundary.md) |
 | How context is compressed and summarised | [ADR-010](./ADR-010-context-compression-simplification.md) → [ADR-011](./ADR-011-compaction-as-distillation.md) → [ADR-032](./ADR-032-context-recall.md) |
 | How sessions are stored, filtered and rendered | [ADR-024](./ADR-024-merge-metadata-into-index.md), [ADR-021](./ADR-021-unified-session-data-loading.md), [ADR-050](./ADR-050-chat-list-data-driven-refactor.md) |
+| Where the chat surface ends and the execution surface begins | [ADR-099](./ADR-099-chat-session-llm-router.md) → [ADR-100](./ADR-100-chat-event-log.md) → [ADR-106](./ADR-106-chat-execution-reference-projection.md) |
 | Who may see what and do what | [ADR-042](./ADR-042-mqtt-user-identity-delivery.md), [ADR-073](./ADR-073-agent-instance-identity-decomposition.md), [ADR-076](./ADR-076-multi-user-account-system.md), [ADR-084](./ADR-084-user-standalone-process.md) |
 | The agent lifecycle contract | [ADR-085](./ADR-085-agent-lifecycle-state-machine.md) |
 
@@ -124,6 +125,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 96 | [ADR-103](./ADR-103-openai-responses-provider-shape.md) | Supporting the OpenAI Responses API as a Provider Shape | Accepted (decided 2026-11-XX; not yet implemented) | [zh](../zh/ADR-103-openai-responses-provider-shape.md) |
 | 97 | [ADR-104](./ADR-104-agent-manifest-declaration-surface.md) | Restructuring the Manifest Declaration Surface — `[config]`, `[[mcp_servers]]`, capability↔skill, `labels` | Implemented (P1–P5) | [zh](../zh/ADR-104-agent-manifest-declaration-surface.md) |
 | 98 | [ADR-105](./ADR-105-group-default-responder.md) | Group Default Responder — an Un-@'d Group Message Goes to One Declared Agent | Accepted (implemented) | [zh](../zh/ADR-105-group-default-responder.md) |
+| 99 | [ADR-106](./ADR-106-chat-execution-reference-projection.md) | Redrawing the chat / execute Boundary — References, Not Copies | Proposed (pending architecture review; P1–P3 implemented, P4–P6 pending) | [zh](../zh/ADR-106-chat-execution-reference-projection.md) |
 
 ---
 

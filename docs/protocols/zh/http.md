@@ -28,6 +28,7 @@
   - [4.11 调试与开发工具](#411-调试与开发工具)
   - [4.12 远程文件系统浏览](#412-远程文件系统浏览)
   - [4.13 全局资源快照（Runtime 主动拉取入口）](#413-全局资源快照runtime-主动拉取入口)
+  - [4.17 Chat 执行块投影读取（ADR-106 D5/D9/D10）](#417-chat-执行块投影读取adr-106-d5d9d10)
 - [5. Gateway → Runtime 反向代理（需 Runtime 在线）](#5-gateway--runtime-反向代理需-runtime-在线)
   - [5.1 Agent 运行时配置](#51-agent-运行时配置)
   - [5.2 会话只读查询](#52-会话只读查询)
@@ -39,6 +40,7 @@
     - [5.4.1 服务直通前缀 `/api/memory/*`（ADR-101）](#541-服务直通前缀-apimemoryadr-100)
   - [5.5 工作区 (Workspace)](#55-工作区-workspace)
   - [5.6 会话控制面（ADR-076 §决策 4）](#56-会话控制面adr-076-决策-4)
+  - [5.7 轮次投影读取（ADR-106 D4）](#57-轮次投影读取adr-106-d4)
 - [6. 静态文件服务（直接流式返回原始字节）](#6-静态文件服务直接流式返回原始字节)
 - [7. MQTT 职责边界（ADR-076 §决策 4）](#7-mqtt-职责边界adr-076-决策-4)
 - [8. 通用错误码](#8-通用错误码)
@@ -140,7 +142,7 @@ Gateway 只负责它的生命周期与反代）。Gateway 通过 HTTP 反向代�
 
 | 大类 | Gateway 实现模块 |
 |---|---|
-| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs), [`intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs) |
+| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs), [`intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs), [`chat_blocks.rs`](../../../core/acowork-gateway/src/http/chat_blocks.rs)（缓存命中时不依赖 Runtime，未命中才回源，见 §4.17）|
 | B | [`proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)（ADR-033 Phase 2 + ADR-034 Phase 3） |
 | C | [`workspaces.rs`](../../../core/acowork-gateway/src/http/workspaces.rs)（仅静态资源部分） |
 
@@ -601,6 +603,108 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 
 ---
 
+### 4.17 Chat 执行块投影读取（ADR-106 D5/D9/D10）
+
+> **实现**：[`core/acowork-gateway/src/http/chat_blocks.rs`](../../../core/acowork-gateway/src/http/chat_blocks.rs)。
+> Chat 转录只存执行轮次的**引用** `{agent_instance_id, agent_session_id, round_id}`，不存内容副本
+> （ADR-106 D1/D2），所以渲染一个块必然要第二次读，而被读的东西住在宿主该执行会话的节点上。
+> Gateway 是唯一能到达每个 Runtime 的进程，所以编排放在它这里：① 先问 acowork-user 要本 chat 已缓存的
+> 投影 → ② 只拉未命中的，按执行会话分组、每组一次批量请求 → ③ 把其中的**终态轮**写回缓存。
+> **首次渲染拉取并落盘，之后的渲染是本地磁盘读**——这是这个缓存存在的唯一理由（见
+> [ADR-106](../../adr/zh/ADR-106-chat-execution-reference-projection.md) D5）。
+
+| 方法 | 路径 | 用途 | 权限 |
+|---|---|---|---|
+| GET | `/api/chat-blocks/{chat_id}?refs=` | 按引用批量解析执行块投影（缓存优先，缺失回源并写回） | chat 参与者（身份取自 token） |
+
+`refs` **必填**，逗号分隔的三段式 `instance|session|r:round`："本 chat 的全部块"没有上界，不该出现在
+请求路径上，而只有客户端知道自己正在渲染哪些行。约束：单次 ≤ 200 个引用（超出 → 422）；按首次出现
+顺序去重；每段字符集限 `[A-Za-z0-9_.-]`（`round` 段另允许 `:` 与 `.`），**三段都禁 `.` 起始与内嵌 `..`**，
+且 `round` 必须以 `r:` 开头并带正文——D2 铸造的是 `r:{inbound_message_id}`，光一个 `r:` 意味着调用方截断过。形状校验不是洁癖：这三段
+下一步就进 URL 路径、query 与 SQL bind。**本层的谓词必须是下游谓词的子集**：铸造谓词（Runtime
+`is_addressable`）与缓存键谓词（acowork-user `rounds_cache::valid_id`）同样禁 `..`，而缓存读对任一
+坏 token 直答整页 422，本层又把非 2xx 读成"缓存不可读 ⇒ 全部 miss"——一个本层放行、下游拒的
+token 会让整页缓存永久失效，每次渲染都跨机全量回源。**422 只留给请求级错误**（什么都没问、超出上限）：一个过不去
+形状校验的 token **不让整请求失败**，它在自己的 `blocks` 项里以 `status: not_found` 作答并回显原 token
+（`detail: "malformed block ref"`）——一个坏转录行不该把它周内的所有块一起变成读不了，而静默丢弃那个
+token 又会让前端为它编造一行。
+
+响应（**顺序与请求一致**，每个引用恰好一项）：
+
+```json
+{ "chat_session_id": "…",
+  "blocks": [ {
+      "ref": "…|…|r:…", "agent_instance_id": "…", "agent_session_id": "…", "round_id": "r:…",
+      "status": "ok", "source": "cache",
+      "projection": { "round_id": "r:…", "user": { "body": "…", "attachments": [] },
+                       "answer": { "body": "…" }, "card": null,
+                       "terminal": true, "chat_session_id": "…" } } ] }
+```
+
+**四态**（ADR-106 D9；引用**永不静默丢弃**——丢弃会让前端为它编造一行）：
+
+| `status` | 含义 | 前端呈现 | 伴随字段 |
+|---|---|---|---|
+| `ok` | 终态投影 | 完整块 | `source` = `cache` \| `runtime` |
+| `pending` | 轮次仍在跑，来自**实时投影** | 进行中，稍后重读 | `source` 恒为 `runtime` |
+| `not_found` | 无此轮次、该投影绑定的是别的 chat、上游转录已无法佐证那个坐标，或那个 token 根本不是合法引用 | 显式空洞（重试读不出内容） | 仅 token 畸形时带 `detail` |
+| `unreachable` | 宿主 Runtime 问不到，或该轮存在但它的行读不出来（批量项带 `error`，[§5.7](#57-轮次投影读取adr-106-d4)）| "暂不可达" + 重试入口 | `detail` |
+
+约定：
+
+- **`unreachable` ≠ 进行中**。把 outage 渲染成"还在跑"，等于让一个已经停掉的节点改写"发生了什么"。
+  块显示进行中的唯一 durable 判据是实时投影报 `terminal=false`；缓存里不可能出现 `terminal=false`（见下）。
+- **三道权限墙**：① 引用行是否可见 = chat 参与者，由 acowork-user 用与转录同一条隐藏 404 规则裁决
+  （非参与者 → 本端点 404，不是 403，也不绕开它去回源）；② 回源用的是 agent 反代同一套 scope 注入
+  （`x-user-id` + 由 token 派生的 chat 成员集合，**永不信任请求头里的 chat 范围**），Runtime 侧仍跑
+  `authorize_read`（[§5.7](#57-轮次投影读取adr-106-d4)）；③ **绑定守卫**——Runtime 在每份投影上盖该执行
+  会话自己的 `chat_session_id`（取自磁盘上的会话 meta，不受请求头影响），Gateway 只呈现、只缓存绑定
+  **等于**被读 chat 的投影。缺第三道，同时属于 A、B 两个 chat 的成员就能把 B 的执行内容灌进 A 的缓存，
+  并让它作为"历史"永久存活。
+- **降级不是故障**：缓存读不到 → 当作全部 miss；某个 Runtime 问不到 → 那几块是 `unreachable`，其余照常
+  返回；单个引用坏掉（畸形 token、坐标失效）→ 只有那个槽位是空洞；写回失败 → 只 `warn`，代价是下一次
+  渲染重付这次已经付过的拉取。一时的读故障与永久的空洞必须分家：批量项的 `found: false` **加 `error`**
+  是 outage（`unreachable`，带重试），不是 `not_found`——把磁盘抖动渲染成"这一轮从未发生"，前端不会重试，
+  而缓存也没有失效路径能把它救回来。只有 chat 关系本身取不到才让请求失败（用户服务未就绪 → 503；`chat_id`
+  形状非法 → 404，与隐藏 404 同纪律）。
+- **不走 `/api/agents/*` 反代**，因此对 [ADR-087](../../adr/zh/ADR-087-node-agent-owner-permissions.md) 的
+  路径分类器是 `Target::None`——权限由 handler 自证，与 `/lsp` 反代同理。路径必须是新的顶层前缀：
+  `/api/chat-sessions/*` 已由 `user_proxy` 通配转发，复用那个前缀会被当成透传请求而不是编排请求。
+
+#### 4.17.1 缓存侧 loopback 内部端点（Gateway → acowork-user）
+
+> **实现**：[`core/acowork-user/src/http/chat_sessions_api.rs`](../../../core/acowork-user/src/http/chat_sessions_api.rs)
+> （路由）+ [`core/acowork-user/src/rounds_cache.rs`](../../../core/acowork-user/src/rounds_cache.rs)（存储）。
+> 归属理由：缓存必须能随 chat 目录一起删掉，而"随 chat 一起死"只有 chat 的拥有方做得到。存储是
+> `{data_dir}/chat-sessions/{sid}/rounds.sqlite`，主键 `(agent_instance_id, agent_session_id, round_id)`。
+> 属于 `/internal/chat-sessions/*` 系统面：只绑 loopback，调用方是本机 Gateway，但每次调用都要点名
+> 它**代表哪个用户**（`who`），参与关系照普通 chat 读校验（ADR-084 §决策 4b/7）。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/internal/chat-sessions/{sid}/rounds?who=&refs=` | 读已缓存的投影，按请求顺序返回 `{"rounds": [ {agent_instance_id, agent_session_id, round_id, projection, terminal, fetched_at} ]}` |
+| PUT | `/internal/chat-sessions/{sid}/rounds` | 写回刚拉到的投影，body `{"who": "…", "rounds": [ {同上，去掉 fetched_at} ]}` → `{"stored": n}` |
+
+约定：
+
+- `refs` 为空是合法的 no-op（什么都不问）；形状非法 → 422；非参与者 → 隐藏 404；单次 ≤ 200 条。
+- **`fetched_at` 由服务端盖时钟**，调用方无法把一行做旧；它**只用于淘汰**（每 chat ≤ 4000 行，超出丢
+  最旧的），不是 TTL——终态轮的内容不可变，因此这套设计里没有失效路径。
+- 单个投影 payload ≤ 256 KiB，超限**跳过不存**：一个块是"一轮的用户行 + 回答行"，超过这个尺寸的东西
+  不是块。因此 `stored` 可以小于提交的条数，这不是错误。
+- **缓存层自己强制 terminal-only**：写入入口见到 `terminal=false` 一律 `warn` 并跳过，不依赖编排方记得
+  过滤。读侧同样不信侧表——非终态、或 payload 不是对象的行一律当 miss（可弃缓存遇上说谎的行，正解是
+  重拉，绝不是相信它）。损坏的 `rounds.sqlite` 删除重建：这个缓存能发生的最坏情况就是"它是空的"。
+- 删除 chat 目录前 MUST 先释放该 SQLite 句柄（Windows 下 SQLite 不带 `FILE_SHARE_DELETE` 打开，留着
+  句柄会让"可弃侧表"变成"删不掉的 chat"），而且缓存读写 MUST 在 per-chat `session_lock` **内**完成
+  （与 `delete_session` 同一把锁）：`connect()` 会 `create_dir_all(父目录)`，一个落在锁外的 open 会复活
+  正在被删的 chat 并留下活句柄——那时不只是删不掉，还是隐私残留。
+- 这两个端点的错误语义与转录表面**故意不同**：缓存打不开是服务端故障（500），不是 422——Gateway 的块
+  端点把"非 2xx 且非 404"读成"降级为全部 miss"，422 会被当成一次静默的 miss 而藏住故障；而 404 只留给
+  "这不是你的 chat"（非参与者与未知 chat 共用同一个隐藏 404）。
+
+---
+
 ## 5. Gateway → Runtime 反向代理（需 Runtime 在线）
 
 > **实现**：`core/acowork-gateway/src/http/proxy.rs`
@@ -1009,6 +1113,68 @@ RAG 不属记忆面，仍由 Runtime 持有：
 > 会被 Runtime 拒绝（404）。PUT body 是 `{content: string}`，单文件 ≤ 1 MiB，空内容
 > 或纯空白 → 400。原子写入（`tmp` + `rename`）保证崩溃时不留半截文件。详见
 > `core/acowork-runtime/src/http/prompts.rs` 与 ADR-063 §3.5。
+
+### 5.7 轮次投影读取（ADR-106 D4）
+
+> **实现**：[`core/acowork-runtime/src/http/rounds.rs`](../../../core/acowork-runtime/src/http/rounds.rs)
+> （路由与授权）+ [`core/acowork-runtime/src/rounds.rs`](../../../core/acowork-runtime/src/rounds.rs)
+> （轮次侧表与投影装配）。
+> "一轮是什么"由**执行会话**定义，不由 chat 定义——这就是投影住在 Runtime 的原因（ADR-106 D1）。
+> 侧表是 `<work_dir>/conversations/{sid}.jsonl.rounds`（append-only、fold-on-read、首触重建——写者
+> open 与**读路径都是**、崩溃时补 `interrupted` 终态），每行只存 ADR-050 data-index 坐标。名字是
+> 主存名加后缀：转录目录里 `.jsonl` 扩展名就是会话身份，侧表不能占它。
+
+| 方法 | Runtime 路径 | 用途 | 权限 |
+|---|---|---|---|
+| GET | `/sessions/{sid}/rounds/{round_id}` | 单轮投影 | `authorize_read`（scope 同 [§5.2](#52-会话只读查询)） |
+| GET | `/sessions/{sid}/rounds?ids=a,b` | 批量投影，一次请求 ≤ 64 个轮次 | 同上 |
+
+响应形状（单条；批量把每项放进 `{"session_id": "…", "rounds": [ … ]}` 并额外带 `found`）：
+
+```json
+{ "round_id": "r:…", "found": true, "terminal": true, "status": "completed",
+  "user":   { "body": "…", "ts": "…", "attachments": [ … ] },
+  "answer": { "body": "…", "ts": "…" },
+  "card": null, "chat_session_id": "…" }
+```
+
+错误码：`400` 单条读的轮次 id 形状非法 / `ids` 为空 / 批量超出 64 个；`404` 会话 id 形状非法、会话不存
+在或不可读、无此轮次、或该轮的转录坐标已不再能佐证它（单条）；`500` 投影装配失败（单条；批量则把失败
+记在该项的 `found: false` + `error`）。批量读里**单个**畸形的 `round_id` 不拒绝整个请求，它在自己的
+项上答 `found: false`（一个坏 ref 不该把同批其余块一起变成读不了）。`found: false` 与
+`found: false` + `error` 是两件事：前者是永久空洞，后者是"该轮存在但行读不出来"，[§4.17](#417-chat-执行块投影读取adr-106-d5d9d10)
+把它映射为 `unreachable` 而不是 `not_found`。
+
+约定：
+
+- **不经 `/api/agents/*` 反代**。这两条是 [§4.17](#417-chat-执行块投影读取adr-106-d5d9d10) 的回源读：
+  Gateway 从 `RuntimeHttpRegistry`（MQTT retained `acowork/agents/{id}/http_port`）直接命中随机端口，
+  按 ADR-055 Phase 5a 注入 `X-ACowork-Node-Token`。不给它们公开前缀，是因为一次块渲染是两次读，
+  而前端不应该负责编排这两次读。
+- **只读盘、不读内存态**：`Closed`（不驻留内存）的会话照样可投影，所以 chat 块在其运行结束几小时后
+  仍能渲染，也**不需要** `POST …/open`——那是写授权，激活会话是生命周期变更（[§5.6.1](#561-生命周期第一批)）。
+- **有界**（ADR-096）：一次投影 = 被引用的两行 + 用户行后 ≤ 32 行的附件窗口（还被该轮的 answer 位置
+  截断），绝不范围扫描转录。批量请求先 fold 一次侧表，不按 id 重复读同一份小文件。
+- **空洞不撒谎**：`found: false` 必须与"没问这一轮"在形状上可分——被问而未答的项由调用方补成显式空洞，
+  而不是缺键（缺键会让调用方把"没有"误读成"未请求"）。
+- **404 不做存在性 oracle**（ADR-076 §决策 4）：单条形状里"会话不存在"、"调用者不可读"、"无此轮次"
+  三种情况共用一个 404。
+- **坐标由行自身背书**：投影取回的两行必须 role 对、且行自己的 `metadata.round_id` 等于所询轮次。
+  转录不存在、坐标越界、坐标漂到别的轮的行——都是**显式空洞**，而不是返回坐在该位置上的那条消息：
+  下游的投影缓存（§4.17）**没有失效路径**，错行一旦被当成内容端出去就会被永久固化。只有真实
+  的读盘失败才报 `Err`（`500` / 该项 `error`），因为调用方需要把可重试的 outage 与永久空洞区分开。
+  **附件窗内的行同样要背书**：窗是一个**范围**，而没有 `answer` 坐标的轮（崩溃 / interrupt）没有
+  东西给它收口，因此不校验就会把下一轮的上传算进本块。写者路径上附件行与 user 行走同一个漏斗，本来
+  就带 stamp，所以这条校验不损失任何真实附件。
+- **`chat_session_id` 是绑定，不是可选字段**：由 Runtime 从磁盘上的会话 meta 盖上，不受请求头影响。
+  它是 Gateway 侧呈现与写回的绑定守卫依据（ADR-106 D10）；缺了它，跨 chat 投毒就成立。
+- **`round_id` 是确定性铸造**：`r:{inbound_message_id}`，纯函数——MQTT 重投递与 HTTP 重试映射到同
+  一轮，这也是 chat 侧引用行天然幂等的原因；超过 128 字节**或字符集不可寻址**（`[A-Za-z0-9_:.-]` 之外、
+  以 `.` 起始、含 `..`）就哈希折叠成 `r:{digest}-{len}`——铸造与寻址必须是同一个谓词，否则一个轮会生于
+  可读之外；折叠用的是**稳定摘要**（SHA-256 前 8 字节），不是实现细节决定的标准库 hasher，因为这个串
+  会落盘并被引用行当幂等键，工具链升级不能改变它；`message_id` 为空则现铸 UUID。
+- **首触重建有上界**：超过 20 000 条的历史转录不重建索引，其投影退化为显式空洞——不在打开路径上
+  付一次无界读的代价。
 
 ---
 
