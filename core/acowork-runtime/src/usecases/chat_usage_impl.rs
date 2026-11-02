@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use acowork_core::providers::traits::UsageInfo;
 use acowork_core::session_meta::SessionTotals;
-use acowork_sqlite::SqliteChatUsageStore;
+use acowork_sqlite::{ChatUsageCall, SqliteChatUsageStore};
 
 use crate::agent::agent_core::AgentCore;
 use crate::conversation::estimate_call_cost;
@@ -51,6 +51,7 @@ impl ChatUsageService for RuntimeChatUsageService {
         usage: &UsageInfo,
         provider_label: &str,
         model_id: &str,
+        history_tokens: Option<u64>,
     ) {
         // Sink 1 — the atomic counters. Unconditional: a ledger-store
         // failure must not silently drop the call from the agent total
@@ -74,9 +75,15 @@ impl ChatUsageService for RuntimeChatUsageService {
         // ledger column never stores `""` (an unrecorded and a blank-kind
         // row must read identically — see `SqliteChatUsageStore::record_call`).
         let kind = (!chat_kind.trim().is_empty()).then_some(chat_kind);
-        if let Err(e) =
-            store.record_call(chat_session_id, kind, usage, provider_label, model_id, cost_delta)
-        {
+        if let Err(e) = store.record_call(&ChatUsageCall {
+            chat_session_id,
+            chat_kind: kind,
+            usage,
+            provider_id: provider_label,
+            model_id,
+            cost_delta,
+            history_tokens,
+        }) {
             // Best-effort by contract: the turn already happened; losing
             // one ledger row is a statistics miss, not a failure to abort.
             tracing::warn!(
@@ -146,6 +153,7 @@ impl ChatUsageService for NoopChatUsageService {
         _usage: &UsageInfo,
         _provider_label: &str,
         _model_id: &str,
+        _history_tokens: Option<u64>,
     ) {
     }
 
@@ -232,11 +240,11 @@ mod tests {
 
         // One chat, three model calls (the shape of a turn with an
         // information round + a dispatch retry): every call is booked.
-        svc.record_chat_llm_usage("c-1", "group", &usage(100, 10, 60, 5), "mock", "test-model");
-        svc.record_chat_llm_usage("c-1", "group", &usage(120, 20, 100, 0), "mock", "test-model");
+        svc.record_chat_llm_usage("c-1", "group", &usage(100, 10, 60, 5), "mock", "test-model", None);
+        svc.record_chat_llm_usage("c-1", "group", &usage(120, 20, 100, 0), "mock", "test-model", None);
         // A second chat, and one call whose Provider reported no input
         // (zero-skip: totals must not move on the input side).
-        svc.record_chat_llm_usage("c-2", "direct", &usage(0, 7, 0, 0), "mock", "test-model");
+        svc.record_chat_llm_usage("c-2", "direct", &usage(0, 7, 0, 0), "mock", "test-model", None);
 
         // Sink 1 — agent atomic counters carry every reported token.
         assert_eq!(core.agent_token_totals(), (220, 37, 160, 5));
@@ -267,8 +275,8 @@ mod tests {
         // Process 1: record chat spend.
         let core1 = make_core(temp.path(), true);
         let svc1 = RuntimeChatUsageService::new(core1.clone());
-        svc1.record_chat_llm_usage("c-1", "group", &usage(100, 10, 60, 5), "mock", "test-model");
-        svc1.record_chat_llm_usage("c-2", "direct", &usage(30, 4, 0, 0), "mock", "test-model");
+        svc1.record_chat_llm_usage("c-1", "group", &usage(100, 10, 60, 5), "mock", "test-model", None);
+        svc1.record_chat_llm_usage("c-2", "direct", &usage(30, 4, 0, 0), "mock", "test-model", None);
         drop(svc1);
         drop(core1);
 
@@ -291,7 +299,7 @@ mod tests {
         let core = make_core(temp.path(), false);
         let svc = RuntimeChatUsageService::new(core.clone());
 
-        svc.record_chat_llm_usage("c-1", "group", &usage(50, 5, 0, 0), "mock", "test-model");
+        svc.record_chat_llm_usage("c-1", "group", &usage(50, 5, 0, 0), "mock", "test-model", None);
 
         // No ledger store: the call is still in the agent totals (never
         // silently dropped), and the recovery scan reads zero rather than
@@ -310,8 +318,8 @@ mod tests {
         let core = make_core(temp.path(), true);
         let svc = RuntimeChatUsageService::new(core.clone());
 
-        svc.record_chat_llm_usage("c-1", "", &usage(100, 10, 0, 0), "mock", "test-model");
-        svc.record_chat_llm_usage("c-2", "user_group", &usage(30, 4, 0, 0), "mock", "test-model");
+        svc.record_chat_llm_usage("c-1", "", &usage(100, 10, 0, 0), "mock", "test-model", None);
+        svc.record_chat_llm_usage("c-2", "user_group", &usage(30, 4, 0, 0), "mock", "test-model", None);
         assert!(svc.forget_chat("c-1"));
         assert!(!svc.forget_chat("c-1"), "idempotent: the second hit removes nothing");
         assert!(!svc.forget_chat("c-unknown"));

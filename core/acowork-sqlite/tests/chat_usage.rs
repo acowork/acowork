@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use acowork_core::providers::traits::UsageInfo;
 use acowork_core::session_meta::{SessionMeta, SessionMetaStore, SessionTokens};
-use acowork_sqlite::{SqliteChatUsageStore, SqliteSessionMetaStore, SqliteStore};
+use acowork_sqlite::{ChatUsageCall, SqliteChatUsageStore, SqliteSessionMetaStore, SqliteStore};
 
 const DIM: usize = 4;
 
@@ -89,14 +89,38 @@ fn record_call_folds_totals_detail_and_aggregate() {
     let dir = tempfile::tempdir().unwrap();
     let (chat, sm) = stores(dir.path());
 
-    chat.record_call("c-1", Some("group"), &usage(100, 20, 60, 5), "openai", "gpt-4o-mini", Some(0.01))
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("group"),
+        usage: &usage(100, 20, 60, 5),
+        provider_id: "openai",
+        model_id: "gpt-4o-mini",
+        cost_delta: Some(0.01),
+        history_tokens: None,
+    })
         .unwrap();
     // Second call, same chat, same model: totals accumulate, `last_*`
     // overwrites with the raw values of THIS call.
-    chat.record_call("c-1", Some("group"), &usage(150, 30, 100, 0), "openai", "gpt-4o-mini", Some(0.02))
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("group"),
+        usage: &usage(150, 30, 100, 0),
+        provider_id: "openai",
+        model_id: "gpt-4o-mini",
+        cost_delta: Some(0.02),
+        history_tokens: None,
+    })
         .unwrap();
     // Third call, same chat, different model: new detail bucket.
-    chat.record_call("c-1", Some("group"), &usage(50, 10, 0, 0), "anthropic", "claude-x", None)
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("group"),
+        usage: &usage(50, 10, 0, 0),
+        provider_id: "anthropic",
+        model_id: "claude-x",
+        cost_delta: None,
+        history_tokens: None,
+    })
         .unwrap();
 
     let rows = chat.list(10, 0).unwrap();
@@ -145,7 +169,15 @@ fn zero_skip_gate_matches_session_rules() {
 
     // A Provider fallback reports prompt == 0: input/cache_read must not
     // accumulate, completion must, and `last_*` honestly shows the zero.
-    chat.record_call("c-1", None, &usage(0, 40, 999, 0), "openai", "gpt-4o-mini", None)
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: None,
+        usage: &usage(0, 40, 999, 0),
+        provider_id: "openai",
+        model_id: "gpt-4o-mini",
+        cost_delta: None,
+        history_tokens: None,
+    })
         .unwrap();
     let r = &chat.list(10, 0).unwrap()[0];
     assert_eq!(r.tokens.total_input, 0);
@@ -174,7 +206,15 @@ fn consistency_and_rebuild_cover_sessions_and_ledger_together() {
         },
     ))
     .unwrap();
-    chat.record_call("c-1", Some("direct"), &usage(100, 20, 0, 0), "openai", "gpt-4o-mini", Some(0.001))
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("direct"),
+        usage: &usage(100, 20, 0, 0),
+        provider_id: "openai",
+        model_id: "gpt-4o-mini",
+        cost_delta: Some(0.001),
+        history_tokens: None,
+    })
         .unwrap();
 
     let before = stats_sum(&sm);
@@ -190,11 +230,35 @@ fn totals_is_the_recovery_scan_over_the_ledger() {
     let (chat, _sm) = stores(dir.path());
 
     assert_eq!(chat.totals().unwrap(), (0, 0, 0, 0));
-    chat.record_call("c-1", None, &usage(100, 20, 10, 1), "openai", "m", Some(0.001))
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: None,
+        usage: &usage(100, 20, 10, 1),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: Some(0.001),
+        history_tokens: None,
+    })
         .unwrap();
-    chat.record_call("c-2", None, &usage(7, 3, 0, 0), "openai", "m", Some(0.001))
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-2",
+        chat_kind: None,
+        usage: &usage(7, 3, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: Some(0.001),
+        history_tokens: None,
+    })
         .unwrap();
-    chat.record_call("c-1", None, &usage(0, 4, 0, 0), "openai", "m", None)
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: None,
+        usage: &usage(0, 4, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: None,
+    })
         .unwrap();
     assert_eq!(chat.totals().unwrap(), (107, 27, 10, 1));
     assert_eq!(chat.count().unwrap(), 2);
@@ -205,10 +269,26 @@ fn list_pages_most_recent_first() {
     let dir = tempfile::tempdir().unwrap();
     let (chat, _sm) = stores(dir.path());
 
-    chat.record_call("c-old", None, &usage(1, 1, 0, 0), "openai", "m", None)
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-old",
+        chat_kind: None,
+        usage: &usage(1, 1, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: None,
+    })
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
-    chat.record_call("c-new", None, &usage(1, 1, 0, 0), "openai", "m", None)
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-new",
+        chat_kind: None,
+        usage: &usage(1, 1, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: None,
+    })
         .unwrap();
     let page = chat.list(1, 0).unwrap();
     assert_eq!(page.len(), 1);
@@ -224,9 +304,98 @@ fn schema_stamps_v9_on_open() {
     // a write is the cheapest existence proof, and every other test in this
     // file would fail loudly if it did not.
     let chat = SqliteChatUsageStore::new(Arc::new(store));
-    chat.record_call("c-v9", None, &usage(1, 1, 0, 0), "openai", "m", None)
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-v9",
+        chat_kind: None,
+        usage: &usage(1, 1, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: None,
+    })
         .unwrap();
     assert_eq!(chat.count().unwrap(), 1);
+}
+
+/// The router's projected-history occupancy is a SNAPSHOT, not a cumulative
+/// counter: the window is refilled on every turn, so only the latest
+/// occupancy is meaningful against the `chat_router.history_max_tokens`
+/// budget. A turn that does not measure it (`None`) must not erase the
+/// previous measurement — "no measurement" is not "zero".
+#[test]
+fn history_tokens_is_a_snapshot_and_none_keeps_the_last_measurement() {
+    let dir = tempfile::tempdir().unwrap();
+    let (chat, _sm) = stores(dir.path());
+
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("group"),
+        usage: &usage(100, 20, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: Some(4_000),
+    })
+        .unwrap();
+    assert_eq!(
+        chat.get("c-1").unwrap().unwrap().history_tokens,
+        Some(4_000),
+        "the measured occupancy must be readable back"
+    );
+
+    // A later turn that measured a smaller window overwrites it.
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("group"),
+        usage: &usage(100, 20, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: Some(1_500),
+    })
+        .unwrap();
+    assert_eq!(
+        chat.get("c-1").unwrap().unwrap().history_tokens,
+        Some(1_500),
+        "the occupancy is a per-turn snapshot, not an accumulator"
+    );
+
+    // A turn that measured nothing keeps the last known value — a missing
+    // measurement is not a zero.
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("group"),
+        usage: &usage(100, 20, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: None,
+    })
+        .unwrap();
+    assert_eq!(
+        chat.get("c-1").unwrap().unwrap().history_tokens,
+        Some(1_500),
+        "an unmeasured turn must not erase the last measurement"
+    );
+}
+
+/// A row that never measured its occupancy reads as "no measurement"
+/// (`None`), never as a fabricated zero (ADR-027: 宁可 miss 也不估计).
+#[test]
+fn history_tokens_is_none_when_never_measured() {
+    let dir = tempfile::tempdir().unwrap();
+    let (chat, _sm) = stores(dir.path());
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: None,
+        usage: &usage(10, 2, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: None,
+    })
+        .unwrap();
+    assert_eq!(chat.get("c-1").unwrap().unwrap().history_tokens, None);
 }
 
 #[test]
@@ -247,9 +416,25 @@ fn forget_drops_the_row_and_nets_the_aggregate() {
         },
     ))
     .unwrap();
-    chat.record_call("c-1", Some("group"), &usage(100, 20, 0, 0), "openai", "gpt-4o-mini", Some(0.01))
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("group"),
+        usage: &usage(100, 20, 0, 0),
+        provider_id: "openai",
+        model_id: "gpt-4o-mini",
+        cost_delta: Some(0.01),
+        history_tokens: None,
+    })
         .unwrap();
-    chat.record_call("c-2", Some("direct"), &usage(7, 3, 0, 0), "openai", "gpt-4o-mini", Some(0.001))
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-2",
+        chat_kind: Some("direct"),
+        usage: &usage(7, 3, 0, 0),
+        provider_id: "openai",
+        model_id: "gpt-4o-mini",
+        cost_delta: Some(0.001),
+        history_tokens: None,
+    })
         .unwrap();
     assert!(sm.token_stats_consistent().unwrap());
 
@@ -277,7 +462,15 @@ fn forget_is_idempotent_on_a_missing_row() {
     let dir = tempfile::tempdir().unwrap();
     let (chat, sm) = stores(dir.path());
 
-    chat.record_call("c-1", None, &usage(100, 20, 0, 0), "openai", "m", None)
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: None,
+        usage: &usage(100, 20, 0, 0),
+        provider_id: "openai",
+        model_id: "m",
+        cost_delta: None,
+        history_tokens: None,
+    })
         .unwrap();
     // Unknown chat: reports false and must not touch the aggregate.
     assert!(!chat.forget("c-never-recorded").unwrap());
@@ -299,14 +492,15 @@ fn forget_is_idempotent_on_a_missing_row() {
 fn get_returns_the_row_or_none() {
     let dir = tempfile::tempdir().unwrap();
     let (chat, _sm) = stores(dir.path());
-    chat.record_call(
-        "c-1",
-        Some("user_group"),
-        &usage(100, 10, 60, 5),
-        "mock",
-        "m1",
-        Some(0.5),
-    )
+    chat.record_call(&ChatUsageCall {
+        chat_session_id: "c-1",
+        chat_kind: Some("user_group"),
+        usage: &usage(100, 10, 60, 5),
+        provider_id: "mock",
+        model_id: "m1",
+        cost_delta: Some(0.5),
+        history_tokens: None,
+    })
     .unwrap();
 
     let row = chat.get("c-1").unwrap().expect("row exists");

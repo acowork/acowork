@@ -49,6 +49,7 @@ impl acowork_runtime::usecases::chat_usage::ChatUsageService for NoopChatUsage {
         _usage: &UsageInfo,
         _provider_label: &str,
         _model_id: &str,
+        _history_tokens: Option<u64>,
     ) {
     }
     fn forget_chat(&self, _chat_session_id: &str) -> bool {

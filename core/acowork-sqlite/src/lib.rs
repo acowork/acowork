@@ -26,7 +26,7 @@ pub use acowork_memory::sqlite::{
     Error, Result, SqliteStore, SCHEMA_SQL, SCHEMA_VERSION, TRIGRAM_MIN, has_sqlite_magic,
     schema_version,
 };
-pub use chat_usage::{ChatUsageRow, SqliteChatUsageStore};
+pub use chat_usage::{ChatUsageCall, ChatUsageRow, SqliteChatUsageStore};
 pub use conversation::{ConversationHit, ConversationStore};
 pub use session_meta::SqliteSessionMetaStore;
 

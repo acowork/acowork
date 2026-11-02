@@ -57,6 +57,19 @@ pub struct ChatUsageRow {
     pub last_active_at: String,
     pub llm_call_count: u64,
     pub tokens: SessionTokens,
+    /// Tokens the router's projected history window (Block B) cost on the
+    /// most recent turn — the occupancy of the `chat_router.history_max_tokens`
+    /// budget.
+    ///
+    /// `None` = not measured (a row written before schema v10, or a turn
+    /// that never projected a history window). The UI renders a dash rather
+    /// than a fabricated 0 — "宁可 miss 也不估计" (ADR-027).
+    ///
+    /// This is deliberately NOT the provider-reported prompt count: that
+    /// number also carries the system prompt and the tool schemas, so it
+    /// routinely exceeds the history budget and cannot be compared against
+    /// it.
+    pub history_tokens: Option<u64>,
     /// Per-`(provider, model)` breakdown; `None` when empty (a row that
     /// recorded only zero-delta calls reads identical to a fresh one).
     pub model_usage: Option<ModelUsageMap>,
@@ -67,6 +80,39 @@ pub struct ChatUsageRow {
 #[derive(Clone)]
 pub struct SqliteChatUsageStore {
     store: Arc<SqliteStore>,
+}
+
+/// One model call to fold into a chat's ledger row.
+///
+/// A parameter object rather than a positional list: the call carries
+/// seven independent facts, and a positional list that long makes
+/// "which one is the cost / which one is the history occupancy" a
+/// reading exercise at every call site. Named fields keep the meaning
+/// attached to the value.
+#[derive(Debug, Clone)]
+pub struct ChatUsageCall<'a> {
+    /// The chat the call belongs to.
+    pub chat_session_id: &'a str,
+    /// The router's Session-kind string. `None` (and the empty string,
+    /// normalized away by the caller) records "kind not known" — the
+    /// column must not distinguish "unrecorded" from "recorded but
+    /// blank", so a blank is stored as NULL, same as a fresh row.
+    pub chat_kind: Option<&'a str>,
+    /// The provider's token accounting for this call.
+    pub usage: &'a UsageInfo,
+    /// Provider label (the `"{provider}|{model}"` breakdown key).
+    pub provider_id: &'a str,
+    /// Model id (the breakdown key's model half).
+    pub model_id: &'a str,
+    /// The call's price delta. `None` = no price known — never "free"
+    /// (ADR-027 poison rule).
+    pub cost_delta: Option<f64>,
+    /// Tokens the router's projected history window (Block B) cost on
+    /// this turn (`None` = not measured). A SNAPSHOT, not a cumulative
+    /// counter: it overwrites on every call, because the window is
+    /// refilled per turn and only the latest occupancy is meaningful
+    /// against the budget.
+    pub history_tokens: Option<u64>,
 }
 
 impl SqliteChatUsageStore {
@@ -80,24 +126,24 @@ impl SqliteChatUsageStore {
     /// Fold one successful router model call into the chat's ledger row
     /// and diff the breakdown into `token_stats`, in a single transaction.
     ///
-    /// `chat_kind` is the router's Session-kind string; `None` (and the
-    /// empty string, normalized away by the caller) records "kind not
-    /// known" — the column must not distinguish "unrecorded" from "recorded
-    /// but blank", so a blank is stored as NULL, same as a fresh row.
-    ///
     /// The diff is computed against the PERSISTED old breakdown — the same
     /// idempotent self-healing contract as `SessionMetaStore::upsert`: a
     /// lost or replayed delta is corrected by the next call's diff, and
     /// `rebuild_token_stats` remains the repair path.
-    pub fn record_call(
-        &self,
-        chat_session_id: &str,
-        chat_kind: Option<&str>,
-        usage: &UsageInfo,
-        provider_id: &str,
-        model_id: &str,
-        cost_delta: Option<f64>,
-    ) -> AcoworkResult<()> {
+    ///
+    /// The per-call facts live in [`ChatUsageCall`] — see that struct for
+    /// the meaning of each field (`chat_kind`, `cost_delta`,
+    /// `history_tokens`).
+    pub fn record_call(&self, call: &ChatUsageCall<'_>) -> AcoworkResult<()> {
+        let ChatUsageCall {
+            chat_session_id,
+            chat_kind,
+            usage,
+            provider_id,
+            model_id,
+            cost_delta,
+            history_tokens,
+        } = *call;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let key = model_usage_key(Some(provider_id), Some(model_id));
         let mut conn = self.store.lock();
@@ -109,7 +155,7 @@ impl SqliteChatUsageStore {
             fold_model_usage_entry(&mut new_map, &key, usage, cost_delta);
 
             tx.execute(
-                "INSERT INTO chat_token_usage ( \n                     chat_session_id, chat_kind, created_at, last_active_at, llm_call_count, \n                     token_last_input, token_last_output, token_total_input, token_total_output, \n                     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \n                     model_usage \n                 ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \n                 ON CONFLICT(chat_session_id) DO UPDATE SET \n                     chat_kind = excluded.chat_kind, \n                     last_active_at = excluded.last_active_at, \n                     llm_call_count = chat_token_usage.llm_call_count + 1, \n                     token_last_input = excluded.token_last_input, \n                     token_last_output = excluded.token_last_output, \n                     token_total_input = excluded.token_total_input, \n                     token_total_output = excluded.token_total_output, \n                     token_last_cache_read = excluded.token_last_cache_read, \n                     token_last_cache_write = excluded.token_last_cache_write, \n                     token_total_cache_read = excluded.token_total_cache_read, \n                     token_total_cache_write = excluded.token_total_cache_write, \n                     model_usage = excluded.model_usage",
+                "INSERT INTO chat_token_usage ( \n                     chat_session_id, chat_kind, created_at, last_active_at, llm_call_count, \n                     token_last_input, token_last_output, token_total_input, token_total_output, \n                     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \n                     model_usage, history_tokens \n                 ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \n                 ON CONFLICT(chat_session_id) DO UPDATE SET \n                     chat_kind = excluded.chat_kind, \n                     last_active_at = excluded.last_active_at, \n                     llm_call_count = chat_token_usage.llm_call_count + 1, \n                     token_last_input = excluded.token_last_input, \n                     token_last_output = excluded.token_last_output, \n                     token_total_input = excluded.token_total_input, \n                     token_total_output = excluded.token_total_output, \n                     token_last_cache_read = excluded.token_last_cache_read, \n                     token_last_cache_write = excluded.token_last_cache_write, \n                     token_total_cache_read = excluded.token_total_cache_read, \n                     token_total_cache_write = excluded.token_total_cache_write, \n                     model_usage = excluded.model_usage, \n                     history_tokens = COALESCE(excluded.history_tokens, chat_token_usage.history_tokens)",
                 params![
                     chat_session_id,
                     chat_kind,
@@ -124,6 +170,7 @@ impl SqliteChatUsageStore {
                     token_to_i64(tokens.total_cache_read),
                     token_to_i64(tokens.total_cache_write),
                     serialize_model_usage(Some(&new_map)),
+                    history_tokens.map(|v| v as i64),
                 ],
             )?;
             apply_stats_delta(&tx, &old_map, &new_map)?;
@@ -187,7 +234,7 @@ impl SqliteChatUsageStore {
         let conn = self.store.lock();
         let row = conn
             .query_row(
-                "SELECT chat_session_id, chat_kind, created_at, last_active_at, llm_call_count, \n                 token_last_input, token_last_output, token_total_input, token_total_output, \n                 token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \n                 model_usage \n                 FROM chat_token_usage WHERE chat_session_id = ?1",
+                "SELECT chat_session_id, chat_kind, created_at, last_active_at, llm_call_count, \n                 token_last_input, token_last_output, token_total_input, token_total_output, \n                 token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \n                 model_usage, history_tokens \n                 FROM chat_token_usage WHERE chat_session_id = ?1",
                 params![chat_session_id],
                 row_to_usage,
             )
@@ -202,7 +249,7 @@ impl SqliteChatUsageStore {
         let conn = self.store.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT chat_session_id, chat_kind, created_at, last_active_at, llm_call_count, \n                 token_last_input, token_last_output, token_total_input, token_total_output, \n                 token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \n                 model_usage \n                 FROM chat_token_usage \n                 ORDER BY last_active_at DESC LIMIT ?1 OFFSET ?2",
+                "SELECT chat_session_id, chat_kind, created_at, last_active_at, llm_call_count, \n                 token_last_input, token_last_output, token_total_input, token_total_output, \n                 token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \n                 model_usage, history_tokens \n                 FROM chat_token_usage \n                 ORDER BY last_active_at DESC LIMIT ?1 OFFSET ?2",
             )
             .map_err(to_acowork_sqlite)?;
         let rows = stmt
@@ -298,6 +345,9 @@ fn row_to_usage(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatUsageRow> {
             total_cache_read: as_u64(r.get("token_total_cache_read")?),
             total_cache_write: as_u64(r.get("token_total_cache_write")?),
         },
+        history_tokens: r
+            .get::<_, Option<i64>>("history_tokens")?
+            .map(|v| v.max(0) as u64),
         model_usage: (!map.is_empty()).then_some(map),
     })
 }
