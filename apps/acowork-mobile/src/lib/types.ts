@@ -303,62 +303,135 @@ export interface UserChatMessage {
  * One durable row of a Chat session (`GET /api/chat-sessions/{id}/messages`).
  * Mirrors `chat_sessions_api::MessageRow` — the same view model Desktop's
  * `chatSessionStore` consumes; the mobile differences are presentation-only
- * (design 27 §6.5: status card collapsed to one line, decision card in a
- * bottom sheet).
+ * (design 27 §6.5: the round's block collapses to its header line, a decision
+ * card is answered from a bottom sheet).
+ *
+ * ADR-106 D3/D4: an `execution_round` row is a POINTER, not a copy — it has no
+ * body, and everything shown for that round is read from the execution
+ * projection (`GET /api/chat-blocks/{chatId}`). The transcript therefore carries
+ * no card row any more (D8): a pending decision lives inside the block.
  */
 export interface ChatMessageRow {
   seq: number
   ts: number
   from: string
-  /** user_message | agent_message | interaction_request | system_notice */
+  /** ADR-106 D1: user_message | agent_message | execution_round | system_notice */
   kind: string
   body: string
   to: string
   meta?: {
     message_id?: string
     conversation_id?: string
+    /** ADR-106 D6 level 1: the reference row this turn continues, or, on a
+     *  card/notice, the message the question was asked about. */
     in_reply_to?: string
-    /** Design 27 §5.3.1: the Agent instances an @-fan-out woke. Only that one
-     *  broadcast `user_message` carries it, and it is what marks the row as an
-     *  opened agent turn (see `opensAgentTurn`). */
-    mentions?: string[]
     status?: string
     repo?: string
     notice_type?: string
-    /** On an `interaction_resolved` notice: how the card's request ended —
-     *  "answered"/"approved"/"rejected" (a human decided, on either surface)
-     *  vs "timeout"/"cancelled"/"stopped"/"turn_ended"/"unanswerable"/
-     *  "superseded" (nobody answered). Mirrors the desktop `ChatMessageRow`;
-     *  see `humanAnsweredCardIds`. */
-    resolution?: string
-    /** Routing-resolved execution session that HANDLED a request — set on the
-     *  `turn_started` pointer and `interaction_request` card. */
+    /** ADR-106 D3: the round this reference row names. With `agent_session_id`
+     *  + `agent_instance_id` it is the block's address — missing any of the
+     *  three and there is no block to read. */
+    round_id?: string
+    /** The instance whose session ran the round (ADR-106 D4). */
+    agent_instance_id?: string
+    /** The execution session that ran the round — set on an `execution_round`
+     *  reference row. */
     agent_session_id?: string
-    /** ADR-100: the routing decision stamped on the turn pointer — "new" when
-     *  this turn starts a fresh task, "continue" when it reuses or rotates an
-     *  existing one. Drives the two-state `turn_started` reaction copy. */
-    turn_mode?: 'new' | 'continue'
-    /** The SENDER's execution session (design 27 `source_agent_session_id`) —
-     *  on a 1:1 `agent_message` this is the exec session that produced the
-     *  reply. `closedCardIds` uses it to bind a terminal row to the card of its
-     *  own execution session in a group fan-out. */
-    sender_session_id?: string
-    interaction?: {
-      kind: string
-      request_id: string
-      question?: string
-      options?: string[]
-    }
-    /** ADR-100 D12: labels of the execution session's own attached items on a
-     *  `user_message` that an execution view's composer sent. Labels only — the
-     *  bytes stay in that run, so the chip is inert (design 27 §4.2.1). */
-    exec_attachments?: ExecAttachmentLabel[]
-    /** Design 27 §6.4 (v2.8): a PM task dispatch row carries the bare task id;
-     *  rendered as a task chip. The dispatch's playbook never reaches chat. */
+    /** ADR-106 D6: the round opened a NEW session rather than continuing one;
+     *  absent when the turn could not say. */
+    opened_new?: boolean
+    /** The router's one-line statement of what the round was asked to do
+     *  (ADR-106 D13) — a presentation hint, never a routing decision. */
+    assignment_brief?: string
+    /** ADR-106 D13: the PM task this round works on, read off the routing
+     *  contract by the Runtime. Rendered as a chip on the block header. */
     task_id?: string
+    /** On a `session_choice` / `confirm_continue` notice (ADR-106 D6 levels 3
+     *  and 5): the sessions the human may pick, plus the always-offered escape
+     *  (`allow_new_task`). Empty-bodied rows — the surfaces own the wording. */
+    options?: ChatCandidateOption[]
+    allow_new_task?: boolean
+    /** ADR-100: display-only labels of the items the Chat-surface composer
+     *  handed to this turn. Present only on the head row; never resolvable
+     *  from here (see [`ExecAttachmentLabel`]). */
+    exec_attachments?: ExecAttachmentLabel[]
   }
   attachment_ids?: string[]
-  attachments?: Array<{ id: string; name: string; mime: string; size: number }>
+  attachments?: Array<{ id: string; filename: string; mime: string; size: number }>
+}
+
+/* ------------------------------------------------------------------ */
+/* Execution-block read (ADR-106 D3/D4/D5/D9)                           */
+/* ------------------------------------------------------------------ */
+
+/** The card a round is parked on (ADR-106 D8): what the round is waiting for,
+ *  and what the human can answer with. Rendered inside the block, never as a
+ *  chat row. */
+export interface BlockCard {
+  /** `approval` | `ask_question` | `pause`. */
+  kind: string
+  /** The coordinate the answer resolves against. */
+  request_id: string
+  /** The question, in the agent's own words. */
+  prompt?: string
+  /** Labels the human may pick; empty for a free-text answer. */
+  options?: string[]
+}
+
+/** One round's projected content, verbatim from the execution session. */
+export interface RoundProjection {
+  round_id: string
+  /** The Chat this round's session is bound to — checked server-side (D10). */
+  chat_session_id?: string
+  user?: { body: string; ts: string } | null
+  answer?: { body: string; ts: string } | null
+  card?: BlockCard | null
+  terminal: boolean
+  /** `in_progress` / `completed` / `aborted` / `failed` / `waiting` /
+   *  `interrupted` / `unknown`. */
+  status: string
+}
+
+/** One entry of `GET /api/chat-blocks/{chatId}`'s answer, in request order. */
+export interface ChatBlockEntry {
+  ref: string
+  agent_instance_id: string
+  agent_session_id: string
+  round_id: string
+  /** `ok` renders the block; `pending` renders it live and may be re-read;
+   *  `not_found` is an explicit hole; `unreachable` offers a retry (D9). */
+  status: 'ok' | 'pending' | 'not_found' | 'unreachable'
+  source?: 'cache' | 'runtime'
+  projection?: RoundProjection
+  detail?: string
+}
+
+/* ------------------------------------------------------------------ */
+/* Addressing candidates (ADR-106 D7 — the second level of the `@`)    */
+/* ------------------------------------------------------------------ */
+
+/** One addressable execution session, from the hosting Runtime. `status` is
+ *  the candidate vocabulary (`working` / `idle` / `errored` / `closed`), not
+ *  the Runtime's fine-grained one; `origin` says whether the session came out
+ *  of this chat or a PM task. The list IS the permission: a session the human
+ *  can click is a session the turn can legally be delivered to. */
+export interface ChatCandidate {
+  session_id: string
+  label: string
+  status: string
+  origin: string
+  last_active_secs: number
+}
+
+/** One offer on an addressing question (ADR-106 D6 levels 3 and 5). `why` is the
+ *  runtime's reason for putting this session on the list — shown as the row's
+ *  tooltip, never as the label: a human decides by name, not by inference score. */
+export interface ChatCandidateOption {
+  session_id: string
+  label?: string
+  status?: string
+  origin?: string
+  why?: string
 }
 
 /** `GET /api/chat-sessions/default` response envelope (the pair's session). */

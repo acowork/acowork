@@ -54,12 +54,36 @@ interface ChatSessionStore {
   openAgent(agentId: string): Promise<void>
   refresh(chatSessionId: string): Promise<void>
   loadOlder(chatSessionId: string): Promise<void>
-  sendText(chatSessionId: string, text: string, inReplyTo?: string): Promise<boolean>
+  sendText(
+    chatSessionId: string,
+    text: string,
+    inReplyTo?: string,
+    attachmentIds?: string[],
+    address?: ChatAddress,
+  ): Promise<boolean>
   /** The doorbell reaction: re-read the one session that can be on screen. */
   wake(): Promise<void>
 }
 
 const emptyWindow = (): Window => ({ older: [], tail: [], tailLoaded: 0, total: 0, loadingOlder: false })
+
+/** ADR-106 D6/D7's explicit address — the fact the human supplied, which no
+ *  client and no model may re-decide. Mobile is 1:1 only, so the first level of
+ *  the `@` is degenerate: the pick is a single session id, or the refusal to
+ *  continue anything. It is sent only when the composer (or the answer to a
+ *  choice card) actually carries one — an absent address is what puts a turn on
+ *  the ladder's lower levels. */
+export interface ChatAddress {
+  /** 1:1 form of level 2: the session the human named for this agent. */
+  targetSession?: string
+  /** D6's cheap escape beside every suggestion: continue nothing, new work. */
+  forceNew?: boolean
+  /** The id of the row being RE-delivered. Answering a `session_choice` /
+   *  `confirm_continue` card re-sends the human's own utterance, now addressed,
+   *  and the backend dedupes on this id — so the transcript keeps one message
+   *  instead of drawing the same sentence twice. */
+  messageId?: string
+}
 
 export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   byAgent: {},
@@ -135,13 +159,13 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     }
   },
 
-  sendText: async (chatSessionId, text, inReplyTo) => {
+  sendText: async (chatSessionId, text, inReplyTo, attachmentIds, address) => {
     const me = useAuthStore.getState().me?.user_id
     if (!me || get().sending[chatSessionId]) return false
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }))
     let ok = false
     try {
-      await sendChatMessage(me, chatSessionId, text, inReplyTo)
+      await sendChatMessage(me, chatSessionId, text, inReplyTo, attachmentIds, address)
       ok = true
     } catch (e) {
       console.warn('chat send failed:', e)

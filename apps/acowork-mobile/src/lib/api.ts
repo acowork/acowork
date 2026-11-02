@@ -19,9 +19,12 @@
 
 import { newId } from './id'
 import type { ChatTransport } from '../stores/chatStore'
+import type { ChatAddress } from '../stores/chatSessionStore'
 import type {
   AccountMe,
   AgentRow,
+  ChatBlockEntry,
+  ChatCandidate,
   ChatMessage,
   ChatMessagesPage,
   ChatSessionInfo,
@@ -589,23 +592,89 @@ export async function fetchChatMessages(
 }
 
 /**
+ * The round contents behind the chat's `execution_round` rows
+ * (`GET /api/chat-blocks/{chatId}?refs=` — ADR-106 D4/D5/D9).
+ *
+ * Refs are the rows' own coordinate triples (`instance|session|round`); the
+ * Gateway composes its disposable projection cache with a live read of the
+ * hosting Runtime, participation-checked against THIS chat (D10) — which is
+ * why the chat id is part of the address and not a filter.
+ *
+ * It goes through `req`, not a bare fetch: the block read is an ordinary
+ * authenticated GET, and the 401 rotation ladder is the app's only one.
+ * An empty ref list is answered client-side — the route makes `refs`
+ * mandatory (422 without it), and asking for nothing must not look like an
+ * outage in the transcript.
+ */
+export async function fetchChatBlocks(
+  chatSessionId: string,
+  refs: string[],
+): Promise<ChatBlockEntry[]> {
+  if (!chatSessionId || refs.length === 0) return []
+  const query = refs.map(encodeURIComponent).join(',')
+  const body = await req<{ blocks?: ChatBlockEntry[] }>(
+    'GET',
+    `/api/chat-blocks/${encodeURIComponent(chatSessionId)}?refs=${query}`,
+  )
+  return body?.blocks ?? []
+}
+
+/**
+ * The second level of the `@` (ADR-106 D7): the execution sessions this Chat
+ * may address, read off the node that hosts the agent.
+ *
+ * Not a convenience filter the client could write itself — the Runtime's
+ * candidate rules ARE the permission (a 1:1 lists this chat's sessions plus
+ * the human's own hand-started ones, never terminal work). Proxied
+ * transparently by the Gateway to `GET /api/agents/{id}/chat-candidates`.
+ */
+export async function fetchChatCandidates(
+  instanceId: string,
+  chatSessionId: string,
+  surface: 'direct' | 'group',
+): Promise<ChatCandidate[]> {
+  if (!instanceId || !chatSessionId) return []
+  const query = new URLSearchParams({ chat_session_id: chatSessionId, surface })
+  const body = await req<{ candidates?: ChatCandidate[] }>(
+    'GET',
+    `/api/agents/${encodeURIComponent(instanceId)}/chat-candidates?${query}`,
+  )
+  return body?.candidates ?? []
+}
+
+/**
  * Post one turn into a Chat session. Goes through the intent channel
  * (`POST /api/intents/chat-message`), NOT a session-scoped write: the
  * durable row lands before delivery resolves (design 27 §5.1), so the
  * caller re-reads after the response regardless of the delivery outcome.
- * `inReplyTo` is a card's `message_id` when answering a decision card.
+ * `inReplyTo` is a REFERENCE ROW's `message_id` — ADR-106 D6 level 1: a turn
+ * addressed that way continues exactly that round and never reaches the
+ * Chat Router.
+ *
+ * `address` is the fact the human supplied (D6/D7): the task to continue, or
+ * the refusal to continue anything, plus the `message_id` of the row being
+ * RE-delivered when a `session_choice` / `confirm_continue` card is answered.
+ * Absent = no address, which is what leaves a message on the ladder's lower
+ * levels; inventing one here would take the Router's answer away from a turn
+ * that needs it.
  */
 export async function sendChatMessage(
   me: string,
   chatSessionId: string,
   text: string,
   inReplyTo?: string,
+  attachmentIds?: string[],
+  address?: ChatAddress,
 ): Promise<void> {
   await req<void>('POST', '/api/intents/chat-message', {
     chat_session_id: chatSessionId,
     from_user: me,
     text,
     in_reply_to: inReplyTo ?? '',
+    ...(attachmentIds && attachmentIds.length > 0 ? { attachment_ids: attachmentIds } : {}),
+    ...(address?.targetSession ? { target_session: address.targetSession } : {}),
+    ...(address?.forceNew ? { force_new: true } : {}),
+    ...(address?.messageId ? { message_id: address.messageId } : {}),
   })
 }
 

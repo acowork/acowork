@@ -574,6 +574,14 @@
   color: var(--color-label);
   border-top-left-radius: 2px;
 }
+/* A row with nothing to say (ADR-106 D12's bodyless Router answer): the
+   placeholder keeps it from collapsing into an empty bubble. Opacity rather
+   than a tertiary ink, because this sits on both bubble fills — white on the
+   accent and near-black on the peer gray. */
+.bubble-empty {
+  font-style: italic;
+  opacity: 0.7;
+}
 
 /* --- Composer --- */
 
@@ -634,10 +642,12 @@
   height: 18px;
 }
 
-/* Settings cog in the composer (mobile-only — opens the 4-item submenu).
- * Same 44x44 hit box as send, ghost variant so it sits next to the filled
- * send without competing. */
-.composer-settings {
+/* Settings cog in the composer (mobile-only — opens the 4-item submenu), and
+   the addressing control beside it (ADR-106 D7's second level of the `@`).
+   Same 44x44 hit box as send, ghost variant so they sit next to the filled
+   send without competing. */
+.composer-settings,
+.composer-address {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -652,9 +662,57 @@
   transition: background 0.12s;
 }
 .composer-settings:hover,
-.composer-settings:active {
+.composer-settings:active,
+.composer-address:hover,
+.composer-address:active {
   background: var(--color-bubble-peer);
   color: var(--color-label);
+}
+.composer-address:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* What the current draft is addressed to. Both the level-1 reply and the
+   level-2 task pick are shown, because an instruction the surface swallowed
+   would be indistinguishable from one never given. */
+.composer-chips {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px 0;
+  background: var(--color-bg);
+}
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 4px 6px 4px 10px;
+  border-radius: 8px;
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--color-label-secondary);
+  font-size: 12px;
+}
+.composer-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-chip-clear {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 /* ── Unified button style (ADR parity with Desktop .btn-accent family) ──
@@ -1994,24 +2052,6 @@
   text-align: center;
 }
 
-/* Design 27 §6.4 (v2.8): the task chip on a PM dispatch row — a pill above
-   the bubble, tap copies the bare task id (mobile twin of desktop TaskChip).
-   Neutral hairline and label: the accent belongs to button fills
-   (.boot-primary, the sheet's send), never to a chip outline or a chip
-   label — the same rule .chat-card-line-btn already follows. */
-.chat-task-chip {
-  align-self: flex-start;
-  display: inline-flex;
-  padding: 2px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--color-border);
-  background: transparent;
-  color: var(--color-label-secondary);
-  font-size: 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  cursor: pointer;
-}
-
 /* ADR-100 D12: an execution surface's attached item, labelled but not
    downloadable — the blob stays in the run. The dashed outline and the muted
    ink say "this is a name, not a link", so it never reads as a broken chip. */
@@ -2026,14 +2066,207 @@
   }
 }
 
-/* One-line collapsed cards (status + decision): a full-width tappable row,
-   NOT an inline chip — 390pt thumbs need a real hit target (§6.5). */
-.chat-card-line {
+/* ── The round's block (ADR-106 D3/D4/D8/D9) ──────────────────────────
+   One `execution_round` reference row drawn in this app's execution-surface
+   ExploreBlock language: a quiet header line stating the outcome, content
+   below, tap the header to fold. Neutral fills only — the accent belongs to
+   button fills, never to a block border. §6.5's mobile delta: the answer stays
+   inline (folding a reply behind a tap would make it cost more to read here
+   than on the surface that owns the same transcript) and the decision card
+   collapses to one line with its buttons in a bottom sheet. */
+.chat-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  margin: 8px 0;
+}
+.chat-block-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: 8px var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: rgba(120, 120, 128, 0.12);
+  color: var(--color-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-block-glyph {
+  flex: none;
+  font-size: 12px;
+}
+/* `is-live` is set off a `pending` projection read and nothing else (D9): an
+   unreachable host says "暂不可达", it never borrows the live mark. */
+.chat-block-glyph.is-live {
+  color: var(--color-accent, #0ea5e9);
+}
+.chat-block-glyph.is-danger {
+  color: var(--color-danger, #ef4444);
+}
+.chat-block-status {
+  flex: none;
+  font-weight: 500;
+  color: var(--color-label);
+}
+/* ADR-106 D13: the PM task id rides the block header — a label, never a link.
+   The retired tappable chip copied the id on tap, which made an addressing
+   hint the most clickable thing on the row. */
+.chat-block-task {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--color-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+.chat-block-peek {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+  font-size: 12px;
+}
+.chat-block-caret {
+  flex: none;
+  margin-left: auto;
+  color: var(--color-label-secondary);
+}
+.chat-block-body {
+  display: flex;
+  flex-direction: column;
+  padding: 4px var(--space-3) 8px;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: rgba(120, 120, 128, 0.08);
+}
+.chat-block-answer {
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-label);
+  word-break: break-word;
+}
+.chat-block-working {
+  font-size: 13px;
+  color: var(--color-label-secondary);
+}
+.chat-block-jump {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 6px 2px;
+  border: none;
+  background: transparent;
+  color: var(--color-accent, #0ea5e9);
+  font-size: 12px;
+  cursor: pointer;
+}
+/* A hole is stated as a hole (D5): inventing content would be writing history.
+   Centered and chrome-free — this is the platform reporting what it could not
+   read, not something a participant said. */
+.chat-block-hole {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--color-text-dim, #888);
+}
+.chat-block-hole-action {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--color-separator, rgba(128, 128, 128, 0.3));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-accent, #0ea5e9);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* The decision a round is parked on (D8), collapsed to one line under the
+   block's header. It stays visible when the block is folded: a round parked on
+   a question has to stay answerable. */
+.chat-block-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.chat-block-card-btn,
+.chat-block-card-static {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.25));
+  border-radius: 12px;
+  background: var(--color-surface, rgba(128, 128, 128, 0.06));
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+.chat-block-card-btn {
+  cursor: pointer;
+}
+.chat-block-card-static {
+  color: var(--color-label-secondary);
+}
+.chat-block-card-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #b45309;
+  font-size: 11px;
+}
+.chat-block-card-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-block-card-go {
+  flex: none;
+  font-size: 11px;
+  color: var(--color-accent, #0ea5e9);
+}
+/* D10: the question shows, the buttons do not, and the row says why — a viewer
+   who is not this round's answerer must not have to guess why a card is inert. */
+.chat-block-card-note {
+  padding: 0 12px;
+  font-size: 11px;
+  color: var(--color-text-dim, #888);
+}
+/* A `pause` is answered with the human's own words, which become the next turn
+   of this round (D6 level 1) — so this addresses the composer, it sends nothing. */
+.chat-block-continue {
+  align-self: flex-start;
+  padding: 8px 14px;
+  border: 1px solid var(--color-accent, #0ea5e9);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-accent, #0ea5e9);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* An addressing question (D6 levels 3 and 5): one line, and the option buttons
+   live in a bottom sheet — on a 390pt screen a strip of small buttons next to a
+   transcript is where a mis-tap sends a turn into the wrong task. */
+.chat-notice-card {
   display: flex;
   justify-content: center;
   margin: 8px 0;
 }
-.chat-card-line-btn {
+.chat-notice-card-btn {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2046,44 +2279,19 @@
   color: inherit;
   font-size: 13px;
   text-align: left;
+  cursor: pointer;
 }
-.chat-card-line-btn:disabled {
+.chat-notice-card-btn:disabled {
   opacity: 0.6;
 }
-.chat-card-tag {
-  flex: none;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: rgba(245, 158, 11, 0.15);
-  color: #b45309;
-  font-size: 11px;
-}
-.chat-card-status .chat-card-tag,
-.chat-card-spinner {
-  flex: none;
-}
-.chat-card-spinner {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 2px solid rgba(56, 189, 248, 0.3);
-  border-top-color: #0ea5e9;
-  animation: chat-card-spin 0.9s linear infinite;
-}
-@keyframes chat-card-spin {
-  to { transform: rotate(360deg); }
-}
-.chat-card-text {
+.chat-notice-card-question {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.chat-card-state {
+.chat-notice-card-go {
   flex: none;
   font-size: 11px;
-  color: var(--color-text-dim, #888);
+  color: var(--color-accent, #0ea5e9);
 }
 
 .chat-notice {
@@ -2140,51 +2348,6 @@
 .chat-turn-status-text-danger {
   color: var(--color-danger, #ef4444);
 }
-.chat-turn-status-drill,
-.chat-bubble-drill {
-  flex: none;
-  padding: 2px 6px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--color-accent, #0ea5e9);
-  font-size: 12px;
-  cursor: pointer;
-}
-/* The reply's own drill sits under the bubble, on the speaker's side. */
-.chat-bubble-drill {
-  align-self: flex-start;
-  margin: -2px 0 2px 2px;
-}
-
-/* The one line above an answer bubble naming the question it answers (the
-   mobile twin of the desktop ReplyQuote). It rides ABOVE the bubble, never
-   inside: the own bubble is accent-filled with white text, and a tertiary-gray
-   quote inside it would be unreadable. Neutral hairline + tertiary label — the
-   highlight belongs to the bubble fill, never to a quote rule. */
-.chat-reply-quote {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  margin: 2px 0 4px;
-  padding-left: 6px;
-  border-left: 2px solid var(--color-separator, rgba(128, 128, 128, 0.3));
-  font-size: 11px;
-  color: var(--color-label-secondary, #888);
-  align-self: flex-end;
-  max-width: 100%;
-}
-.chat-reply-quote-mark {
-  flex: none;
-  opacity: 0.6;
-}
-.chat-reply-quote-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* Back-to-bottom arrow on the agent chat: the reader scrolled up off the tail.
    `position: sticky` (not an overlay) for the same reason as `.chat-newpill`:
@@ -2206,18 +2369,14 @@
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
-/* Decision-card bottom sheet body (§6.5). */
+/* Decision-card and addressing bottom sheets (§6.5). */
 .chat-sheet-question {
   font-size: 15px;
   line-height: 1.5;
   margin-bottom: 12px;
-  white-space: pre-wrap;
+  /* No `white-space: pre-wrap`: the question arrives as rendered markdown,
+   * whose own block spacing would double up against preserved source newlines. */
   word-break: break-word;
-}
-.chat-sheet-answered {
-  padding: 10px 0;
-  font-size: 13px;
-  color: var(--color-text-dim, #888);
 }
 .chat-sheet-option {
   display: block;
@@ -2233,6 +2392,66 @@
 }
 .chat-sheet-option:active {
   background: rgba(245, 158, 11, 0.12);
+}
+/* The sheet's primary decision (approve / "开新任务") fills, so the safe
+   default reads as the default — a mis-tap here delivers a turn. */
+.chat-sheet-option.is-primary {
+  border-color: transparent;
+  background: var(--color-tint-strong);
+  color: #ffffff;
+  font-weight: 600;
+  text-align: center;
+}
+.chat-sheet-option.is-primary:active {
+  background: var(--color-tint-strong);
+  transform: scale(0.99);
+}
+/* An address is an instruction, so the absence of one has to stay reachable:
+   "不指定" is a quiet row, never a filled button competing with the picks. */
+.chat-sheet-option.is-quiet {
+  border: none;
+  background: transparent;
+  color: var(--color-label-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+.chat-sheet-option.is-quiet:active {
+  background: transparent;
+  opacity: 0.6;
+}
+.chat-sheet-row {
+  display: flex;
+  gap: 8px;
+}
+.chat-sheet-row .chat-sheet-option {
+  flex: 1;
+  text-align: center;
+}
+.chat-sheet-option-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-sheet-option-value {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--color-label-secondary);
+}
+.chat-sheet-hint {
+  padding: 8px 0 12px;
+  font-size: 13px;
+  text-align: center;
+  color: var(--color-label-secondary);
+}
+/* A failed send keeps the sheet open and says so: a button that did nothing
+   silently would strand the human with no way to tell the turn never landed. */
+.chat-sheet-failed {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-danger, #ef4444);
 }
 .chat-sheet-free {
   display: flex;

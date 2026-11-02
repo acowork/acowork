@@ -1,21 +1,30 @@
 /**
  * Agent Chat session — the PRIMARY agent surface on mobile (design 27 §6.1,
- * plan Wave 5.5). Same view model as Desktop's `AgentChatView`: durable
- * chat rows only (user_message / agent_message / interaction_request /
- * system_notice). The differences are presentation-only, per §6.5:
+ * plan Wave 5.5). Same view model as Desktop's `AgentChatView`: a durable event
+ * log of four row kinds (ADR-106 D1) where a run is a POINTER row
+ * (`execution_round`) whose content is read from the execution side at render
+ * time (D3/D4) — the Chat keeps no copy of the work, and a pending decision is
+ * shown inside the round's block, never as a chat row (D8). The differences
+ * here are presentation-only, per §6.5:
  *
- *  - turn state is DERIVED, never stored (ADR-100 revision): while the newest
- *    message is unanswered the stream shows one centered shimmer line, and a
- *    turn that ended without a reply (stopped / failed / timed out) leaves a
- *    centered outcome line with a drill into the execution session view (the
- *    existing ChatDetailScreen — the read path enforces visibility, hidden 404
- *    shows its own error);
- *  - a decision card collapses to one line; answering opens a BOTTOM SHEET
- *    (mis-tap safety on a 390pt screen), and every answer goes back through
- *    the same chat-message channel with `in_reply_to` (§5.5.4).
+ *  - the block's header line is the compact shape, its answer stays inline: a
+ *    reply folded behind a tap here would cost more to read than on the surface
+ *    that owns the same transcript;
+ *  - a decision card collapses to one line and its buttons live in a BOTTOM
+ *    SHEET (mis-tap safety on a 390pt screen), and the second level of the `@`
+ *    is a sheet too, not a popup anchored to the composer;
+ *  - answering an addressing card RE-DELIVERS the human's own words, now
+ *    addressed (D6) — the same channel, the same row id, so the transcript
+ *    keeps one message.
  *
- * Deliberately NOT here: agent thinking, tool calls, execution process —
- * those live behind the event row's drill, not in the chat stream (§6).
+ * "In progress" is positive evidence only (D9): the single waiting line this
+ * surface may paint is about its OWN in-flight POST. A round's liveness rides
+ * inside its block, off the `pending` projection read — a transcript shape must
+ * never stand in for liveness, or a dead node keeps looking busy forever.
+ *
+ * Deliberately NOT here: agent thinking, tool calls, execution process — those
+ * live behind the block's drill into the execution session view, not in the
+ * chat stream (§6).
  *
  * Freshness: the `chat/changed` doorbell (content-free) fans out into
  * `wakeAgentChat()` → HTTP re-read; plus an immediate refresh on mount and
@@ -23,22 +32,26 @@
  */
 
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Send } from 'lucide-react'
+import { AtSign, Send } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
-import { useChatSessionStore } from '../../stores/chatSessionStore'
+import { useChatSessionStore, type ChatAddress } from '../../stores/chatSessionStore'
 import { AuthImage } from '../../components/AuthImage'
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from '../../lib/builtinIcons'
 import { daySeparator, timeGapSeparator } from '../../lib/time'
 import { useStickToBottom } from '../../lib/stickToBottom'
-import { Banner, Sheet } from '../../components/ui'
+import { Banner } from '../../components/ui'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
 import { AttachmentViewer } from '../../components/AttachmentViewer'
 import { ChatAttachmentCapsule } from '../../components/ChatAttachmentCapsule'
-import type { ChatAttachment } from '../../lib/chatAttachment'
+import { ChatExecutionBlock } from '../../components/ChatExecutionBlock'
+import { ChatNoticeRow } from '../../components/ChatNoticeRow'
+import { ChatAddressSheet, type AddressPick } from '../../components/ChatAddressSheet'
+import { buildCardAnswer, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
 import { renderMarkdown } from '../../lib/markdown'
+import type { ChatAttachment } from '../../lib/chatAttachment'
 import type { ChatMessageRow } from '../../lib/types'
 
 function pickIconId(seed: string): string | null {
@@ -48,216 +61,13 @@ function pickIconId(seed: string): string | null {
   return BUILTIN_ICON_IDS[Math.abs(h) % BUILTIN_ICON_IDS.length] ?? null
 }
 
-/**
- * COPIED VERBATIM from the desktop store's `closedCardIds` — the two apps
- * must project the same state from the same rows (§5.5.4, plan 5.5 drift
- * guard).
- *
- * A card is no longer answerable when a later row answers it (a human reply
- * or the Runtime's `interaction_resolved` notice) OR when the turn that
- * produced it already wrote its terminal `agent_message`: the run is over,
- * so the request behind the card is dead even if nobody stamped a closure on
- * it — which is what heals the pre-closure transcripts instead of leaving an
- * idle status card with a button that can never work.
- *
- * `status: "waiting"` (a turn that ended *because* a card stayed open) does
- * not close anything, and a terminal row only speaks for the card of its own
- * execution session — a group fan-out answers one trigger from several
- * agents. Missing session ids fall back to trigger-only matching.
- */
-export function closedCardIds(rows: ChatMessageRow[]): Set<string> {
-  const closed = new Set(rows.map((r) => r.meta?.in_reply_to).filter((s): s is string => !!s))
-  const terminals = rows
-    .map((r, i) => ({ r, i }))
-    .filter(
-      ({ r }) =>
-        r.kind === 'agent_message' &&
-        !!r.meta?.in_reply_to &&
-        (r.meta?.status ?? 'completed') !== 'waiting',
-    )
-  rows.forEach((card, i) => {
-    if (card.kind !== 'interaction_request') return
-    const mid = card.meta?.message_id
-    if (!mid || closed.has(mid)) return
-    const sid = card.meta?.agent_session_id
-    const finished = terminals.some(
-      ({ r, i: t }) =>
-        t > i &&
-        r.meta?.in_reply_to === card.meta?.in_reply_to &&
-        (!sid || !r.meta?.sender_session_id || r.meta.sender_session_id === sid),
-    )
-    if (finished) closed.add(mid)
-  })
-  return closed
-}
-
-/** Cards answered on THIS surface — a `user_message` row addressed to the
- *  card. The chat-side subset of [`humanAnsweredCardIds`]: the surface uses
- *  it to suppress the Runtime's duplicate `interaction_resolved` notice, so a
- *  chat-side answer is recorded exactly once (by its own event line). Mirrors
- *  the desktop `chatAnsweredCardIds`. */
-export function chatAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
-  return new Set(
-    rows
-      .filter((r) => r.kind === 'user_message')
-      .map((r) => r.meta?.in_reply_to)
-      .filter((s): s is string => !!s),
-  )
-}
-
-/** Resolutions that mean a human decided. Everything else (timeout / stopped /
- *  turn_ended / cancelled / unanswerable / superseded) closes a card without
- *  claiming an answer. Mirrors the desktop `DECISION_RESOLUTIONS`. */
-const DECISION_RESOLUTIONS = new Set(['answered', 'approved', 'rejected'])
-
-/** Cards a human actually answered. Two shapes carry that fact:
- *  - a `user_message` addressed to the card (answered on THIS surface);
- *  - the Runtime's `interaction_resolved` notice with a decision resolution
- *    ("answered"/"approved"/"rejected") — answered on the execution surface,
- *    where the reply never rides the chat answer channel. A non-decision
- *    resolution means nobody answered, so it stays out.
- *  Narrower than [`closedCardIds`]: it exists so a surface can tell "you
- *  answered this" from "this request is just no longer open". Mirrors the
- *  desktop `humanAnsweredCardIds`. */
-export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
-  const answered = chatAnsweredCardIds(rows)
-  for (const r of rows) {
-    const mid = r.meta?.in_reply_to
-    if (
-      mid &&
-      r.kind === 'system_notice' &&
-      r.meta?.notice_type === 'interaction_resolved' &&
-      DECISION_RESOLUTIONS.has(r.meta?.resolution ?? '')
-    ) {
-      answered.add(mid)
-    }
-  }
-  return answered
-}
-
-/**
- * COPIED VERBATIM from the desktop `chatTurnState` module — both apps must
- * infer the live turn state from the same durable evidence (§5.5.5 drift
- * guard).
- *
- * The chat log records conversation, not progress: the dispatch / round-open
- * milestones are runtime facts and no longer rows. "A turn is in flight" is
- * derived instead: the newest human message has no terminal reply and no open
- * decision card after it.
- */
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'aborted', 'timeout', 'waiting'])
-
-/** Notice types retired by the ADR-100 revision — never painted, even when an
- * old transcript still carries them. Mirrors the desktop renderer. */
-const RETIRED_NOTICES = new Set(['turn_dispatched', 'turn_started'])
-
-export function isTerminalReply(row: ChatMessageRow): boolean {
-  return row.kind === 'agent_message' && TERMINAL_STATUSES.has(row.meta?.status ?? '')
-}
-
-/** `failed` / `timeout` are errors; `aborted` is a user action, not a fault. */
-export function isFailureStatus(status?: string): boolean {
-  return status === 'failed' || status === 'timeout'
-}
-
-/** A terminal reply with no text: the outcome IS the message. */
-export function isEmptyTerminalReply(row: ChatMessageRow): boolean {
-  return isTerminalReply(row) && !row.body.trim() && !(row.attachments && row.attachments.length > 0)
-}
-
-/**
- * The routing reaction row (ADR-100 D11): the agent's immediate in-chat
- * answer to "where did my message go" — "启动新任务：X" / "继续之前的任务：X".
- * A `system_notice` by producer, but it renders as an agent bubble (avatar +
- * name): a user message must always be followed by an agent message — that
- * exchange IS the chat. Mirrors the desktop `chatTurnState` renderer.
- */
-export function isTurnRoutedNotice(row: ChatMessageRow): boolean {
-  return row.kind === 'system_notice' && row.meta?.notice_type === 'turn_routed'
-}
-
-/** Label for the centered outcome line of an empty terminal reply. */
-export function terminalStatusText(status?: string): string {
-  switch (status) {
-    case 'aborted':
-      return '本轮执行已中断'
-    case 'timeout':
-      return '本轮执行超时'
-    case 'failed':
-      return '本轮执行失败'
-    case 'waiting':
-      return '本轮等待你回复'
-    default:
-      return '本轮没有产生回复'
-  }
-}
-
-/** Bound a raw trigger body used as the task name in the routing reaction,
- *  mirroring the desktop `truncateTaskName` — a long first message must not
- *  wrap the bubble. */
-function truncateTaskName(body: string): string {
-  const collapsed = body.trim().replace(/\s+/g, ' ')
-  if (!collapsed) return ''
-  return collapsed.length > 40 ? `${collapsed.slice(0, 40)}…` : collapsed
-}
-
-/**
- * Did this human row actually ask an Agent something? (Same rule as the desktop
- * `chatTurnState.opensAgentTurn`.) `/api/intents/chat-message` files its
- * `user_message` with `to` = the agent it delivered to, and the §5.3.1 mention
- * fan-out files one broadcast row (`to` empty) carrying `meta.mentions`.
- * Archive-only rows — a `user_user` DM, an un-@'d group remark — store `to: ""`
- * and wake nobody, so they must not hold a waiting line open: no agent will ever
- * answer a conversation that contains no agent.
- */
-export function opensAgentTurn(row: ChatMessageRow): boolean {
-  if (row.to?.trim()) return true
-  return (row.meta?.mentions?.length ?? 0) > 0
-}
-
-/**
- * Is the newest human message still waiting for its answer?
- *
- * `sending` covers the HTTP round trip before the human row lands. Afterwards
- * the turn is over as soon as a terminal reply, an OPEN decision card, or a
- * newer human message that opens its own turn follows the trigger — the same
- * rule the desktop uses. Rows that opened no turn are skipped rather than
- * treated as a superseder. The routing reaction row (ADR-100 D11) does NOT close
- * the wait: the run is still in flight, and the live line is the only thing
- * between the reaction and the final answer.
- */
-export function pendingTurn(
-  rows: ChatMessageRow[],
-  sending: boolean,
-  closedCards: ReadonlySet<string>,
-): boolean {
-  if (sending) return true
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i]!
-    if (row.kind !== 'user_message' || !opensAgentTurn(row)) continue
-    const trigger = row.meta?.message_id
-    return !!trigger && !answeredAfter(rows, i, trigger, closedCards)
-  }
-  return false
-}
-
-function answeredAfter(
-  rows: ChatMessageRow[],
-  fromIndex: number,
-  trigger: string,
-  closedCards: ReadonlySet<string>,
-): boolean {
-  for (let i = fromIndex + 1; i < rows.length; i++) {
-    const row = rows[i]!
-    if (row.kind === 'agent_message' && row.meta?.in_reply_to === trigger && isTerminalReply(row)) {
-      return true
-    }
-    if (row.kind === 'interaction_request' && row.meta?.in_reply_to === trigger) {
-      const cardId = row.meta?.message_id
-      if (!cardId || !closedCards.has(cardId)) return true
-    }
-  }
-  return false
+/** A pending continuation of one round: the reference row's id (what the send
+ *  files as `in_reply_to`, ADR-106 D6 level 1) and the question the human is
+ *  answering, shown in the composer chip. A card no longer has a chat row of
+ *  its own, so the block is what hands this over. */
+interface ReplyTarget {
+  id: string
+  quote: string
 }
 
 export function AgentChatScreen() {
@@ -274,8 +84,13 @@ export function AgentChatScreen() {
   const sending = useChatSessionStore((s) => (sessionId ? s.sending[sessionId] ?? false : false))
 
   const [draft, setDraft] = useState('')
-  /** The decision card currently open in the bottom sheet (§6.5). */
-  const [answering, setAnswering] = useState<ChatMessageRow | null>(null)
+  /** D6 level 1: this draft continues one named round. */
+  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null)
+  /** The second level of the `@` (D7). On this surface the first level is
+   *  degenerate — one agent — so the human names only the task. `addressStage`
+   *  is "the sheet is open", `address` is "what was chosen for this draft". */
+  const [addressStage, setAddressStage] = useState(false)
+  const [address, setAddress] = useState<AddressPick | null>(null)
   /** The uploaded file whose viewer is open. Held here, above the list, so a
    *  poll tick that re-renders (or re-keys) a row cannot close the overlay. */
   const [viewing, setViewing] = useState<ChatAttachment | null>(null)
@@ -285,65 +100,72 @@ export function AgentChatScreen() {
   }, [agentId])
 
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win])
-  const closed = useMemo(() => closedCardIds(rows), [rows])
-  const answeredHuman = useMemo(() => humanAnsweredCardIds(rows), [rows])
-  // The narrower "answered on THIS surface" half — what tells the Runtime's
-  // duplicate `interaction_resolved` notice to stay silent.
-  const answeredHere = useMemo(() => chatAnsweredCardIds(rows), [rows])
-  // message_id → body, so the routing reaction bubble (ADR-100 D11) can name
-  // the task off its trigger message — the mobile twin of the desktop index.
-  const bodyById = useMemo(() => {
-    const m = new Map<string, string>()
+  // Which messages already have a round: that is what makes an addressing card
+  // answered (the re-delivery leaves the reference row, ADR-106 D3), so the
+  // transcript itself carries the answer — no chat-side flag to keep in sync.
+  const roundTriggers = useMemo(() => {
+    const s = new Set<string>()
     for (const r of rows) {
-      if (r.meta?.message_id) m.set(r.meta.message_id, r.body)
+      if (r.kind === 'execution_round' && r.meta?.in_reply_to) s.add(r.meta.in_reply_to)
     }
-    return m
+    return s
   }, [rows])
-  // Card rows only, so an answer can name the interaction kind it answers
-  // (ask_question/approval render as an event line, pause keeps its message
-  // form) and quote the question it answers — the mobile twin of the desktop
-  // `cardKindById` / `cardQuoteById` pair. Card-only on purpose: `in_reply_to`
-  // also points at plain messages, and quoting one would paint a decision
-  // quote where no decision was asked.
-  const cardKindById = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const r of rows) {
-      if (r.kind !== 'interaction_request' || !r.meta?.message_id) continue
-      m.set(r.meta.message_id, r.meta.interaction?.kind ?? '')
-    }
-    return m
-  }, [rows])
-  const cardQuoteById = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const r of rows) {
-      if (r.kind !== 'interaction_request' || !r.meta?.message_id) continue
-      m.set(r.meta.message_id, r.meta.interaction?.question || r.body)
-    }
-    return m
-  }, [rows])
-  // Derived live state — one aggregated line while the newest message waits.
-  const waiting = pendingTurn(rows, sending, closed)
 
   const { ref: scrollRef, stickNow, atBottom } = useStickToBottom([rows.length, sessionId], sessionId, () => {
     if (sessionId) void useChatSessionStore.getState().loadOlder(sessionId)
   })
 
-  const send = (text: string, inReplyTo?: string) => {
-    const trimmed = text.trim()
-    if (!trimmed || sending || !sessionId) return
+  /** The one write path of this surface. No trim guard: a re-delivered message
+   *  may legitimately be attachment-only, and the composer gates itself. */
+  const deliver = (text: string, inReplyTo?: string, attachmentIds?: string[], addr?: ChatAddress) => {
+    if (!sessionId) return
     setDraft('')
-    setAnswering(null)
+    setReplyTo(null)
+    setAddress(null)
     // Sending re-claims the follow (the IM convention), before the echo lands.
     stickNow()
-    void useChatSessionStore.getState().sendText(sessionId, trimmed, inReplyTo)
+    void useChatSessionStore.getState().sendText(sessionId, text, inReplyTo, attachmentIds, addr)
   }
 
-  /** §6.5: the status card expands INTO the execution session view — the
-   *  existing screen, reached the same way the inbox reached it before the
-   *  primary surface moved to the Chat session. */
-  const openExec = (execSid: string) => {
-    if (!agentId) return
-    void useChatStore.getState().openSession(agentId, execSid).then(() => push('chat/detail'))
+  const send = () => {
+    const text = draft.trim()
+    if (!text || sending || !sessionId) return
+    // A level-1 reply already names its session, so the address the human picked
+    // for a plain message must not ride that send — the two are contradictory
+    // instructions and the refusal belongs to the backend, not to a guess here.
+    const chosen = replyTo ? null : address
+    const wire: ChatAddress | undefined = chosen?.sessionId
+      ? { targetSession: chosen.sessionId }
+      : chosen?.forceNew
+        ? { forceNew: true }
+        : undefined
+    deliver(text, replyTo?.id, undefined, wire)
+  }
+
+  /** Answering an addressing card (ADR-106 D6): re-send the human's OWN words
+   *  with the address they just chose, keyed by the original row's id so the
+   *  transcript keeps one message instead of narrating the decision twice. */
+  const answerCard = (card: ChatMessageRow, choice: CardChoice) => {
+    const original = rows.find((r) => r.meta?.message_id === card.meta?.in_reply_to)
+    const answer = buildCardAnswer(card, original, choice)
+    if (!answer) return
+    deliver(answer.text, undefined, answer.attachmentIds, directCardAddress(answer))
+  }
+
+  /** A `pause` card's continue is not an answer of its own: the human's words
+   *  make the NEXT turn of that round, so this only addresses the composer. */
+  const replyToRound = (rowId: string, quote: string) => {
+    setReplyTo({ id: rowId, quote })
+    setAddress(null)
+  }
+
+  /** §6.5: the block's drill — the existing execution-session screen, reached
+   *  the same way the inbox reached it before the primary surface moved to the
+   *  Chat session. The block names the instance that hosts the round, so this
+   *  takes it rather than assuming it is the agent on screen. */
+  const openExec = (instanceId: string, execSid: string) => {
+    if (!instanceId || !execSid) return
+    void useChatStore.getState().openSession(instanceId, execSid).then(() => push('chat/detail'))
   }
 
   /** History entry: the old inbox tap path (pick the newest execution
@@ -428,31 +250,27 @@ export function AgentChatScreen() {
                 {sep ? <div className="time-sep">{sep}</div> : null}
                 <RowView
                   row={r}
+                  chatSessionId={sessionId ?? ''}
                   isSelf={r.from === me?.user_id}
                   selfAvatar={meAvatar}
                   selfName={myName}
                   agentAvatar={agentAvatar}
                   agentName={agent?.name ?? 'Agent'}
-                  closed={!!(r.meta?.message_id && closed.has(r.meta.message_id))}
-                  answered={!!(r.meta?.message_id && answeredHuman.has(r.meta.message_id))}
-                  answeredCardKind={
-                    r.meta?.in_reply_to ? cardKindById.get(r.meta.in_reply_to) : undefined
-                  }
-                  replyQuote={r.meta?.in_reply_to ? cardQuoteById.get(r.meta.in_reply_to) : undefined}
-                  answeredCards={answeredHuman}
-                  chatAnswered={answeredHere}
-                  onOpenExec={openExec}
-                  onAnswerCard={(card) => setAnswering(card)}
+                  onJumpToExec={openExec}
+                  onReplyToRound={replyToRound}
+                  // The card asks the person who spoke, and in local mode there
+                  // is exactly one person but no id to compare against.
+                  onChooseCard={mayAnswerCard(r, me?.user_id ?? '') ? answerCard : undefined}
+                  cardAnswered={!!r.meta?.in_reply_to && roundTriggers.has(r.meta.in_reply_to)}
                   onOpenAttachment={setViewing}
-                  triggerBody={r.meta?.in_reply_to ? bodyById.get(r.meta.in_reply_to) : undefined}
                 />
               </Fragment>
             )
           })}
-          {/* One aggregated "the agent has your message" line, derived from the
-              newest unanswered row — it disappears the moment a terminal row
-              lands. */}
-          {waiting ? (
+          {/* D9: the only "working on it" line this surface may paint is about
+              its OWN in-flight POST. The round's liveness rides inside its
+              block, off the `pending` projection read. */}
+          {sending ? (
             <div className="chat-turn-status" role="status">
               <span className="chat-turn-status-text chat-turn-status-text-live">
                 {agent?.name ? `${agent.name}正在处理…` : '正在处理…'}
@@ -478,7 +296,53 @@ export function AgentChatScreen() {
           ) : null}
         </div>
 
+        {/* What this draft is addressed to. Both are shown because an instruction
+            the surface swallowed would be indistinguishable from one never given
+            — and the address is the one fact no model may re-decide (D7). */}
+        {replyTo || address ? (
+          <div className="composer-chips">
+            {replyTo ? (
+              <span className="composer-chip">
+                <span className="composer-chip-text">
+                  回复 {replyTo.quote.slice(0, 30)}
+                </span>
+                <button
+                  type="button"
+                  className="composer-chip-clear"
+                  onClick={() => setReplyTo(null)}
+                  aria-label="取消回复"
+                >
+                  ×
+                </button>
+              </span>
+            ) : address ? (
+              <span className="composer-chip">
+                <span className="composer-chip-text">
+                  投给哪个任务：{address.forceNew ? '开新任务' : address.label || '已指定'}
+                </span>
+                <button
+                  type="button"
+                  className="composer-chip-clear"
+                  onClick={() => setAddress(null)}
+                  aria-label="清除地址"
+                >
+                  ×
+                </button>
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="composer">
+          <button
+            type="button"
+            className="composer-address"
+            aria-label="指定任务"
+            disabled={!sessionId || !!replyTo}
+            onClick={() => setAddressStage(true)}
+          >
+            <AtSign className="composer-send-icon" aria-hidden />
+          </button>
           <textarea
             className="composer-input"
             rows={1}
@@ -492,19 +356,21 @@ export function AgentChatScreen() {
             className="composer-send"
             aria-label="发送"
             disabled={!draft.trim() || sending || !sessionId}
-            onClick={() => send(draft)}
+            onClick={send}
           >
             <Send className="composer-send-icon" aria-hidden />
           </button>
         </div>
 
-        {answering ? (
-          <AnswerSheet
-            card={answering}
-            closed={!!(answering.meta?.message_id && closed.has(answering.meta.message_id))}
-            answered={!!(answering.meta?.message_id && answeredHuman.has(answering.meta.message_id))}
-            onClose={() => setAnswering(null)}
-            onAnswer={(text) => send(text, answering.meta?.message_id)}
+        {addressStage && sessionId ? (
+          <ChatAddressSheet
+            instanceId={agentId}
+            chatSessionId={sessionId}
+            onPick={(pick) => {
+              setAddress(pick.sessionId || pick.forceNew ? pick : null)
+              setAddressStage(false)
+            }}
+            onClose={() => setAddressStage(false)}
           />
         ) : null}
 
@@ -525,173 +391,86 @@ export function AgentChatScreen() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Row rendering — the four durable kinds (design 27 §4.2)              */
+/* Row rendering — the durable kinds (ADR-106 D1)                       */
 /* ------------------------------------------------------------------ */
 
 export interface RowProps {
   row: ChatMessageRow
+  /** The Chat this row belongs to: the block read is participation-checked
+   *  against it (ADR-106 D10), so it is part of the address, not a filter. */
+  chatSessionId: string
   isSelf: boolean
   selfAvatar: ReactNode
   selfName: string
   agentAvatar: ReactNode
   agentName: string
-  /** The card can no longer be answered (§5.5.4). */
-  closed: boolean
-  /** ...and a human did answer it — otherwise it just ended. */
-  answered: boolean
-  onOpenExec: (execSid: string) => void
-  onAnswerCard: (card: ChatMessageRow) => void
+  onJumpToExec: (agentInstanceId: string, execSid: string) => void
+  onReplyToRound: (rowId: string, quote: string) => void
+  /** Answer an addressing card (D6 levels 3 and 5) by re-delivering the
+   *  utterance it asks about, now addressed. Handed only to the person the card
+   *  asked (D10) — `undefined` for anyone else. */
+  onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void
+  /** The card's question already has a round, so its buttons go quiet instead of
+   *  offering a second delivery of the same words. */
+  cardAnswered?: boolean
   /** A tap on an uploaded file's capsule. The parent owns the viewer so one
    *  overlay serves every row in the list (and outlives re-renders of it). */
   onOpenAttachment: (attachment: ChatAttachment) => void
-  /** Body of the message that triggered this row's turn (`meta.in_reply_to`).
-   *  Names the task in the routing reaction bubble (ADR-100 D11), the mobile
-   *  twin of the desktop `triggerBody` — mobile has no session-title store
-   *  read here, so the trigger body is the name. */
-  triggerBody?: string
-  /** Interaction kind of the card this row answers (`ask_question` /
-   *  `approval` / `pause`), resolved through the parent's card-only index. An
-   *  ask/approval answer is a step of the run, not an utterance, so it renders
-   *  as a centered event line; a PAUSE answer keeps reading as a message. */
-  answeredCardKind?: string
-  /** Question text of the card this row answers — the one-line quote above the
-   *  answer bubble (card-only, so a reply to a plain message paints nothing). */
-  replyQuote?: string
-  /** Cards a human answered on either surface (`humanAnsweredCardIds`). Paired
-   *  with `chatAnswered`, tells an exec-surface decision from a nobody-answered
-   *  closure. */
-  answeredCards: ReadonlySet<string>
-  /** Cards answered on THIS surface (`chatAnsweredCardIds`): their answer row
-   *  already states the outcome, so the Runtime's duplicate resolution notice
-   *  must stay silent. */
-  chatAnswered: ReadonlySet<string>
-}
-
-/** Mobile twin of the desktop task chip (design 27 §6.4, v2.8): a PM
- *  dispatch row shows its task id as a pill; tap copies the bare id. The
- *  claim/submit playbook never reaches this surface — the row body is the
- *  human text alone. */
-export function TaskChip({ taskId }: { taskId: string }) {
-  const [copied, setCopied] = useState(false)
-  const onCopy = () => {
-    navigator.clipboard
-      ?.writeText(taskId)
-      .then(() => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      })
-      .catch(() => {
-        /* clipboard unavailable — the id is still visible as the label */
-      })
-  }
-  return (
-    <button type="button" className="chat-task-chip" onClick={onCopy} title="复制任务 ID">
-      任务 {taskId}
-      {copied ? ' ✓' : ''}
-    </button>
-  )
-}
-
-/** Bound a quoted question so one line stays one line. Longer than
- *  `truncateTaskName` because this is the question itself, not a label for it.
- *  The mobile twin of the desktop `ReplyQuote.truncateQuote`. */
-export function truncateQuote(text: string | undefined): string {
-  const collapsed = (text ?? '').trim().replace(/\s+/g, ' ')
-  if (!collapsed) return ''
-  return collapsed.length > 60 ? `${collapsed.slice(0, 60)}…` : collapsed
-}
-
-/** One line above an answer bubble naming the question it answers — the mobile
- *  twin of the desktop `ReplyQuote`. Card-only: the parent resolves it through
- *  a card-only index, so a reply to a plain message paints nothing. It rides
- *  ABOVE the bubble, never inside it: the own bubble is accent-filled with
- *  white text, and a tertiary-gray quote inside it would be unreadable. */
-export function ReplyQuote({ quote }: { quote?: string }) {
-  const text = truncateQuote(quote)
-  if (!text) return null
-  return (
-    <div className="chat-reply-quote" title={quote}>
-      <span className="chat-reply-quote-mark" aria-hidden>↳</span>
-      <span className="chat-reply-quote-text">{text}</span>
-    </div>
-  )
 }
 
 export function RowView(props: RowProps) {
-  const { row, isSelf, selfAvatar, selfName, agentAvatar, agentName, closed, answered, onOpenExec, onAnswerCard, onOpenAttachment, triggerBody, answeredCardKind, replyQuote, answeredCards, chatAnswered } = props
-  const routed = isTurnRoutedNotice(row)
-  const execSid =
-    row.kind === 'agent_message' || routed
-      ? row.meta?.agent_session_id || row.meta?.sender_session_id || ''
-      : ''
-  // ADR-100 D11: the routing reaction — runtime-written, but it speaks as the
-  // agent: avatar + name + bubble, never a centered system line. A user
-  // message must always be followed by an agent message — that exchange IS
-  // the chat, and it lands within seconds of the send, long before the answer.
-  if (routed) {
-    const task = truncateTaskName(triggerBody ?? '')
-    const text =
-      row.meta?.turn_mode === 'new' ? `启动新任务：${task}` : `继续之前的任务：${task}`
+  const {
+    row,
+    chatSessionId,
+    isSelf,
+    selfAvatar,
+    selfName,
+    agentAvatar,
+    agentName,
+    onJumpToExec,
+    onReplyToRound,
+    onChooseCard,
+    cardAnswered,
+    onOpenAttachment,
+  } = props
+
+  if (row.kind === 'execution_round') {
     return (
-      <div className="msg-group msg-group-peer">
-        <div className="msg-header">
-          <div className="msg-avatar">{agentAvatar}</div>
-          <div className="msg-sender">
-            <span className="msg-sender-name">{agentName}</span>
-          </div>
-        </div>
-        <div className="msg-stack">
-          <div className="bubble bubble-peer">
-            <div className="bubble-text">{text}</div>
-          </div>
-          {execSid ? (
-            <button type="button" className="chat-bubble-drill" onClick={() => onOpenExec(execSid)}>
-              查看执行
-            </button>
-          ) : null}
-        </div>
-      </div>
+      <ChatExecutionBlock
+        row={row}
+        chatSessionId={chatSessionId}
+        onJumpToExec={onJumpToExec}
+        onReplyToRound={onReplyToRound}
+      />
     )
   }
-  // A decision answered on THIS surface. The card interaction is a step of
-  // the run, not an utterance — so it states itself as a centered event line,
-  // the sibling of the unanswered note the card leaves behind. PAUSE answers
-  // are excluded: that text IS the new turn's prompt and must read as a
-  // message (so it falls through to the user bubble below, quote included).
-  if (
-    row.kind === 'user_message' &&
-    answeredCardKind &&
-    answeredCardKind !== 'pause' &&
-    !(row.attachments && row.attachments.length > 0)
-  ) {
-    return (
-      <div className="chat-turn-status">
-        <span className="chat-turn-status-text" title={row.body}>
-          已回复：{truncateQuote(row.body)}
-        </span>
-      </div>
-    )
+
+  if (row.kind === 'system_notice') {
+    // Delivery receipts, the budget receipt, and the addressing questions
+    // (ADR-106 D6): quiet centered lines, never agent speech. The routing
+    // milestones and the card-resolution receipt this branch used to paint are
+    // gone from the stream.
+    const noticeType = row.meta?.notice_type
+    const choose =
+      (noticeType === 'session_choice' || noticeType === 'confirm_continue') && onChooseCard
+        ? (choice: CardChoice) => onChooseCard(row, choice)
+        : undefined
+    return <ChatNoticeRow row={row} onChoose={choose} answered={cardAnswered} />
   }
-  // A terminal reply with nothing in it IS its outcome — a centered status
-  // line with the drill into the run, never a bubble in the agent's voice.
-  if (row.kind === 'agent_message' && isEmptyTerminalReply(row)) {
-    return (
-      <div className="chat-turn-status">
-        <span
-          className={`chat-turn-status-text${isFailureStatus(row.meta?.status) ? ' chat-turn-status-text-danger' : ''}`}
-        >
-          {terminalStatusText(row.meta?.status)}
-        </span>
-        {execSid ? (
-          <button type="button" className="chat-turn-status-drill" onClick={() => onOpenExec(execSid)}>
-            查看执行
-          </button>
-        ) : null}
-      </div>
-    )
+
+  if (row.kind === 'interaction_request') {
+    // A run's pending decision is no longer a chat row (ADR-106 D8): it shows
+    // inside the round's block, where answering it also belongs. Old transcripts
+    // still carry these rows and the log keeps recording them — neither may
+    // resurrect a decision that is answered somewhere else now, so this paints
+    // nothing.
+    return null
   }
+
   if (row.kind === 'user_message' || row.kind === 'agent_message') {
     const fromAgent = row.kind === 'agent_message'
+    // A message that continues a round (`in_reply_to` = the reference row) needs
+    // no quote above it: the block it answers is the row directly beneath.
     return (
       <div className={`msg-group${isSelf ? ' msg-group-self' : ' msg-group-peer'}`}>
         <div className="msg-header">
@@ -701,27 +480,24 @@ export function RowView(props: RowProps) {
           </div>
         </div>
         <div className="msg-stack">
-          {/* Design 27 §6.4 (v2.8): a PM dispatch row's task id as a pill,
-              above the bubble — the row body is human text only. */}
-          {row.kind === 'user_message' && row.meta?.task_id ? (
-            <TaskChip taskId={row.meta.task_id} />
-          ) : null}
-          {/* What this answer answers (card-only). The card itself is gone once
-              answered (§5.5.4 records the answer here, not on a receipt), so a
-              PAUSE answer names its question with this one line above the
-              bubble. */}
-          {row.kind === 'user_message' ? <ReplyQuote quote={replyQuote} /> : null}
           <div className={`bubble${isSelf ? ' bubble-self' : ' bubble-peer'}`}>
-            {/* Human input is literal text, markdown is agent speech — the house
-                grammar the desktop surfaces apply to their user rows. Routing a
-                `user_message` through the markdown renderer would make
-                `**bold**` render bold in one surface while reading literally in
-                another, and would pick up the md sub-styles (`.md-quote`'s
-                secondary gray) that are unreadable on the accent-filled bubble's
-                white text. */}
-            <div className={`bubble-text${row.kind === 'user_message' ? ' bubble-raw' : ''}`}>
-              {row.kind === 'user_message' ? row.body : renderMarkdown(row.body)}
-            </div>
+            {/* Only the Chat Router's own answer is written as `agent_message`
+                now (ADR-106 D12) — a plain-text reply to something that opened
+                no run. A bodyless row with no attachments has nothing to say;
+                the placeholder keeps it from collapsing into an empty bubble. */}
+            {row.body || !row.attachments?.length ? (
+              <div className={`bubble-text${row.kind === 'user_message' ? ' bubble-raw' : ''}`}>
+                {row.body ? (
+                  row.kind === 'user_message' ? (
+                    row.body
+                  ) : (
+                    renderMarkdown(row.body)
+                  )
+                ) : (
+                  <span className="bubble-empty">（无内容）</span>
+                )}
+              </div>
+            ) : null}
             {row.attachments && row.attachments.length > 0 ? (
               <div className="chat-attachments">
                 {row.attachments.map((a) => (
@@ -744,76 +520,9 @@ export function RowView(props: RowProps) {
               </div>
             ) : null}
           </div>
-          {/* Every agent reply with a resolved execution session drills into it,
-              finished or empty alike — the mobile twin of the desktop
-              "View run" affordance. */}
-          {fromAgent && execSid ? (
-            <button type="button" className="chat-bubble-drill" onClick={() => onOpenExec(execSid)}>
-              查看执行
-            </button>
-          ) : null}
         </div>
       </div>
     )
-  }
-
-  if (row.kind === 'interaction_request') {
-    // §6.5: collapsed to one line on mobile; the answer surface is a sheet.
-    const q = row.meta?.interaction?.question || row.body
-    return (
-      <div className="chat-card-line">
-        <button
-          type="button"
-          className="chat-card-line-btn"
-          disabled={closed}
-          onClick={() => onAnswerCard(row)}
-        >
-          <span className="chat-card-tag">{row.meta?.interaction?.kind === 'approval' ? '审批' : '提问'}</span>
-          <span className="chat-card-text">{q.length > 34 ? `${q.slice(0, 34)}…` : q}</span>
-          <span className="chat-card-state">{closed ? (answered ? '已回复' : '已结束') : '去回复'}</span>
-        </button>
-      </div>
-    )
-  }
-
-  if (row.kind === 'system_notice') {
-    const noticeType = row.meta?.notice_type ?? ''
-    // The milestones are retired (ADR-100 revision): the runtime stopped
-    // writing them, and an old transcript's copies must not paint either —
-    // state belongs to the live surface, not to history.
-    if (RETIRED_NOTICES.has(noticeType)) return null
-    // A card's closure. A nobody-answered close stays on the CARD (its state
-    // line reads "已结束"), so this row is silent for it. A human decision made
-    // on the EXECUTION surface never arrives here as a message row — this
-    // notice is the transcript's only record of it, and it says so as a
-    // centered event line, not a bubble (a card interaction is a step of the
-    // run, not an utterance). The chat-side decision is suppressed: its own
-    // answer row already stated the outcome.
-    if (noticeType === 'interaction_resolved') {
-      const cardId = row.meta?.in_reply_to ?? ''
-      if (cardId && answeredCards.has(cardId) && !chatAnswered.has(cardId)) {
-        return (
-          <div className="chat-turn-status">
-            <span className="chat-turn-status-text">已在执行会话中回复</span>
-          </div>
-        )
-      }
-      return null
-    }
-    // The router-fallback receipt is keyed by notice_type (bodyless row);
-    // the surface owns the wording.
-    if (noticeType === 'router_fallback') {
-      return (
-        <div className="chat-notice">
-          <span className="chat-notice-pill">已自动分配任务</span>
-        </div>
-      )
-    }
-    return row.body ? (
-      <div className="chat-notice">
-        <span className="chat-notice-pill">{row.body}</span>
-      </div>
-    ) : null
   }
 
   // Unknown kind (forward-compat): a plain notice line, never a blank hole.
@@ -821,58 +530,5 @@ export function RowView(props: RowProps) {
     <div className="chat-notice">
       <span className="chat-notice-pill">{row.body}</span>
     </div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/* Decision card bottom sheet (§6.5)                                    */
-/* ------------------------------------------------------------------ */
-
-interface SheetProps {
-  card: ChatMessageRow
-  /** The card can no longer be answered (§5.5.4) — the sheet is read-only. */
-  closed: boolean
-  /** ...and a human did answer it — otherwise it just ended. */
-  answered: boolean
-  onClose: () => void
-  onAnswer: (text: string) => void
-}
-
-function AnswerSheet({ card, closed, answered, onClose, onAnswer }: SheetProps) {
-  const [free, setFree] = useState('')
-  const interaction = card.meta?.interaction
-  const kindLabel = interaction?.kind === 'approval' ? '允许执行？' : '需要你的回答'
-  return (
-    <Sheet open onClose={onClose} title={kindLabel}>
-      <div className="chat-sheet-question">{interaction?.question || card.body}</div>
-      {closed ? (
-        <div className="chat-sheet-answered">{answered ? '该请求已被回复（可能在其他设备上）' : '该请求已结束，无法再回复'}</div>
-      ) : (
-        <>
-          {(interaction?.options ?? []).map((opt) => (
-            <button key={opt} type="button" className="chat-sheet-option" onClick={() => onAnswer(opt)}>
-              {opt}
-            </button>
-          ))}
-          <div className="chat-sheet-free">
-            <input
-              className="chat-sheet-input"
-              placeholder="自由回答"
-              aria-label="自由回答"
-              value={free}
-              onChange={(e) => setFree(e.target.value)}
-            />
-            <button
-              type="button"
-              className="chat-sheet-send"
-              disabled={!free.trim()}
-              onClick={() => onAnswer(free.trim())}
-            >
-              发送
-            </button>
-          </div>
-        </>
-      )}
-    </Sheet>
   )
 }

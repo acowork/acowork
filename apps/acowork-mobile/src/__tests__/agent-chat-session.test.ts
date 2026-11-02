@@ -1,15 +1,19 @@
 /**
  * The mobile chat-session surface (plan Wave 5.5, design 27 §6.1/§6.5).
  *
- * The chat session is a durable EVENT LOG — the UI renders the point-in-time
- * rows (`turn_dispatched` / `turn_started` / terminal `agent_message`) and owns
- * no live status mirror, so there is no read-time turn projection to pin here
- * any more. What remains is the store rule that matters:
+ * The chat session is a durable EVENT LOG — the UI renders the rows as they
+ * landed (ADR-106 D1) and owns no live status mirror, so there is no read-time
+ * turn projection to pin here any more. What remains is the store rule that
+ * matters:
  *
  *   the freshness loop — the `chat/changed` doorbell is content-free, so
  *   `wake()` re-reads over HTTP and never patches a row from a signal;
  *   `sendText` re-reads once after the POST because the durable row
  *   exists before the delivery resolves (§5.1).
+ *
+ * Plus the one write-side rule the addressing ladder depends on: the human's
+ * address (a named session, or the refusal to continue one) reaches the wire
+ * exactly as given — no client may re-decide it (D6/D7).
  *
  * `lib/api` is the seam, same as `user-chat-push.test.ts`.
  */
@@ -68,10 +72,25 @@ describe('chatSessionStore freshness loop', () => {
   it('sendText posts through the intent channel and re-reads once (§5.1: the row exists before delivery resolves)', async () => {
     await useChatSessionStore.getState().openAgent('agent-1')
     api.fetchChatMessages.mockClear()
-    const ok = await useChatSessionStore.getState().sendText('cs-1', 'hello', 'card-9')
+    const ok = await useChatSessionStore.getState().sendText('cs-1', 'hello', 'round:ag|s1|r1')
     expect(ok).toBe(true)
-    expect(api.sendChatMessage).toHaveBeenCalledWith('u1', 'cs-1', 'hello', 'card-9')
+    expect(api.sendChatMessage).toHaveBeenCalledWith('u1', 'cs-1', 'hello', 'round:ag|s1|r1', undefined, undefined)
     expect(api.fetchChatMessages).toHaveBeenCalledTimes(1)
+  })
+
+  it('carries the human\'s address to the wire unchanged (D6/D7)', async () => {
+    await useChatSessionStore.getState().openAgent('agent-1')
+    const { sendText } = useChatSessionStore.getState()
+    await sendText('cs-1', '继续那个', undefined, ['a-1'], { targetSession: 's-9', messageId: 'm-1' })
+    expect(api.sendChatMessage).toHaveBeenCalledWith('u1', 'cs-1', '继续那个', undefined, ['a-1'], {
+      targetSession: 's-9',
+      messageId: 'm-1',
+    })
+    await sendText('cs-1', '换个话题', undefined, undefined, { forceNew: true, messageId: 'm-2' })
+    expect(api.sendChatMessage).toHaveBeenLastCalledWith('u1', 'cs-1', '换个话题', undefined, undefined, {
+      forceNew: true,
+      messageId: 'm-2',
+    })
   })
 
   it('wake() re-reads every resolved session over HTTP — a content-free doorbell patches no rows', async () => {
