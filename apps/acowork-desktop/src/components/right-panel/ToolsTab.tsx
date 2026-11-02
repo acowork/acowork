@@ -301,7 +301,7 @@ function LogEntryButton({ label, onClick, testId, hint, busy, tone }: LogEntryBu
       className={
         tone === "error"
           ? "inline-flex cursor-pointer items-center gap-1 rounded-full border border-[var(--color-destructive)]/50 px-1.5 py-[1px] text-10 text-[var(--color-destructive)] transition-colors hover:bg-[var(--color-destructive)]/10"
-          : "inline-flex cursor-pointer items-center gap-1 rounded-full border border-border-divider bg-panel-surface px-1.5 py-[1px] text-10 text-text-secondary transition-colors hover:bg-panel-inset hover:text-text"
+          : "inline-flex cursor-pointer items-center gap-1 rounded-full border border-border-divider px-1.5 py-[1px] text-10 text-text-secondary transition-colors hover:bg-panel-inset hover:text-text"
       }
     >
       {busy && <Loader2 className="h-3 w-3 animate-spin" />}
