@@ -172,9 +172,14 @@ fn add_progress(name: &str, text: &str) {
 ///
 /// Handed to `acowork_mcp::health_check_with_output`: for lazy package kinds
 /// that spawn is the install, and its stderr carries the download progress.
-fn server_output_sink(name: &str) -> acowork_mcp::ServerOutputSink {
+/// Every line also stamps `clock`, so the probe's stall watchdog can tell
+/// "still downloading" from "hung".
+fn server_output_sink(name: &str, clock: ActivityClock) -> acowork_mcp::ServerOutputSink {
     let name = name.to_string();
-    std::sync::Arc::new(move |line: &str| append_log(&name, EnsureLogSource::Server, line))
+    std::sync::Arc::new(move |line: &str| {
+        clock.touch();
+        append_log(&name, EnsureLogSource::Server, line)
+    })
 }
 
 /// Snapshot of the current ensure status for `name` (None = never ensured).
@@ -199,16 +204,70 @@ fn is_command_missing(err: &str) -> bool {
         || e.contains("mcp server closed stdout")
 }
 
-/// How long the probe may wait for the MCP handshake.
+/// How long the probe may stay **silent** before it is treated as stalled.
 ///
-/// A package resolver (`npx` / `uvx` / …) downloads during its first spawn, so
-/// the protocol default would abort a healthy first launch and report a broken
-/// server. Everything else is a local binary and keeps the tight window.
-fn probe_window_for(spawn: &McpServerConfigDef) -> std::time::Duration {
+/// Deliberately not a bound on the whole probe: a first launch that keeps
+/// printing is making progress, and aborting it is what made docling look
+/// broken while `uvx` was still downloading. Only a probe that stops producing
+/// output is a hang.
+fn probe_idle_for(spawn: &McpServerConfigDef) -> std::time::Duration {
     if acowork_mcp::resolves_lazily(&spawn.command) {
-        acowork_core::timeout_config::constants::MCP_LAZY_HANDSHAKE
+        acowork_core::timeout_config::constants::MCP_PROBE_IDLE_LAZY
     } else {
-        acowork_core::timeout_config::constants::MCP_RECV
+        acowork_core::timeout_config::constants::MCP_PROBE_IDLE
+    }
+}
+
+/// When the spawned server last produced output — touched by the probe's
+/// stderr sink, read by the stall watchdog.
+#[derive(Clone)]
+struct ActivityClock(std::sync::Arc<std::sync::Mutex<std::time::Instant>>);
+
+impl ActivityClock {
+    fn started_now() -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(
+            std::time::Instant::now(),
+        )))
+    }
+
+    fn touch(&self) {
+        *self.0.lock().expect("activity clock poisoned") = std::time::Instant::now();
+    }
+
+    fn silent_for(&self) -> std::time::Duration {
+        self.0.lock().expect("activity clock poisoned").elapsed()
+    }
+}
+
+/// Await a probe, aborting only when its output has been silent for `idle`.
+///
+/// A probe that keeps printing never trips this, however long it runs; the
+/// deadline is re-armed by every line the server emits. Residual (accepted):
+/// a server that chatters forever without answering the handshake is not
+/// killed — the user sees the log and can flip the switch off.
+async fn await_probe<F, T>(probe: F, clock: &ActivityClock, idle: std::time::Duration) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    tokio::pin!(probe);
+    // Check often enough to notice a stall promptly without busy-waiting.
+    let tick = (idle / 4).clamp(
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_secs(1),
+    );
+    loop {
+        tokio::select! {
+            result = &mut probe => return result,
+            _ = tokio::time::sleep(tick) => {
+                let silent = clock.silent_for();
+                if silent >= idle {
+                    return Err(format!(
+                        "the server produced no output for {}s — treating the probe as stalled                          (a running download would still be printing)",
+                        silent.as_secs()
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -231,7 +290,14 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
     // 1. Probe first — PATH is the state. If the binary is already here
     //    (installed by this or any other agent on this machine), done.
     add_progress(&def.name, "Checking MCP server availability");
-    let probe_window = probe_window_for(&spawn);
+    let idle = probe_idle_for(&spawn);
+    add_progress(
+        &def.name,
+        &format!(
+            "Waiting up to {}s of silence for the MCP handshake — output keeps the wait alive",
+            idle.as_secs()
+        ),
+    );
     if acowork_mcp::resolves_lazily(&spawn.command) {
         add_progress(
             &def.name,
@@ -241,10 +307,15 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
             ),
         );
     }
-    match acowork_mcp::health_check_with_output(
-        &spawn,
-        Some(server_output_sink(&def.name)),
-        probe_window,
+    let clock = ActivityClock::started_now();
+    match await_probe(
+        acowork_mcp::health_check_with_output(
+            &spawn,
+            Some(server_output_sink(&def.name, clock.clone())),
+            None,
+        ),
+        &clock,
+        idle,
     )
     .await
     {
@@ -312,10 +383,15 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
     //    actually downloaded (no explicit install command), so name the step
     //    before blocking on it.
     add_progress(&def.name, "Verifying the server starts and answers MCP initialize");
-    match acowork_mcp::health_check_with_output(
-        &spawn,
-        Some(server_output_sink(&def.name)),
-        probe_window,
+    let clock = ActivityClock::started_now();
+    match await_probe(
+        acowork_mcp::health_check_with_output(
+            &spawn,
+            Some(server_output_sink(&def.name, clock.clone())),
+            None,
+        ),
+        &clock,
+        idle,
     )
     .await
     {
@@ -540,7 +616,7 @@ mod tests {
     fn server_stderr_sink_lands_in_the_log_as_server_lines() {
         let name = "adr090-server-sink-test";
         begin_attempt(name, "probing");
-        let sink = server_output_sink(name);
+        let sink = server_output_sink(name, ActivityClock::started_now());
         sink("npm http fetch GET 200 https://registry.npmjs.org/playwright 42ms");
         sink("added 3 packages in 51s");
         let status = ensure_status(name).expect("attempt registered");
@@ -551,8 +627,8 @@ mod tests {
     }
 
     #[test]
-    fn lazy_resolver_gets_the_wide_probe_window() {
-        // `npx` downloads during the probe; a local binary must not.
+    fn lazy_resolver_gets_the_longer_silence_budget() {
+        // `npx`/`uvx` pause between fetches; a local binary has no excuse.
         let lazy = McpServerConfigDef {
             name: "adr090-lazy".into(),
             transport: McpTransportDef::Stdio,
@@ -560,8 +636,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            probe_window_for(&lazy),
-            acowork_core::timeout_config::constants::MCP_LAZY_HANDSHAKE
+            probe_idle_for(&lazy),
+            acowork_core::timeout_config::constants::MCP_PROBE_IDLE_LAZY
         );
         let local = McpServerConfigDef {
             name: "adr090-local".into(),
@@ -570,9 +646,42 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            probe_window_for(&local),
-            acowork_core::timeout_config::constants::MCP_RECV
+            probe_idle_for(&local),
+            acowork_core::timeout_config::constants::MCP_PROBE_IDLE
         );
+    }
+
+    /// The regression reported for docling: a probe that keeps printing must
+    /// never be aborted, however long it runs — only silence is a hang.
+    #[tokio::test]
+    async fn chatty_probe_outlives_its_idle_budget() {
+        let clock = ActivityClock::started_now();
+        let budget = std::time::Duration::from_millis(300);
+        let chatter = clock.clone();
+        let printer = tokio::spawn(async move {
+            // Four lines over ~4x the budget: a fixed deadline would kill it.
+            for _ in 0..4 {
+                tokio::time::sleep(budget / 2).await;
+                chatter.touch();
+            }
+            "handshake ok"
+        });
+        let probe = async move { Ok::<&str, String>(printer.await.unwrap()) };
+        let result = await_probe(probe, &clock, budget).await;
+        assert_eq!(result.unwrap(), "handshake ok");
+    }
+
+    /// …and a probe that stops printing is a stall, exactly once its output
+    /// has been quiet for the whole budget.
+    #[tokio::test]
+    async fn silent_probe_is_reported_as_stalled() {
+        let clock = ActivityClock::started_now();
+        let budget = std::time::Duration::from_millis(200);
+        let probe = std::future::pending::<Result<&str, String>>();
+        let started = std::time::Instant::now();
+        let error = await_probe(probe, &clock, budget).await.unwrap_err();
+        assert!(error.contains("no output"), "unexpected error: {error}");
+        assert!(started.elapsed() >= budget);
     }
 
     #[tokio::test]

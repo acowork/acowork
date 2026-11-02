@@ -212,7 +212,7 @@ fn ensure_usable(name, pkg, spawn, env):
 - **实施补充（2026-11）：ensure 覆盖自建 stdio server，且探测窗口按命令类型区分**。上线后的事实：用户最常首次下载的恰恰是自建条目（如 `chrome-devtools`，`command = npx -y chrome-devtools-mcp@latest`、**无 install spec**）——旧守卫「无 spec 就不 ensure」让这类服务器完全没有 ensure 尝试，`GET .../mcp-ensure/{name}` 恒为 404，UI 只剩一个不可点的转圈。因此：
   - `spawn_ensure` 的守卫为 **transport = stdio 且命令非空**；无 spec 只意味着「没有安装步骤」，不意味着「不需要探测」。探测失败且命令确实不存在时，仍返回原来的「未找到命令且未声明安装方式」错误并回弹开关。命令为空（catalog 同步残留）不登记尝试，也不动用户的选择。
   - **失败一律回弹开关**，不区分有无 install spec：`Failed` 的含义是「这台机器上现在用不了」，装了个空、装完仍不应答、自建服务器探测不通都属于此列。开关停在「开」而工具列表为空是对用户的误导——他无法判断是还在跑还是已经死了。重试仍是重新打开开关（D6），错误与日志负责解释原因。
-  - 探测/复探的握手窗口不再恒为 `MCP_RECV`(30s)：命令是懒解析器（`npx` / `pnpx` / `bunx` / `uvx`，`resolves_lazily`）时用 `MCP_LAZY_HANDSHAKE`(300s)，因为首次 spawn 就是下载，30s 会把健康的首启判成坏服务器；本地二进制仍用 30s。
+  - 探测/复探的时限是**静默超时，不是全程超时**。首次 spawn 可能就是几分钟的下载（docling + `uvx`），任何"总共只许等 N 秒"的判定都会把健康的下载判成失败——上线后实际发生过：日志一直在刷，界面却因为固定窗口到点而显示失败。现在的判定是：握手等待本身不设上限（`connect_with_timeout(None)`），只有 **spawn 出来的进程连续静默** 超过预算才判定卡死（`MCP_PROBE_IDLE` 30s；命令是懒解析器 `npx`/`pnpx`/`bunx`/`uvx` 时 `MCP_PROBE_IDLE_LAZY` 120s，因为包管理器取包之间会有较长的静默）。每一行 stderr 都会重新计时（`ActivityClock`），与安装命令的 `INSTALL_IDLE_TIMEOUT` 同一语义。残余风险（已知并接受）：一直输出但永不完成握手的服务器不会被杀掉——用户能看到日志，可自行关掉开关。
   - `PUT /agents/{id}/mcp-servers` 回执的 `ensuring` 现在只列**真正登记了尝试**的服务器（非 stdio 不列），客户端因此不会去轮询一个必然 404 的地址。
   - 客户端侧：「首次轮询即 `failed`」也要执行回弹（重载 `active_names` + 通知配置刷新）——命令缺失这类失败在 2s 定时器建立之前就结束了，早退会让开关停在打开态。
 
