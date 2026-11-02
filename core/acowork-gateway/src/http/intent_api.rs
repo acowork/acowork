@@ -648,9 +648,11 @@ struct ChatAppendRequest {
     /// `"execution_round"` | `"system_notice"` | `"agent_message"`.
     /// The first is the contentless reference row a Runtime writes when one of
     /// its rounds belongs to this chat (ADR-106 D3); `agent_message` is a
-    /// chat-native answer (the router's own reply, an agent-to-agent reply).
-    /// `user_message` stays on the human surface — this relay exists for
-    /// Runtime-owned kinds only.
+    /// chat-native answer — since ADR-106 D12 that is only the Chat Router
+    /// replying in its own words, because an execution turn's answer and the
+    /// agent-to-agent exchange live in the round's projection, not in this
+    /// channel. `user_message` stays on the human surface — this relay exists
+    /// for Runtime-owned kinds only.
     pub kind: String,
     #[serde(default)]
     pub to: String,
@@ -1539,10 +1541,11 @@ fn addressed_execution_round(row: Option<&serde_json::Value>) -> Option<(String,
 
 /// `POST /api/intents/mentions` — the group-chat send entry (§5): the human
 /// utterance is ONE `user_message` row carrying the agents the sender named in
-/// its `mentions` field (§5.3.1); each named agent gets its own routed
-/// delivery (initiator role, §5.4.5) and its own write-back `agent_message`
-/// answering that row. The session's repo binding is injected server-side
-/// (§4.1).
+/// its `mentions` field (§5.3.1); each named agent gets its own routed delivery
+/// (initiator role, §5.4.5) and opens its own `execution_round` reference row
+/// under that row (ADR-106 D12 — the turn's answer is read back through the
+/// round's projection, it is not a second chat row). The session's repo binding
+/// is injected server-side (§4.1).
 ///
 /// **Un-addressed messages come here too** (ADR-105). `targets: []` means the
 /// human named nobody, which is the overwhelmingly common way to answer an

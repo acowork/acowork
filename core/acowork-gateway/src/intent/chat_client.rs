@@ -1,17 +1,21 @@
 //! Gateway → acowork-user Chat-session client (design 27 §4.2, §6.3).
 //!
 //! The Chat session store lives in the user service; the Gateway is its
-//! only system writer — Intent request / response rows are appended here
-//! from the delivery pipeline, never by a Runtime or a chat client. The
+//! only system writer. It appends the human-owned row (`user_message`) and
+//! the channel facts (`system_notice`), and it is the single relay through
+//! which a Runtime's own kinds (`execution_round` / `agent_message` /
+//! `system_notice`) reach the store — since ADR-106 D12 the agent-to-agent
+//! Intent exchange writes no chat row of its own; what the chat keeps of a
+//! turn is that turn's reference row, written by the Runtime. The
 //! calls ride the same loopback internal surface as
 //! [`crate::lifecycle::user_profile_sync`] (no identity: the caller is the
 //! Gateway process on this host; `message_id` idempotency bounds replay).
 //!
 //! Every method degrades to `Err(String)`: the caller decides whether a
-//! chat-log write failure blocks delivery. Per design 27 §5.4.3 the Intent
-//! itself is the chat row — a session that cannot be written means the
-//! message has no durable address, so the delivery entry treats append
-//! failures on the request path as fatal-to-delivery, and pair-ensure
+//! chat-log write failure blocks delivery. The human's `user_message` row
+//! is the durable record of the turn it delivers — a session that cannot be
+//! written means the message has no durable address, so the delivery entry
+//! treats append failures on that path as fatal-to-delivery, and pair-ensure
 //! failures as "deliver without a chat binding" (one-off cross-agent
 //! messages keep working when the user service is down).
 
