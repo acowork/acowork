@@ -268,10 +268,21 @@ pub mod constants {
     pub const MCP_PROBE_IDLE: Duration = Duration::from_secs(30);
 
     /// Silence budget for a probe that runs a lazy package resolver
-    /// (`npx` / `uvx` / `bunx` / `pnpx`): the first spawn *is* the download, and
-    /// a package manager may pause longer between fetches than a local binary
-    /// ever stays quiet.
-    pub const MCP_PROBE_IDLE_LAZY: Duration = Duration::from_secs(120);
+    /// (`npx` / `uvx` / `bunx` / `pnpx`).
+    ///
+    /// A *backstop*, not a stall judgement: for these kinds silence proves
+    /// nothing. Measured on this platform (2026-11): `uv` prints one line when
+    /// a package starts and one when it finishes, 39s apart for a 35MiB
+    /// download — a 900MB wheel is minutes of silence; `npx` under a piped
+    /// stderr printed nothing at all for a whole 11s first-run install. A real
+    /// failure (process died) closes the pipe and fails the handshake on its
+    /// own, so the only thing left to catch is a wedged-but-alive process, and
+    /// it is worth waiting an hour before declaring that.
+    pub const MCP_PROBE_IDLE_LAZY: Duration = Duration::from_secs(60 * 60);
+
+    /// While a probe waits, remind the log this often that silence is not a
+    /// verdict — otherwise a quiet large download looks identical to a hang.
+    pub const MCP_PROBE_SILENCE_NOTICE: Duration = Duration::from_secs(60);
 
     /// MCP default per-tool call timeout (was `DEFAULT_TOOL_TIMEOUT_SECS = 180`).
     pub const MCP_DEFAULT_TOOL: Duration = Duration::from_secs(180);
@@ -526,7 +537,8 @@ mod tests {
         assert_eq!(INTENT_DEFAULT, Duration::from_secs(30));
         assert_eq!(MCP_RECV, Duration::from_secs(30));
         assert_eq!(MCP_PROBE_IDLE, Duration::from_secs(30));
-        assert_eq!(MCP_PROBE_IDLE_LAZY, Duration::from_secs(120));
+        assert_eq!(MCP_PROBE_IDLE_LAZY, Duration::from_secs(60 * 60));
+        assert_eq!(MCP_PROBE_SILENCE_NOTICE, Duration::from_secs(60));
         assert_eq!(MCP_DEFAULT_TOOL, Duration::from_secs(180));
         assert_eq!(MCP_MAX_TOOL, Duration::from_secs(600));
         assert_eq!(LSP_REQUEST, Duration::from_secs(30));

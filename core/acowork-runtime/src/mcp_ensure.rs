@@ -242,10 +242,21 @@ impl ActivityClock {
 /// Await a probe, aborting only when its output has been silent for `idle`.
 ///
 /// A probe that keeps printing never trips this, however long it runs; the
-/// deadline is re-armed by every line the server emits. Residual (accepted):
-/// a server that chatters forever without answering the handshake is not
-/// killed — the user sees the log and can flip the switch off.
-async fn await_probe<F, T>(probe: F, clock: &ActivityClock, idle: std::time::Duration) -> Result<T, String>
+/// deadline is re-armed by every line the server emits. `on_silence` is called
+/// at most every `notice` while nothing arrives, so the log can say "quiet for
+/// 2m — large downloads are quiet" instead of leaving the user to guess.
+///
+/// Why silence alone is a weak signal (measured, see
+/// `constants::MCP_PROBE_IDLE_LAZY`): `uv` prints one line when a package's
+/// download starts and the next when it ends, and `npx` may print nothing for
+/// an entire install. So `idle` is a backstop per command kind, not a verdict.
+async fn await_probe<F, T>(
+    probe: F,
+    clock: &ActivityClock,
+    idle: std::time::Duration,
+    notice: std::time::Duration,
+    mut on_silence: impl FnMut(std::time::Duration),
+) -> Result<T, String>
 where
     F: std::future::Future<Output = Result<T, String>>,
 {
@@ -255,6 +266,8 @@ where
         std::time::Duration::from_millis(200),
         std::time::Duration::from_secs(1),
     );
+    let tick = tick.min(notice.max(std::time::Duration::from_millis(100)));
+    let mut last_notice = std::time::Duration::ZERO;
     loop {
         tokio::select! {
             result = &mut probe => return result,
@@ -265,6 +278,10 @@ where
                         "the server produced no output for {}s — treating the probe as stalled                          (a running download would still be printing)",
                         silent.as_secs()
                     ));
+                }
+                if silent >= last_notice + notice {
+                    last_notice = silent;
+                    on_silence(silent);
                 }
             }
         }
@@ -291,6 +308,7 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
     //    (installed by this or any other agent on this machine), done.
     add_progress(&def.name, "Checking MCP server availability");
     let idle = probe_idle_for(&spawn);
+    let silence_notice = acowork_core::timeout_config::constants::MCP_PROBE_SILENCE_NOTICE;
     add_progress(
         &def.name,
         &format!(
@@ -316,6 +334,16 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
         ),
         &clock,
         idle,
+        silence_notice,
+        |silent| {
+            add_progress(
+                &def.name,
+                &format!(
+                    "No output for {}s — package downloads can be quiet while a large file                      streams; the probe is still waiting",
+                    silent.as_secs()
+                ),
+            )
+        },
     )
     .await
     {
@@ -392,6 +420,13 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
         ),
         &clock,
         idle,
+        silence_notice,
+        |silent| {
+            add_progress(
+                &def.name,
+                &format!("No output for {}s — still waiting", silent.as_secs()),
+            )
+        },
     )
     .await
     {
@@ -667,8 +702,11 @@ mod tests {
             "handshake ok"
         });
         let probe = async move { Ok::<&str, String>(printer.await.unwrap()) };
-        let result = await_probe(probe, &clock, budget).await;
+        let mut notices = 0;
+        let result = await_probe(probe, &clock, budget, budget, |_| notices += 1).await;
         assert_eq!(result.unwrap(), "handshake ok");
+        // …and it never got nagged while it was making progress.
+        assert_eq!(notices, 0);
     }
 
     /// …and a probe that stops printing is a stall, exactly once its output
@@ -679,9 +717,27 @@ mod tests {
         let budget = std::time::Duration::from_millis(200);
         let probe = std::future::pending::<Result<&str, String>>();
         let started = std::time::Instant::now();
-        let error = await_probe(probe, &clock, budget).await.unwrap_err();
+        let error = await_probe(probe, &clock, budget, budget, |_| {}).await.unwrap_err();
         assert!(error.contains("no output"), "unexpected error: {error}");
         assert!(started.elapsed() >= budget);
+    }
+
+    /// Silence is not a verdict: a quiet-but-alive probe reports progress to the
+    /// log on a cadence instead of failing (npx can be silent for a whole
+    /// install; uv is silent for the length of one package's transfer).
+    #[tokio::test]
+    async fn quiet_probe_reports_cadence_instead_of_failing() {
+        let clock = ActivityClock::started_now();
+        let notice = std::time::Duration::from_millis(80);
+        let backstop = std::time::Duration::from_secs(30);
+        let probe = async {
+            tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+            Ok::<&str, String>("late but fine")
+        };
+        let mut saw: Vec<std::time::Duration> = Vec::new();
+        let result = await_probe(probe, &clock, backstop, notice, |silent| saw.push(silent)).await;
+        assert_eq!(result.unwrap(), "late but fine");
+        assert!(saw.len() >= 2, "expected repeated notices, got {saw:?}");
     }
 
     #[tokio::test]
