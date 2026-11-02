@@ -99,7 +99,20 @@
     "globalSearch": "グローバル検索 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel",
-    "gatewayDetails": "詳細"
+    "gatewayDetails": "詳細",
+    "appearance": "外観"
+  },
+  "accentColors": {
+    "blue": "ブルー",
+    "indigo": "インディゴ",
+    "violet": "バイオレット",
+    "cyan": "シアン",
+    "teal": "ティール",
+    "green": "グリーン",
+    "rose": "ローズ",
+    "orange": "オレンジ",
+    "amber": "アンバー",
+    "pink": "ピンク"
   },
   "navBar": {
     "editProfile": "Edit Profile",

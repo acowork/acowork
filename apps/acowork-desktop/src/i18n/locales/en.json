@@ -5,7 +5,20 @@
     "globalSearch": "Global Search (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel",
-    "gatewayDetails": "Details"
+    "gatewayDetails": "Details",
+    "appearance": "Appearance"
+  },
+  "accentColors": {
+    "blue": "Blue",
+    "indigo": "Indigo",
+    "violet": "Violet",
+    "cyan": "Cyan",
+    "teal": "Teal",
+    "green": "Green",
+    "rose": "Rose",
+    "orange": "Orange",
+    "amber": "Amber",
+    "pink": "Pink"
   },
   "navBar": {
     "editProfile": "Edit Profile",

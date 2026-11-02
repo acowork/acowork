@@ -99,7 +99,20 @@
     "globalSearch": "전역 검색 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel",
-    "gatewayDetails": "상세"
+    "gatewayDetails": "상세",
+    "appearance": "외관"
+  },
+  "accentColors": {
+    "blue": "블루",
+    "indigo": "인디고",
+    "violet": "바이올렛",
+    "cyan": "시안",
+    "teal": "틸",
+    "green": "그린",
+    "rose": "로즈",
+    "orange": "오렌지",
+    "amber": "앰버",
+    "pink": "핑크"
   },
   "navBar": {
     "editProfile": "Edit Profile",

@@ -99,7 +99,20 @@
     "globalSearch": "全局搜索 (Ctrl+Shift+F)",
     "collapseRightPanel": "折叠右侧面板",
     "expandRightPanel": "展开右侧面板",
-    "gatewayDetails": "详情"
+    "gatewayDetails": "详情",
+    "appearance": "外观"
+  },
+  "accentColors": {
+    "blue": "蓝色",
+    "indigo": "靛蓝",
+    "violet": "紫罗兰",
+    "cyan": "青色",
+    "teal": "蓝绿色",
+    "green": "绿色",
+    "rose": "玫瑰色",
+    "orange": "橙色",
+    "amber": "琥珀色",
+    "pink": "粉色"
   },
   "navBar": {
     "editProfile": "编辑资料",

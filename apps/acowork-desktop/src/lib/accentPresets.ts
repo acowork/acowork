@@ -4,7 +4,6 @@
  * Each preset defines:
  *   - `id`    : short identifier used as the CSS class `accent-{id}` on `<html>`
  *               for tint lookup and as the persistence key in localStorage
- *   - `label` : human-readable name shown in Settings UI tooltip
  *   - `hex`   : the canonical accent color (used for buttons, links, etc.)
  *   - `hue`   : HSL hue (0-360) — drives the glass-tint hue in globals.css
  *   - `glassTintLight` / `glassTintDark`
@@ -31,7 +30,6 @@
 
 export interface AccentPreset {
   id: string;
-  label: string;
   hex: string;
   hue: number;
   /** HSL components (e.g. "217 8% 92%") — bound to `--glass-tint-light`. */
@@ -47,7 +45,6 @@ export interface AccentPreset {
 export const ACCENT_PRESETS: AccentPreset[] = [
   {
     id: "blue",
-    label: "Blue",
     hex: "#3b82f6",
     hue: 217,
     glassTintLight: "217 8% 92%",
@@ -57,7 +54,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "indigo",
-    label: "Indigo",
     hex: "#6366f1",
     hue: 243,
     glassTintLight: "243 8% 92%",
@@ -67,7 +63,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "violet",
-    label: "Violet",
     hex: "#8b5cf6",
     hue: 258,
     glassTintLight: "258 8% 92%",
@@ -77,7 +72,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "cyan",
-    label: "Cyan",
     hex: "#06b6d4",
     hue: 189,
     glassTintLight: "189 8% 92%",
@@ -87,7 +81,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "teal",
-    label: "Teal",
     hex: "#14b8a6",
     hue: 173,
     glassTintLight: "173 8% 92%",
@@ -97,7 +90,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "green",
-    label: "Green",
     hex: "#00C375",
     hue: 158,
     glassTintLight: "158 8% 92%",
@@ -107,7 +99,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "rose",
-    label: "Rose",
     hex: "#f43f5e",
     hue: 350,
     glassTintLight: "350 8% 92%",
@@ -117,7 +108,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "orange",
-    label: "Orange",
     hex: "#f97316",
     hue: 24,
     glassTintLight: "24 8% 92%",
@@ -127,7 +117,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "amber",
-    label: "Amber",
     hex: "#f59e0b",
     hue: 38,
     glassTintLight: "38 8% 92%",
@@ -137,7 +126,6 @@ export const ACCENT_PRESETS: AccentPreset[] = [
   },
   {
     id: "pink",
-    label: "Pink",
     hex: "#ec4899",
     hue: 330,
     glassTintLight: "330 8% 92%",

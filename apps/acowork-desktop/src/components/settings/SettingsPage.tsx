@@ -1054,10 +1054,11 @@ function AppearanceTab() {
           <p className="mb-3 text-xs text-text-tertiary">{t("settings.accentColor")}</p>
           <div className="flex flex-wrap gap-[14px]">
             {ACCENT_PRESETS.map((c) => (
-              <Tooltip content={c.label} variant="plain" key={c.id}>
+              <Tooltip content={t(`accentColors.${c.id}`)} variant="plain" key={c.id}>
                 <button
                   onClick={() => setAccentColor(c.hex)}
-                  aria-label={c.label}
+                  aria-label={t(`accentColors.${c.id}`)}
+                  aria-pressed={accentColor.toLowerCase() === c.hex.toLowerCase()}
                   data-accent-id={c.id}
                   className={cn(
                     "flex h-9 w-9 items-center justify-center rounded-full transition-transform",

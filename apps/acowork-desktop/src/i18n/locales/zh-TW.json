@@ -99,7 +99,20 @@
     "globalSearch": "全域搜尋 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel",
-    "gatewayDetails": "詳情"
+    "gatewayDetails": "詳情",
+    "appearance": "外觀"
+  },
+  "accentColors": {
+    "blue": "藍色",
+    "indigo": "靛藍",
+    "violet": "紫羅蘭",
+    "cyan": "青色",
+    "teal": "藍綠色",
+    "green": "綠色",
+    "rose": "玫瑰色",
+    "orange": "橙色",
+    "amber": "琥珀色",
+    "pink": "粉紅色"
   },
   "navBar": {
     "editProfile": "Edit Profile",
