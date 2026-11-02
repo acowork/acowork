@@ -75,9 +75,6 @@ export interface AgentProfileSettings {
    *  Empty string from the dropdown also means "no opinion" and is
    *  cleared on save. */
   sessionLanguage?: string | null;
-  /** ADR-099: Chat Router kill switch (`chat_router.enabled`).
-   *  Undefined = design default (enabled). */
-  chatRouterEnabled?: boolean;
   /** ADR-099: explicit router model id (`chat_router.model`).
    *  Undefined / empty = the agent's compact-model chain — the router
    *  deliberately does NOT follow the session's chat-model selection. */
@@ -180,11 +177,14 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
       s.compressionRatioThreshold <= 0.95
         ? s.compressionRatioThreshold
         : undefined,
-    // ADR-099 Chat Router knobs. `chatRouterModel` / `chatRouterProvider`
-    // keep non-empty strings only — "" is the UI "auto" marker and
-    // normalizes to undefined (same display, same server semantics).
-    chatRouterEnabled:
-      typeof s.chatRouterEnabled === "boolean" ? s.chatRouterEnabled : undefined,
+    // ADR-099 Chat Session Router knobs. `chatRouterModel` /
+    // `chatRouterProvider` keep non-empty strings only — "" is the UI
+    // "auto" marker and normalizes to undefined (same display, same
+    // server semantics). The router's kill switch
+    // (`chat_router.enabled`) is deliberately NOT part of the profile:
+    // the router is always on, so there is no user-facing setting to
+    // hold, and a stale local copy could only ever contradict the
+    // runtime.
     chatRouterModel:
       typeof s.chatRouterModel === "string" && s.chatRouterModel
         ? s.chatRouterModel
