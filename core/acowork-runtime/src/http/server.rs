@@ -649,6 +649,17 @@ impl RuntimeHttpServer {
                 get(get_session).delete(crate::http::session_control::delete_session),
             )
             .route("/sessions/{sid}/messages", get(get_messages).post(crate::http::session_control::post_send_message))
+            // ADR-106 D4: the round projection read. One round by id, or a bounded
+            // batch — the reads a Chat block is rendered from. Both resolve off disk,
+            // so a `Closed` (not resident) session projects exactly like a live one.
+            .route(
+                "/sessions/{sid}/rounds",
+                get(crate::http::rounds::list_session_rounds),
+            )
+            .route(
+                "/sessions/{sid}/rounds/{round_id}",
+                get(crate::http::rounds::get_session_round),
+            )
             // ADR-076 §决策 4 (second wave): user-triggered session actions.
             // These carried no ownership decision, but they carried no
             // *identity* either, so over MQTT they could be replayed into

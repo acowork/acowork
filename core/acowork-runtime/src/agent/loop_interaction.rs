@@ -258,6 +258,26 @@ impl AgentLoop {
         .await;
     }
 
+    /// The card the current round is parked on, as a reference.
+    ///
+    /// ADR-106 D2/D4: a round's `card` is recorded when its turn ends `waiting`, so
+    /// the block the Chat renders can show what it is stalled on. Only `pause` cards
+    /// qualify — `approval` and `ask_question` are resolved inside the turn they were
+    /// written in, so a round that ended with one still open ended by stop or error
+    /// and is not waiting on anybody.
+    ///
+    /// Coordinates only, never the question body: the card row in the Chat session is
+    /// the content, this is the pointer (D3).
+    pub(crate) fn open_pause_card(&self) -> Option<serde_json::Value> {
+        let card = self.open_chat_cards.iter().find(|c| c.kind == "pause")?;
+        Some(serde_json::json!({
+            "kind": card.kind,
+            "request_id": card.request_id,
+            "chat_session_id": card.chat_session_id,
+            "to": card.to,
+        }))
+    }
+
     /// Mark the turn as user-interrupted (§7.1 `aborted`).
     ///
     /// A stop ends the loop with no text, and the write-back used to

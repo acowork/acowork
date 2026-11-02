@@ -922,8 +922,13 @@ impl SessionTask {
                                     &mut context_builder,
                                 ).await;
                                 // Use replay() to avoid appending a duplicate user message
-                                // to history (the original is already there).
-                                match agent_loop.replay(content, &mut context_builder, None).await {
+                                // to history (the original is already there). The message
+                                // id travels so the replayed rows stay under the round that
+                                // message opened (ADR-106 D2).
+                                match agent_loop
+                                    .replay(content, &mut context_builder, None, Some(msg_id.clone()))
+                                    .await
+                                {
                                     Ok(response) => {
                                         tracing::info!(
                                             session_id = %session_id,

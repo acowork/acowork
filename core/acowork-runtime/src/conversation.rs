@@ -285,6 +285,20 @@ pub enum WriterCommand {
     /// the writer awaits via `blocking_recv` and the caller's `.await` on the
     /// returned receiver hops back to the async runtime context.
     Flush { done: oneshot::Sender<()> },
+    /// ADR-106 D2/D4: write a round snapshot line into the session's round side
+    /// table.
+    ///
+    /// Sent by [`ConversationSession::end_round`] (terminal) and
+    /// [`ConversationSession::snapshot_round`] (non-terminal, e.g. the card a round
+    /// is blocked on). Routed through the writer channel rather than written
+    /// directly so the side table keeps the *same* single writer as the JSONL —
+    /// a snapshot enqueued after an entry can never land before it (ADR-092).
+    RoundSnapshot {
+        round_id: String,
+        terminal: bool,
+        status: Option<String>,
+        card: Option<serde_json::Value>,
+    },
     /// Flush and shut down the writer.
     Shutdown(oneshot::Sender<()>),
 }
@@ -312,10 +326,16 @@ pub struct ConversationWriter {
     /// reader that observes `committed_lines = N` is guaranteed to find an
     /// index covering at least N lines (ADR-022 ordering invariant).
     log: Arc<Mutex<LogIndex>>,
+    /// ADR-106 D4: path of this session's round side table.
+    rounds_path: PathBuf,
+    /// ADR-106 D2: the round currently being appended, shared with
+    /// [`ConversationSession`] so the turn code can read back what the writer saw.
+    active_round: Arc<Mutex<crate::rounds::ActiveRound>>,
 }
 
 impl ConversationWriter {
     /// Create a new writer.
+    #[allow(clippy::too_many_arguments)] // thread-handoff ctor; a struct here only hides the call site
     fn new(
         file: std::fs::File,
         receiver: mpsc::UnboundedReceiver<WriterCommand>,
@@ -323,6 +343,8 @@ impl ConversationWriter {
         committed_lines: Arc<AtomicUsize>,
         log_path: PathBuf,
         log: Arc<Mutex<LogIndex>>,
+        rounds_path: PathBuf,
+        active_round: Arc<Mutex<crate::rounds::ActiveRound>>,
     ) -> Self {
         Self {
             file,
@@ -331,6 +353,8 @@ impl ConversationWriter {
             committed_lines,
             log_path,
             log,
+            rounds_path,
+            active_round,
         }
     }
 
@@ -341,10 +365,14 @@ impl ConversationWriter {
     /// to a full reconcile so the shared index never drifts from disk. Called
     /// before `committed_lines` advances (ADR-022): a reader that sees the new
     /// count can always resolve it against the index.
-    fn commit_appended_line(&self, offset: u64, len: u64) {
+    ///
+    /// Returns the line's ADR-050 **data index** (its position among `Data`
+    /// lines), or `None` when the line is blank / a legacy header — the coordinate
+    /// ADR-106 D4 records in the round side table.
+    fn commit_appended_line(&self, offset: u64, len: u64) -> Option<u64> {
         let mut idx = match self.log.lock() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => return None,
         };
         let continues = offset == idx.end && idx.spans.last().is_none_or(|s| s.terminated);
         if continues {
@@ -358,8 +386,46 @@ impl ConversationWriter {
                 data_index: Some(data_index),
             });
             idx.end = offset + len;
-        } else if let Err(e) = reconcile_log(&self.log_path, &mut idx) {
-            tracing::warn!("conversation writer: log index reconcile failed: {e}");
+            Some(data_index)
+        } else {
+            if let Err(e) = reconcile_log(&self.log_path, &mut idx) {
+                tracing::warn!("conversation writer: log index reconcile failed: {e}");
+                return None;
+            }
+            idx.spans.last().and_then(|s| s.data_index)
+        }
+    }
+
+    /// ADR-106 D2/D4: fold one committed entry into the round index.
+    ///
+    /// The round identity comes from the entry's own metadata, never from its
+    /// position — D2 forbids inferring a round from ordering. Snapshot writes are
+    /// best-effort: a side-table failure must never cost the transcript its entry,
+    /// so every error path here is a `warn` (ADR-097 disposability).
+    fn note_round(&self, entry: &ConversationEntry, data_index: u64) {
+        if entry
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get(crate::rounds::META_KEY_ROUND_ID))
+            .is_none()
+        {
+            return;
+        }
+        let mut guard = match self.active_round.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let records = guard.note_entry(entry, data_index);
+        drop(guard);
+        for rec in records {
+            if let Err(e) = crate::rounds::append_record(&self.rounds_path, &rec) {
+                tracing::warn!(
+                    path = %self.rounds_path.display(),
+                    round_id = %rec.round_id,
+                    error = %e,
+                    "rounds index: snapshot append failed (entry itself is durable)"
+                );
+            }
         }
     }
 
@@ -390,8 +456,13 @@ impl ConversationWriter {
                             // guarantees read_messages_since never sees a line count
                             // ahead of the actual file contents, and the index always
                             // backs a count a reader resolves against it.
-                            self.commit_appended_line(start, len);
+                            let data_index = self.commit_appended_line(start, len);
                             self.committed_lines.fetch_add(1, Ordering::Relaxed);
+                            // ADR-106 D4: record the round coordinate of the line we
+                            // just committed while its position is exactly known.
+                            if let Some(data_index) = data_index {
+                                self.note_round(&entry, data_index);
+                            }
                             if let Some(abs) = abs_offset {
                                 // ADR-024: absolute offset (no header to subtract from).
                                 if let Ok(mut guard) = self.last_compaction_offset.lock() {
@@ -419,7 +490,10 @@ impl ConversationWriter {
                     match self.write_entry(&entry, abs_offset.is_some()) {
                         Err(e) => tracing::error!("Failed to write compaction entry: {}", e),
                         Ok((start, len)) => {
-                            self.commit_appended_line(start, len);
+                            // A compaction marker is never part of a round (D4: the
+                            // projection reads user / assistant rows only), so the
+                            // returned coordinate is deliberately not folded.
+                            let _ = self.commit_appended_line(start, len);
                             self.committed_lines.fetch_add(1, Ordering::Relaxed);
                             if let Some(abs) = abs_offset {
                                 if let Ok(mut guard) = self.last_compaction_offset.lock() {
@@ -435,6 +509,76 @@ impl ConversationWriter {
                     // receiver was dropped (caller panicked before
                     // `recv`), which we treat as benign.
                     let _ = done.send(());
+                }
+                WriterCommand::RoundSnapshot {
+                    round_id,
+                    terminal,
+                    status,
+                    card,
+                } => {
+                    let rec = match self.active_round.lock() {
+                        Ok(mut guard) => {
+                            if guard.round_id != round_id || guard.user.is_none() {
+                                tracing::warn!(
+                                    round_id = %round_id,
+                                    tracked = %guard.round_id,
+                                    "rounds index: snapshot for a round the writer does not hold"
+                                );
+                                continue;
+                            }
+                            let mut rec = guard.snapshot(
+                                terminal,
+                                card.clone(),
+                                status.clone(),
+                                &crate::rounds::now_ts(),
+                            );
+                            if terminal && card.is_none() {
+                                // An explicit close means nothing is pending: the card a
+                                // `waiting` snapshot published was resolved by the very turn
+                                // that answers it, so a completed round must not come back
+                                // still holding a question. Inheriting is right only for
+                                // `forced_closure`, where the round really was abandoned
+                                // mid-wait — and a terminal record is cached forever (D5),
+                                // so this is the difference between an honest block and a
+                                // permanently lying one.
+                                rec.card = None;
+                            }
+                            if !rec.terminal {
+                                // A published non-terminal state sticks: the next
+                                // coordinate snapshot must not erase the status or the
+                                // card, because the fold is last-wins over every record
+                                // of the round.
+                                guard.status = rec.status.clone();
+                                guard.card = rec.card.clone();
+                            }
+                            rec
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "rounds index: active-round lock poisoned, skipping snapshot");
+                            continue;
+                        }
+                    };
+                    if let Err(e) = crate::rounds::append_record(&self.rounds_path, &rec) {
+                        tracing::warn!(
+                            path = %self.rounds_path.display(),
+                            round_id = %round_id,
+                            error = %e,
+                            "rounds index: snapshot append failed"
+                        );
+                        continue;
+                    }
+                    if rec.terminal {
+                        // A terminal snapshot is final by contract (D4), so the writer
+                        // forgets the round. Without this, the next round's first
+                        // stamped entry would force-close a round that already has an
+                        // outcome and overwrite it with `interrupted` (fold is
+                        // last-wins).
+                        if let Ok(mut guard) = self.active_round.lock()
+                            && guard.round_id == rec.round_id
+                        {
+                            *guard = crate::rounds::ActiveRound::default();
+                        }
+                    }
                 }
                 WriterCommand::Shutdown(tx) => {
                     if let Err(e) = self.file.flush() {
@@ -886,6 +1030,18 @@ pub struct ConversationSession {
     session_file_path: PathBuf,
     /// Path to the conversations directory (for meta file writes).
     conversations_dir: PathBuf,
+    /// ADR-106 D4: path of this session's round side table (`{sid}.jsonl.rounds`).
+    rounds_path: PathBuf,
+    /// ADR-106 D2: the round new writes are stamped with.
+    ///
+    /// Set by [`Self::begin_round`] at the turn boundary, cleared by
+    /// [`Self::end_round`]. `None` between turns — entries written outside a turn
+    /// (session-init rows, injected todo rounds, compaction markers) carry no
+    /// stamp and therefore belong to no round, which is exactly what D2 requires.
+    round_stamp: std::sync::Mutex<Option<String>>,
+    /// ADR-106 D4: the writer's live view of the round being appended. Shared
+    /// handle — the writer owns the coordinates, readers only observe them.
+    active_round: Arc<Mutex<crate::rounds::ActiveRound>>,
     /// Channel for emitting config-change notifications.
     ///
     /// Config mutators send a `ConfigChange` snapshot through this channel
@@ -1332,6 +1488,14 @@ impl ConversationSession {
         reset_log_index(&file_path);
         let log = log_index_for(&file_path);
 
+        // ADR-106 D4: a brand-new session starts a brand-new round index too — the
+        // truncate above invalidated every coordinate a previous holder of this
+        // path may have recorded, and a stale side table would project the wrong
+        // lines.
+        let rounds_path = crate::rounds::rounds_path(&conversations_dir, session_id);
+        let _ = std::fs::remove_file(&rounds_path);
+        let active_round = Arc::new(Mutex::new(crate::rounds::ActiveRound::default()));
+
         // ADR-024: no JSONL header — file starts at line 0.
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
         let writer = ConversationWriter::new(
@@ -1341,6 +1505,8 @@ impl ConversationSession {
             committed_lines,
             file_path.clone(),
             log,
+            rounds_path.clone(),
+            Arc::clone(&active_round),
         );
         std::thread::spawn(move || writer.run());
 
@@ -1384,6 +1550,9 @@ impl ConversationSession {
             sender: tx,
             session_file_path: file_path,
             conversations_dir: conversations_dir.clone(),
+            rounds_path,
+            round_stamp: std::sync::Mutex::new(None),
+            active_round,
             config_change_tx: config_tx,
             state_change_tx: state_tx,
             config_version: AtomicU64::new(0),
@@ -1448,6 +1617,14 @@ impl ConversationSession {
         let existing_lines = calibrate_open(&file_path)?;
         committed_lines.store(existing_lines, Ordering::Relaxed);
 
+        // ADR-106 D4: bring the round side table in line with the transcript we just
+        // calibrated — rebuild it once if it is absent, and close any round a crash
+        // left open. Runs while the log index is warm (the calibration above built
+        // it) and before the writer starts appending, so a rebuilt coordinate can
+        // never be stale by the time the first new entry lands.
+        let rounds_path = crate::rounds::rounds_path(&conversations_dir, session_id);
+        crate::rounds::repair_on_open(&rounds_path, &file_path);
+
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -1464,6 +1641,8 @@ impl ConversationSession {
         // value instead of starting from `None`.
         let last_compaction_offset = Arc::new(std::sync::Mutex::new(meta.last_compaction_offset));
 
+        let active_round = Arc::new(Mutex::new(crate::rounds::ActiveRound::default()));
+
         let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
         let writer = ConversationWriter::new(
             file,
@@ -1472,6 +1651,8 @@ impl ConversationSession {
             committed_lines,
             file_path.clone(),
             log_index_for(&file_path),
+            rounds_path.clone(),
+            Arc::clone(&active_round),
         );
         std::thread::spawn(move || writer.run());
 
@@ -1506,6 +1687,9 @@ impl ConversationSession {
                 sender: tx,
                 session_file_path: file_path,
                 conversations_dir,
+                rounds_path,
+                round_stamp: std::sync::Mutex::new(None),
+                active_round,
                 config_change_tx: config_tx,
                 state_change_tx: state_tx,
                 config_version: AtomicU64::new(0),
@@ -1555,6 +1739,7 @@ impl ConversationSession {
         metadata: Option<serde_json::Value>,
         id: Option<String>,
     ) {
+        let metadata = self.stamp_active_round(metadata);
         let entry = ConversationEntry {
             id: id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -1591,6 +1776,131 @@ impl ConversationSession {
         // (same cadence as the meta write itself, so we never publish more
         // often than we persist).
         self.notify_state_change();
+    }
+
+    // ── ADR-106 D2/D4: round boundaries ─────────────────────────────────────
+
+    /// Stamp the entry currently being written with the active round, if any.
+    ///
+    /// This is the single funnel that gives a round its identity in the log: D2
+    /// forbids inferring a round from message ordering, so membership is explicit
+    /// metadata on the entry itself. Written only while a turn is active — rows
+    /// produced outside a turn (session-init rows, injected todo rounds, compaction
+    /// markers) carry no stamp and therefore belong to no round.
+    fn stamp_active_round(
+        &self,
+        metadata: Option<serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        let round_id = match self.round_stamp.lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(id) => id.clone(),
+                None => return metadata,
+            },
+            Err(_) => return metadata,
+        };
+        let mut meta = match metadata {
+            Some(serde_json::Value::Object(map)) => map,
+            // A round id is an object member; a non-object metadata payload cannot
+            // carry one without changing shape for existing readers. Dropping the
+            // stamp only costs that entry its round membership, which is the
+            // degrade-don't-break behaviour the side table is specified for.
+            Some(other) => {
+                tracing::debug!(
+                    round_id = %round_id,
+                    metadata = %other,
+                    "rounds index: non-object metadata, entry left unstamped"
+                );
+                return Some(other);
+            }
+            None => serde_json::Map::new(),
+        };
+        meta.insert(
+            crate::rounds::META_KEY_ROUND_ID.to_string(),
+            serde_json::Value::String(round_id),
+        );
+        Some(serde_json::Value::Object(meta))
+    }
+
+    /// Open a round (or continue the one already open).
+    ///
+    /// Calling this with the id the writer already holds is the continuation case
+    /// (D2): the round keeps its recorded user coordinate, so the answering turn's
+    /// reply lands in the same block instead of opening a second one. Any other id
+    /// arms a new round; the writer closes the round it was tracking when the first
+    /// newly-stamped entry arrives, which is what keeps a pre-empted round from
+    /// looking open forever.
+    pub fn begin_round(&self, round_id: &str) {
+        if round_id.is_empty() {
+            return;
+        }
+        if let Ok(mut stamp) = self.round_stamp.lock() {
+            *stamp = Some(round_id.to_string());
+        }
+    }
+
+    /// Close the active round with its outcome.
+    ///
+    /// Terminal: the snapshot is enqueued behind every entry the round produced
+    /// (writer channel FIFO), and the stamp is released so later rows are unstamped.
+    /// `card` is the card the round is parked on, when it ended by waiting.
+    pub fn end_round(&self, status: &str, card: Option<serde_json::Value>) {
+        self.publish_round(status, card, true);
+    }
+
+    /// Publish the round's current state without closing it.
+    ///
+    /// Used when a turn ends in `waiting`: the round stays open (its answer continues
+    /// it), but the card it is blocked on has to be visible to the chat now — a
+    /// blocked round whose card never renders is the failure ADR-100 was written
+    /// about. Non-terminal records are exactly what the projection cache must NOT
+    /// hold (D5), which is why `terminal` is explicit here.
+    ///
+    /// The stamp is released like [`Self::end_round`]: rows written outside a turn
+    /// must never move a round's coordinates. A continuation re-arms it via
+    /// [`Self::begin_round`].
+    pub fn snapshot_round(&self, status: &str, card: Option<serde_json::Value>) {
+        self.publish_round(status, card, false);
+    }
+
+    /// The round the session is currently on, if a turn is active.
+    ///
+    /// Read from the writer's own tracking rather than from the stamp, so it
+    /// survives the turn loop being rebuilt: a continuation asks "which round am I
+    /// answering?" and must get the round whose coordinates the writer holds.
+    pub fn active_round_id(&self) -> Option<String> {
+        let guard = self.active_round.lock().ok()?;
+        guard.round_id().map(|s| s.to_string())
+    }
+
+    /// Path of the session's round side table (ADR-106 D4).
+    ///
+    /// The canonical transcript is [`Self::session_path`]; the side table sits next to
+    /// it and is what the projection endpoint reads.
+    pub fn rounds_index_path(&self) -> &Path {
+        &self.rounds_path
+    }
+
+    /// Take the stamp and enqueue the round snapshot it names.
+    fn publish_round(&self, status: &str, card: Option<serde_json::Value>, terminal: bool) {
+        let round_id = match self.round_stamp.lock() {
+            Ok(mut guard) => match guard.take() {
+                Some(id) => id,
+                None => return,
+            },
+            Err(_) => return,
+        };
+        if let Err(e) = self.sender.send(WriterCommand::RoundSnapshot {
+            round_id: round_id.clone(),
+            terminal,
+            status: Some(status.to_string()),
+            card,
+        }) {
+            tracing::warn!(
+                round_id = %round_id,
+                error = %e,
+                "rounds index: writer gone, round outcome not recorded"
+            );
+        }
     }
 
     /// Append a compaction event to the JSONL.
@@ -2575,6 +2885,15 @@ impl Clone for ConversationSession {
             sender: self.sender.clone(),
             session_file_path: self.session_file_path.clone(),
             conversations_dir: self.conversations_dir.clone(),
+            // ADR-106: the round side table is addressed by path, and the writer's
+            // active-round tracking is *shared* (Arc) rather than snapshotted — a
+            // clone must never be able to fork the round identity, since a second
+            // tracker would silently drop the coordinates the single writer records.
+            rounds_path: self.rounds_path.clone(),
+            round_stamp: std::sync::Mutex::new(
+                self.round_stamp.lock().ok().and_then(|s| s.clone()),
+            ),
+            active_round: Arc::clone(&self.active_round),
             config_change_tx: self.config_change_tx.clone(),
             state_change_tx: self.state_change_tx.clone(),
             config_version: AtomicU64::new(self.config_version.load(Ordering::Relaxed)),
@@ -2911,6 +3230,25 @@ pub(crate) fn prune_excess_sessions(conversations_dir: &Path, max_sessions: usiz
                     "Failed to archive JSONL file during session pruning"
                 );
                 continue;
+            }
+        }
+
+        // ADR-106 D4: the round side table travels with the transcript it
+        // indexes, so an archived session keeps both halves together and no
+        // orphaned side table is left naming a session the list no longer has.
+        // Best-effort: a session older than ADR-106 has no such file, and its
+        // rounds are re-derivable from the archived transcript anyway.
+        let rounds_path = crate::rounds::rounds_path(conversations_dir, session_id);
+        match std::fs::rename(&rounds_path, format!("{}.archive", rounds_path.display())) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    path = %rounds_path.display(),
+                    error = %e,
+                    "Failed to archive round side table during session pruning"
+                );
             }
         }
     }
@@ -3392,6 +3730,56 @@ pub fn read_messages_paginated(
         limit: actual_limit,
         total,
     })
+}
+
+/// Read a data-coordinate window **paired with each entry's true coordinate**.
+///
+/// Unlike [`read_messages_paginated`], a line whose JSON cannot be parsed does not
+/// shift the coordinates reported for the lines after it: every entry is paired with
+/// the `data_index` the index holds for its own byte span. Any caller that *persists*
+/// coordinates must use this — a truncated last line is the normal shape of a crash
+/// mid-append, and arithmetic on a compressed page would then point every later
+/// coordinate one row early. A persisted coordinate that names the wrong row is not a
+/// display glitch: the projection cache has no invalidation path (ADR-106 D5), so a
+/// block would render somebody else's message forever.
+pub(crate) fn read_entries_indexed(
+    path: &Path,
+    start_idx: u64,
+    end_idx: u64,
+) -> Result<Vec<(u64, ConversationEntry)>> {
+    if std::fs::metadata(path)?.len() == 0 {
+        return Ok(Vec::new());
+    }
+    let index = log_index_for(path);
+    let mut idx = index.lock().unwrap();
+    reconcile_log(path, &mut idx)?;
+
+    let mut out: Vec<(u64, ConversationEntry)> = Vec::new();
+    let mut file = std::fs::File::open(path)?;
+    // Spans are in file order and `data_index` increases with it, so the window ends
+    // at the first span past `end_idx` — same bounded walk the paginated reader does.
+    for span in idx.spans.iter() {
+        let Some(di) = span.data_index else { continue };
+        if di < start_idx {
+            continue;
+        }
+        if di >= end_idx {
+            break;
+        }
+        let Some(text) = read_log_span_text(&mut file, span)? else {
+            continue;
+        };
+        match serde_json::from_str::<ConversationEntry>(&text) {
+            Ok(e) => out.push((di, e)),
+            Err(e) => tracing::warn!(
+                data_index = di,
+                error = %e,
+                "skipping corrupt JSONL line; its coordinate is reported as absent"
+            ),
+        }
+    }
+    drop(idx); // release the index before the (allocating) return path
+    Ok(out)
 }
 
 // ── ADR-021: Incremental read with line-number coordinates ─────────────────
@@ -3968,6 +4356,21 @@ mod tests {
             model_usage: None,
         };
         std::fs::write(conv.join(format!("{}.jsonl", sid)), "").unwrap();
+        // ADR-106 D4: a session's round side table sits next to its transcript,
+        // so the prune path has one to carry along.
+        crate::rounds::append_record(
+            &crate::rounds::rounds_path(conv, sid),
+            &crate::rounds::RoundRecord {
+                round_id: format!("r:{sid}"),
+                user: 1,
+                answer: Some(1),
+                card: None,
+                terminal: true,
+                status: Some("completed".to_string()),
+                ts: last_active_at.to_string(),
+            },
+        )
+        .unwrap();
         write_session_meta(conv, &meta).unwrap();
     }
 
@@ -4024,6 +4427,12 @@ mod tests {
         assert!(conv.join("bob_0.jsonl.archive").exists());
         assert!(!conv.join("bob_0.jsonl").exists());
         assert!(!session_meta_exists(&conv, "bob_0"));
+        // ADR-106 D4: the side table is archived with the transcript it indexes,
+        // so no orphaned round index is left naming a session the list no longer
+        // has — and the surviving session keeps its own.
+        assert!(conv.join("bob_0.jsonl.rounds.archive").exists());
+        assert!(!crate::rounds::rounds_path(&conv, "bob_0").exists());
+        assert!(crate::rounds::rounds_path(&conv, "bob_1").exists());
         for i in 1..3 {
             assert!(conv.join(format!("bob_{i}.jsonl")).exists());
             assert!(session_meta_exists(&conv, &format!("bob_{i}")));
@@ -7925,6 +8334,88 @@ mod tests {
         assert_eq!(total, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── ADR-106 D2/D4: the round index through the real write funnel ───────
+
+    /// Only the writer thread knows a line's data index at the moment it lands,
+    /// so the round coordinates have to be recorded there. This drives the real
+    /// funnel — stamp, append, close — and reads the side table back.
+    #[tokio::test]
+    async fn round_index_records_coordinates_and_outcome() {
+        let session = make_test_session();
+        session.begin_round("r:round-1");
+        session.append_message_with_id("user", "hello", None, Some("u-1".to_string()));
+        session.append_message("assistant", "the answer", None);
+        session.end_round(
+            "completed",
+            Some(serde_json::json!({ "kind": "pause", "request_id": "q1" })),
+        );
+        // After the round is closed the stamp is released, so this row belongs to
+        // no round — D2 forbids a round absorbing rows it did not produce.
+        session.append_message("system", "out of turn", None);
+        session.flush_pending().await.unwrap();
+
+        // D2: membership is explicit metadata on the entry, not inferred order.
+        let page = read_messages_paginated(session.session_path(), 0, 10, false).unwrap();
+        let round_of = |i: usize| {
+            page.messages[i]
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get(crate::rounds::META_KEY_ROUND_ID))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        assert_eq!(round_of(0).as_deref(), Some("r:round-1"), "user row");
+        assert_eq!(round_of(1).as_deref(), Some("r:round-1"), "assistant row");
+        assert_eq!(round_of(2), None, "row written outside the turn is unstamped");
+
+        let rec = crate::rounds::read_record(session.rounds_index_path(), "r:round-1")
+            .unwrap()
+            .expect("the round the turn produced");
+        assert_eq!((rec.user, rec.answer), (0, Some(1)));
+        assert!(rec.terminal);
+        assert_eq!(rec.status.as_deref(), Some("completed"));
+        assert_eq!(rec.card.as_ref().unwrap()["request_id"], "q1");
+
+        // D4: the projection resolves those two coordinates out of the transcript.
+        let p = crate::rounds::project(session.session_path(), &rec)
+            .unwrap()
+            .expect("round is projectable");
+        assert_eq!(p.user.as_ref().unwrap().body, "hello");
+        assert_eq!(p.answer.as_ref().unwrap().body, "the answer");
+        assert_eq!(fold_round_count(session.rounds_index_path()), 1);
+    }
+
+    /// A second round must not rewrite the first one's outcome: the writer forgets
+    /// a round once it published a terminal snapshot, so the pre-emption closure
+    /// cannot fire for it.
+    #[tokio::test]
+    async fn a_second_round_leaves_the_closed_one_alone() {
+        let session = make_test_session();
+        session.begin_round("r:round-1");
+        session.append_message("user", "first", None);
+        session.end_round("completed", None);
+        session.begin_round("r:round-2");
+        session.append_message("user", "second", None);
+        session.end_round("aborted", None);
+        session.flush_pending().await.unwrap();
+
+        let first = crate::rounds::read_record(session.rounds_index_path(), "r:round-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.status.as_deref(), Some("completed"));
+        assert_ne!(first.status.as_deref(), Some(crate::rounds::STATUS_INTERRUPTED));
+        let second = crate::rounds::read_record(session.rounds_index_path(), "r:round-2")
+            .unwrap()
+            .unwrap();
+        assert_eq!((second.user, second.status), (1, Some("aborted".to_string())));
+        assert_eq!(fold_round_count(session.rounds_index_path()), 2);
+    }
+
+    /// How many rounds the side table describes.
+    fn fold_round_count(path: &Path) -> usize {
+        crate::rounds::fold(path).unwrap().len()
     }
 }
 

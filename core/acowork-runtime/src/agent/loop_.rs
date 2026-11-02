@@ -785,16 +785,59 @@ impl AgentLoop {
         raw_user_message: Option<&str>,
         attached_items: Option<&[acowork_core::protocol::AttachedItem]>,
     ) -> Result<String> {
-        self.run_inner(
-            user_message,
-            context_builder,
-            false,
-            content_parts,
-            message_id,
-            raw_user_message,
-            attached_items,
-        )
-        .await
+        // ADR-106 D2: the round boundary. `run` is the one funnel every inbound turn
+        // passes through, so this is where a round is opened and closed, and the id
+        // is derived from the inbound message id rather than minted fresh — a
+        // redelivery of the same message then lands in the same round instead of
+        // opening a second one, and no protocol field is needed to carry it.
+        //
+        // A turn that follows a `waiting` one continues the round it was parked on.
+        // §5.5.4 already declares the next turn in that Chat to be the card's answer
+        // (`supersede_pause_cards`), so minting here would split one logical
+        // execution across two blocks. After a restart the writer holds no round and
+        // the answer degrades into a new one — a fresh block, not a corrupt one.
+        let conversation = self.session.conversation.clone();
+        let continuing =
+            self.turn_outcome == crate::agent::intent_turn::TurnOutcome::Waiting;
+        if let Some(conv) = &conversation {
+            let round_id = match (continuing, conv.active_round_id()) {
+                (true, Some(id)) => id,
+                _ => crate::rounds::mint_round_id(message_id.as_deref().unwrap_or_default()),
+            };
+            conv.begin_round(&round_id);
+        }
+
+        let outcome = self
+            .run_inner(
+                user_message,
+                context_builder,
+                false,
+                content_parts,
+                message_id,
+                raw_user_message,
+                attached_items,
+            )
+            .await;
+
+        self.close_turn_round(outcome)
+    }
+
+    /// Close the round opened by [`Self::run`] / [`Self::replay`] (ADR-106 D2).
+    ///
+    /// Runs on every exit path, errors included: a turn that returned `Err` ended, and
+    /// a round left open is what made the old mirror show a run that had already died
+    /// as one still in progress.
+    fn close_turn_round(&self, outcome: Result<String>) -> Result<String> {
+        if let Some(conv) = &self.session.conversation {
+            match &outcome {
+                Err(_) => conv.end_round("failed", None),
+                Ok(_) if self.turn_outcome == crate::agent::intent_turn::TurnOutcome::Waiting => {
+                    conv.snapshot_round("waiting", self.open_pause_card());
+                }
+                Ok(_) => conv.end_round(self.turn_outcome.as_str(), None),
+            }
+        }
+        outcome
     }
 
     /// Re-run the agent loop after a debug resume (user message already in history).
@@ -805,17 +848,44 @@ impl AgentLoop {
         user_message: &str,
         context_builder: &mut ContextBuilder,
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+        message_id: Option<String>,
     ) -> Result<String> {
-        self.run_inner(
-            user_message,
-            context_builder,
-            true,
-            content_parts,
-            None,
-            None,
-            None,
-        )
-        .await
+        // ADR-106 D2: a replay is not a new round. The rows it writes belong to the
+        // round the original message opened, and without that stamp they would carry no
+        // round at all (`note_entry` ignores unstamped rows): the round's recorded
+        // answer would stay frozen on the row written before the pause, and — since
+        // that round is already terminal — the chat block would show the pre-pause
+        // answer forever with nothing to heal it.
+        //
+        // The writer's own view comes first because it survives the continuation case
+        // (a round that reopened on a card answer is not named after this message id),
+        // and the id is the fallback because a restarted writer holds no round.
+        let opened = self.session.conversation.as_ref().is_some_and(|conv| {
+            let id = match conv.active_round_id() {
+                Some(id) => id,
+                None => match message_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                    Some(raw) => crate::rounds::mint_round_id(raw),
+                    None => return false,
+                },
+            };
+            conv.begin_round(&id);
+            true
+        });
+        let outcome = self
+            .run_inner(
+                user_message,
+                context_builder,
+                true,
+                content_parts,
+                message_id,
+                None,
+                None,
+            )
+            .await;
+        if opened {
+            return self.close_turn_round(outcome);
+        }
+        outcome
     }
 
     /// Core agent loop shared by [`run`] and [`replay`].

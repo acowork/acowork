@@ -1858,6 +1858,23 @@ impl SessionManager {
             }
         }
 
+        // 3b. ADR-106 D4: the round side table goes with the transcript it
+        // indexes. Leaving it behind would keep a derivable-but-unreferenced
+        // record of what was said in a session the user deleted.
+        let rounds_path = crate::rounds::rounds_path(&conversations_dir, session_id);
+        match std::fs::remove_file(&rounds_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    path = %rounds_path.display(),
+                    error = %e,
+                    "Failed to delete round side table"
+                );
+            }
+        }
+
         // 4. If the deleted session was the "latest", recompute the latest
         //    from the remaining sessions (or clear it if none remain).
         //    Without this, `/sessions/latest` keeps returning the deleted
