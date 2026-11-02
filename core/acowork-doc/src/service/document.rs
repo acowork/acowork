@@ -46,12 +46,47 @@ pub struct UpdateDocumentInput {
     pub content: String,
 }
 
+/// Result of [`DocumentService::stat`] — metadata only, never the body.
+///
+/// Exists so callers can read `version` / `size_bytes` without paying for an
+/// O(n) content transfer. Before this, the only way to learn a document's
+/// version was `doc_pull`, which returned the whole body just to expose an
+/// integer — the doc-library equivalent of having no `stat(2)`.
+#[derive(Debug, Clone)]
+pub struct DocStat {
+    pub meta: DocMeta,
+    /// Storage path **keyed by `dir_id`** (`dir-xxxx/纪要.md`, or `纪要.md`
+    /// at the root) — the on-disk layout, not the agent's addressing space.
+    /// `研发/纪要.md` is rendered by the presentation layer
+    /// (`mcp::tools::PathCtx`), which owns `DirectoryService`; the document
+    /// service has no ancestor lookup and must not pretend to.
+    pub path: String,
+    /// Body size in bytes (UTF-8 encoded).
+    pub size_bytes: u64,
+}
+
+/// Input for [`DocumentService::append`].
+///
+/// `base_version` is an optional optimistic guard: `Some(v)` fails with
+/// `VersionConflict` unless the document is still at `v`; `None` appends to
+/// whatever is current. Appending is what makes documents larger than a
+/// single tool call writable — see the `doc_write` tool docs.
+#[derive(Debug, Clone)]
+pub struct AppendDocumentInput {
+    pub base_version: Option<u64>,
+    pub content: String,
+}
+
 /// Service-trait contract. Methods are `async`; `Send + Sync` is required
 /// so the impl can be shared via `Arc<dyn DocumentService>` in axum state.
 #[async_trait]
 pub trait DocumentService: Send + Sync {
     /// Look up a document by id and return its metadata + body.
     async fn read(&self, doc_id: &str) -> Result<DocRead>;
+
+    /// Look up a document by id and return **metadata only** (no body read).
+    /// Cheap enough to call on every write to fetch the current version.
+    async fn stat(&self, doc_id: &str) -> Result<DocStat>;
 
     /// List documents under a directory (active / non-deleted only).
     async fn list(&self, dir_id: &str) -> Result<Vec<DocMeta>>;
@@ -68,6 +103,16 @@ pub trait DocumentService: Send + Sync {
     /// move together).
     async fn update(&self, doc_id: &str, input: UpdateDocumentInput) -> Result<DocMeta>;
 
+    /// Append `content` to the document body, bumping the version once.
+    ///
+    /// This is the primitive that makes documents larger than a single
+    /// caller payload writable: the caller writes the first chunk with
+    /// `create` / `update`, then appends the rest. Combined with `rename`
+    /// (write to a temp name, then rename into place) it also gives an
+    /// atomic publish — the filesystem's classic temp+rename pattern, with
+    /// no draft/staging state in the library model.
+    async fn append(&self, doc_id: &str, input: AppendDocumentInput) -> Result<DocMeta>;
+
     /// Rename a document (both `DocMeta.name` and the `.md` filename
     /// move together; atomic on disk via the impl). Version-checked —
     /// stale `base_version` returns `DocError::VersionConflict`.
@@ -78,14 +123,21 @@ pub trait DocumentService: Send + Sync {
         base_version: u64,
     ) -> Result<DocMeta>;
 
-    /// Move a document to another directory. Cross-directory atomicity
-    /// is the impl's responsibility (target first, source cleanup second,
-    /// rollback on failure). When `overwrite` is `false` and the target
-    /// has a doc with the same title, the call fails with `NameConflict`.
+    /// Place a document at `target_dir_id / new_name` — the single primitive
+    /// behind *move*, *rename* and *replace*.
+    ///
+    /// `new_name: None` keeps the current name (a pure move). Within one
+    /// directory, `Some(name)` is a rename; with `overwrite` it is also a
+    /// replace. Atomicity is the impl's responsibility: the destination index
+    /// is written first, then the file, then the source index, and every step
+    /// has an inverse. When `overwrite` is `false` and the destination name is
+    /// taken, the call fails with `NameConflict`; when it is `true`, the
+    /// replaced body goes to the recycle bin (it is never simply unlinked).
     async fn move_doc(
         &self,
         doc_id: &str,
         target_dir_id: &str,
+        new_name: Option<&str>,
         overwrite: bool,
     ) -> Result<DocMeta>;
 

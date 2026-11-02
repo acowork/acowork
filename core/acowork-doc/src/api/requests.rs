@@ -15,6 +15,9 @@
 use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+
+use crate::api::body::DocJson;
+use crate::limit;
 use serde::Deserialize;
 
 use crate::api::dto::{
@@ -40,9 +43,15 @@ pub struct ListQuery {
 /// real enforcement lands on `approve` / `reject` / read (design §9).
 pub async fn submit_request(
     state: ApiState,
-    Json(body): Json<SubmitRequestBody>,
+    DocJson(body): DocJson<SubmitRequestBody>,
 ) -> ApiResult<(StatusCode, Json<UpdateRequestDto>)> {
     validate_doc_id(&body.doc_id)?;
+    // The proposal is a whole document body (approving it *is* a write), so
+    // it is held to the same ceiling as `create` / `update`: otherwise a
+    // body the document limit refuses to store could be parked here and then
+    // applied by `approve`, which writes through `DocumentService::update`.
+    limit::ensure_document_size(body.content.len(), state.config.max_doc_size_bytes)
+        .map_err(ApiError::from)?;
     let req = state
         .requests
         .submit(SubmitRequestInput {
@@ -121,6 +130,11 @@ pub async fn approve_request(
         .acl
         .check(&actor, AclTarget::Doc(&pending.doc_id), AclRole::Edit)
         .await
+        .map_err(ApiError::from)?;
+    // Approving *is* the write, so the ceiling is re-checked here too: a
+    // proposal parked before the limit was lowered must not become a
+    // document the limit refuses to store.
+    limit::ensure_document_size(pending.content.len(), state.config.max_doc_size_bytes)
         .map_err(ApiError::from)?;
     let outcome = state
         .requests

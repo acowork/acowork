@@ -31,7 +31,7 @@ ADR-064 已确立：业务逻辑不得进入 Gateway（embed、LSP relay、PM �
 | 目录语义 | `children/` 隔离子目录 | **目录 = 文件夹**（直接对应文件系统目录） |
 | 内容载体 | `task.json` + 附件目录 | Markdown 原文即内容（无独立元数据文件，元数据在 `library.json` 索引） |
 | 并发 | 版本号 | 版本号（同款乐观并发，`base_version` 校验） |
-| 修改路径 | 人类直改；Agent claim→submit 审核 | 人类 PUT 直改；Agent `doc_submit_update` → PR 式审核 |
+| 修改路径 | 人类直改；Agent claim→submit 审核 | 人类 PUT 直改；Agent `doc_write`（改他人文档时策略返回 `pending_review` → PR 式审核） |
 
 ### 设计文档偏差（本 ADR 记录修正）
 
@@ -90,6 +90,24 @@ ADR-064 已确立：业务逻辑不得进入 Gateway（embed、LSP relay、PM �
 - REST `/api/doc/*`：doc_proxy 丢弃客户端自报 `X-Actor`，注入可信 `human`（防伪造 `agent:xxx`）。
 - MCP `/api/doc/mcp`：doc_proxy 校验 `X-MCP-Actor ∈ installed_agents` → 透传（受信）；否则剥离 → 匿名（仅只读工具 list/read/search/pull/check_request）。
 - doc server 侧不自行维护 agent 白名单（信任决策收敛在 Gateway 单一鉴权点）。
+
+### 决策 6：治理 = 策略（不由动词决定），体积 = 两个上限，替换 = 进回收站
+
+- **写权限是策略不是动词**（`service/policy.rs`，设计 §5.1）：`doc_write` 一个动词
+  覆盖 create/overwrite/append；改自己的文档（`creator == actor`）或管理员直接生效，
+  改他人文档 / 无创建人记录 → `pending_review` + `request_id`。旧的三动词
+  （`doc_add`/`doc_submit_update`/`doc_pull`）把治理编码进名字，使「create 但要审核」
+  「overwrite 但不审核」不可表达。
+- **结构性操作按所有权**（`move` / `remove`）：审核请求只表达「内容提案」，表达不了
+  删除/改名，所以它们不进审核流。无创建人记录的历史文档例外地**不**按所有权拒绝，
+  改由节点 ACL 裁决——没有审核通道时一律拒绝会让它永久不可达（死锁，不是保护）。
+- **两个体积上限**（`limit.rs`）：`transport_ceiling`（线上 JSON 体积，含最坏转义系数）
+  与 `ensure_document_size`（解码后正文，含 `append` 的**结果**大小）。只查前者会把
+  「正文合法但转义膨胀」误拒；只查后者则放行无界内存。413 一律回
+  `payload_too_large` JSON 信封（`DocJson` 自定义 extractor 绕过 axum 纯文本拒绝）。
+- **替换 = 进回收站**：`move_doc` 的 overwrite 分支把被替换文档写入 `.trash/` 并保留
+  正文以便回滚；先把目标删掉再移动（旧 MCP 实现）会让「移动失败」留下「目标已删、
+  源未动」的中间态。
 
 ---
 

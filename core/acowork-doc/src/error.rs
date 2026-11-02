@@ -38,8 +38,13 @@ pub enum DocError {
     #[error("reserved name cannot be used: {0}")]
     ReservedName(String),
 
-    #[error("payload too large: {size} bytes (max {max})")]
-    PayloadTooLarge { size: usize, max: usize },
+    /// Request body exceeded `DocConfig::max_doc_size_bytes`.
+    ///
+    /// `size` is `Some(n)` when the caller declared it (Content-Length) and
+    /// `None` when the limit tripped while streaming an undeclared body — a
+    /// made-up number would be worse than saying "too large".
+    #[error("payload too large: {} (max {} bytes)", match .size { Some(n) => format!("{n} bytes"), None => "body length unknown".to_string() }, .max)]
+    PayloadTooLarge { size: Option<usize>, max: usize },
 
     // ── Conflict / concurrency ────────────────────────────────────────
     #[error("name already exists in this directory: {0}")]

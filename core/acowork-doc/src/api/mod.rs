@@ -17,6 +17,7 @@ use crate::error::DocError;
 use crate::service::acl::ActorCtx;
 use crate::state::DocState;
 
+pub mod body;
 pub mod dirs;
 pub mod docs;
 pub mod dto;

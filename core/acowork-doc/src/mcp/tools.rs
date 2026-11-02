@@ -1,4 +1,4 @@
-//! MCP 工具分发（设计 §6 全量 8 工具）。
+//! MCP 工具分发（设计 §6 全量 9 工具，文件系统语义）。
 //!
 //! 每个工具：解析参数 → 身份校验（写工具需可信 runtime instance_id
 //! (UUID, ADR-073)，匿名只读，设计 §9）→ 经 [`crate::state::DocState`]
@@ -17,9 +17,15 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{DocError, Result};
+use crate::limit;
 use crate::path::validate_request_id;
 use crate::service::directory::{CreateDirectoryInput, DirectoryService};
-use crate::service::document::{CreateDocumentInput, DocumentService};
+use crate::service::document::{
+    AppendDocumentInput, CreateDocumentInput, DocumentService, UpdateDocumentInput,
+};
+use crate::service::acl::{AclTarget, ActorCtx};
+use crate::types::AclRole;
+use crate::service::policy::{gate_owner, gate_write, OwnerGate, WriteGate};
 use crate::service::request::{RequestService, SubmitRequestInput};
 use crate::service::search::SearchService;
 use crate::state::DocState;
@@ -32,6 +38,32 @@ fn require_actor(actor: Option<&str>) -> Result<&str> {
     actor.ok_or_else(|| {
         DocError::Forbidden(actor.map(str::to_string))
     })
+}
+
+/// 结构性操作（`doc_move` / `doc_remove`）的治理闸门。
+///
+/// 所有权优先（[`gate_owner`](crate::service::policy::gate_owner)）；文档没有
+/// 创建人记录时（creator 标记上线前的历史数据、导入的文档）不直接拒绝，而是
+/// 交给节点 ACL 裁决——结构性操作没有审核兜底，按所有权一律拒绝会让这类文档
+/// 在 Agent 面上永久不可达（既不能改名也不能删），那不是保护而是死锁。
+/// ACL 默认公开，显式收紧时才拦人，admin 在 ACL 层内已豁免。
+async fn gate_structural(state: &DocState, actor: &str, meta: &DocMeta) -> Result<()> {
+    match gate_owner(actor, false, meta.creator.as_deref())? {
+        OwnerGate::Owner => Ok(()),
+        OwnerGate::Unowned => {
+            state
+                .acl
+                .check(
+                    &ActorCtx {
+                        id: Some(actor.to_string()),
+                        is_admin: false,
+                    },
+                    AclTarget::Doc(&meta.doc_id),
+                    AclRole::Edit,
+                )
+                .await
+        }
+    }
 }
 
 /// 宽松参数解析：缺省字段走 `default`；未知字段忽略；类型错误给清晰信息。
@@ -104,6 +136,56 @@ async fn resolve_doc_ref(
 /// 目录 path 缺省解析（`""` → root）。
 async fn resolve_dir_or_root(dirs: &dyn DirectoryService, path: &str) -> Result<String> {
     resolve_dir(dirs, path).await
+}
+
+/// Internal `dir_id` → human-readable directory path (`""` for the root).
+///
+/// The service layer's `DocumentService::path_of` is keyed by `dir_id` (that
+/// is the on-disk layout), so it cannot render names on its own — the MCP
+/// layer owns `DirectoryService` and does the translation.
+///
+/// Cost is O(depth) per directory, not O(directories): `DirectoryService::
+/// path_of` walks up the `parent` chain. The memo is per call, so a search
+/// that renders 100 hits in 3 directories walks each chain once — and no
+/// cross-request cache means no invalidation hook to forget on mkdir /
+/// rename / delete.
+struct PathCtx<'a> {
+    dirs: &'a dyn DirectoryService,
+    memo: std::collections::HashMap<String, String>,
+}
+
+impl<'a> PathCtx<'a> {
+    fn new(dirs: &'a dyn DirectoryService) -> Self {
+        let mut memo = std::collections::HashMap::new();
+        memo.insert(ROOT_DIR_ID.to_string(), String::new());
+        Self { dirs, memo }
+    }
+
+    async fn dir(&mut self, dir_id: &str) -> Result<&str> {
+        if !self.memo.contains_key(dir_id) {
+            let path = self.dirs.path_of(dir_id).await?;
+            self.memo.insert(dir_id.to_string(), path);
+        }
+        Ok(self.memo.get(dir_id).map(String::as_str).unwrap_or_default())
+    }
+
+    /// Translate a service-rendered `{dir_id}/{name}.md` path into the path
+    /// the agent sees (`研发/纪要.md`).
+    async fn humanize(&mut self, raw: &str) -> Result<String> {
+        let (dir_id, file) = raw.rsplit_once('/').unwrap_or((ROOT_DIR_ID, raw));
+        let dir = self.dir(dir_id).await?.to_string();
+        Ok(if dir.is_empty() {
+            file.to_string()
+        } else {
+            format!("{dir}/{file}")
+        })
+    }
+
+    /// Public, human-readable path of a document (`研发/纪要.md`).
+    async fn doc(&mut self, docs: &dyn DocumentService, doc_id: &str) -> Result<String> {
+        let raw = docs.path_of(doc_id).await?;
+        self.humanize(&raw).await
+    }
 }
 
 // ── 只读工具 ─────────────────────────────────────────────────────────────
@@ -181,50 +263,40 @@ async fn doc_read(state: &DocState, args: Value) -> Result<Value> {
     let (_dir, doc_id) =
         resolve_doc_ref(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
     let read = state.docs.read(&doc_id).await?;
-    doc_to_value(read.meta, Some(read.content), read.path, None)
-}
-
-/// `doc_pull` — doc_read + base_version + 建议缓存路径（§5.5）。
-///
-/// 注意：doc 进程与 Agent 工作区可能不在同一信任边界（远程 Agent），
-/// 服务端**不落盘**；返回内容 + base_version + 建议缓存相对路径
-/// （`.acowork/tmp/docs/{doc_id}.md`），由调用方（Runtime / Agent 文件工具）
-/// 写入其工作区。这是对设计 §5.5「服务端落盘」的适配 —— 落盘职责在
-/// Agent 侧文件能力。
-async fn doc_pull(state: &DocState, args: Value) -> Result<Value> {
-    let a: DocRefArgs = parse_args("doc_pull", args)?;
-    let (_dir, doc_id) =
-        resolve_doc_ref(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
-    let read = state.docs.read(&doc_id).await?;
-    let base_version = read.meta.version;
-    let cache_path = format!(".acowork/tmp/docs/{}.md", read.meta.doc_id);
-    let mut v = doc_to_value(read.meta, Some(read.content), read.path, Some(&cache_path))?;
-    // §5.5：pull 的版本号即后续 doc_submit_update 的 base_version。
-    v["base_version"] = Value::from(base_version);
+    let mut paths = PathCtx::new(state.dirs.as_ref());
+    let path = paths.humanize(&read.path).await?;
+    let mut v = doc_to_value(read.meta, path)?;
+    v["content"] = Value::String(read.content);
     Ok(v)
 }
 
-/// 共享的文档响应序列化（doc_read / doc_pull 复用）。
-fn doc_to_value(
-    meta: DocMeta,
-    content: Option<String>,
-    path: String,
-    cache_path: Option<&str>,
-) -> Result<Value> {
+/// `doc_stat` — 仅元数据（`stat(2)`）：version / size / creator / 时间。
+///
+/// 取代旧的 `doc_pull`：只为拿一个 `version` 整数而把全文传回调用方是
+/// O(n) 换 O(1)。需要正文时用 `doc_read`。
+async fn doc_stat(state: &DocState, args: Value) -> Result<Value> {
+    let a: DocRefArgs = parse_args("doc_stat", args)?;
+    let (_dir, doc_id) =
+        resolve_doc_ref(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
+    let st = state.docs.stat(&doc_id).await?;
+    let mut paths = PathCtx::new(state.dirs.as_ref());
+    let path = paths.humanize(&st.path).await?;
+    let mut v = doc_to_value(st.meta, path)?;
+    v["size_bytes"] = Value::from(st.size_bytes);
+    Ok(v)
+}
+
+/// 共享的文档响应序列化（doc_read / doc_stat / doc_write 复用）。
+fn doc_to_value(meta: DocMeta, path: String) -> Result<Value> {
     let mut v = json!({
         "doc_id": meta.doc_id,
         "name": meta.name,
         "path": path,
         "version": meta.version,
+        "creator": meta.creator,
         "created_at": meta.created_at,
         "updated_at": meta.updated_at,
     });
-    if let Some(c) = content {
-        v["content"] = Value::String(c);
-    }
-    if let Some(cp) = cache_path {
-        v["cache_path"] = Value::String(cp.to_string());
-    }
     if let Some(imp) = meta.import {
         // ADR-073: wire key is `instance_id` (UUID carried over `X-MCP-Actor`
         // by the Gateway catalog). The legacy `agent_id` key was removed
@@ -250,19 +322,26 @@ fn default_search_limit() -> usize {
 async fn doc_search(state: &DocState, args: Value) -> Result<Value> {
     let a: SearchArgs = parse_args("doc_search", args)?;
     let hits = state.search.search(&a.keyword, a.limit.clamp(1, 100)).await?;
-    let hits: Vec<Value> = hits
-        .into_iter()
-        .map(|h| {
-            json!({
-                "doc_id": h.doc_id,
-                "name": h.name,
-                "path": h.path,
-                "snippet": h.snippet,
-                "score": h.score,
-            })
-        })
-        .collect();
-    Ok(json!({ "keyword": a.keyword, "hits": hits }))
+    // The search service reports `{dir_id}/{name}.md` (its store view); every
+    // other tool answers in the agent's addressing space, so a hit path must
+    // be readable back into `doc_read(ref=…)` — otherwise the natural
+    // `search → read` chain fails with `DirNotFound`.
+    //
+    // A hit whose directory is gone (deleted after indexing) keeps the raw
+    // value: one unaddressable hit must not fail the search.
+    let mut paths = PathCtx::new(state.dirs.as_ref());
+    let mut items: Vec<Value> = Vec::with_capacity(hits.len());
+    for h in hits {
+        let path = paths.humanize(&h.path).await.unwrap_or_else(|_| h.path.clone());
+        items.push(json!({
+            "doc_id": h.doc_id,
+            "name": h.name,
+            "path": path,
+            "snippet": h.snippet,
+            "score": h.score,
+        }));
+    }
+    Ok(json!({ "keyword": a.keyword, "hits": items }))
 }
 
 // ── 写工具（需身份）──────────────────────────────────────────────────────
@@ -304,61 +383,292 @@ async fn doc_mkdir(state: &DocState, actor: &str, args: Value) -> Result<Value> 
     }))
 }
 
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+enum WriteMode {
+    /// `>` — create if absent, replace if present.
+    #[default]
+    Overwrite,
+    /// `O_EXCL` — fail when the name is already taken.
+    Create,
+    /// `>>` — append to an existing document.
+    Append,
+}
+
 #[derive(Deserialize)]
-struct AddArgs {
-    #[serde(default)]
-    path: String,
-    #[serde(default)]
-    title: Option<String>,
+struct WriteArgs {
+    #[serde(rename = "ref")]
+    reference: String,
     content: String,
+    #[serde(default)]
+    mode: WriteMode,
+    #[serde(default)]
+    if_version: Option<u64>,
     #[serde(default)]
     source_workspace: Option<String>,
     #[serde(default)]
     source_path: Option<String>,
 }
 
-/// `doc_add` — add-to-doc 快照导入（新文档直接生效，不审核）。
-async fn doc_add(state: &DocState, actor: &str, args: Value) -> Result<Value> {
-    let a: AddArgs = parse_args("doc_add", args)?;
-    let dir_id = resolve_dir_or_root(state.dirs.as_ref(), &a.path).await?;
-    // title 缺省 → source_path 文件 stem；都缺 → 400
-    let title = match a.title {
-        Some(t) if !t.trim().is_empty() => t,
-        _ => match a.source_path.as_deref().and_then(stem_of_path) {
-            Some(s) => s,
-            None => {
+/// Resolve a `ref` into its location **without reading the body**.
+///
+/// Returns `(dir_id, Some(meta))` when the document exists and
+/// `(dir_id, None)` when the ref is a well-formed *path* whose file does not
+/// exist yet (the create case). A `doc_id` ref that does not exist is an
+/// error — an id never names a non-existent future document.
+async fn resolve_target(
+    dirs: &dyn DirectoryService,
+    docs: &dyn DocumentService,
+    reference: &str,
+) -> Result<(String, Option<DocMeta>)> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(DocError::BadRequest("ref must not be empty".into()));
+    }
+    if reference.starts_with("doc-") {
+        let st = docs.stat(reference).await?;
+        return Ok((String::new(), Some(st.meta)));
+    }
+    let (dir_path, file) = match reference.rsplit_once('/') {
+        Some((d, f)) => (d, f),
+        None => ("", reference),
+    };
+    let stem = file.strip_suffix(".md").ok_or_else(|| {
+        DocError::BadRequest(format!("document path must end in .md, got: {reference}"))
+    })?;
+    if stem.is_empty() || stem.contains('/') {
+        return Err(DocError::BadRequest(format!(
+            "invalid document path: {reference}"
+        )));
+    }
+    let dir_id = resolve_dir(dirs, dir_path).await?;
+    let metas = docs.list(&dir_id).await?;
+    Ok((dir_id, metas.into_iter().find(|m| m.name == stem)))
+}
+
+/// `doc_write` — the single write primitive (create / overwrite / append).
+///
+/// Governance is an orthogonal dimension: `gate_write` decides whether this
+/// write takes effect now; when it lands on review the same call instead
+/// records a `pending` update request and returns `status: "pending_review"`.
+/// The verb never changes with the gate — the filesystem analogue is one
+/// `write(2)` returning EACCES or blocking, not a different system call.
+async fn doc_write(state: &DocState, actor: &str, args: Value) -> Result<Value> {
+    let a: WriteArgs = parse_args("doc_write", args)?;
+    let (dir_id, existing) =
+        resolve_target(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
+
+    match (a.mode, existing) {
+        // ── create over an existing name ────────────────────────────
+        (WriteMode::Create, Some(meta)) => Err(DocError::NameConflict(meta.name)),
+
+        // ── create / overwrite a missing document ───────────────────
+        (WriteMode::Create | WriteMode::Overwrite, None) => {
+            if dir_id.is_empty() {
                 return Err(DocError::BadRequest(
-                    "doc_add requires a `title` when `source_path` is omitted".into(),
+                    "creating needs a path (it supplies the directory and the file name)".into(),
                 ));
             }
-        },
-    };
-    let workspace_path = match (&a.source_workspace, &a.source_path) {
+            let title = stem_of_ref(&a.reference)?;
+            limit::ensure_document_size(a.content.len(), state.config.max_doc_size_bytes)?;
+            let import = import_of(actor, &a.source_workspace, &a.source_path);
+            let meta = state
+                .docs
+                .create(CreateDocumentInput {
+                    parent_dir_id: dir_id,
+                    title,
+                    content: a.content,
+                    import,
+                    creator: Some(actor.to_string()),
+                })
+                .await?;
+            let path = PathCtx::new(state.dirs.as_ref())
+                .doc(state.docs.as_ref(), &meta.doc_id)
+                .await?;
+            Ok(json!({
+                "status": "applied",
+                "doc_id": meta.doc_id,
+                "name": meta.name,
+                "path": path,
+                "version": meta.version,
+            }))
+        }
+
+        // ── append to a missing document ────────────────────────────
+        (WriteMode::Append, None) => Err(DocError::DocNotFound(a.reference.clone())),
+
+        // ── overwrite / append an existing document ─────────────────
+        (mode, Some(meta)) => {
+            let base_version = a.if_version.unwrap_or(meta.version);
+            if base_version != meta.version {
+                return Err(DocError::VersionConflict {
+                    base_version,
+                    current_version: meta.version,
+                });
+            }
+            // Ceiling on the *resulting* document: `append` must not grow a
+            // document past the limit one chunk at a time.
+            let resulting = if mode == WriteMode::Append {
+                let current = state.docs.stat(&meta.doc_id).await?;
+                current.size_bytes as usize + a.content.len()
+            } else {
+                a.content.len()
+            };
+            limit::ensure_document_size(resulting, state.config.max_doc_size_bytes)?;
+            match gate_write(actor, false, meta.creator.as_deref()) {
+                WriteGate::Apply => {
+                    let updated = if mode == WriteMode::Append {
+                        state
+                            .docs
+                            .append(
+                                &meta.doc_id,
+                                AppendDocumentInput {
+                                    base_version: a.if_version,
+                                    content: a.content,
+                                },
+                            )
+                            .await?
+                    } else {
+                        state
+                            .docs
+                            .update(
+                                &meta.doc_id,
+                                UpdateDocumentInput {
+                                    base_version,
+                                    title: None,
+                                    content: a.content,
+                                },
+                            )
+                            .await?
+                    };
+                    let path = PathCtx::new(state.dirs.as_ref())
+                        .doc(state.docs.as_ref(), &updated.doc_id)
+                        .await?;
+                    Ok(json!({
+                        "status": "applied",
+                        "doc_id": updated.doc_id,
+                        "name": updated.name,
+                        "path": path,
+                        "version": updated.version,
+                    }))
+                }
+                WriteGate::Review => {
+                    // The review flow models a *content proposal*, so an
+                    // append proposal carries the merged body while an
+                    // overwrite proposal carries the replacement body as-is.
+                    let proposal = if mode == WriteMode::Append {
+                        let current = state.docs.read(&meta.doc_id).await?;
+                        format!("{}{}", current.content, a.content)
+                    } else {
+                        a.content
+                    };
+                    let req = state
+                        .requests
+                        .submit(SubmitRequestInput {
+                            doc_id: meta.doc_id.clone(),
+                            base_version,
+                            content: proposal,
+                            submitted_by: actor.to_string(),
+                        })
+                        .await?;
+                    Ok(json!({
+                        "status": "pending_review",
+                        "request_id": req.request_id,
+                        "doc_id": req.doc_id,
+                        "path": req.path,
+                        "base_version": req.base_version,
+                    }))
+                }
+            }
+        }
+    }
+}
+
+/// File-name stem of a `ref` path — the title for a create.
+fn stem_of_ref(reference: &str) -> Result<String> {
+    let file = reference
+        .trim()
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| DocError::BadRequest(format!("invalid ref: {reference}")))?;
+    let stem = file.strip_suffix(".md").ok_or_else(|| {
+        DocError::BadRequest(format!("document path must end in .md, got: {reference}"))
+    })?;
+    Ok(stem.to_string())
+}
+
+/// Build the import provenance (create only; `None` when neither source is
+/// supplied).
+fn import_of(
+    actor: &str,
+    source_workspace: &Option<String>,
+    source_path: &Option<String>,
+) -> Option<ImportSource> {
+    let workspace_path = match (source_workspace, source_path) {
+        (None, None) => return None,
         (Some(w), Some(p)) => format!("{w}:{p}"),
         (Some(w), None) => w.clone(),
         (None, Some(p)) => p.clone(),
-        (None, None) => String::new(),
     };
-    let import = ImportSource {
+    Some(ImportSource {
         // ADR-073: `actor` is the runtime instance identity (UUID) — the
-        // value substituted into the Gateway's `{instance_id}` MCP template
-        // for doc. Storing it as `instance_id` keeps the wire format
-        // consistent with `UpdateRequest::submitted_by` and the agentStore
-        // key on desktop.
+        // value substituted into the Gateway's `{instance_id}` MCP template.
         instance_id: actor.to_string(),
         workspace_path,
-    };
+    })
+}
+
+#[derive(Deserialize)]
+struct MoveArgs {
+    from: String,
+    to: String,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+/// `doc_move` — `mv`: rename and/or move across directories; also the atomic
+/// publish primitive (write to a temp name, then move onto the final name).
+///
+/// Gated like every structural op ([`gate_structural`]): the source must be
+/// the caller's, and with `overwrite=true` so must the destination — replacing
+/// someone else's document is destructive and the review flow only models
+/// content proposals, so ownership (not review) is the gate.
+///
+/// The replace itself happens **inside** `DocumentService::move_doc`, which
+/// sends the displaced body to the recycle bin and rolls every step back on
+/// failure. The MCP layer must not delete the destination up front: that made
+/// a failed move leave the destination deleted and the source untouched.
+async fn doc_move(state: &DocState, actor: &str, args: Value) -> Result<Value> {
+    let a: MoveArgs = parse_args("doc_move", args)?;
+    let (_src_dir, src) =
+        resolve_target(state.dirs.as_ref(), state.docs.as_ref(), &a.from).await?;
+    let src = src.ok_or_else(|| DocError::DocNotFound(a.from.clone()))?;
+    gate_structural(state, actor, &src).await?;
+
+    let to = a.to.trim();
+    let (to_dir_path, _) = to.rsplit_once('/').unwrap_or(("", to));
+    let dst_name = stem_of_ref(to)?;
+    let dst_dir = resolve_dir(state.dirs.as_ref(), to_dir_path).await?;
+    let dst_existing = state
+        .docs
+        .list(&dst_dir)
+        .await?
+        .into_iter()
+        .find(|m| m.name == dst_name && m.doc_id != src.doc_id);
+
+    match &dst_existing {
+        Some(dst) if !a.overwrite => return Err(DocError::NameConflict(dst_name)),
+        Some(dst) => gate_structural(state, actor, dst).await?,
+        None => {}
+    }
+
     let meta = state
         .docs
-        .create(CreateDocumentInput {
-            parent_dir_id: dir_id,
-            title,
-            content: a.content,
-            import: Some(import),
-            creator: Some(actor.to_string()),
-        })
+        .move_doc(&src.doc_id, &dst_dir, Some(&dst_name), a.overwrite)
         .await?;
-    let path = state.docs.path_of(&meta.doc_id).await?;
+    let path = PathCtx::new(state.dirs.as_ref())
+        .doc(state.docs.as_ref(), &meta.doc_id)
+        .await?;
     Ok(json!({
         "doc_id": meta.doc_id,
         "name": meta.name,
@@ -367,42 +677,25 @@ async fn doc_add(state: &DocState, actor: &str, args: Value) -> Result<Value> {
     }))
 }
 
-/// 从源路径取文件 stem（`C:\a\report.md` → `report`；无扩展名 → 文件名）。
-fn stem_of_path(p: &str) -> Option<String> {
-    let base = p.rsplit(['/', '\\']).next().unwrap_or(p);
-    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
-    if stem.is_empty() { None } else { Some(stem.to_string()) }
-}
-
 #[derive(Deserialize)]
-struct SubmitUpdateArgs {
+struct RemoveArgs {
     #[serde(rename = "ref")]
     reference: String,
-    content: String,
-    base_version: u64,
 }
 
-/// `doc_submit_update` — PR 式更新请求（不直接写库）。
-async fn doc_submit_update(state: &DocState, actor: &str, args: Value) -> Result<Value> {
-    let a: SubmitUpdateArgs = parse_args("doc_submit_update", args)?;
-    let (_dir, doc_id) =
-        resolve_doc_ref(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
-    let req = state
-        .requests
-        .submit(SubmitRequestInput {
-            doc_id,
-            base_version: a.base_version,
-            content: a.content,
-            submitted_by: actor.to_string(),
-        })
+/// `doc_remove` — `unlink`: soft-delete into the recycle bin (recoverable).
+/// Gated like every structural op ([`gate_structural`]).
+async fn doc_remove(state: &DocState, actor: &str, args: Value) -> Result<Value> {
+    let a: RemoveArgs = parse_args("doc_remove", args)?;
+    let (_dir, meta) =
+        resolve_target(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
+    let meta = meta.ok_or_else(|| DocError::DocNotFound(a.reference.clone()))?;
+    gate_structural(state, actor, &meta).await?;
+    let path = PathCtx::new(state.dirs.as_ref())
+        .doc(state.docs.as_ref(), &meta.doc_id)
         .await?;
-    Ok(json!({
-        "request_id": req.request_id,
-        "doc_id": req.doc_id,
-        "path": req.path,
-        "base_version": req.base_version,
-        "status": "pending",
-    }))
+    state.docs.delete(&meta.doc_id).await?;
+    Ok(json!({ "removed": true, "doc_id": meta.doc_id, "path": path }))
 }
 
 #[derive(Deserialize)]
@@ -446,7 +739,7 @@ pub async fn dispatch(state: &DocState, actor: Option<&str>, name: &str, args: V
         // ── 只读（匿名允许）─────────────────────────────────────────
         "doc_list" => doc_list(state, args).await,
         "doc_read" => doc_read(state, args).await,
-        "doc_pull" => doc_pull(state, args).await,
+        "doc_stat" => doc_stat(state, args).await,
         "doc_search" => doc_search(state, args).await,
         "doc_check_request" => doc_check_request(state, args).await,
 
@@ -455,13 +748,17 @@ pub async fn dispatch(state: &DocState, actor: Option<&str>, name: &str, args: V
             let actor = require_actor(actor)?;
             doc_mkdir(state, actor, args).await
         }
-        "doc_add" => {
+        "doc_write" => {
             let actor = require_actor(actor)?;
-            doc_add(state, actor, args).await
+            doc_write(state, actor, args).await
         }
-        "doc_submit_update" => {
+        "doc_move" => {
             let actor = require_actor(actor)?;
-            doc_submit_update(state, actor, args).await
+            doc_move(state, actor, args).await
+        }
+        "doc_remove" => {
+            let actor = require_actor(actor)?;
+            doc_remove(state, actor, args).await
         }
 
         // 未知工具 → 协议级 method-not-found（tools/call 已校验存在，
@@ -514,7 +811,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mkdir_nested_and_add_read_roundtrip() {
+    async fn mkdir_nested_and_write_read_roundtrip() {
         let (_tmp, state) = setup().await;
         // mkdir 逐级
         let v = ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "研发" })).await;
@@ -523,20 +820,21 @@ mod tests {
         let v = ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "研发/文档库" })).await;
         assert_eq!(v["name"], "文档库");
 
-        // add 进子目录
+        // doc_write(mode=create) into a sub-directory
         let v = ok(
             &state,
             Some(AGENT),
-            "doc_add",
+            "doc_write",
             json!({
-                "path": "研发/文档库",
-                "title": "设计纪要",
+                "ref": "研发/文档库/设计纪要.md",
+                "mode": "create",
                 "content": "# v1 设计纪要",
                 "source_workspace": "ws-main",
                 "source_path": "notes/design.md",
             }),
         )
         .await;
+        assert_eq!(v["status"], "applied");
         assert_eq!(v["version"], 1);
         assert_eq!(v["name"], "设计纪要");
         let doc_id = v["doc_id"].as_str().unwrap().to_string();
@@ -545,14 +843,11 @@ mod tests {
         let by_id = ok(&state, None, "doc_read", json!({ "ref": doc_id })).await;
         assert_eq!(by_id["content"], "# v1 设计纪要");
         // ADR-073: the wire field is `instance_id` (UUID), populated from
-        // the `X-MCP-Actor` header — which here is `AGENT` itself, used as
-        // the actor token. The badge downstream resolves this UUID via the
-        // agentStore to the human display name.
+        // the `X-MCP-Actor` header — here `AGENT` itself acts as the token.
         assert_eq!(by_id["import"]["instance_id"], AGENT);
         assert_eq!(by_id["import"]["workspace_path"], "ws-main:notes/design.md");
         // Regression guard: the legacy `agent_id` field name must not
-        // reappear in the wire JSON. A regression that re-introduces it
-        // would silently break desktop display-name resolution.
+        // reappear in the wire JSON (would break display-name resolution).
         assert!(
             by_id["import"].get("agent_id").is_none(),
             "wire JSON must not contain legacy `agent_id` key: {by_id}"
@@ -598,14 +893,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_duplicate_name_conflicts_and_missing_parent_fails() {
+    async fn create_conflicts_missing_parent_and_bad_names() {
         let (_tmp, state) = setup().await;
         ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "组A" })).await;
         ok(
             &state,
             Some(AGENT),
-            "doc_add",
-            json!({ "path": "组A", "title": "周报", "content": "a" }),
+            "doc_write",
+            json!({ "ref": "组A/周报.md", "mode": "create", "content": "a" }),
         )
         .await;
 
@@ -613,8 +908,8 @@ mod tests {
         let e = err(
             &state,
             Some(AGENT),
-            "doc_add",
-            json!({ "path": "组A", "title": "周报", "content": "b" }),
+            "doc_write",
+            json!({ "ref": "组A/周报.md", "mode": "create", "content": "b" }),
         )
         .await;
         assert!(matches!(e, DocError::NameConflict(_)), "got {e:?}");
@@ -629,49 +924,70 @@ mod tests {
         .await;
         assert!(matches!(e, DocError::DirNotFound(_)), "got {e:?}");
 
-        // 无 title 无 source_path → BadRequest；有 source_path → stem 当 title
+        // 非 .md 路径 → BadRequest
         let e = err(
             &state,
             Some(AGENT),
-            "doc_add",
-            json!({ "content": "x" }),
+            "doc_write",
+            json!({ "ref": "组A/周报", "mode": "create", "content": "x" }),
         )
         .await;
         assert!(matches!(e, DocError::BadRequest(_)), "got {e:?}");
-        let v = ok(
+
+        // append 到不存在的文档 → DocNotFound（append 不隐式创建）
+        let e = err(
             &state,
             Some(AGENT),
-            "doc_add",
-            json!({ "content": "x", "source_path": "/home/a/report.md" }),
+            "doc_write",
+            json!({ "ref": "组A/幽灵.md", "mode": "append", "content": "x" }),
         )
         .await;
-        assert_eq!(v["name"], "report");
-    }
+        assert!(matches!(e, DocError::DocNotFound(_)), "got {e:?}");
 
-    #[tokio::test]
-    async fn submit_update_and_check_request_flow() {
-        let (_tmp, state) = setup().await;
+        // overwrite 一个不存在的名字 = create（`>` 重定向语义）
         let v = ok(
             &state,
             Some(AGENT),
-            "doc_add",
-            json!({ "title": "会议纪要", "content": "# v1" }),
+            "doc_write",
+            json!({ "ref": "组A/新文件.md", "content": "hi" }),
+        )
+        .await;
+        assert_eq!(v["status"], "applied");
+        assert_eq!(v["version"], 1);
+    }
+
+    /// The core of the redesign: one verb, two outcomes. Ownership decides
+    /// whether the write applies or turns into a review request.
+    #[tokio::test]
+    async fn write_applies_for_owner_and_reviews_for_others() {
+        let (_tmp, state) = setup().await;
+        const OTHER: &str = "inst-0000-0000-0000-0000-000000000002";
+
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "会议纪要.md", "mode": "create", "content": "# v1" }),
         )
         .await;
         let doc_id = v["doc_id"].as_str().unwrap().to_string();
 
-        // 提交 base=1 → pending
+        // 非所有者 overwrite → pending_review（不是换动词，是换结果）
         let v = ok(
             &state,
-            Some(AGENT),
-            "doc_submit_update",
-            json!({ "ref": doc_id, "content": "# v2", "base_version": 1 }),
+            Some(OTHER),
+            "doc_write",
+            json!({ "ref": doc_id, "content": "# v2", "if_version": 1 }),
         )
         .await;
-        assert_eq!(v["status"], "pending");
+        assert_eq!(v["status"], "pending_review");
         let request_id = v["request_id"].as_str().unwrap().to_string();
 
-        // check → pending；人类 approve 后 → approved + note
+        // 文档在审批前未被修改
+        let cur = ok(&state, None, "doc_read", json!({ "ref": doc_id })).await;
+        assert_eq!(cur["content"], "# v1");
+        assert_eq!(cur["version"], 1);
+
         let v = ok(&state, None, "doc_check_request", json!({ "request_id": request_id })).await;
         assert_eq!(v["status"], "pending");
         state
@@ -684,25 +1000,78 @@ mod tests {
         assert_eq!(v["review_note"], "ok");
         assert_eq!(v["reviewed_by"], "human:zhang");
 
-        // stale base 提交 → VersionConflict
+        // 所有者自己写入 → 直接生效
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": doc_id, "content": "# v3" }),
+        )
+        .await;
+        assert_eq!(v["status"], "applied");
+        assert_eq!(v["version"], 3);
+
+        // stale if_version → VersionConflict（在 gate 之前就被拦住）
         let e = err(
             &state,
             Some(AGENT),
-            "doc_submit_update",
-            json!({ "ref": doc_id, "content": "x", "base_version": 1 }),
+            "doc_write",
+            json!({ "ref": doc_id, "content": "x", "if_version": 1 }),
         )
         .await;
         assert!(matches!(e, DocError::VersionConflict { .. }), "got {e:?}");
     }
 
+    /// Chunked write + atomic publish: the temp+rename pattern the tool docs
+    /// prescribe for documents larger than one call.
     #[tokio::test]
-    async fn search_and_pull_tools() {
+    async fn append_chunks_then_move_publishes_atomically() {
+        let (_tmp, state) = setup().await;
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "报告.tmp.md", "mode": "create", "content": "AAA" }),
+        )
+        .await;
+        let tmp_id = v["doc_id"].as_str().unwrap().to_string();
+
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": tmp_id, "mode": "append", "content": "BBB" }),
+        )
+        .await;
+        assert_eq!(v["version"], 2);
+
+        // 半成品只在临时名下可见，最终名还不存在
+        let v = ok(&state, None, "doc_read", json!({ "ref": "报告.tmp.md" })).await;
+        assert_eq!(v["content"], "AAABBB");
+        let e = err(&state, None, "doc_read", json!({ "ref": "报告.md" })).await;
+        assert!(matches!(e, DocError::DocNotFound(_)), "got {e:?}");
+
+        // 原子发布
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_move",
+            json!({ "from": "报告.tmp.md", "to": "报告.md" }),
+        )
+        .await;
+        assert_eq!(v["path"], "报告.md");
+        let v = ok(&state, None, "doc_read", json!({ "ref": "报告.md" })).await;
+        assert_eq!(v["content"], "AAABBB");
+    }
+
+    #[tokio::test]
+    async fn stat_returns_metadata_without_body() {
         let (_tmp, state) = setup().await;
         ok(
             &state,
             Some(AGENT),
-            "doc_add",
-            json!({ "title": "发布方案", "content": "回滚策略与灰度发布" }),
+            "doc_write",
+            json!({ "ref": "发布方案.md", "mode": "create", "content": "回滚策略与灰度发布" }),
         )
         .await;
 
@@ -711,28 +1080,312 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0]["name"], "发布方案");
 
-        // pull 返回内容 + base_version + 建议缓存路径（不落盘）
-        let v = ok(&state, None, "doc_pull", json!({ "ref": "发布方案.md" })).await;
+        // stat：版本 + 字节数 + creator，且不带 content
+        let v = ok(&state, None, "doc_stat", json!({ "ref": "发布方案.md" })).await;
         assert_eq!(v["version"], 1);
-        assert_eq!(v["content"], "回滚策略与灰度发布");
-        assert!(v["cache_path"].as_str().unwrap().ends_with(".md"));
-        assert!(!v["cache_path"].as_str().unwrap().contains(".."), "cache path must be safe");
+        assert_eq!(v["creator"], AGENT);
+        assert_eq!(v["size_bytes"], "回滚策略与灰度发布".len() as u64);
+        assert!(v.get("content").is_none(), "stat must not return the body");
+    }
+
+    #[tokio::test]
+    async fn search_hit_paths_are_addressable_by_the_other_tools() {
+        // The addressing contract is one space for the whole tool surface: a
+        // path a tool *returns* must be a path a tool *accepts*. The search
+        // service reports its store view (`{dir_id}/{name}.md`), so
+        // `doc_search` has to translate it — otherwise the natural
+        // `search → doc_read(ref=path)` chain answers `DirNotFound`.
+        let (_tmp, state) = setup().await;
+        ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "研发" })).await;
+        ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "研发/纪要" })).await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "研发/纪要/周会.md", "mode": "create", "content": "灰度发布与回滚" }),
+        )
+        .await;
+
+        let v = ok(&state, None, "doc_search", json!({ "keyword": "灰度" })).await;
+        let hits = v["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1);
+        let path = hits[0]["path"].as_str().unwrap().to_string();
+        assert_eq!(path, "研发/纪要/周会.md");
+        assert!(
+            !path.contains("dir-"),
+            "a returned path must never carry an internal dir id: {path}"
+        );
+
+        // The value round-trips through every path-accepting write/read tool.
+        let v = ok(&state, None, "doc_read", json!({ "ref": path })).await;
+        assert_eq!(v["content"], "灰度发布与回滚");
+        let v = ok(&state, None, "doc_stat", json!({ "ref": path })).await;
+        assert_eq!(v["version"], 1);
+    }
+
+    #[tokio::test]
+    async fn move_and_remove_require_ownership() {
+        let (_tmp, state) = setup().await;
+        const OTHER: &str = "inst-0000-0000-0000-0000-000000000002";
+        ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "归档" })).await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "旧方案.md", "mode": "create", "content": "x" }),
+        )
+        .await;
+
+        // 非所有者 move / remove → Forbidden（结构性操作不走审批流）
+        let e = err(
+            &state,
+            Some(OTHER),
+            "doc_move",
+            json!({ "from": "旧方案.md", "to": "归档/新方案.md" }),
+        )
+        .await;
+        assert!(matches!(e, DocError::Forbidden(_)), "got {e:?}");
+        let e = err(
+            &state,
+            Some(OTHER),
+            "doc_remove",
+            json!({ "ref": "旧方案.md" }),
+        )
+        .await;
+        assert!(matches!(e, DocError::Forbidden(_)), "got {e:?}");
+
+        // 所有者 rename + 跨目录移动
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_move",
+            json!({ "from": "旧方案.md", "to": "归档/新方案.md" }),
+        )
+        .await;
+        assert_eq!(v["path"], "归档/新方案.md");
+        let v = ok(&state, None, "doc_read", json!({ "ref": "归档/新方案.md" })).await;
+        assert_eq!(v["content"], "x");
+
+        // 目标已存在且 overwrite=false → NameConflict
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "归档/新方案.md", "mode": "overwrite", "content": "y" }),
+        )
+        .await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "另一份.md", "mode": "create", "content": "z" }),
+        )
+        .await;
+        let e = err(
+            &state,
+            Some(AGENT),
+            "doc_move",
+            json!({ "from": "另一份.md", "to": "归档/新方案.md" }),
+        )
+        .await;
+        assert!(matches!(e, DocError::NameConflict(_)), "got {e:?}");
+
+        // 所有者删除 → 进回收站
+        let v = ok(&state, Some(AGENT), "doc_remove", json!({ "ref": "另一份.md" })).await;
+        assert_eq!(v["removed"], true);
+        let e = err(&state, None, "doc_read", json!({ "ref": "另一份.md" })).await;
+        assert!(matches!(e, DocError::DocNotFound(_)), "got {e:?}");
+    }
+
+    /// A document with no recorded creator (pre-creator-stamp / imported) has
+    /// no owner to protect and no review channel for structural ops, so the
+    /// ownership gate must not make it permanently unreachable. It falls
+    /// through to the node ACL, which is public unless someone tightened it.
+    #[tokio::test]
+    async fn unowned_documents_stay_reachable_for_structural_ops() {
+        let (_tmp, state) = setup().await;
+        const OTHER: &str = "inst-0000-0000-0000-0000-000000000002";
+        // Created through the service with `creator: None` — the shape of a
+        // document that predates creator stamping.
+        state
+            .docs
+            .create(crate::service::document::CreateDocumentInput {
+                parent_dir_id: ROOT_DIR_ID.into(),
+                title: "legacy".into(),
+                content: "old".into(),
+                import: None,
+                creator: None,
+            })
+            .await
+            .unwrap();
+
+        // Rename is allowed for any actor (no owner exists)…
+        let v = ok(
+            &state,
+            Some(OTHER),
+            "doc_move",
+            json!({ "from": "legacy.md", "to": "legacy-v2.md" }),
+        )
+        .await;
+        assert_eq!(v["path"], "legacy-v2.md");
+        // …and so is removal (soft: it lands in the recycle bin).
+        let v = ok(
+            &state,
+            Some(OTHER),
+            "doc_remove",
+            json!({ "ref": "legacy-v2.md" }),
+        )
+        .await;
+        assert_eq!(v["removed"], true);
+    }
+
+    /// The same fall-through must not open an explicitly ACL-locked node.
+    #[tokio::test]
+    async fn unowned_document_with_a_restrictive_acl_still_denies() {
+        let (_tmp, state) = setup().await;
+        const OTHER: &str = "inst-0000-0000-0000-0000-000000000002";
+        let meta = state
+            .docs
+            .create(crate::service::document::CreateDocumentInput {
+                parent_dir_id: ROOT_DIR_ID.into(),
+                title: "locked".into(),
+                content: "x".into(),
+                import: None,
+                creator: None,
+            })
+            .await
+            .unwrap();
+        let store = crate::store::library::LibraryStore::new(
+            state.config.data_dir.clone(),
+        );
+        let acl = crate::service::acl::AclService::new(store);
+        acl.set(
+            &crate::service::acl::ActorCtx {
+                id: Some("human".into()),
+                is_admin: false,
+            },
+            crate::service::acl::AclTarget::Doc(&meta.doc_id),
+            Some(vec![crate::types::Ace {
+                principal: "inst-0000-0000-0000-0000-000000000009".into(),
+                role: crate::types::AclRole::View,
+            }]),
+        )
+        .await
+        .unwrap();
+
+        let e = err(
+            &state,
+            Some(OTHER),
+            "doc_remove",
+            json!({ "ref": "locked.md" }),
+        )
+        .await;
+        assert!(matches!(e, DocError::AclDenied { .. }), "got {e:?}");
+    }
+
+    /// Replacing a document is a service-level operation now: the displaced
+    /// body is parked in the recycle bin instead of being unlinked, and the
+    /// MCP layer no longer deletes the destination before moving.
+    #[tokio::test]
+    async fn move_over_a_document_parks_the_replaced_body_in_the_trash() {
+        let (_tmp, state) = setup().await;
+        ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "归档" })).await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "归档/方案.md", "mode": "create", "content": "old" }),
+        )
+        .await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "方案.md", "mode": "create", "content": "new" }),
+        )
+        .await;
+
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_move",
+            json!({ "from": "方案.md", "to": "归档/方案.md", "overwrite": true }),
+        )
+        .await;
+        assert_eq!(v["path"], "归档/方案.md");
+        let read = ok(&state, None, "doc_read", json!({ "ref": "归档/方案.md" })).await;
+        assert_eq!(read["content"], "new");
+
+        // The displaced document is recoverable, not gone.
+        let trash = crate::service::trash::TrashService::list(state.trash.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(trash.len(), 1);
+        assert_eq!(trash[0].original_name, "方案");
+    }
+
+    /// Same-directory rename onto an existing name: the MCP layer used to
+    /// delete the destination first; the service must replace it atomically.
+    #[tokio::test]
+    async fn same_dir_rename_with_overwrite_replaces_the_destination() {
+        let (_tmp, state) = setup().await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "草稿.md", "mode": "create", "content": "new" }),
+        )
+        .await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "定稿.md", "mode": "create", "content": "old" }),
+        )
+        .await;
+
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_move",
+            json!({ "from": "草稿.md", "to": "定稿.md", "overwrite": true }),
+        )
+        .await;
+        assert_eq!(v["path"], "定稿.md");
+        let read = ok(&state, None, "doc_read", json!({ "ref": "定稿.md" })).await;
+        assert_eq!(read["content"], "new");
+        let list = ok(&state, None, "doc_list", json!({})).await;
+        assert_eq!(list["total"], 1, "no duplicate entry left behind: {list}");
+        assert_eq!(
+            crate::service::trash::TrashService::list(state.trash.as_ref())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn anonymous_writes_rejected_reads_allowed() {
         let (_tmp, state) = setup().await;
-        // 匿名创建文档 → Forbidden
-        let e = err(&state, None, "doc_add", json!({ "title": "x", "content": "y" })).await;
-        assert!(matches!(e, DocError::Forbidden(_)), "got {e:?}");
-        // 匿名 submit_update → Forbidden
+        // 匿名写入 → Forbidden
         let e = err(
             &state,
             None,
-            "doc_submit_update",
-            json!({ "ref": "doc-ffffffffffff", "content": "x", "base_version": 1 }),
+            "doc_write",
+            json!({ "ref": "x.md", "mode": "create", "content": "y" }),
         )
         .await;
+        assert!(matches!(e, DocError::Forbidden(_)), "got {e:?}");
+        let e = err(
+            &state,
+            None,
+            "doc_move",
+            json!({ "from": "a.md", "to": "b.md" }),
+        )
+        .await;
+        assert!(matches!(e, DocError::Forbidden(_)), "got {e:?}");
+        let e = err(&state, None, "doc_remove", json!({ "ref": "a.md" })).await;
         assert!(matches!(e, DocError::Forbidden(_)), "got {e:?}");
         // 匿名只读仍可用（空库 list）
         let v = ok(&state, None, "doc_list", json!({})).await;
