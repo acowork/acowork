@@ -94,6 +94,21 @@ impl McpClient {
         config: McpServerConfig,
         sink: Option<crate::transport::ServerOutputSink>,
     ) -> Result<Self> {
+        Self::connect_with_timeout(config, sink, RECV_TIMEOUT).await
+    }
+
+    /// Same as [`McpClient::connect_with`] with an explicit handshake timeout.
+    ///
+    /// The wait is a property of *the command being spawned*, not of the MCP
+    /// protocol: a lazily resolved package downloads during the first spawn, so
+    /// a caller that knows it is facing one must be able to widen the window
+    /// (see `constants::MCP_LAZY_HANDSHAKE`) instead of reporting a healthy
+    /// first launch as a broken server.
+    pub async fn connect_with_timeout(
+        config: McpServerConfig,
+        sink: Option<crate::transport::ServerOutputSink>,
+        recv_timeout: Duration,
+    ) -> Result<Self> {
         let mut transport = create_transport_with(&config, sink).with_context(|| {
             format!(
                 "failed to create transport for MCP server `{}`",
@@ -115,7 +130,7 @@ impl McpClient {
             }),
         );
 
-        let init_resp = timeout(RECV_TIMEOUT, transport.send_and_recv(&init_req))
+        let init_resp = timeout(recv_timeout, transport.send_and_recv(&init_req))
             .await
             .with_context(|| {
                 format!(
@@ -139,7 +154,7 @@ impl McpClient {
         // ── Fetch tool list ──────────────────────────────────────────────
         let list_req = JsonRpcRequest::new(2u64, "tools/list", json!({}));
 
-        let list_resp = timeout(RECV_TIMEOUT, transport.send_and_recv(&list_req))
+        let list_resp = timeout(recv_timeout, transport.send_and_recv(&list_req))
             .await
             .with_context(|| {
                 format!(

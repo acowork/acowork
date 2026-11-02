@@ -352,19 +352,37 @@ where
 /// Perform the MCP initialize + tools/list handshake against a derived spawn
 /// config. This is the single health check for all kinds (ADR-072 decision 4).
 pub async fn health_check(spawn: &McpServerConfigDef) -> Result<usize, String> {
-    health_check_with_output(spawn, None).await
+    health_check_with_output(spawn, None, acowork_core::timeout_config::constants::MCP_RECV).await
 }
 
-/// Same handshake, forwarding the server process's stderr to `sink`.
+/// Package resolvers that download on first spawn, i.e. whose handshake window
+/// must not be the protocol default (`constants::MCP_RECV`).
+///
+/// The classification is about the *command*, not the package spec: a custom
+/// server may point straight at `npx` with no install spec at all (ADR-090
+/// §5.4), and it downloads exactly the same way.
+pub fn resolves_lazily(command: &str) -> bool {
+    let program = std::path::Path::new(command)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    matches!(program.as_str(), "npx" | "pnpx" | "bunx" | "uvx")
+}
+
+/// Same handshake, forwarding the server process's stderr to `sink`, with the
+/// handshake window chosen by the caller.
 ///
 /// For lazily resolved packages this handshake *is* the install: `npx -y pkg`
 /// downloads while the client waits, so this is the only way a caller can show
-/// what a long first launch is doing.
+/// what a long first launch is doing — and the reason `recv_timeout` is a
+/// parameter rather than a constant.
 pub async fn health_check_with_output(
     spawn: &McpServerConfigDef,
     sink: Option<crate::transport::ServerOutputSink>,
+    recv_timeout: Duration,
 ) -> Result<usize, String> {
-    let client = crate::client::McpClient::connect_with(spawn.clone(), sink)
+    let client = crate::client::McpClient::connect_with_timeout(spawn.clone(), sink, recv_timeout)
         .await
         .map_err(|e| format!("{:#}", e))?;
     let tools = client.tools();
@@ -375,6 +393,22 @@ pub async fn health_check_with_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_resolvers_are_classified_by_program_name() {
+        // The `npx`/`uvx` cases are what `MCP_LAZY_HANDSHAKE` exists for.
+        assert!(resolves_lazily("npx"));
+        assert!(resolves_lazily("npx.cmd"));
+        assert!(resolves_lazily(r"C:\Program Files\nodejs\npx.cmd"));
+        assert!(resolves_lazily("uvx"));
+        assert!(resolves_lazily("bunx"));
+        assert!(resolves_lazily("pnpx"));
+        // A real binary answers in milliseconds — it keeps the 30s window.
+        assert!(!resolves_lazily("docling-mcp-server"));
+        assert!(!resolves_lazily("uv"));
+        assert!(!resolves_lazily("pnpm"));
+        assert!(!resolves_lazily("pnpm.exe"));
+    }
 
     /// Build a Vec<String> from string literals for assert_eq.
     fn s(v: &[&str]) -> Vec<String> {
