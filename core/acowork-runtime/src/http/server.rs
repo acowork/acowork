@@ -3142,17 +3142,22 @@ async fn put_agent_mcp_servers(
             // ADR-090 D5: first-enable ensure runs in the Agent process —
             // the machine the Runtime actually spawns on. Fire-and-forget;
             // progress is polled via GET /agents/{id}/mcp-ensure/{name}.
-            if !newly_enabled.is_empty() {
+            // The ack lists only what is actually watchable: a server whose
+            // transport is not stdio gets no ensure attempt, so echoing it
+            // would make the client poll a route that always 404s.
+            let ensuring = if newly_enabled.is_empty() {
+                Vec::new()
+            } else {
                 crate::mcp_ensure::ensure_newly_enabled(
                     std::path::Path::new(&state.work_dir),
                     &newly_enabled,
                     state.mcp_notifier.clone(),
-                );
-            }
+                )
+            };
             Ok(Json(serde_json::json!({
                 "agent_id": resp.agent_id,
                 "active_servers": resp.active_servers,
-                "ensuring": newly_enabled,
+                "ensuring": ensuring,
             })))
         }
         Err(crate::usecases::AgentToolsError::UnknownServers(unknown)) => Err((

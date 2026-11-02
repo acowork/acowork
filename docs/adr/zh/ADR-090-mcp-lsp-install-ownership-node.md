@@ -209,6 +209,10 @@ fn ensure_usable(name, pkg, spawn, env):
   - `[stdout]` / `[stderr]`——安装子进程输出，由 `run_install_with_output` 逐行转发（`acowork-mcp/src/install.rs`）；
   - `[server]`——MCP server **自身**的 stderr，由 `health_check_with_output` 经 stdio transport 的 `ServerOutputSink` 逐行送进 Runtime。npx/uvx 懒解析类的下载就发生在这个 spawn 里，此前只进 `tracing`（`mcp::stderr`），用户面对的是静默转圈——这是补 `[server]` 的唯一理由。
   定性不变：ensure 状态仍是**进程内 in-flight 事实**，日志是它的附加视图，不落盘、不过 Gateway、不新增路由（Gateway 仍是纯反代）；单 server 上限 500 行 / 64 KiB，环形截断，每次新尝试（重开开关）清空。长连接的连接池后续重连不观察——只在 ensure/复探这两处 spawn 上挂观察者，因为那是用户等待发生的地方。
+- **实施补充（2026-11）：ensure 覆盖自建 stdio server，且探测窗口按命令类型区分**。上线后的事实：用户最常首次下载的恰恰是自建条目（如 `chrome-devtools`，`command = npx -y chrome-devtools-mcp@latest`、**无 install spec**）——旧守卫「无 spec 就不 ensure」让这类服务器完全没有 ensure 尝试，`GET .../mcp-ensure/{name}` 恒为 404，UI 只剩一个不可点的转圈。因此：
+  - `spawn_ensure` 的守卫收紧为**只判 transport**；无 spec 只意味着「没有安装步骤」，不意味着「不需要探测」。探测失败且命令确实不存在时，仍返回原来的「未找到命令且未声明安装方式」错误并回弹开关。
+  - 探测/复探的握手窗口不再恒为 `MCP_RECV`(30s)：命令是懒解析器（`npx` / `pnpx` / `bunx` / `uvx`，`resolves_lazily`）时用 `MCP_LAZY_HANDSHAKE`(300s)，因为首次 spawn 就是下载，30s 会把健康的首启判成坏服务器；本地二进制仍用 30s。
+  - `PUT /agents/{id}/mcp-servers` 回执的 `ensuring` 现在只列**真正登记了尝试**的服务器（非 stdio 不列），客户端因此不会去轮询一个必然 404 的地址。
 
 ### 5.5 UI（D10）
 

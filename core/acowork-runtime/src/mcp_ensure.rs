@@ -199,6 +199,19 @@ fn is_command_missing(err: &str) -> bool {
         || e.contains("mcp server closed stdout")
 }
 
+/// How long the probe may wait for the MCP handshake.
+///
+/// A package resolver (`npx` / `uvx` / …) downloads during its first spawn, so
+/// the protocol default would abort a healthy first launch and report a broken
+/// server. Everything else is a local binary and keeps the tight window.
+fn probe_window_for(spawn: &McpServerConfigDef) -> std::time::Duration {
+    if acowork_mcp::resolves_lazily(&spawn.command) {
+        acowork_core::timeout_config::constants::MCP_LAZY_HANDSHAKE
+    } else {
+        acowork_core::timeout_config::constants::MCP_RECV
+    }
+}
+
 /// Build the spawn def for a health check: env with the user bin dirs
 /// (pipx home, `~/.cargo/bin`, ...) prepended to PATH, so a binary
 /// installed by any agent on this machine resolves (ADR-090 "PATH is the
@@ -218,7 +231,23 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
     // 1. Probe first — PATH is the state. If the binary is already here
     //    (installed by this or any other agent on this machine), done.
     add_progress(&def.name, "Checking MCP server availability");
-    match acowork_mcp::health_check_with_output(&spawn, Some(server_output_sink(&def.name))).await {
+    let probe_window = probe_window_for(&spawn);
+    if acowork_mcp::resolves_lazily(&spawn.command) {
+        add_progress(
+            &def.name,
+            &format!(
+                "`{}` resolves packages on first launch — the download happens inside this probe",
+                spawn.command
+            ),
+        );
+    }
+    match acowork_mcp::health_check_with_output(
+        &spawn,
+        Some(server_output_sink(&def.name)),
+        probe_window,
+    )
+    .await
+    {
         Ok(_tools) => {
             add_progress(&def.name, "Server answered MCP initialize — no install necessary");
             return Ok(());
@@ -283,7 +312,13 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
     //    actually downloaded (no explicit install command), so name the step
     //    before blocking on it.
     add_progress(&def.name, "Verifying the server starts and answers MCP initialize");
-    match acowork_mcp::health_check_with_output(&spawn, Some(server_output_sink(&def.name))).await {
+    match acowork_mcp::health_check_with_output(
+        &spawn,
+        Some(server_output_sink(&def.name)),
+        probe_window,
+    )
+    .await
+    {
         Ok(_) => {
             add_progress(&def.name, "Server is ready");
             Ok(())
@@ -333,19 +368,46 @@ fn deactivate_server(work_dir: &Path, name: &str) {
     }
 }
 
+/// Record a failed attempt and, when this attempt owned an install step, undo
+/// the user's selection.
+///
+/// The asymmetry is the point: D6's spring-back exists so a switch cannot keep
+/// claiming "on" after an install the Runtime itself performed failed. A custom
+/// server has no install step (`install == None`) — ensure only *observed* it,
+/// nothing on this machine changed, so the selection is the user's declaration
+/// and stays; the failure and its log are reported instead
+/// (`state == "failed"`, error text on the row).
+fn record_failure(def: &McpServerConfigDef, work_dir: &Path, error: String) {
+    tracing::warn!(server = %def.name, %error, "ADR-090 ensure_usable failed");
+    set_state(&def.name, "failed", Some(error));
+    if def.install.is_some() {
+        deactivate_server(work_dir, &def.name);
+        add_progress(&def.name, "Install failed — server removed from the active list");
+    } else {
+        add_progress(
+            &def.name,
+            "This server declares no install step, so its selection is left as-is",
+        );
+    }
+}
+
 /// Spawn the ensure task for one server if it needs ensuring.
 ///
-/// A server "needs ensure" when: transport is stdio, it carries an install
-/// spec (preset-added), and no ensure is currently running. Custom stdio
-/// servers (no spec) keep the pre-ADR-090 behavior — the connection pool
-/// simply fails and reports, nothing is auto-installed.
+/// A server "needs ensure" when: transport is stdio and no ensure is currently
+/// running. **Having an install spec is not required** — a custom stdio server
+/// (`npx -y something-mcp`, no spec) downloads on first launch exactly like a
+/// preset does, so it needs the same probe (and the same log) even though there
+/// is nothing to install; `ensure_usable_inner` reports the missing spec only
+/// when the command is genuinely absent.
 ///
 /// Idempotent while an ensure is in flight (second open-toggle click sees
 /// the running "probing"/"installing" status, no duplicate task — the
 /// package-manager race D7 accepted only applies to *different processes*).
-pub fn spawn_ensure(def: McpServerConfigDef, work_dir: PathBuf, notifier: McpNotifyRef) {
-    if def.transport != McpTransportDef::Stdio || def.install.is_none() {
-        return;
+/// Returns `true` when an attempt is now registered (fresh or already
+/// running) — i.e. when `GET /mcp-ensure/{name}` will answer for this server.
+pub fn spawn_ensure(def: McpServerConfigDef, work_dir: PathBuf, notifier: McpNotifyRef) -> bool {
+    if def.transport != McpTransportDef::Stdio {
+        return false;
     }
     let already_running = registry()
         .lock()
@@ -354,7 +416,7 @@ pub fn spawn_ensure(def: McpServerConfigDef, work_dir: PathBuf, notifier: McpNot
         .map(|s| s.state == "probing" || s.state == "installing")
         .unwrap_or(false);
     if already_running {
-        return;
+        return true;
     }
     begin_attempt(&def.name, "probing");
     let name = def.name.clone();
@@ -369,32 +431,38 @@ pub fn spawn_ensure(def: McpServerConfigDef, work_dir: PathBuf, notifier: McpNot
                 }
             }
             Err(error) => {
-                tracing::warn!(server = %name, %error, "ADR-090 ensure_usable failed");
-                set_state(&name, "failed", Some(error));
-                deactivate_server(&work_dir, &name);
+                record_failure(&def, &work_dir, error);
                 if let Some(n) = notifier {
                     n.notify();
                 }
             }
         }
     });
+    true
 }
 
 /// Trigger ensure for every newly-enabled server in `enabled` (the diff of
 /// a `PUT /agents/{id}/mcp-servers` against the previous selection).
+/// Returns the names that now have a watchable ensure attempt — the HTTP
+/// handler echoes exactly this list as `ensuring`, so the client never polls a
+/// server that will 404 (ADR-090 D5).
 pub fn ensure_newly_enabled(
     work_dir: &Path,
     enabled: &[String],
     notifier: McpNotifyRef,
-) {
+) -> Vec<String> {
     let Some(cfg) = agent_config::load_agent_mcp_config(work_dir).ok().flatten() else {
-        return;
+        return Vec::new();
     };
+    let mut ensuring = Vec::new();
     for name in enabled {
-        if let Some(def) = cfg.catalog.iter().find(|d| &d.name == name) {
-            spawn_ensure(def.clone(), work_dir.to_path_buf(), notifier.clone());
+        if let Some(def) = cfg.catalog.iter().find(|d| &d.name == name)
+            && spawn_ensure(def.clone(), work_dir.to_path_buf(), notifier.clone())
+        {
+            ensuring.push(name.clone());
         }
     }
+    ensuring
 }
 
 /// Clear the registry entry when the user closes the toggle (retry = reopen,
@@ -471,6 +539,131 @@ mod tests {
         assert!(status.logs[0].starts_with("[server]"), "{:?}", status.logs[0]);
         assert!(status.logs[1].contains("added 3 packages"));
         clear_status(name);
+    }
+
+    #[test]
+    fn lazy_resolver_gets_the_wide_probe_window() {
+        // `npx` downloads during the probe; a local binary must not.
+        let lazy = McpServerConfigDef {
+            name: "adr090-lazy".into(),
+            transport: McpTransportDef::Stdio,
+            command: "npx".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            probe_window_for(&lazy),
+            acowork_core::timeout_config::constants::MCP_LAZY_HANDSHAKE
+        );
+        let local = McpServerConfigDef {
+            name: "adr090-local".into(),
+            transport: McpTransportDef::Stdio,
+            command: "docling-mcp-server".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            probe_window_for(&local),
+            acowork_core::timeout_config::constants::MCP_RECV
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_stdio_server_without_spec_is_still_ensured() {
+        // The regression this covers: a user-added `npx` server carries no
+        // install spec, so the old guard skipped ensure entirely and the UI had
+        // no progress channel (chrome-devtools, 2026-11-02).
+        let def = McpServerConfigDef {
+            name: "adr090-custom-no-spec".into(),
+            transport: McpTransportDef::Stdio,
+            command: "definitely-not-a-real-binary-adr090".into(),
+            ..Default::default()
+        };
+        assert!(def.install.is_none(), "precondition: no install spec");
+        let work_dir = std::env::temp_dir().join("adr090-ensure-custom-test");
+        assert!(spawn_ensure(def.clone(), work_dir, None));
+        let status = ensure_status(&def.name).expect("attempt registered for a custom server");
+        assert_eq!(status.state, "probing");
+        clear_status(&def.name);
+    }
+
+    /// The asymmetry D6 needs: an attempt that installed nothing may report the
+    /// failure but must not rewrite the user's selection; one that owned an
+    /// install must spring the switch back.
+    #[test]
+    fn failure_only_reverts_the_selection_when_the_attempt_owned_an_install() {
+        let work_dir = std::env::temp_dir().join("adr090-failure-asymmetry-test");
+        let _ = std::fs::remove_dir_all(&work_dir);
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        let write_config = || {
+            let cfg = agent_config::AgentMcpConfig {
+                catalog: vec![],
+                local: vec![],
+                active_names: Some(vec!["custom".into(), "preset".into()]),
+                recommended: vec![],
+                dismissed: vec![],
+            };
+            agent_config::save_agent_mcp_config(&work_dir, &cfg).unwrap();
+        };
+        let active = || {
+            agent_config::load_agent_mcp_config(&work_dir)
+                .unwrap()
+                .unwrap()
+                .active_names
+                .unwrap_or_default()
+        };
+
+        // Custom server: no spec → selection untouched, failure still recorded.
+        write_config();
+        let custom = McpServerConfigDef {
+            name: "custom".into(),
+            transport: McpTransportDef::Stdio,
+            command: "npx".into(),
+            ..Default::default()
+        };
+        begin_attempt(&custom.name, "probing");
+        record_failure(&custom, &work_dir, "boom".into());
+        assert_eq!(ensure_status(&custom.name).unwrap().state, "failed");
+        assert!(active().contains(&"custom".to_string()));
+
+        // Preset server: has a spec → the switch must spring back.
+        let preset = McpServerConfigDef {
+            name: "preset".into(),
+            transport: McpTransportDef::Stdio,
+            command: "npx".into(),
+            install: Some(acowork_core::protocol::McpInstallSpec {
+                package: acowork_core::protocol::McpPackageSpec {
+                    kind: acowork_core::protocol::PackageKind::Npm,
+                    spec: "@playwright/mcp@latest".into(),
+                    runner: None,
+                    entry_point: None,
+                    spawn_args: Vec::new(),
+                    exec_override: None,
+                    install_script: None,
+                    http_probe_ports: Vec::new(),
+                },
+                state: acowork_core::protocol::InstallState::Unknown,
+            }),
+            ..Default::default()
+        };
+        begin_attempt(&preset.name, "installing");
+        record_failure(&preset, &work_dir, "boom".into());
+        assert!(!active().contains(&"preset".to_string()));
+
+        clear_status("custom");
+        clear_status("preset");
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn non_stdio_server_gets_no_attempt() {
+        let def = McpServerConfigDef {
+            name: "adr090-http".into(),
+            transport: McpTransportDef::Http,
+            url: Some("https://example.invalid/mcp".into()),
+            ..Default::default()
+        };
+        assert!(!spawn_ensure(def.clone(), std::env::temp_dir(), None));
+        assert!(ensure_status(&def.name).is_none());
     }
 
     #[test]
