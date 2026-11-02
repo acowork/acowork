@@ -258,15 +258,20 @@ pub mod constants {
     /// MCP receive timeout for init / list (was `RECV_TIMEOUT_SECS = 30`).
     pub const MCP_RECV: Duration = Duration::from_secs(30);
 
-    /// MCP handshake timeout when the server command is a lazy package
-    /// resolver (`npx` / `uvx` / `bunx` / `pnpx`).
+    /// How long an MCP probe may stay **silent** before it is considered
+    /// stalled (stdout/stderr of the spawned server reset the clock).
     ///
-    /// For those kinds the first spawn *is* the download, so the handshake
-    /// legitimately takes minutes; `MCP_RECV` would abort a healthy first
-    /// launch and report it as a broken server. Everything else (a binary on
-    /// PATH, an already-cached package) answers in milliseconds and keeps
-    /// `MCP_RECV`.
-    pub const MCP_LAZY_HANDSHAKE: Duration = Duration::from_secs(300);
+    /// The bound on a first launch is not "the whole download takes too long"
+    /// — a package manager can legitimately spend minutes — it is "the server
+    /// produced no output for a long time", which is what a hang looks like.
+    /// Same semantic as `INSTALL_IDLE_TIMEOUT` for install commands.
+    pub const MCP_PROBE_IDLE: Duration = Duration::from_secs(30);
+
+    /// Silence budget for a probe that runs a lazy package resolver
+    /// (`npx` / `uvx` / `bunx` / `pnpx`): the first spawn *is* the download, and
+    /// a package manager may pause longer between fetches than a local binary
+    /// ever stays quiet.
+    pub const MCP_PROBE_IDLE_LAZY: Duration = Duration::from_secs(120);
 
     /// MCP default per-tool call timeout (was `DEFAULT_TOOL_TIMEOUT_SECS = 180`).
     pub const MCP_DEFAULT_TOOL: Duration = Duration::from_secs(180);
@@ -520,7 +525,8 @@ mod tests {
         assert_eq!(SESSION_IPC, Duration::from_secs(10));
         assert_eq!(INTENT_DEFAULT, Duration::from_secs(30));
         assert_eq!(MCP_RECV, Duration::from_secs(30));
-        assert_eq!(MCP_LAZY_HANDSHAKE, Duration::from_secs(300));
+        assert_eq!(MCP_PROBE_IDLE, Duration::from_secs(30));
+        assert_eq!(MCP_PROBE_IDLE_LAZY, Duration::from_secs(120));
         assert_eq!(MCP_DEFAULT_TOOL, Duration::from_secs(180));
         assert_eq!(MCP_MAX_TOOL, Duration::from_secs(600));
         assert_eq!(LSP_REQUEST, Duration::from_secs(30));

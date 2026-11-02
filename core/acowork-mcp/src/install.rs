@@ -352,7 +352,12 @@ where
 /// Perform the MCP initialize + tools/list handshake against a derived spawn
 /// config. This is the single health check for all kinds (ADR-072 decision 4).
 pub async fn health_check(spawn: &McpServerConfigDef) -> Result<usize, String> {
-    health_check_with_output(spawn, None, acowork_core::timeout_config::constants::MCP_RECV).await
+    health_check_with_output(
+        spawn,
+        None,
+        Some(acowork_core::timeout_config::constants::MCP_RECV),
+    )
+    .await
 }
 
 /// Package resolvers that download on first spawn, i.e. whose handshake window
@@ -371,16 +376,16 @@ pub fn resolves_lazily(command: &str) -> bool {
 }
 
 /// Same handshake, forwarding the server process's stderr to `sink`, with the
-/// handshake window chosen by the caller.
+/// handshake bound chosen by the caller (`None` = unbounded).
 ///
 /// For lazily resolved packages this handshake *is* the install: `npx -y pkg`
 /// downloads while the client waits, so this is the only way a caller can show
-/// what a long first launch is doing — and the reason `recv_timeout` is a
-/// parameter rather than a constant.
+/// what a long first launch is doing — and the reason the bound is a parameter
+/// rather than a constant.
 pub async fn health_check_with_output(
     spawn: &McpServerConfigDef,
     sink: Option<crate::transport::ServerOutputSink>,
-    recv_timeout: Duration,
+    recv_timeout: Option<Duration>,
 ) -> Result<usize, String> {
     let client = crate::client::McpClient::connect_with_timeout(spawn.clone(), sink, recv_timeout)
         .await
@@ -396,7 +401,8 @@ mod tests {
 
     #[test]
     fn lazy_resolvers_are_classified_by_program_name() {
-        // The `npx`/`uvx` cases are what `MCP_LAZY_HANDSHAKE` exists for.
+        // The `npx`/`uvx` cases are what the longer probe silence budget exists
+        // for: the first spawn downloads, and its output is the only progress.
         assert!(resolves_lazily("npx"));
         assert!(resolves_lazily("npx.cmd"));
         assert!(resolves_lazily(r"C:\Program Files\nodejs\npx.cmd"));
