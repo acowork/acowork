@@ -204,6 +204,11 @@ fn ensure_usable(name, pkg, spawn, env):
 - **重试 = 重开开关**：不缓存失败态；用户再次打开开关即重跑整套流程（大概率仍失败，故错误信息质量是关键）。
 - npm/uvx 类 `derive_install_command` 返回 `None`（`npx -y`/`uvx` 懒解析）→ 跳过步骤 2，直接靠步骤 1 的 health_check（首次 spawn 会触发 npx 下载）。
 - 并发（D7）：不加锁，靠包管理器自带锁 + 一次性窗口。
+- **实施补充（2026-10）：ensure 状态携带有界日志**。`GET /agents/{id}/mcp-ensure/{name}` 的载荷在原状态机字段上新增 `logs: [...]`，每行按来源加前缀，三条来源覆盖了"等待"的全部时段：
+  - `[progress]`——ensure 各阶段提示（探测 → 安装 → 复探）；
+  - `[stdout]` / `[stderr]`——安装子进程输出，由 `run_install_with_output` 逐行转发（`acowork-mcp/src/install.rs`）；
+  - `[server]`——MCP server **自身**的 stderr，由 `health_check_with_output` 经 stdio transport 的 `ServerOutputSink` 逐行送进 Runtime。npx/uvx 懒解析类的下载就发生在这个 spawn 里，此前只进 `tracing`（`mcp::stderr`），用户面对的是静默转圈——这是补 `[server]` 的唯一理由。
+  定性不变：ensure 状态仍是**进程内 in-flight 事实**，日志是它的附加视图，不落盘、不过 Gateway、不新增路由（Gateway 仍是纯反代）；单 server 上限 500 行 / 64 KiB，环形截断，每次新尝试（重开开关）清空。长连接的连接池后续重连不观察——只在 ensure/复探这两处 spawn 上挂观察者，因为那是用户等待发生的地方。
 
 ### 5.5 UI（D10）
 
@@ -211,6 +216,7 @@ fn ensure_usable(name, pkg, spawn, env):
 - 设置页为**单一列表、两类行**：preset 行常驻（未添加 → 「添加」，已添加 → 「已添加」，**无 Remove**——内置模板的注册表副本不是用户可删对象）；custom 行（不属于任何 preset 的 catalog 条目）带 Remove。两类行都**无 Test 按钮**（见 §5.6，运行时探测不属于 Gateway）。
 - 右侧工具面板 MCP 列表每项显示 health_check 驱动的状态：`探测中 / 本机可用 / 需安装 / 失败(详细原因)`。措辞用「**本机可用**」而非「本 Agent 已安装」——binary 是全机共享事实，避免误导。
 - 失败态展示详细错误（运行时缺失/依赖/install stderr 摘要），并提供「重试」（= 重新打开开关）。
+- `探测中 / 安装中` 的转圈指示器**可点击**，弹出该 server 的 ensure 日志（`logs` 逐行显示 + 自动滚到底）；失败态的「查看日志」按钮同理。首次安装的 server 尚无工具列表、行本身不可展开，因此弹窗必须挂在行容器之外（desktop 用 `createPortal` 到 `document.body`），否则会被折叠容器吞掉。
 - 「需要哪些 key」的展示仍可用前端 preset（`requiredEnv`），但**过滤判定的真相在 catalog**（D4 `required_secrets`），二者需对齐。
 
 ### 5.6 删除项（D12）

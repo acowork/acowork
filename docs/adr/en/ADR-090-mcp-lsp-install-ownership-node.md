@@ -204,6 +204,11 @@ fn ensure_usable(name, pkg, spawn, env):
 - **Retry = flip the switch again**: failed state is not cached; flipping on again reruns the whole flow (likely failing again, hence error quality is key).
 - npm/uvx kinds return `None` from `derive_install_command` (`npx -y`/`uvx` resolve lazily) → step 2 is skipped, relying on step 1's health_check (first spawn triggers the npx download).
 - Concurrency (D7): no locks; rely on package managers' own locks + the one-time window.
+- **Implementation note (2026-10): the ensure state carries a bounded log.** The `GET /agents/{id}/mcp-ensure/{name}` payload gained `logs: [...]` next to the state machine fields; each line is prefixed with its source, and the three sources cover every stretch of waiting:
+  - `[progress]` — stage markers emitted by ensure (probe → install → re-probe);
+  - `[stdout]` / `[stderr]` — the install child process, forwarded line by line by `run_install_with_output` (`acowork-mcp/src/install.rs`);
+  - `[server]` — the MCP server's **own** stderr, forwarded by `health_check_with_output` through the stdio transport's `ServerOutputSink`. For lazily resolved `npx`/`uvx` kinds the download happens inside that spawn and previously only reached `tracing` (`mcp::stderr`), leaving the user with a silent spinner — the sole reason `[server]` exists.
+  The characterisation is unchanged: ensure state is still an **in-flight, in-process fact** and the log is an accessory view of it — not persisted, never routed through the Gateway (still a pure reverse proxy), no new route. Bounded per server at 500 lines / 64 KiB with ring truncation, cleared on each new attempt (switch flipped on again). Later reconnects of the long-lived pool are not observed — observers are attached only to the ensure and re-probe spawns, which is where the waiting happens.
 
 ### 5.5 UI (D10)
 
@@ -211,6 +216,7 @@ fn ensure_usable(name, pkg, spawn, env):
 - The settings page is a **single list with two row kinds**: preset rows are permanent (not added → "Add"; added → "Added", with **no Remove** — the registry copy of a built-in template is not the user's to delete); custom rows (catalog entries matching no preset) carry Remove. Neither row kind has a **Test** button (see §5.6 — runtime probing is not the Gateway's job).
 - Each item in the right-panel MCP list shows a health_check-driven state: `probing / usable on this machine / needs install / failed (detailed reason)`. Wording uses "**usable on this machine**", not "installed for this Agent" — the binary is a machine-wide shared fact; avoid misleading users.
 - The failed state shows the detailed error (missing runtime / dependency / install stderr summary) and offers "retry" (= flip the switch back on).
+- The `probing / installing` spinner is **clickable** and opens that server's ensure log (the `logs` lines, auto-scrolled to the bottom); the failed state's "view log" button does the same. A first-install server has no tool list yet, so its row cannot expand — the dialog must therefore live outside the row container (desktop portals it to `document.body`), otherwise the collapsible container swallows it.
 - "Which keys are required" display may still use the frontend preset (`requiredEnv`), but the **filter's source of truth is the catalog** (D4 `required_secrets`); the two must stay aligned.
 
 ### 5.6 Deletions (D12)

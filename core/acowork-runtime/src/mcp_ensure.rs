@@ -20,11 +20,28 @@
 //! state (ADR-090 D6). The in-process registry below only tracks *in-flight
 //! and last-outcome* status so the UI can render 探测中/本机可用/失败 and the
 //! toggle can spring back on failure.
+//!
+//! ## Why the status also carries a log
+//!
+//! A first-time install is the only operation in the Tools panel that can take
+//! minutes (a package-manager download), and it used to be an opaque spinner.
+//! Each registry entry therefore also carries a bounded ring of log lines —
+//! stage markers plus the installer's own stdout/stderr — served by the same
+//! `GET /agents/{id}/mcp-ensure/{name}` payload the UI already polls. No new
+//! route, no new service boundary, no new persisted state.
+//!
+//! For `npx`/`uvx` presets there is no explicit install command, so the download
+//! happens *inside* the health check's spawn. That spawn's stderr is therefore
+//! observed too (`health_check_with_output` → stdio transport sink) and logged
+//! as `[server]`, which is what makes a one-minute silent spinner legible.
+//! The long-lived connection pool's later reconnects are not observed — only
+//! the ensure/verify spawns, which is where the waiting happens.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+use acowork_core::process::OutputStream;
 use acowork_core::protocol::{McpServerConfigDef, McpTransportDef};
 
 use crate::agent_config;
@@ -40,6 +57,10 @@ pub struct EnsureStatus {
     /// summary, or handshake error). Only set when `state == "failed"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Bounded, chronological output of the current attempt. Absent for
+    /// entries written before any line was captured.
+    #[serde(default)]
+    pub logs: Vec<String>,
 }
 
 /// In-process ensure registry: server name → last status.
@@ -53,11 +74,107 @@ fn registry() -> &'static Mutex<HashMap<String, EnsureStatus>> {
     REGISTRY.get_or_init(Default::default)
 }
 
-fn set_status(name: &str, status: EnsureStatus) {
+/// Start a fresh attempt: a retry must not inherit the previous run's lines,
+/// or one transcript would mix two installs and read as a contradiction.
+fn begin_attempt(name: &str, state: &str) {
     registry()
         .lock()
         .expect("ensure registry lock poisoned")
-        .insert(name.to_string(), status);
+        .insert(
+            name.to_string(),
+            EnsureStatus { state: state.into(), error: None, logs: Vec::new() },
+        );
+}
+
+/// Move to a new state, carrying the attempt's log forward.
+fn set_state(name: &str, state: &str, error: Option<String>) {
+    let mut statuses = registry().lock().expect("ensure registry lock poisoned");
+    let logs = statuses.get(name).map(|s| s.logs.clone()).unwrap_or_default();
+    statuses.insert(name.to_string(), EnsureStatus { state: state.into(), error, logs });
+}
+
+/// Cap on what one attempt may hold in memory. A `cargo install` emits far
+/// more than this; the tail is what matters when something hangs.
+const MAX_LOG_LINES: usize = 500;
+const MAX_LOG_BYTES: usize = 64 * 1024;
+
+/// Where a log line came from — the `[tag]` prefix the UI shows.
+///
+/// [`OutputStream`] is the process fact; `Progress` is the runtime's own stage
+/// marker, so the user sees *what* is happening even while the installer is
+/// silent.
+#[derive(Debug, Clone, Copy)]
+enum EnsureLogSource {
+    /// Install command's stdout.
+    Stdout,
+    /// Install command's stderr.
+    Stderr,
+    /// The MCP server process's own stderr — for `npx`/`uvx` presets this is
+    /// where the first-launch download reports progress.
+    Server,
+    Progress,
+}
+
+impl EnsureLogSource {
+    fn label(self) -> &'static str {
+        match self {
+            EnsureLogSource::Stdout => "stdout",
+            EnsureLogSource::Stderr => "stderr",
+            EnsureLogSource::Server => "server",
+            EnsureLogSource::Progress => "progress",
+        }
+    }
+}
+
+impl From<OutputStream> for EnsureLogSource {
+    fn from(stream: OutputStream) -> Self {
+        match stream {
+            OutputStream::Stdout => EnsureLogSource::Stdout,
+            OutputStream::Stderr => EnsureLogSource::Stderr,
+        }
+    }
+}
+
+/// Append one line to an attempt's ring, dropping the oldest lines to stay
+/// inside [`MAX_LOG_LINES`] / [`MAX_LOG_BYTES`].
+///
+/// No-op when no attempt is registered for `name` (every caller begins one
+/// first) — a log without a status would be unreachable through the API.
+fn append_log(name: &str, source: EnsureLogSource, line: &str) {
+    let Ok(mut statuses) = registry().lock() else { return };
+    let Some(status) = statuses.get_mut(name) else { return };
+
+    let mut entry = format!("[{}] {line}", source.label());
+    if entry.len() > MAX_LOG_BYTES {
+        // Truncate on a char boundary — `String::truncate` panics otherwise,
+        // and installer output is not guaranteed to be ASCII.
+        let mut boundary = MAX_LOG_BYTES;
+        while !entry.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        entry.truncate(boundary);
+    }
+    status.logs.push(entry);
+
+    let mut total_bytes: usize = status.logs.iter().map(String::len).sum();
+    while status.logs.len() > MAX_LOG_LINES || total_bytes > MAX_LOG_BYTES {
+        let Some(removed) = status.logs.first() else { break };
+        total_bytes = total_bytes.saturating_sub(removed.len());
+        status.logs.remove(0);
+    }
+}
+
+fn add_progress(name: &str, text: &str) {
+    append_log(name, EnsureLogSource::Progress, text);
+}
+
+/// Stderr observer for the health-check spawn under `name`.
+///
+/// Handed to `acowork_mcp::health_check_with_output`: for lazy package kinds
+/// that spawn is the install, and its stderr carries the download progress.
+fn server_output_sink(name: &str) -> acowork_mcp::ServerOutputSink {
+    let name = name.to_string();
+    std::sync::Arc::new(move |line: &str| append_log(&name, EnsureLogSource::Server, line))
 }
 
 /// Snapshot of the current ensure status for `name` (None = never ensured).
@@ -100,13 +217,19 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
     let spawn = spawn_def_with_path(def);
     // 1. Probe first — PATH is the state. If the binary is already here
     //    (installed by this or any other agent on this machine), done.
-    match acowork_mcp::health_check(&spawn).await {
-        Ok(_tools) => return Ok(()),
+    add_progress(&def.name, "Checking MCP server availability");
+    match acowork_mcp::health_check_with_output(&spawn, Some(server_output_sink(&def.name))).await {
+        Ok(_tools) => {
+            add_progress(&def.name, "Server answered MCP initialize — no install necessary");
+            return Ok(());
+        }
         Err(e) if !is_command_missing(&e) => {
             // Connectable failure that an install cannot fix.
+            add_progress(&def.name, &format!("MCP probe failed: {e}"));
             return Err(e);
         }
-        Err(_) => {} // command missing → proceed to install
+        // Command missing → proceed to install.
+        Err(e) => add_progress(&def.name, &format!("Server command unavailable: {e}")),
     }
 
     // 2. Install (declarative spec only — no shell). npm/uvx kinds derive
@@ -122,7 +245,7 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
                 .to_string(),
         );
     };
-    set_status(&def.name, EnsureStatus { state: "installing".into(), error: None });
+    set_state(&def.name, "installing", None);
 
     if let Err(missing) = acowork_mcp::ensure_runtime(&spec.package) {
         // Dependency (pipx/cargo/docker/node...) absent — never auto-install
@@ -130,14 +253,25 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
         let acowork_mcp::DependencyStatus::Missing { runtime, install_hint } = missing else {
             unreachable!("ensure_runtime only returns Missing on Err");
         };
+        add_progress(&def.name, &format!("Required runtime '{runtime}' is missing"));
         return Err(format!(
             "Missing runtime '{runtime}'. {install_hint} — install it first, then retry."
         ));
     }
-    let output = acowork_mcp::run_install(&spec.package)
+    add_progress(&def.name, &install_command_summary(&spec.package));
+    let mut capture =
+        |stream: OutputStream, line: &str| append_log(&def.name, stream.into(), line);
+    let output = acowork_mcp::run_install_with_output(&spec.package, &mut capture)
         .await
-        .map_err(|e| format!("install failed: {e}"))?;
+        .map_err(|e| {
+            add_progress(&def.name, &format!("install error: {e}"));
+            format!("install failed: {e}")
+        })?;
     if !output.success {
+        add_progress(
+            &def.name,
+            &format!("Install command exited with code {:?}", output.exit_code),
+        );
         let stderr: String = output.stderr.chars().take(2000).collect();
         return Err(format!(
             "install command exited with code {:?}: {stderr}",
@@ -145,10 +279,31 @@ async fn ensure_usable_inner(def: &McpServerConfigDef) -> Result<(), String> {
         ));
     }
 
-    // 3. Re-probe.
-    match acowork_mcp::health_check(&spawn).await {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("installed but health check still fails: {e}")),
+    // 3. Re-probe. For `npx`/`uvx` presets this is where the package is
+    //    actually downloaded (no explicit install command), so name the step
+    //    before blocking on it.
+    add_progress(&def.name, "Verifying the server starts and answers MCP initialize");
+    match acowork_mcp::health_check_with_output(&spawn, Some(server_output_sink(&def.name))).await {
+        Ok(_) => {
+            add_progress(&def.name, "Server is ready");
+            Ok(())
+        }
+        Err(e) => {
+            add_progress(&def.name, &format!("Server still unusable after install: {e}"));
+            Err(format!("installed but health check still fails: {e}"))
+        }
+    }
+}
+
+/// One-line description of what the install will run, so a silent minute has
+/// a visible cause.
+fn install_command_summary(pkg: &acowork_core::protocol::McpPackageSpec) -> String {
+    match acowork_mcp::derive_install_command(pkg) {
+        Some(parts) => format!("Running install command: {}", parts.join(" ")),
+        None => format!(
+            "No explicit install command for {}; the next step resolves it",
+            pkg.spec
+        ),
     }
 }
 
@@ -201,12 +356,12 @@ pub fn spawn_ensure(def: McpServerConfigDef, work_dir: PathBuf, notifier: McpNot
     if already_running {
         return;
     }
-    set_status(&def.name, EnsureStatus { state: "probing".into(), error: None });
+    begin_attempt(&def.name, "probing");
     let name = def.name.clone();
     tokio::spawn(async move {
         match ensure_usable_inner(&def).await {
             Ok(()) => {
-                set_status(&name, EnsureStatus { state: "usable".into(), error: None });
+                set_state(&name, "usable", None);
                 // Reconnect the pool so the now-usable server's tools land
                 // in agent_mcp_tools.json without a user round-trip.
                 if let Some(n) = notifier {
@@ -215,7 +370,7 @@ pub fn spawn_ensure(def: McpServerConfigDef, work_dir: PathBuf, notifier: McpNot
             }
             Err(error) => {
                 tracing::warn!(server = %name, %error, "ADR-090 ensure_usable failed");
-                set_status(&name, EnsureStatus { state: "failed".into(), error: Some(error) });
+                set_state(&name, "failed", Some(error));
                 deactivate_server(&work_dir, &name);
                 if let Some(n) = notifier {
                     n.notify();
@@ -263,10 +418,66 @@ mod tests {
     }
 
     #[test]
+    fn log_ring_keeps_the_tail_and_stays_bounded() {
+        let name = "adr090-log-ring-test";
+        begin_attempt(name, "installing");
+        for index in 0..(MAX_LOG_LINES + 10) {
+            append_log(name, EnsureLogSource::Stdout, &format!("line-{index}"));
+        }
+        let status = ensure_status(name).expect("attempt registered");
+        assert_eq!(status.logs.len(), MAX_LOG_LINES);
+        assert!(status.logs.first().unwrap().contains("line-10"));
+        assert!(status.logs.last().unwrap().contains("line-509"));
+        clear_status(name);
+    }
+
+    #[test]
+    fn begin_attempt_drops_the_previous_run_log() {
+        let name = "adr090-log-reset-test";
+        begin_attempt(name, "installing");
+        append_log(name, EnsureLogSource::Stderr, "first attempt failed");
+        begin_attempt(name, "probing");
+        assert!(ensure_status(name).unwrap().logs.is_empty());
+        clear_status(name);
+    }
+
+    #[test]
+    fn state_transitions_carry_the_log_forward() {
+        let name = "adr090-log-carry-test";
+        begin_attempt(name, "probing");
+        append_log(name, EnsureLogSource::Progress, "checking");
+        set_state(name, "installing", None);
+        with_state_assert(name);
+        clear_status(name);
+    }
+
+    /// Split out so the assertion reads as one statement per invariant.
+    fn with_state_assert(name: &str) {
+        let status = ensure_status(name).expect("attempt registered");
+        assert_eq!(status.state, "installing");
+        assert_eq!(status.logs.len(), 1);
+        assert!(status.logs[0].contains("checking"));
+    }
+
+    #[test]
+    fn server_stderr_sink_lands_in_the_log_as_server_lines() {
+        let name = "adr090-server-sink-test";
+        begin_attempt(name, "probing");
+        let sink = server_output_sink(name);
+        sink("npm http fetch GET 200 https://registry.npmjs.org/playwright 42ms");
+        sink("added 3 packages in 51s");
+        let status = ensure_status(name).expect("attempt registered");
+        assert_eq!(status.logs.len(), 2);
+        assert!(status.logs[0].starts_with("[server]"), "{:?}", status.logs[0]);
+        assert!(status.logs[1].contains("added 3 packages"));
+        clear_status(name);
+    }
+
+    #[test]
     fn registry_roundtrip_and_clear() {
         let name = "adr090-test-server";
         assert!(ensure_status(name).is_none());
-        set_status(name, EnsureStatus { state: "probing".into(), error: None });
+        begin_attempt(name, "probing");
         assert_eq!(ensure_status(name).unwrap().state, "probing");
         clear_status(name);
         assert!(ensure_status(name).is_none());
@@ -284,8 +495,18 @@ mod tests {
             command: "definitely-not-a-real-binary-adr090".into(),
             ..Default::default()
         };
+        // `ensure_usable` registers the attempt before delegating; mirror it so
+        // the log assertions below see the real registry entry.
+        begin_attempt(&def.name, "probing");
         let err = ensure_usable_inner(&def).await.unwrap_err();
         assert!(err.contains("no install spec"), "unexpected error: {err}");
+        // The same run must still have left a progress trail for the UI dialog.
+        let status = ensure_status(&def.name).expect("attempt registered");
+        assert!(
+            status.logs.iter().any(|line| line.contains("[progress]")),
+            "no progress lines: {:?}",
+            status.logs
+        );
         clear_status(&def.name);
     }
 }
