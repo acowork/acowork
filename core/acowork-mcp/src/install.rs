@@ -352,12 +352,25 @@ where
 /// Perform the MCP initialize + tools/list handshake against a derived spawn
 /// config. This is the single health check for all kinds (ADR-072 decision 4).
 pub async fn health_check(spawn: &McpServerConfigDef) -> Result<usize, String> {
-    health_check_with_output(
-        spawn,
-        None,
-        Some(acowork_core::timeout_config::constants::MCP_RECV),
-    )
-    .await
+    health_check_with_output(spawn, None, Some(handshake_bound_for(&spawn.command))).await
+}
+
+/// Handshake bound for a **bounded** connect, picked by the command's kind.
+///
+/// A lazily resolved package launches through a package manager, so its
+/// handshake includes resolving and importing the package — `uvx docling-mcp`
+/// measured 11.4s warm here, and cold it can exceed the protocol default
+/// silently. A plain local binary answers in milliseconds, so it keeps the
+/// tight default and a hang still surfaces in 30s.
+///
+/// The probe does NOT use this: it passes `None` and judges silence instead
+/// (`constants::MCP_PROBE_IDLE_LAZY`, ADR-090 §5.4).
+pub fn handshake_bound_for(command: &str) -> std::time::Duration {
+    if resolves_lazily(command) {
+        acowork_core::timeout_config::constants::MCP_LAZY_START
+    } else {
+        acowork_core::timeout_config::constants::MCP_RECV
+    }
 }
 
 /// Package resolvers that download on first spawn, i.e. whose handshake window
@@ -414,6 +427,19 @@ mod tests {
         assert!(!resolves_lazily("uv"));
         assert!(!resolves_lazily("pnpm"));
         assert!(!resolves_lazily("pnpm.exe"));
+    }
+
+    #[test]
+    fn handshake_bound_follows_the_command_kind() {
+        use acowork_core::timeout_config::constants::{MCP_LAZY_START, MCP_RECV};
+        // A launch through a package manager includes resolving and importing
+        // the package: `uvx docling-mcp` measured 11.4s warm here, and cold it
+        // can exceed the protocol default without printing anything.
+        assert_eq!(handshake_bound_for("uvx"), MCP_LAZY_START);
+        assert_eq!(handshake_bound_for(r"C:\tools\npx.cmd"), MCP_LAZY_START);
+        // A plain binary answers in milliseconds; its hang must surface fast.
+        assert_eq!(handshake_bound_for("docling-mcp-server"), MCP_RECV);
+        assert_eq!(handshake_bound_for("python"), MCP_RECV);
     }
 
     /// Build a Vec<String> from string literals for assert_eq.

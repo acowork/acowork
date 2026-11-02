@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use acowork_core::timeout_config::constants;
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,7 +22,12 @@ use crate::protocol::{JSONRPC_VERSION, JsonRpcRequest, JsonRpcResponse};
 /// Maximum bytes for a single JSON-RPC response.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024; // 4 MB
 
-/// Timeout for init/list operations.
+/// Default bound for one JSON-RPC round trip (`constants::MCP_RECV`).
+///
+/// Used by [`create_transport`] and therefore by every long-lived client. A
+/// first enable of a lazily resolved package must NOT use it: the download
+/// happens inside that spawn and is silent for minutes — such callers pass
+/// their own policy to [`create_transport_with`].
 const RECV_TIMEOUT: Duration = constants::MCP_RECV;
 
 /// Streamable HTTP Accept header required by MCP HTTP transport.
@@ -124,17 +129,29 @@ pub struct StdioTransport {
     _child: Child,
     stdin: tokio::process::ChildStdin,
     stdout_lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    /// Bound on a single JSON-RPC round trip; `None` = the caller owns the
+    /// deadline (see [`create_transport_with`]).
+    recv_timeout: Option<Duration>,
 }
 
 impl StdioTransport {
     pub fn new(config: &McpServerConfig) -> Result<Self> {
-        Self::new_with(config, None)
+        Self::new_with(config, None, Some(RECV_TIMEOUT))
     }
 
     /// Spawn the server and, when `sink` is given, forward each stderr line to
     /// it in addition to `tracing`. The sink runs on the reader task, so it
     /// must not block.
-    pub fn new_with(config: &McpServerConfig, sink: Option<ServerOutputSink>) -> Result<Self> {
+    ///
+    /// `recv_timeout` bounds one JSON-RPC round trip. `None` disables the bound
+    /// so the caller can govern the wait itself — a first enable of `npx`/`uvx`
+    /// downloads *inside* this spawn and can be silent for minutes, which a
+    /// constant cannot distinguish from a hang (see [`create_transport_with`]).
+    pub fn new_with(
+        config: &McpServerConfig,
+        sink: Option<ServerOutputSink>,
+        recv_timeout: Option<Duration>,
+    ) -> Result<Self> {
         let server_name = config.name.clone();
         let mut child = spawn_mcp_command(&config.command, &config.args, &config.env)
             .with_context(|| format!("failed to spawn MCP server `{}`", config.name))?;
@@ -167,6 +184,7 @@ impl StdioTransport {
             _child: child,
             stdin,
             stdout_lines,
+            recv_timeout,
         })
     }
 
@@ -209,15 +227,25 @@ impl McpTransportConn for StdioTransport {
                 error: None,
             });
         }
-        let deadline = std::time::Instant::now() + RECV_TIMEOUT;
+        // `None` = policy is the caller's: it is watching the child's output and
+        // decides when the silence has gone on too long (Runtime probe,
+        // ADR-090 §5.4).
+        let deadline = self.recv_timeout.map(|bound| (Instant::now() + bound, bound));
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                bail!("timeout waiting for MCP response");
-            }
-            let resp_line = timeout(remaining, self.recv_raw())
-                .await
-                .context("timeout waiting for MCP response")??;
+            let resp_line = match deadline {
+                Some((deadline, bound)) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        bail!("timeout waiting for MCP response after {bound:?}");
+                    }
+                    timeout(remaining, self.recv_raw())
+                        .await
+                        .with_context(|| {
+                            format!("timeout waiting for MCP response after {bound:?}")
+                        })??
+                }
+                None => self.recv_raw().await?,
+            };
             let resp: JsonRpcResponse = serde_json::from_str(&resp_line)
                 .with_context(|| format!("invalid JSON-RPC response: {}", resp_line))?;
             if resp.id.is_none() {
@@ -475,21 +503,33 @@ async fn read_first_jsonrpc_from_sse_response(
 
 /// Create a transport based on config.
 pub fn create_transport(config: &McpServerConfig) -> Result<Box<dyn McpTransportConn>> {
-    create_transport_with(config, None)
+    create_transport_with(config, None, Some(RECV_TIMEOUT))
 }
 
-/// Create a transport, forwarding a stdio server's stderr to `sink`.
+/// Create a transport, forwarding a stdio server's stderr to `sink` and
+/// bounding each JSON-RPC round trip by `recv_timeout` (`None` = unbounded).
 ///
-/// Only the stdio transport has a child process to observe; HTTP/SSE ignore
-/// the sink.
+/// Only the stdio transport has a child process to observe, and only it honours
+/// `recv_timeout`: HTTP/SSE ignore both (their bound comes from the HTTP client
+/// and never covers a package download).
+///
+/// Why the bound is a parameter: for a lazily resolved package the *first spawn
+/// is the install*, and `npx`/`uvx` can be silent for longer than any sane
+/// constant while a large wheel streams (measured: 31 s of total silence for a
+/// 12 MiB download — see `constants::MCP_PROBE_IDLE_LAZY`). A hardcoded deadline
+/// here therefore contradicts the caller that knows it is watching output
+/// activity, so the caller owns the policy and passes `None`.
 pub fn create_transport_with(
     config: &McpServerConfig,
     sink: Option<ServerOutputSink>,
+    recv_timeout: Option<Duration>,
 ) -> Result<Box<dyn McpTransportConn>> {
     match config.transport {
-        crate::config::McpTransportDef::Stdio => {
-            Ok(Box::new(StdioTransport::new_with(config, sink)?))
-        }
+        crate::config::McpTransportDef::Stdio => Ok(Box::new(StdioTransport::new_with(
+            config,
+            sink,
+            recv_timeout,
+        )?)),
         crate::config::McpTransportDef::Http => Ok(Box::new(HttpTransport::new(config)?)),
         crate::config::McpTransportDef::Sse => {
             // SSE transport uses the same HTTP client path for streamable HTTP

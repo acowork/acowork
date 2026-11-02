@@ -221,6 +221,11 @@ fn ensure_usable(name, pkg, spawn, env):
 - 等待期间每 `MCP_PROBE_SILENCE_NOTICE`(60s) 往日志写一条 `[progress]`（"No output for Ns — package downloads can be quiet…"），让"安静地在大文件传输"与"卡死"在界面上可区分。
 
 残余风险（已知并接受）：一直输出但永不完成握手的服务器不会被杀掉——用户能看到日志，可自行关掉开关。
+
+- **时限的归属在调用方，不在 transport**（2026-11 修复）。上面这条"握手不设上限"上线后，同一个失败仍出现过一次：日志停在 `Installed 65 packages`，紧接着 `MCP probe failed: timeout waiting for MCP response: deadline has elapsed`。根因不在探测器的预算，而在 `StdioTransport::send_and_recv` 里写死的 30s 往返时限（`constants::MCP_RECV`）——它与调用方传入的 `None` 无关，自己先到点。`uvx` 装完包之后还要启动 server（docling 首次启动要 import 整个 ML 栈），这段时间 **stdout/stderr 一个字节都不出**，正好落在 30s 窗口上。因此：
+  - `recv_timeout` 变成 stdio transport 的**构造参数**（`create_transport_with(config, sink, recv_timeout)`）：`None` = 不设往返上限，交由调用方判定（探测的 `ActivityClock`）。只有一个主人，外层的 `timeout` 包装随之取消，不再和它抢同一个截止点。
+  - 常规连接（`McpClient::connect` / `connect_all`）按**命令类型**取上限（`handshake_bound_for`）：本地二进制 30s（`MCP_RECV`）；懒解析器 300s（`MCP_LAZY_START`——本机实测 `uvx docling-mcp` 热启动 11.4s、21 个工具，冷启动要跑首次 import，远超 30s）。300s 是"启动多久算死"的界限，不是下载窗口：Runtime 重启后的连接前面没有探测，总得有个上限把错误报出来。
+  - 探测路径仍传 `None`：它不需要往返上限，只需要"静默多久算卡住"。
   - `PUT /agents/{id}/mcp-servers` 回执的 `ensuring` 现在只列**真正登记了尝试**的服务器（非 stdio 不列），客户端因此不会去轮询一个必然 404 的地址。
   - 客户端侧：「首次轮询即 `failed`」也要执行回弹（重载 `active_names` + 通知配置刷新）——命令缺失这类失败在 2s 定时器建立之前就结束了，早退会让开关停在打开态。
 
