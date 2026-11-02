@@ -74,6 +74,28 @@ describe("MCP install progress", () => {
     expect(text).toContain("warn");
   });
 
+  it("offers an entry point while the pool is still connecting (no ensure yet)", () => {
+    // The regression reported on 2026-11-02: a user-added `npx` server had no
+    // ensure attempt at all, so the card fell back to a bare `loading` spinner
+    // — a spinner with nothing to click. Every waiting state must open the
+    // dialog.
+    renderCard({ ensure: undefined, loading: true });
+
+    fireEvent.click(screen.getByTestId("mcp-ensure-playwright"));
+
+    expect(screen.getByTestId("mcp-ensure-logs-dialog")).toBeTruthy();
+    // …and it is honest about why the log is empty.
+    expect(screen.getByText(i18n.t("agentSetup.ensureLogsHint"))).toBeTruthy();
+  });
+
+  it("opens the dialog from a failed install to show why it failed", () => {
+    renderCard({ ensure: { state: "failed", error: "install command exited with code 1" } });
+
+    fireEvent.click(screen.getByTestId("mcp-ensure-playwright"));
+
+    expect(screen.getByTestId("mcp-ensure-logs-dialog")).toBeTruthy();
+  });
+
   it("does not open the dialog from the spinner while the server is usable", () => {
     renderCard({ ensure: { state: "usable" } });
 

@@ -134,6 +134,7 @@ export function McpServerCard({
   // enabling the server (PUT /mcp-servers → reconnect → reconcile)
   // materialises the tool list and the chevron appears.
   const hasExpandableBody = isChecked && tools.length > 0;
+  const ensureBusy = ensure?.state === "probing" || ensure?.state === "installing";
   const showBody = open && hasExpandableBody;
   // Note: no outer ListBox here — the caller places each server row
   // inside the MCP group card's plain body list (Debug-panel style),
@@ -153,37 +154,39 @@ export function McpServerCard({
           // stuck UI. The spinner replaces the transport badge while
           // loading to keep the meta slot single-width and avoid a
           // layout shift when it disappears.
-          ensure?.state === "probing" || ensure?.state === "installing" ? (
-            <button
-              type="button"
-              onClick={(event) => {
-                // The header is a button (expand/collapse); opening the
-                // log must not also toggle the row.
-                event.stopPropagation();
-                setShowLogs(true);
-              }}
-              className="inline-flex items-center gap-1 text-10 text-text-tertiary hover:text-text"
-              data-testid={`mcp-ensure-${server.name}`}
-              aria-label={t("agentSetup.ensureViewLogs")}
-              title={t("agentSetup.ensureViewLogs")}
-            >
-              <Loader2 className="h-3 w-3 animate-spin" />
-              {ensure.state === "probing"
-                ? t("agentSetup.ensureProbing")
-                : t("agentSetup.ensureInstalling")}
-              <Terminal className="h-3 w-3" />
-            </button>
+          ensureBusy ? (
+            <LogEntryButton
+              busy
+              tone="busy"
+              label={
+                ensure?.state === "probing"
+                  ? t("agentSetup.ensureProbing")
+                  : t("agentSetup.ensureInstalling")
+              }
+              onClick={() => setShowLogs(true)}
+              testId={`mcp-ensure-${server.name}`}
+              hint={t("agentSetup.ensureViewLogs")}
+            />
           ) : ensure?.state === "failed" ? (
-            <span
-              className="inline-flex items-center gap-1 text-10 text-red-500"
-              data-testid={`mcp-ensure-${server.name}`}
-            >
-              {t("agentSetup.ensureFailed")}
-            </span>
+            <LogEntryButton
+              tone="error"
+              label={t("agentSetup.ensureFailed")}
+              onClick={() => setShowLogs(true)}
+              testId={`mcp-ensure-${server.name}`}
+              hint={t("agentSetup.ensureViewLogs")}
+            />
           ) : loading ? (
-            <Loader2
-              className="h-3 w-3 animate-spin text-text-tertiary "
-              aria-label={`Connecting ${server.name}`}
+            // Waiting on the pool (connect + reconcile) with no ensure attempt
+            // to read — non-stdio servers land here for their whole lifetime.
+            // The entry is still shown so every "spinner" has somewhere to
+            // click, and the dialog is honest about the missing log.
+            <LogEntryButton
+              busy
+              tone="busy"
+              label={t("agentSetup.ensureViewLogs")}
+              onClick={() => setShowLogs(true)}
+              testId={`mcp-ensure-${server.name}`}
+              hint={t("agentSetup.ensureViewLogs")}
             />
           ) : (
             <Badge>{server.transport}</Badge>
@@ -255,11 +258,56 @@ export function McpServerCard({
           <EnsureLogsDialog
             serverName={displayName?.trim() || server.name}
             logs={ensure?.logs ?? EMPTY_ARRAY}
+            hint={t("agentSetup.ensureLogsHint")}
             onClose={() => setShowLogs(false)}
           />,
           document.body,
         )}
     </>
+  );
+}
+
+// ── Sub-component: the clickable progress/log entry (ADR-090) ─────────
+//
+// Everything the user waits on in this list — an install, an `npx` first
+// download, a pool reconnect — must lead somewhere. A bare spinner does not:
+// it cannot be clicked, so the wait looks unowned. This renders the same
+// bordered pill in every waiting state (busy / failed / plain connect) and the
+// border + terminal glyph are what tell the user it opens something.
+
+interface LogEntryButtonProps {
+  label: string;
+  onClick: () => void;
+  testId: string;
+  /** Tooltip / accessible name — the click affordance, not the stuck state. */
+  hint: string;
+  busy?: boolean;
+  tone: "busy" | "error";
+}
+
+function LogEntryButton({ label, onClick, testId, hint, busy, tone }: LogEntryButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        // The row header is its own click target (expand/collapse); opening the
+        // log must not also toggle it.
+        event.stopPropagation();
+        onClick();
+      }}
+      data-testid={testId}
+      aria-label={hint}
+      title={hint}
+      className={
+        tone === "error"
+          ? "inline-flex cursor-pointer items-center gap-1 rounded-full border border-[var(--color-destructive)]/50 px-1.5 py-[1px] text-10 text-[var(--color-destructive)] transition-colors hover:bg-[var(--color-destructive)]/10"
+          : "inline-flex cursor-pointer items-center gap-1 rounded-full border border-border-divider bg-panel-surface px-1.5 py-[1px] text-10 text-text-secondary transition-colors hover:bg-panel-inset hover:text-text"
+      }
+    >
+      {busy && <Loader2 className="h-3 w-3 animate-spin" />}
+      <span>{label}</span>
+      <Terminal className="h-2.5 w-2.5 opacity-60" aria-hidden />
+    </button>
   );
 }
 
@@ -273,10 +321,12 @@ export function McpServerCard({
 interface EnsureLogsDialogProps {
   serverName: string;
   logs: string[];
+  /** Shown under the empty body — why there may be nothing to read. */
+  hint?: string;
   onClose: () => void;
 }
 
-export function EnsureLogsDialog({ serverName, logs, onClose }: EnsureLogsDialogProps) {
+export function EnsureLogsDialog({ serverName, logs, hint, onClose }: EnsureLogsDialogProps) {
   const { t } = useTranslation();
   const logRef = useRef<HTMLPreElement>(null);
   // Live log: follow new lines unless the user scrolled up to read history.
@@ -335,6 +385,9 @@ export function EnsureLogsDialog({ serverName, logs, onClose }: EnsureLogsDialog
               ))
             : t("agentSetup.ensureLogsWaiting")}
         </pre>
+        {hint && (
+          <p className="mt-2 text-9 leading-snug text-text-tertiary">{hint}</p>
+        )}
       </div>
     </div>
   );
