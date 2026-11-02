@@ -1215,6 +1215,11 @@ pub fn delete_session(
     // `session_lock`, so the registry's `Arc` is the only strong reference
     // and dropping the entry closes the connection.
     crate::search_index::forget(&dir);
+    // Same ordering contract for the round-projection cache (ADR-106 D5): a
+    // held SQLite handle makes `remove_dir_all` fail on Windows. This is also
+    // the privacy half of the design — a chat's cached execution content
+    // leaves with the chat, by directory, with no listing of what is in it.
+    crate::rounds_cache::forget(&dir);
     fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     // Drop the derived line index with the directory — the id can never
     // come back (session ids are server UUIDs), so a cached entry would
@@ -1222,6 +1227,55 @@ pub fn delete_session(
     let _ = lock(&LINE_INDEXES).remove(&dir);
     reindex(data_dir, session_id, Some(&session.participants), &[])?;
     Ok(session)
+}
+
+/// ADR-106 D5 — the round projections this chat already caches, keyed by ref.
+///
+/// The whole read runs under the same per-session lock [`delete_session`] holds while
+/// it releases the SQLite handles and removes the directory. That is not a style rule:
+/// `rounds_cache::connect` creates its parent directory, so a cache open landing
+/// outside the lock can resurrect a chat that is mid-deletion and leave a live handle
+/// behind — which on Windows turns "a disposable side table" into "a chat that can
+/// never be deleted", and keeps a copy of someone's execution content after the chat
+/// it came from is gone. Same contract as the search index, same reason.
+pub fn rounds_read(
+    data_dir: &Path,
+    session_id: &str,
+    who: &str,
+    keys: &[crate::rounds_cache::RoundKey],
+) -> Result<HashMap<crate::rounds_cache::RoundKey, crate::rounds_cache::CachedRound>, String> {
+    validate_session_id(session_id)?;
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    crate::rounds_cache::read_many(&dir, keys).map_err(|e| format!("round cache unreadable: {e}"))
+}
+
+/// ADR-106 D5 — store what the Gateway just fetched for this chat.
+///
+/// Locked and participation-gated exactly as [`rounds_read`] is; the cache layer
+/// itself is what refuses a non-terminal round (an open round would be a frozen lie,
+/// since nothing ever invalidates these rows).
+pub fn rounds_write(
+    data_dir: &Path,
+    session_id: &str,
+    who: &str,
+    rows: &[crate::rounds_cache::CachedRound],
+) -> Result<usize, String> {
+    validate_session_id(session_id)?;
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    crate::rounds_cache::write_many(&dir, rows)
+        .map_err(|e| format!("round cache unwritable: {e}"))
 }
 
 // ── Attachments (design 27 §4.2.1, plan 3.5) ──────────────────────────
@@ -3515,6 +3569,103 @@ mod tests {
             .expect("delete with a live search handle");
         assert!(!session_dir(&dir, &extra.session_id).exists());
         assert!(load(&dir, &extra.session_id).is_err());
+    }
+
+    #[test]
+    fn delete_session_releases_round_cache_before_removing_dir() {
+        // ADR-106 D5 ordering contract. Rendering blocks opens `rounds.sqlite`
+        // in this same process, so a live cache handle would make
+        // `remove_dir_all` fail on Windows — turning a disposable side table
+        // into a chat that cannot be deleted. The assertion also covers the
+        // privacy half: cached execution content leaves with the chat, by
+        // directory, with no listing of what the chat ever referenced.
+        let dir = temp_dir();
+        let human = Participant::new("human-1", ParticipantIdentity::Human);
+        let agent = Participant::new("agent-1", ParticipantIdentity::Agent);
+        ensure_pair(&dir, human.clone(), agent.clone(), SessionKind::UserAgent, 100)
+            .expect("pair");
+        let extra = create_session(
+            &dir,
+            SessionKind::UserAgent,
+            &[human, agent],
+            "second",
+            None,
+            None,
+            101,
+        )
+        .expect("create");
+        let sess = session_dir(&dir, &extra.session_id);
+        let row = crate::rounds_cache::CachedRound {
+            key: crate::rounds_cache::RoundKey {
+                agent_instance_id: "agent-1".to_string(),
+                agent_session_id: "sess-1".to_string(),
+                round_id: "r:m-1".to_string(),
+            },
+            projection: serde_json::json!({ "user": "hi", "answer": "hello" }),
+            terminal: true,
+            fetched_at: 1,
+        };
+        // The write leaves the connection cached in the registry, which is
+        // exactly the state deletion has to survive.
+        assert_eq!(
+            crate::rounds_cache::write_many(&sess, &[row]).expect("cache write"),
+            1
+        );
+
+        delete_session(&dir, &extra.session_id, "human-1", false)
+            .expect("delete with a live round-cache handle");
+        assert!(!sess.exists());
+    }
+
+    #[test]
+    fn round_cache_failure_never_fails_the_chat() {
+        // The cache is non-load-bearing (ADR-106 D5): a directory squatting on
+        // the sidecar path makes every open fail (and cannot be removed by the
+        // open-failure retry), yet the chat must keep working — a broken cache
+        // may only ever cost a re-fetch.
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let sid = &s.session_id;
+        let sess = session_dir(&dir, sid);
+        fs::create_dir_all(sess.join("rounds.sqlite")).unwrap();
+
+        let key = crate::rounds_cache::RoundKey {
+            agent_instance_id: "agent-1".to_string(),
+            agent_session_id: "sess-1".to_string(),
+            round_id: "r:m-1".to_string(),
+        };
+        let row = crate::rounds_cache::CachedRound {
+            key: key.clone(),
+            projection: serde_json::json!({ "answer": "hello" }),
+            terminal: true,
+            fetched_at: 1,
+        };
+        assert!(
+            crate::rounds_cache::write_many(&sess, std::slice::from_ref(&row)).is_err(),
+            "an unusable cache reports the failure instead of pretending"
+        );
+        assert!(
+            crate::rounds_cache::read_many(&sess, &[key]).is_err(),
+            "the caller reads that error as 'every ref missed'"
+        );
+
+        let (stored, written) = append_message(
+            &dir,
+            sid,
+            &msg("human-1", KIND_USER_MESSAGE, "durable despite cache", "m-1"),
+            1,
+        )
+        .expect("append must not fail on a round-cache error");
+        assert!(written);
+        assert_eq!(stored.body, "durable despite cache");
+
+        let (rows, total) = read_messages(&dir, sid, 0, 10).expect("read");
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].body, "durable despite cache");
+
+        // Leave the temp dir cleanable (Windows cannot remove a non-empty
+        // dir through the sidecar path retry).
+        fs::remove_dir_all(sess.join("rounds.sqlite")).unwrap();
     }
 
     #[test]
