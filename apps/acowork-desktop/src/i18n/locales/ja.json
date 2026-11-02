@@ -422,6 +422,9 @@
     "cancel": "キャンセル",
     "windowRangeError": "{{floor}}K〜{{ceiling}}K の範囲で入力してください"
   },
+  "chatUsage": {
+    "routerModel": "ルーターモデル"
+  },
   "agentList": {
     "searchPlaceholder": "Agentを検索...",
     "stopConfirm": "{{agent}} を停止しますか？現在の会話状態は保持されます。",
@@ -649,8 +652,7 @@
     "reset": "リセット",
     "compressionRatioThreshold": "圧縮率しきい値",
     "compressionRatioThresholdDesc": "コンテキスト圧縮後の保持率。90% は 10% 残すまで圧縮。範囲 50%–95%、デフォルト 90%。",
-    "sectionChatRouter": "Chat ルーター",
-    "chatRouterEnabled": "Chat ルーターを有効化",
+    "sectionChatRouter": "Chat Session ルーター",
     "chatRouterModel": "ルーターモデル",
     "chatRouterModelAuto": "自動（コンパクトモデルチェーン）",
     "chatRouterModelDesc": "直接応答か実行セッションへの転送かを判断するルーター LLM ターンで使用されるモデルです。セッションで選択したチャットモデルには追随しません。「自動」のままにするとエージェントのコンパクトモデルチェーンを使用します。",
@@ -658,7 +660,6 @@
     "chatRouterTimeoutMsDesc": "直接転送にフォールバックするまでの単一のルーター LLM 呼び出しのタイムアウト。範囲 1000–300000、デフォルト 60000。",
     "chatRouterHistoryMaxTokens": "Chat 履歴のコンテキスト長",
     "chatRouterHistoryMaxTokensDesc": "ルーティング判断の前にルーターが読み取れる会話履歴の長さ（トークン）。ウィンドウはメッセージ件数ではなくコンテキストサイズで切り詰められます。範囲 1000–64000、デフォルト 8000。",
-    "chatRouterDisabledHint": "Chat ルーターが無効です。すべてのチャットメッセージはルーティングターンを経ずに処理されます。",
     "sectionAgentInfo": "Agent情報",
     "sectionSessionParams": "セッションパラメータ",
     "sectionModelParams": "モデルパラメータ",

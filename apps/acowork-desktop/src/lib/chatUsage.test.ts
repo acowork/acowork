@@ -119,5 +119,39 @@ describe("summarizeChatUsage", () => {
     expect(s.totalCost).toBeNull();
     expect(s.modelItems).toHaveLength(0);
     expect(s.lastActiveMs).toBeNull();
+    // 未测量 ≠ 0：没有 agent 投影过历史窗口，占用量就是 null。
+    expect(s.historyTokens).toBeNull();
+  });
+
+  it("takes the MAX history occupancy across agents, never the sum", () => {
+    const s = summarizeChatUsage([
+      {
+        agentId: "a-1",
+        // Each agent projects its OWN window against its OWN budget, so
+        // summing two occupancies would produce a number with no
+        // corresponding budget.
+        row: row({ chat_session_id: "c-1", history_tokens: 3_000 }),
+      },
+      {
+        agentId: "a-2",
+        row: row({ chat_session_id: "c-1", history_tokens: 5_500 }),
+      },
+    ]);
+    expect(s.historyTokens).toBe(5_500);
+  });
+
+  it("a row without a history measurement keeps the measured one", () => {
+    const s = summarizeChatUsage([
+      {
+        agentId: "a-1",
+        row: row({ chat_session_id: "c-1", history_tokens: 4_000 }),
+      },
+      {
+        agentId: "a-2",
+        // A row written before schema v10 carries no measurement.
+        row: row({ chat_session_id: "c-1", history_tokens: null }),
+      },
+    ]);
+    expect(s.historyTokens).toBe(4_000);
   });
 });

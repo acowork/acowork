@@ -348,6 +348,7 @@
     "byModel": "By model",
     "byAgent": "By agent",
     "unknownModel": "Unknown model",
+    "routerModel": "Router model",
     "noData": "No LLM usage recorded for this chat yet"
   },
   "contextUsage": {
@@ -1065,8 +1066,7 @@
     "temperatureDesc": "Controls LLM output randomness. Lower = more deterministic, higher = more creative. Range 0.0–2.0. Leave empty to use package default.",
     "compressionRatioThreshold": "Compression Ratio",
     "compressionRatioThresholdDesc": "Saved share after context compaction. 90% = compress until 10% remains. Range 50%–95%, default 90%.",
-    "sectionChatRouter": "Chat Router",
-    "chatRouterEnabled": "Enable chat router",
+    "sectionChatRouter": "Chat Session Router",
     "chatRouterModel": "Router model",
     "chatRouterModelAuto": "Auto (compact-model chain)",
     "chatRouterModelDesc": "Model used for the router LLM turn that decides whether to reply directly or dispatch to an execution session. It does NOT follow the session's chat-model selection. Leave on Auto to use the agent's compact-model chain.",
@@ -1074,7 +1074,6 @@
     "chatRouterTimeoutMsDesc": "Timeout for a single router LLM call before falling back to direct dispatch. Range 1000–300000, default 60000.",
     "chatRouterHistoryMaxTokens": "Chat history context length",
     "chatRouterHistoryMaxTokensDesc": "How much of the conversation the router may read before deciding, in tokens (the window is trimmed by context size, not by message count). Range 1000–64000, default 8000.",
-    "chatRouterDisabledHint": "The chat router is off; every chat message is handled without a routing turn.",
     "resetTemperature": "Clear temperature override, revert to package default",
     "contextWindow": "Context Window",
     "contextWindowDesc": "Max context tokens per request. 0 or empty = no limit (use model's full window). Set a value to cap token usage for this agent.",
