@@ -41,10 +41,7 @@ import { useEditorStatusStore } from "../../stores/editorStatusStore";
 import { FileStatusCluster, type FileStatusClusterActiveFile } from "../editor/FileStatusCluster";
 import { cn, formatPercent } from "../../lib/utils";
 import { computeCacheHitRate, formatCacheHitRate, hasCacheData } from "../../lib/cacheHitRate";
-import {
-  DEFAULT_ACCENT_PRESET,
-  getAccentPresetByHex,
-} from "../../lib/accentPresets";
+import { resolveAccentPreset } from "../../lib/accentPresets";
 import { SettingsPage } from "../settings/SettingsPage";
 import { useLocalNodeAutoStart } from "../../hooks/useLocalNodeAutoStart";
 import { HarnessPage } from "../harness/HarnessPage";
@@ -518,7 +515,7 @@ export function AppLayout() {
   useEffect(() => {
     if (typeof navigator === "undefined" || !/Mac/i.test(navigator.userAgent)) return;
 
-    const preset = getAccentPresetByHex(accentColor) ?? DEFAULT_ACCENT_PRESET;
+    const preset = resolveAccentPreset(accentColor);
     const key = `${isDark ? "dark" : "light"}:${preset.id}`;
     if (lastAppliedKeyRef.current === key) return;
 

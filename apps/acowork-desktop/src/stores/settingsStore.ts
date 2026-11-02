@@ -39,9 +39,10 @@ export async function requestGatewayModeChange(mode: GatewayMode): Promise<void>
 }
 
 import { useAuthStore } from "./authStore";
+import { readPref, writePref, onScopeChange } from "../lib/prefsScope";
 import {
-  DEFAULT_ACCENT_PRESET,
-  getAccentPresetByHex,
+  CUSTOM_ACCENT_ID,
+  resolveAccentPreset,
   type AccentPreset,
 } from "../lib/accentPresets";
 
@@ -159,12 +160,25 @@ function applyAccentPreset(preset: AccentPreset) {
     if (cls.startsWith("accent-")) classList.remove(cls);
   }
   classList.add(`accent-${preset.id}`);
+
+  // globals.css ships a `.accent-{id}` block for the ten presets only, so a
+  // custom accent has no class to select its tints — write them inline.
+  // Presets must have these cleared, or an inline value left over from a
+  // custom pick would outrank the `.accent-{id}` rule and freeze the old hue.
+  const style = document.documentElement.style;
+  if (preset.id === CUSTOM_ACCENT_ID) {
+    style.setProperty("--glass-tint-light", preset.glassTintLight);
+    style.setProperty("--glass-tint-dark", preset.glassTintDark);
+  } else {
+    style.removeProperty("--glass-tint-light");
+    style.removeProperty("--glass-tint-dark");
+  }
 }
 
 /** Read persisted theme from localStorage, fallback to "system" */
 function getPersistedTheme(): Theme {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY_THEME);
+    const stored = readPref(STORAGE_KEY_THEME);
     if (stored === "light" || stored === "dark" || stored === "system") return stored;
   } catch {
     // localStorage unavailable (SSR / privacy mode)
@@ -175,7 +189,7 @@ function getPersistedTheme(): Theme {
 /** Read persisted font size from localStorage, fallback to 0.875 (M) */
 function getPersistedFontSize(): number {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY_FONT_SIZE);
+    const stored = readPref(STORAGE_KEY_FONT_SIZE);
     if (stored) {
       const val = parseFloat(stored);
       if (!isNaN(val) && val > 0) return val;
@@ -196,7 +210,7 @@ function getPersistedLogLevel(): string {
 /** Read persisted content width from localStorage, fallback to 90 */
 function getPersistedContentWidth(): number {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY_CONTENT_WIDTH);
+    const stored = readPref(STORAGE_KEY_CONTENT_WIDTH);
     if (stored) {
       const val = parseInt(stored, 10);
       if (!isNaN(val) && val >= 40 && val <= 100) return val;
@@ -205,17 +219,24 @@ function getPersistedContentWidth(): number {
   return DEFAULT_CONTENT_WIDTH;
 }
 
+/** A `#rrggbb` in the exact shape `--color-accent` and `<input type="color">`
+ *  both require. The store's contract is that `accentColor` is always in this
+ *  form, so both the read path and the write path gate on it. */
+function isAccentHex(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
 /** Read persisted accent color from localStorage, fallback to default blue.
  *
  * Always returns a valid `#rrggbb` hex string.  Unknown / malformed values
  * are coerced to `DEFAULT_ACCENT_COLOR` so downstream code can rely on the
- * format.  The matching `AccentPreset` is resolved lazily via
- * `getAccentPresetByHex()` in `setAccentColor` — see `applyAccentPreset`.
+ * format.  A valid hex outside the ten presets is *kept* — it is a
+ * user-picked custom color, not a corrupt value.
  */
 function getPersistedAccentColor(): string {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY_ACCENT_COLOR);
-    if (stored && /^#[0-9a-fA-F]{6}$/.test(stored)) return stored;
+    const stored = readPref(STORAGE_KEY_ACCENT_COLOR);
+    if (stored && isAccentHex(stored)) return stored;
   } catch { }
   return DEFAULT_ACCENT_COLOR;
 }
@@ -309,7 +330,7 @@ function getPersistedFrontendLogLevel(): LogLevel {
 /** Read persisted opacity from localStorage, fallback to 1.0 (opaque) */
 function getPersistedOpacity(): number {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY_OPACITY);
+    const stored = readPref(STORAGE_KEY_OPACITY);
     if (stored) {
       const val = parseFloat(stored);
       if (!isNaN(val) && val >= 0.0 && val <= 1.0) return val;
@@ -383,7 +404,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
   applyFontSize(initialFontSize);
   applyOpacity(initialOpacity);
   applyContentWidth(initialContentWidth);
-  applyAccentPreset(getAccentPresetByHex(initialAccentColor) ?? DEFAULT_ACCENT_PRESET);
+  applyAccentPreset(resolveAccentPreset(initialAccentColor));
   // Sync logger module level with persisted setting on startup
   setLoggerLevel(initialFrontendLogLevel);
 
@@ -434,35 +455,39 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     setTheme: (theme) => {
       const osTheme = get().osTheme;
       applyTheme(theme, osTheme);
-      try { localStorage.setItem(STORAGE_KEY_THEME, theme); } catch { }
+      writePref(STORAGE_KEY_THEME, theme);
       set({ theme });
     },
 
     setFontSize: (fontSize) => {
       applyFontSize(fontSize);
-      try { localStorage.setItem(STORAGE_KEY_FONT_SIZE, String(fontSize)); } catch { }
+      writePref(STORAGE_KEY_FONT_SIZE, String(fontSize));
       set({ fontSize });
     },
 
     setContentWidth: (contentWidth) => {
       applyContentWidth(contentWidth);
-      try { localStorage.setItem(STORAGE_KEY_CONTENT_WIDTH, String(contentWidth)); } catch { }
+      writePref(STORAGE_KEY_CONTENT_WIDTH, String(contentWidth));
       set({ contentWidth });
     },
 
     setOpacity: (opacity) => {
       applyOpacity(opacity);
-      try { localStorage.setItem(STORAGE_KEY_OPACITY, String(opacity)); } catch { }
+      writePref(STORAGE_KEY_OPACITY, String(opacity));
       set({ opacity });
     },
 
     setAccentColor: (accentColor) => {
-      // Resolve the preset by hex; fall back to the default if the
-      // stored value is no longer a known preset (e.g. a removed accent).
-      const preset = getAccentPresetByHex(accentColor) ?? DEFAULT_ACCENT_PRESET;
+      // A hex outside the ten presets is a user-picked custom color, not a
+      // corrupt value: resolve it to a synthesized preset so glass tints and
+      // the native vibrancy still follow it. Malformed input is the one case
+      // that still falls back — the store's contract is that `accentColor`
+      // is always `#rrggbb`, and `<input type="color">` rejects anything else.
+      const value = isAccentHex(accentColor) ? accentColor : DEFAULT_ACCENT_COLOR;
+      const preset = resolveAccentPreset(value);
       applyAccentPreset(preset);
-      try { localStorage.setItem(STORAGE_KEY_ACCENT_COLOR, accentColor); } catch { }
-      set({ accentColor });
+      writePref(STORAGE_KEY_ACCENT_COLOR, value);
+      set({ accentColor: value });
     },
 
     setGatewayUrl: (gatewayUrl) => {
@@ -562,3 +587,35 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     },
   };
 });
+
+/**
+ * Re-read the user-level preferences under the current account scope and
+ * re-apply them to both the store and the DOM.
+ *
+ * Needed because `authStore.login()` resolves the account *in place* — only
+ * sign-out and account switch reload the page. A store that initialized
+ * before login (theme applied at import, for the pre-login first paint) is
+ * holding the previous scope's values, so signing in as a different user
+ * would keep showing that user's appearance until the next restart.
+ *
+ * Machine-level settings are left alone: the Gateway URL and mode are what
+ * the login round-trip itself depends on.
+ */
+function rehydrateUserPrefs(): void {
+  const theme = getPersistedTheme();
+  const osTheme = readOsTheme();
+  const fontSize = getPersistedFontSize();
+  const contentWidth = getPersistedContentWidth();
+  const opacity = getPersistedOpacity();
+  const accentColor = getPersistedAccentColor();
+  applyTheme(theme, osTheme);
+  applyFontSize(fontSize);
+  applyOpacity(opacity);
+  applyContentWidth(contentWidth);
+  applyAccentPreset(resolveAccentPreset(accentColor));
+  useSettingsStore.setState({ theme, osTheme, fontSize, contentWidth, opacity, accentColor });
+}
+
+// `prefsScope` seeds itself from the stored token at import, so this fires
+// only on an actual change of account during the session.
+onScopeChange(() => rehydrateUserPrefs());

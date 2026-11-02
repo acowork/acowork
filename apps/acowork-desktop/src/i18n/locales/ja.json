@@ -112,7 +112,8 @@
     "rose": "ローズ",
     "orange": "オレンジ",
     "amber": "アンバー",
-    "pink": "ピンク"
+    "pink": "ピンク",
+    "custom": "カスタムカラー"
   },
   "navBar": {
     "editProfile": "Edit Profile",

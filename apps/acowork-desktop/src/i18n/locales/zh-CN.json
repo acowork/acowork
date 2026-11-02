@@ -112,7 +112,8 @@
     "rose": "玫瑰色",
     "orange": "橙色",
     "amber": "琥珀色",
-    "pink": "粉色"
+    "pink": "粉色",
+    "custom": "自定义颜色"
   },
   "navBar": {
     "editProfile": "编辑资料",

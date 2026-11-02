@@ -149,3 +149,90 @@ export function getAccentPresetByHex(hex: string): AccentPreset | undefined {
 /** Default preset (first one — "blue"). Used as fallback when localStorage is empty
  *  or contains an unknown hex value (e.g. a future preset that was removed). */
 export const DEFAULT_ACCENT_PRESET: AccentPreset = ACCENT_PRESETS[0];
+
+/** `id` of a synthesized preset. Not a CSS class target: globals.css only
+ *  ships `.accent-{id}` blocks for the ten shipped presets, so a custom
+ *  accent gets its glass tints written inline on `<html>` instead
+ *  (see `settingsStore.applyAccentPreset`). */
+export const CUSTOM_ACCENT_ID = "custom";
+
+/** sRGB hex → HSL hue in degrees (0-360). Achromatic input (grey/white/black)
+ *  has no hue by definition; 0 is returned, which renders a neutral tint —
+ *  the same thing the accent-agnostic fallback in globals.css does. */
+export function hexToHue(hex: string): number {
+  const { r, g, b } = hexToRgb(hex);
+  const rn = r / 255, gn = g / 255, bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const d = max - min;
+  if (d === 0) return 0;
+  let h: number;
+  if (max === rn) h = ((gn - bn) / d) % 6;
+  else if (max === gn) h = (bn - rn) / d + 2;
+  else h = (rn - gn) / d + 4;
+  return Math.round((h * 60 + 360) % 360);
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const n = parseInt(hex.replace(/^#/, ""), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+/** HSL(hue, 8%, lightness) → RGB, matching the fixed 8% saturation every
+ *  preset uses. Mirrors the `hslRgb()` script noted in the header comment. */
+function hslToRgb(hue: number, lightness: number): { r: number; g: number; b: number } {
+  const s = 0.08;
+  const c = (1 - Math.abs(2 * lightness - 1)) * s;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = lightness - c / 2;
+  const seg = [
+    [c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x],
+  ][Math.floor((hue / 60) % 6)];
+  return {
+    r: Math.round((seg[0] + m) * 255),
+    g: Math.round((seg[1] + m) * 255),
+    b: Math.round((seg[2] + m) * 255),
+  };
+}
+
+/**
+ * Synthesize an `AccentPreset` for an arbitrary hex, so a user-picked color
+ * drives the same three layers a shipped preset does: `--color-accent`, the
+ * CSS glass tints, and the macOS native vibrancy RGB.
+ *
+ * The tints are derived, not stored — the presets hard-code exactly
+ * `H 8% 92%` / `H 8% 14%` and the RGB equivalent of the same, so reproducing
+ * that formula keeps a custom accent visually consistent with the shipped
+ * ten rather than inventing a second tint model.
+ *
+ * Note the shipped `hue` field is hand-tuned for three presets (indigo 243
+ * vs the true 239, green 158 vs 156, orange 24 vs 25). The derived hue here
+ * is the true one; the difference is invisible at 8% saturation — the RGB
+ * triples come out identical to the authored ones for all ten. Presets are
+ * matched by hex first (see `resolveAccentPreset`), so their authored hue
+ * still wins when one is picked.
+ */
+export function presetFromHex(hex: string): AccentPreset {
+  const hue = hexToHue(hex);
+  return {
+    id: CUSTOM_ACCENT_ID,
+    hex,
+    hue,
+    glassTintLight: `${hue} 8% 92%`,
+    glassTintDark: `${hue} 8% 14%`,
+    glassRgbLight: hslToRgb(hue, 0.92),
+    glassRgbDark: hslToRgb(hue, 0.14),
+  };
+}
+
+/** Resolve any accent hex to a preset: a shipped one if it matches, otherwise
+ *  a synthesized custom preset. This is what lets `accentColor` hold a color
+ *  outside the ten presets without being coerced back to blue. */
+export function resolveAccentPreset(hex: string): AccentPreset {
+  return getAccentPresetByHex(hex) ?? presetFromHex(hex);
+}
+
+/** True when `hex` is not one of the shipped presets. */
+export function isCustomAccent(hex: string): boolean {
+  return getAccentPresetByHex(hex) === undefined;
+}

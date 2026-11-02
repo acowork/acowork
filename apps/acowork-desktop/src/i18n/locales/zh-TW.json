@@ -112,7 +112,8 @@
     "rose": "玫瑰色",
     "orange": "橙色",
     "amber": "琥珀色",
-    "pink": "粉紅色"
+    "pink": "粉紅色",
+    "custom": "自訂顏色"
   },
   "navBar": {
     "editProfile": "Edit Profile",

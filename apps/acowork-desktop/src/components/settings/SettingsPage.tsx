@@ -13,7 +13,7 @@ import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { RadioGroup } from "../common/RadioGroup";
 import { Switch } from "../common/Switch";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
-import { ACCENT_PRESETS } from "../../lib/accentPresets";
+import { AccentSwatches } from "../common/AccentSwatches";
 import { Bug, HelpCircle, Monitor, User, SlidersHorizontal, Palette, Globe } from "lucide-react";
 import { inputReadonly } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
@@ -1052,28 +1052,7 @@ function AppearanceTab() {
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <p className="mb-3 text-xs text-text-tertiary">{t("settings.accentColor")}</p>
-          <div className="flex flex-wrap gap-[14px]">
-            {ACCENT_PRESETS.map((c) => (
-              <Tooltip content={t(`accentColors.${c.id}`)} variant="plain" key={c.id}>
-                <button
-                  onClick={() => setAccentColor(c.hex)}
-                  aria-label={t(`accentColors.${c.id}`)}
-                  aria-pressed={accentColor.toLowerCase() === c.hex.toLowerCase()}
-                  data-accent-id={c.id}
-                  className={cn(
-                    "flex h-9 w-9 items-center justify-center rounded-full transition-transform",
-                    accentColor.toLowerCase() === c.hex.toLowerCase()
-                      ? "scale-110 ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
-                      : "hover:scale-105",
-                  )}
-                  style={{
-                    backgroundColor: c.hex,
-                    "--tw-ring-color": c.hex,
-                  } as React.CSSProperties}
-                />
-              </Tooltip>
-            ))}
-          </div>
+          <AccentSwatches value={accentColor} onChange={setAccentColor} />
         </ExpandableRow>
       </ListBox>
 

@@ -2,10 +2,10 @@ import { useRef, useState } from "react";
 import { Check, Monitor, Moon, Palette, Sun } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { ACCENT_PRESETS } from "../../lib/accentPresets";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
+import { AccentSwatches } from "../common/AccentSwatches";
 import { titleBarMenuPanel, titleBarMenuTrigger, useDismissMenu } from "./titleBarMenu";
 import type { Theme } from "../../lib/types";
 
@@ -122,32 +122,11 @@ export function AppearanceMenu() {
             <p className="px-1 pb-1.5 text-xs text-text-tertiary">
               {t("settings.accentColor")}
             </p>
-            <div className="flex flex-wrap gap-[14px] px-1">
-              {ACCENT_PRESETS.map((c) => {
-                const current = accentColor.toLowerCase() === c.hex.toLowerCase();
-                return (
-                  <Tooltip content={t(`accentColors.${c.id}`)} variant="plain" key={c.id}>
-                    <button
-                      type="button"
-                      onClick={() => setAccentColor(c.hex)}
-                      aria-label={t(`accentColors.${c.id}`)}
-                      aria-pressed={current}
-                      data-accent-id={c.id}
-                      className={cn(
-                        "flex h-9 w-9 items-center justify-center rounded-full transition-transform",
-                        current
-                          ? "scale-110 ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
-                          : "hover:scale-105",
-                      )}
-                      style={{
-                        backgroundColor: c.hex,
-                        "--tw-ring-color": c.hex,
-                      } as React.CSSProperties}
-                    />
-                  </Tooltip>
-                );
-              })}
-            </div>
+            <AccentSwatches
+              value={accentColor}
+              onChange={setAccentColor}
+              className="px-1"
+            />
           </div>
         </div>
       )}

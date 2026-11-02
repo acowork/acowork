@@ -18,7 +18,8 @@
     "rose": "Rose",
     "orange": "Orange",
     "amber": "Amber",
-    "pink": "Pink"
+    "pink": "Pink",
+    "custom": "Custom color"
   },
   "navBar": {
     "editProfile": "Edit Profile",
