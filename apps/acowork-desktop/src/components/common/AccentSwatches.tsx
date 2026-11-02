@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { Plus } from "lucide-react";
+import { Pencil, Plus } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ACCENT_PRESETS, isCustomAccent } from "../../lib/accentPresets";
 import { cn } from "../../lib/utils";
@@ -67,7 +67,14 @@ export function AccentSwatches({
 
       {/* The trailing slot doubles as the picker trigger and as the current
           custom swatch, so a picked color stays visible and re-editable
-          instead of vanishing the moment the menu repaints. */}
+          instead of vanishing the moment the menu repaints.
+
+          A picked custom color must not look like just another preset: the
+          swatch is a plain circle either way, so the pencil badge carried
+          into the selected state is what says "this one is yours, click to
+          re-pick". Same badge vocabulary as the My Profile avatar's edit
+          corner (ProfileTab.tsx), scaled to a 36px swatch instead of a 64px
+          avatar. */}
       <Tooltip content={t("accentColors.custom")} variant="plain">
         <button
           type="button"
@@ -76,9 +83,9 @@ export function AccentSwatches({
           aria-pressed={custom}
           data-accent-id="custom"
           className={cn(
-            "flex h-9 w-9 items-center justify-center rounded-full border transition-transform",
+            "relative flex h-9 w-9 items-center justify-center rounded-full border transition-transform",
             custom
-              ? "scale-110 border-transparent text-white ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
+              ? "scale-110 border-transparent ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
               : "border-dashed border-border-divider text-text-tertiary hover:scale-105 hover:text-text-secondary",
           )}
           style={
@@ -87,7 +94,16 @@ export function AccentSwatches({
             } as React.CSSProperties
           }
         >
-          {custom ? null : <Plus className="h-4 w-4" />}
+          {custom ? (
+            <span
+              data-accent-edit-badge=""
+              className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600"
+            >
+              <Pencil className="h-2 w-2" strokeWidth={2.5} />
+            </span>
+          ) : (
+            <Plus className="h-4 w-4" />
+          )}
         </button>
       </Tooltip>
 

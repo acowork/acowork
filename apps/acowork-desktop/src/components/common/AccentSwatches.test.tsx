@@ -59,6 +59,25 @@ describe("AccentSwatches", () => {
     expect(slots[slots.length - 1].getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("shows a plus when no custom color is picked, an edit badge once one is", () => {
+    // Without the badge a picked custom color is just another plain circle of
+    // color, indistinguishable from the ten presets beside it — and the "+"
+    // the user clicked is gone, so nothing says the slot is still clickable.
+    const { unmount } = render(
+      <AccentSwatches value={ACCENT_PRESETS[0].hex} onChange={() => {}} />,
+    );
+    expect(document.querySelector("[data-accent-edit-badge]")).toBeNull();
+    // The plus glyph is the affordance in this state (an <svg>, so it carries
+    // no text — assert the element, not textContent).
+    expect(customBtn().querySelector("svg")).not.toBeNull();
+
+    unmount();
+    render(<AccentSwatches value={CUSTOM} onChange={() => {}} />);
+    const badge = document.querySelector("[data-accent-edit-badge]");
+    expect(badge).not.toBeNull();
+    expect(badge?.querySelector("svg")).not.toBeNull();
+  });
+
   it("opens the native picker at the color that is actually active", () => {
     render(<AccentSwatches value={CUSTOM} onChange={() => {}} />);
     expect(picker().value).toBe(CUSTOM);
