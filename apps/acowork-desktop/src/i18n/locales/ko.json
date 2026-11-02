@@ -422,7 +422,7 @@
     "windowRangeError": "{{floor}}K~{{ceiling}}K 사이의 값을 입력하세요"
   },
   "chatUsage": {
-    "routerModel": "라우터 모델"
+    "usedNotMeasured": "아직 측정되지 않음 — 다음 턴에서 기록됩니다"
   },
   "agentList": {
     "searchPlaceholder": "Agent 검색...",

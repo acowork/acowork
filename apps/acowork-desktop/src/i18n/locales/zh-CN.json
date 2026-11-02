@@ -442,8 +442,8 @@
     "byModel": "按模型",
     "byAgent": "按 Agent",
     "unknownModel": "未知模型",
-    "routerModel": "路由模型",
-    "noData": "本会话尚无 LLM 用量"
+    "noData": "本会话尚无 LLM 用量",
+    "usedNotMeasured": "尚未测量 — 路由器会在本会话的下一轮记录历史长度"
   },
   "contextUsage": {
     "ariaLabel": "上下文用量",

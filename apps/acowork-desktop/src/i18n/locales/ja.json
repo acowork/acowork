@@ -423,7 +423,7 @@
     "windowRangeError": "{{floor}}K〜{{ceiling}}K の範囲で入力してください"
   },
   "chatUsage": {
-    "routerModel": "ルーターモデル"
+    "usedNotMeasured": "まだ計測されていません — 次回のターンで履歴サイズが記録されます"
   },
   "agentList": {
     "searchPlaceholder": "Agentを検索...",

@@ -348,8 +348,8 @@
     "byModel": "By model",
     "byAgent": "By agent",
     "unknownModel": "Unknown model",
-    "routerModel": "Router model",
-    "noData": "No LLM usage recorded for this chat yet"
+    "noData": "No LLM usage recorded for this chat yet",
+    "usedNotMeasured": "Not measured yet — the router records the history size on its next turn in this chat"
   },
   "contextUsage": {
     "ariaLabel": "Context usage",

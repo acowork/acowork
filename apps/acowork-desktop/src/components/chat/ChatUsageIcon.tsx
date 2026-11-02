@@ -25,9 +25,10 @@
  * `chat_router.history_max_tokens` tokens of history per turn (default
  * 8,000). The headline therefore reads:
  *
- *   - the big number = `last_input / window` — how much of the router's
- *     history budget the most recent turn actually consumed. This is the
- *     Chat-side analogue of the exec surface's `used / window`.
+ *   - the big number = `history_tokens / window` — how much of the
+ *     router's history budget the most recent turn actually consumed.
+ *     This is the Chat-side analogue of the exec surface's
+ *     `used / window`.
  *   - the small `Used X / Y` = the same two numbers in absolute tokens.
  *   - the pencil edits `Y` — the SAME field the Agent Setup panel's
  *     "Chat Session Router" card edits
@@ -39,9 +40,18 @@
  * to this conversation. Pulled on mount and re-pulled whenever the
  * popover opens: no push channel exists for ledger rows, and the numbers
  * are lifetime-cumulative, so hover-time freshness is the right budget.
+ *
+ * **`history_tokens` is a snapshot, not a running total.** The column was
+ * added after the ledger had already been in service (schema v10), so a
+ * row written before it carries `NULL` until that chat's next router turn
+ * — and `NULL` renders as `—`, never as a fabricated `0%`. Aggregate
+ * counters (input/output/cache) do NOT have this gap, so a legacy row can
+ * show a cache block and a dash side by side; that is the honest reading,
+ * not a rendering bug.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pencil, X } from "lucide-react";
+import { CircularProgressIcon } from "./CircularProgressIcon";
 import { useTranslation } from "../../i18n/useTranslation";
 import { fetchChatUsage, type ChatUsageSummary } from "../../lib/chatUsage";
 import { computeTokenSegments } from "../../lib/tokenStats";
@@ -65,16 +75,6 @@ function formatTokens(n: number | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
-}
-
-/** One label/value row (the ledger's aggregate lines). */
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between py-0.5">
-      <span className="text-text-tertiary">{label}</span>
-      <span className="font-mono text-text-secondary">{value}</span>
-    </div>
-  );
 }
 
 export function ChatUsageIcon({
@@ -264,24 +264,12 @@ export function ChatUsageIcon({
         className={cn(toolbarIconButton, loading && "opacity-50")}
         aria-label={t("chatUsage.ariaLabel")}
       >
-        {/* Gauge glyph — deliberately not the exec surface's progress
-            ring: the Chat budget is a per-turn reading, not a filled
-            context window, so a ring would imply a state the chat does
-            not have. */}
-        <svg
-          width={16}
-          height={16}
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={2}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M12 14l3.5-3.5" />
-          <path d="M20.3 18a8.32 8.32 0 0 0 .7-3 9 9 0 1 0-17 0 8.32 8.32 0 0 0 .7 3" />
-          <path d="M12 18a1 1 0 1 0 0-.01" />
-        </svg>
+        {/* The SAME glyph the execution composer uses — one control
+            family across both surfaces. A `null` percentage draws an
+            empty ring rather than hiding the button: the affordance
+            (open the menu) must still be there before the first turn
+            has been measured. */}
+        <CircularProgressIcon usagePercent={usagePercent ?? 0} />
       </button>
 
       {open && (
@@ -313,7 +301,14 @@ export function ChatUsageIcon({
               <span className="text-[clamp(1.125rem,4.5vw,1.375rem)] font-medium leading-none tracking-[-0.01em] text-text-secondary tabular-nums ">
                 {usagePercent != null ? `${formatDetailedPercent(usagePercent)}%` : "—"}
               </span>
-              <span className="text-xs text-text-tertiary ">
+              <span
+                className="text-xs text-text-tertiary"
+                title={
+                  usedTokens == null
+                    ? t("chatUsage.usedNotMeasured")
+                    : undefined
+                }
+              >
                 {t("contextUsage.used")} {" "}
                 <span className="font-mono text-text-secondary ">
                   {formatTokens(usedTokens ?? undefined)}
@@ -407,20 +402,7 @@ export function ChatUsageIcon({
               </div>
             )}
 
-            {/* The model that served this chat's router turns. The
-                ledger records one breakdown per `(provider, model)`;
-                the largest entry is the one that did the work. */}
-            {segments.length > 0 && (
-              <p className="mt-1.5 truncate text-10 text-text-tertiary">
-                {t("chatUsage.routerModel")}:{" "}
-                <span className="font-mono text-text-secondary">
-                  {segments[0].isUnknown
-                    ? t("chatUsage.unknownModel")
-                    : `${segments[0].provider !== "unknown" ? `${segments[0].provider}/` : ""}${segments[0].model}`}
-                </span>
-              </p>
-            )}
-          </div>
+            </div>
 
           {/* ── Cache hit rate block (exec surface's layout) ───────── */}
           {hasCache && (
@@ -452,21 +434,13 @@ export function ChatUsageIcon({
           <div className="px-3 pb-3 pt-1 text-xs">
             {summary && summary.llmCallCount > 0 ? (
               <>
-                <Row label={t("chatUsage.llmCalls")} value={String(summary.llmCallCount)} />
-                <Row label={t("chatUsage.totalInput")} value={formatTokens(summary.totalInput)} />
-                <Row label={t("chatUsage.totalOutput")} value={formatTokens(summary.totalOutput)} />
-                {summary.totalCacheRead > 0 && (
-                  <Row
-                    label={t("chatUsage.cacheRead")}
-                    value={formatTokens(summary.totalCacheRead)}
-                  />
-                )}
-                {summary.totalCacheWrite > 0 && (
-                  <Row
-                    label={t("chatUsage.cacheWrite")}
-                    value={formatTokens(summary.totalCacheWrite)}
-                  />
-                )}
+                {/* The cumulative counters (LLM calls / total input /
+                    total output / cache read+write) are deliberately NOT
+                    rendered: the headline's `Used X / Y` and the cache
+                    block above already carry the two figures a reader
+                    acts on, and the rest is ledger bookkeeping. The
+                    per-model split below is kept because it is the only
+                    place the serving model appears. */}
                 {segments.length > 0 && (
                   <>
                     <div className="mt-2 border-t border-border-divider pt-2">

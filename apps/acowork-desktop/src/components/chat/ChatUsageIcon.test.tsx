@@ -124,7 +124,7 @@ describe("ChatUsageIcon", () => {
     expect(mocks.fetchChatUsage).not.toHaveBeenCalled();
   });
 
-  it("shows the merged totals and the model share in the popover", async () => {
+  it("shows the model share in the popover and drops the ledger counters", async () => {
     mocks.fetchChatUsage.mockResolvedValue(
       summary({
         llmCallCount: 4,
@@ -152,16 +152,25 @@ describe("ChatUsageIcon", () => {
 
     fireEvent.mouseEnter(container.firstElementChild!);
     expect(screen.getByRole("dialog", { name: "chatUsage.title" })).toBeTruthy();
-    expect(screen.getByText("4")).toBeTruthy();
-    expect(screen.getAllByText("12.3K").length).toBeGreaterThan(0);
-    // Model share row (single agent → no per-agent section). The model
-    // name appears twice — in the router-model line and in the by-model
-    // breakdown — so the assertion counts them.
-    expect(screen.getAllByText("openai/gpt-4o").length).toBe(2);
+    // Model share row (single agent → no per-agent section). The name
+    // appears EXACTLY once: the by-model breakdown is the only place the
+    // serving model is named (the old headline line that duplicated it is
+    // gone by request).
+    expect(screen.getAllByText("openai/gpt-4o").length).toBe(1);
+    // The share row renders value · percentage; the two halves are
+    // separate text nodes, so assert on the assembled dialog text.
+    expect(
+      screen.getByRole("dialog", { name: "chatUsage.title" }).textContent,
+    ).toMatch(/\d+\.\dK · 100%/);
+    // The cumulative ledger counters are deliberately absent.
+    expect(screen.queryByText("chatUsage.llmCalls")).toBeNull();
+    expect(screen.queryByText("chatUsage.totalInput")).toBeNull();
+    expect(screen.queryByText("chatUsage.totalOutput")).toBeNull();
+    expect(screen.queryByText("chatUsage.cacheRead")).toBeNull();
     expect(screen.queryByText("chatUsage.byAgent")).toBeNull();
   });
 
-  it("shows the router model that served the chat's turns", async () => {
+  it("names the serving model once, in the by-model breakdown only", async () => {
     mocks.fetchChatUsage.mockResolvedValue(
       summary({
         llmCallCount: 1,
@@ -184,8 +193,11 @@ describe("ChatUsageIcon", () => {
     );
     await waitFor(() => expect(mocks.fetchChatUsage).toHaveBeenCalled());
     fireEvent.mouseEnter(container.firstElementChild!);
-    expect(screen.getByText(/chatUsage\.routerModel/)).toBeTruthy();
-    expect(screen.getAllByText("anthropic/claude-sonnet-5").length).toBeGreaterThan(0);
+    // Exactly one occurrence — a second one means the removed headline
+    // line (or anything else) crept back in and re-introduced the
+    // duplication the user flagged.
+    expect(screen.getAllByText("anthropic/claude-sonnet-5").length).toBe(1);
+    expect(screen.getByText("chatUsage.byModel")).toBeTruthy();
   });
 
   it("the headline reads the history-budget occupancy, not the prompt count", async () => {
@@ -228,6 +240,11 @@ describe("ChatUsageIcon", () => {
     await waitFor(() => expect(mocks.fetchChatUsage).toHaveBeenCalled());
     fireEvent.mouseEnter(container.firstElementChild!);
     expect(screen.queryByText("0.0%")).toBeNull();
+    // ...and the dash explains itself instead of leaving the reader to
+    // guess why a ledger with recorded calls has no occupancy.
+    expect(
+      screen.getByTitle("chatUsage.usedNotMeasured"),
+    ).toBeTruthy();
   });
 
   it("splits by agent only when more than one participant carries a row", async () => {

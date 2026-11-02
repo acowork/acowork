@@ -422,7 +422,7 @@
     "windowRangeError": "請輸入 {{floor}}K~{{ceiling}}K 之間的值"
   },
   "chatUsage": {
-    "routerModel": "路由模型"
+    "usedNotMeasured": "尚未測量 — 路由器會在本會話的下一輪記錄歷史長度"
   },
   "agentList": {
     "searchPlaceholder": "搜尋 Agent...",
