@@ -43,6 +43,7 @@ export function AppearanceMenu() {
   const theme = useSettingsStore((s) => s.theme);
   const setTheme = useSettingsStore((s) => s.setTheme);
   const accentColor = useSettingsStore((s) => s.accentColor);
+  const customAccent = useSettingsStore((s) => s.customAccent);
   const setAccentColor = useSettingsStore((s) => s.setAccentColor);
 
   const [open, setOpen] = useState(false);
@@ -124,6 +125,7 @@ export function AppearanceMenu() {
             </p>
             <AccentSwatches
               value={accentColor}
+              customColor={customAccent}
               onChange={setAccentColor}
               className="px-1"
             />

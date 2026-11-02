@@ -990,7 +990,7 @@ function RuntimeRow({ agent, padding }: { agent: AgentListResponse; padding?: "d
 /** Appearance settings */
 function AppearanceTab() {
   const { t } = useTranslation();
-  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, setAccentColor } = useSettingsStore();
+  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, customAccent, setAccentColor } = useSettingsStore();
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   // Tools-tab style level-1 collapsible cards (default open)
   const [themeOpen, setThemeOpen] = useState(true);
@@ -1052,7 +1052,7 @@ function AppearanceTab() {
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <p className="mb-3 text-xs text-text-tertiary">{t("settings.accentColor")}</p>
-          <AccentSwatches value={accentColor} onChange={setAccentColor} />
+          <AccentSwatches value={accentColor} customColor={customAccent} onChange={setAccentColor} />
         </ExpandableRow>
       </ListBox>
 

@@ -11,14 +11,18 @@
  *      CSS rule to select, so they must be written inline.
  *   3. Switching back to a preset must clear those inline tints, or the glass
  *      keeps the custom hue while the swatch says otherwise.
+ *   4. The saved custom color survives selecting a preset, and survives a
+ *      restart — losing it that way was a bug, and it is why `customColor` is
+ *      a separate prop from `value` and a separate key from `accentColor`.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { AccentSwatches } from "./AccentSwatches";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { ACCENT_PRESETS } from "../../lib/accentPresets";
 
 const CUSTOM = "#d4228a";
+const BLUE = ACCENT_PRESETS[0].hex;
 
 const root = () => document.documentElement;
 const customBtn = () =>
@@ -26,6 +30,7 @@ const customBtn = () =>
 /** The hidden native picker the "+" button drives. */
 const picker = () =>
   document.querySelector('input[type="color"]') as HTMLInputElement;
+const badge = () => document.querySelector("[data-accent-edit-badge]");
 
 function setAccent(hex: string) {
   useSettingsStore.getState().setAccentColor(hex);
@@ -33,53 +38,65 @@ function setAccent(hex: string) {
 
 describe("AccentSwatches", () => {
   beforeEach(() => {
-    setAccent(ACCENT_PRESETS[0].hex);
-    localStorage.removeItem("acowork-accent-color");
+    useSettingsStore.setState({ customAccent: null });
+    setAccent(BLUE);
   });
 
   it("renders the ten presets plus one custom slot", () => {
-    render(<AccentSwatches value={ACCENT_PRESETS[0].hex} onChange={() => {}} />);
+    render(<AccentSwatches value={BLUE} customColor={null} onChange={() => {}} />);
     expect(document.querySelectorAll("[data-accent-id]")).toHaveLength(ACCENT_PRESETS.length + 1);
   });
 
   it("calls onChange with the color picked from the native palette", () => {
     const seen: string[] = [];
-    render(<AccentSwatches value={ACCENT_PRESETS[0].hex} onChange={(h) => seen.push(h)} />);
+    render(<AccentSwatches value={BLUE} customColor={null} onChange={(h) => seen.push(h)} />);
     fireEvent.click(customBtn());
     fireEvent.change(picker(), { target: { value: CUSTOM } });
     expect(seen).toEqual([CUSTOM]);
   });
 
-  it("marks the custom slot pressed only when the color is outside the presets", () => {
-    render(<AccentSwatches value={ACCENT_PRESETS[0].hex} onChange={() => {}} />);
-    expect(customBtn().getAttribute("aria-pressed")).toBe("false");
-    // Same host, a custom value: the slot becomes the current-color swatch.
-    render(<AccentSwatches value={CUSTOM} onChange={() => {}} />);
-    const slots = screen.getAllByRole("button", { name: /Custom|自定义|自訂|カスタム|사용자 지정/ });
-    expect(slots[slots.length - 1].getAttribute("aria-pressed")).toBe("true");
-  });
-
-  it("shows a plus when no custom color is picked, an edit badge once one is", () => {
-    // Without the badge a picked custom color is just another plain circle of
-    // color, indistinguishable from the ten presets beside it — and the "+"
-    // the user clicked is gone, so nothing says the slot is still clickable.
+  it("shows a plus when there is no custom color, an edit badge when there is", () => {
+    // Without the badge a saved custom color is just another plain circle,
+    // indistinguishable from the ten presets beside it — and the "+" the user
+    // clicked is gone, so nothing says the slot is still clickable.
     const { unmount } = render(
-      <AccentSwatches value={ACCENT_PRESETS[0].hex} onChange={() => {}} />,
+      <AccentSwatches value={BLUE} customColor={null} onChange={() => {}} />,
     );
-    expect(document.querySelector("[data-accent-edit-badge]")).toBeNull();
+    expect(badge()).toBeNull();
     // The plus glyph is the affordance in this state (an <svg>, so it carries
     // no text — assert the element, not textContent).
     expect(customBtn().querySelector("svg")).not.toBeNull();
 
     unmount();
-    render(<AccentSwatches value={CUSTOM} onChange={() => {}} />);
-    const badge = document.querySelector("[data-accent-edit-badge]");
-    expect(badge).not.toBeNull();
-    expect(badge?.querySelector("svg")).not.toBeNull();
+    render(<AccentSwatches value={BLUE} customColor={CUSTOM} onChange={() => {}} />);
+    expect(badge()).not.toBeNull();
+    expect(badge()?.querySelector("svg")).not.toBeNull();
   });
 
-  it("opens the native picker at the color that is actually active", () => {
-    render(<AccentSwatches value={CUSTOM} onChange={() => {}} />);
+  it("paints the slot with the saved custom color, not the active accent", () => {
+    // While a preset is active the slot must still show the user's own color.
+    // Painting `value` would render the active preset a second time and make
+    // the custom color look destroyed.
+    render(<AccentSwatches value={BLUE} customColor={CUSTOM} onChange={() => {}} />);
+    expect(customBtn().style.backgroundColor).toBe("rgb(212, 34, 138)");
+  });
+
+  it("rings the custom slot only when the custom color is the active accent", () => {
+    // `aria-pressed` answers "is this the current color", which is a
+    // different question from "does the user have one".
+    const { unmount } = render(
+      <AccentSwatches value={BLUE} customColor={CUSTOM} onChange={() => {}} />,
+    );
+    expect(customBtn().getAttribute("aria-pressed")).toBe("false");
+    unmount();
+    render(<AccentSwatches value={CUSTOM} customColor={CUSTOM} onChange={() => {}} />);
+    expect(customBtn().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("re-opens the picker at the saved custom color while a preset is active", () => {
+    // The user is editing *that* color, so the palette starts there rather
+    // than on the active preset or on black.
+    render(<AccentSwatches value={BLUE} customColor={CUSTOM} onChange={() => {}} />);
     expect(picker().value).toBe(CUSTOM);
   });
 
@@ -90,13 +107,20 @@ describe("AccentSwatches", () => {
     // on black.
     const green = ACCENT_PRESETS.find((p) => p.id === "green")!;
     expect(green.hex).toBe("#00C375");
-    render(<AccentSwatches value={green.hex} onChange={() => {}} />);
+    render(<AccentSwatches value={green.hex} customColor={null} onChange={() => {}} />);
     expect(picker().value).toBe("#00c375");
   });
 });
 
-describe("custom accent reaches the DOM", () => {
-  beforeEach(() => setAccent(ACCENT_PRESETS[0].hex));
+describe("custom accent persistence and DOM", () => {
+  beforeEach(() => {
+    // These cases assert on storage, so the keys must start empty — an
+    // earlier test's write would otherwise satisfy or poison the assertion.
+    localStorage.removeItem("acowork-accent-custom");
+    localStorage.removeItem("acowork-accent-color");
+    useSettingsStore.setState({ customAccent: null });
+    setAccent(BLUE);
+  });
 
   it("sets --color-accent, the custom class, and inline glass tints", () => {
     setAccent(CUSTOM);
@@ -113,15 +137,44 @@ describe("custom accent reaches the DOM", () => {
     expect(localStorage.getItem("acowork-accent-color")).toBe(CUSTOM);
   });
 
+  it("keeps the custom color when a shipped preset is selected afterwards", () => {
+    // The regression this exists for: selecting a preset used to drop the
+    // custom color and force a re-mix.
+    setAccent(CUSTOM);
+    setAccent(ACCENT_PRESETS[5].hex);
+    expect(useSettingsStore.getState().accentColor).toBe(ACCENT_PRESETS[5].hex);
+    expect(useSettingsStore.getState().customAccent).toBe(CUSTOM);
+    expect(localStorage.getItem("acowork-accent-custom")).toBe(CUSTOM);
+  });
+
+  it("survives a restart: the stored custom color is read back on init", async () => {
+    setAccent(CUSTOM);
+    setAccent(BLUE);
+    expect(localStorage.getItem("acowork-accent-custom")).toBe(CUSTOM);
+
+    // A fresh module graph stands in for a page reload.
+    vi.resetModules();
+    const { useSettingsStore: reloaded } = await import("../../stores/settingsStore");
+    expect(reloaded.getState().customAccent).toBe(CUSTOM);
+    // The active accent is the preset, so the two really are independent.
+    expect(reloaded.getState().accentColor).toBe(BLUE);
+  });
+
+  it("does not record a shipped preset as a custom color", () => {
+    setAccent(ACCENT_PRESETS[2].hex);
+    expect(useSettingsStore.getState().customAccent).toBeNull();
+    expect(localStorage.getItem("acowork-accent-custom")).toBeNull();
+  });
+
   it("rejects a malformed hex instead of writing it into the CSS variable", () => {
     // The store's contract is that `accentColor` is always `#rrggbb`; the
     // picker can only emit that, but a caller must not be able to break it.
     // Starting from a valid custom color so a no-op write would fail this.
     setAccent(CUSTOM);
     setAccent("red");
-    expect(useSettingsStore.getState().accentColor).toBe(ACCENT_PRESETS[0].hex);
-    expect(root().style.getPropertyValue("--color-accent")).toBe(ACCENT_PRESETS[0].hex);
-    expect(localStorage.getItem("acowork-accent-color")).toBe(ACCENT_PRESETS[0].hex);
+    expect(useSettingsStore.getState().accentColor).toBe(BLUE);
+    expect(root().style.getPropertyValue("--color-accent")).toBe(BLUE);
+    expect(localStorage.getItem("acowork-accent-color")).toBe(BLUE);
   });
 
   it("clears the inline tints when switching back to a shipped preset", () => {

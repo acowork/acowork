@@ -42,6 +42,7 @@ import { useAuthStore } from "./authStore";
 import { readPref, writePref, onScopeChange } from "../lib/prefsScope";
 import {
   CUSTOM_ACCENT_ID,
+  isCustomAccent,
   resolveAccentPreset,
   type AccentPreset,
 } from "../lib/accentPresets";
@@ -88,6 +89,11 @@ const STORAGE_KEY_LOG_LEVEL = "acowork-log-level";
 const STORAGE_KEY_CONTENT_WIDTH = "acowork-content-width";
 const STORAGE_KEY_OPACITY = "acowork-opacity";
 const STORAGE_KEY_ACCENT_COLOR = "acowork-accent-color";
+/** Last user-picked custom accent, kept separately from `acowork-accent-color`
+ *  so selecting a shipped preset does not destroy it. Without this the custom
+ *  slot collapsed back to "+" the moment a preset was picked, and the color
+ *  had to be mixed again by hand. */
+const STORAGE_KEY_ACCENT_CUSTOM = "acowork-accent-custom";
 const STORAGE_KEY_GATEWAY_URL = "acowork-gateway-url";
 const STORAGE_KEY_GATEWAY_URL_HISTORY = "acowork-gateway-url-history";
 const STORAGE_KEY_GATEWAY_MODE = "acowork-gateway-mode";
@@ -241,6 +247,21 @@ function getPersistedAccentColor(): string {
   return DEFAULT_ACCENT_COLOR;
 }
 
+/** Read the last user-picked custom accent, or `null` if there is none.
+ *
+ * A stored value that happens to match a shipped preset is treated as "no
+ * custom color" — otherwise the custom slot would render a duplicate of a
+ * swatch already present in the row.
+ */
+function getPersistedAccentCustom(): string | null {
+  try {
+    const stored = readPref(STORAGE_KEY_ACCENT_CUSTOM);
+    if (!stored || !isAccentHex(stored)) return null;
+    return isCustomAccent(stored) ? stored : null;
+  } catch { }
+  return null;
+}
+
 /** Read persisted gateway URL from localStorage, fallback to DEFAULT_GATEWAY_URL */
 function getPersistedGatewayUrl(): string {
   try {
@@ -346,6 +367,13 @@ interface SettingsStore {
   contentWidth: number;
   opacity: number;
   accentColor: string;
+  /**
+   * The last custom accent the user mixed, or `null` if they never have.
+   * Independent of which accent is *active*: picking a shipped preset changes
+   * `accentColor` and leaves this alone, so the custom slot keeps its color
+   * instead of collapsing back to a "+".
+   */
+  customAccent: string | null;
   gatewayUrl: string;
   /**
    * Recently-used gateway URLs (most-recent first). Lets the SettingsPage
@@ -400,6 +428,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
   const initialOpacity = getPersistedOpacity();
   const initialContentWidth = getPersistedContentWidth();
   const initialAccentColor = getPersistedAccentColor();
+  const initialCustomAccent = getPersistedAccentCustom();
   applyTheme(initialTheme, initialOsTheme);
   applyFontSize(initialFontSize);
   applyOpacity(initialOpacity);
@@ -443,6 +472,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     contentWidth: initialContentWidth,
     opacity: initialOpacity,
     accentColor: initialAccentColor,
+    customAccent: initialCustomAccent,
     gatewayUrl: getPersistedGatewayUrl(),
     gatewayUrlHistory: getPersistedGatewayUrlHistory(),
     gatewayMode: getPersistedGatewayMode(),
@@ -487,7 +517,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
       const preset = resolveAccentPreset(value);
       applyAccentPreset(preset);
       writePref(STORAGE_KEY_ACCENT_COLOR, value);
-      set({ accentColor: value });
+      // Recording the custom color here — rather than through a separate
+      // setter — is what makes it impossible to apply a custom accent without
+      // it being remembered. Selecting a preset deliberately leaves it intact.
+      const custom = isCustomAccent(value) ? value : get().customAccent;
+      if (isCustomAccent(value)) writePref(STORAGE_KEY_ACCENT_CUSTOM, value);
+      set({ accentColor: value, customAccent: custom });
     },
 
     setGatewayUrl: (gatewayUrl) => {
@@ -608,12 +643,13 @@ function rehydrateUserPrefs(): void {
   const contentWidth = getPersistedContentWidth();
   const opacity = getPersistedOpacity();
   const accentColor = getPersistedAccentColor();
+  const customAccent = getPersistedAccentCustom();
   applyTheme(theme, osTheme);
   applyFontSize(fontSize);
   applyOpacity(opacity);
   applyContentWidth(contentWidth);
   applyAccentPreset(resolveAccentPreset(accentColor));
-  useSettingsStore.setState({ theme, osTheme, fontSize, contentWidth, opacity, accentColor });
+  useSettingsStore.setState({ theme, osTheme, fontSize, contentWidth, opacity, accentColor, customAccent });
 }
 
 // `prefsScope` seeds itself from the stored token at import, so this fires
