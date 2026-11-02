@@ -1176,6 +1176,34 @@ RAG 不属记忆面，仍由 Runtime 持有：
 - **首触重建有上界**：超过 20 000 条的历史转录不重建索引，其投影退化为显式空洞——不在打开路径上
   付一次无界读的代价。
 
+### 5.8 第二级 `@` 的候选读取（ADR-106 D7）
+
+> **实现**：[`core/acowork-runtime/src/http/chat_candidates.rs`](../../../core/acowork-runtime/src/http/chat_candidates.rs)
+> （路由与过滤）+ [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)
+> （透明代理 `GET /api/agents/{id}/chat-candidates`）。两级 `@` 的第二级要回答的是"这个人在这
+> 个 chat 里能把一句话投给哪些执行会话"，而它只在拥有执行会话的节点上算得出。
+
+| 方法 | Runtime 路径 | 用途 | 权限 |
+|---|---|---|---|
+| GET | `/chat-candidates?chat_session_id=&surface=` | 第二级 `@` 的可寻址会话列表 | chat 参与者（身份取 Gateway 注入的 scope 头） |
+
+响应：`{"chat_session_id": "…", "surface": "direct|group", "candidates": [{ "session_id", "label",
+"status", "origin", "last_active_secs" }]}`。
+
+约定：
+
+- **候选过滤就是权限**：权限集合直接复用 Router 的 `resolve_candidates`（1:1 只列绑定本 chat +
+  本人手起；群只列"我发起的"；跨 kind 互斥；`has_human=false` 的 agent↔agent pair 永不入列）。
+  让 picker 自己算一遍，就等于让一个界面端出 router 本会拒绝的会话。
+- **不做存在性 oracle**：不是本 chat 的参与者拿 404，与"chat 不存在"同形。本地模式（`SessionScope::Unfiltered`）
+  没有账号体系，边界仍是 loopback 绑定本身，与其余 Runtime 面一致。
+- **展示集合 ≠ 候选集合**：再交一层展示谓词——`working` / `errored` 直接入列，`idle` / `Closed` 按
+  `last_active < 7d` 判定，最多 20 条。这里的 `Closed` 是"不在本进程驻留"而不是"人已归档"：它仍可寻址，
+  调度器会重开它，所以决定列不列的是新鲜度而不是驻留。超出上限的轮靠回复它的块抵达。
+- **盘扫在锁外**（设计 29 §5）：两次 meta / bindings 遍历在 `SessionManager` 全局锁**之前**完成，否则打开
+  一次 picker 会把 `POST /sessions` 排在一次文件遍历后面。
+- 空 `chat_session_id` → 400；`surface` 只认 `group`，其余（含缺省）按 `direct`。这是只读面，不在执行会话上开写入口：选中某条候选之后的投递仍走 `POST /api/intents/mentions`（§4.5）。
+
 ---
 
 ## 6. 静态文件服务（直接流式返回原始字节）

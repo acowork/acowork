@@ -740,6 +740,43 @@ Conventions:
 - **`round_id` is minted deterministically**: `r:{inbound_message_id}`, a pure function — an MQTT redelivery and an HTTP retry map to the same round, which is also why the chat-side reference row is idempotent by construction; an id that is oversized (past 128 bytes) **or outside the addressable character set** (anything but `[A-Za-z0-9_:.-]`, a leading `.`, or an inner `..`) is hash-folded to `r:{digest}-{len}` — minting and addressing must test the same predicate or a round is born unreadable; the fold uses a **stable digest** (SHA-256, first 8 bytes), not a standard-library hasher whose algorithm is an implementation detail, because this string is persisted and becomes the reference row's idempotency key, so a toolchain upgrade must not change it; an empty `message_id` mints a UUID.
 - **First-touch rebuild is capped**: a transcript above 20,000 entries is not rebuilt, and projections on it degrade to an explicit hole — the open path never pays for an unbounded read.
 
+### 5.8 Level-Two `@` Candidate Read (ADR-106 D7)
+
+> **Implementation**: [`core/acowork-runtime/src/http/chat_candidates.rs`](../../../core/acowork-runtime/src/http/chat_candidates.rs)
+> (routing and filtering) + [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)
+> (the transparent proxy `GET /api/agents/{id}/chat-candidates`). The second `@` level answers "which
+> execution sessions may this person address inside this chat" — a fact only computable on the node that
+> owns the execution sessions.
+
+| Method | Runtime path | Purpose | Permission |
+|---|---|---|---|
+| GET | `/chat-candidates?chat_session_id=&surface=` | the addressable session list for the second `@` level | chat participant (identity from the Gateway's injected scope headers) |
+
+Response: `{"chat_session_id": "…", "surface": "direct|group", "candidates": [{ "session_id", "label",
+"status", "origin", "last_active_secs" }]}`.
+
+Conventions:
+
+- **The candidate filter IS the permission**: the permission set is the router's own
+  `resolve_candidates` (1:1 lists sessions bound to this chat plus sessions the human started by hand; a
+  group lists only sessions *I* initiated; kinds never mix; `has_human=false` agent↔agent pairs never
+  enter the list). Letting the picker recompute it would have a surface offer sessions the router would
+  have been refused.
+- **No existence oracle**: a caller who is not a participant of this chat gets the same 404 as a chat that
+  does not exist. Local mode (`SessionScope::Unfiltered`) has no account system, so the boundary stays the
+  loopback bind itself, as on every other Runtime surface.
+- **The displayed set is not the candidate set**: one more predicate filters it — `working` / `errored` are
+  always offered, `idle` / `Closed` only while `last_active < 7d`, at most 20 rows. `Closed` here means
+  "not resident in this process", not "the human archived it": such a session is still addressable and the
+  dispatcher reopens it, so recency decides the listing rather than residency. A round past the cap is
+  reached by replying to its block.
+- **The disk scans happen outside the lock** (design 29 §5): the meta and bindings walks complete before
+  `SessionManager`'s global lock is taken, otherwise opening a picker once would queue `POST /sessions`
+  behind a filesystem scan.
+- An empty `chat_session_id` → 400; `surface` recognises only `group`, anything else (including absent)
+  is `direct`. This is a read-only surface and opens no write entry on an execution session: delivering to
+  a chosen candidate still goes through `POST /api/intents/mentions` (§4.5).
+
 ---
 
 ## 6. Static File Service (direct streaming of raw bytes)

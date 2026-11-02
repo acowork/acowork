@@ -13,6 +13,7 @@ import {
   detectMention,
   filterMentionCandidates,
   applyMention,
+  buildChatAddress,
 } from "./GroupChatPanel";
 
 describe("detectMention (@ token under the caret)", () => {
@@ -89,5 +90,39 @@ describe("resolveMentions (picked name must actually fan out)", () => {
   it("maps an inserted @Ponytail back to the agent id", () => {
     const agents = [{ id: "a1", name: "Ponytail" }];
     expect(resolveMentions("hi @Ponytail ", agents)).toEqual(["a1"]);
+  });
+});
+
+describe("buildChatAddress (the second level rides the targets of THIS send)", () => {
+  it("names the session for the agent it was chosen for", () => {
+    expect(
+      buildChatAddress(["a1"], { a1: { sessionId: "s-1" } }),
+    ).toEqual({ targetSessions: { a1: "s-1" } });
+  });
+
+  it("carries the refusal to continue per agent, never as a blanket flag", () => {
+    // @A @B with "new task" picked for A only must not start a new session for
+    // B: that would rewrite a routing decision nobody addressed.
+    expect(
+      buildChatAddress(["a1", "b2"], {
+        a1: { forceNew: true },
+        b2: { sessionId: "s-9" },
+      }),
+    ).toEqual({ targetSessions: { b2: "s-9" }, forceNewFor: ["a1"] });
+  });
+
+  it("drops an address whose @ the human deleted", () => {
+    // The chip stays in state until the send, but an address that is not a
+    // target of this message is refused by the Gateway rather than dropped — so
+    // the composer must not send it.
+    expect(buildChatAddress([], { a1: { sessionId: "s-1" } })).toBeUndefined();
+  });
+
+  it("sends nothing when nothing was chosen", () => {
+    // `undefined`, not `{}`: the absence of an address is what keeps the turn on
+    // the ladder's lower levels, where an un-addressed message may be answered
+    // as chat instead of routed.
+    expect(buildChatAddress(["a1"], {})).toBeUndefined();
+    expect(buildChatAddress(["a1"], { a1: {} })).toBeUndefined();
   });
 });

@@ -1862,6 +1862,29 @@ impl ConversationSession {
         self.publish_round(status, card, false);
     }
 
+    /// Publish the round's state and KEEP the round open.
+    ///
+    /// Unlike [`Self::snapshot_round`] this does not consume the stamp: the fact
+    /// being published (ADR-106 D8 — the card a turn is blocking on, or the fact
+    /// that its interaction was resolved) happens *inside* a live turn, and every
+    /// row the turn still produces belongs to the same round. Taking the stamp
+    /// here would un-stamp them and the writer would refuse the snapshot as one
+    /// "for a round it does not hold".
+    ///
+    /// Non-terminal by construction, so the projection never caches it (D5) and a
+    /// reader always folds the live state. Pass `Some(Value::Null)` as the card to
+    /// say there is nothing pending anymore.
+    pub fn note_round_state(&self, status: &str, card: Option<serde_json::Value>) {
+        let round_id = match self.round_stamp.lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(id) => id.clone(),
+                None => return,
+            },
+            Err(_) => return,
+        };
+        self.enqueue_round_snapshot(round_id, status, card, false);
+    }
+
     /// The round the session is currently on, if a turn is active.
     ///
     /// Read from the writer's own tracking rather than from the stamp, so it
@@ -1889,6 +1912,17 @@ impl ConversationSession {
             },
             Err(_) => return,
         };
+        self.enqueue_round_snapshot(round_id, status, card, terminal);
+    }
+
+    /// Hand a finished snapshot to the round side table's single writer.
+    fn enqueue_round_snapshot(
+        &self,
+        round_id: String,
+        status: &str,
+        card: Option<serde_json::Value>,
+        terminal: bool,
+    ) {
         if let Err(e) = self.sender.send(WriterCommand::RoundSnapshot {
             round_id: round_id.clone(),
             terminal,

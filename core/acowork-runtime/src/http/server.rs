@@ -660,6 +660,13 @@ impl RuntimeHttpServer {
                 "/sessions/{sid}/rounds/{round_id}",
                 get(crate::http::rounds::get_session_round),
             )
+            // ADR-106 D7: the second level of the `@`. The candidate filter is the
+            // permission, so the list of sessions a Chat may address is answered
+            // here — where the session rows live — and never client-side.
+            .route(
+                "/chat-candidates",
+                get(crate::http::chat_candidates::get_chat_candidates),
+            )
             // ADR-076 §决策 4 (second wave): user-triggered session actions.
             // These carried no ownership decision, but they carried no
             // *identity* either, so over MQTT they could be replayed into

@@ -168,6 +168,13 @@ pub struct TurnReference {
     /// block header (D13). Written once with the row and never rewritten —
     /// reading the projection to name a list item is the ADR-096 red line.
     pub assignment_brief: Option<String>,
+    /// The PM task this round works on, when the delivery came in through a task
+    /// conversation. The block renders it as a task chip (D13), which is why it
+    /// is durable on the reference rather than read back from the projection.
+    /// Derived from the Gateway's routing contract (`task:{project}:{task}`),
+    /// never from a peer's params — a chip naming a task the sender invented
+    /// would be a claim the Chat has no way to check.
+    pub task_id: Option<String>,
 }
 
 /// How a turn ended, in the Chat-facing vocabulary: the status of the
@@ -414,9 +421,10 @@ pub const KIND_EXECUTION_ROUND: &str = "execution_round";
 /// This is the only row a turn of work leaves in the Chat, and it carries no
 /// content: the round's user row, its answer and the card it waits on are read
 /// from the execution session's projection (D4). What stays durable here is the
-/// reference — which round, in which session, on which instance — plus the one
-/// presentation hint the Chat may render without a projection read
-/// (`assignment_brief`; D13 forbids reading the projection to paint a list).
+/// reference — which round, in which session, on which instance — plus the two
+/// presentation hints the Chat may render without a projection read
+/// (`assignment_brief` and `task_id`; D13 forbids reading the projection to
+/// paint a list).
 ///
 /// The idempotency key is the round's own natural key, `round:{round_id}`.
 /// `round_id` is a deterministic function of the inbound message id (D2), so a
@@ -424,17 +432,19 @@ pub const KIND_EXECUTION_ROUND: &str = "execution_round";
 /// retired mirror rows needed (`exec:` / `tr:` / `card:` / `resp-`) has no
 /// remaining consumer.
 ///
+/// The turn-only facts arrive on [`TurnReference`], the struct the transport
+/// fills precisely because the loop cannot derive them — so adding a hint costs
+/// a field there, not a positional argument here.
+///
 /// `opened_new` is `None` when the delivery did not resolve whether a session
 /// was created (an execution-surface turn already had one). It must not be
 /// faked as `Some(false)`: the block header says "new task" only when something
 /// actually opened one.
 pub fn execution_round_meta(
     round_id: &str,
-    trigger_message_id: &str,
+    reference: &TurnReference,
     agent_session_id: &str,
     agent_instance_id: &str,
-    opened_new: Option<bool>,
-    assignment_brief: Option<&str>,
 ) -> serde_json::Value {
     let mut meta = serde_json::json!({
         "message_id": format!("round:{round_id}"),
@@ -444,16 +454,48 @@ pub fn execution_round_meta(
     });
     // A turn composed against the execution surface has no Chat row to answer:
     // the reference still names the round, it just has no thread above it.
-    if !trigger_message_id.is_empty() {
-        meta["in_reply_to"] = serde_json::Value::String(trigger_message_id.to_string());
+    if !reference.trigger_message_id.is_empty() {
+        meta["in_reply_to"] =
+            serde_json::Value::String(reference.trigger_message_id.clone());
     }
-    if let Some(new) = opened_new {
+    if let Some(new) = reference.opened_new {
         meta["opened_new"] = serde_json::Value::Bool(new);
     }
-    if let Some(brief) = assignment_brief.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(brief) = reference
+        .assignment_brief
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         meta["assignment_brief"] = serde_json::Value::String(brief.to_string());
     }
+    if let Some(task) = reference
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        meta["task_id"] = serde_json::Value::String(task.to_string());
+    }
     meta
+}
+
+/// The `meta` of the Chat Router's own answer row (ADR-106 D12).
+///
+/// A router that replies without routing opened no round, so its answer is
+/// agent speech *inside* the chat channel rather than a projection of an
+/// execution session — which is why `agent_message` stays in the vocabulary at
+/// all. `in_reply_to` is the id of the human row that triggered the turn, and
+/// the Gateway delivers a chat turn under exactly that id, so the relay reads
+/// the row as the answer to the request it is still waiting for.
+///
+/// The idempotency key is the request it answers: a redelivered turn leaves no
+/// second answer row beside the first.
+pub fn router_answer_meta(request_message_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "message_id": format!("reply:{request_message_id}"),
+        "in_reply_to": request_message_id,
+    })
 }
 
 /// The `meta` of a Chat choice card (ADR-106 D6 levels 3 and 5).
@@ -956,12 +998,35 @@ mod tests {
         assert!(h(false, None).is_empty());
     }
 
+    /// The transport's hand-over, built from the one or two facts a test cares
+    /// about (the shape `execution_round_meta` reads). `task_id` arrives here
+    /// already parsed out of the delivery's conversation id, which is the
+    /// Gateway's routing contract — not a params value a peer could set.
+    fn reference(
+        trigger: &str,
+        opened_new: Option<bool>,
+        brief: Option<&str>,
+        task_id: Option<&str>,
+    ) -> TurnReference {
+        TurnReference {
+            trigger_message_id: trigger.to_string(),
+            opened_new,
+            assignment_brief: brief.map(str::to_string),
+            task_id: task_id.map(str::to_string),
+        }
+    }
+
     #[test]
     fn execution_round_meta_is_a_contentless_reference_keyed_by_the_round() {
         // ADR-106 D3: the row carries the round's natural key and the
         // coordinates the block is read with — nothing else. No body, no status,
         // no mirrored answer text (that would be the old echo back again).
-        let m = execution_round_meta("r:m-42", "m-42", "20261023_131156_a3bb7d", "inst-a", Some(true), None);
+        let m = execution_round_meta(
+            "r:m-42",
+            &reference("m-42", Some(true), None, None),
+            "20261023_131156_a3bb7d",
+            "inst-a",
+        );
         assert_eq!(m["message_id"], "round:r:m-42");
         assert_eq!(m["round_id"], "r:m-42");
         assert_eq!(m["in_reply_to"], "m-42");
@@ -974,13 +1039,14 @@ mod tests {
         // A reuse is a fact worth keeping distinct from "unknown": only the
         // routing decision can say a session was not newly opened.
         assert_eq!(
-            execution_round_meta("r:m-43", "m-43", "s-1", "inst-a", Some(false), None)["opened_new"],
+            execution_round_meta("r:m-43", &reference("m-43", Some(false), None, None), "s-1", "inst-a")
+                ["opened_new"],
             false
         );
         // And `None` must not degrade to `false` — the block header only says
         // "new task" when something actually opened one.
         assert!(
-            execution_round_meta("r:m-44", "m-44", "s-1", "inst-a", None, None)
+            execution_round_meta("r:m-44", &reference("m-44", None, None, None), "s-1", "inst-a")
                 .get("opened_new")
                 .is_none()
         );
@@ -990,27 +1056,42 @@ mod tests {
     fn execution_round_meta_omits_the_coordinates_a_delivery_does_not_have() {
         // An execution-surface turn has no Chat row above it: no thread, rather
         // than a thread pointing at a row that does not exist.
-        let no_trigger = execution_round_meta("r:msg-7", "", "s-2", "inst-a", None, None);
+        let no_trigger = execution_round_meta("r:msg-7", &reference("", None, None, None), "s-2", "inst-a");
         assert!(no_trigger.get("in_reply_to").is_none());
 
-        // A PM brief is the one presentation hint the Chat may render without a
+        // The PM hints are the only presentation the Chat may render without a
         // projection read (D13); a blank one is absent, not empty — an empty
-        // string would render an empty task name.
+        // string would render an empty task name or an empty chip.
         let with_brief = execution_round_meta(
             "r:m-45",
-            "m-45",
+            &reference("m-45", Some(true), Some("  draft the release note  "), Some("t-083")),
             "s-1",
             "inst-a",
-            Some(true),
-            Some("  draft the release note  "),
         );
         assert_eq!(with_brief["assignment_brief"], "draft the release note");
+        assert_eq!(with_brief["task_id"], "t-083", "the chip's coordinate");
         for blank in [Some(""), Some("   "), None] {
-            let m = execution_round_meta("r:m-46", "m-46", "s-1", "inst-a", None, blank);
-            assert!(
-                m.get("assignment_brief").filter(|v| v.as_str() != Some("")).is_none(),
-                "a blank brief must not be written as a task name: {m}"
-            );
+            let m = execution_round_meta("r:m-46", &reference("m-46", None, blank, blank), "s-1", "inst-a");
+            for key in ["assignment_brief", "task_id"] {
+                assert!(
+                    m.get(key).filter(|v| v.as_str() != Some("")).is_none(),
+                    "a blank {key} must not be written as a task name: {m}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn the_task_chip_is_read_off_the_routing_contract() {
+        // D13 / D12: the reference row is now the only place a PM dispatch's
+        // task identity reaches the Chat, so the parse of the Gateway's own
+        // conversation key is the trust gate — a peer's `task_id` param is not.
+        assert_eq!(
+            acowork_core::intent::task_id_from_conversation("task:p-1:t-083").as_deref(),
+            Some("t-083")
+        );
+        assert_eq!(acowork_core::intent::task_id_from_conversation("chat-9"), None);
+        assert_eq!(acowork_core::intent::task_id_from_conversation("task:p-1:"), None);
+        assert_eq!(acowork_core::intent::task_id_from_conversation("task:"), None);
     }
 }

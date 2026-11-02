@@ -9,8 +9,9 @@
  *
  * The pin: with `RowView` memoized and every host→row prop reference-stable,
  * a keystroke must produce ZERO row renders. Row renders are counted through
- * `useSessionTitle` — the one hook `RowView` calls unconditionally on every
- * render and nowhere else in this tree.
+ * `useUserProfileStore` — the one hook `RowView` calls unconditionally on every
+ * render and nowhere else in this tree (the header avatar is conditional, so
+ * it cannot serve as the counter).
  *
  * The mocks mirror the real app's stability contract: zustand actions are
  * created once (so `getState()` hands the SAME object every call) and
@@ -45,13 +46,6 @@ function makeWindow() {
 }
 
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (x: string) => x }));
-
-vi.mock("../../lib/useSessionTitle", () => ({
-  useSessionTitle: () => {
-    rowRenders.n += 1;
-    return undefined;
-  },
-}));
 
 vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../stores/chatSessionStore")>();
@@ -101,11 +95,14 @@ vi.mock("../../stores/authStore", () => ({
   ),
 }));
 
+const PROFILE_STATE = {
+  profile: { displayName: "You", backendAvatarUrl: null, backendBuiltinAvatarId: null },
+};
 vi.mock("../../stores/userProfileStore", () => ({
-  useUserProfileStore: (selector: (state: unknown) => unknown) =>
-    selector({
-      profile: { displayName: "You", backendAvatarUrl: null, backendBuiltinAvatarId: null },
-    }),
+  useUserProfileStore: (selector: (state: unknown) => unknown) => {
+    rowRenders.n += 1;
+    return selector(PROFILE_STATE);
+  },
 }));
 
 vi.mock("../../lib/config", () => ({ getGatewayUrl: () => "http://127.0.0.1:1" }));

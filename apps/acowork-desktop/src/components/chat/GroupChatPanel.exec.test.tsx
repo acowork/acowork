@@ -1,19 +1,24 @@
 /**
  * Group-chat "查看执行" affordance.
  *
- * The group twin of the 1:1 chat surface's drill: an agent reply carries a
- * resolved exec session (`sender_session_id` / `agent_session_id`), and its
- * button must route through the exact calls AgentChatView.jumpToExec makes —
- * existence probe (a definitive 404 is a toast, no navigation) → selectAgent
- * (switch the middle pane to the agent) → openSession (cold-load the exec
- * tab) → setMode('exec') (flip the surface). Rows that
- * are the human's own, carry no exec sid, or name a non-local agent (so are
- * not addressable) must NOT show the button.
+ * ADR-106 D3/D8 moved the drill: it is no longer a chip on an agent's reply
+ * bubble, it lives in the header of the round's block. So these tests feed an
+ * `execution_round` row plus its projection read and assert that the button
+ * routes through the exact calls AgentChatView.jumpToExec makes — existence
+ * probe (a definitive 404 is a toast, no navigation) → selectAgent (switch the
+ * middle pane to the agent) → openSession (cold-load the exec tab) →
+ * setMode('exec') (flip the surface).
+ *
+ * What this pins that the block's own suite cannot: the group surface hands the
+ * block the CHAT it must be participation-checked against, and drills into the
+ * INSTANCE the projection names — not the row's `from`, which on a multi-party
+ * surface is only who spoke.
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GroupChatPanel } from "./GroupChatPanel";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
+import type { ChatBlockEntry } from "../../stores/chatBlockStore";
 
 const AGENT = "agent-1";
 const ME = "user-me";
@@ -26,6 +31,8 @@ let setModeMock: ReturnType<typeof vi.fn>;
 
 // Rows fed to the mocked message window; each test overwrites this.
 let tail: ChatMessageRow[];
+// The block read behind each round row; `null` = the read has not landed.
+let blockEntry: ChatBlockEntry | null;
 
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (x: string) => x }));
 
@@ -53,13 +60,22 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   };
 });
 
+// The block read is one entry per ref; batching is chatBlockStore's own suite.
+vi.mock("../../stores/chatBlockStore", () => ({
+  useChatBlock: () => blockEntry,
+  useChatBlockStore: (selector: (s: { reload: () => void }) => unknown) =>
+    selector({ reload: vi.fn() }),
+}));
+
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: Object.assign(
-    // The "view run" tooltip reads the live exec-session title through this
-    // hook; an empty `agentStates` resolves to no name (tooltip falls back to
-    // the label), which is exactly what these drill-routing tests expect.
     (selector: (state: unknown) => unknown) => selector({ agentStates: {} }),
-    { getState: () => ({ openSession: (...a: unknown[]) => openSessionMock(...(a as [])) }) },
+    {
+      getState: () => ({
+        openSession: (...a: unknown[]) => openSessionMock(...(a as [])),
+        resolveQuestion: vi.fn(),
+      }),
+    },
   ),
 }));
 
@@ -122,17 +138,48 @@ vi.mock("../editor/markdownLinkResolver", () => ({
   markdownUrlTransform: (x: string) => x,
 }));
 
-function agentRow(seq: number, body: string, extra?: Record<string, unknown>): ChatMessageRow {
+/** One round's pointer row (D3): bodyless, and it names a run. */
+function roundRow(
+  seq: number,
+  over: { instance?: string; execSid?: string; round?: string } = {},
+): ChatMessageRow {
+  const instance = over.instance ?? AGENT;
+  const execSid = over.execSid ?? "exec-7";
+  const round = over.round ?? `r${seq}`;
   return {
     seq,
     ts: seq,
-    from: AGENT,
-    kind: "agent_message",
-    body,
+    from: instance,
+    kind: "execution_round",
+    body: "",
     to: ME,
-    meta: { message_id: `a${seq}`, ...(extra ?? {}) },
+    meta: {
+      message_id: `round:${execSid}|${round}`,
+      agent_instance_id: instance,
+      agent_session_id: execSid,
+      round_id: round,
+      in_reply_to: "u1",
+    },
   };
 }
+
+/** What the block read answers for that round. */
+function entryOf(instance: string, execSid: string, round: string): ChatBlockEntry {
+  return {
+    ref: `${instance}|${execSid}|${round}`,
+    agent_instance_id: instance,
+    agent_session_id: execSid,
+    round_id: round,
+    status: "ok",
+    projection: {
+      round_id: round,
+      terminal: true,
+      status: "completed",
+      answer: { body: "pong", ts: "1" },
+    },
+  };
+}
+
 function userRow(seq: number, body: string): ChatMessageRow {
   return { seq, ts: seq, from: ME, kind: "user_message", body, to: AGENT, meta: { message_id: `u${seq}` } };
 }
@@ -143,11 +190,12 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     selectAgentMock = vi.fn();
     openSessionMock = vi.fn().mockResolvedValue(undefined);
     setModeMock = vi.fn();
+    blockEntry = entryOf(AGENT, "exec-7", "r2");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
   });
 
-  it("jumps to the answering agent's exec session via selectAgent → openSession → setMode('exec')", async () => {
-    tail = [userRow(1, "ping"), agentRow(2, "pong", { sender_session_id: "exec-7" })];
+  it("jumps to the running agent's exec session via selectAgent → openSession → setMode('exec')", async () => {
+    tail = [userRow(1, "ping"), roundRow(2)];
     render(<GroupChatPanel />);
 
     const btn = screen.getByText("chatView.viewRun");
@@ -161,45 +209,58 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     await waitFor(() => expect(setModeMock).toHaveBeenCalledWith(AGENT, "exec"));
   });
 
-  it("prefers agent_session_id when both pointers are present", async () => {
-    tail = [agentRow(1, "pong", { agent_session_id: "exec-router", sender_session_id: "exec-sender" })];
+  it("drills into the instance the projection names, not the row's `from`", async () => {
+    // A multi-party surface can show a round whose host is not the speaker the
+    // roster resolves — the block read is authoritative about where it ran.
+    tail = [roundRow(2, { instance: "remote-agent", execSid: "exec-9", round: "r9" })];
+    blockEntry = entryOf("remote-agent", "exec-9", "r9");
     render(<GroupChatPanel />);
 
     fireEvent.click(screen.getByText("chatView.viewRun"));
-    await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-router", { prepend: true }));
+    await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith("remote-agent", "exec-9", { prepend: true }));
   });
 
-  it("renders on an empty-body reply that still carries a session pointer", () => {
-    tail = [agentRow(1, "", { sender_session_id: "exec-9", status: "completed" })];
+  it("the drill rides the block even when the round has said nothing yet", () => {
+    tail = [roundRow(1, { execSid: "exec-9", round: "r1" })];
+    blockEntry = {
+      ...entryOf(AGENT, "exec-9", "r1"),
+      projection: { round_id: "r1", terminal: true, status: "aborted", answer: null },
+    };
     render(<GroupChatPanel />);
     expect(screen.queryByText("chatView.viewRun")).toBeTruthy();
+    // An outcome is reported whether or not there is a body to show.
+    expect(screen.getByText("chatView.notice.interrupted")).toBeTruthy();
   });
 
-  it("omits the button on the human's own row", () => {
+  it("shows no drill on the human's own row", () => {
     tail = [userRow(1, "mine")];
     render(<GroupChatPanel />);
     expect(screen.queryByText("chatView.viewRun")).toBeNull();
   });
 
-  it("omits the button on an agent reply with no resolved exec session", () => {
-    tail = [agentRow(1, "no pointer")];
+  it("shows no drill when the row names no resolvable round (D3)", () => {
+    tail = [{ ...roundRow(2), meta: { ...roundRow(2).meta, agent_session_id: undefined } }];
+    blockEntry = null;
     render(<GroupChatPanel />);
     expect(screen.queryByText("chatView.viewRun")).toBeNull();
+    // The pointer still states something rather than vanishing into blank space.
+    expect(screen.getByText("chatView.block.notFound")).toBeTruthy();
   });
 
-  it("omits the button for a non-local (unaddressable) agent", () => {
-    // `from` is not in the mocked agents registry → nameOf reports isAgent=false
-    // → the drill target cannot be addressed, so no button.
-    tail = [{ ...agentRow(1, "ghost", { sender_session_id: "exec-1" }), from: "remote-agent" }];
+  it("offers a retry, not a drill, when the run cannot be read (D9)", () => {
+    tail = [roundRow(2)];
+    blockEntry = { ...entryOf(AGENT, "exec-7", "r2"), status: "unreachable", projection: undefined, detail: "refused" };
     render(<GroupChatPanel />);
     expect(screen.queryByText("chatView.viewRun")).toBeNull();
+    expect(screen.getByText("chatView.block.unreachable")).toBeTruthy();
+    expect(screen.getByText("chatView.block.retry")).toBeTruthy();
   });
 
   it("toasts instead of jumping when the exec session has been deleted", async () => {
     // A definitive 404 from the existence probe (session meta AND live state
     // gone) must stop the drill: no selectAgent, no tab, no mode flip — just
-    // a toast. The message's exec pointer outlives the session it names.
-    tail = [agentRow(1, "pong", { sender_session_id: "exec-gone" })];
+    // a toast. The block's exec pointer outlives the session it names.
+    tail = [roundRow(2)];
     (global.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 404 });
     const toasts: Event[] = [];
     const listener = (e: Event) => toasts.push(e);

@@ -16,7 +16,7 @@ import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { blobToBase64, extensionForMime } from "./clipboardImageExt";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
 import { detectPaste } from "./pasteDetect";
-import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
+import { composerChip, listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
@@ -2554,7 +2554,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
-              <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-border-outer text-text-tertiary">
+              <span className={composerChip}>
                 /{activeSkill.name}
                 <button
                   type="button"

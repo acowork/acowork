@@ -921,11 +921,9 @@ impl AgentLoop {
         let node_token = self.core.config.mqtt_password.clone().unwrap_or_default();
         let meta = crate::agent::intent_turn::execution_round_meta(
             round_id,
-            &self.turn_reference.trigger_message_id,
+            &self.turn_reference,
             &session_id,
             &instance_id,
-            self.turn_reference.opened_new,
-            self.turn_reference.assignment_brief.as_deref(),
         );
         crate::agent::intent_turn::append_chat_row(
             &instance_id,

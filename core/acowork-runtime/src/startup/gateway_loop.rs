@@ -1571,6 +1571,11 @@ async fn deliver_intent_turn(
     // Origin-gated: a peer's params are never trusted with the system
     // block (`extract_assignment_brief`).
     let assignment_brief = crate::agent::intent_turn::extract_assignment_brief(&kind, &params);
+    // ADR-106 D13: the PM task a delivery's conversation names is the block's
+    // task chip. Read off the Gateway's routing key, not off `params` — a peer
+    // must not be able to label a Chat block with a task it does not own.
+    let task_id = acowork_core::intent::task_id_from_conversation(&conversation_id)
+        .unwrap_or_default();
     let content = render_intent_message(
         &from,
         &action,
@@ -1644,6 +1649,7 @@ async fn deliver_intent_turn(
                 .unwrap_or_default(),
             in_reply_to,
             assignment_brief,
+            task_id,
             // ADR-106 D3: the deterministic route knows whether it created the
             // session it is delivering into; only the turn's reference row can
             // state that to the chat, and only the transport knows it.

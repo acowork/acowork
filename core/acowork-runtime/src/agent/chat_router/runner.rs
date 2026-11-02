@@ -51,7 +51,6 @@ use super::tool::{
 use super::ChatSlot;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::IntentEnvelope;
-use crate::agent::intent_turn::{post_intent_response, IntentTurnContext};
 use crate::agent::session::chat_candidates::{
     self, CandidateSurface, SessionCandidate,
 };
@@ -723,19 +722,21 @@ async fn run_turn(
                 trace.write("fallback", None, "error", Some("empty reply".into()), None);
                 return degrade(deps, envelope, &chat_id, "empty reply".to_string(), &rows).await;
             }
-            let sent = post_intent_response(
+            // ADR-106 D12: the router's own answer is a chat-native row, so it
+            // is written here and not carried back through an intent response —
+            // this is the only place `agent_message` is still produced, and the
+            // Gateway closes the tracked request off that row's `in_reply_to`.
+            // The idempotency key is the request id, so a redelivered turn
+            // leaves no second answer beside the first.
+            let sent = crate::agent::intent_turn::append_chat_row(
                 &deps.instance_id,
                 &deps.gateway_host,
                 &deps.node_token,
-                // No session pointer: the row is the router's own answer, and
-                // an empty id is what tells the surface there is nothing to
-                // open (design 29 §7.2).
-                "",
-                &IntentTurnContext::new(&envelope.message_id, &envelope.from, &envelope.action),
-                // The router's fallback is a finished answer, not a turn that
-                // paused or was stopped.
-                crate::agent::intent_turn::TurnOutcome::Completed,
+                &chat_id,
+                acowork_core::intent::chat_kinds::AGENT_MESSAGE,
+                &envelope.from,
                 &body,
+                crate::agent::intent_turn::router_answer_meta(&envelope.message_id),
             )
             .await;
             match sent {
@@ -866,8 +867,15 @@ async fn run_turn(
                                 in_reply_to: envelope.in_reply_to.clone(),
                                 // The router only takes Chat-originated
                                 // turns (policy.router_eligible); a PM
-                                // dispatch's brief never arrives here.
+                                // dispatch's brief never arrives here. The task
+                                // id is still parsed off the conversation key so
+                                // the two transports state the same fact the same
+                                // way — empty for a chat conversation.
                                 assignment_brief: String::new(),
+                                task_id: acowork_core::intent::task_id_from_conversation(
+                                    &envelope.conversation_id,
+                                )
+                                .unwrap_or_default(),
                                 // ADR-106 D3: the routing's own verdict, carried
                                 // to the round's reference row because the loop
                                 // cannot see it — it replaces the retired

@@ -5,9 +5,9 @@
  * projection any more (that lived to serve the removed status card). What
  * the store still owns and these tests pin:
  *
- *   1. the durable card projections — `closedCardIds` / `humanAnsweredCardIds`
- *      decide when an `interaction_request` can no longer be answered and
- *      whether it was answered by a human (§5.5.4);
+ *   1. the send channels — an addressed reply to a round's reference row and an
+ *      @-fan-out take different entries, and both may carry attachments
+ *      (ADR-106 D6/D8);
  *   2. the freshness loop — the `chat/changed` doorbell is content-free, so
  *      `wake()` re-reads over HTTP and never patches a row from a signal;
  *      `sendText` re-reads once after the POST because the durable row
@@ -21,8 +21,6 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
-  closedCardIds,
-  humanAnsweredCardIds,
   useChatSessionStore,
   wakeAgentChat,
   type ChatMessageRow,
@@ -65,96 +63,6 @@ vi.stubGlobal("fetch", fetchMock);
 
 const calls = (needle: string) =>
   fetchMock.mock.calls.filter((c) => String(c[0]).includes(needle));
-
-const row = (kind: string, meta: Partial<NonNullable<ChatMessageRow["meta"]>> = {}): ChatMessageRow => ({
-  seq: 0,
-  ts: 0,
-  from: "u1",
-  kind,
-  body: "x",
-  to: "",
-  meta: { message_id: "", ...meta },
-});
-
-const user = (id: string) => row("user_message", { message_id: id });
-const pointer = (trigger: string, sid: string) =>
-  row("system_notice", { notice_type: "turn_started", in_reply_to: trigger, agent_session_id: sid });
-const card = (id: string, trigger: string, sid?: string) =>
-  row("interaction_request", {
-    message_id: id,
-    in_reply_to: trigger,
-    ...(sid ? { agent_session_id: sid } : {}),
-  });
-
-describe("closedCardIds / humanAnsweredCardIds (design 27 §5.5.4 — card self-heal)", () => {
-  it("closes a card once its turn writes a terminal agent_message", () => {
-    const rows = [
-      user("t1"),
-      pointer("t1", "exec-9"),
-      card("c1", "t1", "exec-9"),
-      row("agent_message", { message_id: "resp-t1", in_reply_to: "t1", sender_session_id: "exec-9" }),
-    ];
-    expect(closedCardIds(rows).has("c1")).toBe(true);
-  });
-
-  it("keeps a card open while its turn ended `waiting` (the pause outcome)", () => {
-    const rows = [
-      user("t1"),
-      pointer("t1", "exec-9"),
-      card("c1", "t1", "exec-9"),
-      row("agent_message", { message_id: "resp-t1", in_reply_to: "t1", sender_session_id: "exec-9", status: "waiting" }),
-    ];
-    expect(closedCardIds(rows).has("c1")).toBe(false);
-  });
-
-  it("a terminal from a DIFFERENT exec session does not close this agent's card (group fan-out)", () => {
-    const rows = [
-      user("t1"),
-      pointer("t1", "exec-9"),
-      card("c1", "t1", "exec-9"),
-      row("agent_message", { message_id: "resp-x", in_reply_to: "t1", sender_session_id: "exec-other" }),
-    ];
-    expect(closedCardIds(rows).has("c1")).toBe(false);
-  });
-
-  it("a human answer closes the card and counts as answered", () => {
-    const rows = [user("t1"), card("c1", "t1"), row("user_message", { message_id: "t2", in_reply_to: "c1" })];
-    expect(closedCardIds(rows).has("c1")).toBe(true);
-    expect(humanAnsweredCardIds(rows).has("c1")).toBe(true);
-  });
-
-  it("an exec-surface answer (interaction_resolved notice) counts as answered", () => {
-    const rows = [
-      user("t1"),
-      card("c1", "t1"),
-      row("system_notice", {
-        message_id: "ir:c1",
-        notice_type: "interaction_resolved",
-        in_reply_to: "c1",
-        resolution: "answered",
-      }),
-    ];
-    expect(closedCardIds(rows).has("c1")).toBe(true);
-    expect(humanAnsweredCardIds(rows).has("c1")).toBe(true);
-  });
-
-  it("a non-decision resolution closes the card but is NOT answered", () => {
-    for (const resolution of ["timeout", "cancelled", "stopped", "turn_ended", "unanswerable", "superseded"]) {
-      const rows = [
-        user("t1"),
-        card("c1", "t1"),
-        row("system_notice", {
-          message_id: "ir:c1",
-          notice_type: "interaction_resolved",
-          in_reply_to: "c1",
-          resolution,
-        }),
-      ];
-      expect(closedCardIds(rows).has("c1")).toBe(true);
-      expect(humanAnsweredCardIds(rows).has("c1")).toBe(false);
-    }
-  });
-});
 
 describe("chatSessionStore freshness loop", () => {
   beforeEach(() => {
@@ -349,13 +257,114 @@ describe("sendGroupText attachment passthrough (design 27 §4.2.1 / §5.3)", () 
     expect(body).toMatchObject({ text: "", attachment_ids: ["att-1"] });
   });
 
-  it("a card answer never carries attachments — the send is refused", async () => {
+  it("replying to a round's block carries attachments on the chat-message channel (D6/D8)", async () => {
     const ok = await useChatSessionStore
       .getState()
-      .sendGroupText("grp-1", "answer", [], "card-9", ["att-1"]);
-    expect(ok).toBe(false);
-    // Neither the chat-message channel nor the mention channel fired.
-    expect(calls("/api/intents/chat-message").length).toBe(0);
+      .sendGroupText("grp-1", "answer", [], "round:ag|s1|r1", ["att-1"]);
+    expect(ok).toBe(true);
+    const post = calls("/api/intents/chat-message");
+    expect(post.length).toBe(1);
+    const body = JSON.parse((post[0]![1] as RequestInit).body as string);
+    expect(body).toMatchObject({
+      chat_session_id: "grp-1",
+      text: "answer",
+      in_reply_to: "round:ag|s1|r1",
+      attachment_ids: ["att-1"],
+    });
+    // The mention channel is for @-fan-out, not for an addressed reply.
     expect(calls("/api/intents/mentions").length).toBe(0);
+  });
+});
+
+describe("the explicit address rides the send (ADR-106 D6/D7)", () => {
+  beforeEach(() => {
+    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(defaultFetch);
+    useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
+  });
+
+  const bodyOf = (needle: string) =>
+    JSON.parse((calls(needle)[0]![1] as RequestInit).body as string);
+
+  it("a group send names the session per agent, and refuses continuation per agent", async () => {
+    await useChatSessionStore.getState().sendGroupText(
+      "grp-1",
+      "@A @B go on",
+      ["a", "b"],
+      undefined,
+      undefined,
+      { targetSessions: { a: "s-1" }, forceNewFor: ["b"] },
+    );
+    expect(bodyOf("/api/intents/mentions")).toMatchObject({
+      target_sessions: { a: "s-1" },
+      force_new_for: ["b"],
+    });
+  });
+
+  it("sends no address fields at all when the human named nothing", async () => {
+    // Their absence is what keeps the turn on the ladder's lower levels: an
+    // empty map or a `false` flag would read as an instruction the human never
+    // gave, and would take the Router's `answer` act away from a message that
+    // needs it.
+    await useChatSessionStore.getState().sendGroupText("grp-1", "hi", ["a"]);
+    const body = bodyOf("/api/intents/mentions");
+    expect(body.target_sessions).toBeUndefined();
+    expect(body.force_new_for).toBeUndefined();
+    expect(body.message_id).toBeUndefined();
+  });
+
+  it("never refuses continuation for a target that already has an address", async () => {
+    // The two are contradictory instructions and the Gateway answers the pair
+    // with a 400, so the client must not create it out of a blanket flag.
+    await useChatSessionStore.getState().sendGroupText(
+      "grp-1",
+      "@A @B go on",
+      ["a", "b"],
+      undefined,
+      undefined,
+      { targetSessions: { a: "s-1" }, forceNew: true },
+    );
+    expect(bodyOf("/api/intents/mentions")).toMatchObject({
+      target_sessions: { a: "s-1" },
+      force_new_for: ["b"],
+    });
+  });
+
+  it("a card answer re-delivers the human's own row under its id", async () => {
+    // The dedupe key is the point: one message in the transcript, one delivery
+    // per target — not the same sentence drawn twice.
+    await useChatSessionStore.getState().sendGroupText(
+      "grp-1",
+      "go on",
+      ["a"],
+      undefined,
+      undefined,
+      { forceNewFor: ["a"], messageId: "m-1" },
+    );
+    expect(bodyOf("/api/intents/mentions").message_id).toBe("m-1");
+    await useChatSessionStore
+      .getState()
+      .sendText("cs-1", "go on", undefined, undefined, undefined, {
+        targetSession: "s-9",
+        messageId: "m-1",
+      });
+    expect(bodyOf("/api/intents/chat-message")).toMatchObject({
+      target_session: "s-9",
+      message_id: "m-1",
+    });
+  });
+
+  it("the 1:1 channel carries the single-session forms", async () => {
+    await useChatSessionStore
+      .getState()
+      .sendText("cs-1", "new thing", undefined, undefined, undefined, {
+        forceNew: true,
+      });
+    expect(bodyOf("/api/intents/chat-message")).toMatchObject({
+      text: "new thing",
+      force_new: true,
+    });
+    expect(bodyOf("/api/intents/chat-message").target_session).toBeUndefined();
   });
 });

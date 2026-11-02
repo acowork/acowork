@@ -40,12 +40,15 @@ describe("ChatNoticeEventRow", () => {
     },
   );
 
-  it("paints the router_fallback receipt — the degraded route tells the human", () => {
-    // The runtime writes this row again (router fallback notice); the localised
-    // pill must show, not vanish behind the retired-milestone filter.
-    // (The mocked `t` echoes the key — see the vi.mock above.)
-    const { container } = render(<ChatNoticeEventRow row={noticeRow("router_fallback")} />);
-    expect(container.textContent).toBe("chatView.routerFallback");
+  it("paints the addressing question it is asked in common (D6 levels 3 and 5)", () => {
+    // `session_choice` / `confirm_continue` are empty-bodied notices whose real
+    // content is the option list — the picker paints the buttons, and this line
+    // is the question they share, localized on the surface rather than by the
+    // server (ADR-105's rule).
+    const { container } = render(<ChatNoticeEventRow row={noticeRow("session_choice")} />);
+    expect(container.textContent).toBe("chatView.block.chooseSession");
+    const { container: confirm } = render(<ChatNoticeEventRow row={noticeRow("confirm_continue")} />);
+    expect(confirm.textContent).toBe("chatView.block.confirmSession");
   });
   it("paints a delivery_failed receipt even though the row is bodyless (ADR-105)", () => {
     // The Gateway writes no body — the prose would be server-side English plus
@@ -62,7 +65,9 @@ describe("ChatNoticeEventRow", () => {
     expect(container.textContent).toBe("chatView.deliveryFailedNoTarget");
   });
 
-  it("folds an interaction_resolved receipt into nothing (the card paints it)", () => {
+  it("folds a retired card-resolution receipt into nothing (the block paints it)", () => {
+    // ADR-106 D12: no writer for this notice is left, and an old transcript must
+    // not narrate a card that is now shown inside the round's block.
     const { container } = render(<ChatNoticeEventRow row={noticeRow("interaction_resolved")} />);
     expect(container.innerHTML).toBe("");
   });

@@ -162,6 +162,18 @@ pub fn is_task_conversation(conversation_id: &str) -> bool {
     conversation_id.starts_with(TASK_CONVERSATION_PREFIX)
 }
 
+/// The task half of a task conversation id, or `None` for any other
+/// conversation. Inverse of [`task_conversation_id`].
+///
+/// ADR-106 D13: the round reference row renders a task chip, and reading the id
+/// out of the Gateway's own routing contract is what lets the Runtime do that
+/// without trusting a `task_id` in a peer's arbitrary params JSON.
+pub fn task_id_from_conversation(conversation_id: &str) -> Option<String> {
+    let rest = conversation_id.strip_prefix(TASK_CONVERSATION_PREFIX)?;
+    let task = rest.split_once(':').map(|(_, task)| task)?;
+    (!task.is_empty()).then(|| task.to_string())
+}
+
 /// The runtime routing key for a task context (see
 /// [`TASK_ROUTING_KEY_PREFIX`]).
 pub fn task_routing_key(project_id: &str, task_id: &str) -> String {
@@ -186,8 +198,10 @@ pub mod chat_kinds {
     /// A human utterance. The Gateway is its only writer, through the chat
     /// write entries — never through `chat-append`.
     pub const USER_MESSAGE: &str = "user_message";
-    /// Agent speech inside the chat channel: the Chat Router's own answer, and
-    /// the agent-to-agent exchange. It is never a copy of execution output.
+    /// Agent speech inside the chat channel: the Chat Router's own answer,
+    /// which is the only row it still writes (ADR-106 D12). An agent-to-agent
+    /// exchange reaches the chat as a round reference instead, and it is never
+    /// a copy of execution output.
     pub const AGENT_MESSAGE: &str = "agent_message";
     /// ADR-106 D3: one round of execution work, recorded as a bodyless
     /// reference row. The Runtime writes it at the turn boundary and it is the

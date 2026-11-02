@@ -1,9 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ChatEventText } from "./ChatEventText";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
-import { InlineInteractionCard } from "./InlineInteractionCard";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
 vi.mock("../../i18n/useTranslation", () => ({
@@ -13,13 +12,16 @@ vi.mock("../../i18n/useTranslation", () => ({
   }),
 }));
 
-// jsdom has no layout engine, so "centered" / "in the row's content column" can
-// only be asserted as the class that produces it. That is the point: the axis
-// is the contract, and these tests pin which tier each call site claims.
+// jsdom has no layout engine, so "centered" can only be asserted as the class
+// that produces it. That is the point: the axis is the contract.
+// ADR-106 D3/D8 leave the transcript exactly one tier of event text — the
+// centered one. The row-anchored note (a card closed with nobody answering it)
+// retired with the chat-side card row, so these tests now also pin that no call
+// site reintroduces a second axis.
 
-describe("ChatEventText — the two tiers of the transcript's event text", () => {
-  it("turn tier: centered, icon-less, and it carries the wait shimmer", () => {
-    render(<ChatEventText anchor="turn" text="interrupted" live />);
+describe("ChatEventText — the transcript's single event-text tier", () => {
+  it("is centered, icon-less, and carries the wait shimmer when live", () => {
+    render(<ChatEventText text="interrupted" live />);
     const el = document.querySelector('[data-event-text="turn"]') as HTMLElement;
     expect(el.className).toContain("justify-center");
     expect(el.querySelector("svg")).toBeNull();
@@ -28,36 +30,32 @@ describe("ChatEventText — the two tiers of the transcript's event text", () =>
     expect(el.querySelector(".thinking-shimmer")).toBeTruthy();
   });
 
-  it("turn tier: a settled outcome is quiet, and danger only when asked", () => {
-    render(<ChatEventText anchor="turn" text="failed" danger />);
+  it("a settled outcome is quiet, and danger only when asked", () => {
+    render(<ChatEventText text="failed" danger />);
     const el = document.querySelector('[data-event-text="turn"]') as HTMLElement;
     expect(el.getAttribute("role")).toBeNull();
     expect(el.querySelector(".thinking-shimmer")).toBeNull();
     expect(el.querySelector(".text-red-500")).toBeTruthy();
   });
 
-  it("row tier: in the row's content column and led by the kind glyph", () => {
-    render(<ChatEventText anchor="row" text="unanswered" icon={<svg data-testid="glyph" />} title="full" />);
-    const el = document.querySelector('[data-event-text="row"]') as HTMLElement;
-    expect(el.className).toContain("ml-12");
-    expect(el.className).not.toContain("justify-center");
-    expect(el.querySelector("svg")).toBeTruthy();
-    expect(el.getAttribute("title")).toBe("full");
+  it("a trailing affordance rides the same line (the block's retry)", () => {
+    render(<ChatEventText text="unreachable" trailing={<button>retry</button>} />);
+    const el = document.querySelector('[data-event-text="turn"]') as HTMLElement;
+    expect(el.querySelector("button")?.textContent).toBe("retry");
   });
 });
 
-// The grammar's real failure mode is a call site picking the wrong tier, so the
-// two axes are asserted at the call sites, not only on the primitive.
+// The grammar's real failure mode is a call site stepping off the axis, so the
+// centered line is asserted at the call sites, not only on the primitive.
 describe("event-text grammar at the call sites", () => {
-  it("a turn outcome ('interrupted') is a turn-tier line — no bubble, no row", () => {
-    render(<ChatTurnStatusLine text="chatView.turnAborted" onJump={vi.fn()} />);
+  it("a turn outcome ('interrupted') is a centered line — no bubble, no row note", () => {
+    render(<ChatTurnStatusLine text="chatView.turnAborted" />);
     const el = document.querySelector('[data-event-text="turn"]') as HTMLElement;
     expect(el).toBeTruthy();
     expect(el.className).toContain("justify-center");
-    expect(document.querySelector('[data-event-text="row"]')).toBeNull();
   });
 
-  it("a channel receipt is a turn-tier line (it belongs to no row)", () => {
+  it("a channel receipt is a centered line (it belongs to no row)", () => {
     const row: ChatMessageRow = {
       seq: 9,
       ts: 1,
@@ -75,38 +73,5 @@ describe("event-text grammar at the call sites", () => {
     expect(el.className).toContain("justify-center");
     expect(el.className).toContain("px-4"); // the surface gutter survives
     expect(el.textContent).toContain("chatView.deliveryFailed");
-  });
-
-  it("a card closed without an answer is a row-tier line — it stays in the card's slot", () => {
-    const row: ChatMessageRow = {
-      seq: 1,
-      ts: 1,
-      from: "ag",
-      kind: "interaction_request",
-      body: "",
-      to: "u",
-      meta: {
-        message_id: "card1",
-        interaction: { kind: "approval", request_id: "a1", question: "Approve `bash`?" },
-      },
-    };
-    render(
-      <InlineInteractionCard
-        row={row}
-        closed={new Set(["card1"])}
-        answered={new Set()}
-        onAnswer={vi.fn()}
-      />,
-    );
-    const el = document.querySelector('[data-event-text="row"]') as HTMLElement;
-    expect(el).toBeTruthy();
-    expect(el.className).toContain("ml-12");
-    expect(el.className).not.toContain("justify-center");
-    // The glyph is what distinguishes this tier from a turn-level line.
-    expect(el.querySelector("svg")).toBeTruthy();
-    expect(screen.getByText(/chatView\.cardUnanswered/)).toBeTruthy();
-    // …and the card shell is gone: this is a note, not an unanswered card.
-    expect(document.querySelector('[data-event-text="turn"]')).toBeNull();
-    expect(screen.queryByText("chatView.cardApproval")).toBeNull();
   });
 });

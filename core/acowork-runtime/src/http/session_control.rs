@@ -220,7 +220,7 @@ pub(crate) fn authorize_write(
 ///
 /// Returns the shared handle rather than a guard: `SessionManager`'s
 /// mutating methods need `&mut` across an `.await`, so the caller locks.
-async fn session_manager(
+pub(crate) async fn session_manager(
     state: &HttpState,
 ) -> Result<Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>, ApiError> {
     state

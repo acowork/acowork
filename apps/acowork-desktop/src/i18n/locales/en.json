@@ -166,6 +166,36 @@
       "turnRoutedNew": "Starting a new task: {{task}}",
       "turnRoutedContinue": "Continuing the previous task: {{task}}"
     },
+    "block": {
+      "loading": "Loading this run…",
+      "notFound": "This run is no longer available",
+      "unreachable": "The run's host is unreachable right now",
+      "retry": "Retry",
+      "inProgress": "Running",
+      "working": "Working…",
+      "completed": "Done",
+      "unknown": "Outcome unknown",
+      "answeredByOwner": "Only the person who started this run can answer",
+      "otherAnswer": "Other…",
+      "answerFailed": "Could not send the answer — try again",
+      "chooseSession": "Which task did you mean?",
+      "confirmSession": "Continue this task?",
+      "newTask": "Start a new task",
+      "chooseThis": "Continue this one"
+    },
+    "address": {
+      "label": "Which task should this go to?",
+      "subject": "{{name}} — which task?",
+      "pick": "Which task",
+      "noPreference": "No preference — let the agent decide",
+      "empty": "Nothing to continue here yet",
+      "failed": "Could not read this chat's tasks",
+      "clear": "Clear",
+      "continuing": "Continue",
+      "statusWorking": "Running",
+      "statusIdle": "Idle",
+      "statusErrored": "Needs a look"
+    },
     "execSessionGone": "This execution session has been deleted"
   },
   "time": {

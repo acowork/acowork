@@ -8,6 +8,7 @@
 //! See `docs/zh/protocols/mqtt.md` §7.5.
 
 pub mod avatar;
+pub mod chat_candidates;
 pub mod debug;
 pub mod global_search;
 pub mod prompts;

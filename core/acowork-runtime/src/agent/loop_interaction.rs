@@ -39,23 +39,17 @@ pub(crate) struct OpenInteraction {
 impl AgentLoop {
     /// Record the interaction this turn is about to block on (ADR-106 D8).
     ///
-    /// The gate is the one §5.5.4 always applied and is unchanged: a Chat this
-    /// turn is accountable to, a participant who could answer, and not a Chat
-    /// known to be human-free (`has_human == Some(false)`, the availability gate
-    /// — a card nobody can answer would park the round forever). What changed is
-    /// what a passing gate costs: no row is written, so the Chat-side projection
-    /// has no card to keep in step with the execution dialog anymore.
+    /// The gates retired with the Chat row: a card is a fact about the round, so
+    /// it is recorded whether or not this turn is accountable to a Chat, and
+    /// whether or not the Chat is known to be human-free (D8's third bullet).
+    /// Whoever may *answer* it is a separate question, settled at the write
+    /// entry by `answerable_by` (D10) — which is why an unanswerable card parks
+    /// nothing: it is state, not an obligation.
     ///
-    /// Read from the surface, never from `chat_writeback`: the card is a Chat
-    /// obligation, the write-back is an agent-to-agent one, and conflating them
-    /// is what made an execution-surface turn's cards vanish (ADR-100 follow-up).
+    /// Callers that need an answerer to exist before the interaction is even
+    /// opened (the `pause` cards, which would hold a round hostage otherwise)
+    /// keep checking `has_human == Some(true)` themselves.
     pub(crate) fn track_interaction(&mut self, interaction: serde_json::Value) {
-        if self.turn_surface.card_target().is_none() {
-            return;
-        }
-        if self.turn_surface.has_human == Some(false) {
-            return;
-        }
         let kind = interaction
             .get("kind")
             .and_then(|v| v.as_str())
@@ -94,8 +88,38 @@ impl AgentLoop {
         self.open_interactions.push(OpenInteraction {
             kind,
             request_id,
-            card,
+            card: card.clone(),
         });
+        // ADR-106 D8, second half: the block becomes visible when the question
+        // opens, not when the turn ends. A round parked inside a live turn is
+        // still non-terminal, so this is never cached (D5) and a reader always
+        // folds the current state — and the stamp stays armed because the round
+        // has rows left to write.
+        self.publish_round_card_state(Some(card));
+    }
+
+    /// State the round's card on the side table without closing the round.
+    ///
+    /// `Some(card)` parks the round on that card (`waiting`); `None` says nothing
+    /// is pending anymore, which is what a resolved mid-turn interaction means
+    /// for the block: the live turn is still working, and offering a button that
+    /// was already answered would be a second, lying copy of the fact.
+    fn publish_round_card_state(&self, card: Option<serde_json::Value>) {
+        let Some(conv) = &self.session.conversation else {
+            return;
+        };
+        match card {
+            Some(c) => conv.note_round_state("waiting", Some(c)),
+            None => conv.note_round_state(
+                crate::rounds::STATUS_IN_PROGRESS,
+                Some(serde_json::Value::Null),
+            ),
+        }
+    }
+
+    /// The card the round is parked on right now, if any.
+    fn current_round_card(&self) -> Option<serde_json::Value> {
+        self.open_interactions.last().map(|c| c.card.clone())
     }
 
     /// Drop the record for one resolved interaction.
@@ -104,13 +128,17 @@ impl AgentLoop {
     /// resolve path that ran twice, or an interaction that was never tracked
     /// (no Chat this turn was accountable to) must all be no-ops.
     pub(crate) fn forget_interaction(&mut self, kind: &str, request_id: &str) {
-        if let Some(idx) = self
+        let Some(idx) = self
             .open_interactions
             .iter()
             .position(|c| c.kind == kind && c.request_id == request_id)
-        {
-            self.open_interactions.remove(idx);
-        }
+        else {
+            return;
+        };
+        self.open_interactions.remove(idx);
+        // The answer came in while the turn was live, so the block has to stop
+        // showing the question now (ADR-106 D8).
+        self.publish_round_card_state(self.current_round_card());
     }
 
     /// Drop every open record whose kind is listed in `kinds`.
@@ -146,11 +174,11 @@ impl AgentLoop {
     /// error and is not waiting on anybody.
     ///
     /// Those two kinds are nevertheless tracked, and not as leftovers of the old
-    /// Chat-row writes: they block *inside* a live turn, so the moment their block
-    /// has to become visible is when they open, not when the turn ends. Publishing
-    /// the round's `card` at track time (a non-terminal snapshot, so it is never
-    /// cached) is ADR-106 D8's remaining half and lands with the block renderer;
-    /// until then the execution dialog is the only surface that shows them.
+    /// Chat-row writes: they block *inside* a live turn, so [`Self::track_interaction`]
+    /// publishes the round's `card` the moment they open (a non-terminal snapshot,
+    /// so it is never cached) and [`Self::forget_interaction`] retracts it when they
+    /// are answered. The block and the execution dialog therefore read one fact,
+    /// not two copies.
     pub(crate) fn open_pause_card(&self) -> Option<serde_json::Value> {
         Some(self.open_interactions.iter().find(|c| c.kind == "pause")?.card.clone())
     }

@@ -251,6 +251,12 @@ pub enum SessionMessage {
         /// never written to a Chat surface, never persisted with the
         /// conversation. Empty for every other origin.
         assignment_brief: String,
+        /// The PM task this delivery's conversation names (`task:{project}:{task}`),
+        /// empty for every other conversation. ADR-106 D13: the round's reference
+        /// row renders it as the block's task chip, since a Chat may not read the
+        /// projection to paint a list. Parsed off the Gateway's routing contract by
+        /// the transport — never off a peer's params.
+        task_id: String,
         /// Whether this delivery opened the execution session it landed in, or
         /// reused one already mapped to the Chat. `None` when the transport did
         /// not resolve it (a parked-card answer, a PM dispatch that re-enters an
@@ -1358,6 +1364,7 @@ impl SessionTask {
                     attached_items,
                     in_reply_to,
                     assignment_brief,
+                    task_id,
                     opened_new,
                 }) => {
                     // A PM dispatch's playbook joins Block A for this
@@ -1448,6 +1455,15 @@ impl SessionTask {
                             None
                         } else {
                             Some(brief.to_string())
+                        },
+                        // D13: the chip's coordinate, stated once with the row. The
+                        // transport parsed it off the conversation key, so an empty
+                        // string here means "not a task conversation" — a task id no
+                        // peer could invent.
+                        task_id: if task_id.is_empty() {
+                            None
+                        } else {
+                            Some(task_id)
                         },
                     };
                     agent_loop.turn_surface = surface;

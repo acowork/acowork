@@ -243,7 +243,10 @@ impl ActiveRound {
     /// Build the snapshot line for the tracked round.
     ///
     /// `card` / `status` default to what the tracker already holds — pass `None` to
-    /// leave them alone, `Some(Value::Null)` to state them explicitly.
+    /// leave them alone, `Some(Value::Null)` to state them explicitly. For the card,
+    /// "explicitly" means *no card*: a round whose interaction was resolved
+    /// mid-turn has nothing left to be parked on, and a block still showing a
+    /// clickable question would be lying about a live turn.
     pub fn snapshot(
         &self,
         terminal: bool,
@@ -251,11 +254,16 @@ impl ActiveRound {
         status: Option<String>,
         ts: &str,
     ) -> RoundRecord {
+        let card = match card {
+            Some(v) if v.is_null() => None,
+            Some(v) => Some(v),
+            None => self.card.clone(),
+        };
         RoundRecord {
             round_id: self.round_id.clone(),
             user: self.user.unwrap_or_default(),
             answer: self.answer,
-            card: card.or_else(|| self.card.clone()),
+            card,
             terminal,
             status: status.or_else(|| self.status.clone()),
             ts: ts.to_string(),

@@ -260,6 +260,36 @@
       "turnRoutedNew": "启动新任务：{{task}}",
       "turnRoutedContinue": "继续之前的任务：{{task}}"
     },
+    "block": {
+      "loading": "正在加载本轮执行…",
+      "notFound": "本轮执行已不可用",
+      "unreachable": "执行所在的主机暂不可达",
+      "retry": "重试",
+      "inProgress": "执行中",
+      "working": "处理中…",
+      "completed": "已完成",
+      "unknown": "结果未知",
+      "answeredByOwner": "只有发起本轮的人可以回复",
+      "otherAnswer": "其他…",
+      "answerFailed": "回复未能发送，请重试",
+      "chooseSession": "你指的是哪一个任务？",
+      "confirmSession": "继续这个任务吗？",
+      "newTask": "开新任务",
+      "chooseThis": "就继续这个"
+    },
+    "address": {
+      "label": "这条消息投给哪个任务？",
+      "subject": "{{name}} — 投给哪个任务？",
+      "pick": "投给哪个任务",
+      "noPreference": "不指定 — 由 agent 决定",
+      "empty": "这里还没有可继续的任务",
+      "failed": "读不到本会话的任务列表",
+      "clear": "清除",
+      "continuing": "继续",
+      "statusWorking": "进行中",
+      "statusIdle": "空闲",
+      "statusErrored": "需要你看一眼"
+    },
     "execSessionGone": "该执行会话已被删除，无法查看"
   },
   "time": {

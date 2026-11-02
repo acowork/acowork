@@ -6,9 +6,10 @@
  *
  * A composer keystroke re-renders the host, the host re-runs `rows.map`;
  * with `GroupRowView` memoized and every host→row prop reference-stable, the
- * keystroke must produce ZERO row renders. Row renders are counted through
- * `useSessionTitle` — the one hook `GroupRowView` calls unconditionally on
- * every render and nowhere else in this tree.
+ * keystroke must produce ZERO row renders. Row renders are counted through the
+ * row avatar — `GroupRowView` builds exactly one of `AgentAvatar` /
+ * `UserAvatar` on every render, and the host paints them only in the
+ * @-mention picker and the history drawer, both closed in these tests.
  *
  * Store mocks keep the REAL app's stability contract (single action object,
  * single store-state object, stable `t`): `nameOf` is a `useCallback` over
@@ -30,13 +31,6 @@ let tail: ChatMessageRow[] = [];
 let winObj: Record<string, unknown> = {};
 
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (x: string) => x }));
-
-vi.mock("../../lib/useSessionTitle", () => ({
-  useSessionTitle: () => {
-    rowRenders.n += 1;
-    return undefined;
-  },
-}));
 
 vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../stores/chatSessionStore")>();
@@ -129,8 +123,18 @@ vi.mock("../../lib/stickToBottom", () => ({
 const TRANSLATION = { t: (key: string, vars?: Record<string, unknown>) => key };
 vi.mock("../../i18n/useTranslation", () => ({ useTranslation: () => TRANSLATION }));
 
-vi.mock("../common/AgentAvatar", () => ({ AgentAvatar: () => <div /> }));
-vi.mock("../common/UserAvatar", () => ({ UserAvatar: () => <div /> }));
+vi.mock("../common/AgentAvatar", () => ({
+  AgentAvatar: () => {
+    rowRenders.n += 1;
+    return <div />;
+  },
+}));
+vi.mock("../common/UserAvatar", () => ({
+  UserAvatar: () => {
+    rowRenders.n += 1;
+    return <div />;
+  },
+}));
 vi.mock("../common/Tooltip", () => ({
   Tooltip: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
 }));
