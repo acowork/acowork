@@ -262,6 +262,75 @@ mod tests {
         assert!(sm.token_stats_consistent().unwrap());
     }
 
+    /// The router's history occupancy must survive the whole chain:
+    /// recorded → persisted → read back through the public `get_chat`
+    /// (the shape `GET /chat-usage/{id}` serves) → and the column must
+    /// be present on the persisted row, not silently dropped.
+    ///
+    /// This is the test that would have caught a broken write: without it
+    /// the UI would show a dash for the occupancy while every other
+    /// number in the same row read fine.
+    #[test]
+    fn the_history_occupancy_survives_the_ledger_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = make_core(temp.path(), true);
+        let svc = RuntimeChatUsageService::new(core.clone());
+
+        svc.record_chat_llm_usage(
+            "c-1",
+            "group",
+            &usage(4_000, 200, 0, 0),
+            "mock",
+            "test-model",
+            Some(3_979),
+        );
+
+        let row = svc.get_chat("c-1").expect("the row must be readable back");
+        assert_eq!(
+            row.history_tokens,
+            Some(3_979),
+            "the occupancy must be readable back from the ledger row"
+        );
+        // The other columns must be unaffected by the new one.
+        assert_eq!(row.llm_call_count, 1);
+        assert_eq!(row.tokens.total_input, 4_000);
+    }
+
+    /// A turn that measured nothing must not overwrite the last known
+    /// occupancy with a zero — "not measured" is not "measured zero"
+    /// (ADR-027: rather miss than estimate).
+    #[test]
+    fn an_unmeasured_turn_keeps_the_last_occupancy() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = make_core(temp.path(), true);
+        let svc = RuntimeChatUsageService::new(core.clone());
+
+        svc.record_chat_llm_usage(
+            "c-1",
+            "group",
+            &usage(1_000, 10, 0, 0),
+            "mock",
+            "test-model",
+            Some(2_500),
+        );
+        svc.record_chat_llm_usage(
+            "c-1",
+            "group",
+            &usage(1_100, 10, 0, 0),
+            "mock",
+            "test-model",
+            None,
+        );
+
+        let row = svc.get_chat("c-1").expect("row");
+        assert_eq!(
+            row.history_tokens,
+            Some(2_500),
+            "an unmeasured turn must not erase the last measurement"
+        );
+        assert_eq!(row.llm_call_count, 2);
+    }
+
     /// Restart recovery, faithful to the production merge input: a fresh
     /// `AgentCore` (counters at zero) re-opens the same workspace store,
     /// the ledger scan yields the persisted chat totals, and the
