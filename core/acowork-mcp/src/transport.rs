@@ -5,6 +5,7 @@
 //! SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use acowork_core::timeout_config::constants;
@@ -108,6 +109,16 @@ fn spawn_mcp_command(
     result.map_err(Into::into)
 }
 
+/// Receives every line a spawned MCP server writes to **stderr**, as it
+/// arrives.
+///
+/// Why this exists: for lazily resolved packages (`npx -y pkg`, `uvx --from`)
+/// the first launch *is* the install — the download happens inside the spawn
+/// that the health check performs, and its progress goes to stderr. Without an
+/// observer those lines reach `tracing` only, so a caller that wants to show
+/// the user what a long first launch is doing has nothing to show.
+pub type ServerOutputSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Stdio-based transport (spawn local process).
 pub struct StdioTransport {
     _child: Child,
@@ -117,6 +128,13 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     pub fn new(config: &McpServerConfig) -> Result<Self> {
+        Self::new_with(config, None)
+    }
+
+    /// Spawn the server and, when `sink` is given, forward each stderr line to
+    /// it in addition to `tracing`. The sink runs on the reader task, so it
+    /// must not block.
+    pub fn new_with(config: &McpServerConfig, sink: Option<ServerOutputSink>) -> Result<Self> {
         let server_name = config.name.clone();
         let mut child = spawn_mcp_command(&config.command, &config.args, &config.env)
             .with_context(|| format!("failed to spawn MCP server `{}`", config.name))?;
@@ -138,6 +156,9 @@ impl StdioTransport {
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(target: "mcp::stderr", server = %server_name, "{}", line);
+                    if let Some(sink) = sink.as_ref() {
+                        sink(&line);
+                    }
                 }
             });
         }
@@ -454,8 +475,21 @@ async fn read_first_jsonrpc_from_sse_response(
 
 /// Create a transport based on config.
 pub fn create_transport(config: &McpServerConfig) -> Result<Box<dyn McpTransportConn>> {
+    create_transport_with(config, None)
+}
+
+/// Create a transport, forwarding a stdio server's stderr to `sink`.
+///
+/// Only the stdio transport has a child process to observe; HTTP/SSE ignore
+/// the sink.
+pub fn create_transport_with(
+    config: &McpServerConfig,
+    sink: Option<ServerOutputSink>,
+) -> Result<Box<dyn McpTransportConn>> {
     match config.transport {
-        crate::config::McpTransportDef::Stdio => Ok(Box::new(StdioTransport::new(config)?)),
+        crate::config::McpTransportDef::Stdio => {
+            Ok(Box::new(StdioTransport::new_with(config, sink)?))
+        }
         crate::config::McpTransportDef::Http => Ok(Box::new(HttpTransport::new(config)?)),
         crate::config::McpTransportDef::Sse => {
             // SSE transport uses the same HTTP client path for streamable HTTP

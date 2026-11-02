@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use acowork_core::process::run_command_with_idle_timeout;
+use acowork_core::process::{OutputStream, run_command_with_idle_timeout_with_output};
 use acowork_core::protocol::{
     ExecOverride, McpPackageSpec, McpServerConfigDef, McpTransportDef, PackageKind, PypiRunner,
 };
@@ -300,6 +300,19 @@ pub fn ensure_runtime(pkg: &McpPackageSpec) -> Result<(), DependencyStatus> {
 
 /// Run the derived install command with idle-timeout monitoring.
 pub async fn run_install(pkg: &McpPackageSpec) -> Result<InstallOutput, String> {
+    run_install_with_output(pkg, &mut |_, _| {}).await
+}
+
+/// Run the install command and forward each captured output line to the caller
+/// as it is produced, so a caller that surfaces progress can show what the
+/// package manager is doing while it runs.
+pub async fn run_install_with_output<F>(
+    pkg: &McpPackageSpec,
+    on_output: &mut F,
+) -> Result<InstallOutput, String>
+where
+    F: FnMut(OutputStream, &str),
+{
     let Some(cmd) = derive_install_command(pkg) else {
         // No explicit install step (npx/uvx lazy resolve; binary by presence).
         return Ok(InstallOutput {
@@ -314,9 +327,10 @@ pub async fn run_install(pkg: &McpPackageSpec) -> Result<InstallOutput, String> 
     command.args(&cmd[1..]);
     command.envs(build_spawn_env(&HashMap::new()));
 
-    let output = run_command_with_idle_timeout(&mut command, INSTALL_IDLE_TIMEOUT)
-        .await
-        .map_err(|e| {
+    let output =
+        run_command_with_idle_timeout_with_output(&mut command, INSTALL_IDLE_TIMEOUT, on_output)
+            .await
+            .map_err(|e| {
             format!(
                 "install command `{}` failed: {}",
                 cmd.join(" "),
@@ -338,7 +352,19 @@ pub async fn run_install(pkg: &McpPackageSpec) -> Result<InstallOutput, String> 
 /// Perform the MCP initialize + tools/list handshake against a derived spawn
 /// config. This is the single health check for all kinds (ADR-072 decision 4).
 pub async fn health_check(spawn: &McpServerConfigDef) -> Result<usize, String> {
-    let client = crate::client::McpClient::connect(spawn.clone())
+    health_check_with_output(spawn, None).await
+}
+
+/// Same handshake, forwarding the server process's stderr to `sink`.
+///
+/// For lazily resolved packages this handshake *is* the install: `npx -y pkg`
+/// downloads while the client waits, so this is the only way a caller can show
+/// what a long first launch is doing.
+pub async fn health_check_with_output(
+    spawn: &McpServerConfigDef,
+    sink: Option<crate::transport::ServerOutputSink>,
+) -> Result<usize, String> {
+    let client = crate::client::McpClient::connect_with(spawn.clone(), sink)
         .await
         .map_err(|e| format!("{:#}", e))?;
     let tools = client.tools();

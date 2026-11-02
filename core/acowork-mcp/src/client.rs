@@ -15,7 +15,7 @@ use tokio::time::{Duration, timeout};
 
 use crate::config::McpServerConfig;
 use crate::protocol::{JsonRpcRequest, MCP_PROTOCOL_VERSION, McpToolDef, McpToolsListResult};
-use crate::transport::{McpTransportConn, create_transport};
+use crate::transport::{McpTransportConn, create_transport_with};
 
 /// Timeout for receiving a response from an MCP server during init/list.
 const RECV_TIMEOUT: Duration = constants::MCP_RECV;
@@ -84,7 +84,17 @@ impl Clone for McpClient {
 impl McpClient {
     /// Connect to the server, perform the initialize handshake, and fetch the tool list.
     pub async fn connect(config: McpServerConfig) -> Result<Self> {
-        let mut transport = create_transport(&config).with_context(|| {
+        Self::connect_with(config, None).await
+    }
+
+    /// Same as [`McpClient::connect`], forwarding the server process's stderr
+    /// to `sink` while the connection lives — used by the first-enable health
+    /// check, where a lazy `npx`/`uvx` download prints its progress there.
+    pub async fn connect_with(
+        config: McpServerConfig,
+        sink: Option<crate::transport::ServerOutputSink>,
+    ) -> Result<Self> {
+        let mut transport = create_transport_with(&config, sink).with_context(|| {
             format!(
                 "failed to create transport for MCP server `{}`",
                 config.name
