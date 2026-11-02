@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Loader2, Terminal } from "lucide-react";
 import { useAgentStore } from "../../stores/agentStore";
 import { useMcpStore, mcpEnsureKey, type McpEnsureStatus } from "../../stores/mcpStore";
 import { getGatewayUrl } from "../../lib/config";
@@ -109,7 +110,7 @@ interface McpServerCardProps {
  * Default collapsed. A future enhancement could persist the open
  * state per-server in localStorage; for v1 we keep it in-memory only.
  */
-function McpServerCard({
+export function McpServerCard({
   server,
   displayName,
   isChecked,
@@ -123,6 +124,7 @@ function McpServerCard({
 }: McpServerCardProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
   // ADR-068/069 UX: the chevron is only meaningful when there is
   // actually something to expand — the server is active AND its tool
   // list is available. An inactive server (e.g. `playwright` before it
@@ -137,101 +139,204 @@ function McpServerCard({
   // inside the MCP group card's plain body list (Debug-panel style),
   // which owns the hairline separation between rows.
   return (
-    <ExpandableRow
-      open={showBody}
-      onToggle={() => setOpen((v) => !v)}
-      disabled={!hasExpandableBody}
-      title={`${displayName?.trim() || server.name}${tools.length > 0 ? ` (${tools.length})` : ""}`}
-      meta={
-        // Inline spinner on the right of the title — visible from the
-        // moment the user flips the Switch until the post-reconcile
-        // `/mcp-tools` reload settles, so a multi-second third-party
-        // MCP reconnect (e.g. `playwright` ~5s) does not look like a
-        // stuck UI. The spinner replaces the transport badge while
-        // loading to keep the meta slot single-width and avoid a
-        // layout shift when it disappears.
-        ensure?.state === "probing" || ensure?.state === "installing" ? (
-          <span
-            className="inline-flex items-center gap-1 text-10 text-text-tertiary"
-            data-testid={`mcp-ensure-${server.name}`}
-          >
-            <Loader2 className="h-3 w-3 animate-spin" />
-            {ensure.state === "probing"
-              ? t("agentSetup.ensureProbing")
-              : t("agentSetup.ensureInstalling")}
-          </span>
-        ) : ensure?.state === "failed" ? (
-          <span
-            className="inline-flex items-center gap-1 text-10 text-red-500"
-            data-testid={`mcp-ensure-${server.name}`}
-          >
-            {t("agentSetup.ensureFailed")}
-          </span>
-        ) : loading ? (
-          <Loader2
-            className="h-3 w-3 animate-spin text-text-tertiary "
-            aria-label={`Connecting ${server.name}`}
-          />
-        ) : (
-          <Badge>{server.transport}</Badge>
-        )
-      }
-      description={
-        ensure?.state === "failed" && ensure.error
-          ? ensure.error
-          : server.command || server.url || ""
-      }
-      trailing={
-        // The Switch component owns its own click handler; we stop
-        // propagation so clicking the activation toggle does not
-        // also collapse/expand the row.
-        <span onClick={(e) => e.stopPropagation()}>
-          <Switch
-            checked={isChecked}
-            onChange={onToggleServer}
-            disabled={switchDisabled}
-            size="sm"
-            aria-label={server.name}
-          />
-        </span>
-      }
-      surface="inset"
-      bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset-2"
-      ariaLabel={`Toggle ${server.name} tools`}
-    >
-      {/* Body — one row per tool, name on the left, Switch on the
-          right (same visual contract as the Builtin Tools list) with a
-          deep left indent so the nested tools read clearly as
-          "children of the server row". Right edge stays aligned with
-          the header Switch column. */}
-      <ListBox variant="plain">
-        {tools.map((tool) => (
-          <ListRow
-            key={tool.name}
-            padding="nested"
-            surface="inset"
-            trailing={
-              <Switch
-                checked={tool.enabled}
-                onChange={() => onToggleTool(tool.name)}
-                disabled={toolSwitchDisabled}
-                size="sm"
-                aria-label={tool.name}
-              />
-            }
-          >
-            <span className="block truncate font-mono text-11 font-medium text-text-secondary ">
-              {tool.name}
+    <>
+      <ExpandableRow
+        open={showBody}
+        onToggle={() => setOpen((v) => !v)}
+        disabled={!hasExpandableBody}
+        title={`${displayName?.trim() || server.name}${tools.length > 0 ? ` (${tools.length})` : ""}`}
+        meta={
+          // Inline spinner on the right of the title — visible from the
+          // moment the user flips the Switch until the post-reconcile
+          // `/mcp-tools` reload settles, so a multi-second third-party
+          // MCP reconnect (e.g. `playwright` ~5s) does not look like a
+          // stuck UI. The spinner replaces the transport badge while
+          // loading to keep the meta slot single-width and avoid a
+          // layout shift when it disappears.
+          ensure?.state === "probing" || ensure?.state === "installing" ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                // The header is a button (expand/collapse); opening the
+                // log must not also toggle the row.
+                event.stopPropagation();
+                setShowLogs(true);
+              }}
+              className="inline-flex items-center gap-1 text-10 text-text-tertiary hover:text-text"
+              data-testid={`mcp-ensure-${server.name}`}
+              aria-label={t("agentSetup.ensureViewLogs")}
+              title={t("agentSetup.ensureViewLogs")}
+            >
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {ensure.state === "probing"
+                ? t("agentSetup.ensureProbing")
+                : t("agentSetup.ensureInstalling")}
+              <Terminal className="h-3 w-3" />
+            </button>
+          ) : ensure?.state === "failed" ? (
+            <span
+              className="inline-flex items-center gap-1 text-10 text-red-500"
+              data-testid={`mcp-ensure-${server.name}`}
+            >
+              {t("agentSetup.ensureFailed")}
             </span>
-            {tool.description && (
-              <span className="block truncate text-9 leading-tight text-text-tertiary ">
-                {tool.description}
+          ) : loading ? (
+            <Loader2
+              className="h-3 w-3 animate-spin text-text-tertiary "
+              aria-label={`Connecting ${server.name}`}
+            />
+          ) : (
+            <Badge>{server.transport}</Badge>
+          )
+        }
+        description={
+          ensure?.state === "failed" && ensure.error
+            ? ensure.error
+            : server.command || server.url || ""
+        }
+        trailing={
+          // The Switch component owns its own click handler; we stop
+          // propagation so clicking the activation toggle does not
+          // also collapse/expand the row.
+          <span onClick={(e) => e.stopPropagation()}>
+            <Switch
+              checked={isChecked}
+              onChange={onToggleServer}
+              disabled={switchDisabled}
+              size="sm"
+              aria-label={server.name}
+            />
+          </span>
+        }
+        surface="inset"
+        bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset-2"
+        ariaLabel={`Toggle ${server.name} tools`}
+      >
+        {/* Body — one row per tool, name on the left, Switch on the
+            right (same visual contract as the Builtin Tools list) with a
+            deep left indent so the nested tools read clearly as
+            "children of the server row". Right edge stays aligned with
+            the header Switch column. */}
+        <ListBox variant="plain">
+          {tools.map((tool) => (
+            <ListRow
+              key={tool.name}
+              padding="nested"
+              surface="inset"
+              trailing={
+                <Switch
+                  checked={tool.enabled}
+                  onChange={() => onToggleTool(tool.name)}
+                  disabled={toolSwitchDisabled}
+                  size="sm"
+                  aria-label={tool.name}
+                />
+              }
+            >
+              <span className="block truncate font-mono text-11 font-medium text-text-secondary ">
+                {tool.name}
               </span>
-            )}
-          </ListRow>
-        ))}
-      </ListBox>
-    </ExpandableRow>
+              {tool.description && (
+                <span className="block truncate text-9 leading-tight text-text-tertiary ">
+                  {tool.description}
+                </span>
+              )}
+            </ListRow>
+          ))}
+        </ListBox>
+      </ExpandableRow>
+      {/* The log dialog MUST live outside `ExpandableRow` children: that body
+          only mounts while the row is expanded, and a server being installed
+          for the first time has no tool list yet — the row is therefore never
+          expandable exactly when the user needs to see progress. Portalled to
+          `document.body` so the panel's scroll container cannot clip it. */}
+      {showLogs &&
+        createPortal(
+          <EnsureLogsDialog
+            serverName={displayName?.trim() || server.name}
+            logs={ensure?.logs ?? EMPTY_ARRAY}
+            onClose={() => setShowLogs(false)}
+          />,
+          document.body,
+        )}
+    </>
+  );
+}
+
+// ── Sub-component: ensure/install log dialog (ADR-090 progress) ───────
+//
+// Renders the Runtime's bounded ensure log (`logs` on the `/mcp-ensure`
+// status payload). Kept as its own component so the row stays readable and
+// the dialog can be asserted on directly in tests: it is the only place the
+// user can see what a long first-time install is actually doing.
+
+interface EnsureLogsDialogProps {
+  serverName: string;
+  logs: string[];
+  onClose: () => void;
+}
+
+export function EnsureLogsDialog({ serverName, logs, onClose }: EnsureLogsDialogProps) {
+  const { t } = useTranslation();
+  const logRef = useRef<HTMLPreElement>(null);
+  // Live log: follow new lines unless the user scrolled up to read history.
+  // `stick` starts true so the first paint lands on the newest line.
+  const stickToBottom = useRef(true);
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el || !stickToBottom.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [logs]);
+  const handleScroll = useCallback(() => {
+    const el = logRef.current;
+    if (!el) return;
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  }, []);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t("agentSetup.ensureLogsTitle", { name: serverName })}
+      data-testid="mcp-ensure-logs-dialog"
+    >
+      <div className="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-lg border border-border-divider bg-modal-surface p-4 shadow-xl">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-sm font-semibold text-text">
+            {t("agentSetup.ensureLogsTitle", { name: serverName })}
+          </h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded px-2 py-1 text-xs text-text-secondary hover:bg-panel-inset"
+          >
+            {t("common.close")}
+          </button>
+        </div>
+        <pre
+          ref={logRef}
+          onScroll={handleScroll}
+          className="min-h-32 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-md bg-zinc-950 p-3 font-mono text-10 leading-relaxed text-zinc-100"
+          data-testid="mcp-ensure-logs-text"
+        >
+          {logs.length > 0
+            ? logs.map((line, index) => (
+                <div key={index} className="whitespace-pre-wrap break-words">
+                  {line}
+                </div>
+              ))
+            : t("agentSetup.ensureLogsWaiting")}
+        </pre>
+      </div>
+    </div>
   );
 }
 

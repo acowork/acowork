@@ -28,6 +28,8 @@ export interface McpEnsureStatus {
   state: "probing" | "installing" | "usable" | "failed";
   /** Detailed failure reason (only when state === "failed"). */
   error?: string;
+  /** Captured ensure/install output, bounded by the Runtime. */
+  logs?: string[];
 }
 
 /**
