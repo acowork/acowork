@@ -344,6 +344,11 @@ fn install_command_summary(pkg: &acowork_core::protocol::McpPackageSpec) -> Stri
 
 /// Remove a server from `active_names` (toggle spring-back, ADR-090 D6).
 /// Read-modify-write; no-op when the name is not active.
+///
+/// `active_names == None` means "everything is active" for older config files
+/// (see [`agent_config::AgentMcpConfig::active_names`]). It has to be
+/// materialised here, otherwise a failure on such a file would silently keep
+/// the switch on — the exact symptom this function exists to prevent.
 fn deactivate_server(work_dir: &Path, name: &str) {
     let Some(mut cfg) = agent_config::load_agent_mcp_config(work_dir)
         .ok()
@@ -351,13 +356,19 @@ fn deactivate_server(work_dir: &Path, name: &str) {
     else {
         return;
     };
-    let Some(active) = cfg.active_names.as_ref() else {
-        return;
+    let active: Vec<String> = match cfg.active_names.as_ref() {
+        Some(active) => active.clone(),
+        None => cfg
+            .catalog
+            .iter()
+            .chain(cfg.local.iter())
+            .map(|d| d.name.clone())
+            .collect(),
     };
     if !active.iter().any(|n| n == name) {
         return;
     }
-    cfg.active_names = Some(active.iter().filter(|n| n.as_str() != name).cloned().collect());
+    cfg.active_names = Some(active.into_iter().filter(|n| n != name).collect());
     if let Err(e) = agent_config::save_agent_mcp_config(work_dir, &cfg) {
         tracing::error!(error = %e, server = %name, "ADR-090: failed to persist auto-deactivate after ensure failure");
     } else {
@@ -368,33 +379,29 @@ fn deactivate_server(work_dir: &Path, name: &str) {
     }
 }
 
-/// Record a failed attempt and, when this attempt owned an install step, undo
-/// the user's selection.
+/// Record a failed attempt and spring the user's selection back to off.
 ///
-/// The asymmetry is the point: D6's spring-back exists so a switch cannot keep
-/// claiming "on" after an install the Runtime itself performed failed. A custom
-/// server has no install step (`install == None`) — ensure only *observed* it,
-/// nothing on this machine changed, so the selection is the user's declaration
-/// and stays; the failure and its log are reported instead
-/// (`state == "failed"`, error text on the row).
+/// Any failure means "this server cannot be used on this machine right now" —
+/// installed nothing, installed but still does not answer, or a custom server
+/// with no install step at all. The switch must not keep claiming "on" in any
+/// of those cases: an on switch with no tools is a lie, and the user cannot
+/// tell whether it is still working. Retrying is flipping it on again (D6),
+/// with the error and the log explaining what went wrong.
 fn record_failure(def: &McpServerConfigDef, work_dir: &Path, error: String) {
     tracing::warn!(server = %def.name, %error, "ADR-090 ensure_usable failed");
     set_state(&def.name, "failed", Some(error));
-    if def.install.is_some() {
-        deactivate_server(work_dir, &def.name);
-        add_progress(&def.name, "Install failed — server removed from the active list");
-    } else {
-        add_progress(
-            &def.name,
-            "This server declares no install step, so its selection is left as-is",
-        );
-    }
+    deactivate_server(work_dir, &def.name);
+    add_progress(
+        &def.name,
+        "Ensure failed — server switched off so it does not look ready",
+    );
 }
 
 /// Spawn the ensure task for one server if it needs ensuring.
 ///
-/// A server "needs ensure" when: transport is stdio and no ensure is currently
-/// running. **Having an install spec is not required** — a custom stdio server
+/// A server "needs ensure" when: transport is stdio, it has a command, and no
+/// ensure is currently running. **Having an install spec is not required** — a
+/// custom stdio server
 /// (`npx -y something-mcp`, no spec) downloads on first launch exactly like a
 /// preset does, so it needs the same probe (and the same log) even though there
 /// is nothing to install; `ensure_usable_inner` reports the missing spec only
@@ -406,7 +413,9 @@ fn record_failure(def: &McpServerConfigDef, work_dir: &Path, error: String) {
 /// Returns `true` when an attempt is now registered (fresh or already
 /// running) — i.e. when `GET /mcp-ensure/{name}` will answer for this server.
 pub fn spawn_ensure(def: McpServerConfigDef, work_dir: PathBuf, notifier: McpNotifyRef) -> bool {
-    if def.transport != McpTransportDef::Stdio {
+    // No command = nothing to spawn, so there is nothing to probe and nothing
+    // to report (an empty def is a catalog sync artefact, not a server).
+    if def.transport != McpTransportDef::Stdio || def.command.trim().is_empty() {
         return false;
     }
     let already_running = registry()
@@ -585,11 +594,12 @@ mod tests {
         clear_status(&def.name);
     }
 
-    /// The asymmetry D6 needs: an attempt that installed nothing may report the
-    /// failure but must not rewrite the user's selection; one that owned an
-    /// install must spring the switch back.
+    /// D6: a failed ensure always springs the switch back — including a custom
+    /// server with no install spec, whose "failure" is a probe that says the
+    /// server cannot be used on this machine. Leaving such a switch on shows an
+    /// enabled server with no tools and no way to tell whether it is working.
     #[test]
-    fn failure_only_reverts_the_selection_when_the_attempt_owned_an_install() {
+    fn failure_always_springs_the_selection_back() {
         let work_dir = std::env::temp_dir().join("adr090-failure-asymmetry-test");
         let _ = std::fs::remove_dir_all(&work_dir);
         std::fs::create_dir_all(&work_dir).unwrap();
@@ -612,7 +622,7 @@ mod tests {
                 .unwrap_or_default()
         };
 
-        // Custom server: no spec → selection untouched, failure still recorded.
+        // Custom server: no spec → the failure is still authoritative.
         write_config();
         let custom = McpServerConfigDef {
             name: "custom".into(),
@@ -623,9 +633,9 @@ mod tests {
         begin_attempt(&custom.name, "probing");
         record_failure(&custom, &work_dir, "boom".into());
         assert_eq!(ensure_status(&custom.name).unwrap().state, "failed");
-        assert!(active().contains(&"custom".to_string()));
+        assert!(!active().contains(&"custom".to_string()));
 
-        // Preset server: has a spec → the switch must spring back.
+        // Preset server: has a spec → same outcome.
         let preset = McpServerConfigDef {
             name: "preset".into(),
             transport: McpTransportDef::Stdio,
@@ -651,6 +661,52 @@ mod tests {
 
         clear_status("custom");
         clear_status("preset");
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[tokio::test]
+    async fn commandless_server_gets_no_attempt_and_keeps_its_selection() {
+        // A catalog entry with no command (catalog-sync artefact) cannot be
+        // spawned, so ensure must neither register an attempt nor revert the
+        // user's selection on the way out.
+        let def = McpServerConfigDef {
+            name: "adr090-no-command".into(),
+            transport: McpTransportDef::Stdio,
+            command: String::new(),
+            ..Default::default()
+        };
+        assert!(!spawn_ensure(def, std::env::temp_dir(), None));
+        assert!(ensure_status("adr090-no-command").is_none());
+    }
+
+    /// Older config files express "everything active" as `active_names: None`.
+    /// A failure there must still be able to switch the server off.
+    #[test]
+    fn deactivate_materialises_the_all_active_form() {
+        let work_dir = std::env::temp_dir().join("adr090-deactivate-none-test");
+        let _ = std::fs::remove_dir_all(&work_dir);
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let cfg = agent_config::AgentMcpConfig {
+            catalog: vec![McpServerConfigDef {
+                name: "legacy".into(),
+                transport: McpTransportDef::Stdio,
+                command: "npx".into(),
+                ..Default::default()
+            }],
+            local: vec![],
+            active_names: None,
+            recommended: vec![],
+            dismissed: vec![],
+        };
+        agent_config::save_agent_mcp_config(&work_dir, &cfg).unwrap();
+
+        deactivate_server(&work_dir, "legacy");
+
+        let saved = agent_config::load_agent_mcp_config(&work_dir).unwrap().unwrap();
+        assert!(
+            !saved.active_names.unwrap_or_default().contains(&"legacy".to_string()),
+            "legacy all-active config must be narrowed, not ignored"
+        );
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 

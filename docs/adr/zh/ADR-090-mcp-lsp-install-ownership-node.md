@@ -210,9 +210,11 @@ fn ensure_usable(name, pkg, spawn, env):
   - `[server]`——MCP server **自身**的 stderr，由 `health_check_with_output` 经 stdio transport 的 `ServerOutputSink` 逐行送进 Runtime。npx/uvx 懒解析类的下载就发生在这个 spawn 里，此前只进 `tracing`（`mcp::stderr`），用户面对的是静默转圈——这是补 `[server]` 的唯一理由。
   定性不变：ensure 状态仍是**进程内 in-flight 事实**，日志是它的附加视图，不落盘、不过 Gateway、不新增路由（Gateway 仍是纯反代）；单 server 上限 500 行 / 64 KiB，环形截断，每次新尝试（重开开关）清空。长连接的连接池后续重连不观察——只在 ensure/复探这两处 spawn 上挂观察者，因为那是用户等待发生的地方。
 - **实施补充（2026-11）：ensure 覆盖自建 stdio server，且探测窗口按命令类型区分**。上线后的事实：用户最常首次下载的恰恰是自建条目（如 `chrome-devtools`，`command = npx -y chrome-devtools-mcp@latest`、**无 install spec**）——旧守卫「无 spec 就不 ensure」让这类服务器完全没有 ensure 尝试，`GET .../mcp-ensure/{name}` 恒为 404，UI 只剩一个不可点的转圈。因此：
-  - `spawn_ensure` 的守卫收紧为**只判 transport**；无 spec 只意味着「没有安装步骤」，不意味着「不需要探测」。探测失败且命令确实不存在时，仍返回原来的「未找到命令且未声明安装方式」错误并回弹开关。
+  - `spawn_ensure` 的守卫为 **transport = stdio 且命令非空**；无 spec 只意味着「没有安装步骤」，不意味着「不需要探测」。探测失败且命令确实不存在时，仍返回原来的「未找到命令且未声明安装方式」错误并回弹开关。命令为空（catalog 同步残留）不登记尝试，也不动用户的选择。
+  - **失败一律回弹开关**，不区分有无 install spec：`Failed` 的含义是「这台机器上现在用不了」，装了个空、装完仍不应答、自建服务器探测不通都属于此列。开关停在「开」而工具列表为空是对用户的误导——他无法判断是还在跑还是已经死了。重试仍是重新打开开关（D6），错误与日志负责解释原因。
   - 探测/复探的握手窗口不再恒为 `MCP_RECV`(30s)：命令是懒解析器（`npx` / `pnpx` / `bunx` / `uvx`，`resolves_lazily`）时用 `MCP_LAZY_HANDSHAKE`(300s)，因为首次 spawn 就是下载，30s 会把健康的首启判成坏服务器；本地二进制仍用 30s。
   - `PUT /agents/{id}/mcp-servers` 回执的 `ensuring` 现在只列**真正登记了尝试**的服务器（非 stdio 不列），客户端因此不会去轮询一个必然 404 的地址。
+  - 客户端侧：「首次轮询即 `failed`」也要执行回弹（重载 `active_names` + 通知配置刷新）——命令缺失这类失败在 2s 定时器建立之前就结束了，早退会让开关停在打开态。
 
 ### 5.5 UI（D10）
 
