@@ -217,10 +217,23 @@ export const useMcpStore = create<McpStore>((set, get) => ({
       if (t) clearInterval(t);
       ensureWatchers.delete(key);
     };
+    // The Runtime removes a failed server from `active_names` (D6
+    // spring-back); the local list must follow or the Switch keeps showing
+    // "on" after the attempt already gave up.
+    const springBack = async () => {
+      await get().loadActiveServers(agentId);
+      emitAgentConfigRefresh();
+    };
     // First poll immediately so a fast local health check resolves the
     // toggle in one frame; then every 2s (cargo install is minutes).
     const first = await get().pollEnsureStatus(agentId, name);
-    if (!first || first.state === "usable" || first.state === "failed") return;
+    if (!first || first.state === "usable") return;
+    if (first.state === "failed") {
+      // Cheap failures (missing command, no install spec) land here before a
+      // timer even exists — they still have to spring the switch back.
+      await springBack();
+      return;
+    }
     ensureWatchers.set(
       key,
       setInterval(async () => {
@@ -234,11 +247,10 @@ export const useMcpStore = create<McpStore>((set, get) => ({
         if (st.state === "usable" || st.state === "failed") {
           stop();
           if (st.state === "failed") {
-            // Runtime auto-removed the server from active_names (D6
-            // spring-back) — resync local state so the Switch snaps off.
-            await get().loadActiveServers(agentId);
+            await springBack();
+          } else {
+            emitAgentConfigRefresh();
           }
-          emitAgentConfigRefresh();
         }
       }, 2000),
     );
