@@ -177,7 +177,8 @@ export function UserWithAttachmentsBubble({
               className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
               style={fontSizeStyle}
             >
-              <div className="px-4 py-2.5 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+              {/* Uncapped — see MessageBubble's user branch. */}
+              <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
                 {userMessage.content}
               </div>
             </div>

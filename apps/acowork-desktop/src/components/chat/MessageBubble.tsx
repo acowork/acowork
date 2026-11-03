@@ -296,7 +296,12 @@ const MessageBubble = React.memo(function MessageBubble({
                   className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
                   style={fontSizeStyle}
                 >
-                  <div className="px-4 py-2.5 whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+                  {/* Human text renders in full — no height cap, no inner
+                      scroller. Same as the agent bubble and the other two
+                      chat surfaces (`AgentChatView`, `GroupChatPanel`): a
+                      capped box put a second, native scrollbar inside the
+                      list's own overlay thumb. */}
+                  <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
                     {message.content}
                   </div>
                 </div>

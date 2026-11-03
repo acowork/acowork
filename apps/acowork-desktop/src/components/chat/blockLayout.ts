@@ -8,7 +8,7 @@
  * below the last message.
  *
  * Rendered components currently express dimensions as Tailwind classes
- * (e.g. `px-4 py-2.5`, `mt-[6px]`, `max-h-48`).  The numerical values
+ * (e.g. `px-4 py-2.5`, `mt-[6px]`, `max-h-60`).  The numerical values
  * below mirror those classes byte-for-byte.  When you change a class,
  * change the matching constant here — the comment in this file is the
  * audit trail.
@@ -152,9 +152,6 @@ export const USER_NAME_TOP_GAP_PX = 2;
 export const USER_NAME_LINE_HEIGHT_PX = 18;
 /** `mt-[6px]` between liveUserName and the bubble. */
 export const USER_NAME_TO_BUBBLE_GAP_PX = 6;
-/** `max-h-48` on the user bubble — 12rem × 16 = 192px. Beyond this the
- *  bubble scrolls internally; the visible height never exceeds this. */
-export const USER_BUBBLE_MAX_HEIGHT_PX = 192;
 /** `mt-[6px]` between bubble and the documents chip row (when present). */
 export const USER_DOCS_TOP_GAP_PX = 6;
 

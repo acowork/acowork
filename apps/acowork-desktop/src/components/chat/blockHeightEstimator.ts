@@ -75,7 +75,6 @@ import {
   USER_NAME_TO_BUBBLE_GAP_PX,
   USER_AVATAR_SIZE_PX,
   USER_AVATAR_TOP_OFFSET_PX,
-  USER_BUBBLE_MAX_HEIGHT_PX,
   DOCUMENT_CHIP_HEIGHT,
   EXPLORE_HEADER_HEIGHT,
   EXPLORE_CONTENT_MAX_HEIGHT,
@@ -202,13 +201,14 @@ export function estimateBlockHeight(
       const content = msg?.content ?? "";
       const hasName = !!msg?.senderDisplayName;
       // Right column (text side): liveUserName (mt-[2px] + line) →
-      // mt-[6px] → bubble (capped at max-h-48). No inline attachment
-      // chips — ADR-046 renders each attachment as a separate system
-      // entry in the message list.
-      const bubbleHeight = Math.min(
-        USER_BUBBLE_MAX_HEIGHT_PX,
-        estimateTextBubbleHeight(content, containerWidth),
-      );
+      // mt-[6px] → bubble. No inline attachment chips — ADR-046 renders
+      // each attachment as a separate system entry in the message list.
+      //
+      // The bubble is UNCAPPED (no max-h / inner scroller), so the text
+      // estimate feeds straight through — a long message is as tall as it
+      // renders. Clamping here would under-report every long user block by
+      // however much it overflows, and scrollToIndex(end) would land short.
+      const bubbleHeight = estimateTextBubbleHeight(content, containerWidth);
       const rightColumn =
         (hasName ? USER_NAME_TOP_GAP_PX + USER_NAME_LINE_HEIGHT_PX : 0)
         + USER_NAME_TO_BUBBLE_GAP_PX
