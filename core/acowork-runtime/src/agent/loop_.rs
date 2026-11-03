@@ -875,6 +875,20 @@ impl AgentLoop {
             // Add user message to history
             // ADR-011: reset compaction flag — new user input means new content since last compaction
             self.session.is_compacted = false;
+            // A document part is only ever for the round that attached it, and
+            // this is the boundary where that round ends. Dropping the previous
+            // rounds' parts here is what keeps their base64 out of memory, out
+            // of the token projection, and out of the per-build clone — the
+            // request-side filter in `context.rs` only governs what is sent.
+            // `doc_reader` still reaches the file: the blob is on disk and the
+            // hint line in the message text names it.
+            let stale_documents = self.session.history.drop_documents_from_previous_rounds();
+            if stale_documents > 0 {
+                tracing::debug!(
+                    stale_documents,
+                    "Expired previous rounds' inlined documents at the round boundary"
+                );
+            }
             // Per-turn text for ToolContext (kept for the WHOLE turn).
             // Lives on this per-session loop, never on agent-shared tool
             // instances.
@@ -2356,6 +2370,110 @@ mod tests {
         assert_eq!(result.unwrap(), "Final response");
         // Verify usage was tracked (budget guard should have been updated)
         assert!(agent_loop.history().estimate_total_tokens() > 0);
+    }
+
+    /// The round boundary is where an inlined PDF expires — not the request
+    /// filter alone. Otherwise the base64 of the whole file sits in the session
+    /// for the rest of its life, is deep-copied into every `build()`, and keeps
+    /// being priced at pages × 1500 by every `recalibrate_tokens()` (the one
+    /// compaction runs after replacing the middle) even though no later request
+    /// carries it.
+    #[tokio::test]
+    async fn test_next_round_drops_the_previous_rounds_document_payload() {
+        use acowork_core::providers::traits::ContentPart;
+
+        // Responses without a usage report: `calibrate_from_usage` would
+        // otherwise overwrite the estimate with the API's own prompt size and
+        // the local projection — the thing under test — would never be visible.
+        let provider = Arc::new(MockProvider::new(vec![
+            MockResponse::Raw(Box::new(ChatResponse {
+                content: "Final response".to_string(),
+                ..Default::default()
+            })),
+            MockResponse::Raw(Box::new(ChatResponse {
+                content: "Second response".to_string(),
+                ..Default::default()
+            })),
+        ]));
+        let (mut agent_loop, _) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            provider,
+            entries(vec![]),
+            test_budget(),
+            None,
+            None,
+        );
+        let mut context_builder = ContextBuilder::new("System".to_string());
+        agent_loop
+            .run(
+                "read the attached pdf",
+                &mut context_builder,
+                Some(vec![ContentPart::document(
+                    "JVBERi0xLjQ=".repeat(400),
+                    "a.pdf",
+                    Some(30),
+                )]),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let attaching_idx = agent_loop
+            .history()
+            .messages()
+            .iter()
+            .position(|m| m.content == "read the attached pdf")
+            .expect("first turn's message is in history");
+        assert!(
+            matches!(
+                agent_loop.history().messages()[attaching_idx]
+                    .content_parts
+                    .as_deref(),
+                Some([ContentPart::Document { .. }])
+            ),
+            "turn 1 must have put the document into history"
+        );
+        let first_turn_tokens = agent_loop.history().token_count();
+        let first_turn_bytes = agent_loop.history().messages_json_bytes();
+        assert!(
+            first_turn_tokens >= 30 * crate::token::counter::TOKENS_PER_PDF_PAGE,
+            "turn 1's projection priced the document, got {first_turn_tokens}"
+        );
+
+        agent_loop
+            .run(
+                "and now the next question",
+                &mut context_builder,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let attaching = &agent_loop.history().messages()[attaching_idx];
+        // The words stay; the bytes do not. Reaching the file again is
+        // `doc_reader`'s job, off the hint path in the text.
+        assert_eq!(attaching.role, MessageRole::User);
+        assert!(
+            attaching.content_parts.is_none(),
+            "got {:?}",
+            attaching.content_parts
+        );
+        assert!(
+            agent_loop.history().token_count() + 20 < first_turn_tokens,
+            "the projection must stop carrying the payload too: turn 1 = {first_turn_tokens}, \
+             turn 2 = {}",
+            agent_loop.history().token_count()
+        );
+        assert!(
+            agent_loop.history().messages_json_bytes() < first_turn_bytes,
+            "and so must the byte accounting the usage report reads"
+        );
     }
 
     // ── Token ratio calibration end-to-end ────────────────────────────

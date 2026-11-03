@@ -715,23 +715,32 @@ impl ContextBuilder {
         // (b) Turn. A document belongs to the turn that attached it and to no
         //     other: `content_parts` live in the session history and are
         //     replayed on every request, so a 30-page PDF would cost ~45k
-        //     tokens per call for the rest of the session. Only Block B's last
-        //     user message keeps its documents — and the file does not
+        //     tokens per call for the rest of the session. Only the current
+        //     turn's user message keeps its documents — and the file does not
         //     disappear, because the blob stays on disk and the hint path
         //     names it, so `doc_reader` can still open it on any later round.
+        //
+        //     "Current turn" is the last `User` message with no `name`, not the
+        //     last `User` message. The loop appends several internal
+        //     injections with the `User` role (budget warnings, the nudge
+        //     after an output-limit cut-off, the compaction marker), all of
+        //     which stamp `name`, so keying on the role alone would hand the
+        //     slot to an injection and strip the document from the round that
+        //     attached it — mid-turn, right after the first tool call. The
+        //     role-plus-no-name test is the same discriminator
+        //     `loop_session::count_output_budget_nudges` relies on.
         //
         // Stripping is the whole remedy here; the provider layer's own
         // "this format has no document block" warnings would otherwise fire
         // on every replayed round.
-        let document_slot = if crate::agent::attachment_to_document::model_accepts_pdf(
-            gateway_capabilities,
-        ) {
-            messages
-                .iter()
-                .rposition(|m| matches!(m.role, MessageRole::User))
-        } else {
-            None
-        };
+        let document_slot =
+            if crate::agent::attachment_to_document::model_accepts_pdf(gateway_capabilities) {
+                messages
+                    .iter()
+                    .rposition(|m| m.role == MessageRole::User && m.name.is_none())
+            } else {
+                None
+            };
         let has_document = messages.iter().any(|m| {
             m.content_parts.as_deref().is_some_and(|parts| {
                 parts
@@ -1963,7 +1972,10 @@ mod tests {
     }
 
     fn document_turn(text: &str) -> ChatMessage {
-        ChatMessage::user_multimodal(text, vec![ContentPart::document("JVBERi0=", "a.pdf", Some(2))])
+        ChatMessage::user_multimodal(
+            text,
+            vec![ContentPart::document("JVBERi0=", "a.pdf", Some(2))],
+        )
     }
 
     /// A model with no declared `pdf` input must not be handed the document it
@@ -1987,7 +1999,14 @@ mod tests {
         // is not a model we may push a document to.
         let blind = ContextBuilder::new("You are a helper.".to_string());
         let blind_request = blind.build(&history, None, 32_768);
-        assert!(blind_request.messages.last().unwrap().content_parts.is_none());
+        assert!(
+            blind_request
+                .messages
+                .last()
+                .unwrap()
+                .content_parts
+                .is_none()
+        );
     }
 
     /// The same PDF must not ride along on every later request of the session:
@@ -2018,6 +2037,54 @@ mod tests {
             ),
             "the turn that attached the PDF keeps it"
         );
+    }
+
+    /// The turn that attached the PDF is still the current turn when the loop
+    /// has since injected one of its own `User`-role messages (budget warning,
+    /// output-limit nudge, deferred tool warning). Keying the slot on the role
+    /// alone handed it to the injection and stripped the document mid-turn — so
+    /// the model lost the file exactly after the first tool call, which is when
+    /// it most needed it.
+    #[test]
+    fn test_build_keeps_the_document_when_an_internal_injection_follows_it() {
+        use acowork_core::providers::traits::{FunctionCall, ToolCall};
+
+        let mut history = HistoryManager::new(10_000);
+        history.append(document_turn("what does page 3 say"));
+        history.append(ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        ));
+        history.append(ChatMessage::tool("toolu_1", "ok"));
+        // The loop's own warning, appended after the tool result: `User` role,
+        // but named — it is not a real user turn.
+        let mut injection = ChatMessage::user("[System Warning] Daily token limit".to_string());
+        injection.name = Some("system".to_string());
+        history.append(injection);
+
+        let builder = ContextBuilder::new("You are a helper.".to_string());
+        let request = builder.build(&history, Some(&pdf_modality_caps()), 32_768);
+        let attaching = &request.messages[1];
+        assert!(
+            matches!(
+                attaching.content_parts.as_deref(),
+                Some([ContentPart::Document { .. }])
+            ),
+            "the round that attached the PDF keeps it across an injection, got {:?}",
+            attaching.content_parts
+        );
+        // The injection stays in the request with its own text — it is not
+        // silently swallowed, and it never claimed the document.
+        let tail = request.messages.last().unwrap();
+        assert_eq!(tail.content, "[System Warning] Daily token limit");
+        assert!(tail.content_parts.is_none());
     }
 
     /// The two filters must not trip over each other: a model that declares

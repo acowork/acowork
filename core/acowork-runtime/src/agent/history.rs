@@ -667,6 +667,47 @@ impl HistoryManager {
         self.current_tokens = total;
     }
 
+    /// Drop the `ContentPart::Document` parts that *previous* rounds left
+    /// behind. Called at the round boundary, before the new user message is
+    /// appended.
+    ///
+    /// A document part is the largest payload a message can carry (base64 of a
+    /// whole PDF, up to `MAX_INLINE_DOCUMENT_BYTES`) and, unlike text, it has
+    /// no life after its turn: the blob stays on disk and the attachment hint
+    /// in the message text keeps `doc_reader` able to open it on any later
+    /// round. Keeping the bytes would hold tens of megabytes in the session for
+    /// the rest of its life, re-count them in every token projection
+    /// (`count_message` prices a document at pages × 1500) — which makes
+    /// compaction fire on a payload the request no longer sends — and
+    /// deep-copy them on every `build()`.
+    ///
+    /// `Text` and `ImageUrl` parts survive untouched: the image path is
+    /// deliberately unchanged. Returns the number of parts dropped, so the
+    /// caller can log; the counters are only recomputed when that is nonzero.
+    pub fn drop_documents_from_previous_rounds(&mut self) -> usize {
+        use acowork_core::providers::traits::ContentPart;
+
+        let mut dropped = 0usize;
+        for msg in self.messages_mut().iter_mut() {
+            let Some(parts) = msg.content_parts.as_mut() else {
+                continue;
+            };
+            let before = parts.len();
+            parts.retain(|p| !matches!(p, ContentPart::Document { .. }));
+            dropped += before - parts.len();
+            // Same rule the request-side filters use: an empty part list is
+            // dropped rather than sent as `[]`.
+            if parts.is_empty() {
+                msg.content_parts = None;
+            }
+        }
+        if dropped > 0 {
+            self.recalibrate_tokens();
+            self.recompute_byte_counters();
+        }
+        dropped
+    }
+
     /// Sanitize message history to remove or fix corrupted entries.
     ///
     /// This prevents LLM 400 errors caused by invalid tool_call data when
@@ -2088,6 +2129,60 @@ mod tests {
         hm.append(make_message(MessageRole::User, "Hello world"));
         assert_eq!(hm.len(), 1);
         assert!(hm.token_count() > 0);
+    }
+
+    /// A round's inlined PDF must not outlive the round. The part is the
+    /// largest thing history can hold, and `count_message` prices it at
+    /// pages × 1500 on every recomputation, so a stale one weighs on the
+    /// compaction projection for a payload the request no longer sends.
+    #[test]
+    fn drop_documents_from_previous_rounds_keeps_text_and_images() {
+        use acowork_core::providers::traits::ContentPart;
+
+        let doc_heavy = ContentPart::document("JVBERi0xLjQ=".repeat(400), "a.pdf", Some(30));
+        let with_both = ChatMessage::user_multimodal(
+            "read this pdf, and this screenshot",
+            vec![doc_heavy, ContentPart::image_url("data:image/png;base64,AAAA")],
+        );
+        let doc_only = ChatMessage::user_multimodal(
+            "just the pdf",
+            vec![ContentPart::document("AAAA", "b.pdf", Some(1))],
+        );
+
+        let mut hm = HistoryManager::new(100_000);
+        hm.append(with_both);
+        hm.append(ChatMessage::assistant("sure"));
+        hm.append(doc_only);
+        let before_tokens = hm.token_count();
+        let before_bytes = hm.messages_json_bytes();
+
+        assert_eq!(hm.drop_documents_from_previous_rounds(), 2);
+        assert_eq!(
+            hm.token_count(),
+            before_tokens - 31 * crate::token::counter::TOKENS_PER_PDF_PAGE,
+            "the projection loses exactly the weight of the parts that are gone"
+        );
+        assert!(
+            hm.messages_json_bytes() < before_bytes,
+            "the byte counters follow the payload out"
+        );
+
+        let msgs = hm.messages();
+        assert_eq!(msgs[0].content, "read this pdf, and this screenshot");
+        assert!(
+            matches!(msgs[0].content_parts.as_deref(), Some([ContentPart::ImageUrl { .. }])),
+            "images keep their round-independent treatment, got {:?}",
+            msgs[0].content_parts
+        );
+        // A message whose only part was the document loses the list entirely
+        // rather than carrying `Some([])` into the serializer.
+        assert!(msgs[2].content_parts.is_none());
+        assert_eq!(msgs[2].content, "just the pdf");
+
+        // Idempotent, and the counters stay put when there is nothing to do.
+        let after_tokens = hm.token_count();
+        assert_eq!(hm.drop_documents_from_previous_rounds(), 0);
+        assert_eq!(hm.token_count(), after_tokens);
     }
 
     #[test]
