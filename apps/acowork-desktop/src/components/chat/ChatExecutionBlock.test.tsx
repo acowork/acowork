@@ -352,27 +352,25 @@ describe("ChatExecutionBlock", () => {
         ag: { sessionStates: { s1: { sessionStatus: { status: "tool_executing" } } } },
       },
     };
-    // The read is TERMINAL: D9 says the run is history, so no spinner and no
-    // "in progress" copy may ride in on the session's own state (t-1b7bdb21).
-    // The state word refines a LIVE claim; it never upgrades a settled one,
-    // because the session may already be busy with a round this Chat holds no
-    // row for — and that must not make a finished block read as running.
-    const settled = renderBlock({ [REF1]: entryOf({}) });
-    expect(headerText(settled.container)).toContain("chatView.block.completed");
+    // The session's own activity is the freshest fact and outranks the block's
+    // settled rounds (a session can be busy with a round this Chat holds no row
+    // for yet), but it may not manufacture liveness: the read is TERMINAL, so no
+    // spinner and no "in progress" copy ride in on it (D9).
+    const { container } = renderBlock({ [REF1]: entryOf({}) });
+    expect(headerText(container)).toContain("chatView.block.state.toolExecuting");
     expect(document.querySelector(".animate-spin")).toBeNull();
     expect(screen.queryByText("chatView.block.inProgress")).toBeNull();
+  });
 
-    // The same live state over a block whose own newest read IS pending: now it
-    // refines the header, because there really is a round in flight.
-    settled.unmount();
-    const live = renderBlock({
-      [REF1]: entryOf({
-        status: "pending",
-        projection: { round_id: "r1", terminal: false, status: "in_progress" },
-      }),
-    });
-    expect(headerText(live.container)).toContain("chatView.block.state.toolExecuting");
-    expect(live.container.querySelector(".animate-spin")).toBeTruthy();
+  it("an idle session lets the block's own outcome speak", () => {
+    store.chat = {
+      agentStates: {
+        ag: { sessionStates: { s1: { sessionStatus: { status: "idle" } } } },
+      },
+    };
+    const { container } = renderBlock({ [REF1]: entryOf({}) });
+    expect(headerText(container)).toContain("chatView.block.completed");
+    expect(headerText(container)).not.toContain("chatView.block.state.");
   });
 
   it("the drill keeps its own chrome and sits above the block", () => {
