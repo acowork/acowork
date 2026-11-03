@@ -5,13 +5,14 @@
  * is the WIRING between the panel and it, because every part of it fails
  * silently rather than loudly:
  *
- *   1. a raster image in preview mode reaches the viewer with the base64
- *      `data:` URL the Gateway returned (and NOT a broken empty one while the
- *      bytes are still loading) — and with no double-click-to-source
- *      affordance, since a raster image's "source" is a base64 blob;
- *   2. an SVG reaches it the same way (re-encoded from its XML text, which is
- *      what keeps `#` / `<` / `>` out of a utf8 data URI) and DOES offer the
- *      source toggle;
+ *   1. a raster image in preview mode reaches the viewer through the blob
+ *      path (a `blob:` URL from `useWorkspaceFileBlob`, not the base64 JSON
+ *      content — and NOT a broken empty one while the bytes are still
+ *      loading), with no double-click-to-source affordance, since a raster
+ *      image's "source" is opaque bytes;
+ *   2. an SVG reaches it via the text route (re-encoded from its XML text,
+ *      so the preview mirrors the EDIT buffer and `#` / `<` / `>` stay out of
+ *      a utf8 data URI) and DOES offer the source toggle;
  *   3. the viewer's two chat gestures become a composer insertion carrying the
  *      workspace-relative path the agent's tools resolve — the panel builds
  *      that text, not the viewer;
@@ -59,6 +60,7 @@ const h = vi.hoisted(() => ({
     setSelectedCount: vi.fn(),
   },
   treeState: { getNode: vi.fn(() => null) },
+  blobHook: vi.fn(),
 }));
 
 vi.mock("@monaco-editor/react", () => ({
@@ -134,6 +136,11 @@ vi.mock("./ImageViewer", () => ({
     return <div data-testid="image-viewer" />;
   },
 }));
+// The blob fetch hook is stubbed — the raster branch reads `blobUrl` from it.
+// Tests re-point the implementation to simulate loading / error states.
+vi.mock("../../hooks/useWorkspaceFileBlob", () => ({
+  useWorkspaceFileBlob: h.blobHook,
+}));
 vi.mock("./LspDocumentTracker", () => ({ LspDocumentTracker: () => null }));
 vi.mock("./MarkdownPreviewView", () => ({ MarkdownPreviewView: () => null }));
 vi.mock("./UrlPreviewView", () => ({ UrlPreviewView: () => null }));
@@ -191,17 +198,41 @@ beforeEach(() => {
   h.attachImage.mockClear();
   h.editorState.openFiles = [];
   h.editorState.activeFileId = null;
+  h.blobHook.mockReset();
+  h.blobHook.mockImplementation(() => ({
+    blob: null,
+    blobUrl: "blob:gw/docs/logo.png",
+    mime: "image/png",
+    loading: false,
+    error: null,
+    retry: vi.fn(),
+  }));
 });
 
 describe("FileEditorPanel image preview", () => {
-  it("hands the viewer the image as a base64 data URL, without a source toggle", () => {
+  it("hands the viewer the fetched blob URL, without a source toggle", () => {
     renderWith(imageFile());
     expect(screen.getByTestId("image-viewer")).toBeTruthy();
     const props = latestViewerProps();
-    expect(props.src).toBe("data:image/png;base64,QUJD");
+    expect(props.src).toBe("blob:gw/docs/logo.png");
     expect(props.fileName).toBe("logo.png");
-    // A raster image's source is a base64 blob — no double-click-to-edit.
+    // A raster image's source is opaque bytes — no double-click-to-edit.
     expect(props.onOpenSource).toBeUndefined();
+  });
+
+  it("shows a retry affordance when the blob fetch fails", () => {
+    h.blobHook.mockImplementation(() => ({
+      blob: null,
+      blobUrl: null,
+      mime: null,
+      loading: false,
+      error: "Error: workspace file → 500",
+      retry: vi.fn(),
+    }));
+    renderWith(imageFile());
+    expect(screen.queryByTestId("image-viewer")).toBeNull();
+    expect(screen.getByText("fileEditor.previewLoadFailed")).toBeTruthy();
+    expect(screen.getByText("fileEditor.previewRetry")).toBeTruthy();
   });
 
   it("re-encodes SVG text and offers the source toggle", () => {
@@ -220,7 +251,7 @@ describe("FileEditorPanel image preview", () => {
     expect(typeof props.onOpenSource).toBe("function");
   });
 
-  it("does not mount the viewer until the bytes have arrived", () => {
+  it("does not mount the viewer until the file metadata has arrived", () => {
     renderWith(imageFile({ loading: true }));
     expect(screen.queryByTestId("image-viewer")).toBeNull();
   });

@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { useSettingsStore } from "./settingsStore";
 import { useAuthStore } from "./authStore";
 import { DEFAULT_GATEWAY_URL } from "../lib/config";
+import { invalidateWorkspaceFileBlob } from "../lib/workspaceFileBlob";
+import { getCachedFileVersion } from "./fileTree";
 import { log } from "../lib/logger";
 import type { GitCommitDto } from "./gitStore";
 
@@ -201,8 +203,24 @@ export interface OpenFile {
      *  Cleared by closeFile / workspace switch (handled by the file
      *  being replaced wholesale). */
     reachedEnd?: boolean;
-    /** MIME type from Gateway response (e.g. "image/png", "text/html") */
+    /** MIME type from Gateway response (e.g. "image/png", "text/html").
+     *  For document-preview files (pdf/office) it is inferred client-side
+     *  from the extension — those tabs never fetch the JSON content. */
     mimeType?: string;
+    /** Bumped by `refreshFile` for document-preview files when an fs event
+     *  invalidated the cached bytes — viewers add it to their fetch effect
+     *  deps so the tab re-reads the file without a content round-trip. */
+    previewSeq?: number;
+    /** Source size / mtime (epoch ms) captured from the cached file-tree
+     *  entry when a document-preview tab was opened, and re-captured on
+     *  refresh. The Office→PDF converter uses them as its cache version
+     *  key (`lib/docConvert.ts`): an edited file means a new key, so the
+     *  next open converts again instead of replaying the old PDF.
+     *  Undefined when the tree node was not loaded yet — the converter
+     *  then re-runs per open, which is slower but never stale. */
+    previewSize?: number;
+    /** See `previewSize`. Second-resolution, like the wire value. */
+    previewMtimeMs?: number;
     // ── ADR-058: external-modification conflict tracking ──
     /** Disk mtime (RFC3339 string) as of the last read/save — used to
      *  distinguish real external writes from touch/chmod noise. */
@@ -413,6 +431,60 @@ function detectLanguage(fileName: string): string {
     return EXT_LANGUAGE_MAP[ext] || "plaintext";
 }
 
+// ── Document-preview files (remote file preview plan) ─────────────────
+// pdf / office documents open in dedicated viewer components that fetch
+// the raw bytes themselves through the Gateway raw-file route (see
+// `lib/workspaceFileBlob.ts`). Loading their content as base64 through
+// the JSON `/workspaces/file` endpoint would transfer megabytes the
+// editor never renders, so these tabs carry an EMPTY `content` and a
+// client-side inferred `mimeType`; the viewer keys off the MIME to pick
+// the renderer. CSV deliberately stays on the text path (its JSON
+// content is cheap plain text, and the sheet viewer reads the blob).
+const DOC_PREVIEW_EXT_RE = /\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt)$/i;
+
+/** Whether this file is rendered by a document viewer instead of Monaco. */
+export function isDocPreviewFile(fileName: string): boolean {
+    return DOC_PREVIEW_EXT_RE.test(fileName);
+}
+
+/** Client-side MIME inference for document-preview files — the JSON
+ *  endpoint they used to go through is never called for them. Keep in
+ *  sync with the Runtime's `mime_type_for` (workspace_query_impl.rs). */
+const DOC_MIME_MAP: Record<string, string> = {
+    pdf: "application/pdf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    doc: "application/msword",
+    xls: "application/vnd.ms-excel",
+    ppt: "application/vnd.ms-powerpoint",
+};
+
+function inferDocMimeType(fileName: string): string {
+    const ext = fileName.split(".").pop()?.toLowerCase() || "";
+    return DOC_MIME_MAP[ext] ?? "application/octet-stream";
+}
+
+/**
+ * The `previewSize` / `previewMtimeMs` patch for a document tab.
+ *
+ * Reads the already-cached file-tree entry (`getCachedFileVersion`) — no
+ * network, no await, because opening a preview must not wait on a tree
+ * fetch. When the directory is not cached the fields stay unset and the
+ * converter treats every open as a new version: correct, just uncached.
+ */
+function docVersionPatch(
+    agentId: string,
+    workspaceId: string,
+    relPath: string,
+): Pick<OpenFile, "previewSize" | "previewMtimeMs"> {
+    const version = getCachedFileVersion(agentId, workspaceId, relPath);
+    return {
+        ...(version?.size !== undefined ? { previewSize: version.size } : {}),
+        ...(version?.mtimeMs !== undefined ? { previewMtimeMs: version.mtimeMs } : {}),
+    };
+}
+
 export const useFileEditorStore = create<FileEditorState>((set, get) => ({
     openFiles: [],
     activeFileId: null,
@@ -463,6 +535,25 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             openFiles: [...state.openFiles, newFile],
             activeFileId: fileId,
         }));
+
+        // Document-preview files never go through the base64 JSON read —
+        // the viewer fetches raw bytes on demand (see DOC_PREVIEW_EXT_RE
+        // above). Mark the tab ready immediately with an inferred MIME.
+        if (isDocPreviewFile(fileName)) {
+            set((state) => ({
+                openFiles: state.openFiles.map((f) =>
+                    f.id === fileId
+                        ? {
+                            ...f,
+                            loading: false,
+                            mimeType: inferDocMimeType(fileName),
+                            ...docVersionPatch(agentId, workspaceId, relPath),
+                        }
+                        : f,
+                ),
+            }));
+            return;
+        }
 
         // Fetch content from Gateway
         try {
@@ -534,6 +625,23 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
             openFiles: [...state.openFiles, newFile],
             activeFileId: fileId,
         }));
+
+        // Document-preview files: no base64 round-trip, see openFile.
+        if (isDocPreviewFile(fileName)) {
+            set((state) => ({
+                openFiles: state.openFiles.map((f) =>
+                    f.id === fileId
+                        ? {
+                            ...f,
+                            loading: false,
+                            mimeType: inferDocMimeType(fileName),
+                            ...docVersionPatch(agentId, workspaceId, relPath),
+                        }
+                        : f,
+                ),
+            }));
+            return;
+        }
 
         // Fetch content from Gateway
         try {
@@ -935,6 +1043,35 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
         // clobbering the in-flight state).
         if (file.loading) return;
 
+        // The blob LRU must never outlive a disk reload — every preview
+        // fed from it (documents, images) would keep showing stale bytes.
+        invalidateWorkspaceFileBlob(file.agentId, file.workspaceId, file.relPath);
+
+        // Document-preview tabs have no Monaco content to reload — the
+        // bytes live in the blob LRU (invalidated above); bump the seq the
+        // viewer's fetch effect depends on so the remounted fetch misses
+        // the cache and re-reads through the Gateway raw route.
+        if (isDocPreviewFile(file.fileName)) {
+            set((state) => ({
+                openFiles: state.openFiles.map((f) =>
+                    f.id === fileId
+                        ? {
+                            ...f,
+                            previewSeq: (f.previewSeq ?? 0) + 1,
+                            diskConflict: undefined,
+                            diskDeleted: undefined,
+                            // Re-read the version pair: the tree refresh
+                            // that the same fs event triggered usually
+                            // landed by now, and the new mtime is what
+                            // makes the converter drop its cached PDF.
+                            ...docVersionPatch(f.agentId, f.workspaceId, f.relPath),
+                        }
+                        : f,
+                ),
+            }));
+            return;
+        }
+
         set((state) => ({
             openFiles: state.openFiles.map((f) =>
                 f.id === fileId ? { ...f, loading: true } : f,
@@ -968,6 +1105,10 @@ export const useFileEditorStore = create<FileEditorState>((set, get) => ({
                         originalContent: data.content,
                         mimeType: data.mimeType,
                         loading: false,
+                        // The blob cache was invalidated at the top of
+                        // refreshFile; bump the seq so blob-fed previews
+                        // (image tabs) re-read the fresh bytes.
+                        previewSeq: (f.previewSeq ?? 0) + 1,
                         // Resetting both content and originalContent means dirty must be false.
                         dirty: false,
                         // ADR-058: refresh resolves any pending disk

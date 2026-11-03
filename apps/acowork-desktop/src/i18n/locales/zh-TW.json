@@ -1037,6 +1037,44 @@
     "showSource": "顯示原始碼",
     "previewLoading": "正在載入預覽...",
     "previewDoubleClickHint": "雙擊切換到編輯器",
+    "previewLoadFailed": "預覽載入失敗",
+    "previewRetry": "重試",
+    "docViewer": {
+      "saveAs": "另存新檔",
+      "openExternally": "外部開啟",
+      "saveFailed": "儲存失敗",
+      "openExternalFailed": "外部開啟失敗",
+      "loadFailed": "檔案載入失敗",
+      "retry": "重試"
+    },
+    "pdfViewer": {
+      "title": "PDF 預覽"
+    },
+    "officePdf": {
+      "converting": "正在準備預覽檔案…",
+      "engineMissing": "未偵測到 Office 或 LibreOffice——目前為近似排版預覽",
+      "convertFailed": "轉換為 PDF 失敗——已降級為近似排版",
+      "printLayoutNote": "已依印刷版式渲染（本機轉換）",
+      "installHint": "安裝 LibreOffice 或 Microsoft Office 後可依實際版式預覽"
+    },
+    "sheetViewer": {
+      "tooLarge": "表格過大，僅預覽前 {{rows}} 列",
+      "parseFailed": "表格解析失敗"
+    },
+    "docxViewer": {
+      "renderFailed": "文件渲染失敗，檔案可能已加密或損壞"
+    },
+    "pptxViewer": {
+      "degradedHint": "簡化預覽（文字與圖片，非保真渲染）",
+      "jumpPlaceholder": "頁碼",
+      "jump": "跳轉",
+      "page": "第 {{page}} 頁",
+      "parseFailed": "簡報解析失敗"
+    },
+    "unsupported": {
+      "formatHint": "應用程式內暫不支援預覽 {{name}}",
+      "useExternal": "可使用外部開啟，或先另存新檔"
+    },
     "imageViewer": {
       "zoomIn": "放大",
       "zoomOut": "縮小",

@@ -1047,6 +1047,44 @@
     "showSource": "ソースを表示",
     "previewLoading": "プレビューを読み込み中...",
     "previewDoubleClickHint": "ダブルクリックでエディタを開く",
+    "previewLoadFailed": "プレビューの読み込みに失敗しました",
+    "previewRetry": "再試行",
+    "docViewer": {
+      "saveAs": "名前を付けて保存",
+      "openExternally": "外部アプリで開く",
+      "saveFailed": "保存に失敗しました",
+      "openExternalFailed": "外部アプリで開けませんでした",
+      "loadFailed": "ファイルの読み込みに失敗しました",
+      "retry": "再試行"
+    },
+    "pdfViewer": {
+      "title": "PDF プレビュー"
+    },
+    "officePdf": {
+      "converting": "プレビューの準備中…",
+      "engineMissing": "Office / LibreOffice が見つかりません—近似レイアウトのプレビューです",
+      "convertFailed": "PDF への変換に失敗しました—近似レイアウトで表示しています",
+      "printLayoutNote": "印刷レイアウトで表示しています（このマシン上で変換）",
+      "installHint": "LibreOffice または Microsoft Office をインストールすると、実際のレイアウトでプレビューできます"
+    },
+    "sheetViewer": {
+      "tooLarge": "シートが大きすぎます—最初の {{rows}} 行のみプレビュー表示",
+      "parseFailed": "スプレッドシートの解析に失敗しました"
+    },
+    "docxViewer": {
+      "renderFailed": "文書の描画に失敗しました—暗号化または破損している可能性があります"
+    },
+    "pptxViewer": {
+      "degradedHint": "簡易プレビュー（テキストと画像、完全な再現ではありません）",
+      "jumpPlaceholder": "スライド番号",
+      "jump": "移動",
+      "page": "スライド {{page}}",
+      "parseFailed": "プレゼンの解析に失敗しました"
+    },
+    "unsupported": {
+      "formatHint": "アプリ内で {{name}} をプレビューできません",
+      "useExternal": "外部アプリで開くか、まずコピーを保存してください"
+    },
     "imageViewer": {
       "zoomIn": "拡大",
       "zoomOut": "縮小",

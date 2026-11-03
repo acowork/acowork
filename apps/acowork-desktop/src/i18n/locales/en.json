@@ -1429,6 +1429,44 @@
     "previewDisabled": "Preview is not available for this file",
     "previewLoading": "Loading preview...",
     "previewDoubleClickHint": "Double-click to open in editor",
+    "previewLoadFailed": "Failed to load preview",
+    "previewRetry": "Retry",
+    "docViewer": {
+      "saveAs": "Save as",
+      "openExternally": "Open externally",
+      "saveFailed": "Failed to save",
+      "openExternalFailed": "Failed to open externally",
+      "loadFailed": "Failed to load file",
+      "retry": "Retry"
+    },
+    "pdfViewer": {
+      "title": "PDF preview"
+    },
+    "officePdf": {
+      "converting": "Preparing file for preview…",
+      "engineMissing": "No Office or LibreOffice found — this is an approximate layout preview",
+      "convertFailed": "Conversion to PDF failed — showing the approximate layout instead",
+      "printLayoutNote": "Shown at print layout (converted on this machine)",
+      "installHint": "Install LibreOffice or Microsoft Office to preview this exactly as it prints"
+    },
+    "sheetViewer": {
+      "tooLarge": "Sheet too large — showing the first {{rows}} rows only",
+      "parseFailed": "Failed to parse spreadsheet"
+    },
+    "docxViewer": {
+      "renderFailed": "Failed to render document — it may be encrypted or corrupted"
+    },
+    "pptxViewer": {
+      "degradedHint": "Simplified preview (text and images, not pixel-faithful)",
+      "jumpPlaceholder": "Slide number",
+      "jump": "Jump",
+      "page": "Slide {{page}}",
+      "parseFailed": "Failed to parse presentation"
+    },
+    "unsupported": {
+      "formatHint": "No in-app preview for {{name}}",
+      "useExternal": "Use Open externally, or save a copy first"
+    },
     "imageViewer": {
       "zoomIn": "Zoom in",
       "zoomOut": "Zoom out",
