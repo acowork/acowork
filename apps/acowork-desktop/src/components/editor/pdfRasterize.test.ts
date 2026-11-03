@@ -14,7 +14,7 @@
  * the document with the caller's `ArrayBuffer` in the transfer list
  * (`sendWithPromise("GetDocRequest", docParams, [data.buffer])`), which
  * DETACHES it — `byteLength` drops to 0 and the next use throws
- * `DataCloneError: An ArrayBuffer is detached`. `PdfRegionPicker` opens from an
+ * `DataCloneError: An ArrayBuffer is detached`. The PDF viewer opens from an
  * effect, and an effect may re-run over the same `bytes` prop (a remount,
  * React StrictMode's dev double-invoke), so the copy has to live at the
  * transfer point. Pinning that here is what keeps a framed screenshot from
