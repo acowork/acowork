@@ -171,6 +171,83 @@ fn prepare_target(path: &str) -> Result<PathBuf, String> {
     Ok(path_buf)
 }
 
+// ── "Open externally" for workspace preview files ─────────────────────────
+//
+// The in-app preview renderers (PDF iframe, SheetJS, docx-preview, the
+// pptx card fallback) cannot cover every file the user opens — legacy
+// .doc/.ppt, encrypted documents, or simply "show me this in a real app".
+// The workspace file lives on the Gateway/Node machine, not on this one,
+// so there is no local path to hand the OS: the bytes must first come
+// over via the same authenticated download as "save as", land in a temp
+// folder, and only then open with the default application.
+
+/// Folder holding the transient copies `open_file_externally` launches.
+/// A fixed name under the OS temp dir so repeat opens of the same file
+/// overwrite instead of piling up copies.
+fn external_preview_dir() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("acowork-external-preview");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("create preview temp dir {}: {}", dir.display(), e))?;
+    Ok(dir)
+}
+
+/// Reduce a webview-supplied filename to one safe file name: last path
+/// component only (kills any directory traversal), empty/`.`/`..` and
+/// embedded NULs rejected, dots kept (extensions matter to the OS
+/// launcher). Unicode names pass through untouched.
+fn sanitize_external_name(filename: &str) -> Result<String, String> {
+    let last = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .replace('\0', "");
+    if last.is_empty() || last == "." || last == ".." {
+        return Err(format!("invalid file name: {filename:?}"));
+    }
+    Ok(last)
+}
+
+/// Launch `path` with the OS default application.
+#[allow(unused_variables)] // platform-specific backends consume `path`
+fn spawn_open(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        // `explorer.exe <file>` opens the file with its associated app
+        // (it is NOT the `/select,` reveal form from commands::reveal —
+        // plain arg quoting is fine for this invocation).
+        std::process::Command::new("explorer.exe").arg(path).spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(path).spawn()?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(path).spawn()?;
+    }
+    Ok(())
+}
+
+/// Download `url` into the temp preview folder under `filename` (with
+/// account credentials, streamed) and open it with the default app.
+/// Powers the document viewers' "open externally" button.
+#[tauri::command]
+pub async fn open_file_externally(
+    state: State<'_, AppState>,
+    url: String,
+    filename: String,
+) -> Result<(), String> {
+    let name = sanitize_external_name(&filename)?;
+    let target = external_preview_dir()?.join(name);
+    let client = state.gateway.read().await;
+    // Progress goes nowhere: the download is a click-away step before the
+    // OS launch, and a stalled socket still dies at DOWNLOAD_TIMEOUT.
+    let quiet = Channel::new(|_| Ok(()));
+    download_to_file(&client, &url, &target.to_string_lossy(), &quiet).await?;
+    spawn_open(&target).map_err(|e| format!("open {}: {}", target.display(), e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +344,22 @@ mod tests {
     #[test]
     fn empty_path_is_rejected() {
         assert!(prepare_target("   ").is_err());
+    }
+
+    #[test]
+    fn sanitize_external_name_keeps_basenames_and_kills_traversal() {
+        assert_eq!(sanitize_external_name("报告 Q1.pdf").unwrap(), "报告 Q1.pdf");
+        assert_eq!(
+            sanitize_external_name(r"C:\ws\sub\deck.pptx").unwrap(),
+            "deck.pptx"
+        );
+        assert_eq!(sanitize_external_name("a/b/c.xlsx").unwrap(), "c.xlsx");
+        assert!(sanitize_external_name("").is_err());
+        assert!(sanitize_external_name("   ").is_err());
+        assert!(sanitize_external_name("..").is_err());
+        assert!(sanitize_external_name("a/../").is_err());
+        // A trailing separator yields an empty last component — rejected,
+        // never silently glued into the temp dir root.
+        assert!(sanitize_external_name("x/").is_err());
     }
 }

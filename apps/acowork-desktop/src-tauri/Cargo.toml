@@ -18,7 +18,7 @@ tauri-plugin-notification = "=2.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "process"] }
 thiserror = "2"
 anyhow = "1"
 acowork-core = { path = "../../../core/acowork-core" }

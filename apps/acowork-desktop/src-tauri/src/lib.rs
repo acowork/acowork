@@ -699,6 +699,15 @@ pub fn run() {
             // performs the transfer (never the webview — see the module
             // docs for why bytes must not travel over IPC).
             commands::save_attachment::download_attachment,
+            // Document viewers' "open externally": authenticated download
+            // into the temp preview folder + OS default-app launch.
+            commands::save_attachment::open_file_externally,
+            // Office → PDF high-fidelity preview: probe the local
+            // conversion engine (LibreOffice / MS Office COM) and run
+            // one conversion, returning the PDF bytes over raw IPC.
+            // See commands::doc_convert.
+            commands::doc_convert::detect_doc_convert_engine,
+            commands::doc_convert::convert_workspace_file_to_pdf,
             // OS clipboard file-path fallback for paste/upload. Returns
             // the absolute paths of any files on the clipboard so the
             // chat panel can upload files copied from the OS file manager
