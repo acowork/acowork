@@ -61,7 +61,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -1598,10 +1598,15 @@ async fn read_workspace_file(
 /// HTML-preview endpoints here instead of reading the workspace
 /// filesystem itself. Returns `Content-Type` + verbatim bytes so the
 /// preview iframe's `<img>` / `<link>` / `<script>` sub-resources resolve.
+///
+/// The body is a **stream** (never buffered in the Runtime) and the
+/// response carries `ETag` + `Content-Length`; `If-None-Match` (forwarded
+/// verbatim by both reverse-proxy hops) short-circuits to 304.
 async fn read_workspace_raw(
     State(state): State<HttpState>,
     Path(file_rel_path): Path<String>,
     Query(q): Query<crate::usecases::workspace_query::RawFileQuery>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_query.lock().await;
     let svc = svc.as_ref().ok_or((
@@ -1612,15 +1617,31 @@ async fn read_workspace_raw(
         workspace_id: q.workspace_id,
         path: file_rel_path,
     };
+    let inm = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
     let dto = svc
-        .read_file_raw(&params)
+        .read_file_raw(&params, inm)
         .await
         .map_err(workspace_error_to_response)?;
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, dto.mime_type)],
-        dto.bytes,
-    ))
+
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(header::ETAG, dto.etag.parse().unwrap_or_else(|_| HeaderValue::from_static("\"\"")));
+    if let Some(lm) = dto.last_modified {
+        if let Ok(v) = HeaderValue::from_str(&lm) {
+            resp_headers.insert(header::LAST_MODIFIED, v);
+        }
+    }
+    // 304: no body, no Content-Type/Length (RFC 9110 §15.4.5).
+    if dto.body.is_none() {
+        return Ok((StatusCode::NOT_MODIFIED, resp_headers).into_response());
+    }
+    resp_headers.insert(header::CONTENT_TYPE, dto.mime_type.parse().unwrap_or(HeaderValue::from_static("application/octet-stream")));
+    if let Ok(v) = HeaderValue::from_str(&dto.size.to_string()) {
+        resp_headers.insert(header::CONTENT_LENGTH, v);
+    }
+    let body = axum::body::Body::from_stream(dto.body.expect("checked above"));
+    Ok((StatusCode::OK, resp_headers, body).into_response())
 }
 
 /// `GET /workspaces/find` — fuzzy filename search (Ctrl+P-style palette).

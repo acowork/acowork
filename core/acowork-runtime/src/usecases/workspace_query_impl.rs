@@ -23,6 +23,7 @@ use base64::Engine;
 use chrono::DateTime;
 use ignore::WalkBuilder;
 use regex::Regex;
+use tokio::io::AsyncReadExt;
 
 use crate::usecases::workspace_query::{
     FindFilesParams, FindMatchDto, FindResponse, ListTreeParams, RawFileDto, ReadFileParams,
@@ -39,6 +40,12 @@ const DEFAULT_MAX_SEARCH_RESULTS: usize = 200;
 const ABSOLUTE_MAX_SEARCH_RESULTS: usize = 1000;
 const SEARCH_BAILOUT_BYTES: u64 = 1_048_576; // 1 MiB per file
 
+/// Hard cap for `read_file_raw` (the preview byte pipe). The endpoint is
+/// reachable from remote desktops through the Gateway/node reverse
+/// proxies, so an unbounded read is a bandwidth/memory attack surface;
+/// 256 MiB is far above any realistic PDF/Office document.
+const MAX_RAW_PREVIEW_BYTES: u64 = 268_435_456;
+
 /// VSCode's default `files.exclude` — the only dotfiles/dirs hidden from
 /// the workspace tree. Everything else (`.cargo`, `.vscode`, `.gitignore`,
 /// ...) is shown, mirroring the Explorer's default behaviour: hidden
@@ -50,6 +57,27 @@ const VSCODE_DEFAULT_EXCLUDES: &[&str] = &[".git", ".svn", ".hg", "CVS", ".DS_St
 fn is_vscode_default_excluded(name: &str) -> bool {
     VSCODE_DEFAULT_EXCLUDES.contains(&name)
 }
+/// RFC 7232 §3.2 `If-None-Match` matching with RFC 7232 §2.3.2 weak
+/// comparison: opaque quoted tags compare by value regardless of the
+/// `W/` marker, `*` matches any current representation.
+fn if_none_match_has_etag(if_none_match: Option<&str>, etag: &str) -> bool {
+    let Some(inm) = if_none_match else {
+        return false;
+    };
+    let current = strip_weak_prefix(etag);
+    inm.split(',').any(|entry| {
+        let entry = entry.trim();
+        if entry == "*" {
+            return true;
+        }
+        strip_weak_prefix(entry) == current
+    })
+}
+
+fn strip_weak_prefix(tag: &str) -> &str {
+    tag.strip_prefix("W/").unwrap_or(tag)
+}
+
 const BINARY_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tif", "mp3", "mp4", "avi", "mov",
     "wav", "flac", "ogg", "webm", "mkv", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst", "o",
@@ -185,8 +213,8 @@ impl RuntimeWorkspaceQueryService {
     /// `application/octet-stream` for unknown extensions.
     ///
     /// Covers both the text formats read by the editor and the binary
-    /// image/PDF formats returned base64-encoded to the desktop image
-    /// preview branch (`mimeType.startsWith("image/")`).
+    /// image/PDF/Office formats streamed through the raw endpoint
+    /// (`GET /workspaces/raw/*`) to the desktop preview surface.
     fn mime_type_for(rel_path: &str) -> &'static str {
         let ext = Path::new(rel_path)
             .extension()
@@ -222,6 +250,21 @@ impl RuntimeWorkspaceQueryService {
             "bmp" => "image/bmp",
             "ico" => "image/x-icon",
             "pdf" => "application/pdf",
+            // OOXML documents — the desktop preview renderers key off
+            // these MIME types (docx-preview / SheetJS / JSZip paths).
+            "docx" => {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            }
+            "xlsx" => {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }
+            "pptx" => {
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            }
+            "doc" => "application/msword",
+            "xls" => "application/vnd.ms-excel",
+            "ppt" => "application/vnd.ms-powerpoint",
+            "rtf" => "application/rtf",
             _ => "application/octet-stream",
         }
     }
@@ -605,7 +648,11 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
         })
     }
 
-    async fn read_file_raw(&self, params: &ReadFileParams) -> Result<RawFileDto, WorkspaceError> {
+    async fn read_file_raw(
+        &self,
+        params: &ReadFileParams,
+        if_none_match: Option<&str>,
+    ) -> Result<RawFileDto, WorkspaceError> {
         // Same `resolve_within` guard as `read_file` — canonicalise +
         // containment check (path-traversal defence) before touching disk.
         let (_root, abs_path, rel_path) =
@@ -620,14 +667,59 @@ impl WorkspaceQueryService for RuntimeWorkspaceQueryService {
                 rel_path
             )));
         }
+        let size = meta.len();
+        if size > MAX_RAW_PREVIEW_BYTES {
+            return Err(WorkspaceError::TooLarge(format!(
+                "{} exceeds raw preview limit of {MAX_RAW_PREVIEW_BYTES} bytes",
+                rel_path
+            )));
+        }
 
-        let bytes = std::fs::read(&abs_path)
+        // Weak ETag over (size, mtime): stable across requests, cheap to
+        // recompute, and the raw path never hashes content bytes. Weak
+        // (`W/`) because two same-size writes seconds apart can collide —
+        // a stale preview is recovered by the desktop's force-reload.
+        let mtime_secs = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let etag = match mtime_secs {
+            Some(s) => format!("W/\"{size:x}-{s:x}\""),
+            None => format!("W/\"{size:x}-0\""),
+        };
+        let last_modified = Self::modified_rfc3339(&meta);
+
+        // 304 short-circuit: If-None-Match hit — metadata headers only,
+        // the file content is never opened nor read.
+        if if_none_match_has_etag(if_none_match, &etag) {
+            return Ok(RawFileDto {
+                body: None,
+                mime_type: Self::mime_type_for(&rel_path).to_string(),
+                size,
+                etag,
+                last_modified,
+            });
+        }
+
+        // Streamed body: the file is read in 8 KiB chunks and piped
+        // straight into the HTTP response — a 200 MB PDF must not become
+        // a 200 MB Vec in the Runtime process (this endpoint now backs the
+        // remote-aware desktop preview path). `.take()` bounds the stream
+        // at the cap even if the file grows between metadata and open.
+        let file = tokio::fs::File::open(&abs_path)
+            .await
             .map_err(|_| WorkspaceError::NotFound(format!("failed to read file: {}", rel_path)))?;
+        let reader = tokio::io::BufReader::new(file).take(MAX_RAW_PREVIEW_BYTES);
+        let stream = tokio_util::io::ReaderStream::new(reader);
+        let body: crate::usecases::workspace_query::RawFileStream = Box::pin(stream);
 
         Ok(RawFileDto {
-            bytes,
+            body: Some(body),
             mime_type: Self::mime_type_for(&rel_path).to_string(),
-            size: meta.len(),
+            size,
+            etag,
+            last_modified,
         })
     }
 
@@ -1226,10 +1318,13 @@ mod tests {
         );
     }
 
-    /// `read_file_raw` (ADR-055 L2-7) must return verbatim bytes + MIME
+    /// `read_file_raw` (ADR-055 L2-7) must stream verbatim bytes + MIME
     /// and reject path traversal, so the Gateway's HTML-preview reverse
     /// proxy serves sub-resources correctly and never escapes the
-    /// workspace root.
+    /// workspace root. The preview path (PDF/Office, remote-aware) also
+    /// rides on this endpoint: ETag stability, If-None-Match → 304
+    /// short-circuit, the 413 size cap, and OOXML MIME mapping are
+    /// pinned here at the service layer.
     #[tokio::test]
     async fn read_file_raw_returns_bytes_and_blocks_traversal() {
         let tmp = tempdir().expect("tempdir");
@@ -1238,26 +1333,133 @@ mod tests {
         let svc =
             RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
 
-        // Agent home: raw bytes + HTML MIME (not a JSON envelope).
+        // Agent home: streamed raw bytes + HTML MIME (not a JSON envelope).
         let dto = svc
-            .read_file_raw(&ReadFileParams {
-                workspace_id: None,
-                path: "index.html".to_string(),
-            })
+            .read_file_raw(
+                &ReadFileParams {
+                    workspace_id: None,
+                    path: "index.html".to_string(),
+                },
+                None,
+            )
             .await
             .expect("read_file_raw");
-        assert_eq!(dto.bytes, b"<h1>hi</h1>");
         assert_eq!(dto.mime_type, "text/html");
+        assert_eq!(dto.size, 11);
+        let collected = collect_raw_stream(dto.body.expect("body present")).await;
+        assert_eq!(collected, b"<h1>hi</h1>");
 
         // Path traversal must be rejected by the shared `resolve_within`.
         let err = svc
-            .read_file_raw(&ReadFileParams {
-                workspace_id: None,
-                path: "../secret.txt".to_string(),
-            })
+            .read_file_raw(
+                &ReadFileParams {
+                    workspace_id: None,
+                    path: "../secret.txt".to_string(),
+                },
+                None,
+            )
             .await
             .expect_err("traversal must fail");
         assert_eq!(err.http_status(), 400);
+    }
+
+    #[tokio::test]
+    async fn read_file_raw_etag_is_stable_and_304_short_circuits() {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("report.pdf"), b"%PDF-1.4 fake").expect("write");
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+        let params = ReadFileParams {
+            workspace_id: None,
+            path: "report.pdf".to_string(),
+        };
+
+        let dto = svc.read_file_raw(&params, None).await.expect("first read");
+        assert_eq!(dto.mime_type, "application/pdf");
+        // Weak tag over size+mtime, recomputable and stable per request.
+        assert!(dto.etag.starts_with("W/\""), "etag shape: {}", dto.etag);
+        let etag = dto.etag.clone();
+
+        // If-None-Match hit -> no body (handler answers 304); exact tag,
+        // weak-tag comparison, and `*` all match (RFC 7232 §2.3.2/§3.2).
+        let strong_as_weak = format!("W/{}", &etag[2..]); // strip W/, keep quotes
+        let multi = format!("{etag}, other");
+        let inm_cases = [
+            etag.as_str(),
+            "W/\"deadbeef\", *",
+            strong_as_weak.as_str(),
+            multi.as_str(),
+        ];
+        for inm in inm_cases {
+            let dto = svc
+                .read_file_raw(&params, Some(inm))
+                .await
+                .expect("conditional read");
+            assert!(dto.body.is_none(), "If-None-Match '{inm}' must hit");
+            assert_eq!(dto.etag, etag, "etag must be stable across requests");
+        }
+
+        // A stale tag must NOT short-circuit.
+        let stale = "W/\"1-1\"".to_string();
+        let dto = svc
+            .read_file_raw(&params, Some(stale.as_str()))
+            .await
+            .expect("stale tag");
+        assert!(dto.body.is_some(), "stale If-None-Match serves the body");
+    }
+
+    #[tokio::test]
+    async fn read_file_raw_rejects_oversized_files_with_413() {
+        let tmp = tempdir().expect("tempdir");
+        // Sparse file: metadata size exceeds the cap with no real disk cost.
+        let f = std::fs::File::create(tmp.path().join("huge.bin")).expect("create");
+        f.set_len(MAX_RAW_PREVIEW_BYTES + 1).expect("set_len");
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        let err = svc
+            .read_file_raw(
+                &ReadFileParams {
+                    workspace_id: None,
+                    path: "huge.bin".to_string(),
+                },
+                None,
+            )
+            .await
+            .expect_err("over-cap file must fail");
+        assert_eq!(err.http_status(), 413);
+    }
+
+    #[test]
+    fn mime_type_for_covers_office_formats() {
+        assert_eq!(
+            RuntimeWorkspaceQueryService::mime_type_for("a.docx"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert_eq!(
+            RuntimeWorkspaceQueryService::mime_type_for("a.XLSX"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        assert_eq!(
+            RuntimeWorkspaceQueryService::mime_type_for("a.pptx"),
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        );
+        assert_eq!(
+            RuntimeWorkspaceQueryService::mime_type_for("legacy.xls"),
+            "application/vnd.ms-excel"
+        );
+    }
+
+    /// Drain a [`RawFileDto`] stream into bytes (test helper).
+    async fn collect_raw_stream(
+        mut stream: crate::usecases::workspace_query::RawFileStream,
+    ) -> Vec<u8> {
+        use futures_util::StreamExt;
+        let mut out = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            out.extend_from_slice(&chunk.expect("stream chunk"));
+        }
+        out
     }
 
     // ── File scope: content + file-name matches (ADR-081 D2) ──────────
