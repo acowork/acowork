@@ -48,9 +48,13 @@ import { log } from "../../lib/logger";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { useAddToChatTarget, attachWorkspaceRef } from "../../lib/addToChat";
 import {
+    attachFileToChatComposer,
     attachImageToChatComposer,
     insertIntoChatComposer,
 } from "../../lib/chatComposerBridge";
+// Type-only: the viewer component itself stays lazy-loaded (its payload is a
+// PDF engine), but the shape of the hand-off the panel builds is shared.
+import type { PdfChatProps } from "./PdfViewer";
 
 /**
  * Encode a UTF-8 text string to base64 in a way that survives non-ASCII
@@ -132,8 +136,24 @@ function isDocumentViewerFile(file: OpenFile): boolean {
     );
 }
 
+/**
+ * The "send this document to the agent" hand-off, assembled by the panel and
+ * handed to whichever document viewer is mounted.
+ *
+ * Split this way for the same reason the image viewer's is: the viewer knows
+ * how to produce bytes (crop a page region, read the PDF it is previewing),
+ * and ONLY the panel knows the workspace-relative path the agent's own tools
+ * resolve and whether the live composer can take anything at all. A viewer
+ * that built its own prompt would have to be told the path anyway.
+ *
+ * `Required`: the panel always wires up all three. The viewer declares them
+ * optional, so a surface without a composer to feed (a test, a future
+ * read-only pane) can mount it without pretending to offer a hand-off.
+ */
+type DocChatHandoff = Required<PdfChatProps>;
+
 /** Pick the viewer component for a document tab by extension. */
-function renderDocViewer(file: OpenFile) {
+function renderDocViewer(file: OpenFile, docChat: DocChatHandoff) {
     const viewerFile = {
         agentId: file.agentId,
         workspaceId: file.workspaceId,
@@ -141,7 +161,7 @@ function renderDocViewer(file: OpenFile) {
         fileName: file.fileName,
         previewSeq: file.previewSeq,
     };
-    if (/\.pdf$/i.test(file.fileName)) return <PdfViewer {...viewerFile} />;
+    if (/\.pdf$/i.test(file.fileName)) return <PdfViewer {...viewerFile} {...docChat} />;
     // CSV keeps the grid (see OFFICE_EXT_RE); every other Office format
     // tries the print-layout PDF path first and keeps its JS renderer as
     // the fallback, so a machine without an engine — or one bad file —
@@ -167,6 +187,7 @@ function renderDocViewer(file: OpenFile) {
         return (
             <OfficePdfViewer
                 {...viewerFile}
+                {...docChat}
                 fallback={fallback}
                 size={file.previewSize}
                 mtimeMs={file.previewMtimeMs}
@@ -1238,6 +1259,57 @@ export function FileEditorPanel({ width }: { width: number }) {
         [activeFile, t],
     );
 
+    /**
+     * A cropped PDF PAGE, attached as the image it is. No pixel coordinates
+     * accompany it — unlike a bitmap, whose pixels ARE the file, a PDF page's
+     * pixels are a product of this one rasterisation and cannot be mapped back
+     * into the source, so quoting them would only mislead the agent. The page
+     * number is the one locator that does survive the round trip.
+     */
+    const handlePdfAddRegionToChat = useCallback(
+        (file: File, info: { page: number }) => {
+            if (!activeFile) return;
+            attachImageToChatComposer(file);
+            insertIntoChatComposer(
+                t("fileEditor.pdfViewer.regionPrompt", {
+                    path: sourceRelPath(activeFile),
+                    page: info.page,
+                }),
+            );
+        },
+        [activeFile, t],
+    );
+
+    /**
+     * The whole document, as the PDF the user was looking at. The prompt names
+     * the SOURCE path twice on purpose: the agent is being handed a rendered
+     * export, and has to know that what it must edit is the file in the
+     * workspace — not the attachment it is reading.
+     */
+    const handlePdfAddDocumentToChat = useCallback(
+        (file: File) => {
+            if (!activeFile) return;
+            attachFileToChatComposer(file);
+            insertIntoChatComposer(
+                t("fileEditor.pdfViewer.documentPrompt", {
+                    path: sourceRelPath(activeFile),
+                }),
+            );
+        },
+        [activeFile, t],
+    );
+
+    /** The one hand-off object every document viewer gets, so the disabled
+     *  rule and the path cannot drift from what the image viewer is told. */
+    const docChat = useMemo<DocChatHandoff>(
+        () => ({
+            addToChatDisabledTitle,
+            onAddRegionToChat: handlePdfAddRegionToChat,
+            onAddDocumentToChat: handlePdfAddDocumentToChat,
+        }),
+        [addToChatDisabledTitle, handlePdfAddRegionToChat, handlePdfAddDocumentToChat],
+    );
+
     const handleEditorChange = useCallback((value: string | undefined) => {
         if (value === undefined) return;
         const currentId = useFileEditorStore.getState().activeFileId;
@@ -1980,7 +2052,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                             </div>
                         }
                     >
-                        {renderDocViewer(activeFile)}
+                        {renderDocViewer(activeFile, docChat)}
                     </Suspense>
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
                     // Image preview (raster via the blob path, or SVG

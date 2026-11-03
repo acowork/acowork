@@ -56,6 +56,11 @@ interface DocumentViewerFrameProps {
     /** Degradation / fallback notice rendered above the body even when
      *  the frame is in its ready state (e.g. "previewing first N rows"). */
     banner?: ReactNode;
+    /** Viewer-specific header actions, placed left of the two escape hatches.
+     *  A slot rather than a second header: the frame owns the single row of
+     *  chrome every document tab shares, and a viewer that needs a button
+     *  ("frame a region", "send this file") supplies it here. */
+    extraActions?: ReactNode;
     /** Skip the blob-feed gating entirely and render `children`.
      *  For surfaces that carry no bytes of their own (the unsupported
      *  legacy-format card) — the header actions still work because they
@@ -75,7 +80,7 @@ const IDLE_FEED: WorkspaceFileBlobState = {
     retry: () => {},
 };
 
-export function DocumentViewerFrame({ file, state = IDLE_FEED, banner, bypassFeed, children }: DocumentViewerFrameProps) {
+export function DocumentViewerFrame({ file, state = IDLE_FEED, banner, extraActions, bypassFeed, children }: DocumentViewerFrameProps) {
     const { t } = useTranslation();
     const [saving, setSaving] = useState(false);
     const [opening, setOpening] = useState(false);
@@ -124,6 +129,7 @@ export function DocumentViewerFrame({ file, state = IDLE_FEED, banner, bypassFee
                 <span className="truncate text-xs font-medium text-text">{file.fileName}</span>
                 <span className="truncate font-mono text-10 text-text-tertiary">{file.relPath}</span>
                 <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {extraActions}
                     <button
                         type="button"
                         className={actionBtn}

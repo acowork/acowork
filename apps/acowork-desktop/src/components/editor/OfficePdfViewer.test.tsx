@@ -11,6 +11,9 @@
  *   - unavailable  → the fallback viewer + "approximate layout" + the
  *                    install hint, and NO error styling;
  *   - failed       → the fallback viewer + the reason + a working retry.
+ *
+ * The chat hand-off props are the routing this file can still check without a
+ * real viewer: they reach the PDF branch and never the fallback one.
  * Rust side of the contract (engine probing, soffice, COM) is not tested
  * here — this file only pins the UI's reaction to its answers.
  */
@@ -148,5 +151,27 @@ describe("OfficePdfViewer", () => {
     ).toBeTruthy();
     fireEvent.click(screen.getByText("fileEditor.docViewer.retry"));
     expect(h.convState.retry).toHaveBeenCalled();
+  });
+
+  it("forwards the chat hand-offs only to the PDF viewer", () => {
+    // The panel wires the hand-offs once and this wrapper only routes them:
+    // the JS fallback renderers have no print layout to offer, so promising
+    // "send the agent the way this looks when printed" there would be a lie.
+    const onAddRegionToChat = vi.fn();
+    const onAddDocumentToChat = vi.fn();
+    const handOffs = { addToChatDisabledTitle: "fileEditor.noChatTarget", onAddRegionToChat, onAddDocumentToChat };
+    h.convState.status = "ready";
+    h.convState.pdfBytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    render(<OfficePdfViewer {...file} {...handOffs} fallback={fallback} />);
+    expect(h.pdfProps[0]).toMatchObject({ ...handOffs, fileName: "paper.docx" });
+    // The tab's own addressing, not the wrapper's leftovers.
+    expect(h.pdfProps[0]).not.toHaveProperty("fallback");
+    expect(h.pdfProps[0]).not.toHaveProperty("size");
+    cleanup();
+
+    h.pdfProps.length = 0;
+    h.convState.status = "unavailable";
+    render(<OfficePdfViewer {...file} {...handOffs} fallback={fallback} />);
+    expect(h.pdfProps).toHaveLength(0);
   });
 });

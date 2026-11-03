@@ -1059,7 +1059,17 @@
       "retry": "재시도"
     },
     "pdfViewer": {
-      "title": "PDF 미리보기"
+      "title": "PDF 미리보기",
+      "selectRegion": "영역을 선택해 대화로 보내기",
+      "regionPickerTitle": "영역 선택",
+      "prevPage": "이전 페이지",
+      "nextPage": "다음 페이지",
+      "pageIndicator": "{{page}} / 전체 {{pages}} 페이지",
+      "addRegion": "선택 영역을 대화로 보내기",
+      "addDocument": "문서 전체를 대화로 보내기",
+      "regionPrompt": "첨부한 이미지는 {{path}}의 {{page}} 페이지에서 선택한 영역입니다. 인쇄할 때와 같은 배치로 표시한 것입니다.",
+      "documentPrompt": "이것은 {{path}}를 인쇄할 때와 같은 배치의 PDF로 첨부한 것입니다. 수정해야 할 파일은 워크스페이스의 {{path}}입니다.",
+      "rasterizeFailed": "이 PDF를 읽을 수 없습니다"
     },
     "officePdf": {
       "converting": "미리보기를 준비하는 중…",

@@ -13,7 +13,7 @@ import { cn } from "../../lib/utils";
 import { reasoningLevelsFor } from "../../lib/reasoningEfforts";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
-import { blobToBase64, extensionForMime } from "./clipboardImageExt";
+import { blobToBase64, extensionForFile } from "./clipboardImageExt";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
 import { detectPaste } from "./pasteDetect";
 import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
@@ -1674,14 +1674,18 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   /**
    * Workspace panel → composer bridge (see `lib/chatComposerBridge.ts`).
    *
-   * The image preview on the right fires this when the user sends a cursor
-   * coordinate or a dragged region. Text lands at the caret, exactly like a
-   * paste; the region's PNG takes the SAME route as a clipboard screenshot —
-   * `save_clipboard_blob` writes the bytes to a temp file, and the existing
-   * path-based pipeline uploads it — because this composer's upload path is
-   * filesystem-based. The `File` is turned back into base64 here rather than
-   * serialised across the IPC as a byte array, for the reason spelled out in
-   * `handlePaste`.
+   * The preview on the right fires this when the user sends a cursor
+   * coordinate, a cropped region of an image or a PDF page, or a whole PDF.
+   * Text lands at the caret, exactly like a paste; a file takes the SAME route
+   * as a clipboard screenshot — `save_clipboard_blob` writes the bytes to a
+   * temp file, and the existing path-based pipeline uploads it — because this
+   * composer's upload path is filesystem-based. The `File` is turned back into
+   * base64 here rather than serialised across the IPC as a byte array, for the
+   * reason spelled out in `handlePaste`.
+   *
+   * The temp file's extension comes from the file's own NAME, not its MIME:
+   * the runtime classifies an attachment by extension, and a document sent
+   * from the PDF viewer has to arrive as a document.
    */
   useChatComposerBridge((request) => {
     if (request.kind === "text") {
@@ -1692,12 +1696,18 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
       try {
         const path = await invoke<string>("save_clipboard_blob", {
           dataBase64: await blobToBase64(request.file),
-          extension: extensionForMime(request.file.type || "image/png"),
+          extension: extensionForFile(request.file),
         });
         void uploadFileAtPath(path);
       } catch (err) {
-        log.error("[ChatPanel] workspace image bridge failed", err);
-        addToast({ type: "error", message: t("fileEditor.imageViewer.captureFailed") });
+        log.error("[ChatPanel] workspace file bridge failed", err);
+        addToast({
+          type: "error",
+          message:
+            request.kind === "file"
+              ? t("documentChip.uploadFailed")
+              : t("fileEditor.imageViewer.captureFailed"),
+        });
       }
     })();
   });

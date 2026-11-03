@@ -21,8 +21,17 @@
 // different ways — the Chat surface takes a `File` through
 // `chatSessionStore.upload`, the execution surface writes a temp file through
 // the Rust `save_clipboard_blob` command and then re-uses its path-based
-// pipeline — so `kind: "image"` carries the bytes (as a `File`) and each
-// composer chooses its own way to the Gateway.
+// pipeline — so a file-carrying request carries the bytes (as a `File`) and
+// each composer chooses its own way to the Gateway.
+//
+// `kind` says which END of the Gateway pipeline the file belongs to, not what
+// it contains: "image" is a picture the model should see (a pasted screenshot,
+// a cropped region — including a crop taken out of a PDF page), "file" is a
+// document the model should be handed as itself (a whole PDF). The two differ
+// downstream — the runtime rasterises the former into an image part and, for
+// the latter, only offers a document part when the model can take a PDF — and
+// the distinction cannot be recovered from the MIME type at the composer, which
+// is why the sender states it.
 
 /** One request for the composer currently on screen. */
 export type ChatComposerRequest =
@@ -35,6 +44,11 @@ export type ChatComposerRequest =
           kind: "image";
           /** Already named and MIME-typed — the composer uploads it as-is. */
           file: File;
+      }
+    | {
+          kind: "file";
+          /** A document attachment. Already named and MIME-typed. */
+          file: File;
       };
 
 const COMPOSER_EVENT = "acowork:chat-composer-request";
@@ -45,9 +59,16 @@ export function insertIntoChatComposer(text: string): void {
     dispatch({ kind: "text", text });
 }
 
-/** Attach `file` to the live composer's pending attachment tray. */
+/** Attach `file` to the live composer's pending attachment tray, as a picture
+ *  the model should see. */
 export function attachImageToChatComposer(file: File): void {
     dispatch({ kind: "image", file });
+}
+
+/** Attach `file` to the live composer's pending attachment tray, as a document
+ *  the model should receive whole (a PDF). */
+export function attachFileToChatComposer(file: File): void {
+    dispatch({ kind: "file", file });
 }
 
 /** Subscribe a composer to requests. Returns the unsubscribe function. */
@@ -58,7 +79,7 @@ export function subscribeChatComposerRequests(
         const detail = (e as CustomEvent<ChatComposerRequest>).detail;
         if (!detail) return;
         if (detail.kind === "text" && !detail.text) return;
-        if (detail.kind === "image" && !detail.file) return;
+        if ((detail.kind === "image" || detail.kind === "file") && !detail.file) return;
         handler(detail);
     };
     window.addEventListener(COMPOSER_EVENT, listener);

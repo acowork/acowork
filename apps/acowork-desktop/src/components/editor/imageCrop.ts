@@ -25,6 +25,21 @@ export interface CropSource {
     naturalHeight: number;
 }
 
+/**
+ * The same intrinsic size under the names a `<canvas>` uses.
+ *
+ * A canvas IS a bitmap — `width`/`height` are its pixel dimensions, exactly
+ * what `naturalWidth`/`naturalHeight` mean for an element that had to be
+ * decoded — so a rendered page can be cropped with this function and nothing
+ * else, as long as the type admits both spellings. `cropImageRegion` never
+ * READS either pair (it draws from the region the caller measured), so this is
+ * a naming widened, not a behaviour changed.
+ */
+export interface CanvasCropSource {
+    width: number;
+    height: number;
+}
+
 export type CanvasFactory = (width: number, height: number) => HTMLCanvasElement;
 
 function defaultCanvasFactory(width: number, height: number): HTMLCanvasElement {
@@ -43,7 +58,7 @@ function defaultCanvasFactory(width: number, height: number): HTMLCanvasElement 
  * unreadable file in the transcript.
  */
 export async function cropImageRegion(
-    source: CanvasImageSource & CropSource,
+    source: CanvasImageSource & (CropSource | CanvasCropSource),
     region: ImageRect,
     createCanvas: CanvasFactory = defaultCanvasFactory,
 ): Promise<Blob> {

@@ -1058,7 +1058,17 @@
       "retry": "再試行"
     },
     "pdfViewer": {
-      "title": "PDF プレビュー"
+      "title": "PDF プレビュー",
+      "selectRegion": "範囲を選んで会話に送信",
+      "regionPickerTitle": "範囲を選択",
+      "prevPage": "前のページ",
+      "nextPage": "次のページ",
+      "pageIndicator": "{{page}} / {{pages}} ページ",
+      "addRegion": "選択範囲を会話に送信",
+      "addDocument": "文書全体を会話に送信",
+      "regionPrompt": "添付した画像は {{path}} の {{page}} ページで選択した範囲です。印刷時と同じ並びで表示しています。",
+      "documentPrompt": "これは {{path}} を印刷時と同じ並びの PDF として添付したものです。修正対象はあくまでワークスペース内の {{path}} です。",
+      "rasterizeFailed": "この PDF を読み込めませんでした"
     },
     "officePdf": {
       "converting": "プレビューの準備中…",

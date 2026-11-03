@@ -954,11 +954,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
 
   // ── Workspace panel → composer bridge ─────────────────────────────
-  // The image preview in the right-hand workspace panel fires
-  // `insertIntoChatComposer` / `attachImageToChatComposer` (see
-  // `lib/chatComposerBridge.ts`) when the user sends a coordinate point or a
-  // dragged region. Only one composer is mounted at a time, so no session id
-  // is needed; `useChatComposerBridge` handles the latest-closure plumbing.
+  // The preview in the right-hand workspace panel fires
+  // `insertIntoChatComposer` / `attachImageToChatComposer` /
+  // `attachFileToChatComposer` (see
+  // `lib/chatComposerBridge.ts`) when the user sends a coordinate point, a
+  // cropped region, or a whole PDF. Only one composer is mounted at a time, so
+  // no session id is needed; `useChatComposerBridge` handles the
+  // latest-closure plumbing.
   useChatComposerBridge((request) => {
     if (request.kind === "text") {
       insertTextAtCaret(request.text);
@@ -966,7 +968,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     }
     // Same path the paste handler's `image` branch takes: the bytes are
     // already in the WebView, so they upload straight through the Chat
-    // session's `files/` route, no temp-file roundtrip.
+    // session's `files/` route, no temp-file roundtrip. Both file kinds take
+    // it unchanged — the runtime reads an attachment's role off the NAME the
+    // sender gave it (a `…-region-…png` crop, a `….pdf` document), so there is
+    // nothing for this surface to branch on.
     void uploadFiles([request.file]);
   });
 

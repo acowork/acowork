@@ -1048,7 +1048,17 @@
       "retry": "重試"
     },
     "pdfViewer": {
-      "title": "PDF 預覽"
+      "title": "PDF 預覽",
+      "selectRegion": "框選區域傳送到對話",
+      "regionPickerTitle": "框選區域",
+      "prevPage": "上一頁",
+      "nextPage": "下一頁",
+      "pageIndicator": "第 {{page}} / 共 {{pages}} 頁",
+      "addRegion": "將選取區域傳送到對話",
+      "addDocument": "將整份檔案傳送到對話",
+      "regionPrompt": "附圖是我在 {{path}} 第 {{page}} 頁上框選的區域，排版與列印時一致。",
+      "documentPrompt": "這是 {{path}}，依列印時實際的排版作為 PDF 傳送。要修改的仍然是工作區裡的 {{path}} 本身。",
+      "rasterizeFailed": "無法讀取這份 PDF"
     },
     "officePdf": {
       "converting": "正在準備預覽檔案…",

@@ -1,9 +1,9 @@
 /**
- * Map a raster MIME to a file extension (lowercase, no dot).
+ * Extension plumbing for files that reach the composer as bytes.
  *
- * Used by the chat panel's paste handler when it bridges a clipboard
- * image Blob through the Rust temp-file writer — the writer needs an
- * extension to form the temp path, and the runtime's `upload_file`
+ * Used by the chat panel's paste handler and by the workspace-panel bridge
+ * when they push a Blob through the Rust temp-file writer — the writer needs
+ * an extension to form the temp path, and the runtime's `upload_file`
  * pipeline reads the extension to classify the attachment (image vs
  * document).
  *
@@ -31,6 +31,23 @@ export function extensionForMime(mime: string): string {
       return tail.replace(/[^a-z0-9]/gi, "").toLowerCase() || "png";
     }
   }
+}
+
+/**
+ * Pick the extension for a `File` handed over by the composer bridge.
+ *
+ * Order matters and is the opposite of the intuition: the NAME wins, the MIME
+ * is only a fallback. The runtime's `upload_file` does not sniff content — it
+ * classifies the attachment (image vs document) by the extension it is given —
+ * so the name the sender chose is the assertion, and a MIME cannot always
+ * express one: a PDF with an empty `type` would otherwise be written out as a
+ * `.png`, and `image/svg+xml` would come back as `svgxml`. A clipboard blob has
+ * no name at all, which is exactly the case the MIME fallback is for.
+ */
+export function extensionForFile(file: File): string {
+  const match = /\.([a-z0-9]{1,8})$/i.exec(file.name);
+  if (match) return match[1].toLowerCase();
+  return extensionForMime(file.type || "image/png");
 }
 
 /**

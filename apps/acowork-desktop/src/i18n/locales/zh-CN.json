@@ -1156,7 +1156,17 @@
       "retry": "重试"
     },
     "pdfViewer": {
-      "title": "PDF 预览"
+      "title": "PDF 预览",
+      "selectRegion": "框选区域发送到对话",
+      "regionPickerTitle": "框选区域",
+      "prevPage": "上一页",
+      "nextPage": "下一页",
+      "pageIndicator": "第 {{page}} / 共 {{pages}} 页",
+      "addRegion": "将选中区域发送到对话",
+      "addDocument": "将整份文档发送到对话",
+      "regionPrompt": "附图是我在 {{path}} 第 {{page}} 页上框选的区域，排版和打印出来时一致。",
+      "documentPrompt": "这是 {{path}}，按打印出来时的排版作为 PDF 发送。要修改的仍然是工作区里的 {{path}} 本身。",
+      "rasterizeFailed": "无法读取这份 PDF"
     },
     "officePdf": {
       "converting": "正在准备预览文件…",

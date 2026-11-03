@@ -23,6 +23,14 @@
  * owns its own `DocumentViewerFrame` header — a notice cannot be injected
  * into another component's chrome, and stacking a second header above it
  * would read as two documents.
+ *
+ * The chat hand-off props are forwarded to the inner `PdfViewer` untouched.
+ * The tab keeps showing the SOURCE name (`deck.pptx`) because that is the
+ * document the user opened; the attachment is renamed to `deck.pdf` inside
+ * the viewer, so the runtime classifies it as the document it actually is.
+ * On the degraded paths there is nothing to forward to — the JS fallback
+ * renderers carry no hand-off, because a document this machine could not
+ * render as a PDF has no print layout to send.
  */
 import { Loader2 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -34,8 +42,9 @@ import {
     type ViewerFileProps,
 } from "./DocumentViewerFrame";
 import PdfViewer from "./PdfViewer";
+import type { PdfChatProps } from "./PdfViewer";
 
-export interface OfficePdfViewerProps extends ViewerFileProps {
+export interface OfficePdfViewerProps extends ViewerFileProps, PdfChatProps {
     /** The existing JS renderer for this format, shown while conversion is
      *  unavailable or failed. Passed as an element so this component stays
      *  free of format-specific imports (and lazy-loading stays in
@@ -67,6 +76,9 @@ export default function OfficePdfViewer(props: OfficePdfViewerProps) {
         return (
             <PdfViewer
                 {...viewerFile}
+                addToChatDisabledTitle={props.addToChatDisabledTitle}
+                onAddRegionToChat={props.onAddRegionToChat}
+                onAddDocumentToChat={props.onAddDocumentToChat}
                 external={{ state: "ready", bytes: conv.pdfBytes, retry: conv.retry }}
                 banner={
                     <div className="shrink-0 border-b border-border-divider bg-input px-3 py-1 text-11 text-text-tertiary">

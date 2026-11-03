@@ -61,6 +61,7 @@
     "micromark-extension-gfm": "^3.0.0",
     "monaco-editor": "^0.55.1",
     "monaco-languageclient": "^10.7.0",
+    "pdfjs-dist": "^6.5.438",
     "qrcode": "^1.5.4",
     "react": "^19",
     "react-dom": "^19",

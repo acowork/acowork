@@ -1440,7 +1440,17 @@
       "retry": "Retry"
     },
     "pdfViewer": {
-      "title": "PDF preview"
+      "title": "PDF preview",
+      "selectRegion": "Frame a region to send to the chat",
+      "regionPickerTitle": "Select a region",
+      "prevPage": "Previous page",
+      "nextPage": "Next page",
+      "pageIndicator": "Page {{page}} / {{pages}}",
+      "addRegion": "Add selection to Chat",
+      "addDocument": "Add document to Chat",
+      "regionPrompt": "The attached image is the area I framed on page {{page}} of {{path}}, shown the way it prints.",
+      "documentPrompt": "This is {{path}}, added as a PDF shown the way it prints. Any change still belongs in the {{path}} file in the workspace.",
+      "rasterizeFailed": "Could not read this PDF"
     },
     "officePdf": {
       "converting": "Preparing file for preview…",

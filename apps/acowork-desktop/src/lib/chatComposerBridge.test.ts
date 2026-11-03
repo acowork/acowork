@@ -3,6 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
+    attachFileToChatComposer,
     attachImageToChatComposer,
     insertIntoChatComposer,
     subscribeChatComposerRequests,
@@ -29,6 +30,19 @@ describe("chatComposerBridge", () => {
         expect(request.kind === "image" && request.file).toBe(file);
     });
 
+    it("delivers a document as the caller's own File", () => {
+        // `kind: "file"` is the whole-document path: the composer must be able
+        // to tell a PDF from a crop of a PDF page without sniffing bytes.
+        const handler = vi.fn();
+        const off = subscribeChatComposerRequests(handler);
+        const file = new File(["%PDF"], "report.pdf", { type: "application/pdf" });
+        attachFileToChatComposer(file);
+        off();
+        const request = handler.mock.calls[0][0] as ChatComposerRequest;
+        expect(request.kind).toBe("file");
+        expect(request.kind === "file" && request.file).toBe(file);
+    });
+
     it("stops delivering after unsubscribe", () => {
         const handler = vi.fn();
         subscribeChatComposerRequests(handler)();
@@ -42,6 +56,10 @@ describe("chatComposerBridge", () => {
         insertIntoChatComposer("");
         window.dispatchEvent(new CustomEvent("acowork:chat-composer-request", { detail: { kind: "text", text: "" } }));
         window.dispatchEvent(new CustomEvent("acowork:chat-composer-request", { detail: undefined }));
+        // A file request with nothing in it is the same non-event — neither
+        // kind may reach a composer as an empty attachment.
+        window.dispatchEvent(new CustomEvent("acowork:chat-composer-request", { detail: { kind: "image" } }));
+        window.dispatchEvent(new CustomEvent("acowork:chat-composer-request", { detail: { kind: "file" } }));
         off();
         expect(handler).not.toHaveBeenCalled();
     });
