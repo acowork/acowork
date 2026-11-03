@@ -2,12 +2,12 @@
  * ChatAddressPicker — the second level of the `@` (ADR-106 D7).
  *
  * The first level answers "which agent"; this one answers "which of its runs".
- * It is deliberately not a session browser: the rows come from the Runtime's
- * candidate filter (`GET …/chat-candidates`), which is the permission that says
- * what this human may address in THIS chat — my runs in a group, this chat's
- * bound sessions plus my own hand-started ones in a 1:1, never terminal work.
- * A picker built off any other list would offer a session the turn could not
- * legally be delivered to.
+ * The rows come from `GET …/sessions` with `chat_session_id` / `surface`, which
+ * is the same paging path the session-history menu uses, narrowed by the
+ * Runtime's own candidate rule (ADR-106 D7): what the server hands back IS what
+ * this chat may address, so the picker never recomputes a permission it cannot
+ * see. No window and no row cap — the human pages and searches as far back as
+ * they want instead of wondering why a session they remember is missing.
  *
  * Two rules the list must keep:
  * - **"new task" is always the first row.** D6's cheap escape exists because a
@@ -28,25 +28,31 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type RefObject,
 } from "react";
-import { Loader2, Plus } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, Plus, Search } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
-import {
-  fetchChatCandidates,
-  type CandidateSurface,
-  type ChatCandidate,
-} from "../../lib/chatCandidates";
+import { useAgentStore } from "../../stores/agentStore";
+import { chatListKey } from "../../stores/agentStore";
+import { useChatStore } from "../../stores/chatStore";
+import { isProcessing } from "../../lib/types";
+import { listRowSelected } from "../../lib/ui-styles";
+import type { ChatSurface, SessionInfo } from "../../lib/types";
+import { FilledBrainIcon, OutlineBrainIcon } from "../common/BrainIcon";
+import { StyledInput } from "../common/StyledInput";
+import { formatRelativeTime } from "./SessionTabBar";
 
 /** What the human decided. `{}` = no address at all (the ladder continues). */
 export interface AddressPick {
   sessionId?: string;
   forceNew?: boolean;
-  /** Display name of the named session - the chip that records the address on
-   *  the composer needs the human's own words, not an id. */
+  /** Display name of the named session, as shown in the list - the chip that
+   *  records the address on the composer needs the human's own words, not an
+   *  id. */
   label?: string;
 }
 
@@ -54,12 +60,16 @@ export interface AddressPick {
 export type AddressChoice = NonNullable<AddressPick> & { sessionId?: string };
 
 interface ChatAddressPickerProps {
-  /** Whose runs these are. The address rides the wire per agent (D7's
-   *  `target_sessions`), so the picker must know the instance it is naming. */
+  /** Whose runs these are: the agent instance whose session list is shown, and
+   *  the agent the address is finally delivered to. */
   instanceId: string;
-  /** Part of the address, not a filter: the candidate set is per chat. */
+  /** Which conversation the human is writing in. Part of the address, not a
+   *  filter the client could invent: the Runtime narrows the listing by it, so
+   *  a non-participant is refused rather than shown somebody else's work. */
   chatSessionId: string;
-  surface: CandidateSurface;
+  /** `group` for a multi-party chat; a 1:1 leaves it `direct` (the default).
+   *  The two have different rules, so the surface is stated, not inferred. */
+  surface?: ChatSurface;
   onPick: (pick: AddressPick) => void;
   onClose: () => void;
   /** Shown as the list's subject on a multi-party surface, where "the sessions"
@@ -72,24 +82,19 @@ interface ChatAddressPickerProps {
   anchorRef?: RefObject<HTMLElement | null>;
 }
 
-/** One line of the list. `session` rows carry the candidate; the two fixed rows
+/** One line of the list. `session` rows carry the session; the two fixed rows
  *  are the escape (first) and the refusal to name anything (last). */
 type Row =
   | { kind: "new" }
-  | { kind: "session"; candidate: ChatCandidate }
+  | { kind: "session"; session: SessionInfo }
   | { kind: "none" };
 
-const STATUS_KEYS: Record<string, string> = {
-  working: "chatView.address.statusWorking",
-  idle: "chatView.address.statusIdle",
-  errored: "chatView.address.statusErrored",
-  closed: "chatView.address.statusIdle",
-};
+const EMPTY_SESSIONS: SessionInfo[] = [];
 
 export function ChatAddressPicker({
   instanceId,
   chatSessionId,
-  surface,
+  surface = "direct",
   onPick,
   onClose,
   agentName,
@@ -97,34 +102,48 @@ export function ChatAddressPicker({
   anchorRef,
 }: ChatAddressPickerProps) {
   const { t } = useTranslation();
-  const [candidates, setCandidates] = useState<ChatCandidate[] | null>(null);
-  const [failed, setFailed] = useState(false);
+  // This chat's own page of addressable sessions — the sidebar's list of every
+  // session the agent has is a different question, and sharing it would let
+  // opening a picker move the sidebar under the human.
+  const listKey = chatListKey(instanceId, surface, chatSessionId);
+  const storage = useAgentStore((s) => s.chatSessionLists[listKey]);
+  const fetchChatSessions = useAgentStore((s) => s.fetchChatSessions);
+  const sessions = storage?.sessions ?? EMPTY_SESSIONS;
+  const currentPage = storage?.pagination.currentPage ?? 1;
+  const totalPages = storage?.pagination.totalPages ?? 1;
+  const loading = storage?.isLoading ?? false;
+  /** The listing read failed — not "this chat has no tasks yet". */
+  const failed = storage?.error ?? false;
+  /** Whether a task is still working. The only live source of that is the MQTT
+   *  `session_state` push, which lands in `chatStore` for every session this
+   *  window has seen (`fetchSessions`' ADR-014 pass cannot help: the session
+   *  listing carries no status field). A session with no entry here was never
+   *  reported busy, which is idle — the outline mark, never an invented
+   *  breath. Subscribing rather than reading `getState()` per row is what keeps
+   *  the mark live while the popup stays open. */
+  const sessionStates = useChatStore(
+    (s) => s.agentStates[instanceId]?.sessionStates,
+  );
+  const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  const [attempt, setAttempt] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const ac = new AbortController();
-    let alive = true;
-    setFailed(false);
-    setCandidates(null);
-    fetchChatCandidates(instanceId, chatSessionId, surface, { signal: ac.signal })
-      .then((rows) => {
-        if (alive) setCandidates(rows);
-      })
-      .catch(() => {
-        if (alive && !ac.signal.aborted) setFailed(true);
-      });
-    return () => {
-      alive = false;
-      ac.abort();
-    };
-  }, [instanceId, chatSessionId, surface, attempt]);
+    // Scoped per chat, so nothing else in the app has fetched it: the first
+    // open of this chat's picker asks for the first page.
+    if (!useAgentStore.getState().chatSessionLists[listKey]) {
+      void fetchChatSessions(instanceId, chatSessionId, surface, 1);
+    }
+  }, [listKey, instanceId, chatSessionId, surface, fetchChatSessions]);
 
-  // The list owns the keyboard once it is open, so focus it — the composer keeps
-  // the draft in state, so leaving the textarea costs the human nothing.
+  // The popup opens in its search box: the first gesture here is typing a
+  // filter, so the caret has to start where that happens. Keyboard traversal
+  // still belongs to the list — arrows / Enter / Escape bubble from the input up
+  // to `listRef`'s handler, so the two do not fight. The composer keeps its draft
+  // in state, so leaving the textarea costs the human nothing.
   useEffect(() => {
-    listRef.current?.focus();
+    inputRef.current?.focus();
   }, []);
 
   // A popup only its opener can dismiss does not read as a popup: pointer-down
@@ -141,17 +160,36 @@ export function ChatAddressPicker({
     return () => document.removeEventListener("mousedown", onMouseDown);
   }, [onClose, anchorRef]);
 
+  // Search filters the page that is loaded, exactly like the session-history
+  // menu does — server-side search would be a second query path for one list.
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return q
+      ? sessions.filter((s) => (s.title ?? "").toLowerCase().includes(q))
+      : sessions;
+  }, [sessions, query]);
+
   const rows: Row[] = [
     { kind: "new" },
-    ...(candidates ?? []).map((candidate) => ({ kind: "session" as const, candidate })),
-    ...(candidates && candidates.length > 0 ? [{ kind: "none" as const }] : []),
+    ...matches.map((session) => ({ kind: "session" as const, session })),
+    ...(sessions.length > 0 ? [{ kind: "none" as const }] : []),
   ];
+
+  // A new page or query is a new list: the highlight must not stay on a row the
+  // human can no longer see.
+  useEffect(() => {
+    setActive(0);
+  }, [currentPage, query]);
 
   const choose = useCallback(
     (row: Row) => {
       if (row.kind === "new") onPick({ forceNew: true });
       else if (row.kind === "none") onPick({});
-      else onPick({ sessionId: row.candidate.session_id, label: row.candidate.label });
+      else
+        onPick({
+          sessionId: row.session.session_id,
+          label: row.session.title ?? undefined,
+        });
     },
     [onPick],
   );
@@ -198,41 +236,55 @@ export function ChatAddressPicker({
         className,
       )}
     >
-      <div className="px-2 pb-1 pt-1.5 text-[0.7rem] text-text-tertiary">
+      <div className="px-4 pb-1 pt-2.5 text-[0.7rem] text-text-tertiary">
         {agentName
           ? t("chatView.address.subject", { name: agentName })
           : t("chatView.address.label")}
       </div>
-      {failed ? (
-        <button
-          type="button"
-          role="option"
-          aria-selected={false}
-          onClick={() => setAttempt((a) => a + 1)}
-          className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs text-text-secondary hover:bg-nav-item-hover"
-        >
-          <span className="min-w-0 flex-1 truncate">{t("chatView.address.failed")}</span>
-          <span className="shrink-0 text-[0.7rem] text-accent">{t("chatView.block.retry")}</span>
-        </button>
-      ) : null}
-      {!failed && candidates === null ? (
-        <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-text-tertiary">
-          <Loader2 size={14} className="animate-spin" />
-          {t("chatView.block.loading")}
+      <div className="border-b border-border-divider px-4 py-2">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-text-tertiary" />
+          <StyledInput
+            ref={inputRef}
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("chatView.address.search")}
+            aria-label={t("chatView.address.search")}
+            className="pl-7"
+          />
         </div>
-      ) : null}
-      {failed || candidates === null
-        ? null
-        : rows.map((row, i) => {
+      </div>
+      {/* The list region is inset from the shell so a row's highlight wash
+          floats inside the hairline instead of bleeding to both edges — the
+          `titleBarMenuPanel` grammar. `role="none"` keeps the options owned by
+          the `listbox` above. */}
+      <div role="none" className="px-1 pb-1">
+        {loading && sessions.length === 0 ? (
+          <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-text-tertiary">
+            <Loader2 size={14} className="animate-spin" />
+            {t("chatView.block.loading")}
+          </div>
+        ) : (
+          rows.map((row, i) => {
             const label =
               row.kind === "new"
                 ? t("chatView.block.newTask")
                 : row.kind === "none"
                   ? t("chatView.address.noPreference")
-                  : row.candidate.label;
+                  : (row.session.title ?? t("chatView.address.untitled"));
+            /** The brain pair from the session-history list (design 27 §6.1):
+             *  solid + breathing while the run is working, outline when it is
+             *  settled. No accent arm here — the cursor row already wears the
+             *  accent wash, and the picker has no "which task is on screen".
+             *  The words ride the icon so a screen reader gets what the glyph
+             *  says. */
+            const working =
+              row.kind === "session" &&
+              isProcessing(sessionStates?.[row.session.session_id]?.sessionStatus);
             return (
               <button
-                key={row.kind === "session" ? row.candidate.session_id : row.kind}
+                key={row.kind === "session" ? row.session.session_id : row.kind}
                 type="button"
                 role="option"
                 aria-selected={i === active}
@@ -240,25 +292,90 @@ export function ChatAddressPicker({
                 onClick={() => choose(row)}
                 onMouseEnter={() => setActive(i)}
                 className={
-                  "flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs " +
-                  (i === active ? "bg-nav-item-hover text-text" : "text-text-secondary")
+                  // The cursor row wears the app-wide accent tint (the same
+                  // family the session-history list uses), never the neutral
+                  // `--color-nav-item-hover`, which is reserved for icon
+                  // controls.
+                  "flex w-full items-center gap-2 rounded px-3 py-1.5 text-left text-xs " +
+                  (i === active ? `${listRowSelected} text-text` : "text-text-secondary")
                 }
               >
                 {row.kind === "new" ? <Plus size={14} className="shrink-0" /> : null}
+                {row.kind === "session" ? (
+                  <>
+                    {working ? (
+                      <FilledBrainIcon className="h-3.5 w-3.5 shrink-0 animate-pulse text-text-secondary" />
+                    ) : (
+                      <OutlineBrainIcon className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+                    )}
+                    <span className="sr-only">
+                      {t(working ? "chatView.address.statusWorking" : "chatView.address.statusIdle")}
+                    </span>
+                  </>
+                ) : null}
                 <span className="min-w-0 flex-1 truncate">{label}</span>
                 {row.kind === "session" ? (
                   <span className="shrink-0 text-[0.7rem] text-text-tertiary">
-                    {t(STATUS_KEYS[row.candidate.status] ?? "chatView.address.statusIdle")}
+                    {formatRelativeTime(row.session.created_at, t)}
                   </span>
                 ) : null}
               </button>
             );
-          })}
-      {candidates !== null && candidates.length === 0 ? (
-        <div className="px-2 py-1.5 text-[0.7rem] text-text-tertiary">
+          })
+        )}
+      </div>
+      {sessions.length === 0 && !loading && failed ? (
+        <div className="flex items-center gap-1.5 px-4 py-1.5 text-[0.7rem] text-text-tertiary">
+          {t("chatView.address.failed")}
+          <button
+            type="button"
+            onClick={() =>
+              void fetchChatSessions(instanceId, chatSessionId, surface, 1)
+            }
+            className="rounded px-1 text-brand-primary hover:bg-zinc-100 dark:hover:bg-zinc-800"
+          >
+            {t("common.retry")}
+          </button>
+        </div>
+      ) : sessions.length === 0 && !loading ? (
+        <div className="px-4 py-1.5 text-[0.7rem] text-text-tertiary">
           {t("chatView.address.empty")}
         </div>
       ) : null}
+      {/* Pager — same chrome as the session-history menu: the human decides when
+          to walk further back instead of a threshold they cannot see. */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between border-t border-border-divider px-3 py-1.5">
+          <button
+            type="button"
+            onClick={() =>
+              void fetchChatSessions(instanceId, chatSessionId, surface, currentPage - 1)
+            }
+            disabled={currentPage <= 1 || loading}
+            aria-label={t("chatView.address.prevPage")}
+            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+          >
+            <ChevronLeft className="h-3.5 w-3.5" />
+          </button>
+          <span className="text-11 text-text-tertiary">
+            {t("chatView.address.pagerOf", {
+              current: currentPage,
+              total: totalPages,
+            })}
+          </span>
+          <button
+            type="button"
+            onClick={() =>
+              void fetchChatSessions(instanceId, chatSessionId, surface, currentPage + 1)
+            }
+            disabled={currentPage >= totalPages || loading}
+            aria-label={t("chatView.address.nextPage")}
+            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+          >
+            <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

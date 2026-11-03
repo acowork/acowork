@@ -11,7 +11,10 @@
  *   2. the freshness loop — the `chat/changed` doorbell is content-free, so
  *      `wake()` re-reads over HTTP and never patches a row from a signal;
  *      `sendText` re-reads once after the POST because the durable row
- *      exists before the delivery resolves (§5.1).
+ *      exists before the delivery resolves (§5.1);
+ *   3. the in-flight turn claim (`inflight`) — what the surfaces key the wait
+ *      line and the composer lock on for the whole window between the POST
+ *      returning and the turn's first durable row (ADR-106 D9).
  *
  * `fetch` is the seam (the store talks to the Gateway's user proxy
  * directly); local mode (no account) must fall the store to mode 'exec'.
@@ -19,13 +22,14 @@
  * resolves it through the default endpoint and never fetches a session
  * list.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import {
   useChatSessionStore,
   wakeAgentChat,
   type ChatMessageRow,
   type ChatSessionConfig,
 } from "./chatSessionStore";
+import { TURN_INFLIGHT_DEADLINE_MS } from "../lib/chatTurnInflight";
 import { useAuthStore } from "./authStore";
 
 const PAGE = { messages: [] as ChatMessageRow[], total: 0 };
@@ -66,7 +70,13 @@ const calls = (needle: string) =>
 
 describe("chatSessionStore freshness loop", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({
+      byAgent: {},
+      windows: {},
+      sending: {},
+      inflight: {},
+      draft: {},
+    });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
@@ -125,7 +135,13 @@ describe("chatSessionStore freshness loop", () => {
 
 describe("chatSessionStore seed draft (design 27 §4.5 — backend-persisted, store is a cache)", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({
+      byAgent: {},
+      windows: {},
+      sending: {},
+      inflight: {},
+      draft: {},
+    });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
@@ -205,7 +221,13 @@ describe("chatSessionStore seed draft (design 27 §4.5 — backend-persisted, st
 
 describe("sendGroupText attachment passthrough (design 27 §4.2.1 / §5.3)", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({
+      byAgent: {},
+      windows: {},
+      sending: {},
+      inflight: {},
+      draft: {},
+    });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
@@ -278,7 +300,13 @@ describe("sendGroupText attachment passthrough (design 27 §4.2.1 / §5.3)", () 
 
 describe("the explicit address rides the send (ADR-106 D6/D7)", () => {
   beforeEach(() => {
-    useChatSessionStore.setState({ byAgent: {}, windows: {}, sending: {}, draft: {} });
+    useChatSessionStore.setState({
+      byAgent: {},
+      windows: {},
+      sending: {},
+      inflight: {},
+      draft: {},
+    });
     fetchMock.mockClear();
     fetchMock.mockImplementation(defaultFetch);
     useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
@@ -366,5 +394,170 @@ describe("the explicit address rides the send (ADR-106 D6/D7)", () => {
       force_new: true,
     });
     expect(bodyOf("/api/intents/chat-message").target_session).toBeUndefined();
+  });
+});
+
+/**
+ * The claim the Chat surfaces lock on (ADR-106 D9).
+ *
+ * `sending` only covers the POST, which returns as soon as delivery lands (~150
+ * ms measured) while the turn's first durable row can be a minute behind it. So
+ * the store keeps one more piece of state: the row id THIS device's own response
+ * handed back, held until the surface sees a row answer it, and released by a
+ * deadline for the case the surface cannot see — a Runtime that died before it
+ * opened the round, which writes no outcome row at all.
+ *
+ * Two rules the tests below are really about: a claim is only ever taken from a
+ * send that actually put something in front of an agent (a failed 1:1 delivery
+ * writes no receipt, an archived group row gets no answer, so both would lock
+ * the composer against a row that can never arrive), and a release only ever
+ * clears the claim it names, so a stale settle or a stale deadline cannot unlock
+ * a fresher turn.
+ */
+describe("the in-flight turn claim (ADR-106 D9)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useChatSessionStore.setState({
+      byAgent: {},
+      windows: {},
+      sending: {},
+      inflight: {},
+      draft: {},
+    });
+    fetchMock.mockClear();
+    fetchMock.mockImplementation(defaultFetch);
+    useAuthStore.setState({ account: { user_id: "u1" } as never, accessToken: "tok" });
+  });
+
+  afterEach(() => {
+    // Claims arm a 300 s timer; never let one outlive its case.
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  /** Answers the named send endpoint with `body` and everything else normally. */
+  function respondTo(needle: string, body: unknown) {
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (String(url).includes(needle)) return { ok: true, json: async () => body };
+      return defaultFetch(url, init);
+    });
+  }
+
+  const claimOf = (sessionId: string) => useChatSessionStore.getState().inflight[sessionId];
+
+  it("a delivered 1:1 send claims the row id its OWN response carried", async () => {
+    // Not a row read off the transcript — the id the Gateway gave this device's
+    // message, which is what makes the claim first-person.
+    respondTo("/api/intents/chat-message", { message_id: "m-1", status: "delivered" });
+    await useChatSessionStore.getState().sendText("cs-1", "hello");
+    expect(claimOf("cs-1")?.messageId).toBe("m-1");
+  });
+
+  it("a 1:1 delivery that failed claims nothing: nothing will ever answer it", async () => {
+    // This arm writes no receipt into the Chat (the intent is dropped before the
+    // transcript), so a claim here would lock the composer for the full deadline
+    // over a row that cannot land. The human's send still reports failure.
+    respondTo("/api/intents/chat-message", {
+      message_id: "m-1",
+      status: "failed",
+      error_code: "agent_unreachable",
+    });
+    const ok = await useChatSessionStore.getState().sendText("cs-1", "hello");
+    expect(ok).toBe(true);
+    expect(claimOf("cs-1")).toBeUndefined();
+  });
+
+  it("the claim survives the POST: `sending` clears, the turn stays claimed", async () => {
+    respondTo("/api/intents/chat-message", { message_id: "m-1", status: "delivered" });
+    await useChatSessionStore.getState().sendText("cs-1", "hello");
+    expect(useChatSessionStore.getState().sending["cs-1"]).toBe(false);
+    expect(claimOf("cs-1")).toBeDefined();
+  });
+
+  it("a fan-out claims the HUMAN'S row when any target took it", async () => {
+    // One row, N deliveries: `results[].message_id` is a per-target dispatch id
+    // that the transcript never keys an outcome on, while every receipt and
+    // reference row answers the top-level row id — even the receipt written for
+    // the target that failed.
+    respondTo("/api/intents/mentions", {
+      message_id: "row-1",
+      routed: "mentions",
+      results: [
+        { target: "a", message_id: "d-1", status: "failed" },
+        { target: "b", message_id: "d-2", status: "delivered" },
+      ],
+    });
+    await useChatSessionStore.getState().sendGroupText("grp-1", "@A @B go", ["a", "b"]);
+    expect(claimOf("grp-1")?.messageId).toBe("row-1");
+  });
+
+  it("an archived group row claims nothing — the row IS the outcome", async () => {
+    respondTo("/api/intents/mentions", {
+      message_id: "row-1",
+      routed: "archived",
+      results: [],
+    });
+    await useChatSessionStore.getState().sendGroupText("grp-1", "note for later", []);
+    expect(claimOf("grp-1")).toBeUndefined();
+  });
+
+  it("a fan-out where every target failed claims nothing", async () => {
+    // Each failure already wrote its own `delivery_failed` receipt against the
+    // row, so the human has an answer on screen before the POST returns.
+    respondTo("/api/intents/mentions", {
+      message_id: "row-1",
+      routed: "mentions",
+      results: [{ target: "a", message_id: "d-1", status: "failed" }],
+    });
+    await useChatSessionStore.getState().sendGroupText("grp-1", "@A go", ["a"]);
+    expect(claimOf("grp-1")).toBeUndefined();
+  });
+
+  it("a reply addressed to a round claims on the 1:1 channel too", async () => {
+    respondTo("/api/intents/chat-message", { message_id: "m-9", status: "delivered" });
+    await useChatSessionStore.getState().sendGroupText("grp-1", "answer", [], "round:ag|s1|r1");
+    expect(claimOf("grp-1")?.messageId).toBe("m-9");
+  });
+
+  it("settleTurn releases the claim and cancels its deadline", async () => {
+    respondTo("/api/intents/chat-message", { message_id: "m-1", status: "delivered" });
+    await useChatSessionStore.getState().sendText("cs-1", "hello");
+    useChatSessionStore.getState().settleTurn("cs-1", "m-1");
+    expect(claimOf("cs-1")).toBeUndefined();
+    // The armed timer is gone, so nothing fires later to clear a newer claim.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("the deadline releases a turn whose outcome never landed", async () => {
+    respondTo("/api/intents/chat-message", { message_id: "m-1", status: "delivered" });
+    await useChatSessionStore.getState().sendText("cs-1", "hello");
+    vi.advanceTimersByTime(TURN_INFLIGHT_DEADLINE_MS);
+    expect(claimOf("cs-1")).toBeUndefined();
+  });
+
+  it("a stale release cannot drop a fresher claim", async () => {
+    // Two sends, one session. A surface that renders after the second send may
+    // still settle on the first id, and the first send's deadline may fire late;
+    // either one clearing the live claim would unlock a composer with a real
+    // turn still ahead of it.
+    respondTo("/api/intents/chat-message", { message_id: "m-1", status: "delivered" });
+    await useChatSessionStore.getState().sendText("cs-1", "first");
+    respondTo("/api/intents/chat-message", { message_id: "m-2", status: "delivered" });
+    await useChatSessionStore.getState().sendText("cs-1", "second");
+    expect(claimOf("cs-1")?.messageId).toBe("m-2");
+    useChatSessionStore.getState().settleTurn("cs-1", "m-1");
+    expect(claimOf("cs-1")?.messageId).toBe("m-2");
+    useChatSessionStore.getState().expireTurn("cs-1", "m-1");
+    expect(claimOf("cs-1")?.messageId).toBe("m-2");
+    // Only the m-2 send's own deadline lets go.
+    vi.advanceTimersByTime(TURN_INFLIGHT_DEADLINE_MS);
+    expect(claimOf("cs-1")).toBeUndefined();
+  });
+
+  it("one session's claim says nothing about another's", async () => {
+    respondTo("/api/intents/chat-message", { message_id: "m-1", status: "delivered" });
+    await useChatSessionStore.getState().sendText("cs-1", "hello");
+    useChatSessionStore.getState().settleTurn("cs-2", "m-1");
+    expect(claimOf("cs-1")?.messageId).toBe("m-1");
   });
 });

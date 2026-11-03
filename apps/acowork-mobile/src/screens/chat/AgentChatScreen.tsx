@@ -4,7 +4,10 @@
  * log of four row kinds (ADR-106 D1) where a run is a POINTER row
  * (`execution_round`) whose content is read from the execution side at render
  * time (D3/D4) — the Chat keeps no copy of the work, and a pending decision is
- * shown inside the round's block, never as a chat row (D8). The differences
+ * shown inside the round's block, never as a chat row (D8). The storage is per
+ * round, the RENDERING is per execution SESSION: the layout layer
+ * (`lib/chatTranscriptGroups`) folds a session's rows into one block, the same
+ * way one run's tool calls fold into a single `ExploreBlock`. The differences
  * here are presentation-only, per §6.5:
  *
  *  - the block's header line is the compact shape, its answer stays inline: a
@@ -18,9 +21,15 @@
  *    keeps one message.
  *
  * "In progress" is positive evidence only (D9): the single waiting line this
- * surface may paint is about its OWN in-flight POST. A round's liveness rides
- * inside its block, off the `pending` projection read — a transcript shape must
- * never stand in for liveness, or a dead node keeps looking busy forever.
+ * surface may paint is about a send THIS device made, keyed by the id its own
+ * response carried, and it ends where the transcript answers that id — the
+ * round's reference row, the router's reply, or a receipt. A transcript SHAPE
+ * ("the newest human row has no answer") is still not evidence, so a dead node
+ * never keeps looking busy; and the same flag that shows the line locks the
+ * composer, because this Chat has no queue to absorb a second send racing a
+ * router still deciding the first. A round's liveness rides inside its block,
+ * off the `pending` projection read — a transcript shape must never stand in
+ * for liveness.
  *
  * Deliberately NOT here: agent thinking, tool calls, execution process — those
  * live behind the block's drill into the execution session view, not in the
@@ -50,6 +59,8 @@ import { ChatExecutionBlock } from '../../components/ChatExecutionBlock'
 import { ChatNoticeRow } from '../../components/ChatNoticeRow'
 import { ChatAddressSheet, type AddressPick } from '../../components/ChatAddressSheet'
 import { buildCardAnswer, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
+import { turnInflight } from '../../lib/chatTurnInflight'
+import { buildTranscriptItems, type TranscriptItem } from '../../lib/chatTranscriptGroups'
 import { renderMarkdown } from '../../lib/markdown'
 import type { ChatAttachment } from '../../lib/chatAttachment'
 import type { ChatMessageRow } from '../../lib/types'
@@ -59,6 +70,18 @@ function pickIconId(seed: string): string | null {
   let h = 0
   for (let i = 0; i < seed.length; i++) h = (seed.charCodeAt(i) + (h << 5) - h) | 0
   return BUILTIN_ICON_IDS[Math.abs(h) % BUILTIN_ICON_IDS.length] ?? null
+}
+
+/** The render key of a transcript row. A folded block is keyed by its ANCHOR row
+ *  — the newest of its session — so the list key tracks the item the reader sees,
+ *  not one of the rows hidden inside it. */
+function rowKeyOf(row: ChatMessageRow): string {
+  return `${row.seq}-${row.meta?.message_id ?? ''}`
+}
+
+/** The row an item is positioned by: a block sits where its newest round is. */
+function itemOf(item: TranscriptItem): ChatMessageRow {
+  return item.kind === 'run' ? item.anchorRow : item.row
 }
 
 /** A pending continuation of one round: the reference row's id (what the send
@@ -82,6 +105,10 @@ export function AgentChatScreen() {
   const sessionId = st?.sessionId ?? null
   const win = useChatSessionStore((s) => (sessionId ? s.windows[sessionId] : undefined))
   const sending = useChatSessionStore((s) => (sessionId ? s.sending[sessionId] ?? false : false))
+  // The turn this device sent and has not seen an outcome for. `sending` alone
+  // only covers the POST (~150 ms measured); the claim carries the wait through
+  // to the row the turn actually produces.
+  const inflightTurn = useChatSessionStore((s) => (sessionId ? s.inflight[sessionId] : undefined))
 
   const [draft, setDraft] = useState('')
   /** D6 level 1: this draft continues one named round. */
@@ -100,6 +127,24 @@ export function AgentChatScreen() {
   }, [agentId])
 
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win])
+  const turnLive = turnInflight(rows, inflightTurn)
+  // ONE state drives the line and the lock: a wait line with an unlocked
+  // composer invites the second send this Chat cannot absorb, and a locked
+  // composer with no line reads as a broken button.
+  const composerLocked = sending || turnLive
+  // Hand the claim back as soon as a row answers it, so nothing keeps
+  // asserting a turn the transcript has already settled.
+  useEffect(() => {
+    if (!sessionId || !inflightTurn) return
+    if (turnInflight(rows, inflightTurn)) return
+    useChatSessionStore.getState().settleTurn(sessionId, inflightTurn.messageId)
+  }, [rows, inflightTurn, sessionId])
+  // The fold (ADR-106 D3/D4): the reference rows of ONE execution session become
+  // ONE block item, and the question rows they were built from fold inside it.
+  // Memoized on the window, so a composer keystroke keeps every item identity
+  // that `ItemView`'s memo needs.
+  const layout = useMemo(() => buildTranscriptItems(rows, rowKeyOf), [rows])
+  const items = layout.items
   // Which messages already have a round: that is what makes an addressing card
   // answered (the re-delivery leaves the reference row, ADR-106 D3), so the
   // transcript itself carries the answer — no chat-side flag to keep in sync.
@@ -129,7 +174,7 @@ export function AgentChatScreen() {
 
   const send = () => {
     const text = draft.trim()
-    if (!text || sending || !sessionId) return
+    if (!text || composerLocked || !sessionId) return
     // A level-1 reply already names its session, so the address the human picked
     // for a plain message must not ride that send — the two are contradictory
     // instructions and the refusal belongs to the backend, not to a guess here.
@@ -242,16 +287,18 @@ export function AgentChatScreen() {
           {st?.resolved && !failed && rows.length === 0 ? (
             <div className="empty-state">还没有消息，发一条开始对话</div>
           ) : null}
-          {rows.map((r, i) => {
-            const prev = i > 0 ? rows[i - 1]! : null
-            const sep = prev ? daySeparator(prev.ts, r.ts) ?? timeGapSeparator(prev.ts, r.ts) : null
+          {items.map((item, i) => {
+            const row = item.kind === 'run' ? item.anchorRow : item.row
+            const prev = i > 0 ? itemOf(items[i - 1]!) : null
+            const sep = prev ? daySeparator(prev.ts, row.ts) ?? timeGapSeparator(prev.ts, row.ts) : null
             return (
-              <Fragment key={`${r.seq}-${r.meta?.message_id ?? ''}`}>
+              <Fragment key={rowKeyOf(row)}>
                 {sep ? <div className="time-sep">{sep}</div> : null}
-                <RowView
-                  row={r}
+                <ItemView
+                  item={item}
+                  hasFollowUp={i < items.length - 1}
                   chatSessionId={sessionId ?? ''}
-                  isSelf={r.from === me?.user_id}
+                  isSelf={row.from === me?.user_id}
                   selfAvatar={meAvatar}
                   selfName={myName}
                   agentAvatar={agentAvatar}
@@ -260,17 +307,28 @@ export function AgentChatScreen() {
                   onReplyToRound={replyToRound}
                   // The card asks the person who spoke, and in local mode there
                   // is exactly one person but no id to compare against.
-                  onChooseCard={mayAnswerCard(r, me?.user_id ?? '') ? answerCard : undefined}
-                  cardAnswered={!!r.meta?.in_reply_to && roundTriggers.has(r.meta.in_reply_to)}
+                  onChooseCard={
+                    item.kind === 'row' && mayAnswerCard(item.row, me?.user_id ?? '')
+                      ? answerCard
+                      : undefined
+                  }
+                  cardAnswered={
+                    item.kind === 'row' &&
+                    !!item.row.meta?.in_reply_to &&
+                    roundTriggers.has(item.row.meta.in_reply_to)
+                  }
                   onOpenAttachment={setViewing}
                 />
               </Fragment>
             )
           })}
-          {/* D9: the only "working on it" line this surface may paint is about
-              its OWN in-flight POST. The round's liveness rides inside its
-              block, off the `pending` projection read. */}
-          {sending ? (
+          {/* D9: the only "working on it" line this surface may paint is about a
+              send of its own — never about the transcript's shape. It ends at the
+              first row that answers the send (the round's reference row, the
+              router's reply, a receipt), so it cannot fake liveness for a node
+              that is gone; and the round's own liveness rides inside its block,
+              off the `pending` projection read. */}
+          {composerLocked ? (
             <div className="chat-turn-status" role="status">
               <span className="chat-turn-status-text chat-turn-status-text-live">
                 {agent?.name ? `${agent.name}正在处理…` : '正在处理…'}
@@ -349,13 +407,15 @@ export function AgentChatScreen() {
             placeholder="发送消息"
             aria-label="消息输入框"
             value={draft}
+            disabled={composerLocked}
             onChange={(e) => setDraft(e.target.value)}
           />
           <button
             type="button"
             className="composer-send"
             aria-label="发送"
-            disabled={!draft.trim() || sending || !sessionId}
+            title={turnLive ? '上一条消息正在处理中' : '发送'}
+            disabled={!draft.trim() || composerLocked || !sessionId}
             onClick={send}
           >
             <Send className="composer-send-icon" aria-hidden />
@@ -391,7 +451,7 @@ export function AgentChatScreen() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Row rendering — the durable kinds (ADR-106 D1)                       */
+/* Item rendering — the folded transcript (ADR-106 D1/D3/D4)            */
 /* ------------------------------------------------------------------ */
 
 export interface RowProps {
@@ -421,28 +481,22 @@ export interface RowProps {
 export function RowView(props: RowProps) {
   const {
     row,
-    chatSessionId,
     isSelf,
     selfAvatar,
     selfName,
     agentAvatar,
     agentName,
-    onJumpToExec,
-    onReplyToRound,
     onChooseCard,
     cardAnswered,
     onOpenAttachment,
   } = props
 
   if (row.kind === 'execution_round') {
-    return (
-      <ChatExecutionBlock
-        row={row}
-        chatSessionId={chatSessionId}
-        onJumpToExec={onJumpToExec}
-        onReplyToRound={onReplyToRound}
-      />
-    )
+    // A reference row that names no round (a missing coordinate) addresses
+    // nothing, so it has no block to fold into and keeps its own explicit hole
+    // (ADR-106 D3). Every row that DOES name a round is drawn by the session's
+    // `ChatExecutionBlock` and reaches it as a `run` item — not as a row.
+    return <div className="chat-notice"><span className="chat-notice-pill">本轮执行已不可用</span></div>
   }
 
   if (row.kind === 'system_notice') {
@@ -531,4 +585,34 @@ export function RowView(props: RowProps) {
       <span className="chat-notice-pill">{row.body}</span>
     </div>
   )
+}
+
+export interface ItemProps extends Omit<RowProps, 'row'> {
+  item: TranscriptItem
+  /** Something follows this block in the transcript — `ExploreBlock`'s
+   *  follow-up condition, the one that auto-collapses a settled run. */
+  hasFollowUp: boolean
+}
+
+/** One item of the folded transcript: an execution session's block, or a row.
+ *  The layout layer (`lib/chatTranscriptGroups`) decides the fold; this is where
+ *  it becomes a component. */
+export function ItemView({ item, hasFollowUp, ...rowProps }: ItemProps) {
+  if (item.kind === 'run') {
+    return (
+      <ChatExecutionBlock
+        block={item}
+        chatSessionId={rowProps.chatSessionId}
+        // A block always starts a new turn, so it wears the avatar and name a
+        // bubble wears — the run speaks as the agent, not as the transcript.
+        showHeader
+        hasFollowUp={hasFollowUp}
+        agentAvatar={rowProps.agentAvatar}
+        agentName={rowProps.agentName}
+        onJumpToExec={rowProps.onJumpToExec}
+        onReplyToRound={rowProps.onReplyToRound}
+      />
+    )
+  }
+  return <RowView {...rowProps} row={item.row} />
 }

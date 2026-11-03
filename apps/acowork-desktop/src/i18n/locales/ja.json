@@ -262,6 +262,7 @@
     "notice": {
       "pendingTurn": "{{name}}が処理中です…",
       "pendingTurnGeneric": "処理中です…",
+      "turnInflightTooltip": "前のメッセージはまだ処理中です",
       "interrupted": "この実行は中断されました",
       "failed": "この実行は失敗しました",
       "timeout": "この実行はタイムアウトしました",

@@ -6,7 +6,7 @@
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊 §5.5.4 / §5.5.5 / §6）、ADR-099（Chat Router，D3 投递时锚定 pointer）、ADR-086（移动端多会话）、ADR-049（Session 状态子态）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
 
-> **取代说明（2026-11-03）**：[ADR-106](./ADR-106-chat-execution-reference-projection.md) 重绘了 chat / execute 边界（引用行 + 读时投影），**废止**本 ADR 的 D2（两类指针行）、D8（`turn_mode` 与两态文案的 durable 来源）、D9（执行会话本地回合的 chat 回写）、D10（停写中间状态 + 前端派生等待行 + 本地 stop 落 `aborted` 行）、D11（`turn_routed` 唯一反应行）、D12（pin / `for_execution_session` 及其全部 Rev.4–7 修订）；并**重述** D1 / D3 的边界（“易变态不得当 durable 事实”的结论不变）。D4（“查看执行”跳转）、D5（卡片就地可答，落点改为块内）、D6（发送侧瞬态占位）、D7（turn 指针按 agent 归属化反应呈现，现由块承担）、Rev.3 头像不变量、Rev.8“执行面消息不进 chat 通道”不变量仍生效。本文余下内容保留为设计历史，**不要**据此恢复实现；现行契约以 ADR-106 与设计 27 v3.1 为准。
+> **取代说明（2026-11-03）**：[ADR-106](./ADR-106-chat-execution-reference-projection.md) 重绘了 chat / execute 边界（引用行 + 读时投影），**废止**本 ADR 的 D2（两类指针行）、D8（`turn_mode` 与两态文案的 durable 来源）、D9（执行会话本地回合的 chat 回写）、D10（停写中间状态 + 前端派生等待行 + 本地 stop 落 `aborted` 行）、D11（`turn_routed` 唯一反应行）、D12（pin / `for_execution_session` 及其全部 Rev.4–7 修订）；并**重述** D1 / D3 的边界（“易变态不得当 durable 事实”的结论不变）。D4（“查看执行”跳转）、D5（卡片就地可答，落点改为块内）、D6（发送侧瞬态占位）、D7（turn 指针按 agent 归属化反应呈现，现由块承担）、Rev.3 头像不变量、Rev.8“执行面消息不进 chat 通道”不变量仍生效。本文余下内容保留为设计历史，**不要**据此恢复实现；现行契约以 ADR-106（含其 2026-11-03 修订：D6 的发送侧瞬态占位延长为等待行与 composer 的 claim）与设计 27 v3.1.2 为准。
 
 ## 摘要
 

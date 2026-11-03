@@ -26,7 +26,7 @@ const EMPTY_ARRAY: string[] = [];
 
 // ── Relative time formatter ──────────────────────────────────────────────
 
-function formatRelativeTime(dateStr: string, t: (key: string, options?: Record<string, unknown>) => string): string {
+export function formatRelativeTime(dateStr: string, t: (key: string, options?: Record<string, unknown>) => string): string {
   const date = new Date(dateStr);
   const now = new Date();
   const diffSec = Math.floor((now.getTime() - date.getTime()) / 1000);

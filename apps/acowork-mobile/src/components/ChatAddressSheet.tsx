@@ -3,12 +3,14 @@
  * twin of Desktop's `ChatAddressPicker`.
  *
  * The first level answers "which agent"; this one answers "which of its runs".
- * It is deliberately not a session browser: the rows come from the Runtime's
- * candidate filter (`GET …/chat-candidates`), which IS the permission for what
- * this human may address in THIS chat. A picker built off any other list would
- * offer a session the turn could not legally be delivered to — and on mobile the
- * only other list the app holds is the execution session index, which is exactly
- * the mistake this rule exists to prevent.
+ * It is deliberately not a session browser: the rows come from `GET …/sessions`
+ * narrowed by `chat_session_id` / `surface`, where the narrowing IS the Runtime's
+ * candidate rule for this chat. A picker built off any other list would offer a
+ * session the turn could not legally be delivered to — and the app's other list
+ * is the execution session index, which is exactly the mistake this rule exists
+ * to prevent. No row cap and no freshness window: the paging IS the window, so
+ * the human taps back as far as they want instead of wondering why a session
+ * they remember is missing.
  *
  * Two rules the list keeps:
  * - **"开新任务" is always the first row.** D6's cheap escape must be answerable
@@ -23,11 +25,11 @@
  * composer, because a phone has no hover and no room for a floating list.
  */
 
-import { useEffect, useState } from 'react'
-import { fetchChatCandidates } from '../lib/api'
-import { candidateStatusText } from '../lib/chatBlocks'
+import { useEffect, useRef, useState } from 'react'
+import { fetchChatSessions } from '../lib/api'
+import { formatListTime } from '../lib/time'
 import { Sheet } from './ui'
-import type { ChatCandidate } from '../lib/types'
+import type { SessionInfo } from '../lib/types'
 
 /** What the human decided. `{}` = no address at all (the ladder continues). */
 export interface AddressPick {
@@ -41,32 +43,62 @@ export interface AddressPick {
 interface ChatAddressSheetProps {
   /** Whose runs these are. */
   instanceId: string
-  /** Part of the address, not a filter: the candidate set is per chat. */
+  /** Part of the address, not a filter: the listing is narrowed per chat. */
   chatSessionId: string
   onPick: (pick: AddressPick) => void
   onClose: () => void
 }
 
 export function ChatAddressSheet({ instanceId, chatSessionId, onPick, onClose }: ChatAddressSheetProps) {
-  const [candidates, setCandidates] = useState<ChatCandidate[] | null>(null)
+  const [rows, setRows] = useState<SessionInfo[] | null>(null)
+  const [hasMore, setHasMore] = useState(false)
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
+  // One generation counter for both the reload and the append: a "加载更多"
+  // that answers after the sheet was reloaded (retry, chat switch) belongs to a
+  // dead request and must not repaint what is on screen.
+  const generation = useRef(0)
+  const page = useRef(1)
 
   useEffect(() => {
-    let alive = true
+    const gen = ++generation.current
     setFailed(false)
-    setCandidates(null)
-    fetchChatCandidates(instanceId, chatSessionId, 'direct')
-      .then((rows) => {
-        if (alive) setCandidates(rows)
+    setRows(null)
+    setHasMore(false)
+    page.current = 1
+    fetchChatSessions(instanceId, chatSessionId, 'direct', 1)
+      .then((res) => {
+        if (gen !== generation.current) return
+        setRows(res.items)
+        setHasMore(res.hasMore)
       })
       .catch(() => {
-        if (alive) setFailed(true)
+        if (gen === generation.current) setFailed(true)
       })
-    return () => {
-      alive = false
-    }
   }, [instanceId, chatSessionId, attempt])
+
+  const loadMore = () => {
+    const gen = generation.current
+    setLoadingMore(true)
+    fetchChatSessions(instanceId, chatSessionId, 'direct', page.current + 1)
+      .then((res) => {
+        if (gen !== generation.current) return
+        page.current += 1
+        setLoadingMore(false)
+        setHasMore(res.hasMore)
+        // A session created between the two reads can appear on both pages;
+        // a duplicate row would be a second key AND a second tap target for the
+        // same run.
+        setRows((prev) => {
+          const seen = new Set((prev ?? []).map((s) => s.session_id))
+          return [...(prev ?? []), ...res.items.filter((s) => !seen.has(s.session_id))]
+        })
+      })
+      .catch(() => {
+        if (gen === generation.current) setLoadingMore(false)
+      })
+  }
 
   return (
     <Sheet open onClose={onClose} title="这条消息投给哪个任务？">
@@ -85,25 +117,28 @@ export function ChatAddressSheet({ instanceId, chatSessionId, onPick, onClose }:
         </button>
       ) : null}
 
-      {!failed && candidates === null ? <div className="chat-sheet-hint">载入中…</div> : null}
+      {!failed && rows === null ? <div className="chat-sheet-hint">载入中…</div> : null}
 
-      {failed || candidates === null
+      {failed || rows === null
         ? null
-        : candidates.map((c) => (
+        : rows.map((s) => (
             <button
-              key={c.session_id}
+              key={s.session_id}
               type="button"
               className="chat-sheet-option"
               data-testid="address-session"
-              title={c.session_id}
-              onClick={() => onPick({ sessionId: c.session_id, label: c.label })}
+              title={s.session_id}
+              onClick={() => onPick({ sessionId: s.session_id, label: s.title })}
             >
-              <span className="chat-sheet-option-label">{c.label}</span>
-              <span className="chat-sheet-option-value">{candidateStatusText(c.status)}</span>
+              <span className="chat-sheet-option-label">{s.title}</span>
+              {/* The listing carries no run status (that arrives over the live
+                  push, which a closed sheet is not subscribed to), so the row
+                  says when the work last moved — same slot, honest content. */}
+              <span className="chat-sheet-option-value">{formatListTime(s.updated_at)}</span>
             </button>
           ))}
 
-      {candidates && candidates.length > 0 ? (
+      {rows && rows.length > 0 ? (
         <button
           type="button"
           className="chat-sheet-option is-quiet"
@@ -114,7 +149,19 @@ export function ChatAddressSheet({ instanceId, chatSessionId, onPick, onClose }:
         </button>
       ) : null}
 
-      {candidates && candidates.length === 0 && !failed ? (
+      {hasMore ? (
+        <button
+          type="button"
+          className="chat-sheet-option"
+          data-testid="address-more"
+          disabled={loadingMore}
+          onClick={loadMore}
+        >
+          {loadingMore ? '载入中…' : '更早的任务'}
+        </button>
+      ) : null}
+
+      {rows && rows.length === 0 && !failed ? (
         <div className="chat-sheet-hint">这里还没有可继续的任务</div>
       ) : null}
     </Sheet>

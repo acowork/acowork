@@ -721,7 +721,40 @@ message SessionMessage {
     // occupy; an event does not care about contiguity, and 33 keeps
     // ADR-083's doc/references valid.
     CompactionCancelledPayload  compaction_cancelled    = 33;
+    // ADR-106 revision (2026-11-03): a round's durable state changed — it
+    // reached a terminal outcome, or it parked on a card a human must answer.
+    // QoS 1, non-retained: this is the notification face that ADR-106's
+    // exec -> chat zero-write removed and never replaced, so a Chat block
+    // would otherwise only learn its own round had finished on the next read.
+    // It carries coordinates only, never content.
+    RoundStatePayload           round_state             = 34;
   }
+}
+
+/// A round changed state in the execution session (ADR-106 D2/D4/D9).
+/// Topic: acowork/agents/{id}/sessions/{sid}/messages/round_state
+///
+/// The subscriber is the Chat surface, and what it needs is exactly enough to
+/// know *which* block to re-read and *that* the read is worth doing: the block
+/// content itself still comes from `GET /api/chat-blocks` (D4's projection read),
+/// because this event is published at the turn boundary while the round's own
+/// record is appended by the session's single writer (ADR-092) — so the event
+/// says "worth re-reading now", not "here is the final content".
+///
+/// Two coordinates and nothing else. The outcome word (`completed` / `waiting`
+/// / …) is deliberately NOT on the wire: no subscriber acts on it — every one of
+/// them re-reads, and learns the word from the projection — and a proto3 field
+/// can be added later for free, so carrying a speculative one now only widens a
+/// public contract (and the hand-written Mobile decoder that keeps it honest)
+/// without a reader.
+message RoundStatePayload {
+  /// Which round changed: the projection ref is (agent, session, round), and
+  /// the topic supplies the first two.
+  string round_id = 1;
+  /// The Chat this round answers to, taken from the session's own meta — the
+  /// same binding D10 checks. A surface that is not this chat drops the signal
+  /// without a read.
+  string chat_session_id = 2;
 }
 
 message ChunkPayload {

@@ -11,6 +11,11 @@
  *   `bg-accent-strong`, globals.css:1649-1670). A card wears the neutral
  *   hairline and its title wears the regular text tier.
  *
+ *   Second regression, same family: the chat block had been given the accent
+ *   wash on its ANSWER panel, which `ExploreBlock` does too (its tool-result
+ *   panel) — so the guard is stated as "no accent border, no accent title",
+ *   not as "no accent anywhere in the file".
+ *
  * What this pins:
  *   1. The execution-session card shell (`AskQuestionCard`) is
  *      `border-border-outer` and carries no `--color-accent` anywhere in its
@@ -89,9 +94,19 @@ describe("interaction card chrome", () => {
   });
 
   it("the fix does not strip the accent BUTTONS inside the cards", () => {
-    for (const file of ["AskQuestionCard.tsx", "ChatExecutionBlock.tsx"]) {
+    // The rule is "the highlight paints a BUTTON BACKGROUND", and the two
+    // surfaces implement that with their family's recipe: the execution-session
+    // card uses the shared `btn-accent` class, the chat block copies
+    // `ExploreBlock`'s approval pair (an inline `--color-accent-strong`
+    // background). Either is acceptable; a card that lost its primary action to
+    // the neutral-border fix would not be.
+    const recipes: Record<string, string> = {
+      "AskQuestionCard.tsx": "btn-accent",
+      "ChatExecutionBlock.tsx": "--color-accent-strong",
+    };
+    for (const [file, marker] of Object.entries(recipes)) {
       const src = readFileSync(resolve(__dirname, file), "utf8");
-      expect(src, `${file} must keep its btn-accent primary action`).toContain("btn-accent");
+      expect(src, `${file} must keep its accent primary action`).toContain(marker);
     }
   });
 });

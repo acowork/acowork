@@ -3470,11 +3470,22 @@ pub fn scan_sessions_async(
     size: Option<u32>,
     scope: SessionScope,
 ) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
-    scan_sessions_async_filtered(conversations_dir, page, size, scope, None)
+    scan_sessions_async_filtered(conversations_dir, page, size, scope, None, None)
 }
 
+/// An extra pre-pagination predicate over the raw meta rows.
+///
+/// Carried as a boxed closure rather than a policy type because the storage
+/// layer must not know what the policies are: which sessions a Chat surface may
+/// address is [`crate::agent::session::chat_candidates`]' rule, and the
+/// ADR-076 read rule is `SessionMeta::is_readable_by`. Passing a callback keeps
+/// one implementation of each and still lets the scan apply them in the one
+/// order that makes pagination honest.
+pub type MetaFilter = Box<dyn Fn(&SessionMeta) -> bool + Send + Sync + 'static>;
+
 /// [`scan_sessions_async`] with an extra pre-pagination predicate on the
-/// ADR-038 `Active` set (`None` = no such filter).
+/// ADR-038 `Active` set (`None` = no such filter) and on a caller-supplied row
+/// rule ([`MetaFilter`], also `None` = no such filter).
 ///
 /// Kept as its own entry point instead of a fifth argument on
 /// [`scan_sessions_async`] because "the sessions resident in the Runtime
@@ -3488,6 +3499,7 @@ pub fn scan_sessions_async_filtered(
     size: Option<u32>,
     scope: SessionScope,
     active_ids: Option<std::collections::HashSet<String>>,
+    meta_filter: Option<MetaFilter>,
 ) -> tokio::task::JoinHandle<(Vec<SessionInfo>, usize, (u64, u64, u64, u64))> {
     tokio::task::spawn_blocking(move || {
         // ADR-082 §4 step 3: the rows come from the session-meta store
@@ -3509,7 +3521,14 @@ pub fn scan_sessions_async_filtered(
         // per workspace — keeping `is_readable_by` as the reference
         // implementation the SQL would have to match.
         let rows = scan_sessions_from_meta(&conversations_dir);
-        build_session_page(&rows, page, size, &scope, active_ids.as_ref())
+        build_session_page(
+            &rows,
+            page,
+            size,
+            &scope,
+            active_ids.as_ref(),
+            meta_filter.as_deref(),
+        )
     })
 }
 
@@ -3525,6 +3544,11 @@ pub fn scan_sessions_async_filtered(
 /// filter does — `total` / `total_pages` must describe the rows the caller
 /// asked for, or a client asking "which sessions are open?" would get short
 /// pages and a page count pointing at rows it never asked about.
+///
+/// `meta_filter` is a second optional pre-pagination filter, placed for the
+/// same reason (ADR-106 D7: the sessions one Chat is allowed to address). It
+/// arrives as a callback so the rule stays owned by the layer that defines it
+/// and this file keeps owning only the reading and the slicing.
 #[allow(clippy::type_complexity)]
 fn build_session_page(
     rows: &[(String, SessionMeta)],
@@ -3532,6 +3556,7 @@ fn build_session_page(
     size: Option<u32>,
     scope: &SessionScope,
     active_ids: Option<&std::collections::HashSet<String>>,
+    meta_filter: Option<&(dyn Fn(&SessionMeta) -> bool + Send + Sync)>,
 ) -> (Vec<SessionInfo>, usize, (u64, u64, u64, u64)) {
     // ADR-076 §决策 4: drop sessions `scope` may not read *before*
     // paginating, so `total` / `total_pages` describe what the caller
@@ -3575,17 +3600,29 @@ fn build_session_page(
             },
         );
 
+    // ADR-106 D7: the caller's row rule (which sessions this Chat may address)
+    // narrows the listed set but never `readable` itself — the agent-total
+    // merge above is a whole-agent counter repair, so a Chat-scoped listing
+    // must not shrink it, any more than an `active=true` listing may.
+    let scoped: Vec<&(String, SessionMeta)> = match meta_filter {
+        Some(keep) => readable
+            .iter()
+            .copied()
+            .filter(|(_, meta)| keep(meta))
+            .collect(),
+        None => readable,
+    };
+
     // ADR-038: `active=true` narrows the set to sessions resident in the
     // Runtime right now — same pre-pagination placement as the read filter,
-    // so `total` / `total_pages` describe the resident set. Placed after the
-    // aggregate below so `readable` can be moved, not cloned.
+    // so `total` / `total_pages` describe the resident set.
     let sessions: Vec<&(String, SessionMeta)> = match active_ids {
-        Some(ids) => readable
+        Some(ids) => scoped
             .iter()
             .copied()
             .filter(|(sid, _)| ids.contains(sid))
             .collect(),
-        None => readable,
+        None => scoped,
     };
 
     let total = sessions.len();
@@ -8327,6 +8364,7 @@ mod tests {
                     Some(size),
                     SessionScope::user("u-alice"),
                     Some(active),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -8361,11 +8399,105 @@ mod tests {
             None,
             SessionScope::Unfiltered,
             Some(std::collections::HashSet::new()),
+            None,
         )
         .await
         .unwrap();
         assert!(sessions.is_empty());
         assert_eq!(total, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-106 D7: a caller-supplied row rule (the Chat-scoped read rule the
+    /// session listing passes for `?chat_session_id=`) must also run *before*
+    /// pagination. A page and a page count computed over unfiltered rows would
+    /// tell the caller how many sessions this chat is not allowed to see.
+    #[tokio::test]
+    async fn meta_filter_runs_before_pagination() {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-scan-chat-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let conv = dir.join("conversations");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&conv).unwrap();
+
+        let meta = |sid: &str, chat: Option<&str>, at: &str| SessionMeta {
+            version: 1,
+            session_id: sid.into(),
+            agent_id: "a".into(),
+            created_at: at.into(),
+            initiator: Some("u-alice".into()),
+            visibility: None,
+            title: Some(sid.into()),
+            workspace_id: None,
+            model: None,
+            provider: None,
+            account_id: None,
+            reasoning_effort: None,
+            temperature: None,
+            context_window: None,
+            todos: None,
+            message_count: 0,
+            last_active_at: at.into(),
+            tokens: None,
+            corrupted: false,
+            llm_call_counter: None,
+            perf: None,
+            model_ratio: None,
+            last_compaction_offset: None,
+            chat_session_id: chat.map(str::to_string),
+            model_usage: None,
+        };
+
+        // Four rows, activity stamps ascending with the index: s-0 and s-3 are
+        // bound to chat-1, s-1 to another chat, s-2 to nothing.
+        for (i, (sid, chat)) in
+            [("s-0", Some("chat-1")), ("s-1", Some("chat-2")), ("s-2", None), ("s-3", Some("chat-1"))]
+                .iter()
+                .enumerate()
+        {
+            write_session_meta(&conv, &meta(sid, *chat, &format!("2026-01-0{}T00:00:00Z", i + 1)))
+                .unwrap();
+        }
+
+        let bound_to_chat1: MetaFilter =
+            Box::new(|m: &SessionMeta| m.chat_session_id.as_deref() == Some("chat-1"));
+
+        let (sessions, total, _) = scan_sessions_async_filtered(
+            conv.clone(),
+            Some(1),
+            Some(10),
+            SessionScope::Unfiltered,
+            None,
+            Some(bound_to_chat1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sessions.into_iter().map(|s| s.session_id).collect::<Vec<_>>(),
+            // Newest first, as every listing is — the filter did not reorder.
+            vec!["s-3", "s-0"]
+        );
+        assert_eq!(total, 2, "the count is the filtered set, not the 4 rows on disk");
+
+        // The unfiltered call is unchanged: no parameter, no narrowing.
+        let (sessions, total, _) = scan_sessions_async_filtered(
+            conv.clone(),
+            Some(1),
+            Some(10),
+            SessionScope::Unfiltered,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 4);
+        assert_eq!(sessions.len(), 4);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

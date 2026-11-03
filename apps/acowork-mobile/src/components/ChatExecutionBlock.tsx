@@ -1,164 +1,387 @@
 /**
- * ChatExecutionBlock — one `execution_round` reference row, rendered as the run
- * it points at (ADR-106 D3/D4/D8/D9). The mobile twin of Desktop's
- * `components/chat/ChatExecutionBlock`.
+ * ChatExecutionBlock — one execution SESSION's worth of rounds, drawn as one
+ * collapsible block (ADR-106 D3/D4/D8/D9; design 27 §5.5). The mobile twin of
+ * Desktop's `components/chat/ChatExecutionBlock`.
  *
- * The chat holds no copy of the work. The row names a round (`instance|session|
- * round`) and everything shown here is read from that round's projection at
- * render time, through the Gateway's participant-checked block read (D10).
+ * The chat holds no copy of the work. Its transcript carries one bodyless
+ * reference row per round, and the layout layer (`lib/chatTranscriptGroups`)
+ * folds a session's rows into ONE block. Drawing a card per row turned a
+ * long-lived run into a stack of near-identical boxes — on a 390pt screen that
+ * is not just ugly, it buries the conversation.
  *
- * The visual language is this app's execution-surface `ExploreBlock`: a hairline
- * card, a quiet header line stating the outcome, content below, tap the header to
- * fold. Design 27 §6.5's mobile deltas:
- * - the answer shows inline — folding a reply behind a tap would make reading it
- *   cost more here than on the surface that owns the same transcript;
- * - the decision card collapses to one line, and the buttons live in a BOTTOM
- *   SHEET: on a 390pt screen the tap that approves a tool call must not be
- *   reachable by accident. The line stays visible even when the block is folded,
- *   because a round parked on a question has to stay answerable.
+ * The visual language is this app's execution-surface `ExploreBlock`, class for
+ * class: a quiet pill as the collapse header, a hairline list under it, one row
+ * per item with a glyph and a caret, and the pair's content in stacked panels
+ * under the open row. The only thing invented here is what a row pairs:
+ * `user` / `assistant` instead of `tool_call` / `tool_result`, plus the
+ * session's live state next to the count. Design 27 §6.5's mobile deltas:
+ * - the newest round's answer shows inline — folding a reply behind a tap would
+ *   make reading it cost more here than on the surface that owns the transcript;
+ * - a decision card a round is parked on stays visible even when the block is
+ *   folded, and its buttons live in a BOTTOM SHEET: on a thumb-sized screen the
+ *   tap that approves a tool call must not be reachable by accident.
  *
  * Three rules this component owns:
- * - "in progress" is positive evidence only — a `pending` projection (D9). An
- *   unreachable Runtime says "暂不可达" with a retry, never "still running";
- *   showing an outage as a live run lets a dead node rewrite history.
+ * - "in progress" is positive evidence only — a `pending` projection read (D9).
+ *   The watched session's `session_state` refines the header copy; it never
+ *   substitutes for that read.
  * - the card a round is parked on lives HERE, in the block (D8). Answering it
  *   posts to the execution session's own write entry, where the owner check
  *   already runs; no chat row is written for the decision.
- * - a hole is stated as a hole (D5): inventing content would be writing history.
+ * - a hole is drawn as a hole (D5): a round that cannot be read says so, instead
+ *   of the transcript inventing an outcome for it.
  */
 
-import { memo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { sendAnswer, sendApproval } from '../lib/api'
-import { blockRefOf, blockStatusText, isFailureStatus } from '../lib/chatBlocks'
+import { blockStatusText, isFailureStatus } from '../lib/chatBlocks'
+import type { RunBlock } from '../lib/chatTranscriptGroups'
 import { renderMarkdown } from '../lib/markdown'
-import { useChatBlock, useChatBlockStore } from '../stores/chatBlockStore'
-import { useChatStore } from '../stores/chatStore'
+import { useChatBlockStore, useChatBlocks } from '../stores/chatBlockStore'
+import { isActiveStatus, useChatStore } from '../stores/chatStore'
+import { useAgentStore } from '../stores/agentStore'
 import { Sheet } from './ui'
-import type { BlockCard, ChatMessageRow } from '../lib/types'
+import type { BlockCard, ChatBlockEntry, LiveStatus } from '../lib/types'
+
+/** How many of a session's rounds stay visible when the block is opened. On a
+ *  phone the transcript itself scrolls, so the freshest pair is what a reader
+ *  came for; the rest are one tap away inside the block. */
+const RECENT_ROUNDS = 2
+/** How many more each reveal adds, so "show earlier" never dumps a long run on
+ *  a 390pt screen at once. */
+const REVEAL_STEP = 4
 
 interface ChatExecutionBlockProps {
-  row: ChatMessageRow
-  /** The Chat this row belongs to — the block read is participation-checked
+  /** The session's folded rounds, in order; the newest is the block's anchor. */
+  block: RunBlock
+  /** The Chat this block belongs to — the block read is participation-checked
    *  against it, so it is part of the address, not a filter (D10). */
   chatSessionId: string
-  /** Drill into the execution session that owns this round. The block names the
-   *  instance that hosts it, so the handler takes it — on this 1:1 surface that
-   *  instance is the agent the screen is open on, but the row must not have to
-   *  know that. */
+  /** Avatar + name above the block, the same header a bubble wears. */
+  showHeader?: boolean
+  agentAvatar: ReactNode
+  agentName: string
+  /** Something follows this block in the transcript. This is `ExploreBlock`'s
+   *  follow-up condition — the ONE that auto-collapses: while the run is the
+   *  freshest thing on screen it stays open. */
+  hasFollowUp?: boolean
+  /** Drill into the execution session that owns these rounds. */
   onJumpToExec: (agentInstanceId: string, execSid: string) => void
-  /** Address the composer at this round (D6 level 1) — what a `pause` card's
+  /** Address the composer at one round (D6 level 1) — what a `pause` card's
    *  "continue" rides. `quote` is the question the human is answering. */
   onReplyToRound: (rowId: string, quote: string) => void
-  /** A viewer who is not this round's answerer (`answerable_by`): the question
+  /** A viewer who is not a round's answerer (`answerable_by`): the question
    *  shows, the buttons do not (D10's read/write split). */
   canAnswer?: boolean
 }
 
+/** The session's live state, in as few words as a header line can carry. This is
+ *  `session_state` talk, not the round's (D9 keeps liveness a `pending` read). */
+function liveStatusText(s: LiveStatus): string {
+  switch (s.status) {
+    case 'llm_awaiting_first_chunk':
+      return '等模型响应'
+    case 'thinking':
+      return '思考中'
+    case 'llm_streaming':
+      return '正在输出'
+    case 'tool_executing':
+      return '执行工具中'
+    case 'waiting_approval':
+      return '等你审批'
+    case 'paused':
+      return '已暂停'
+    case 'errored':
+      return '出错了'
+    default:
+      return '空闲'
+  }
+}
+
+/** One-line summary of a question: whitespace folded, cut at what a row holds. */
+function summarize(text: string, max = 40): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim()
+  return collapsed.length > max ? `${collapsed.slice(0, max - 1)}…` : collapsed
+}
+
 export const ChatExecutionBlock = memo(function ChatExecutionBlock({
-  row,
+  block,
   chatSessionId,
+  showHeader,
+  agentAvatar,
+  agentName,
+  hasFollowUp,
   onJumpToExec,
   onReplyToRound,
   canAnswer = true,
 }: ChatExecutionBlockProps) {
-  const ref = blockRefOf(row.meta)
-  const entry = useChatBlock(chatSessionId, ref)
+  const instanceId = block.instanceId
+  const execSid = block.execSessionId
+  const refs = useMemo(() => block.rounds.map((r) => r.ref), [block])
+  const entries = useChatBlocks(chatSessionId, refs)
   const reload = useChatBlockStore((s) => s.reload)
-  const [open, setOpen] = useState(true)
+  // The run's own name, read the way the session list reads it. Empty until the
+  // session is titled — a fresh turn's block then wears its opening question.
+  const runTitle = useAgentStore((s) =>
+    s.agents[instanceId]?.sessions.find((x) => x.session_id === execSid)?.title,
+  )
+  // Mobile polls the state of ONE foreground session per agent (v1.1 §8), so a
+  // live line is only honest while this block's session IS the watched one.
+  const liveStatus = useChatStore((s) => {
+    const view = s.agentStates[instanceId]
+    return view && view.activeSessionId === execSid ? view.status : null
+  })
 
-  if (!ref || !entry) {
-    // No coordinates, or the read has not landed: a line holding the block's
-    // own place. A transcript that painted nothing here would let a missing run
-    // look like a message nobody received.
-    return <div className="chat-block-hole">{ref ? '正在加载本轮执行…' : '本轮执行已不可用'}</div>
-  }
+  // D9: a `pending` read is the ONLY positive evidence a round is still going.
+  const inProgress = block.rounds.some((r) => entries[r.ref]?.status === 'pending')
+  // A round parked on a decision the human has not answered.
+  const hasOpenCard = block.rounds.some((r) => {
+    const entry = entries[r.ref]
+    return !!entry?.projection?.card && entry.status === 'pending'
+  })
 
-  if (entry.status === 'unreachable') {
-    // The transcript's event line with a retry: the fact is "we could not read
-    // this", which belongs to the transcript, not to a bubble.
-    return (
-      <div className="chat-block-hole">
-        <span>执行所在的主机暂不可达</span>
-        <button type="button" className="chat-block-hole-action" onClick={() => reload(chatSessionId, [ref])}>
-          重试
-        </button>
-      </div>
-    )
-  }
+  const newest = block.rounds[block.rounds.length - 1]
+  const newestEntry = newest ? entries[newest.ref] : undefined
+  const outcome =
+    newestEntry?.status === 'pending' ? 'in_progress' : newestEntry?.projection?.status ?? ''
+  const shownState =
+    (liveStatus && isActiveStatus(liveStatus) ? liveStatusText(liveStatus) : '') ||
+    (outcome ? blockStatusText(outcome) : '')
 
-  const projection = entry.projection
-  if (entry.status === 'not_found' || !projection) {
-    // The round names a session this chat cannot resolve. An explicit hole is
-    // the honest answer (D5).
-    return <div className="chat-block-hole">本轮执行已不可用</div>
-  }
+  // Rounds beyond the recent window stay in the block, one tap away.
+  const [revealed, setRevealed] = useState(0)
+  const start = Math.max(0, block.rounds.length - RECENT_ROUNDS - revealed)
+  const shown = block.rounds.slice(start)
+  const hiddenOlder = start
 
-  const instanceId = entry.agent_instance_id
-  const execSid = entry.agent_session_id
-  // D9: `pending` is the ONLY positive evidence that a round is still running —
-  // the Gateway answers it from a live read of a non-terminal projection. A
-  // terminal block is `ok` and immutable, and an `unreachable` one is an outage,
-  // which must never be drawn as a run in flight.
-  const inProgress = entry.status === 'pending'
-  const status = inProgress ? 'in_progress' : projection.status
-  const answer = projection.answer?.body.trim() ?? ''
-  const card = projection.card ?? null
+  // `ExploreBlock`'s state machine, on the same conditions: open while it is the
+  // freshest thing on screen, fold once the conversation moves past it, and never
+  // re-open over a reader who collapsed it by hand.
+  const [open, setOpen] = useState(!hasFollowUp)
+  const manuallyCollapsed = useRef(false)
+
+  useEffect(() => {
+    if ((inProgress || hasOpenCard) && !manuallyCollapsed.current) setOpen(true)
+  }, [inProgress, hasOpenCard])
+
+  useEffect(() => {
+    if (hasFollowUp && !inProgress && !hasOpenCard) {
+      setOpen(false)
+      manuallyCollapsed.current = false
+    }
+  }, [hasFollowUp, inProgress, hasOpenCard])
+
+  const question0 = block.rounds.find((r) => r.triggerRow)?.triggerRow?.body ?? ''
+  const name = runTitle?.trim() || summarize(question0, 24) || '执行会话'
+  // The task coordinate (ADR-106 D13): it rides the ROUND, and the header is
+  // where a reader looks for "which piece of work is this".
+  const taskId = block.rounds.find((r) => r.roundRow.meta?.task_id)?.roundRow.meta?.task_id
+
+  // The rounds whose projection still carries a decision, whether or not the
+  // body is open: §6.5's rule is that a parked round stays answerable. The card
+  // comes from the read itself, so the transcript never judges whether the
+  // question is still open — the execution side does.
+  const parked = block.rounds.filter((r) => !!entries[r.ref]?.projection?.card)
 
   return (
-    <div className="chat-block" data-testid="exec-block" data-ref={ref} data-chat={chatSessionId}>
-      <button type="button" className="chat-block-head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+    <div className="chat-run" data-testid="exec-block" data-session={`${instanceId}|${execSid}`}>
+      {showHeader ? (
+        <div className="msg-group msg-group-peer">
+          <div className="msg-header">
+            <div className="msg-avatar">{agentAvatar}</div>
+            <div className="msg-sender">
+              <span className="msg-sender-name">{agentName}</span>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* The drill keeps its own chrome and sits ABOVE the block: it opens the
+          execution session, a different object from the rounds listed inside it. */}
+      <button
+        type="button"
+        className="chat-run-drill"
+        title={name}
+        onClick={() => onJumpToExec(instanceId, execSid)}
+      >
+        查看执行
+      </button>
+
+      <button
+        type="button"
+        className="explore-toggle"
+        onClick={() => {
+          const next = !open
+          setOpen(next)
+          manuallyCollapsed.current = next ? false : true
+        }}
+        aria-expanded={open}
+      >
         <span
-          className={`chat-block-glyph${inProgress ? ' is-live' : ''}${isFailureStatus(projection.status) ? ' is-danger' : ''}`}
+          className={`explore-toggle-icon${inProgress ? ' is-live' : ''}${
+            isFailureStatus(newestEntry?.projection?.status ?? '') ? ' is-danger' : ''
+          }`}
           aria-hidden
         >
-          {inProgress ? '◌' : isFailureStatus(projection.status) ? '!' : '⚙'}
+          {inProgress ? '◌' : isFailureStatus(newestEntry?.projection?.status ?? '') ? '!' : '⚙'}
         </span>
-        <span className="chat-block-status">{blockStatusText(status)}</span>
-        {row.meta?.task_id ? <span className="chat-block-task">{row.meta.task_id}</span> : null}
-        {!open && answer ? <span className="chat-block-peek">{peek(answer)}</span> : null}
-        <span className="chat-block-caret" aria-hidden>
+        <span className="explore-toggle-label">{name}</span>
+        <span className="explore-toggle-summary">
+          {block.rounds.length} 轮{shownState ? ` · ${shownState}` : ''}
+          {taskId ? ` · ${taskId}` : ''}
+        </span>
+        <span className="explore-toggle-caret" aria-hidden>
           {open ? '⌄' : '›'}
         </span>
       </button>
 
       {open ? (
-        <div className="chat-block-body">
-          {answer ? (
-            <div className="chat-block-answer">{renderMarkdown(answer)}</div>
-          ) : inProgress ? (
-            <div className="chat-block-working">处理中…</div>
-          ) : null}
-          {execSid ? (
-            <button type="button" className="chat-block-jump" onClick={() => onJumpToExec(instanceId, execSid)}>
-              查看执行
+        <div className="explore-body">
+          {hiddenOlder > 0 ? (
+            <button
+              type="button"
+              className="chat-run-older"
+              onClick={() => setRevealed((n) => n + REVEAL_STEP)}
+            >
+              查看更早 {hiddenOlder} 轮
             </button>
           ) : null}
+          {shown.map((round, i) => (
+            <RoundItem
+              key={round.ref}
+              round={round}
+              index={block.rounds.length - shown.length + i}
+              /** The freshest round of an open block shows its pair; earlier ones
+               *  fold to one line, the way a long run's older tool calls do. */
+              defaultOpen={i === shown.length - 1}
+              chatSessionId={chatSessionId}
+              entry={entries[round.ref]}
+              reload={reload}
+            />
+          ))}
         </div>
       ) : null}
 
-      {card && execSid ? (
+      {parked.map((round) => (
         <BlockCardSurface
-          card={card}
+          key={round.ref}
+          card={entries[round.ref]!.projection!.card!}
           canAnswer={canAnswer}
           instanceId={instanceId}
           execSid={execSid}
-          rowId={row.meta?.message_id ?? ''}
+          rowId={round.roundRow.meta?.message_id ?? ''}
           chatSessionId={chatSessionId}
-          blockRef={ref}
+          blockRef={round.ref}
           onReplyToRound={onReplyToRound}
         />
-      ) : null}
+      ))}
     </div>
   )
 })
 
-/** One folded line of the answer's opening, so a collapsed block still says
- *  something — a card that only states its status would read as a run that
- *  produced nothing. */
-function peek(answer: string): string {
-  const collapsed = answer.replace(/\s+/g, ' ').trim()
-  if (!collapsed) return ''
-  return collapsed.length > 28 ? `${collapsed.slice(0, 28)}…` : collapsed
+interface RoundItemProps {
+  round: RunBlock['rounds'][number]
+  /** Position in the session's round list (1-based) — the row's label. */
+  index: number
+  defaultOpen: boolean
+  chatSessionId: string
+  entry: ChatBlockEntry | undefined
+  reload: (chatId: string, refs: string[]) => void
+}
+
+/** One round: a question line that opens into the question/answer pair, in
+ *  `ExploreBlock`'s row-plus-panels chrome. The decision a round is parked on is
+ *  NOT drawn here — it rides under the block, so it stays answerable while the
+ *  list is folded (§6.5). */
+function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: RoundItemProps) {
+  const [open, setOpen] = useState(defaultOpen)
+  const projection = entry?.projection
+  const question = (round.showUserLine ? round.triggerRow?.body : '') || projection?.user?.body || ''
+  const summary =
+    summarize(question) || summarize(round.roundRow.meta?.assignment_brief ?? '') || '（无提问内容）'
+  const inProgress = entry?.status === 'pending'
+  const status = inProgress ? 'in_progress' : (projection?.status ?? '')
+
+  return (
+    <div className="chat-run-round" data-seq={round.roundRow.seq}>
+      <button
+        type="button"
+        className="chat-run-row"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <span className="chat-run-row-name">
+          第 {index + 1} 轮
+          <span
+            className={`chat-run-glyph${inProgress ? ' is-live' : ''}${
+              isFailureStatus(status) ? ' is-danger' : ''
+            }`}
+            aria-hidden
+          >
+            {inProgress ? '◌' : isFailureStatus(status) ? '!' : '✓'}
+          </span>
+        </span>
+        <span className="explore-item-args">{summary}</span>
+        <span className="chat-run-row-caret" aria-hidden>
+          {open ? '⌄' : '›'}
+        </span>
+      </button>
+
+      {open ? (
+        <div className="chat-run-detail">
+          {round.showUserLine && question ? <div className="chat-run-question">{question}</div> : null}
+          <RoundBody
+            entry={entry}
+            chatSessionId={chatSessionId}
+            reload={reload}
+            blockRef={round.ref}
+            status={status}
+          />
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+interface RoundBodyProps {
+  entry: ChatBlockEntry | undefined
+  chatSessionId: string
+  reload: (chatId: string, refs: string[]) => void
+  /** The ref this round is read under — the retry asks for exactly it. */
+  blockRef: string
+  status: string
+}
+
+/** The answer panel. Anything that is NOT an answer states what is missing,
+ *  instead of painting a blank box (D5). */
+function RoundBody({ entry, chatSessionId, reload, blockRef, status }: RoundBodyProps) {
+  const body = entry?.projection?.answer?.body.trim() ?? ''
+
+  if (!entry) {
+    return <div className="chat-run-note">正在加载本轮执行…</div>
+  }
+  if (entry.status === 'unreachable') {
+    return (
+      <div className="chat-run-note is-danger">
+        <span>执行所在的主机暂不可达</span>
+        <button
+          type="button"
+          className="chat-block-hole-action"
+          onClick={() => reload(chatSessionId, [blockRef])}
+        >
+          重试
+        </button>
+      </div>
+    )
+  }
+  if (entry.status === 'not_found' || !entry.projection) {
+    return <div className="chat-run-note">本轮执行已不可用</div>
+  }
+  if (body) {
+    // §6.5: the answer is inline, at reading size — never folded behind a tap.
+    return <div className="chat-block-answer">{renderMarkdown(body)}</div>
+  }
+  return <div className="chat-run-note">{blockStatusText(status)}</div>
 }
 
 interface CardSurfaceProps {
@@ -170,7 +393,7 @@ interface CardSurfaceProps {
    *  level 1). */
   rowId: string
   chatSessionId: string
-  /** This block's ref, re-read once the answer lands so the answered card leaves
+  /** This round's ref, re-read once the answer lands so the answered card leaves
    *  the transcript on the decision, not on the next projection that happens to
    *  arrive. Named `blockRef` because `ref` is a reserved JSX attribute. */
   blockRef: string
@@ -178,11 +401,7 @@ interface CardSurfaceProps {
 }
 
 /** The round's pending decision (D8), collapsed to one line with its buttons in
- *  a bottom sheet (§6.5).
- *
- *  A `pause` is not answered through a sheet: the turn already ended `waiting`,
- *  and the human's reply IS the next turn of this round (D6 level 1) — so the
- *  button addresses the composer instead. */
+ *  a bottom sheet (§6.5). Rendered whether or not the block is folded. */
 function BlockCardSurface({
   card,
   canAnswer,
@@ -193,6 +412,54 @@ function BlockCardSurface({
   blockRef,
   onReplyToRound,
 }: CardSurfaceProps) {
+  if (canAnswer) {
+    return (
+      <RoundCard
+        card={card}
+        instanceId={instanceId}
+        execSid={execSid}
+        rowId={rowId}
+        chatSessionId={chatSessionId}
+        blockRef={blockRef}
+        onReplyToRound={onReplyToRound}
+      />
+    )
+  }
+  return (
+    <div className="chat-block-card">
+      <div className="chat-block-card-static">
+        <span className="chat-block-card-tag">{cardLabel(card)}</span>
+        <span className="chat-block-card-text">{truncate(card.prompt)}</span>
+      </div>
+      <div className="chat-block-card-note">只有发起本轮的人可以回复</div>
+    </div>
+  )
+}
+
+interface CardActionsProps {
+  card: BlockCard
+  instanceId: string
+  execSid: string
+  rowId: string
+  /** The Chat the read is participation-checked against — the retry/re-read
+   *  rides it, because a block is addressed, not filtered (D10). */
+  chatSessionId: string
+  /** This round's ref: the answered round is the one re-read. */
+  blockRef: string
+  onReplyToRound: (rowId: string, quote: string) => void
+}
+
+/** The answerable form of the parked decision — the sheet's opener, or the
+ *  composer address for a `pause`. */
+function RoundCard({
+  card,
+  instanceId,
+  execSid,
+  rowId,
+  chatSessionId,
+  blockRef,
+  onReplyToRound,
+}: CardActionsProps) {
   const [sheet, setSheet] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -205,6 +472,8 @@ function BlockCardSurface({
       // The execution view keeps its own copy of the pending request; clear it
       // only when it IS this request (see `dismissAnsweredCard`).
       useChatStore.getState().dismissAnsweredCard(instanceId, execSid, card.request_id)
+      // Re-read this round, so the answered card leaves the transcript on the
+      // decision rather than on the next projection that happens to arrive.
       useChatBlockStore.getState().reload(chatSessionId, [blockRef])
       setSheet(false)
     } catch {
@@ -217,7 +486,7 @@ function BlockCardSurface({
   }
 
   if (card.kind === 'pause') {
-    return canAnswer ? (
+    return (
       <div className="chat-block-card">
         <div className="chat-block-card-static">
           <span className="chat-block-card-tag">步骤确认</span>
@@ -232,40 +501,21 @@ function BlockCardSurface({
           继续执行
         </button>
       </div>
-    ) : (
-      <div className="chat-block-card">
-        <div className="chat-block-card-static">
-          <span className="chat-block-card-tag">步骤确认</span>
-          <span className="chat-block-card-text">{truncate(card.prompt)}</span>
-        </div>
-        <div className="chat-block-card-note">只有发起本轮的人可以回复</div>
-      </div>
     )
   }
 
-  const label = card.kind === 'approval' ? '需要审批' : 'Agent 询问'
   return (
     <div className="chat-block-card">
-      {canAnswer ? (
-        <button
-          type="button"
-          className="chat-block-card-btn"
-          data-testid="block-card-open"
-          onClick={() => setSheet(true)}
-        >
-          <span className="chat-block-card-tag">{label}</span>
-          <span className="chat-block-card-text">{truncate(card.prompt)}</span>
-          <span className="chat-block-card-go">去回复</span>
-        </button>
-      ) : (
-        <>
-          <div className="chat-block-card-static">
-            <span className="chat-block-card-tag">{label}</span>
-            <span className="chat-block-card-text">{truncate(card.prompt)}</span>
-          </div>
-          <div className="chat-block-card-note">只有发起本轮的人可以回复</div>
-        </>
-      )}
+      <button
+        type="button"
+        className="chat-block-card-btn"
+        data-testid="block-card-open"
+        onClick={() => setSheet(true)}
+      >
+        <span className="chat-block-card-tag">{cardLabel(card)}</span>
+        <span className="chat-block-card-text">{truncate(card.prompt)}</span>
+        <span className="chat-block-card-go">去回复</span>
+      </button>
       {sheet ? (
         <CardSheet
           card={card}
@@ -280,10 +530,21 @@ function BlockCardSurface({
   )
 }
 
-/** The answer surface's bottom sheet (§6.5). Approval offers exactly two
- *  decisions; an `ask_question` offers its labels plus free text — the same
- *  content the desktop block's inline buttons carry, just not one tap from the
- *  thumb. */
+/** The label a parked decision wears on its collapsed line. */
+function cardLabel(card: BlockCard): string {
+  return card.kind === 'approval' ? '需要审批' : card.kind === 'pause' ? '步骤确认' : 'Agent 询问'
+}
+
+/** Bound a card's question to one line on the collapsed row — the sheet is where
+ *  the whole question is read. */
+function truncate(prompt?: string): string {
+  const collapsed = (prompt ?? '').replace(/\s+/g, ' ').trim()
+  return collapsed.length > 34 ? `${collapsed.slice(0, 34)}…` : collapsed
+}
+
+/** The sheet's answer surface (§6.5). Approval offers exactly two decisions; an
+ *  `ask_question` offers its labels plus free text — the same content the desktop
+ *  block's inline buttons carry, just not one tap from the thumb. */
 function CardSheet({
   card,
   busy,
@@ -345,11 +606,4 @@ function CardSheet({
       {failed ? <div className="chat-sheet-failed">回复未能发送，请重试</div> : null}
     </Sheet>
   )
-}
-
-/** Bound a card's question to one line on the collapsed row — the sheet is where
- *  the whole question is read. */
-function truncate(prompt?: string): string {
-  const collapsed = (prompt ?? '').replace(/\s+/g, ' ').trim()
-  return collapsed.length > 34 ? `${collapsed.slice(0, 34)}…` : collapsed
 }

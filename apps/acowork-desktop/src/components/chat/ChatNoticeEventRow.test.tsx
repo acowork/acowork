@@ -40,6 +40,27 @@ describe("ChatNoticeEventRow", () => {
     },
   );
 
+  it("hides EVERY retired milestone the mobile surface hides, body or not", () => {
+    // Design 27 §5.5.4: Desktop's two views and Mobile share one hidden set. The
+    // routing reaction and the card-resolution receipt are on it too — an old
+    // transcript that carries them must not narrate a routing decision or a
+    // decision card the reference row and the block now own (D8/D12). Asserted
+    // WITH a body, because a bodyless row would fall through to nothing anyway.
+    for (const noticeType of [
+      "turn_dispatched",
+      "turn_started",
+      "turn_routed",
+      "router_fallback",
+      "interaction_resolved",
+    ]) {
+      const { container, unmount } = render(
+        <ChatNoticeEventRow row={noticeRow(noticeType, "Routed to a new task")} />,
+      );
+      expect(container.innerHTML, noticeType).toBe("");
+      unmount();
+    }
+  });
+
   it("paints the addressing question it is asked in common (D6 levels 3 and 5)", () => {
     // `session_choice` / `confirm_continue` are empty-bodied notices whose real
     // content is the option list — the picker paints the buttons, and this line

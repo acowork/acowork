@@ -53,7 +53,7 @@ The delivered row is still a broadcast row (`to: ""`); `meta.mentions` keeps mea
 
 Rationale: `mentions` renders as @ chips, so folding an automatic target in would put a name in the sender's mouth. Meanwhile the wait line ("working on it") is keyed on "did this human row wake an agent", and it needs that evidence slot — `auto_routed_to` is it. The storage layer must declare the field explicitly or it is dropped at the serialization boundary (the same trap as `meta.task_id`).
 
-> **Overturned by ADR-106 D9 / D14**: keying the wait line on `auto_routed_to` reads "cannot see it" as "still running" — a restart, an offline agent or a failed projection each leaves a permanent wait line. The only test today is this surface's own in-flight POST that has not returned (`sending`); the field is still written (it records where the message went) but drives no rendering.
+> **Overturned by ADR-106 D9 / D14**: keying the wait line on `auto_routed_to` reads "cannot see it" as "still running" — a restart, an offline agent or a failed projection each leaves a permanent wait line. The field is still written (it records where the message went) but drives no rendering. The wait line was then shrunk to "this surface's own POST that has not returned yet" (`sending`), and that version was too short as well: a POST answers in about 150 ms while that round's first row can land a minute later. The rule in force is in [ADR-106, Revision (2026-11-03)](./ADR-106-chat-execution-reference-projection.md): a claim on this device's own send, keyed by the row id its response carried, settled by the first row that answers it, with a 300 s deadline as the backstop.
 
 ### D5 — A failed delivery must be visible
 
@@ -64,7 +64,7 @@ Two frontend rules:
 - `ChatNoticeEventRow` renders the row by `notice_type` — it must paint even with an empty body, since the row exists precisely so that the failure stops being silent;
 - `chatTurnState.answeredAfter` treats a `delivery_failed` notice bound to the same trigger as the end of the turn: the receipt is the outcome, and keeping the wait line up would be a louder version of the same lie.
 
-> **Status after ADR-106 D14**: the semantics ("a failure must be visible") and the `delivery_failed` channel row are kept — the first rule still holds. The host of the second rule, `chatTurnState.answeredAfter`, was deleted with P6: a wait line is no longer inferred from chat rows, so it has nothing to close.
+> **Status after ADR-106 D14**: the semantics ("a failure must be visible") and the `delivery_failed` channel row are kept — the first rule still holds. The host of the second rule, `chatTurnState.answeredAfter`, was deleted with P6. As of 2026-11-03 the receipt takes back a smaller and more honest role: it is not an inference-closing signal but the **settlement row** for this device's send claim — on the group surface a failed delivery is visible and ends the wait at the same time, because those are one rule (a 1:1 failure arms no claim, so there is nothing to settle).
 
 ### D6 — Lifecycle: the role leaves with its member
 

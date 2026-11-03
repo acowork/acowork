@@ -62,7 +62,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
     ...actual,
     useChatSessionStore: Object.assign(
       (selector: (state: unknown) => unknown) =>
-        selector({ windows, sending: {}, draft: {}, attachedContext: {} }),
+        selector({ windows, sending: {}, inflight: {}, draft: {}, attachedContext: {} }),
       { getState: () => state },
     ),
   };
@@ -171,7 +171,7 @@ describe("AgentChatView row memo (render-perf L1)", () => {
     expect(rowRenders.n).toBe(tail.length);
 
     rowRenders.n = 0;
-    const ta = screen.getByPlaceholderText("chatPanel.inputMessage") as HTMLTextAreaElement;
+    const ta = screen.getByPlaceholderText("chatView.address.composerHint") as HTMLTextAreaElement;
     fireEvent.change(ta, { target: { value: "t" } });
     // The host re-rendered (the controlled textarea proves it)…
     expect(ta.value).toBe("t");

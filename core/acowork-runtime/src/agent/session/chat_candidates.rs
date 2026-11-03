@@ -252,6 +252,53 @@ pub fn deliverable_candidates(
     build_candidates(rows, &HashMap::new(), &query)
 }
 
+/// The same read rule as an owned value, for a caller that filters rows outside
+/// the router (ADR-106 D7: `GET /sessions?chat_session_id=&surface=`).
+///
+/// [`CandidateQuery`] is the router's shape — it borrows the sets it needs and
+/// carries the PM-origin labels a listing never renders. This owns its inputs so
+/// the session scan can move it into a blocking task as a row predicate without
+/// borrowing the HTTP request or a lock. The rule itself stays `is_visible`:
+/// one implementation for both entry points, because a second copy of a
+/// permission filter is how the two drift apart.
+#[derive(Debug, Clone)]
+pub struct ChatScopeRule {
+    pub chat_session_id: String,
+    /// The reading human, taken from the Gateway-injected scope headers — never
+    /// from the query string. `None` = local mode (no accounts to attribute).
+    pub owner_user_id: Option<String>,
+    pub surface: CandidateSurface,
+    /// Sessions whose PM task already reached a terminal state: not addressable
+    /// again, so not listable either.
+    pub terminal_session_ids: HashSet<String>,
+}
+
+impl ChatScopeRule {
+    /// May this session be listed for this chat, to this reader?
+    ///
+    /// Exactly the candidate filter — terminal exclusion, chat binding, initiator
+    /// ownership — with no display policy on top. Ordering, paging, and how far
+    /// back to look are the listing's business; this only says what is legal.
+    pub fn allows(&self, meta: &SessionMeta) -> bool {
+        if self.terminal_session_ids.contains(&meta.session_id) {
+            return false;
+        }
+        // The PM-origin set is a label, never a gate, so an empty one is
+        // harmless here — and `HashSet::new` allocates nothing until inserted
+        // into, which is the point of building it per call.
+        let task_session_ids = HashSet::new();
+        let query = CandidateQuery {
+            chat_session_id: &self.chat_session_id,
+            owner_user_id: self.owner_user_id.as_deref(),
+            surface: self.surface,
+            task_session_ids: &task_session_ids,
+            terminal_session_ids: &self.terminal_session_ids,
+            max: usize::MAX,
+        };
+        is_visible(meta, &query)
+    }
+}
+
 /// The two visibility rules (module docs). A session bound to another chat is
 /// invisible on every surface, which is what keeps a group's `Members`-visible
 /// sessions out of an unrelated private chat's candidate list.
@@ -595,5 +642,75 @@ mod tests {
             &query(CandidateSurface::Direct, &tasks, &terminal, 10),
         );
         assert_eq!(out[0].title, "untitled");
+    }
+
+    fn rule(surface: CandidateSurface, terminal: &[&str]) -> ChatScopeRule {
+        ChatScopeRule {
+            chat_session_id: CHAT.to_string(),
+            owner_user_id: Some(ALICE.to_string()),
+            surface,
+            terminal_session_ids: terminal.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// ADR-106 D7: `GET /sessions?chat_session_id=` filters through
+    /// [`ChatScopeRule`], so it must agree with the router's own filter row for
+    /// row. A listing that admits one extra session is a picker offering an
+    /// address the router would refuse; one that drops a session hides work the
+    /// human may legally continue.
+    #[test]
+    fn chat_scope_rule_admits_exactly_what_the_candidate_filter_does() {
+        let rows = vec![
+            ("s-cur".to_string(), meta("s-cur", "Current", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("s-old".to_string(), meta("s-old", "Predecessor", "2026-10-20T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("s-manual".to_string(), meta("s-manual", "Manual", "2026-10-19T10:00:00+00:00", None, Some(ALICE))),
+            ("s-other-chat".to_string(), meta("s-other-chat", "Elsewhere", "2026-10-21T11:00:00+00:00", Some("chat-2"), Some(ALICE))),
+            ("s-bob".to_string(), meta("s-bob", "Bob", "2026-10-21T11:00:00+00:00", None, Some("bob"))),
+            ("s-agent".to_string(), meta("s-agent", "Agent", "2026-10-21T11:00:00+00:00", None, None)),
+        ];
+        for surface in [CandidateSurface::Direct, CandidateSurface::Group] {
+            for terminal in [&[][..], &["s-old"][..]] {
+                let tasks = empty_set();
+                let terminal_set: HashSet<String> =
+                    terminal.iter().map(|s| s.to_string()).collect();
+                let through_query_rows = build_candidates(
+                    &rows,
+                    &HashMap::new(),
+                    &CandidateQuery {
+                        chat_session_id: CHAT,
+                        owner_user_id: Some(ALICE),
+                        surface,
+                        task_session_ids: &tasks,
+                        terminal_session_ids: &terminal_set,
+                        max: 10,
+                    },
+                );
+                let mut through_query = ids(&through_query_rows);
+                let rule = rule(surface, terminal);
+                let mut through_rule: Vec<&str> = rows
+                    .iter()
+                    .filter(|(_, meta)| rule.allows(meta))
+                    .map(|(sid, _)| sid.as_str())
+                    .collect();
+                through_query.sort();
+                through_rule.sort();
+                assert_eq!(through_rule, through_query, "surface={surface:?} terminal={terminal:?}");
+            }
+        }
+    }
+
+    /// The rule is the permission, so the two answers it must never give are
+    /// "somebody else's run" and "work that is already over".
+    #[test]
+    fn chat_scope_rule_keeps_other_people_and_finished_work_out() {
+        let rows = [
+            ("mine".to_string(), meta("mine", "Mine", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("bobs".to_string(), meta("bobs", "Bob", "2026-10-21T10:00:00+00:00", Some(CHAT), Some("bob"))),
+            ("finished".to_string(), meta("finished", "Done", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+        ];
+        let rule = rule(CandidateSurface::Direct, &["finished"]);
+        assert!(rule.allows(&rows[0].1));
+        assert!(!rule.allows(&rows[1].1));
+        assert!(!rule.allows(&rows[2].1));
     }
 }

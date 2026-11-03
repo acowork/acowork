@@ -39,7 +39,7 @@ import {
   encodeConnect, encodeDisconnect, encodePingreq, encodePuback,
   encodeSubscribe, PacketFramer, PKT, type ConnectOpts, type Decoded,
 } from './mqtt-wire'
-import { decodeEnvelope, decodePresence, type PresenceUpdate } from './proto-wire'
+import { decodeEnvelope, decodePresence, decodeRoundSignal, type PresenceUpdate, type RoundSignal } from './proto-wire'
 import type { WebSocketLike } from './realtime'
 
 /** One wildcard filter for the whole fleet (QoS 1: the status topic is QoS 1). */
@@ -49,6 +49,15 @@ export const PRESENCE_TOPIC = 'acowork/agents/+/status'
  *  Drives the inbox's breathing working dot: the presence wire above only
  *  carries lifecycle (offline/error/idle), never `busy`. */
 export const SESSION_STATE_TOPIC = 'acowork/agents/+/sessions/+/state'
+/** ADR-106 revision (2026-11-03): the round doorbell, published by the execution
+ *  session when one of its rounds reaches a terminal outcome or parks on a card.
+ *  Non-retained and once per round, so a wildcard costs a frame per finished run
+ *  — no fleet replay on subscribe, unlike the retained `state` filter above.
+ *  Mobile needs it here rather than in `realtime.ts` because the block lives in a
+ *  Chat while the signal lives on the EXECUTION session's topic tree, and the
+ *  realtime socket watches exactly one session (§8.0).
+ *  Mirrors the Runtime publisher's `messages/round_state` topic. */
+export const ROUND_STATE_TOPIC = 'acowork/agents/+/sessions/+/messages/round_state'
 /** Prefix of the per-account chat signals — routes a PUBLISH to the right
  *  consumer without re-deriving the account id. Mirrors
  *  `acowork_core::mqtt_proto::user_chat_changed_topic`. */
@@ -72,6 +81,11 @@ export interface PresenceDeps {
   /** One session's lifecycle status pushed/retained (`.../sessions/{sid}/state`).
    *  Raw Runtime status string; the store decides busy vs idle. */
   onSessionState?(agentId: string, sessionId: string, status: string): void
+  /** A round of some execution session changed state. `agentId`/`sessionId` come
+   *  from the topic (the execution coordinates); the signal's own
+   *  `chatSessionId` names the Chat that owes the block a re-read. Deciding
+   *  whether anybody is looking is the block store's, never this channel's. */
+  onRoundState?(agentId: string, sessionId: string, sig: RoundSignal): void
   /**
    * The account's chat signal topic, or null while there is no account (boot,
    * logged out). Read per CONNECT, so a rotation that lands during a reconnect
@@ -111,7 +125,7 @@ let packetId = 1
  *  one this connection is actually listening to. Kept per connection: the
  *  account can change between two CONNECTs, and routing a PUBLISH against a
  *  stale topic would silently drop the wake-up. */
-let subTopics: string[] = [PRESENCE_TOPIC, SESSION_STATE_TOPIC]
+let subTopics: string[] = [PRESENCE_TOPIC, SESSION_STATE_TOPIC, ROUND_STATE_TOPIC]
 let chatSub: string | null = null
 /** Last value handed to `onChatChannel`, so a reconnect does not re-arm a poll
  *  that is already armed (and the reverse). */
@@ -199,9 +213,13 @@ function handlePacket(d: Decoded, s: WebSocketLike): void {
       // to presence only, half-awake, with nothing logging it.
       const chat = deps.chatTopic?.() ?? null
       chatSub = chat
+      // The account topic stays LAST: a caller feeding a SUBACK short by the
+      // mailbox code (a Gateway that never enabled the account system) then
+      // still grants every positional filter above it, which is the truthful
+      // answer for presence and for the round doorbell.
       subTopics = chat
-        ? [PRESENCE_TOPIC, SESSION_STATE_TOPIC, chat]
-        : [PRESENCE_TOPIC, SESSION_STATE_TOPIC]
+        ? [PRESENCE_TOPIC, SESSION_STATE_TOPIC, ROUND_STATE_TOPIC, chat]
+        : [PRESENCE_TOPIC, SESSION_STATE_TOPIC, ROUND_STATE_TOPIC]
       s.send(encodeSubscribe(subTopics, subTopics.map(() => 1), packetId++))
     } else onDown() // rejected (stale token / fail-closed verifier): retry later
     return
@@ -211,8 +229,9 @@ function handlePacket(d: Decoded, s: WebSocketLike): void {
     // off can hand back 0x80 for the mailbox while still delivering presence.
     const presenceOk = granted(d.codes, PRESENCE_TOPIC)
     const stateOk = granted(d.codes, SESSION_STATE_TOPIC)
+    const roundOk = granted(d.codes, ROUND_STATE_TOPIC)
     const chatOk = chatSub !== null && granted(d.codes, chatSub)
-    if (presenceOk || stateOk || chatOk) {
+    if (presenceOk || stateOk || roundOk || chatOk) {
       alive = true
       retries = 0
       if (connectTimer !== null) { clearTimeout(connectTimer); connectTimer = null }
@@ -237,6 +256,19 @@ function handlePacket(d: Decoded, s: WebSocketLike): void {
       // never sent, and if one ever were, another account's signal must not
       // refresh this device.
       if (chatSub !== null && p.topic === chatSub) deps.onChatWake?.()
+      return
+    }
+    if (p.topic.endsWith('/messages/round_state')) {
+      // Checked before the `/state` branch: a round signal is a `messages/*`
+      // publish, and reading it as a session snapshot would flip a working dot
+      // from a payload that never mentions status.
+      const sig = decodeRoundSignal(p.payload)
+      if (sig) {
+        const seg = p.topic.split('/')
+        const agentId = seg[2]
+        const sessionId = seg[4]
+        if (agentId && sessionId) deps.onRoundState?.(agentId, sessionId, sig)
+      }
       return
     }
     if (p.topic.startsWith('acowork/agents/') && p.topic.endsWith('/state')) {

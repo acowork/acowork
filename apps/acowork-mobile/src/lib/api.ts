@@ -24,7 +24,6 @@ import type {
   AccountMe,
   AgentRow,
   ChatBlockEntry,
-  ChatCandidate,
   ChatMessage,
   ChatMessagesPage,
   ChatSessionInfo,
@@ -308,6 +307,37 @@ export function mapSessionRow(r: SessionRow): SessionInfo {
 
 export async function fetchSessions(agentId: string, page: number): Promise<{ items: SessionInfo[]; hasMore: boolean }> {
   const r = await req<SessionsPage>('GET', `/api/agents/${agentId}/sessions?page=${page}&size=20`)
+  return { items: (r.sessions ?? []).map(mapSessionRow), hasMore: (r.page ?? page) < (r.total_pages ?? page) }
+}
+
+/**
+ * ADR-106 D7: the second level of the `@` — the execution sessions THIS Chat may
+ * address, read off the node that hosts the agent.
+ *
+ * The same listing as `fetchSessions`, narrowed by `chat_session_id` / `surface`:
+ * the narrowing is the Runtime's permission rule (a 1:1 lists this chat's runs
+ * plus the human's own hand-started ones, never finished work), so it runs
+ * server-side and BEFORE pagination — `hasMore` walks only what is legal to
+ * name here. One list, one filter: a second endpoint would be the same question
+ * asked twice, with two answers that can drift.
+ */
+export async function fetchChatSessions(
+  agentId: string,
+  chatSessionId: string,
+  surface: 'direct' | 'group',
+  page: number,
+): Promise<{ items: SessionInfo[]; hasMore: boolean }> {
+  if (!agentId || !chatSessionId) return { items: [], hasMore: false }
+  const query = new URLSearchParams({
+    page: String(page),
+    size: '20',
+    chat_session_id: chatSessionId,
+    surface,
+  })
+  const r = await req<SessionsPage>(
+    'GET',
+    `/api/agents/${encodeURIComponent(agentId)}/sessions?${query}`,
+  )
   return { items: (r.sessions ?? []).map(mapSessionRow), hasMore: (r.page ?? page) < (r.total_pages ?? page) }
 }
 
@@ -620,26 +650,19 @@ export async function fetchChatBlocks(
 }
 
 /**
- * The second level of the `@` (ADR-106 D7): the execution sessions this Chat
- * may address, read off the node that hosts the agent.
- *
- * Not a convenience filter the client could write itself — the Runtime's
- * candidate rules ARE the permission (a 1:1 lists this chat's sessions plus
- * the human's own hand-started ones, never terminal work). Proxied
- * transparently by the Gateway to `GET /api/agents/{id}/chat-candidates`.
+ * `POST /api/intents/chat-message` answers with the row it wrote and whether
+ * anybody took it. The id is the durable `message_id` the Gateway assigned to
+ * the human's row — the key every outcome row of this turn threads itself to
+ * under `meta.in_reply_to`, and therefore the only id the Chat surface may
+ * claim an in-flight turn with (ADR-106 D9). `status` is `"delivered"` or
+ * `"failed"`: a failed 1:1 delivery writes no receipt into the Chat, so the
+ * surface must not wait on one.
  */
-export async function fetchChatCandidates(
-  instanceId: string,
-  chatSessionId: string,
-  surface: 'direct' | 'group',
-): Promise<ChatCandidate[]> {
-  if (!instanceId || !chatSessionId) return []
-  const query = new URLSearchParams({ chat_session_id: chatSessionId, surface })
-  const body = await req<{ candidates?: ChatCandidate[] }>(
-    'GET',
-    `/api/agents/${encodeURIComponent(instanceId)}/chat-candidates?${query}`,
-  )
-  return body?.candidates ?? []
+export interface ChatSendResponse {
+  message_id: string
+  status: string
+  error_code?: string
+  error?: string
 }
 
 /**
@@ -665,8 +688,8 @@ export async function sendChatMessage(
   inReplyTo?: string,
   attachmentIds?: string[],
   address?: ChatAddress,
-): Promise<void> {
-  await req<void>('POST', '/api/intents/chat-message', {
+): Promise<ChatSendResponse> {
+  return req<ChatSendResponse>('POST', '/api/intents/chat-message', {
     chat_session_id: chatSessionId,
     from_user: me,
     text,

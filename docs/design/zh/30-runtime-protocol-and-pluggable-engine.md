@@ -1,6 +1,6 @@
 # 30-runtime-protocol-and-pluggable-engine — Runtime 协议壳、能力模型与可插拔引擎接入
 
-> **版本**: v0.2（纳入四条核心诉求；v0.1→v0.2 变更见 §14）
+> **版本**: v0.2.1（纳入四条核心诉求；v0.1→v0.2 与 v0.2.1 变更见 §14）
 > **状态**: 📝 待评审（REQ-01~04 为**约束条件**，不再开放讨论；§11 剩 4 个开放问题）
 > **范围**: ACowork 平台协议层（Gateway / Node / Runtime / Desktop 四方契约）
 > **一句话结论**: ACowork 只定义**一个协议壳 + 一套能力模型**，不定义引擎该有什么能力。壳的必选面是三件事：**轮次流、session 基础配置（模型 / reasoning / workspace）、agent 参数设置面**；其余全部由 runtime 自行声明，声明的词汇表由 ACowork 拥有。Desktop 只有一套界面和一套交互逻辑，差异一律表现为能力开关的**开与关**，不表现为代码分支。
@@ -174,7 +174,7 @@ graph TD
 | **T1 轮次流** | `POST/GET /sessions/{sid}/messages`、核心 **9 个事件**（reasoning 起止成对）：`chunk` / `reasoning_started` / `reasoning_ended` / `tool_call` / `tool_result` / `done` / `error` / `stopped` / `context_usage`；`SessionState` | ✅ 必选 | **启动即失败**（FAILED + detail） |
 | **T1C 必选配置面**（新增，REQ-03/04） | `SessionConfig` 三件套（`provider_id`+`model_id` / `reasoning_effort` / `workspace_id`）读写与 retained 同步；**agent 参数面**（schema 声明 + 读写 + retained 同步） | ✅ 必选 | **启动即失败**（FAILED + detail） |
 | **T2 会话控制** | `open`/`close`/`visibility`、`stop`、`approval`、`answer`、`cancel-tool`、`todo_updated`、`ask_question` | 🟡 能力声明 | 开关关闭 + 标注"该 runtime 不支持"；**禁止静默 fallback** |
-| **T3 引擎私货** | `compacting_*`/`compaction_cancelled`、`iteration_limit_paused`、`loop_detected_paused`、`skill_executed`、`memory_updated`、`/compress`、`/search/summary`、`/conversation/index/rebuild`、`/api/debug/*`、`prompt-file` | 🟡 能力声明 | 面板不渲染；HTTP 返回 `404 unsupported_capability`（不塌缩成 500，不返回假成功） |
+| **T3 引擎私货** | `compacting_*`/`compaction_cancelled`、`iteration_limit_paused`、`loop_detected_paused`、`skill_executed`、`memory_updated`、`round_state`（ADR-106 轮次门铃）、`/compress`、`/search/summary`、`/conversation/index/rebuild`、`/api/debug/*`、`prompt-file` | 🟡 能力声明 | 面板不渲染；HTTP 返回 `404 unsupported_capability`（不塌缩成 500，不返回假成功）；`round_state` 缺失 ⇒ 执行块靠周期重读收口（响应变慢，正确性不变——这正是它进 T3 而不进 T1 的理由） |
 
 > **分层即评审闸门**：任何新增 topic/路由/事件必须先回答"属于哪一层"。进 **T1/T1C** 需要该语义已被 REQ 列为必选，或至少 2 个引擎天然具备（rule-of-three）；否则进 T3。这是防协议膨胀的唯一有效手段。
 
@@ -470,4 +470,5 @@ Android 仓库对上游的依赖痛点（无 tag、无发布、path 依赖、103
 |---|---|
 | v0.1 | 首版：ARP/EIP 两层拆分、T0–T3 分层、选项 A/B/C/D 对比（D 主干、C 否决）、D1–D9、S0–S5；开放问题 Q1–Q4 |
 | **v0.2** | **纳入四条核心诉求 REQ-01~04**（§1.2）。新增：§6.2 能力模型（权威二分 + 注册表条目结构 + 5 条校验规则 + 3 条裁定）、§6.3 必选配置面（三件套语义 + `ParamDef` schema）、§6.4 统一交互界面规则（U1/U2/U3）。ARP 分层新增 **T1C 必选配置面**；EIP 从 6 动作扩为 **9 动作**；新增事实 **F16/F17/F18**；新增决策 **D10–D14**；**Q3 关闭**（REQ-02 裁定），新增 **Q5/Q6**；§10 的 S1 扩为含 schema 驱动设置面板 + conformance 探针，S5 增加"零 `engine_kind` 分支"终局检验；§12 契约清单补 `AgentConfig` schema 化与 Desktop 去硬编码；§13 增加 REQ 追溯行 |
+| v0.2.1 | 按 §6.1 下方的"分层即评审闸门"补齐一条新事件的归层：ADR-106 修订（2026-11-03）的 `round_state` 轮次门铃入 **T3**（不带正文、不建立 liveness、缺失时只付周期重读），非 `acowork-runtime` 引擎不实现它也不破坏任何必选面。本节只登记层属，字段号 / topic / QoS 的规范在 [ADR-106](../../adr/zh/ADR-106-chat-execution-reference-projection.md) 与 [protocols/zh/mqtt.md](../../protocols/zh/mqtt.md) |
 

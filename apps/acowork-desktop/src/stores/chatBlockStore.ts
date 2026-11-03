@@ -1,26 +1,37 @@
 /**
  * Execution-block store (ADR-106 D3/D5/D9).
  *
- * The transcript renders a block per `execution_round` row, and every row of a
- * window asks for its block. One HTTP call per row would be a request storm on
- * scroll, so reads are BATCHED per chat: whichever component asks first queues
- * the refs, and the queue flushes on a microtask-free timer (a frame) with the
- * refs this chat does not already hold.
+ * The transcript renders one block per EXECUTION SESSION (ADR-106's presentation
+ * contract), so a block asks for every round its session has in the loaded
+ * window, and every row of a window asks for something. One HTTP call per ref
+ * would be a request storm on scroll, so reads are BATCHED per chat: whichever
+ * component asks first queues the refs, and the queue flushes on a microtask-free
+ * timer (a frame) with the refs this chat does not already hold.
  *
  * What is deliberately NOT here: any invalidation of a terminal block. D5 gives
  * the cache no invalidation path because a terminal projection cannot change, so
- * the only re-reads are a `pending` block's poll and an explicit retry on an
- * `unreachable` one.
+ * the only re-reads are a `pending` block's re-read — driven by the round-state
+ * signal (ADR-106 revision 2026-11-03), with a slow interval as the loss
+ * backstop — and an explicit retry on an `unreachable` one.
  */
 
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { create } from "zustand";
 import { fetchChatBlocks, type ChatBlockEntry } from "../lib/chatBlocks";
 
-/** How long a `pending` block waits between re-reads. Long enough that a run of
- *  minutes costs almost nothing, short enough that the block does not look
- *  frozen when it finishes. */
-const PENDING_POLL_MS = 4000;
+/** How long a `pending` block waits between backstop re-reads. The round-state
+ *  signal is what flips a finished block promptly; this interval only mops up a
+ *  dropped frame (QoS 1 covers broker loss, not a webview that was closed), so
+ *  it is deliberately long: a run of minutes must cost almost nothing. */
+const PENDING_POLL_MS = 15000;
+
+/** How long after a round-state signal to re-read once more if the block is
+ *  still `pending`. The signal is published at the turn boundary, while the
+ *  round's terminal record is appended by the session's single writer (ADR-092)
+ *  — measured ~8 ms apart on disk, and the batched read leaves the request ~16
+ *  ms later, so the first answer can legitimately still say `pending`. One
+ *  bounded retry, not a faster poll. */
+const ROUND_SIGNAL_RETRY_MS = 500;
 
 /** Batch window: refs requested during one render pass ride one request. */
 const BATCH_MS = 16;
@@ -41,6 +52,42 @@ interface ChatBlockState {
 }
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Mounted readers: chat → ref → the hook keys watching that ref.
+ *
+ *  A round-state signal names a round, not a Chat surface, and the store holds
+ *  no chat → refs map of its own (the transcript owns that knowledge). Without
+ *  this registry the signal would have to request blocks nobody is looking at,
+ *  or be dropped; with it, a signal re-reads exactly the mounted block that
+ *  named the round. Held outside the store because it is component lifetime,
+ *  not cache content — putting it in state would re-render every block on every
+ *  mount. */
+const watchers = new Map<string, Map<string, Set<string>>>();
+
+function watchRefs(chatId: string, refs: string[], key: string) {
+  let byRef = watchers.get(chatId);
+  if (!byRef) {
+    byRef = new Map();
+    watchers.set(chatId, byRef);
+  }
+  for (const ref of refs) {
+    const holders = byRef.get(ref) ?? new Set<string>();
+    holders.add(key);
+    byRef.set(ref, holders);
+  }
+}
+
+function unwatchRefs(chatId: string, refs: string[], key: string) {
+  const byRef = watchers.get(chatId);
+  if (!byRef) return;
+  for (const ref of refs) {
+    const holders = byRef.get(ref);
+    if (!holders) continue;
+    holders.delete(key);
+    if (holders.size === 0) byRef.delete(ref);
+  }
+  if (byRef.size === 0) watchers.delete(chatId);
+}
 
 export const useChatBlockStore = create<ChatBlockState>((set, get) => {
   const flush = (chatId: string) => {
@@ -102,9 +149,12 @@ export const useChatBlockStore = create<ChatBlockState>((set, get) => {
     const queue = new Set(state.pending[chatId] ?? []);
     wanted.forEach((r) => queue.add(r));
     set({ pending: { ...state.pending, [chatId]: queue } });
-    if (!timers.has(chatId)) {
-      timers.set(chatId, setTimeout(() => flush(chatId), BATCH_MS));
-    }
+    // Re-arm, never skip: the batch window is what it is, and a map entry that
+    // outlives its timer would wedge this chat's reads forever — the guard
+    // would refuse to schedule while nothing is left to flush the queue.
+    const stale = timers.get(chatId);
+    if (stale) clearTimeout(stale);
+    timers.set(chatId, setTimeout(() => flush(chatId), BATCH_MS));
   };
 
   return {
@@ -116,32 +166,101 @@ export const useChatBlockStore = create<ChatBlockState>((set, get) => {
   };
 });
 
-/**
- * One block, read on demand (ADR-106 D3/D9).
+/** Delimiter for the ref-set keys below. Refs are `instance|session|round`, so
+ *  `|` is taken; a newline cannot appear in an id and keeps the key readable. */
+const REF_SET_SEP = "\n";
+
+/** Refs of one block, read on demand (ADR-106 D3/D5/D9).
  *
- * A row asks for exactly its own ref, so a re-render never rebuilds a list the
- * store has to compare by identity (which would defeat the transcript's memo).
- * Multiple rows asking in the same render pass is not multiple requests: the
- * queue batches per chat.
+ * A block is a whole EXECUTION SESSION (design 27 §5.5), so it owns several
+ * rounds and needs them all to draw its lines: it asks once for its whole ref
+ * list, and the reads are batched per chat — N rounds in one render pass are one
+ * request, not N. The list is joined into a string key because the caller
+ * rebuilds the array on every render: the effect dependencies and the store read
+ * must ride the CONTENT, not the identity.
  *
- * A block that comes back `pending` is re-read on a timer while its row stays
- * mounted, and the poll stops the moment it reaches a terminal projection: an
- * in-progress block that never re-reads looks frozen, and a finished one that
- * keeps re-reading is a client that does not believe history (D5).
+ * Re-read rule: only a `pending` ref is re-read, and only while its block is
+ * mounted. The round-state signal is what makes that re-read prompt; the
+ * interval is the backstop for a frame the webview never saw. A block that never
+ * re-reads looks frozen; a settled one that keeps re-reading is a client that
+ * does not believe history (D5).
  */
-export function useChatBlock(chatId: string, ref?: string | null): ChatBlockEntry | undefined {
+export function useChatBlocks(
+  chatId: string,
+  refs: readonly string[],
+): Record<string, ChatBlockEntry | undefined> {
   const ensure = useChatBlockStore((s) => s.ensure);
   const reload = useChatBlockStore((s) => s.reload);
-  const entry = useChatBlockStore((s) => (ref ? s.blocks[ref] : undefined));
+  // The whole record, not a derived object: a selector that built a new object
+  // per call would re-render the block on every store tick (the transcript's
+  // memo contract). Record identity changes only when a read lands.
+  const blocks = useChatBlockStore((s) => s.blocks);
+  const key = refs.join(REF_SET_SEP);
+
+  const entries = useMemo(() => {
+    const out: Record<string, ChatBlockEntry | undefined> = {};
+    if (!key) return out;
+    for (const ref of key.split(REF_SET_SEP)) out[ref] = blocks[ref];
+    return out;
+  }, [blocks, key]);
+
   useEffect(() => {
-    if (!chatId || !ref) return;
-    ensure(chatId, [ref]);
-  }, [chatId, ref, ensure]);
-  const pending = entry?.status === "pending";
+    if (!chatId || !key) return;
+    ensure(chatId, key.split(REF_SET_SEP));
+  }, [chatId, key, ensure]);
+
+  // Registration is on mount, not on `pending`: a round that parks on a card
+  // (`terminal = false`) is not pending-by-cache-status yet, and a block that
+  // has not asked is exactly the one a signal must reach.
   useEffect(() => {
-    if (!chatId || !ref || !pending) return;
-    const timer = setTimeout(() => reload(chatId, [ref]), PENDING_POLL_MS);
-    return () => clearTimeout(timer);
-  }, [chatId, ref, pending, reload]);
-  return entry;
+    if (!chatId || !key) return;
+    const refsList = key.split(REF_SET_SEP);
+    watchRefs(chatId, refsList, key);
+    return () => unwatchRefs(chatId, refsList, key);
+  }, [chatId, key]);
+
+  const anyPending = refs.some((r) => entries[r]?.status === "pending");
+  useEffect(() => {
+    if (!chatId || !key || !anyPending) return;
+    // Recurring, never one-shot. A block that stays `pending` sees no change in
+    // any dependency — ADR-106's zero-write means the transcript gains no row
+    // while a run finishes — so a `setTimeout` armed by this effect fired once
+    // and was never re-armed: the block sat at "running" until an unmount /
+    // remount (the "view run → back" round trip) armed it again.
+    const timer = setInterval(() => {
+      // Read the pending set at fire time: a block whose round settled while the
+      // timer ran must not be re-requested (D5 — a finished round is history).
+      const held = useChatBlockStore.getState().blocks;
+      const pending = key
+        .split(REF_SET_SEP)
+        .filter((r) => held[r]?.status === "pending");
+      if (pending.length) reload(chatId, pending);
+    }, PENDING_POLL_MS);
+    return () => clearInterval(timer);
+  }, [chatId, key, anyPending, reload]);
+
+  return entries;
+}
+
+/** Tell the store a round changed state (ADR-106 revision 2026-11-03).
+ *
+ * Called from the MQTT event dispatcher with the ref the signal names. Re-reads
+ * that ref if a mounted block holds it — and only then, so a background Chat
+ * never pays for a run it is not showing. Returns whether anyone was listening,
+ * which is what makes the gap this event closes measurable in a test.
+ */
+export function noteRoundState(chatId: string, ref: string): boolean {
+  if (!chatId || !ref) return false;
+  if (!(watchers.get(chatId)?.has(ref) ?? false)) return false;
+  useChatBlockStore.getState().reload(chatId, [ref]);
+  setTimeout(() => {
+    // One bounded retry: the signal can outrun the writer's terminal record by a
+    // few ms, and a read that landed in that window still says `pending`.
+    const held = useChatBlockStore.getState().blocks[ref];
+    const stillWatched = watchers.get(chatId)?.has(ref) ?? false;
+    if (stillWatched && held?.status === "pending") {
+      useChatBlockStore.getState().reload(chatId, [ref]);
+    }
+  }, ROUND_SIGNAL_RETRY_MS);
+  return true;
 }

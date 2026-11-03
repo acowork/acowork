@@ -87,6 +87,8 @@ import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import { ChatUsageIcon } from "./ChatUsageIcon";
 import { AttachedContextChips } from "./AttachedContextChips";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
+import { type TranscriptItem } from "./chatTranscriptGroups";
+import { useTranscriptLayout } from "./useTranscriptLayout";
 import { ChatAddressPicker, type AddressPick } from "./ChatAddressPicker";
 import {
   buildCardAnswer,
@@ -95,6 +97,7 @@ import {
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { turnInflight } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 import {
   useChatSessionStore,
@@ -154,8 +157,6 @@ const RowView = memo(function RowView({
   agentId,
   chatSessionId,
   showHeader,
-  onJumpToExec,
-  onReplyToRound,
   onChooseCard,
   cardAnswered,
 }: RowProps) {
@@ -165,15 +166,15 @@ const RowView = memo(function RowView({
   const agentName = agent?.display_name ?? agent?.name ?? "";
 
   if (row.kind === "execution_round") {
-    // ADR-106 D3/D4/D8: the round's content, liveness and pending decision are
-    // read from the execution projection at render time — the transcript owns
-    // only the pointer. Design 27 §5.5.4's inline card is gone with this row.
+    // A reference row that names no round (a missing coordinate) has no block to
+    // fold into, so it keeps its own explicit hole (ADR-106 D3). Every row that
+    // DOES name a round is drawn by `ChatExecutionBlock`, one block per execution
+    // session, and reaches that block as a `run` item — not as a row.
     return (
-      <ChatExecutionBlock
-        row={row}
-        chatSessionId={chatSessionId}
-        onJumpToExec={onJumpToExec}
-        onReplyToRound={onReplyToRound}
+      <ChatTurnStatusLine
+        className="px-4"
+        text={t("chatView.block.notFound")}
+        danger={false}
       />
     );
   }
@@ -371,6 +372,42 @@ const RowView = memo(function RowView({
   );
 });
 
+/**
+ * One item of the folded transcript: either a session's block or a row.
+ *
+ * The layout layer (`chatTranscriptGroups`) decides the fold; this is where it
+ * becomes a component. Memoized for the same reason as `RowView` — a keystroke in
+ * the composer re-renders the host, and the window must not re-paint (plan L1).
+ * `item` references come from the memoized layout, so they hold their identity
+ * while the window is unchanged.
+ */
+interface ItemProps extends Omit<RowProps, "row"> {
+  item: TranscriptItem;
+  /** Something follows this block in the transcript — `ExploreBlock`'s
+   *  `hasFollowUpReply`, the one condition that auto-collapses a settled run. */
+  hasFollowUp: boolean;
+}
+
+const ItemView = memo(function ItemView({
+  item,
+  hasFollowUp,
+  ...rowProps
+}: ItemProps) {
+  if (item.kind === "run") {
+    return (
+      <ChatExecutionBlock
+        block={item}
+        chatSessionId={rowProps.chatSessionId}
+        showHeader={rowProps.showHeader}
+        hasFollowUp={hasFollowUp}
+        onJumpToExec={rowProps.onJumpToExec}
+        onReplyToRound={rowProps.onReplyToRound}
+      />
+    );
+  }
+  return <RowView {...rowProps} row={item.row} />;
+});
+
 // ── View ───────────────────────────────────────────────────────────────
 
 interface AgentChatViewProps {
@@ -404,6 +441,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const { t } = useTranslation();
   const win = useChatSessionStore((s) => s.windows[sessionId]);
   const sending = !!useChatSessionStore((s) => s.sending[sessionId]);
+  // The turn this device sent and has not seen an outcome for — the store
+  // claimed it from the send's own response (ADR-106 D9). `undefined` once the
+  // transcript answers it, once the deadline passes, and always after a reload.
+  const inflightTurn = useChatSessionStore((s) => s.inflight[sessionId]);
   const pendingLocateSeq = useChatSessionStore(
     (s) => s.windows[sessionId]?.pendingLocateSeq ?? null,
   );
@@ -420,14 +461,22 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     setMode,
     saveDraft,
     upload,
+    settleTurn,
   } = useChatSessionStore.getState();
+
+  // The agent's own name, for the line that says it is working on this turn.
+  const agentMeta = useAgentStore((s) => s.agents[agentId]?.meta);
+  const agentName = agentMeta?.display_name ?? agentMeta?.name ?? "";
 
   const [input, setInput] = useState("");
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   // The second level of the `@` (ADR-106 D7). On this surface the first level is
   // degenerate — one agent — so the human names only the task. `addressStage` is
-  // "the list is open", `address` is "what was chosen for this draft".
-  const [addressStage, setAddressStage] = useState(false);
+  // where the open list hangs from (`null` = closed), `address` is "what was
+  // chosen for this draft".
+  const [addressStage, setAddressStage] = useState<"button" | "typed" | null>(
+    null,
+  );
   const [address, setAddress] = useState<AddressPick | null>(null);
   // The card asks the person who spoke, and in local mode there is exactly one
   // person but no id to compare against (see `mayAnswerCard`).
@@ -502,6 +551,21 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   }, [agentId, gatewayConnected]);
 
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win]);
+  // D9's claim read against the transcript: this device's send is owed its
+  // first visible outcome until a row answers its id (the round's reference
+  // row, the router's reply, a receipt). `sending` alone only covers the POST —
+  // measured 150 ms — which is what left the 0.1 s … 81 s window blank.
+  const turnLive = turnInflight(rows, inflightTurn);
+  // ONE state drives the line and the lock: a wait line with an unlocked
+  // composer invites the second send this Chat has no queue to absorb, and a
+  // locked composer with no line reads as a broken button.
+  const composerLocked = sending || turnLive;
+  // Hand the claim back as soon as a row answers it, so nothing keeps
+  // asserting a turn the transcript has already settled.
+  useEffect(() => {
+    if (!inflightTurn || turnInflight(rows, inflightTurn)) return;
+    settleTurn(sessionId, inflightTurn.messageId);
+  }, [rows, inflightTurn, sessionId, settleTurn]);
   // Which messages already have a round: that is what makes an addressing card
   // answered (the re-delivery leaves the reference row, ADR-106 D3), so the
   // transcript itself carries the answer — no chat-side flag to keep in sync.
@@ -513,23 +577,19 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     }
     return s;
   }, [rows]);
-  // Virtualization adapters (render-perf L2). Keys are session-qualified:
-  // the shell's measured-height cache is module-level, and `seq` is unique
-  // only WITHIN a chat session. `rowsRef` lets the locate fallback resolve a
-  // seq to an index without re-creating the (stamp-keyed) locate effect.
-  const rowKeyOf = useCallback(
-    (r: ChatMessageRow) => `${sessionId}:${r.seq}`,
-    [sessionId],
-  );
-  const rowsRef = useRef(rows);
-  rowsRef.current = rows;
-  // Coarse pre-measure estimate from body length; `measureElement` corrects
-  // it on first mount and the shell's cache keeps the real height after.
-  const estimateRow = useCallback((r: ChatMessageRow) => {
-    const body = r.body ?? "";
-    const lines = Math.max(1, Math.ceil(body.length / 70));
-    return Math.min(480, 32 + lines * 22);
-  }, []);
+  // Virtualization adapters (render-perf L2): keys, estimates, per-item
+  // attributes and the seq→item index shared with the group panel.
+  const {
+    items,
+    rowsRef,
+    keyOfSeqRef,
+    virtualKeyOf,
+    virtualEstimate,
+    virtualAttrs,
+    seqsByItem,
+  } = useTranscriptLayout(rows, sessionId);
+  const isBubble = (item: TranscriptItem | undefined) =>
+    item?.kind === "row" && item.row.kind === "agent_message";
   // Optimistic exec-session title seed (ADR-099). A Router-created execute
   // session has no list row and often no open tab, so it would read "Untitled"
   // until the backend's generated title arrives over MQTT. The round's
@@ -618,13 +678,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => containerRef.current,
     pendingLocateSeq,
     () => clearLocate(sessionId),
-    // Virtualization fallback: the row is in the window but not in the DOM.
+    // Virtualization fallback: the row is in the window but not in the DOM. A
+    // folded row is not in the transcript as its own item either, so its seq
+    // resolves through the layout's `keyOfSeq` to the block that holds it.
     (seq) => {
-      const idx = rowsRef.current.findIndex((r) => r.seq === seq);
-      if (idx < 0) return false;
-      return (
-        listRef.current?.scrollToKey(`${sessionId}:${seq}`, "center") ?? false
-      );
+      const key = keyOfSeqRef.current.get(seq);
+      if (!key) return false;
+      return listRef.current?.scrollToKey(key, "center") ?? false;
     },
     // A locate parks the reader mid-history on purpose: take them out of
     // the follow, or the persistent anchor rides the next commit back to
@@ -674,7 +734,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     // have delivered.
     if (
       (!text && attachmentIds.length === 0 && pendingRefs.length === 0) ||
-      sending ||
+      composerLocked ||
       uploading
     ) {
       return;
@@ -921,6 +981,28 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     }
   };
 
+  // One picker, two anchor points: the toolbar button opens it under its own
+  // icon, the typed `@` opens it above the composer. `anchorRef` is the button
+  // in both cases, so a click on the toggle still closes what it opened.
+  const addressPicker = (
+    <ChatAddressPicker
+      instanceId={agentId}
+      /** The pair's own chat: the listing is narrowed to what this conversation
+       *  may address, so the id is part of the request, not a label. */
+      chatSessionId={sessionId}
+      anchorRef={addressBtnRef}
+      onPick={(pick) => {
+        setAddress(pick.sessionId || pick.forceNew ? pick : null);
+        setAddressStage(null);
+        textareaRef.current?.focus();
+      }}
+      onClose={() => {
+        setAddressStage(null);
+        textareaRef.current?.focus();
+      }}
+    />
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Message stream — a relative box so the "back to bottom" arrow floats
@@ -945,7 +1027,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               )}
             </div>
           )}
-          {rows.length === 0 && (
+          {items.length === 0 && (
             <div className="py-10 text-center text-sm text-text-tertiary">
               {t("chatView.empty")}
             </div>
@@ -960,49 +1042,69 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           <VirtualRowList
             key={sessionId}
             ref={listRef}
-            items={rows}
-            keyOf={rowKeyOf}
+            items={items}
+            keyOf={virtualKeyOf}
             scrollContainerRef={containerRef}
             followBottom={atBottom}
-            estimateSize={estimateRow}
-            rowAttrs={(r) => ({ "data-seq": r.seq })}
-            rowClassName={(r) =>
+            estimateSize={virtualEstimate}
+            rowAttrs={virtualAttrs}
+            rowClassName={(item) =>
               cn(
                 "scroll-mt-2 transition-colors",
-                highlightSeq === r.seq && "bg-[var(--color-accent)]/10",
+                highlightSeq !== null &&
+                  seqsByItem.get(virtualKeyOf(item))?.has(highlightSeq) &&
+                  "bg-[var(--color-accent)]/10",
               )
             }
-            renderItem={(r, i) => (
-              <RowView
-                row={r}
+            renderItem={(item, i) => (
+              <ItemView
+                item={item}
+                hasFollowUp={i < items.length - 1}
                 agentId={agentId}
                 chatSessionId={sessionId}
                 showHeader={
                   // Adjacent bubbles from the same speaker fold the header; a
                   // block above is not a bubble, so the reply under it still
-                  // wears its avatar.
-                  r.kind === "agent_message" &&
-                  rows[i - 1]?.kind !== "agent_message"
+                  // wears its avatar — and a block always starts a new turn.
+                  item.kind === "run" ||
+                  (item.row.kind === "agent_message" &&
+                    !isBubble(items[i - 1]))
                 }
                 onJumpToExec={handleBlockJump}
                 onReplyToRound={handleReplyToRound}
-                onChooseCard={mayAnswerCard(r, me) ? answerCard : undefined}
+                onChooseCard={
+                  item.kind === "row" && mayAnswerCard(item.row, me)
+                    ? answerCard
+                    : undefined
+                }
                 cardAnswered={
-                  !!r.meta?.in_reply_to && roundTriggers.has(r.meta.in_reply_to)
+                  item.kind === "row" &&
+                  !!item.row.meta?.in_reply_to &&
+                  roundTriggers.has(item.row.meta.in_reply_to)
                 }
               />
             )}
           />
-          {/* D9: the only "working on it" line this surface may paint is about
-              its OWN in-flight POST. A transcript shape (no answer row yet)
-              must never stand in for liveness — that is how a dead node would
-              keep looking busy forever. The round's own liveness rides inside
-              its block, off the `pending` projection read. */}
-          {sending && (
+          {/* D9, first person only: this line claims that a send THIS device
+              made has not been answered yet. It starts from the id that send's
+              response carried and ends at the first row answering it — the
+              round's reference row, the router's own reply, a receipt — or on a
+              deadline, so it cannot outlive the send it belongs to and never
+              fakes liveness for a node that is gone. A transcript SHAPE ("the
+              newest human row has no answer") is still not evidence: after a
+              reload there is nothing to claim. The same flag locks the composer
+              below — a Chat has no queue, so a second send would race a router
+              still deciding the first. The round's own liveness rides inside its
+              block, off the `pending` projection read. */}
+          {composerLocked && (
             <ChatTurnStatusLine
               className="px-4"
               live
-              text={t("chatView.notice.pendingTurnGeneric")}
+              text={
+                agentName
+                  ? t("chatView.notice.pendingTurn", { name: agentName })
+                  : t("chatView.notice.pendingTurnGeneric")
+              }
             />
           )}
           {hasMoreNewer && (
@@ -1028,7 +1130,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         {/* Back-to-bottom arrow — visible only while the reader has scrolled
             up off the tail (and there is content). Same treatment as the
             execute-session button: default-reduced opacity, full on hover. */}
-        {atBottom === false && rows.length > 0 && (
+        {atBottom === false && items.length > 0 && (
           <button
             onClick={stickNow}
             className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
@@ -1087,27 +1189,15 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             </span>
           </div>
         )}
-        {/* Second level of the `@` — the agent's own routable tasks. */}
-        {addressStage && (
-          <div
-            className="absolute bottom-full left-3 z-20 mb-2"
-            onMouseDown={(e) => e.preventDefault()}
-          >
-            <ChatAddressPicker
-              instanceId={agentId}
-              chatSessionId={sessionId}
-              surface="direct"
-              anchorRef={addressBtnRef}
-              onPick={(pick) => {
-                setAddress(pick.sessionId || pick.forceNew ? pick : null);
-                setAddressStage(false);
-                textareaRef.current?.focus();
-              }}
-              onClose={() => {
-                setAddressStage(false);
-                textareaRef.current?.focus();
-              }}
-            />
+        {/* Second level of the `@` — the agent's own routable tasks, opened by
+            typing `@` in the composer: it belongs above the text it was typed
+            into. The button's own popup anchors under that button instead. No
+            `mousedown` preventDefault on this shell: the picker holds a search
+            box, and cancelling a mousedown is precisely what cancels the focus
+            it would hand the input. Every pick path refocuses the composer. */}
+        {addressStage === "typed" && (
+          <div className="absolute bottom-full left-3 z-20 mb-2">
+            {addressPicker}
           </div>
         )}
         {/* Workspace references picked with "Add to Chat" in the right-hand
@@ -1131,11 +1221,32 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={t("chatPanel.inputMessage")}
-          disabled={sending}
+          placeholder={t("chatView.address.composerHint")}
+          disabled={composerLocked}
           className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
           style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
           onKeyDown={(e) => {
+            /** Typing `@` at the start of a word opens the same task list the
+             *  toolbar button opens (ADR-106 D7) — one gesture on both chats.
+             *  The character is NOT inserted: here the address rides the chip
+             *  above the composer, not the message text, so a leftover `@`
+             *  would be noise the model has to read. A mid-word `@` (an email)
+             *  stays literal, the rule the group's `detectMention` uses. */
+            if (
+              e.key === "@" &&
+              !e.ctrlKey &&
+              !e.metaKey &&
+              !e.altKey &&
+              !e.nativeEvent.isComposing
+            ) {
+              const caret = e.currentTarget.selectionStart ?? input.length;
+              const prev = input[caret - 1];
+              if (!prev || /\s/.test(prev)) {
+                e.preventDefault();
+                setAddressStage("typed");
+                return;
+              }
+            }
             if (e.key !== "Enter" || e.shiftKey) return;
             const elapsed = Date.now() - lastCompositionEndRef.current;
             if (elapsed < 300) return; // IME confirmation — do not send
@@ -1197,28 +1308,35 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 }
               />
             </div>
-            {/* "Which task?" — the 1:1 form of the second-level `@`. It lives in
-                the settings cluster because it is a routing opinion about this
-                message, not an action on the transcript. */}
-            <Tooltip content={t("chatView.address.pick")} variant="plain">
-              <button
-                ref={addressBtnRef}
-                className={cn(
-                  toolbarIconButton,
-                  addressStage && "bg-nav-item-hover",
-                )}
-                onClick={() => setAddressStage((v) => !v)}
-                aria-label={t("chatView.address.pick")}
-                aria-expanded={addressStage}
-              >
-                <AtSign size={16} />
-              </button>
-            </Tooltip>
           </div>
           <div
             data-toolbar-cluster="right"
             className="flex shrink-0 items-center gap-1"
           >
+            {/* The button opens the list above itself, right-aligned to its own
+                icon — a popup that appeared across the composer from the click
+                would not read as belonging to it. */}
+            <div className="relative">
+              <Tooltip content={t("chatView.address.pick")} variant="plain">
+                <button
+                  ref={addressBtnRef}
+                  className={cn(
+                    toolbarIconButton,
+                    addressStage && "bg-nav-item-hover",
+                  )}
+                  onClick={() => setAddressStage((v) => (v ? null : "button"))}
+                  aria-label={t("chatView.address.pick")}
+                  aria-expanded={addressStage !== null}
+                >
+                  <AtSign size={16} />
+                </button>
+              </Tooltip>
+              {addressStage === "button" && (
+                <div className="absolute bottom-full right-0 z-20 mb-2">
+                  {addressPicker}
+                </div>
+              )}
+            </div>
             {/* Per-chat ledger read (plan §4.6 phase two): the pair's
                 router spend lives on this one agent. */}
             <ChatUsageIcon
@@ -1236,11 +1354,18 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 <Paperclip size={16} />
               </button>
             </Tooltip>
-            <Tooltip content={t("chatPanel.sendMessage")} variant="plain">
+            <Tooltip
+              content={
+                turnLive
+                  ? t("chatView.notice.turnInflightTooltip")
+                  : t("chatPanel.sendMessage")
+              }
+              variant="plain"
+            >
               <button
-                className={cn(toolbarIconButton, sending && "opacity-50")}
+                className={cn(toolbarIconButton, composerLocked && "opacity-50")}
                 onClick={handleSend}
-                disabled={sending}
+                disabled={composerLocked}
                 aria-label={t("chatPanel.sendMessage")}
               >
                 <Send size={16} />

@@ -13,8 +13,8 @@ use crate::conversation::{self, SessionScope};
 use crate::error::{Result, RuntimeError};
 use crate::usecases::agent_token::AgentTokenService;
 use crate::usecases::session_metadata::{
-    MessagesResponse, SessionDetail, SessionMetadataService, SessionSummary, SessionsListResponse,
-    TokenStatsResponse,
+    ChatListingScope, MessagesResponse, SessionDetail, SessionMetadataService, SessionSummary,
+    SessionsListResponse, TokenStatsResponse,
 };
 
 pub struct RuntimeSessionMetadataService {
@@ -54,6 +54,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         size: u32,
         scope: &SessionScope,
         active_only: bool,
+        chat: Option<&ChatListingScope>,
     ) -> Result<SessionsListResponse> {
         // Read the snapshot keys once, before the scan: Active = present in
         // the in-memory map (ADR-038 lifecycle; close_session removes the
@@ -66,6 +67,30 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             .unwrap_or_default();
 
         let conversations = self.work_dir.join("conversations");
+        // ADR-106 D7: the Chat-scoped read rule, handed to the scan as a row
+        // predicate so the page slice and `total_*` describe only what this chat
+        // may address. Its terminal exclusions come off the intent-binding
+        // index — the same small second metadata read the router's candidate
+        // pass makes, read here rather than passed in so no caller has to know
+        // that finished PM chains are part of the rule. The rule itself lives in
+        // `chat_candidates`, which is the only place it may be written.
+        let meta_filter = chat.map(|chat| {
+            use crate::agent::session::chat_candidates::{ChatScopeRule, scan_bindings};
+            let terminal_session_ids = scan_bindings(&self.work_dir.to_string_lossy())
+                .into_iter()
+                .filter(|binding| binding.closed)
+                .map(|binding| binding.session_id)
+                .collect();
+            let rule = ChatScopeRule {
+                chat_session_id: chat.chat_session_id.clone(),
+                owner_user_id: chat.owner_user_id.clone(),
+                surface: chat.surface,
+                terminal_session_ids,
+            };
+            let keep: conversation::MetaFilter =
+                Box::new(move |meta: &conversation::SessionMeta| rule.allows(meta));
+            keep
+        });
         let join = conversation::scan_sessions_async_filtered(
             conversations.clone(),
             Some(page),
@@ -79,6 +104,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             } else {
                 None
             },
+            meta_filter,
         );
         // ADR-066: scan_sessions_async returns a 4-tuple
         // (input, output, cache_read, cache_write) — feed all four into

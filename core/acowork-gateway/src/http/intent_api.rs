@@ -1658,7 +1658,10 @@ async fn deliver_mentions(
     // `mentions` keeps its meaning — the agents the HUMAN named — so an
     // auto-routed target never appears there (the transcript would draw a
     // chip the sender never typed). The auto decision travels in
-    // `auto_routed_to`, which is also what the surfaces key the wait line on.
+    // `auto_routed_to`, which records where the sentence went and drives no
+    // rendering: a surface's wait line claims its OWN send only, keyed by the
+    // `message_id` returned below and ended by the first row that answers it
+    // (ADR-106 D9 / D14, superseding ADR-105 D4's evidence-slot reading).
     let row_id = match req.message_id.as_deref().map(str::trim) {
         None | Some("") => uuid::Uuid::new_v4().to_string(),
         Some(id) if is_valid_row_id(id) => id.to_string(),
@@ -1892,12 +1895,15 @@ async fn deliver_mentions(
 
 /// Record a failed delivery in the transcript (ADR-105).
 ///
-/// The endpoint's `results` array is read by no client — the chat surfaces post
-/// and forget — so a delivery that failed used to leave *no* trace at all: the
-/// message was addressed (by @ or by the group's responder), nobody answered,
-/// and the transcript looked exactly like a message nobody had picked up. That
-/// is the same defect ADR-105 removes on the routing side, so it gets the same
-/// treatment here: a durable `system_notice` threaded to the human row.
+/// A surface may read this fan-out's `results` to decide whether its OWN send is
+/// worth claiming as in flight (ADR-106 D9), but a response is seen by the
+/// posting device alone: before this notice, a delivery that failed left *no*
+/// trace at all for anybody else — the message was addressed (by @ or by the
+/// group's responder), nobody answered, and the transcript looked exactly like a
+/// message nobody had picked up. That is the same defect ADR-105 removes on the
+/// routing side, so it gets the same treatment here: a durable `system_notice`
+/// threaded to the human row, which is also the row that settles the sender's
+/// claim.
 ///
 /// The row is written on the **target's** behalf (it is the party that did not
 /// receive the message). `system_notice` carries no writer-identity constraint

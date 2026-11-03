@@ -212,14 +212,6 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/rounds/{round_id}",
             get(proxy_get_round),
         )
-        // ADR-106 D7: the second level of the `@`. Transparent like the round
-        // reads — the candidate filter IS the permission (which sessions this
-        // initiator may address in this chat), and that is decided on the node
-        // owning the execution sessions, never on the client.
-        .route(
-            "/api/agents/{id}/chat-candidates",
-            get(proxy_chat_candidates),
-        )
         // ADR-076 §决策 4 (second wave): user-triggered session actions.
         // The Runtime authorizes each one against the session's owner, which
         // is only possible because these arrive through the Gateway's auth
@@ -664,6 +656,13 @@ async fn proxy_git_revert(
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions` to Runtime's `GET /sessions`.
+///
+/// ADR-106 D7: `chat_session_id` / `surface` ride the same transparent forward
+/// as `page` / `size` / `active`. The Gateway must not interpret them — which
+/// execution sessions a Chat may address is decided on the node that owns those
+/// sessions (ADR-009 §5), and a second copy of that filter here would be a
+/// second thing to keep honest. The membership header the Runtime needs to
+/// check them is injected by the auth middleware for every `/api/agents/` hop.
 async fn proxy_list_sessions(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -912,22 +911,6 @@ async fn proxy_list_rounds(
     let path = format!("/sessions/{}/rounds", sid);
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, &path, &query, &headers).await
-}
-
-/// Reverse-proxy `GET /api/agents/{id}/chat-candidates` — ADR-106 D7.
-///
-/// Transparent: the picker asks, the Runtime decides what may be offered. The
-/// auth middleware's injected scope headers travel with the request, which is
-/// what makes "which chats is this caller in" and "which sessions in this chat
-/// are theirs" two facts the Runtime can check instead of two claims.
-async fn proxy_chat_candidates(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
-    headers: HeaderMap,
-) -> Response {
-    let query = build_query_string(&params);
-    proxy_to_runtime(&state, &id, "/chat-candidates", &query, &headers).await
 }
 
 /// Reverse-proxy `GET .../sessions/{sid}/rounds/{round_id}` — ADR-106 D4.

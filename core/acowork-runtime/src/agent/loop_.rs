@@ -310,6 +310,24 @@ pub enum ChunkEvent {
     SessionStateChanged {
         state: acowork_core::mqtt_proto::SessionState,
     },
+    /// ADR-106 revision (2026-11-03): a round changed state — it reached a
+    /// terminal outcome, or it parked on a card a human must answer.
+    ///
+    /// This is the notification face that D3's `exec → chat` zero-write removed
+    /// and never replaced: with no mirror row to update, a Chat surface that
+    /// does not re-read has no way to learn that a round it is showing as
+    /// in-flight has ended. Published at QoS 1, non-retained, on the execution
+    /// session's `messages/round_state` topic — the block content itself still
+    /// comes from the projection read (D4), because this event fires at the turn
+    /// boundary while the round's terminal record is appended by the session's
+    /// single writer (ADR-092). The event therefore means "worth re-reading
+    /// now", not "here is the final content".
+    RoundState {
+        round_id: String,
+        /// The Chat this round answers to, so the subscriber can confirm the
+        /// D10 binding instead of trusting the topic it received on.
+        chat_session_id: String,
+    },
 }
 
 /// Unified control signal returned by `poll_control()`.
@@ -945,6 +963,10 @@ impl AgentLoop {
     /// a round left open is what made the old mirror show a run that had already died
     /// as one still in progress.
     fn close_turn_round(&self, outcome: Result<String>) -> Result<String> {
+        // ADR-106 revision (2026-11-03): the round id is read *before* the
+        // closure, because closing a round clears the writer's active round —
+        // asking afterwards would return the next turn's id, or none at all.
+        let round_id = self.current_round_id();
         if let Some(conv) = &self.session.conversation {
             match &outcome {
                 Err(_) => conv.end_round("failed", None),
@@ -954,7 +976,46 @@ impl AgentLoop {
                 Ok(_) => conv.end_round(self.turn_outcome.as_str(), None),
             }
         }
+        // The doorbell is published for both shapes of the closure above — a
+        // terminal outcome and a round parked on a card are the same notification
+        // hole — and it names the round only: the word a reader sees comes from
+        // the projection read it triggers (D4), not from this event.
+        self.publish_round_state(&round_id);
         outcome
+    }
+
+    /// Ring the round doorbell (ADR-106 revision 2026-11-03).
+    ///
+    /// Routed through the chunk channel like every other session event, which is
+    /// what keeps the relay's call order equal to the broker's enqueue order —
+    /// the Chat must never be told to re-read before the turn's own final events
+    /// have been handed to the publisher.
+    ///
+    /// A no-op when there is no round to name: a turn that never opened one (no
+    /// conversation writer, or the degenerate path where the transport supplied
+    /// no round coordinate) has nothing for a Chat block to re-read.
+    fn publish_round_state(&self, round_id: &str) {
+        if round_id.is_empty() {
+            return;
+        }
+        let chat_session_id = self
+            .session
+            .conversation
+            .as_ref()
+            .and_then(|conv| conv.chat_session_id())
+            .unwrap_or_default();
+        if !self.session_core.try_send_chunk(ChunkEvent::RoundState {
+            round_id: round_id.to_string(),
+            chat_session_id,
+        }) {
+            // No session id / no chunk channel / channel full: the interval
+            // backstop is the only remaining path, and saying so here is
+            // cheaper than pretending success.
+            tracing::debug!(
+                round_id = %round_id,
+                "round_state: chunk channel unavailable, dropping round doorbell"
+            );
+        }
     }
 
     /// Re-run the agent loop after a debug resume (user message already in history).
@@ -4538,6 +4599,7 @@ mod tests {
             Some(MessageRole::Assistant)
         ));
     }
+
 }
 
 

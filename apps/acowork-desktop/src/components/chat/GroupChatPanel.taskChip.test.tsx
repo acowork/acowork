@@ -15,7 +15,7 @@ import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GroupChatPanel } from "./GroupChatPanel";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
-import type { ChatBlockEntry } from "../../stores/chatBlockStore";
+import type { ChatBlockEntry } from "../../lib/chatBlocks";
 
 const AGENT = "agent-1";
 const ME = "user-me";
@@ -37,6 +37,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
             [GROUP]: { older: [], tail, tailLoaded: tail.length, total: tail.length, loadingOlder: false },
           },
           sending: {},
+          inflight: {},
         }),
       {
         getState: () => ({
@@ -51,7 +52,9 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
 });
 
 vi.mock("../../stores/chatBlockStore", () => ({
-  useChatBlock: () => blockEntry,
+  // The block reads its whole session at once (ADR-106 D4): a record keyed by
+  // ref, which is what the component indexes into.
+  useChatBlocks: () => (blockEntry ? { [blockEntry.ref]: blockEntry } : {}),
   useChatBlockStore: (selector: (s: { reload: () => void }) => unknown) =>
     selector({ reload: vi.fn() }),
 }));

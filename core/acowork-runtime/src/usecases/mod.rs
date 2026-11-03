@@ -40,7 +40,7 @@ pub use git_query::{
 };
 pub use session_config::SessionConfigService;
 pub use session_control::SessionControlService;
-pub use session_metadata::SessionMetadataService;
+pub use session_metadata::{ChatListingScope, SessionMetadataService};
 pub use workspace_mutation::WorkspaceMutationService;
 pub use workspace_query::{WorkspaceError, WorkspaceQueryService};
 

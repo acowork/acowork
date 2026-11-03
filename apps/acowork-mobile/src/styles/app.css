@@ -2068,117 +2068,153 @@
   }
 }
 
-/* ── The round's block (ADR-106 D3/D4/D8/D9) ──────────────────────────
-   One `execution_round` reference row drawn in this app's execution-surface
-   ExploreBlock language: a quiet header line stating the outcome, content
-   below, tap the header to fold. Neutral fills only — the accent belongs to
-   button fills, never to a block border. §6.5's mobile delta: the answer stays
-   inline (folding a reply behind a tap would make it cost more to read here
-   than on the surface that owns the same transcript) and the decision card
-   collapses to one line with its buttons in a bottom sheet. */
-.chat-block {
+/* ── The session's block (ADR-106 D3/D4/D8/D9) ─────────────────────────
+   ONE execution session's rounds in ONE collapsible block, drawn in this app's
+   execution-surface ExploreBlock chrome: a pill header, a hairline list under
+   it, one row per round, the round's pair in panels under the open row. A card
+   per reference row turned a long-lived run into a stack of near-identical
+   boxes. The accent never paints a block border — it tints the human's line,
+   exactly as the thread's user bubble does, and the answer sits on the peer
+   bubble's fill. §6.5's mobile delta: the newest round's answer stays inline
+   (folding a reply behind a tap would make it cost more to read here than on
+   the surface that owns the same transcript) and the decision card collapses to
+   one line with its buttons in a bottom sheet. */
+.chat-run {
   display: flex;
   flex-direction: column;
   gap: 2px;
   width: 100%;
   margin: 8px 0;
 }
-.chat-block-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  padding: 8px var(--space-3);
+/* The drill keeps its own chrome and sits ABOVE the block: it opens the
+   execution session, a different object from the rounds listed inside it. */
+.chat-run-drill {
+  align-self: flex-start;
+  margin-bottom: 4px;
+  padding: 6px 12px;
   border: none;
-  border-radius: var(--radius-sm);
+  border-radius: 999px;
   background: rgba(120, 120, 128, 0.12);
   color: var(--color-label-secondary);
   font: inherit;
-  font-size: 13px;
-  text-align: left;
+  font-size: 12px;
   cursor: pointer;
 }
-.chat-block-glyph {
-  flex: none;
-  font-size: 12px;
+.chat-run-drill:active {
+  background: rgba(120, 120, 128, 0.2);
 }
-/* `is-live` is set off a `pending` projection read and nothing else (D9): an
-   unreachable host says "暂不可达", it never borrows the live mark. */
-.chat-block-glyph.is-live {
-  color: var(--color-accent, #0ea5e9);
-}
-.chat-block-glyph.is-danger {
-  color: var(--color-danger, #ef4444);
-}
-.chat-block-status {
-  flex: none;
-  font-weight: 500;
-  color: var(--color-label);
-}
-/* ADR-106 D13: the PM task id rides the block header — a label, never a link.
-   The retired tappable chip copied the id on tap, which made an addressing
-   hint the most clickable thing on the row. */
-.chat-block-task {
-  flex: none;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: rgba(120, 120, 128, 0.16);
-  color: var(--color-label-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-}
-.chat-block-peek {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.8;
-  font-size: 12px;
-}
-.chat-block-caret {
-  flex: none;
-  margin-left: auto;
-  color: var(--color-label-secondary);
-}
-.chat-block-body {
-  display: flex;
-  flex-direction: column;
-  padding: 4px var(--space-3) 8px;
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
-  background: rgba(120, 120, 128, 0.08);
-}
-.chat-block-answer {
-  font-size: 14px;
-  line-height: 1.5;
-  color: var(--color-label);
-  word-break: break-word;
-}
-.chat-block-working {
-  font-size: 13px;
-  color: var(--color-label-secondary);
-}
-.chat-block-jump {
+/* Older rounds stay in the block, one tap away — a long run must not push the
+   rest of the transcript off the device. */
+.chat-run-older {
   align-self: flex-start;
-  margin-top: 4px;
-  padding: 6px 2px;
+  padding: 4px 0;
   border: none;
   background: transparent;
   color: var(--color-accent, #0ea5e9);
   font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   cursor: pointer;
 }
-/* A hole is stated as a hole (D5): inventing content would be writing history.
-   Centered and chrome-free — this is the platform reporting what it could not
-   read, not something a participant said. */
-.chat-block-hole {
-  display: flex;
+/* One round of the session: a row in `ExploreBlock`'s list, opening into its
+   question/answer pair. The glyph is the round's own state, so the list reads as
+   a run of steps rather than a run of messages. */
+.chat-run-round {
+  padding: 4px 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.chat-run-round + .chat-run-round {
+  border-top: 0.5px solid var(--color-separator);
+}
+.chat-run-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
-  justify-content: center;
   gap: 8px;
-  margin: 6px 0;
+  width: 100%;
+  padding: 6px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.chat-run-row-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-weight: 500;
+  color: var(--color-label);
+  white-space: nowrap;
+}
+.chat-run-glyph {
+  font-size: 11px;
+  color: var(--color-label-secondary);
+}
+/* `is-live` is set off a `pending` projection read and nothing else (D9): an
+   unreachable host says "暂不可达", it never borrows the live mark. */
+.chat-run-glyph.is-live,
+.explore-toggle-icon.is-live {
+  color: var(--color-accent, #0ea5e9);
+}
+.chat-run-glyph.is-danger,
+.explore-toggle-icon.is-danger {
+  color: var(--color-danger, #ef4444);
+}
+.chat-run-row-caret {
+  flex: none;
+  color: var(--color-label-secondary);
+}
+/* The panels under an open row — the pair's two halves, in the same bubble
+   language the transcript uses: the human's line wears the highlight tint (a
+   user bubble is the highlighted one), the answer wears the peer bubble fill. */
+.chat-run-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 6px var(--space-2);
+}
+.chat-run-question {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-tint) 10%, transparent);
+  color: var(--color-label-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* A hole is stated as a hole (D5): inventing content would be writing history. */
+.chat-run-note {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bubble-peer);
   font-size: 12px;
   color: var(--color-text-dim, #888);
+}
+/* An outage is not a slow run: the read failed, and the retry is the action. */
+.chat-run-note.is-danger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--color-danger, #ef4444);
+}
+/* The answer half of the pair, at reading size (§6.5: inline, never folded
+   behind a tap) and on the agent bubble's fill — the same surface the same
+   words get in the thread. */
+.chat-block-answer {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bubble-peer);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-label);
+  word-break: break-word;
 }
 .chat-block-hole-action {
   flex: none;

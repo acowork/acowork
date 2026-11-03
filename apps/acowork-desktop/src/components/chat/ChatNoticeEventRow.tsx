@@ -20,14 +20,10 @@
 
 import { ChatEventText } from "./ChatEventText";
 import { useTranslation } from "../../i18n/useTranslation";
+import { RETIRED_NOTICES } from "../../lib/retiredNotices";
 import { cn } from "../../lib/utils";
 import type { CardChoice } from "../../lib/chatCardAnswer";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
-
-/** Milestones the runtime stopped writing, kept invisible even when an old
- *  transcript still carries them — history says nothing about "queued" or "a
- *  round opened". */
-const RETIRED_NOTICES = new Set(["turn_dispatched", "turn_started"]);
 
 interface ChatNoticeEventRowProps {
   row: ChatMessageRow;

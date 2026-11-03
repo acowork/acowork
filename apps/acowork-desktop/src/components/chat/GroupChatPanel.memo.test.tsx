@@ -48,7 +48,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
       // The outer literal is fresh per call, but every selector picks a VALUE
       // (winObj reference / primitive) — the memo-relevant identity is stable.
       (selector: (state: unknown) => unknown) =>
-        selector({ windows: { [GROUP]: winObj }, sending: { [GROUP]: false } }),
+        selector({ windows: { [GROUP]: winObj }, sending: { [GROUP]: false }, inflight: {} }),
       { getState: () => state },
     ),
   };

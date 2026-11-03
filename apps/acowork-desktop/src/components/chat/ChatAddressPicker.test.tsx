@@ -2,53 +2,86 @@
 /**
  * The second level of the `@` (ADR-106 D7).
  *
- * What these tests pin is the shape of the offer, not its look:
- * - the list is the Runtime's candidate set — the permission for THIS chat — so
- *   the picker must not filter it by residency or invent rows;
+ * The list is the session-history menu's list: the same `GET …/sessions` paging
+ * path, narrowed to this chat by the `chat_session_id` / `surface` parameters,
+ * newest first, with a search box and a pager. What these tests pin is
+ * the shape of the offer, plus the pieces of its plumbing and look that had
+ * drifted:
+ * - the rows come from the chat-scoped listing slice, fetched with this chat's
+ *   scope, so the picker cannot be shown somebody else's work or move the
+ *   sidebar's page cursor;
  * - "new task" is the FIRST row, because D6 requires a question to be answerable
  *   in one click rather than after a scroll;
  * - declining to name a session is still an answer (the ladder's lower levels
- *   must stay reachable), and so is a failed fetch — a list that could not load
- *   must not become a dead end.
+ *   must stay reachable);
+ * - the popup's chrome (one visible case + one source anchor below): the cursor
+ *   row carries the app-wide accent tint, inset from the hairline, because a
+ *   neutral full-bleed band made the two `@` levels look glued to their frame.
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatAddressPicker } from "./ChatAddressPicker";
-import { fetchChatCandidates, type ChatCandidate } from "../../lib/chatCandidates";
+import { chatListKey, useAgentStore } from "../../stores/agentStore";
+import { useChatStore } from "../../stores/chatStore";
+import type { SessionInfo } from "../../lib/types";
 
-vi.mock("../../lib/chatCandidates", () => ({
-  fetchChatCandidates: vi.fn(),
-}));
 vi.mock("../../i18n/useTranslation", () => ({
   useTranslation: () => ({
     t: (key: string, vars?: Record<string, unknown>) =>
-      vars && "name" in vars ? `${key}:${vars.name}` : key,
+      vars ? `${key}:${Object.values(vars).join("/")}` : key,
   }),
 }));
 
-const CANDIDATES: ChatCandidate[] = [
-  {
-    session_id: "s-1",
-    label: "Draft the release note",
-    status: "working",
-    origin: "chat",
-    last_active_secs: 100,
-  },
-  {
-    session_id: "s-2",
-    label: "Review the schema",
+function session(id: string, title: string): SessionInfo {
+  return {
+    session_id: id,
+    title,
+    created_at: "2026-11-01T10:00:00Z",
+    message_count: 1,
     status: "idle",
-    origin: "manual",
-    last_active_secs: 90,
-  },
+  } as SessionInfo;
+}
+
+const SESSIONS = [
+  session("s-1", "Draft the release note"),
+  session("s-2", "Review the schema"),
 ];
+
+/** The chat the picker is opened in — every case below is one 1:1 pair. */
+const CHAT = "chat-1";
+
+function seed(
+  sessions: SessionInfo[],
+  { currentPage = 1, totalPages = 1, isLoading = false, error = false } = {},
+) {
+  const fetchChatSessions = vi.fn(async () => {});
+  useAgentStore.setState({
+    chatSessionLists: {
+      [chatListKey("agent-a", "direct", CHAT)]: {
+        sessions,
+        pagination: {
+          currentPage,
+          totalPages,
+          totalCount: sessions.length,
+          pageSize: 10,
+        },
+        isLoading,
+        error,
+      },
+    },
+    fetchChatSessions,
+  } as never);
+  return fetchChatSessions;
+}
 
 function picker(onPick = vi.fn(), onClose = vi.fn()) {
   render(
     <ChatAddressPicker
       instanceId="agent-a"
-      chatSessionId="grp-1"
-      surface="group"
+      chatSessionId={CHAT}
       agentName="Architect"
       onPick={onPick}
       onClose={onClose}
@@ -60,18 +93,10 @@ function picker(onPick = vi.fn(), onClose = vi.fn()) {
 describe("ChatAddressPicker", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(fetchChatCandidates).mockResolvedValue(CANDIDATES);
-  });
-
-  it("asks the Runtime for this chat's candidates, named by surface", async () => {
-    picker();
-    await screen.findByText("Draft the release note");
-    expect(fetchChatCandidates).toHaveBeenCalledWith(
-      "agent-a",
-      "grp-1",
-      "group",
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
+    // The run-state mark is read from the chat store; start every case clean so
+    // one case's `thinking` cannot breathe in another's row.
+    useChatStore.setState({ agentStates: {} });
+    seed(SESSIONS);
   });
 
   it("offers the cheap escape FIRST, above every suggestion", async () => {
@@ -89,14 +114,11 @@ describe("ChatAddressPicker", () => {
       sessionId: "s-2",
       label: "Review the schema",
     });
-    fireEvent.click(screen.getByText("chatView.block.newTask"));
-    expect(onPick).toHaveBeenLastCalledWith({ forceNew: true });
+    fireEvent.click(screen.getByText("chatView.address.noPreference"));
+    expect(onPick).toHaveBeenLastCalledWith({});
   });
 
   it("keeps 'no preference' as an answer when the list is not empty", async () => {
-    // Refusing to name a session is what leaves the turn on the ladder's lower
-    // levels, where the Router may answer it as chat — so the refusal has to be
-    // a row, not just an Escape nobody will find.
     const { onPick } = picker();
     fireEvent.click(await screen.findByText("chatView.address.noPreference"));
     expect(onPick).toHaveBeenLastCalledWith({});
@@ -113,7 +135,7 @@ describe("ChatAddressPicker", () => {
   it("walks the list with the arrows and picks the highlighted row on Enter", async () => {
     const { onPick } = picker();
     const list = await screen.findByTestId("chat-address-picker");
-    // Focus starts on the escape row; one step down is the first session.
+    // The highlight starts on the escape row; one step down is the first session.
     fireEvent.keyDown(list, { key: "ArrowDown" });
     fireEvent.keyDown(list, { key: "Enter" });
     expect(onPick).toHaveBeenCalledWith({
@@ -122,23 +144,93 @@ describe("ChatAddressPicker", () => {
     });
   });
 
-  it("says so when there is nothing to continue, without hiding the escape", async () => {
-    vi.mocked(fetchChatCandidates).mockResolvedValue([]);
-    const { onPick } = picker();
-    await screen.findByText("chatView.address.empty");
-    expect(screen.getByText("chatView.block.newTask")).toBeTruthy();
-    fireEvent.click(screen.getByText("chatView.block.newTask"));
-    expect(onPick).toHaveBeenCalledWith({ forceNew: true });
+  it("opens with the caret in the search box, where typing a filter starts", async () => {
+    picker();
+    const input = await screen.findByLabelText("chatView.address.search");
+    // What this pins: focus parked on the listbox — or stolen by a host that
+    // cancels `mousedown` across the whole popup — left the search box
+    // unclickable. jsdom never applies mousedown's default focus, so the check
+    // is on where the picker puts the caret itself.
+    expect(document.activeElement).toBe(input);
   });
 
-  it("offers a retry when the read failed, instead of an empty dead end", async () => {
-    vi.mocked(fetchChatCandidates).mockRejectedValue(new Error("gateway down"));
+  it("keeps the list's keyboard reachable from inside the search box", async () => {
+    const { onPick } = picker();
+    const input = await screen.findByLabelText("chatView.address.search");
+    fireEvent.change(input, { target: { value: "draft" } });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onPick).toHaveBeenCalledWith({
+      sessionId: "s-1",
+      label: "Draft the release note",
+    });
+  });
+
+  it("narrows the list as the human types in the search box", async () => {
     picker();
-    const retry = await screen.findByText("chatView.block.retry");
-    vi.mocked(fetchChatCandidates).mockResolvedValue(CANDIDATES);
-    fireEvent.click(retry);
-    await waitFor(() => expect(screen.getByText("Draft the release note")).toBeTruthy());
-    expect(vi.mocked(fetchChatCandidates)).toHaveBeenCalledTimes(2);
+    await screen.findByText("Draft the release note");
+    fireEvent.change(screen.getByLabelText("chatView.address.search"), {
+      target: { value: "schema" },
+    });
+    expect(screen.queryByText("Draft the release note")).toBeNull();
+    expect(screen.getByText("Review the schema")).toBeTruthy();
+  });
+
+  it("asks the chat-scoped listing for the next page", async () => {
+    const fetchChatSessions = seed(SESSIONS, { currentPage: 1, totalPages: 3 });
+    picker();
+    fireEvent.click(await screen.findByLabelText("chatView.address.nextPage"));
+    expect(fetchChatSessions).toHaveBeenCalledWith("agent-a", CHAT, "direct", 2);
+  });
+
+  it("asks with THIS chat's scope, not the agent's whole history", async () => {
+    // The permission narrowing lives on the server and is driven by these two
+    // parameters: a picker that fetched the unscoped listing would offer runs
+    // this chat may not address, and the router would then be handed an
+    // address the human had no right to name. A chat-scoped list is also never
+    // the sidebar's list — sharing it would move the sidebar under the human.
+    const fetchChatSessions = vi.fn(async () => {});
+    useAgentStore.setState({ chatSessionLists: {}, fetchChatSessions } as never);
+    picker();
+    await screen.findByTestId("chat-address-picker");
+    expect(fetchChatSessions).toHaveBeenCalledWith("agent-a", CHAT, "direct", 1);
+  });
+
+  it("keeps a group's page separate from the same agent's 1:1 page", async () => {
+    // Same agent, same chat id space, different rules — so a group's `@` must
+    // not be served the page the 1:1 composer loaded, nor repaint it.
+    const fetchChatSessions = seed(SESSIONS);
+    render(
+      <ChatAddressPicker
+        instanceId="agent-a"
+        chatSessionId={CHAT}
+        surface="group"
+        onPick={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    await screen.findByTestId("chat-address-picker");
+    expect(fetchChatSessions).toHaveBeenCalledWith("agent-a", CHAT, "group", 1);
+  });
+
+  it("says so when there is nothing to continue, without hiding the escape", async () => {
+    seed([]);
+    picker();
+    await screen.findByText("chatView.address.empty");
+    expect(screen.getByText("chatView.block.newTask")).toBeTruthy();
+    expect(screen.queryByText("chatView.address.noPreference")).toBeNull();
+  });
+
+  it("says the read failed instead of claiming the chat is empty", async () => {
+    // A failed first read used to paint the empty state, which claims this chat
+    // has no tasks — and the listing is fetched once per chat key, so the claim
+    // would survive reopening the picker.
+    const fetchChatSessions = seed([], { error: true });
+    picker();
+    await screen.findByText("chatView.address.failed");
+    expect(screen.queryByText("chatView.address.empty")).toBeNull();
+    fireEvent.click(screen.getByText("common.retry"));
+    expect(fetchChatSessions).toHaveBeenCalledWith("agent-a", CHAT, "direct", 1);
   });
 
   it("closes when the pointer goes down outside it", async () => {
@@ -157,8 +249,7 @@ describe("ChatAddressPicker", () => {
     render(
       <ChatAddressPicker
         instanceId="agent-a"
-        chatSessionId="grp-1"
-        surface="group"
+        chatSessionId={CHAT}
         anchorRef={{ current: anchor }}
         onPick={vi.fn()}
         onClose={onClose}
@@ -170,8 +261,67 @@ describe("ChatAddressPicker", () => {
     anchor.remove();
   });
 
-  it("shows whose tasks these are on a multi-party surface", async () => {
+  it("shows whose sessions these are on a multi-party surface", async () => {
     picker();
-    expect(await screen.findByText("chatView.address.subject:Architect")).toBeTruthy();
+    expect(
+      await screen.findByText("chatView.address.subject:Architect"),
+    ).toBeTruthy();
+  });
+
+  it("tints the cursor row with the accent and floats it inside the hairline", async () => {
+    picker();
+    const list = await screen.findByTestId("chat-address-picker");
+    const row = list.querySelector('[data-address-index="0"]') as HTMLElement;
+    // `listRowSelected` — the same accent family the session-history list uses.
+    // `--color-nav-item-hover` is documented as an icon-control fill and must
+    // not come back here as a list row's cursor.
+    expect(row.className).toContain("--color-accent");
+    expect(row.className).not.toContain("bg-nav-item-hover");
+    // Rounded and inset by the list region, so the wash reads as a row inside
+    // the popup instead of a band glued to both edges.
+    expect(row.className).toContain("rounded");
+    expect(row.parentElement?.className).toContain("px-1");
+    // `role="none"` keeps the options owned by the `listbox` above: an
+    // intervening generic element would otherwise break the required relation.
+    expect(row.parentElement?.getAttribute("role")).toBe("none");
+  });
+
+  it("gives the first `@` level the same cursor tint", () => {
+    // Source anchor, not rendered DOM: the group's first level lives deep in
+    // `GroupChatPanel`, whose render needs the whole store graph (the same
+    // trade-off `chatCardChrome.test.tsx` makes). The two levels open from one
+    // gesture, so they must not learn two visual languages.
+    const src = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "GroupChatPanel.tsx"),
+      "utf8",
+    );
+    expect(src).toContain("listRowSelected");
+    expect(src).not.toContain("bg-nav-item-hover text-text");
+  });
+
+  it("breathes the brain mark on a task that is still working", async () => {
+    useChatStore.getState().updateSessionStatus("agent-a", "s-1", {
+      status: "thinking",
+    });
+    picker();
+    const row = (await screen.findByText("Draft the release note")).closest(
+      "button[data-address-index]",
+    ) as HTMLElement;
+    // Solid + breathing — the session-history list's own "still working" mark
+    // (design 27 §6.1), so the two lists speak one cue.
+    expect(row.querySelector("svg.animate-pulse")).toBeTruthy();
+    expect(row.textContent).toContain("chatView.address.statusWorking");
+  });
+
+  it("marks a settled task with the outline brain, inventing no breath", async () => {
+    picker();
+    const row = (await screen.findByText("Review the schema")).closest(
+      "button[data-address-index]",
+    ) as HTMLElement;
+    // No entry in the session-state map = never reported busy: outline, static.
+    expect(row.querySelector("svg")).toBeTruthy();
+    expect(row.querySelector("svg.animate-pulse")).toBeNull();
+    expect(row.querySelector("svg[fill='none']")).toBeTruthy();
+    expect(row.textContent).toContain("chatView.address.statusIdle");
   });
 });

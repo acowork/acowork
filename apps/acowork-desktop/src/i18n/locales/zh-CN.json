@@ -265,6 +265,7 @@
     "notice": {
       "pendingTurn": "{{name}}正在处理…",
       "pendingTurnGeneric": "正在处理…",
+      "turnInflightTooltip": "上一条消息正在处理中",
       "interrupted": "本轮执行已中断",
       "failed": "本轮执行失败",
       "timeout": "本轮执行超时",
@@ -289,12 +290,30 @@
       "chooseSession": "你指的是哪一个任务？",
       "confirmSession": "继续这个任务吗？",
       "newTask": "开新任务",
-      "chooseThis": "就继续这个"
+      "chooseThis": "就继续这个",
+      "roundCount_one": "{{count}} 轮",
+      "roundCount_other": "{{count}} 轮",
+      "olderRounds_one": "查看更早 {{count}} 轮",
+      "olderRounds_other": "查看更早 {{count}} 轮",
+      "roundN": "第 {{n}} 轮",
+      "toggleRound": "展开 / 收起本轮详情",
+      "unnamedRun": "执行会话",
+      "noQuestion": "（本轮没有记录提问）",
+      "state": {
+        "idle": "空闲",
+        "waiting": "等模型响应",
+        "thinking": "思考中",
+        "streaming": "正在输出",
+        "toolExecuting": "执行工具中",
+        "waitingApproval": "等你审批",
+        "paused": "已暂停"
+      }
     },
     "address": {
       "label": "这条消息投给哪个任务？",
       "subject": "{{name}} — 投给哪个任务？",
       "pick": "投给哪个任务",
+      "composerHint": "输入消息...（@ 可选择投给哪个任务）",
       "noPreference": "不指定 — 由 agent 决定",
       "empty": "这里还没有可继续的任务",
       "failed": "读不到本会话的任务列表",
@@ -302,7 +321,12 @@
       "continuing": "继续",
       "statusWorking": "进行中",
       "statusIdle": "空闲",
-      "statusErrored": "需要你看一眼"
+      "statusErrored": "需要你看一眼",
+      "search": "搜索会话…",
+      "untitled": "未命名会话",
+      "pagerOf": "第 {{current}} / {{total}} 页",
+      "prevPage": "上一页",
+      "nextPage": "下一页"
     },
     "execSessionGone": "该执行会话已被删除，无法查看"
   },
@@ -343,6 +367,7 @@
     "pendingNoPreview": "（无预览）",
     "uploadFile": "上传文件",
     "uploadHint": "上传文件 (PDF/DOCX/PPTX/XLSX/PNG/JPG/GIF/WebP)",
+    "uploadTooLarge": "「{{filename}}」超过 {{limit}} 附件大小限制",
     "sendMessage": "发送消息",
     "attach": "添加附件",
     "removeAttachment": "移除附件",
@@ -469,8 +494,9 @@
     "cacheRead": "累计缓存读取",
     "cacheWrite": "累计缓存写入",
     "estCost": "估算成本",
-    "byModel": "按模型",
-    "byAgent": "按 Agent",
+    "byModel": "按模型（全会话累计）",
+    "usedThisTurn": "本轮已使用",
+    "byAgent": "按 Agent（全会话累计）",
     "unknownModel": "未知模型",
     "noData": "本会话尚无 LLM 用量",
     "usedNotMeasured": "尚未测量 — 路由器会在本会话的下一轮记录历史长度"
@@ -1548,7 +1574,9 @@
     "questions": "题",
     "previous": "上一题",
     "next": "下一题",
-    "goTo": "跳转到第"
+    "goTo": "跳转到第",
+    "expiresIn": "剩余时间",
+    "expired": "已过期"
   },
   "debugPausedBanner": {
     "resume": "继续",

@@ -26,18 +26,7 @@ import { useState } from 'react'
 import { Sheet } from './ui'
 import type { CardChoice } from '../lib/chatCardAnswer'
 import type { ChatCandidateOption, ChatMessageRow } from '../lib/types'
-
-/** Milestones the runtime stopped writing, kept invisible even when an old
- *  transcript still carries them — history says nothing about "queued" or "a
- *  round opened", and a retired card receipt must not resurrect a card that is
- *  now shown inside the block (D12). */
-const RETIRED_NOTICES = new Set([
-  'turn_dispatched',
-  'turn_started',
-  'turn_routed',
-  'router_fallback',
-  'interaction_resolved',
-])
+import { RETIRED_NOTICES } from '../lib/retiredNotices'
 
 interface ChatNoticeRowProps {
   row: ChatMessageRow

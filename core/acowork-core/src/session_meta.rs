@@ -542,6 +542,24 @@ impl SessionScope {
             Self::Admin { chats, .. } | Self::User { chats, .. } => chats,
         }
     }
+
+    /// May this caller act **inside** `chat_session_id`?
+    ///
+    /// ADR-106 D7's first wall: a Chat-scoped read must not be served to
+    /// somebody who is not a participant of that Chat, even when the ADR-076
+    /// row-level rules (`is_readable_by`) would let them read the sessions it
+    /// binds. Local mode has no membership table — one human owns everything
+    /// there, so it sees every chat; an account sees only the chats the
+    /// Gateway injected for it. A missing header therefore yields an empty
+    /// membership and denies: fail closed, never fail open.
+    pub fn sees_chat(&self, chat_session_id: &str) -> bool {
+        match self {
+            Self::Unfiltered => true,
+            Self::Admin { chats, .. } | Self::User { chats, .. } => {
+                chats.iter().any(|c| c == chat_session_id)
+            }
+        }
+    }
 }
 
 /// One persisted session, mapped 1:1 onto the `sessions` row.
@@ -1000,6 +1018,34 @@ mod perf_tests {
         assert!(perf.is_empty());
         assert_eq!(perf.avg_tps(), None);
         assert_eq!(perf.avg_ttft_ms(), None);
+    }
+}
+
+#[cfg(test)]
+mod chat_scope_tests {
+    use super::SessionScope;
+
+    /// ADR-106 D7's first wall. Local mode has no membership table, so one
+    /// human owns every chat; an account is limited to what the Gateway
+    /// injected — and an absent header means nothing is injected, which must
+    /// deny rather than admit everything.
+    #[test]
+    fn chat_membership_is_fail_closed() {
+        assert!(SessionScope::Unfiltered.sees_chat("chat-1"));
+
+        let member = SessionScope::from_headers(Some("alice"), None, Some("chat-1, chat-2"));
+        assert!(member.sees_chat("chat-1"));
+        assert!(member.sees_chat("chat-2"));
+        assert!(!member.sees_chat("chat-3"));
+
+        let no_header = SessionScope::from_headers(Some("alice"), None, None);
+        assert!(!no_header.sees_chat("chat-1"));
+
+        // An administrator may read every *session*, which is a different
+        // question from being a participant of a *chat*.
+        let admin = SessionScope::from_headers(Some("*"), Some("root"), Some("chat-1"));
+        assert!(admin.sees_chat("chat-1"));
+        assert!(!admin.sees_chat("chat-2"));
     }
 }
 

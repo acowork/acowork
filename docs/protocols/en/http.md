@@ -536,6 +536,7 @@ Gateway does not parse the Runtime response body; all reads and writes are verba
 |---|---|---|---|
 | GET | `/api/agents/{id}/sessions` | Session list (Runtime perspective, token stats merged) | `/sessions` |
 | GET | `/api/agents/{id}/sessions?active=true` | **Only currently-active sessions** (ADR-038 `Active` = resident in Runtime memory; the Desktop rebuilds its tab strip from this after a restart) | `/sessions?active=true` |
+| GET | `/api/agents/{id}/sessions?chat_session_id=&surface=` | the same session list, **narrowed to the execution sessions this chat may address** (the second `@` level; rule and pagination order: [§5.8](#58-level-two--addressable-session-read-adr-106-d7)) | `/sessions?chat_session_id=&surface=` |
 | GET | `/api/agents/{id}/latest-session` | Latest session (quick startup lookup) | `/sessions/latest` |
 | GET | `/api/agents/{id}/conversations/latest` | Latest session messages (the only conversations endpoint retained per ADR-034) | `/sessions/latest` |
 | GET | `/api/agents/{id}/sessions/{sid}` | Single session full state (meta + state merged) | `/sessions/{sid}` |
@@ -740,42 +741,57 @@ Conventions:
 - **`round_id` is minted deterministically**: `r:{inbound_message_id}`, a pure function — an MQTT redelivery and an HTTP retry map to the same round, which is also why the chat-side reference row is idempotent by construction; an id that is oversized (past 128 bytes) **or outside the addressable character set** (anything but `[A-Za-z0-9_:.-]`, a leading `.`, or an inner `..`) is hash-folded to `r:{digest}-{len}` — minting and addressing must test the same predicate or a round is born unreadable; the fold uses a **stable digest** (SHA-256, first 8 bytes), not a standard-library hasher whose algorithm is an implementation detail, because this string is persisted and becomes the reference row's idempotency key, so a toolchain upgrade must not change it; an empty `message_id` mints a UUID.
 - **First-touch rebuild is capped**: a transcript above 20,000 entries is not rebuilt, and projections on it degrade to an explicit hole — the open path never pays for an unbounded read.
 
-### 5.8 Level-Two `@` Candidate Read (ADR-106 D7)
+### 5.8 Level-Two `@` Addressable Session Read (ADR-106 D7)
 
-> **Implementation**: [`core/acowork-runtime/src/http/chat_candidates.rs`](../../../core/acowork-runtime/src/http/chat_candidates.rs)
-> (routing and filtering) + [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)
-> (the transparent proxy `GET /api/agents/{id}/chat-candidates`). The second `@` level answers "which
-> execution sessions may this person address inside this chat" — a fact only computable on the node that
-> owns the execution sessions.
+> **Implementation**: the rule itself lives in
+> [`core/acowork-runtime/src/agent/session/chat_candidates.rs`](../../../core/acowork-runtime/src/agent/session/chat_candidates.rs)
+> (`ChatScopeRule::allows` → `is_visible`, the very function the router's candidate pass uses), the path
+> that wires it into the listing is
+> [`core/acowork-runtime/src/usecases/session_metadata_impl.rs`](../../../core/acowork-runtime/src/usecases/session_metadata_impl.rs)
+> plus [`core/acowork-runtime/src/conversation.rs`](../../../core/acowork-runtime/src/conversation.rs)
+> (`MetaFilter`, evaluated per row **before** the page slice), the query parameters are in
+> [`core/acowork-runtime/src/http/server.rs`](../../../core/acowork-runtime/src/http/server.rs), and the
+> Gateway side is still the transparent proxy in
+> [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs).
+> **There is no separate endpoint**: the second `@` level answers "which execution sessions may this
+> person address inside this chat", which is the same question as "this agent's session list" asked with a
+> scope — a second endpoint would only produce two answers that can drift apart.
 
 | Method | Runtime path | Purpose | Permission |
 |---|---|---|---|
-| GET | `/chat-candidates?chat_session_id=&surface=` | the addressable session list for the second `@` level | chat participant (identity from the Gateway's injected scope headers) |
+| GET | `/sessions?chat_session_id=&surface=` (public prefix `/api/agents/{id}/sessions`) | narrow [§5.2](#52-session-read-only-queries)' listing to what this chat may address | chat participant (identity from the Gateway's injected scope headers) |
 
-Response: `{"chat_session_id": "…", "surface": "direct|group", "candidates": [{ "session_id", "label",
-"status", "origin", "last_active_secs" }]}`.
+The response is §5.2's paging envelope: `{"sessions": [SessionSummary…], "total_count", "total_pages", "page", "size"}`.
 
 Conventions:
 
-- **The candidate filter IS the permission**: the permission set is the router's own
-  `resolve_candidates` (1:1 lists sessions bound to this chat plus sessions the human started by hand; a
-  group lists only sessions *I* initiated; kinds never mix; `has_human=false` agent↔agent pairs never
-  enter the list). Letting the picker recompute it would have a surface offer sessions the router would
-  have been refused.
+- **The filter IS the permission**: the permission set is the router's own candidate rule (1:1 lists
+  sessions bound to this chat plus sessions the human started by hand; a group lists only sessions *I*
+  initiated; kinds never mix; a session an agent started carries an instance UUID as its `initiator`, which
+  never equals a human account id, so agent↔agent runs never reach a human's list). Letting the picker
+  recompute it would have a surface offer sessions the router would have refused.
+- **The filter runs BEFORE pagination**: `total_count` / `total_pages` count only the rows this chat may
+  address, so **the paging is the window** — the 20-row cap and the 7-day freshness test that lived on the
+  old candidate endpoint are gone with it, and a human pages back as far as they want. Ordering stays
+  most-recently-active first (the same order the session-history list uses).
+- **The initiator is an identity, not a parameter**: the "I" of the visible set comes from the caller
+  resolved out of `x-user-id`, never from the query string — otherwise anybody could name somebody else's
+  visible set.
 - **No existence oracle**: a caller who is not a participant of this chat gets the same 404 as a chat that
-  does not exist. Local mode (`SessionScope::Unfiltered`) has no account system, so the boundary stays the
-  loopback bind itself, as on every other Runtime surface.
-- **The displayed set is not the candidate set**: one more predicate filters it — `working` / `errored` are
-  always offered, `idle` / `Closed` only while `last_active < 7d`, at most 20 rows. `Closed` here means
-  "not resident in this process", not "the human archived it": such a session is still addressable and the
-  dispatcher reopens it, so recency decides the listing rather than residency. A round past the cap is
-  reached by replying to its block.
-- **The disk scans happen outside the lock** (design 29 §5): the meta and bindings walks complete before
+  does not exist (`SessionScope::sees_chat`, fail-closed). Local mode (`SessionScope::Unfiltered`) has no
+  account system, so the boundary stays the loopback bind itself, as on every other Runtime surface.
+- **The Gateway does not interpret these two parameters**: forwarded verbatim like `page` / `size` /
+  `active`. The permission lives on the node that owns the execution sessions, which the proxy can neither
+  read nor should (ADR-009 §5).
+- **A `Closed` session is still addressable**: non-residency is not "the human archived it" — the dispatcher
+  reopens it, so the listing does not drop rows by residency. The only exclusions are sessions whose PM task
+  already reached a terminal state: reviving a finished chain is not a legal continuation target.
+- **The disk scans happen outside the lock** (design 29 §5): the bindings and meta walks complete before
   `SessionManager`'s global lock is taken, otherwise opening a picker once would queue `POST /sessions`
   behind a filesystem scan.
-- An empty `chat_session_id` → 400; `surface` recognises only `group`, anything else (including absent)
-  is `direct`. This is a read-only surface and opens no write entry on an execution session: delivering to
-  a chosen candidate still goes through `POST /api/intents/mentions` (§4.5).
+- An empty `chat_session_id` → 400; `surface` recognises only `group`, anything else (including absent) is
+  `direct`. This is a read-only surface and opens no write entry on an execution session: delivering to a
+  chosen session still goes through `POST /api/intents/mentions` (§4.5).
 
 ---
 

@@ -289,11 +289,13 @@ pub struct IntentMeta {
     /// Deliberately *not* folded into [`Self::mentions`]: `mentions` is what
     /// the human typed, and the transcript draws a chip per entry — an
     /// auto-routed target there would put a name in the sender's mouth. This
-    /// field is the separate fact "the group's responder took this one", which
-    /// is exactly what the Chat surface keys the in-flight wait line on: a
-    /// `user_message` with no mentions otherwise opens no turn at all (see the
-    /// desktop's `opensAgentTurn`), so the wait line — and with it any sign
-    /// that the message was picked up — never appeared.
+    /// field is the separate fact "the group's responder took this one".
+    ///
+    /// It is a record of where the sentence went and drives no rendering: the
+    /// surfaces' wait line is a claim about the device's OWN send (ADR-106 D9 /
+    /// D14 superseding ADR-105 D4), keyed by the row id the send's response
+    /// returned and ended by the first outcome row that answers it under
+    /// `in_reply_to` — the reference row, the router's reply, or a receipt.
     ///
     /// Declared here because undeclared meta keys are silently dropped at this
     /// storage boundary (same trap as [`Self::task_id`]).

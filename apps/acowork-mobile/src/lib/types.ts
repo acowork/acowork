@@ -407,21 +407,8 @@ export interface ChatBlockEntry {
 }
 
 /* ------------------------------------------------------------------ */
-/* Addressing candidates (ADR-106 D7 — the second level of the `@`)    */
+/* Addressing questions (ADR-106 D6 levels 3 and 5)                    */
 /* ------------------------------------------------------------------ */
-
-/** One addressable execution session, from the hosting Runtime. `status` is
- *  the candidate vocabulary (`working` / `idle` / `errored` / `closed`), not
- *  the Runtime's fine-grained one; `origin` says whether the session came out
- *  of this chat or a PM task. The list IS the permission: a session the human
- *  can click is a session the turn can legally be delivered to. */
-export interface ChatCandidate {
-  session_id: string
-  label: string
-  status: string
-  origin: string
-  last_active_secs: number
-}
 
 /** One offer on an addressing question (ADR-106 D6 levels 3 and 5). `why` is the
  *  runtime's reason for putting this session on the list — shown as the row's

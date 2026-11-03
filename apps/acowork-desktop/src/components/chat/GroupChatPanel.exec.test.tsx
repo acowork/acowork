@@ -2,11 +2,11 @@
  * Group-chat "查看执行" affordance.
  *
  * ADR-106 D3/D8 moved the drill: it is no longer a chip on an agent's reply
- * bubble, it lives in the header of the round's block. So these tests feed an
- * `execution_round` row plus its projection read and assert that the button
- * routes through the exact calls AgentChatView.jumpToExec makes — existence
- * probe (a definitive 404 is a toast, no navigation) → selectAgent (switch the
- * middle pane to the agent) → openSession (cold-load the exec tab) →
+ * bubble, it rides ABOVE the session's block. A block is one execution SESSION
+ * (D4), so these tests feed reference rows plus their projection reads and assert
+ * that the button routes through the exact calls AgentChatView.jumpToExec makes
+ * — existence probe (a definitive 404 is a toast, no navigation) → selectAgent
+ * (switch the middle pane to the agent) → openSession (cold-load the exec tab) →
  * setMode('exec') (flip the surface).
  *
  * What this pins that the block's own suite cannot: the group surface hands the
@@ -18,7 +18,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GroupChatPanel } from "./GroupChatPanel";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
-import type { ChatBlockEntry } from "../../stores/chatBlockStore";
+import type { ChatBlockEntry } from "../../lib/chatBlocks";
 
 const AGENT = "agent-1";
 const ME = "user-me";
@@ -47,6 +47,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
             [GROUP]: { older: [], tail, tailLoaded: tail.length, total: tail.length, loadingOlder: false },
           },
           sending: { [GROUP]: false },
+          inflight: {},
         }),
       {
         getState: () => ({
@@ -61,8 +62,14 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
 });
 
 // The block read is one entry per ref; batching is chatBlockStore's own suite.
+// A block asks for its whole ref list (it is a SESSION's worth of rounds), so the
+// mock answers per ref out of that list.
 vi.mock("../../stores/chatBlockStore", () => ({
-  useChatBlock: () => blockEntry,
+  useChatBlocks: (_chatId: string, refs: readonly string[]) => {
+    const out: Record<string, ChatBlockEntry> = {};
+    for (const ref of refs) if (blockEntry?.ref === ref) out[ref] = blockEntry;
+    return out;
+  },
   useChatBlockStore: (selector: (s: { reload: () => void }) => unknown) =>
     selector({ reload: vi.fn() }),
 }));
@@ -247,13 +254,36 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     expect(screen.getByText("chatView.block.notFound")).toBeTruthy();
   });
 
-  it("offers a retry, not a drill, when the run cannot be read (D9)", () => {
+  it("offers the retry AND the drill when the run cannot be read (D9)", () => {
+    // The unreadable thing is the ROUND projection; the drill addresses the
+    // execution SESSION, which is a different object and is not thereby gone —
+    // the click probes it and toasts if it turns out to be deleted.
     tail = [roundRow(2)];
     blockEntry = { ...entryOf(AGENT, "exec-7", "r2"), status: "unreachable", projection: undefined, detail: "refused" };
     render(<GroupChatPanel />);
-    expect(screen.queryByText("chatView.viewRun")).toBeNull();
+    expect(screen.queryByText("chatView.viewRun")).toBeTruthy();
     expect(screen.getByText("chatView.block.unreachable")).toBeTruthy();
     expect(screen.getByText("chatView.block.retry")).toBeTruthy();
+  });
+
+  it("the rounds of one session are one block, so the drill appears once per run", () => {
+    // The failure this pins is the visual one: two reference rows of the same
+    // execution session used to draw two cards, each with its own drill, and a
+    // reader could not tell whether they were looking at one run or two.
+    tail = [
+      userRow(1, "ping"),
+      roundRow(2, { round: "r2" }),
+      roundRow(3, { round: "r3" }),
+    ];
+    blockEntry = entryOf(AGENT, "exec-7", "r3");
+    render(<GroupChatPanel />);
+    expect(screen.getAllByText("chatView.viewRun")).toHaveLength(1);
+    fireEvent.click(screen.getByText("chatView.viewRun"));
+    // One block, one session address — the newest round's, which is the same
+    // session for every row in it.
+    return waitFor(() =>
+      expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7", { prepend: true }),
+    );
   });
 
   it("toasts instead of jumping when the exec session has been deleted", async () => {

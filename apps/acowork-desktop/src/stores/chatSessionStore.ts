@@ -37,6 +37,10 @@ import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
 import { toWireAttachedItems, workspaceRefToAttachedItem } from "../lib/types";
 import type { WorkspaceRef } from "../lib/types";
+import {
+  TURN_INFLIGHT_DEADLINE_MS,
+  type InflightTurn,
+} from "../lib/chatTurnInflight";
 import { useAuthStore } from "./authStore";
 
 // ── Wire types (mirror `chat_sessions_api.rs` responses) ──────────────
@@ -81,8 +85,10 @@ export interface ChatMessageRow {
      *  `auto_routed_to`, never here — the human typed no name. */
     mentions?: string[];
     /** ADR-105: the group's default responder that took an UN-addressed
-     *  message. Never rendered as a mention chip (the human typed no name) —
-     *  it is what marks the row as an opened agent turn. */
+     *  message. Never rendered as a mention chip (the human typed no name),
+     *  and no longer an input to any rendering: the wait line claims this
+     *  device's OWN send (`inflight`), keyed by the row id its response
+     *  carried — ADR-106 D9 / D14 superseded ADR-105 D4's evidence slot. */
     auto_routed_to?: string;
     status?: string;
     repo?: string;
@@ -298,6 +304,29 @@ export interface ChatAddress {
   messageId?: string;
 }
 
+/** `POST /api/intents/chat-message` response. `message_id` is the durable id
+ *  the Gateway gave the human's row — the key every outcome row threads itself
+ *  to under `meta.in_reply_to`, which is why a client claim cannot invent one.
+ *  A delivery that failed answers 200 with `status: "failed"`: the row is
+ *  already durable, so only the delivery did not land — and that path writes no
+ *  receipt back into the Chat (the 1:1 arm of `deliver_chat_message`), so no
+ *  claim may wait for a row that will never exist. */
+interface ChatSendResponse {
+  message_id: string;
+  status: string;
+  error_code?: string;
+  error?: string;
+}
+
+/** `POST /api/intents/mentions` response: the ONE `user_message` row's id
+ *  (what every outcome threads to), plus one delivery result per target it
+ *  woke. `routed: "archived"` carries an empty `results` — nobody was asked. */
+interface MentionSendResponse {
+  message_id: string;
+  routed?: string;
+  results?: Array<{ target?: string; message_id?: string; status?: string }>;
+}
+
 /** Post one turn into a Chat session. Goes through the intent channel
  *  (`POST /api/intents/chat-message`), NOT the session-scoped write: the
  *  durable row lands before delivery resolves (design 27 §5.1), and only
@@ -320,8 +349,8 @@ function sendChatMessage(
   attachmentIds?: string[],
   attachedItems?: unknown[],
   address?: ChatAddress,
-): Promise<void> {
-  return req<void>("POST", "/api/intents/chat-message", {
+): Promise<ChatSendResponse> {
+  return req<ChatSendResponse>("POST", "/api/intents/chat-message", {
     chat_session_id: chatSessionId,
     from_user: me,
     text,
@@ -356,7 +385,7 @@ function fanoutMentions(
   targets: string[],
   attachmentIds?: string[],
   address?: ChatAddress,
-): Promise<void> {
+): Promise<MentionSendResponse> {
   const targetSessions = address?.targetSessions ?? {};
   // A refusal to continue is only ever sent for a target with no address: the
   // two are contradictory instructions, and the Gateway answers the pair with a
@@ -367,7 +396,7 @@ function fanoutMentions(
       ...(address?.forceNewFor ?? []),
     ]),
   ].filter((t) => !targetSessions[t]);
-  return req<void>("POST", "/api/intents/mentions", {
+  return req<MentionSendResponse>("POST", "/api/intents/mentions", {
     chat_session_id: chatSessionId,
     from_user: me,
     targets,
@@ -525,7 +554,24 @@ interface Window {
 interface ChatSessionStore {
   byAgent: Record<string, AgentChatState>;
   windows: Record<string, Window>;
+  /** The POST this device has in flight. Deliberately NOT the wait-line / lock
+   *  signal on its own: a POST answers as soon as delivery lands (~150 ms),
+   *  while the turn's first durable row can be a minute behind it — that window
+   *  is `inflight`'s job. */
   sending: Record<string, boolean>;
+  /** The turn this device sent and has not seen an outcome for, per Chat
+   *  session — ADR-106 D9's first-person claim, restored to the whole window
+   *  the old `pendingTurn(rows, …)` used to cover without ever reading the
+   *  transcript's shape. Written from the send's own response (the id the
+   *  Gateway gave the human's row), dropped when the surface sees a row answer
+   *  it (`settleTurn`) or when the deadline passes (`expireTurn`). In-memory
+   *  only: a reload has no send of its own to claim, and so shows no wait line
+   *  — the deliberate D9 boundary. */
+  inflight: Record<string, InflightTurn | undefined>;
+  /** Stop claiming a turn because the transcript already answers it. */
+  settleTurn(chatSessionId: string, messageId: string): void;
+  /** Stop claiming a turn because its outcome rows never arrived. */
+  expireTurn(chatSessionId: string, messageId: string): void;
   /** Cache of the server-side `session_config` draft, keyed by chat
    *  session id. The session row is the source of truth (design 27 §4.5);
    *  this slot is hydrated by `openAgent` and updated by `saveDraft`'s
@@ -640,8 +686,13 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   openGroupIds: {},
   windows: {},
   sending: {},
+  inflight: {},
   draft: {},
   attachedContext: {},
+
+  settleTurn: (chatSessionId, messageId) => dropTurn(chatSessionId, messageId),
+
+  expireTurn: (chatSessionId, messageId) => dropTurn(chatSessionId, messageId),
 
   addAttachedContext: (chatSessionId, ref) => {
     set((s) => {
@@ -711,21 +762,33 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }));
     let ok = false;
     try {
+      // Which row this send owes a claim on, once the response says somebody
+      // took it. `null` for a send nothing was delivered to.
+      let claimed: string | null = null;
       if (inReplyTo) {
         // Reply to a round's block: the 1:1 channel resolves the reference row
         // into its agent and execution session (ADR-106 D6 level 1); group
         // sessions are accepted for exactly this case (design 27 §5.5.4). A
         // level-2 address cannot ride this branch - level 1 already named the
         // session, and the backend drops `force_new` wherever an address exists.
-        await sendChatMessage(me, chatSessionId, text, inReplyTo, undefined, attachmentIds, undefined, address);
+        const resp = await sendChatMessage(me, chatSessionId, text, inReplyTo, undefined, attachmentIds, undefined, address);
+        if (resp.status === "delivered") claimed = resp.message_id;
       } else {
         // Every group send takes the one entry: `targets` carries the @-ed
         // agents, and an empty list asks the Gateway to apply the group's
         // default responder (ADR-105) or archive. Splitting the two cases
         // client-side is what used to make an un-addressed reply vanish.
-        await fanoutMentions(me, chatSessionId, text, targets, attachmentIds, address);
+        const resp = await fanoutMentions(me, chatSessionId, text, targets, attachmentIds, address);
+        // One row, N deliveries: the claim is on the ROW's id, and any target
+        // that took the turn owes that row an answer. `archived` (no target)
+        // and an all-failed fan-out owe none — a failed target already wrote its
+        // own receipt server-side, and an archived row is the whole outcome.
+        if ((resp.results ?? []).some((r) => r.status === "delivered")) {
+          claimed = resp.message_id;
+        }
       }
       ok = true;
+      if (claimed) armTurn(chatSessionId, claimed);
     } catch (e) {
       console.warn("[chatSessionStore] group send failed:", e);
     }
@@ -970,8 +1033,13 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       const refs = get().attachedContext[chatSessionId] ?? [];
       const attachedItems =
         refs.length === 0 ? undefined : toWireAttachedItems(refs.map(workspaceRefToAttachedItem));
-      await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, attachedItems, address);
+      const resp = await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, attachedItems, address);
       ok = true;
+      // The claim starts here, from the id the Gateway gave THIS row. A failed
+      // delivery is not claimed: that arm writes no receipt into the Chat, so
+      // a claim would wait for a row that cannot exist and lock the composer
+      // for the whole deadline.
+      if (resp.status === "delivered") armTurn(chatSessionId, resp.message_id);
       if (attachedItems) {
         set((s) => ({ attachedContext: { ...s.attachedContext, [chatSessionId]: [] } }));
       }
@@ -992,6 +1060,49 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
 
   wake: () => wakeCoalesced(get),
 }));
+
+// ── In-flight turn claims (ADR-106 D9, restored window) ────────────────
+//
+// Module-level rather than per-view on purpose: the claim belongs to the Chat
+// session, so closing the tab must not strand a turn nothing is left to expire.
+// One timer per session — a second send replaces the claim, and the timer names
+// the messageId it may clear so a stale deadline cannot drop a fresher turn's
+// claim. `TURN_INFLIGHT_DEADLINE_MS` is the backstop for the case the surface
+// cannot see: a Runtime that died between delivery and round open writes no
+// outcome row, and without a deadline the composer would stay locked for good.
+
+const turnTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Claim the turn this device just sent, and arm its deadline. */
+function armTurn(chatSessionId: string, messageId: string): void {
+  if (!messageId) return;
+  useChatSessionStore.setState((s) => ({
+    inflight: { ...s.inflight, [chatSessionId]: { messageId, at: Date.now() } },
+  }));
+  const prev = turnTimers.get(chatSessionId);
+  if (prev !== undefined) clearTimeout(prev);
+  turnTimers.set(
+    chatSessionId,
+    setTimeout(() => {
+      turnTimers.delete(chatSessionId);
+      dropTurn(chatSessionId, messageId);
+    }, TURN_INFLIGHT_DEADLINE_MS),
+  );
+}
+
+/** Release the claim — only if `messageId` is still the one being claimed. */
+function dropTurn(chatSessionId: string, messageId: string): void {
+  const cur = useChatSessionStore.getState().inflight[chatSessionId];
+  if (!cur || cur.messageId !== messageId) return;
+  const timer = turnTimers.get(chatSessionId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    turnTimers.delete(chatSessionId);
+  }
+  useChatSessionStore.setState((s) => ({
+    inflight: { ...s.inflight, [chatSessionId]: undefined },
+  }));
+}
 
 // ── Doorbell wake coalescing (render-perf L3) ──────────────────────
 // The doorbell is content-free — it says only "something changed

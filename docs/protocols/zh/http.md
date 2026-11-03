@@ -767,6 +767,7 @@ Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读�
 |---|---|---|---|
 | GET | `/api/agents/{id}/sessions` | 会话列表（运行时视角，token 统计合并；**按调用者 scope 过滤**） | `/sessions` |
 | GET | `/api/agents/{id}/sessions?active=true` | **仅当前活跃会话**（ADR-038 `Active` = 驻留 Runtime 内存；Desktop 重启后据此重建 tab strip） | `/sessions?active=true` |
+| GET | `/api/agents/{id}/sessions?chat_session_id=&surface=` | 把本表的会话列表**窄化到本 chat 可寻址的执行会话**（两级 `@` 的第二级；规则与分页次序见 [§5.8](#58-第二级--的可寻址会话读取adr-106-d7)） | `/sessions?chat_session_id=&surface=` |
 | GET | `/api/agents/{id}/latest-session` | 最新会话（启动时快速定位；**不可读时 404**） | `/sessions/latest` |
 | GET | `/api/agents/{id}/conversations/latest` | 最新会话消息（ADR-034 唯一保留的 conversations 端点） | `/sessions/latest` |
 | GET | `/api/agents/{id}/sessions/{sid}` | 单会话完整状态（合并 meta + state） | `/sessions/{sid}` |
@@ -1176,33 +1177,45 @@ RAG 不属记忆面，仍由 Runtime 持有：
 - **首触重建有上界**：超过 20 000 条的历史转录不重建索引，其投影退化为显式空洞——不在打开路径上
   付一次无界读的代价。
 
-### 5.8 第二级 `@` 的候选读取（ADR-106 D7）
+### 5.8 第二级 `@` 的可寻址会话读取（ADR-106 D7）
 
-> **实现**：[`core/acowork-runtime/src/http/chat_candidates.rs`](../../../core/acowork-runtime/src/http/chat_candidates.rs)
-> （路由与过滤）+ [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)
-> （透明代理 `GET /api/agents/{id}/chat-candidates`）。两级 `@` 的第二级要回答的是"这个人在这
-> 个 chat 里能把一句话投给哪些执行会话"，而它只在拥有执行会话的节点上算得出。
+> **实现**：规则本体在 [`core/acowork-runtime/src/agent/session/chat_candidates.rs`](../../../core/acowork-runtime/src/agent/session/chat_candidates.rs)
+> （`ChatScopeRule::allows` → `is_visible`，与 Router 的候选过滤同一份），接进列表的路径是
+> [`core/acowork-runtime/src/usecases/session_metadata_impl.rs`](../../../core/acowork-runtime/src/usecases/session_metadata_impl.rs)
+> ＋ [`core/acowork-runtime/src/conversation.rs`](../../../core/acowork-runtime/src/conversation.rs)
+> （`MetaFilter`，分页**之前**逐行判定），HTTP 参数在
+> [`core/acowork-runtime/src/http/server.rs`](../../../core/acowork-runtime/src/http/server.rs)，
+> Gateway 侧仍是 [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs)
+> 的透明反代。**没有独立端点**：第二级要回答的是"这个人在这个 chat 里能把一句话投给哪些执行
+> 会话"，它与"这个 agent 的会话列表"是同一个问题的两次问法——再造一个端点只会得到两份会各自
+> 漂移的答案。
 
 | 方法 | Runtime 路径 | 用途 | 权限 |
 |---|---|---|---|
-| GET | `/chat-candidates?chat_session_id=&surface=` | 第二级 `@` 的可寻址会话列表 | chat 参与者（身份取 Gateway 注入的 scope 头） |
+| GET | `/sessions?chat_session_id=&surface=`（公开前缀 `/api/agents/{id}/sessions`） | 把 [§5.2](#52-会话只读查询) 的列表窄化为本 chat 可寻址的集合 | chat 参与者（身份取 Gateway 注入的 scope 头） |
 
-响应：`{"chat_session_id": "…", "surface": "direct|group", "candidates": [{ "session_id", "label",
-"status", "origin", "last_active_secs" }]}`。
+响应就是 §5.2 的分页信封：`{"sessions": [SessionSummary…], "total_count", "total_pages", "page", "size"}`。
 
 约定：
 
-- **候选过滤就是权限**：权限集合直接复用 Router 的 `resolve_candidates`（1:1 只列绑定本 chat +
-  本人手起；群只列"我发起的"；跨 kind 互斥；`has_human=false` 的 agent↔agent pair 永不入列）。
+- **过滤就是权限**：权限集合直接复用 Router 的候选规则（1:1 只列绑定本 chat +
+  本人手起；群只列"我发起的"；跨 kind 互斥；agent 发起的会话其 `initiator` 是实例 UUID，永远不等于人的账号 id，
+  所以 agent↔agent 的运行不会出现在人的列表里）。
   让 picker 自己算一遍，就等于让一个界面端出 router 本会拒绝的会话。
-- **不做存在性 oracle**：不是本 chat 的参与者拿 404，与"chat 不存在"同形。本地模式（`SessionScope::Unfiltered`）
-  没有账号体系，边界仍是 loopback 绑定本身，与其余 Runtime 面一致。
-- **展示集合 ≠ 候选集合**：再交一层展示谓词——`working` / `errored` 直接入列，`idle` / `Closed` 按
-  `last_active < 7d` 判定，最多 20 条。这里的 `Closed` 是"不在本进程驻留"而不是"人已归档"：它仍可寻址，
-  调度器会重开它，所以决定列不列的是新鲜度而不是驻留。超出上限的轮靠回复它的块抵达。
-- **盘扫在锁外**（设计 29 §5）：两次 meta / bindings 遍历在 `SessionManager` 全局锁**之前**完成，否则打开
+- **过滤在分页之前**：`total_count` / `total_pages` 只数本 chat 可寻址的行，所以**分页就是窗口**——
+  原候选端点上的 20 条上限与 7 天新鲜度判定随端点一起删除，人往回翻多远就翻多远；排序仍是
+  `last_active` 倒序（与会话历史列表同一个次序）。
+- **发起人是身份，不是参数**：可见集合里的"我"取自 `x-user-id` 解析出的调用者，不接受客户端自报——
+  否则任何人都能指名别人的可见集合。
+- **不做存在性 oracle**：不是本 chat 的参与者拿 404，与"chat 不存在"同形（`SessionScope::sees_chat`，
+  fail-closed）。本地模式（`SessionScope::Unfiltered`）没有账号体系，边界仍是 loopback 绑定本身，与其余 Runtime 面一致。
+- **Gateway 不解释这两个参数**：与 `page` / `size` / `active` 一样 verbatim 透传。权限长在拥有执行会话
+  的节点上，网关既读不到也不该读（ADR-009 §5）。
+- **`Closed` 仍可寻址**：不驻留不等于人已归档——调度器会重开它，所以列表不因驻留状态剔行；被剔除的
+  只有 PM 任务已进终态的会话（"复活一条已终结的链"不是续投的合法目标）。
+- **盘扫在锁外**（设计 29 §5）：bindings 与 meta 两次遍历在 `SessionManager` 全局锁**之前**完成，否则打开
   一次 picker 会把 `POST /sessions` 排在一次文件遍历后面。
-- 空 `chat_session_id` → 400；`surface` 只认 `group`，其余（含缺省）按 `direct`。这是只读面，不在执行会话上开写入口：选中某条候选之后的投递仍走 `POST /api/intents/mentions`（§4.5）。
+- 空 `chat_session_id` → 400；`surface` 只认 `group`，其余（含缺省）按 `direct`。这是只读面，不在执行会话上开写入口：选中某条之后的投递仍走 `POST /api/intents/mentions`（§4.5）。
 
 ---
 

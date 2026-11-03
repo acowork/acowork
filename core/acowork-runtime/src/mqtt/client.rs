@@ -28,8 +28,8 @@ use acowork_core::mqtt_proto::{
     CompactionCancelReason as ProtoCompactionCancelReason, ContextUsagePayload, DataEnvelope,
     DonePayload, ErrorPayload, IterationLimitPausedPayload, LoopDetectedPausedPayload,
     McpTransport as ProtoMcpTransport, NewDataAvailablePayload, NodeInfo, RecordCompletePayload,
-    SessionMessage, StoppedPayload, StreamDeltaPayload, StreamLine, TodoUpdatedPayload,
-    ToolApprovalNeededPayload, data_envelope, session_message,
+    RoundStatePayload, SessionMessage, StoppedPayload, StreamDeltaPayload, StreamLine,
+    TodoUpdatedPayload, ToolApprovalNeededPayload, data_envelope, session_message,
 };
 use acowork_mqtt_session::{
     ErrClass, MqttClient, MqttClientConfig, MqttClientHandler, SessionState, SessionStateRx,
@@ -2061,6 +2061,39 @@ impl MqttChunkPublisher {
         self.publish(&sid, "stopped", &bytes).await;
     }
 
+    /// Publish a round-state doorbell via MQTT (QoS 1, non-retained, protobuf
+    /// DataEnvelope).
+    ///
+    /// ADR-106 revision (2026-11-03): the notification face for a round that
+    /// reached a terminal outcome or parked on a card. Coordinates only — never
+    /// content (D3 keeps `exec → chat` a zero-write path, and the block's body
+    /// stays the projection read's job), and never the outcome word either: no
+    /// subscriber acts on it without the read that this event triggers.
+    pub(crate) async fn publish_round_state(
+        &self,
+        session_id: &str,
+        round_id: &str,
+        chat_session_id: &str,
+    ) {
+        let sid = session_id.to_string();
+        let agent_id = self.agent_id.clone();
+        let event = SessionMessage {
+            agent_id,
+            session_id: sid.clone(),
+            event: Some(session_message::Event::RoundState(RoundStatePayload {
+                round_id: round_id.to_string(),
+                chat_session_id: chat_session_id.to_string(),
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        let bytes = prost::Message::encode_to_vec(&envelope);
+        self.publish_with_qos(&sid, "round_state", &bytes, QoS::AtLeastOnce, false)
+            .await;
+    }
+
     /// ADR-045: Publish a tool progress heartbeat (QoS 0).
     pub(crate) async fn publish_tool_progress(
         &self,
@@ -2566,6 +2599,85 @@ mod tests {
         assert!(status.online);
         assert_eq!(status.state, AgentLifecycleState::Failed as i32);
         assert_eq!(status.detail, "session init: sqlite open failed");
+    }
+
+    // ── round_state doorbell wire format (ADR-106 revision 2026-11-03) ──
+
+    /// Builds the same envelope `publish_round_state` puts on the wire, minus
+    /// the network half (the publisher needs a live MQTT client).
+    fn encode_round_state(round_id: &str, chat_session_id: &str) -> Vec<u8> {
+        let event = SessionMessage {
+            agent_id: "com.test.agent".to_string(),
+            session_id: "s-exec".to_string(),
+            event: Some(session_message::Event::RoundState(RoundStatePayload {
+                round_id: round_id.to_string(),
+                chat_session_id: chat_session_id.to_string(),
+            })),
+        };
+        let envelope = DataEnvelope {
+            version: 1,
+            payload: Some(data_envelope::Payload::SessionMessage(event)),
+        };
+        prost::Message::encode_to_vec(&envelope)
+    }
+
+    /// The mobile client hand-decodes this event (it ships no protobuf runtime),
+    /// so the field numbers are a cross-repo contract: pinning 34 here means a
+    /// silent renumber in the .proto breaks a test instead of stranding every
+    /// Chat block on a stale "running" card.
+    #[test]
+    fn round_state_uses_session_message_field_34() {
+        let bytes = encode_round_state("r:1", "c:9");
+        // DataEnvelope.version = 1 (varint 1) → 0x08 0x01, then payload = 15
+        // (length-delimited) → 0x7a; inside SessionMessage the oneof tag for
+        // field 34 is (34 << 3) | 2 = 274, a two-byte varint 0x92 0x02.
+        assert_eq!(&bytes[0..2], &[0x08, 0x01]);
+        assert_eq!(bytes[2], 0x7a);
+        let pos = bytes
+            .windows(2)
+            .position(|w| w == [0x92, 0x02])
+            .expect("round_state tag (field 34, wire type 2) must appear");
+        assert!(pos > 2, "tag must be inside the SessionMessage submessage");
+    }
+
+    #[test]
+    fn round_state_envelope_roundtrips_the_two_coordinates() {
+        use prost::Message as _;
+        let bytes = encode_round_state("r:1", "c:9");
+        let envelope = DataEnvelope::decode(bytes.as_slice()).unwrap();
+        let data_envelope::Payload::SessionMessage(msg) = envelope.payload.unwrap() else {
+            panic!("envelope must carry SessionMessage");
+        };
+        assert_eq!(msg.session_id, "s-exec");
+        let session_message::Event::RoundState(round) = msg.event.unwrap() else {
+            panic!("event must be round_state");
+        };
+        // Exactly these two: the doorbell names which block to re-read and which
+        // Chat owes the read. The outcome word is deliberately not on the wire —
+        // it is what the read this event triggers returns.
+        assert_eq!(round.round_id, "r:1");
+        assert_eq!(round.chat_session_id, "c:9");
+    }
+
+    /// proto3 omits defaulted strings, so a round with no chat binding encodes
+    /// `chat_session_id` as absent — a reader without a protobuf runtime (the
+    /// mobile client hand-decodes this event) must supply `""` for whatever is
+    /// not on the wire.
+    #[test]
+    fn round_state_omits_a_defaulted_chat_binding_on_the_wire() {
+        use acowork_core::mqtt_proto::RoundStatePayload;
+        use prost::Message as _;
+        let bytes = RoundStatePayload {
+            round_id: "r:1".to_string(),
+            chat_session_id: String::new(),
+        }
+        .encode_to_vec();
+        // The tag that must be absent: 2 (chat_session_id, length-delimited).
+        assert_eq!(bytes.first(), Some(&0x0a), "first field is round_id");
+        assert!(!bytes.contains(&0x12));
+        let decoded = RoundStatePayload::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.round_id, "r:1");
+        assert!(decoded.chat_session_id.is_empty());
     }
 
     // ── decode_lsps_payload (ADR-055 §6.7) ────────────────────────────

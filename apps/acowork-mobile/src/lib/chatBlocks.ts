@@ -65,21 +65,6 @@ export function blockStatusText(status: string): string {
   }
 }
 
-/** Candidate-list status labels (ADR-106 D7) — the candidate vocabulary, not the
- *  Runtime's fine-grained one, so a picker row says what the router knew. */
-export function candidateStatusText(status: string): string {
-  switch (status) {
-    case 'working':
-      return '进行中'
-    case 'errored':
-      return '需要你看一眼'
-    case 'idle':
-    case 'closed':
-    default:
-      return '空闲'
-  }
-}
-
 /** Bound a label so one collapsed line stays one line on a 390pt screen. */
 export function truncateLabel(text: string, max = 34): string {
   const collapsed = text.trim().replace(/\s+/g, ' ')
