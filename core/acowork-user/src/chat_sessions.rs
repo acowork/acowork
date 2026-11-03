@@ -64,6 +64,11 @@ pub const KIND_USER_MESSAGE: &str = "user_message";
 pub const KIND_AGENT_MESSAGE: &str = "agent_message";
 pub const KIND_INTERACTION_REQUEST: &str = "interaction_request";
 pub const KIND_SYSTEM_NOTICE: &str = "system_notice";
+/// ADR-106 D3: the chat's only durable unit of execution work — a **reference**
+/// to one round of an execution session. It carries coordinates, never content:
+/// the round's text lives in the execution session and reaches the chat surface
+/// through the read-time projection (`GET /api/chat-blocks/*`).
+pub const KIND_EXECUTION_ROUND: &str = "execution_round";
 
 /// `project_group` sessions are keyed by project id: the same project can
 /// never get two group chats (§3.3, §14 Phase 2 "幂等创建").
@@ -72,6 +77,7 @@ const KINDS: &[&str] = &[
     KIND_AGENT_MESSAGE,
     KIND_INTERACTION_REQUEST,
     KIND_SYSTEM_NOTICE,
+    KIND_EXECUTION_ROUND,
 ];
 
 /// Design 27 §4.2 / plan D-A (A1 "write new, read old"): render a retired
@@ -283,11 +289,13 @@ pub struct IntentMeta {
     /// Deliberately *not* folded into [`Self::mentions`]: `mentions` is what
     /// the human typed, and the transcript draws a chip per entry — an
     /// auto-routed target there would put a name in the sender's mouth. This
-    /// field is the separate fact "the group's responder took this one", which
-    /// is exactly what the Chat surface keys the in-flight wait line on: a
-    /// `user_message` with no mentions otherwise opens no turn at all (see the
-    /// desktop's `opensAgentTurn`), so the wait line — and with it any sign
-    /// that the message was picked up — never appeared.
+    /// field is the separate fact "the group's responder took this one".
+    ///
+    /// It is a record of where the sentence went and drives no rendering: the
+    /// surfaces' wait line is a claim about the device's OWN send (ADR-106 D9 /
+    /// D14 superseding ADR-105 D4), keyed by the row id the send's response
+    /// returned and ended by the first outcome row that answers it under
+    /// `in_reply_to` — the reference row, the router's reply, or a receipt.
     ///
     /// Declared here because undeclared meta keys are silently dropped at this
     /// storage boundary (same trap as [`Self::task_id`]).
@@ -336,6 +344,29 @@ pub struct IntentMeta {
     /// unable to tell "the agent failed" from "nobody is coming to answer".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<bool>,
+    /// ADR-106 D3: the execution round an `execution_round` row points at
+    /// (`r:{inbound_message_id}`, minted by the Runtime at the turn boundary).
+    /// Required on a reference row — a reference without its round is not a
+    /// reference. Declared here because undeclared meta keys are silently
+    /// dropped at this storage boundary (same trap as [`Self::task_id`]).
+    #[serde(default)]
+    pub round_id: String,
+    /// ADR-106 D3: the agent instance running that round. With
+    /// [`Self::agent_session_id`] it is the projection address the chat surface
+    /// asks `GET /api/chat-blocks/*` for.
+    #[serde(default)]
+    pub agent_instance_id: String,
+    /// ADR-106 D3: routing-time fact — did handing this round to the execution
+    /// session **create** it (`Some(true)` = new task, `Some(false)` = the same
+    /// logical task carries on). `None` on a turn nobody routed (a turn composed
+    /// straight against the execution surface). Never re-derived afterwards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opened_new: Option<bool>,
+    /// ADR-106 D13: the one-line task name a list preview renders for a
+    /// reference row. Written once with the row and never rewritten — the list
+    /// path must not read a projection to name a task (ADR-096).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_brief: Option<String>,
 }
 
 /// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12).
@@ -378,9 +409,9 @@ pub struct SessionMessage {
     /// Participant id of the sender — a user UUID or an agent instance UUID.
     pub from: String,
     /// One of [`KIND_USER_MESSAGE`] / [`KIND_AGENT_MESSAGE`] /
-    /// [`KIND_INTERACTION_REQUEST`] / [`KIND_SYSTEM_NOTICE`] — or a
-    /// retired `intent_*` kind on rows written before Wave 2B, which the
-    /// read path renders through [`normalize_kind`].
+    /// [`KIND_INTERACTION_REQUEST`] / [`KIND_SYSTEM_NOTICE`] /
+    /// [`KIND_EXECUTION_ROUND`] — or a retired `intent_*` kind on rows written
+    /// before Wave 2B, which the read path renders through [`normalize_kind`].
     pub kind: String,
     /// Message text. Intent bodies are the plain message content; routing
     /// facts live in `meta`, not in the text.
@@ -1021,14 +1052,20 @@ pub fn append_message(
         (KIND_USER_MESSAGE, Some(ParticipantIdentity::Agent)) => {
             return Err("only human participants may write user_message".to_string());
         }
-        (KIND_AGENT_MESSAGE | KIND_INTERACTION_REQUEST, Some(ParticipantIdentity::Human)) => {
+        (
+            KIND_AGENT_MESSAGE | KIND_INTERACTION_REQUEST | KIND_EXECUTION_ROUND,
+            Some(ParticipantIdentity::Human),
+        ) => {
             return Err(format!("only agent participants may write {}", msg.kind));
         }
         _ => {}
     }
     // §5.5.4 / §5.5.5 payload shape: a card without a decision or a
-    // target is not a card; a notice without its type is not a notice.
-    // Checked at the single write entry, like every other invariant.
+    // target is not a card; a notice without its type is not a notice; a
+    // reference without the round it points at is not a reference
+    // (ADR-106 D3). Checked at the single write entry, like every other
+    // invariant — a row that cannot be resolved to a projection address would
+    // sit in the transcript as an unrecoverable hole.
     if msg.kind == KIND_INTERACTION_REQUEST {
         if msg.meta.interaction.is_none() {
             return Err("an interaction_request must carry meta.interaction".to_string());
@@ -1039,6 +1076,21 @@ pub fn append_message(
     }
     if msg.kind == KIND_SYSTEM_NOTICE && msg.meta.notice_type.is_empty() {
         return Err("a system_notice must carry meta.notice_type".to_string());
+    }
+    if msg.kind == KIND_EXECUTION_ROUND {
+        if msg.meta.round_id.is_empty() || msg.meta.agent_session_id.is_empty() {
+            return Err(
+                "an execution_round must carry meta.round_id and meta.agent_session_id".to_string(),
+            );
+        }
+        // A reference carries no execution content (ADR-106 D3): a body here
+        // would be a mirror wearing a reference's clothes, and the mirror is the
+        // exact defect this row replaces. Refusing it at the write entry is what
+        // keeps "exec → chat writes nothing" a testable property rather than a
+        // convention.
+        if !msg.body.trim().is_empty() {
+            return Err("an execution_round row carries no body".to_string());
+        }
     }
 
     // Idempotency: resolve the submitted `message_id` through the line
@@ -1102,7 +1154,12 @@ pub fn append_message(
     // milestone in the transcript, not new content to catch up on, so it
     // must not inflate the unread badge. Without this guard a round writes
     // two pointer rows and would count double against the human's unread.
-    let bookkeeping = stored.kind == KIND_SYSTEM_NOTICE && stored.body.is_empty();
+    // ADR-106 D13: an `execution_round` is exempt for the same reason — it is
+    // a reference, and unread counts chat's own speech only. The round's
+    // "waiting for you" state is a separate badge (the projection's `card`),
+    // never a message count.
+    let bookkeeping = (stored.kind == KIND_SYSTEM_NOTICE && stored.body.is_empty())
+        || stored.kind == KIND_EXECUTION_ROUND;
     if !bookkeeping {
         for p in &session.participants {
             if p.id != stored.from {
@@ -1215,6 +1272,11 @@ pub fn delete_session(
     // `session_lock`, so the registry's `Arc` is the only strong reference
     // and dropping the entry closes the connection.
     crate::search_index::forget(&dir);
+    // Same ordering contract for the round-projection cache (ADR-106 D5): a
+    // held SQLite handle makes `remove_dir_all` fail on Windows. This is also
+    // the privacy half of the design — a chat's cached execution content
+    // leaves with the chat, by directory, with no listing of what is in it.
+    crate::rounds_cache::forget(&dir);
     fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     // Drop the derived line index with the directory — the id can never
     // come back (session ids are server UUIDs), so a cached entry would
@@ -1222,6 +1284,55 @@ pub fn delete_session(
     let _ = lock(&LINE_INDEXES).remove(&dir);
     reindex(data_dir, session_id, Some(&session.participants), &[])?;
     Ok(session)
+}
+
+/// ADR-106 D5 — the round projections this chat already caches, keyed by ref.
+///
+/// The whole read runs under the same per-session lock [`delete_session`] holds while
+/// it releases the SQLite handles and removes the directory. That is not a style rule:
+/// `rounds_cache::connect` creates its parent directory, so a cache open landing
+/// outside the lock can resurrect a chat that is mid-deletion and leave a live handle
+/// behind — which on Windows turns "a disposable side table" into "a chat that can
+/// never be deleted", and keeps a copy of someone's execution content after the chat
+/// it came from is gone. Same contract as the search index, same reason.
+pub fn rounds_read(
+    data_dir: &Path,
+    session_id: &str,
+    who: &str,
+    keys: &[crate::rounds_cache::RoundKey],
+) -> Result<HashMap<crate::rounds_cache::RoundKey, crate::rounds_cache::CachedRound>, String> {
+    validate_session_id(session_id)?;
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    crate::rounds_cache::read_many(&dir, keys).map_err(|e| format!("round cache unreadable: {e}"))
+}
+
+/// ADR-106 D5 — store what the Gateway just fetched for this chat.
+///
+/// Locked and participation-gated exactly as [`rounds_read`] is; the cache layer
+/// itself is what refuses a non-terminal round (an open round would be a frozen lie,
+/// since nothing ever invalidates these rows).
+pub fn rounds_write(
+    data_dir: &Path,
+    session_id: &str,
+    who: &str,
+    rows: &[crate::rounds_cache::CachedRound],
+) -> Result<usize, String> {
+    validate_session_id(session_id)?;
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let session = load(data_dir, session_id)?;
+    if !session.participants.iter().any(|p| p.id == who) {
+        return Err("not_a_participant".to_string());
+    }
+    crate::rounds_cache::write_many(&dir, rows)
+        .map_err(|e| format!("round cache unwritable: {e}"))
 }
 
 // ── Attachments (design 27 §4.2.1, plan 3.5) ──────────────────────────
@@ -2157,7 +2268,18 @@ fn commit_row(
     }
 
     session.message_count = stored.seq;
-    session.last_message_preview = Some(preview_of_message(stored));
+    // A row that renders no text must not erase the text the list already shows.
+    // Since ADR-106 the common case is structural rather than accidental: an
+    // `execution_round` reference is bodyless by construction and is the tail row
+    // of every routed turn, so writing its (often absent) brief here would blank
+    // the sidebar line after the first agent round and keep it blank —
+    // `ensure_preview` only heals a `None`. The list keeps naming a round from
+    // that row's own brief when it has one (D13), and from the last row that said
+    // anything otherwise.
+    let preview = preview_of_message(stored);
+    if !preview.is_empty() {
+        session.last_message_preview = Some(preview);
+    }
     save(dir, session)
 }
 
@@ -2294,6 +2416,11 @@ fn preview_of_message(msg: &SessionMessage) -> String {
             .as_ref()
             .map(|i| i.question.clone())
             .unwrap_or_default()
+    } else if msg.kind == KIND_EXECUTION_ROUND {
+        // ADR-106 D13: the reference row's own one-line task name. The list
+        // path may not read a projection to name a task (ADR-096), which is why
+        // the brief is written once with the row.
+        msg.meta.assignment_brief.clone().unwrap_or_default()
     } else {
         String::new()
     };
@@ -3142,12 +3269,12 @@ mod tests {
 
     #[test]
     fn interaction_resolved_resolution_survives_the_store_round_trip() {
-        // The Runtime's `close_chat_card` writes this exact shape through
-        // `POST /api/intents/chat-append`
-        // (acowork-runtime/src/agent/loop_interaction.rs). The chat card
-        // projection tells "a human answered on the execution surface"
-        // from "nobody answered" by reading `meta.resolution` off this row
-        // — an undeclared key would be silently dropped here (design 27
+        // A retired writer (ADR-106 D8 removed `close_chat_card`): a card is the
+        // round's state now, not a chat row. The shape stays pinned because
+        // transcripts written before the cut still carry these notices, and the
+        // chat card projection tells "a human answered on the execution
+        // surface" from "nobody answered" by reading `meta.resolution` off this
+        // row — an undeclared key would be silently dropped here (design 27
         // decision 29) and every exec-answered card would render as
         // "no answer received".
         let wire = serde_json::json!({
@@ -3182,6 +3309,151 @@ mod tests {
         let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
         let out = serde_json::to_value(&rows[0]).unwrap();
         assert_eq!(out["meta"]["resolution"], "answered");
+    }
+
+    /// ADR-106 acceptance 1 + 2, at the storage boundary the Runtime writes
+    /// through: `publish_round_reference` posts exactly this shape over
+    /// `POST /api/intents/chat-append` (acowork-runtime/src/agent/loop_.rs), and
+    /// it is the only `exec → chat` write that remains. Undeclared meta keys are
+    /// silently dropped at this JSON boundary (design 27 decision 29), so the
+    /// coordinates a block needs to re-read its round are pinned here — with the
+    /// three store rules that make the row a reference rather than a mirror.
+    #[test]
+    fn execution_round_is_a_deduped_bodyless_reference_named_by_its_round() {
+        let wire = serde_json::json!({
+            "session_id": "cs-round-test",
+            "message": {
+                "seq": 0,
+                "ts": 0,
+                "from": "agent-1",
+                "kind": "execution_round",
+                "body": "",
+                "to": "human-1",
+                "meta": {
+                    "message_id": "round:r:m-1",
+                    "round_id": "r:m-1",
+                    "agent_session_id": "sess-9",
+                    "agent_instance_id": "agent-1",
+                    "in_reply_to": "m-1",
+                    "opened_new": true,
+                    "assignment_brief": "修复分页不满屏",
+                },
+                "attachment_ids": [],
+            }
+        });
+        let req: crate::http::chat_sessions_api::SystemAppendRequest =
+            serde_json::from_value(wire).expect("runtime wire shape must deserialize");
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        // The human's own row first: the reference must land after it and must
+        // not be what the transcript counts as new content.
+        append_message(
+            &dir,
+            &s.session_id,
+            &msg("human-1", KIND_USER_MESSAGE, "帮我把分页修一下", "m-1"),
+            1,
+        )
+        .expect("human row");
+
+        let (stored, written) = append_message(&dir, &s.session_id, &req.message, 2).unwrap();
+        assert!(written, "a first reference appends");
+        assert!(stored.body.is_empty());
+        assert_eq!(stored.meta.round_id, "r:m-1");
+        assert_eq!(stored.meta.agent_session_id, "sess-9");
+        assert_eq!(stored.meta.agent_instance_id, "agent-1");
+        assert_eq!(stored.meta.in_reply_to, "m-1");
+        assert_eq!(stored.meta.opened_new, Some(true));
+        assert_eq!(stored.meta.assignment_brief.as_deref(), Some("修复分页不满屏"));
+        // The block renderer reads these back off the wire, not off the struct.
+        let out = serde_json::to_value(&stored).unwrap();
+        assert_eq!(out["meta"]["round_id"], "r:m-1");
+        assert_eq!(out["meta"]["opened_new"], true);
+        assert_eq!(out["meta"]["assignment_brief"], "修复分页不满屏");
+
+        // Acceptance 2: the natural key IS the idempotency key, so an MQTT
+        // redelivery or a reconnect replay of the same round appends nothing.
+        let (_, written) = append_message(&dir, &s.session_id, &req.message, 3).unwrap();
+        assert!(!written, "the natural key round:<round_id> dedups by construction");
+        let (rows, total) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        assert_eq!(total, 2, "one question, one reference — no echo row");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].kind, KIND_EXECUTION_ROUND);
+
+        // D13: unread counts the chat's own speech, never a pointer at a round;
+        // and the list names the round from the row itself, with no projection
+        // read (the ADR-096 red line).
+        let session = load(&dir, &s.session_id).unwrap();
+        assert_eq!(
+            session.unread.get("human-1").copied(),
+            None,
+            "a reference row is not content to catch up on"
+        );
+        assert_eq!(
+            session.last_message_preview.as_deref(),
+            Some("修复分页不满屏")
+        );
+        // The exemption is per kind, not per writer: a chat-native
+        // `agent_message` from the same participant does raise the badge.
+        append_message(
+            &dir,
+            &s.session_id,
+            &msg("agent-1", KIND_AGENT_MESSAGE, "分页已修复", "a-1"),
+            4,
+        )
+        .expect("chat-native answer");
+        assert_eq!(
+            load(&dir, &s.session_id)
+                .unwrap()
+                .unread
+                .get("human-1")
+                .copied(),
+            Some(1)
+        );
+
+        // A body here would be a mirror wearing a reference's clothes — the
+        // exact defect this row replaces, so the store refuses it.
+        let mut mirrored = req.message.clone();
+        mirrored.meta.message_id = "round:r:m-2".to_string();
+        mirrored.meta.round_id = "r:m-2".to_string();
+        mirrored.body = "the agent's final answer".to_string();
+        assert_eq!(
+            append_message(&dir, &s.session_id, &mirrored, 5).unwrap_err(),
+            "an execution_round row carries no body"
+        );
+
+        // A reference that names no round cannot be resolved to a projection
+        // address, so it would sit in the transcript as an unrecoverable hole.
+        let mut adrift = req.message.clone();
+        adrift.meta.message_id = "round:r:m-3".to_string();
+        adrift.meta.round_id = String::new();
+        assert!(append_message(&dir, &s.session_id, &adrift, 6).is_err());
+
+        // The kind is agent speech: a human writing it is a producer bug.
+        let mut by_human = req.message.clone();
+        by_human.meta.message_id = "round:r:m-4".to_string();
+        by_human.meta.round_id = "r:m-4".to_string();
+        by_human.from = "human-1".to_string();
+        assert!(append_message(&dir, &s.session_id, &by_human, 7).is_err());
+
+        // A briefless reference is still valid (only a PM dispatch carries one),
+        // and it must not erase the line the list was showing: it is the tail row
+        // of every routed turn, so blanking the preview there would leave the
+        // sidebar saying nothing after every agent round — and `ensure_preview`
+        // only heals a `None`, so the empty string would stay forever.
+        let mut no_brief = req.message.clone();
+        no_brief.meta.message_id = "round:r:m-5".to_string();
+        no_brief.meta.round_id = "r:m-5".to_string();
+        no_brief.meta.assignment_brief = None;
+        append_message(&dir, &s.session_id, &no_brief, 8)
+            .expect("a reference row needs no brief to be a valid reference");
+        assert_eq!(
+            load(&dir, &s.session_id)
+                .unwrap()
+                .last_message_preview
+                .as_deref(),
+            Some("分页已修复"),
+            "a row that renders no text does not replace the text the list shows"
+        );
     }
 
     #[test]
@@ -3515,6 +3787,103 @@ mod tests {
             .expect("delete with a live search handle");
         assert!(!session_dir(&dir, &extra.session_id).exists());
         assert!(load(&dir, &extra.session_id).is_err());
+    }
+
+    #[test]
+    fn delete_session_releases_round_cache_before_removing_dir() {
+        // ADR-106 D5 ordering contract. Rendering blocks opens `rounds.sqlite`
+        // in this same process, so a live cache handle would make
+        // `remove_dir_all` fail on Windows — turning a disposable side table
+        // into a chat that cannot be deleted. The assertion also covers the
+        // privacy half: cached execution content leaves with the chat, by
+        // directory, with no listing of what the chat ever referenced.
+        let dir = temp_dir();
+        let human = Participant::new("human-1", ParticipantIdentity::Human);
+        let agent = Participant::new("agent-1", ParticipantIdentity::Agent);
+        ensure_pair(&dir, human.clone(), agent.clone(), SessionKind::UserAgent, 100)
+            .expect("pair");
+        let extra = create_session(
+            &dir,
+            SessionKind::UserAgent,
+            &[human, agent],
+            "second",
+            None,
+            None,
+            101,
+        )
+        .expect("create");
+        let sess = session_dir(&dir, &extra.session_id);
+        let row = crate::rounds_cache::CachedRound {
+            key: crate::rounds_cache::RoundKey {
+                agent_instance_id: "agent-1".to_string(),
+                agent_session_id: "sess-1".to_string(),
+                round_id: "r:m-1".to_string(),
+            },
+            projection: serde_json::json!({ "user": "hi", "answer": "hello" }),
+            terminal: true,
+            fetched_at: 1,
+        };
+        // The write leaves the connection cached in the registry, which is
+        // exactly the state deletion has to survive.
+        assert_eq!(
+            crate::rounds_cache::write_many(&sess, &[row]).expect("cache write"),
+            1
+        );
+
+        delete_session(&dir, &extra.session_id, "human-1", false)
+            .expect("delete with a live round-cache handle");
+        assert!(!sess.exists());
+    }
+
+    #[test]
+    fn round_cache_failure_never_fails_the_chat() {
+        // The cache is non-load-bearing (ADR-106 D5): a directory squatting on
+        // the sidecar path makes every open fail (and cannot be removed by the
+        // open-failure retry), yet the chat must keep working — a broken cache
+        // may only ever cost a re-fetch.
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let sid = &s.session_id;
+        let sess = session_dir(&dir, sid);
+        fs::create_dir_all(sess.join("rounds.sqlite")).unwrap();
+
+        let key = crate::rounds_cache::RoundKey {
+            agent_instance_id: "agent-1".to_string(),
+            agent_session_id: "sess-1".to_string(),
+            round_id: "r:m-1".to_string(),
+        };
+        let row = crate::rounds_cache::CachedRound {
+            key: key.clone(),
+            projection: serde_json::json!({ "answer": "hello" }),
+            terminal: true,
+            fetched_at: 1,
+        };
+        assert!(
+            crate::rounds_cache::write_many(&sess, std::slice::from_ref(&row)).is_err(),
+            "an unusable cache reports the failure instead of pretending"
+        );
+        assert!(
+            crate::rounds_cache::read_many(&sess, &[key]).is_err(),
+            "the caller reads that error as 'every ref missed'"
+        );
+
+        let (stored, written) = append_message(
+            &dir,
+            sid,
+            &msg("human-1", KIND_USER_MESSAGE, "durable despite cache", "m-1"),
+            1,
+        )
+        .expect("append must not fail on a round-cache error");
+        assert!(written);
+        assert_eq!(stored.body, "durable despite cache");
+
+        let (rows, total) = read_messages(&dir, sid, 0, 10).expect("read");
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].body, "durable despite cache");
+
+        // Leave the temp dir cleanable (Windows cannot remove a non-empty
+        // dir through the sidecar path retry).
+        fs::remove_dir_all(sess.join("rounds.sqlite")).unwrap();
     }
 
     #[test]

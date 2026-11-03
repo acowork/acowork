@@ -199,6 +199,19 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/messages",
             get(proxy_get_messages).post(proxy_post_message),
         )
+        // ADR-106 D4: the round projection read. A Chat block is a reference to
+        // one round of an execution session, and this is the only way anything on
+        // the chat side can resolve that reference — the Gateway never reads a
+        // session transcript off disk (ADR-009 §5). Transparent proxies, like
+        // `messages`: every decision about what a round *is* lives in the Runtime.
+        .route(
+            "/api/agents/{id}/sessions/{sid}/rounds",
+            get(proxy_list_rounds),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/rounds/{round_id}",
+            get(proxy_get_round),
+        )
         // ADR-076 §决策 4 (second wave): user-triggered session actions.
         // The Runtime authorizes each one against the session's owner, which
         // is only possible because these arrive through the Gateway's auth
@@ -643,6 +656,13 @@ async fn proxy_git_revert(
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions` to Runtime's `GET /sessions`.
+///
+/// ADR-106 D7: `chat_session_id` / `surface` ride the same transparent forward
+/// as `page` / `size` / `active`. The Gateway must not interpret them — which
+/// execution sessions a Chat may address is decided on the node that owns those
+/// sessions (ADR-009 §5), and a second copy of that filter here would be a
+/// second thing to keep honest. The membership header the Runtime needs to
+/// check them is injected by the auth middleware for every `/api/agents/` hop.
 async fn proxy_list_sessions(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -874,6 +894,35 @@ async fn proxy_get_messages(
     let path = format!("/sessions/{}/messages", sid);
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+/// Reverse-proxy `GET .../sessions/{sid}/rounds?ids=a,b` — ADR-106 D4.
+///
+/// Transparent like `messages`: the Gateway adds no round semantics, it only
+/// carries the request to the node that owns the session. The batch form is
+/// what the chat side hits on a first render — one cross-host round trip for
+/// every block on screen, not one per block.
+async fn proxy_list_rounds(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}/rounds", sid);
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+/// Reverse-proxy `GET .../sessions/{sid}/rounds/{round_id}` — ADR-106 D4.
+async fn proxy_get_round(
+    State(state): State<AppState>,
+    Path((id, sid, round_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    // A round id is `r:{message_id}` and may legitimately carry `:`; percent-encode
+    // the segment so a weirder id cannot forge a second path segment upstream.
+    let path = format!("/sessions/{}/rounds/{}", sid, urlencoding(&round_id));
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy a POST session action to the Runtime.

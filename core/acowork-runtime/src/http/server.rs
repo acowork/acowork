@@ -649,6 +649,17 @@ impl RuntimeHttpServer {
                 get(get_session).delete(crate::http::session_control::delete_session),
             )
             .route("/sessions/{sid}/messages", get(get_messages).post(crate::http::session_control::post_send_message))
+            // ADR-106 D4: the round projection read. One round by id, or a bounded
+            // batch — the reads a Chat block is rendered from. Both resolve off disk,
+            // so a `Closed` (not resident) session projects exactly like a live one.
+            .route(
+                "/sessions/{sid}/rounds",
+                get(crate::http::rounds::list_session_rounds),
+            )
+            .route(
+                "/sessions/{sid}/rounds/{round_id}",
+                get(crate::http::rounds::get_session_round),
+            )
             // ADR-076 §决策 4 (second wave): user-triggered session actions.
             // These carried no ownership decision, but they carried no
             // *identity* either, so over MQTT they could be replayed into
@@ -969,6 +980,20 @@ struct ListSessionsQuery {
     /// instead of persisting it. Default `false` = the ordinary history list.
     #[serde(default)]
     active: Option<bool>,
+    /// ADR-106 D7: narrow the listing to the execution sessions this Chat
+    /// surface may address (the second `@` level). Absent = the ordinary
+    /// listing. Part of the address, not a convenience filter: a caller who is
+    /// not a participant of that chat is refused, and the rule that admits the
+    /// rows lives in [`crate::agent::session::chat_candidates`] because that is
+    /// the node which owns the sessions.
+    #[serde(default)]
+    chat_session_id: Option<String>,
+    /// `group` marks a group chat; anything else — absent included — is a 1:1.
+    /// The two surfaces have different rules (a group lists only work bound to
+    /// it, a 1:1 also lists the human's own hand-started sessions), so guessing
+    /// one from the other would answer a different question than was asked.
+    #[serde(default)]
+    surface: Option<String>,
 }
 
 /// `GET /sessions` — full session list.
@@ -991,6 +1016,11 @@ struct ListSessionsQuery {
 /// This is the backend for `GET /api/agents/{id}/sessions` via the
 /// Gateway reverse proxy.
 ///
+/// ADR-106 D7: `chat_session_id` (+ `surface`) narrow the listing to one
+/// Chat's addressable executions. There is deliberately no separate candidate
+/// endpoint any more — the same permission filter, the same paging, one row
+/// shape; a second endpoint for one list is a second thing to keep in sync.
+///
 /// ADR-085 D4: an unfilled `session_metadata` slot is answered with
 /// `503 {"error":"session_not_ready"}` + `Retry-After: 2` — the
 /// startup window must be protocol-level distinguishable from "this
@@ -1006,17 +1036,61 @@ async fn list_sessions(
     let size = query.size.unwrap_or(20).clamp(1, 200);
     let active_only = query.active.unwrap_or(false);
     let scope = crate::http::session_control::scope_from_headers(&headers);
+    let chat = chat_listing_scope(&scope, &query)?;
 
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.session_metadata.lock().await;
     let svc = svc.as_ref().ok_or_else(session_not_ready)?;
     let resp = svc
-        .list_sessions(page, size, &scope, active_only)
+        .list_sessions(page, size, &scope, active_only, chat.as_ref())
         .await
         .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(
         serde_json::to_value(resp).map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?,
     ))
+}
+
+/// ADR-106 D7: the Chat-scoped listing this request asks for, if any.
+///
+/// The chat-membership wall is checked here, before the scan, and answered with
+/// the same 404 body as "this agent has no such session": distinguishing
+/// "you are not in that chat" from "that chat does not exist" would make this
+/// endpoint an oracle over other people's chats. An empty-but-present
+/// `chat_session_id` is a caller bug, not a request for the unfiltered listing
+/// — answering it as one would silently widen a call that meant to be scoped.
+fn chat_listing_scope(
+    scope: &crate::conversation::SessionScope,
+    query: &ListSessionsQuery,
+) -> Result<Option<crate::usecases::ChatListingScope>, SessionHttpError> {
+    let Some(raw) = query.chat_session_id.as_deref() else {
+        return Ok(None);
+    };
+    let chat = raw.trim();
+    if chat.is_empty() {
+        return Err(session_http_error(StatusCode::BAD_REQUEST));
+    }
+    if !scope.sees_chat(chat) {
+        return Err(SessionHttpError::NoSession);
+    }
+    let surface = if query.surface.as_deref() == Some("group") {
+        crate::agent::session::chat_candidates::CandidateSurface::Group
+    } else {
+        crate::agent::session::chat_candidates::CandidateSurface::Direct
+    };
+    Ok(Some(crate::usecases::ChatListingScope {
+        chat_session_id: chat.to_string(),
+        surface,
+        // The reader's identity is the header's, never a query argument: a
+        // listing that let the caller name whose sessions to show would be a
+        // permission check written by the party it is checking. An empty uid is
+        // not an account either, so it must not become "the sessions owned by
+        // `""`" — matching on it would hand an unauthenticated scope whatever
+        // rows a stray empty initiator carries.
+        owner_user_id: scope
+            .caller_uid()
+            .filter(|uid| !uid.is_empty())
+            .map(str::to_string),
+    }))
 }
 
 /// Error for the session read endpoints, rendered as a status + optional
@@ -3951,6 +4025,97 @@ mod tests {
         // FAILED: the session subsystem never became ready — 503, not
         // 404, so no caller creates a session against a failed startup.
         assert!(!empty_cache_is_definitive(S::Failed as u8, true));
+    }
+
+    /// ADR-106 D7: the chat-scoped listing is an address, not a convenience
+    /// filter. A blank id is a caller bug (400) rather than a request for
+    /// everything; a chat the caller is not in is refused exactly like a chat
+    /// that does not exist (one 404 body, so the endpoint is not an existence
+    /// oracle); the reader comes from the scope headers, never the query string.
+    #[test]
+    fn chat_scoped_listing_is_an_address_not_a_filter() {
+        use crate::agent::session::chat_candidates::CandidateSurface;
+        use acowork_core::session_meta::SessionScope;
+
+        // The error type is only ever rendered, so it carries no `Debug`; the
+        // test reads the status it would answer with instead.
+        fn status_of(err: SessionHttpError) -> StatusCode {
+            err.into_response().status()
+        }
+        let accept = |result: Result<
+            Option<crate::usecases::ChatListingScope>,
+            SessionHttpError,
+        >| match result {
+            Ok(Some(scope)) => scope,
+            Ok(None) => panic!("expected a scoped listing, got the unfiltered one"),
+            Err(err) => panic!("expected acceptance, got {}", status_of(err)),
+        };
+        let query = |chat: Option<&str>, surface: Option<&str>| ListSessionsQuery {
+            page: None,
+            size: None,
+            active: None,
+            chat_session_id: chat.map(str::to_string),
+            surface: surface.map(str::to_string),
+        };
+        let member = SessionScope::User {
+            uid: "u-1".to_string(),
+            chats: vec!["chat-1".to_string()],
+        };
+
+        // No parameter at all = the ordinary listing, unmodified.
+        assert!(matches!(
+            chat_listing_scope(&member, &query(None, None)),
+            Ok(None)
+        ));
+
+        // The membership wall: another chat's id, and an account in no chat, both
+        // answer with the variant this endpoint already uses for "there is no
+        // session here" — one shape for both facts, so it is not an oracle.
+        assert!(matches!(
+            chat_listing_scope(&member, &query(Some("chat-2"), None)).err(),
+            Some(SessionHttpError::NoSession)
+        ));
+        assert!(matches!(
+            chat_listing_scope(&SessionScope::user("u-2"), &query(Some("chat-1"), None)).err(),
+            Some(SessionHttpError::NoSession)
+        ));
+
+        // Present but blank is a caller bug, not a widening of the request.
+        assert_eq!(
+            chat_listing_scope(&member, &query(Some("   "), None))
+                .err()
+                .map(status_of),
+            Some(StatusCode::BAD_REQUEST)
+        );
+
+        // What the scan is handed: the trimmed id, the surface vocabulary that
+        // recognises only `group`, and the reader's own uid.
+        let scoped = accept(chat_listing_scope(
+            &member,
+            &query(Some(" chat-1 "), Some("group")),
+        ));
+        assert_eq!(scoped.chat_session_id, "chat-1");
+        assert_eq!(scoped.surface, CandidateSurface::Group);
+        assert_eq!(scoped.owner_user_id.as_deref(), Some("u-1"));
+        let scoped = accept(chat_listing_scope(
+            &member,
+            &query(Some("chat-1"), Some("GROUP")),
+        ));
+        assert_eq!(scoped.surface, CandidateSurface::Direct, "only the exact token is a group");
+
+        // Local mode has no accounts to attribute a session to, and an empty uid
+        // is not an account either.
+        let scoped = accept(chat_listing_scope(
+            &SessionScope::Unfiltered,
+            &query(Some("chat-1"), None),
+        ));
+        assert_eq!(scoped.owner_user_id, None, "local mode names no reader");
+        let empty_uid = SessionScope::User {
+            uid: String::new(),
+            chats: vec!["chat-1".to_string()],
+        };
+        let scoped = accept(chat_listing_scope(&empty_uid, &query(Some("chat-1"), None)));
+        assert_eq!(scoped.owner_user_id, None, "an empty uid must not match sessions owned by `\"\"`");
     }
 
     /// Stable instance identity used by all in-process HTTP tests.

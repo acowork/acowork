@@ -28,10 +28,16 @@
 ## 1. 为什么回滚几乎总是免费的
 
 计划 §10 决策 1 选了 **A1「写新读旧」**：新词汇表（`user_message` / `agent_message` /
-`interaction_request` / `system_notice`）只**追加**写入 `chat-sessions/{sid}/messages.jsonl`，
+`system_notice`，以及 [ADR-106](../adr/zh/ADR-106-chat-execution-reference-projection.md) 起追加的
+`execution_round` 引用行）只**追加**写入 `chat-sessions/{sid}/messages.jsonl`，
 从不改写、从不重写存量行。于是回滚 = 撤掉一个二进制/一个前端构建，而不是撤一次数据变换。
 唯一真正动了存量数据的是 Wave 6.2 的一次性迁移（§4，它同样满足"旧行永不改写"——旧行是被
 **复制**成新行，不是被改写）。
+
+> ADR-106 之后的现状（影响撤销 P4–P6 那一批的回滚）：`interaction_request` 不再有生产者（D8 / D14：
+> 行留盘、只在渲染层隐藏）；agent↔agent 的 Intent 不再往 chat 写任何行（D12），`agent_message` 只剩
+> Chat Router 的纯文本自答。执行侧的 `{sid}.jsonl.rounds` 与 chat 侧 `rounds.sqlite` 都是
+> **可重建的本地索引**（D4 / D5）——删掉或留着都不影响存量行，所以它们不算数据回滚面。
 
 数据落点（multi_user 形态，`{data}` = user service 的 `data_dir`）：
 

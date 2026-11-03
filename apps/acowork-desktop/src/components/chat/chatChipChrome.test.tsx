@@ -14,9 +14,12 @@
  * What this pins:
  *   1. DocumentChip's uploading state (rendered): a neutral hairline, no
  *      accent border. The `animate-pulse` carries the progress signal.
- *   2. TaskChip (rendered through GroupChatPanel in its own test file) and
- *      the two composer badges + the pending tag (source-anchored): the
- *      accent survives only as a background wash, never as border or text.
+ *   2. The composer chip recipe (source-anchored on `composerChip` in
+ *      ../../lib/ui-styles.ts): the accent survives only as a background wash,
+ *      never as border or text — and no chat surface re-inlines the recipe, so
+ *      a drift on one surface cannot leave the others behind. (The PM task chip
+ *      is gone — ADR-106 D13 moved the task coordinate onto the round's block
+ *      header.)
  *   3. The negative: no chat chip file paints an accent BORDER any more —
  *      that is the exact regression this rule is about, so it is pinned as a
  *      whole-file assertion rather than line by line.
@@ -92,25 +95,36 @@ describe("DocumentChip uploading state", () => {
 });
 
 describe("composer badges and inline tags", () => {
-  // The two badges are copy-paste twins on two different chat surfaces; both
-  // must land on the same neutral recipe. The anchor is the part of the class
-  // string that survives the fix (the wash), so the test stays meaningful on
-  // both sides of it.
-  for (const file of ["ChatPanel.tsx", "AgentChatView.tsx"] as const) {
-    it(`${file}: the badge outline and label stay neutral`, () => {
-      const line = lineOf(file, "bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium");
-      expect(line).toContain("border-border-outer");
-      // Tertiary, not secondary: the inline style this replaced resolved to
-      // --color-text-tertiary, so the label tier must survive the accent fix
-      // unchanged. Pinning the tier here stops a future pass from "helpfully"
-      // darkening the badge while touching its border.
-      expect(line).toContain("text-text-tertiary");
-      expect(line).not.toContain("border-[var(--color-accent)]");
-      // The label color used to ride an inline style, which no class-based
-      // assertion would have caught.
-      expect(line).not.toContain('style={{ color: "var(--color-accent)" }}');
-      // Highlight survives only as the background wash.
-      expect(line).toContain("bg-[var(--color-accent)]/10");
+  // Every chip above a chat input is the SAME affordance on a different
+  // surface, so the recipe lives in one token instead of being re-typed per
+  // file. Pinning the token keeps the rule alive when a surface gains a chip
+  // (the addressing chip, ADR-106 D7, is the fourth one), and the second
+  // assertion below is what stops a surface from quietly forking the recipe.
+  it("composerChip: the chip outline and label stay neutral", () => {
+    const line = lineOf("../../lib/ui-styles.ts", "bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium");
+    expect(line).toContain("border-border-outer");
+    // Tertiary, not secondary: the inline style this replaced resolved to
+    // --color-text-tertiary, so the label tier must survive the accent fix
+    // unchanged. Pinning the tier here stops a future pass from "helpfully"
+    // darkening the badge while touching its border.
+    expect(line).toContain("text-text-tertiary");
+    expect(line).not.toContain("border-[var(--color-accent)]");
+    // The label color used to ride an inline style, which no class-based
+    // assertion would have caught.
+    expect(line).not.toContain('style={{ color: "var(--color-accent)" }}');
+    // Highlight survives only as the background wash.
+    expect(line).toContain("bg-[var(--color-accent)]/10");
+  });
+
+  for (const file of [
+    "ChatPanel.tsx",
+    "AgentChatView.tsx",
+    "GroupChatPanel.tsx",
+  ] as const) {
+    it(`${file}: the chips ride the shared token, not a copy of it`, () => {
+      const source = readSource(file);
+      expect(source).toContain("className={composerChip}");
+      expect(source).not.toMatch(/bg-\[var\(--color-accent\)\]\/10 px-1\.5/);
     });
   }
 
@@ -119,14 +133,6 @@ describe("composer badges and inline tags", () => {
     expect(block).toContain("bg-chat-badge");
     expect(block).toContain("text-text-secondary");
     expect(block).not.toContain("--color-accent");
-  });
-
-  it("GroupChatPanel: the task chip keeps the wash but drops the accent outline", () => {
-    const block = blockAround("GroupChatPanel.tsx", "groupChat.taskChipCopy", 2, 5);
-    expect(block).toContain("border-border-outer");
-    expect(block).toContain("text-text-secondary");
-    expect(block).not.toContain("hover:border-[var(--color-accent)]");
-    expect(block).toContain("bg-[var(--color-accent)]/10");
   });
 
   it("no chat chip file paints an accent border any more", () => {

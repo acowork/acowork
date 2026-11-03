@@ -157,16 +157,11 @@ impl AgentLoop {
                         .try_send_chunk(ChunkEvent::ClearRetainedEvent {
                             event_type: "tool_approval_needed".to_string(),
                         });
-                    // §5.5.4: the request is answered, so its Chat card (if
-                    // one was written) is closed here — whichever surface the
+                    // §5.5.4: the request is answered, so its recorded
+                    // interaction (if any) is dropped here — whichever surface the
                     // answer came from, both surfaces resolve through this
                     // same request id.
-                    self.close_chat_card(
-                        "approval",
-                        request_id,
-                        if approved { "approved" } else { "rejected" },
-                    )
-                    .await;
+                    self.forget_interaction("approval", request_id);
                     if self.pending_approvals.is_empty() {
                         // ADR-049: tools (possibly more of them) are still
                         // running - resume ToolExecuting, not LlmAwaitingFirstChunk.
@@ -186,7 +181,6 @@ impl AgentLoop {
                     "Stop signal: rejecting all pending approvals"
                 );
                 let reason_text = reason.clone();
-                let ids: Vec<String> = self.pending_approvals.keys().cloned().collect();
                 for (request_id, tx) in self.pending_approvals.drain() {
                     tracing::warn!(
                         request_id = %request_id,
@@ -199,11 +193,9 @@ impl AgentLoop {
                         reason: Some(reason_text.clone()),
                     });
                 }
-                // §5.5.4: a stop is a resolution — the cards it cancels must
-                // not stay open in the Chat session afterwards.
-                for id in ids {
-                    self.close_chat_card("approval", &id, "stopped").await;
-                }
+                // §5.5.4: a stop resolves the approvals it cancels, so they must
+                // not stay recorded as open interactions afterwards.
+                self.forget_interactions_of_kind(&["approval"]);
                 // Let a reconnecting Desktop know no stale dialogs remain.
                 let _ = self
                     .session_core

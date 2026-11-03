@@ -148,6 +148,7 @@ pub fn apply_llm_effects(
                     provider_key_vault: &agent_loop.core.provider_key_vault,
                     compat_cache: agent_loop.core.compat_cache.as_ref(),
                     responses_compat_cache: agent_loop.core.responses_compat_cache.as_ref(),
+                    anthropic_compat_cache: agent_loop.core.anthropic_compat_cache.as_ref(),
                 },
             ) {
                 agent_loop.update_provider(new_provider, model.clone(), Some(provider_id.clone()));

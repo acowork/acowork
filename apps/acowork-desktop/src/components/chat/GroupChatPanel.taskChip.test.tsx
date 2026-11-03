@@ -1,27 +1,28 @@
 // @vitest-environment jsdom
 /**
- * The PM dispatch row renders a task chip (TaskChip) above the human
- * text, driven solely by `meta.task_id` — the playbook that wakes the
- * agent never lands on this row. Two real defects this pins:
- *   1. the chip must appear when the storage boundary delivers
- *      `meta.task_id` (it was silently dropped by `IntentMeta` before
- *      Commit 1 — the producer/consumer pair passed their own tests while
- *      the feature never rendered);
- *   2. it must NOT appear on rows that merely mention a task in text, or
- *      on agent rows: only the dispatch row owns the coordinate.
+ * The task coordinate on a round's block header (ADR-106 D13).
  *
- * Mock harness mirrors `GroupChatPanel.waitLine.test.tsx`.
+ * The PM dispatch used to wear its own chip on the human row. `task_id` now
+ * rides the `execution_round` meta, because the round — not the utterance — is
+ * the unit that belongs to a task, and the block header is the one place a
+ * reader looks for "which piece of work is this". Two things this pins:
+ *   1. the id renders when the row carries it (the producer/consumer pair each
+ *      passed their own tests while the feature never rendered once);
+ *   2. nothing paints when the row carries none — a header that invented a task
+ *      coordinate would be writing history the transcript does not hold.
  */
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GroupChatPanel } from "./GroupChatPanel";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
+import type { ChatBlockEntry } from "../../lib/chatBlocks";
 
 const AGENT = "agent-1";
 const ME = "user-me";
 const GROUP = "group-1";
 
 let tail: ChatMessageRow[];
+let blockEntry: ChatBlockEntry | null;
 
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (x: string) => x }));
 
@@ -36,6 +37,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
             [GROUP]: { older: [], tail, tailLoaded: tail.length, total: tail.length, loadingOlder: false },
           },
           sending: {},
+          inflight: {},
         }),
       {
         getState: () => ({
@@ -49,10 +51,18 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   };
 });
 
+vi.mock("../../stores/chatBlockStore", () => ({
+  // The block reads its whole session at once (ADR-106 D4): a record keyed by
+  // ref, which is what the component indexes into.
+  useChatBlocks: () => (blockEntry ? { [blockEntry.ref]: blockEntry } : {}),
+  useChatBlockStore: (selector: (s: { reload: () => void }) => unknown) =>
+    selector({ reload: vi.fn() }),
+}));
+
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: Object.assign(
     (selector: (state: unknown) => unknown) => selector({ agentStates: {} }),
-    { getState: () => ({ openSession: vi.fn() }) },
+    { getState: () => ({ openSession: vi.fn(), resolveQuestion: vi.fn() }) },
   ),
 }));
 
@@ -101,12 +111,8 @@ vi.mock("../../lib/config", () => ({ getGatewayUrl: () => "http://127.0.0.1:1" }
 vi.mock("../../lib/stickToBottom", () => ({
   useStickToBottom: () => ({ ref: { current: null }, stickNow: vi.fn() }),
 }));
-// Echo the key (and the interpolated id) so assertions see both.
 vi.mock("../../i18n/useTranslation", () => ({
-  useTranslation: () => ({
-    t: (key: string, opts?: Record<string, unknown>) =>
-      opts && "id" in opts ? `${key}:${opts.id}` : key,
-  }),
+  useTranslation: () => ({ t: (key: string) => key }),
 }));
 
 vi.mock("../common/AgentAvatar", () => ({ AgentAvatar: () => <div /> }));
@@ -120,64 +126,81 @@ vi.mock("../editor/markdownLinkResolver", () => ({
   markdownUrlTransform: (x: string) => x,
 }));
 
-function dispatchRow(seq: number, taskId?: string): ChatMessageRow {
+function roundRow(taskId?: string): ChatMessageRow {
   return {
-    seq,
-    ts: seq,
+    seq: 2,
+    ts: 2,
+    from: AGENT,
+    kind: "execution_round",
+    body: "",
+    to: ME,
+    meta: {
+      message_id: "round:exec-1|r2",
+      agent_instance_id: AGENT,
+      agent_session_id: "exec-1",
+      round_id: "r2",
+      in_reply_to: "u1",
+      ...(taskId ? { task_id: taskId } : {}),
+    },
+  };
+}
+
+function humanRow(taskId?: string): ChatMessageRow {
+  return {
+    seq: 1,
+    ts: 1,
     from: ME,
     kind: "user_message",
     body: "修复分页不满屏",
     to: AGENT,
     meta: {
-      message_id: `u${seq}`,
+      message_id: "u1",
       conversation_id: "task:p-1:t-083ae242",
       ...(taskId ? { task_id: taskId } : {}),
     },
   };
 }
 
-describe("GroupChatPanel task chip", () => {
+function entryOf(): ChatBlockEntry {
+  return {
+    ref: `${AGENT}|exec-1|r2`,
+    agent_instance_id: AGENT,
+    agent_session_id: "exec-1",
+    round_id: "r2",
+    status: "ok",
+    projection: {
+      round_id: "r2",
+      terminal: true,
+      status: "completed",
+      answer: { body: "done", ts: "1" },
+    },
+  };
+}
+
+describe("GroupChatPanel round task coordinate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText: vi.fn().mockResolvedValue(undefined) },
-    });
+    blockEntry = entryOf();
   });
 
-  it("renders the chip with the task id when the dispatch row carries meta.task_id", () => {
-    tail = [dispatchRow(1, "t-083ae242")];
+  it("states the task id in the block header when the round carries meta.task_id", () => {
+    tail = [humanRow(), roundRow("t-083ae242")];
     render(<GroupChatPanel />);
-    expect(screen.getByText("groupChat.taskChip:t-083ae242")).toBeTruthy();
+    expect(screen.getByText("t-083ae242")).toBeTruthy();
   });
 
-  it("renders no chip on a plain human row", () => {
-    tail = [dispatchRow(1)];
+  it("invents no task coordinate for a round that carries none", () => {
+    tail = [humanRow(), roundRow()];
     render(<GroupChatPanel />);
-    expect(screen.queryByText(/groupChat\.taskChip/)).toBeNull();
+    expect(screen.queryByText(/t-083ae242/)).toBeNull();
   });
 
-  it("renders no chip on a non-user row even if meta carries a task_id", () => {
-    tail = [
-      {
-        ...dispatchRow(1, "t-083ae242"),
-        from: AGENT,
-        kind: "agent_message",
-        meta: { message_id: "a1", task_id: "t-083ae242" },
-      },
-    ];
+  it("keeps the human dispatch row free of the coordinate (D13: it rides the round)", () => {
+    // The dispatch still carries its `conversation_id`, which is the task's
+    // conversation, not a chip on the utterance.
+    tail = [humanRow("t-083ae242"), roundRow()];
     render(<GroupChatPanel />);
-    expect(screen.queryByText(/groupChat\.taskChip/)).toBeNull();
-  });
-
-  it("copies the bare task id on click", async () => {
-    tail = [dispatchRow(1, "t-083ae242")];
-    render(<GroupChatPanel />);
-    fireEvent.click(screen.getByRole("button", { name: /groupChat\.taskChip/ }));
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("t-083ae242");
-    // Flush the async copied-state update (the checkmark) so the promise
-    // continuation lands inside React's act loop, not after the test.
-    await screen.findByText("✓");
+    expect(screen.queryByText(/t-083ae242/)).toBeNull();
   });
 });

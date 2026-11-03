@@ -55,6 +55,16 @@ describe("AccentSwatches", () => {
     expect(seen).toEqual([CUSTOM]);
   });
 
+  it("selects the saved custom color on click, before any color is picked", () => {
+    // "Switch to my custom color" is a complete action; it must not require
+    // re-picking a color. Closing the native picker without touching it fires
+    // no `change`, so the commit has to happen on the click itself.
+    const seen: string[] = [];
+    render(<AccentSwatches value={BLUE} customColor={CUSTOM} onChange={(h) => seen.push(h)} />);
+    fireEvent.click(customBtn());
+    expect(seen).toEqual([CUSTOM]);
+  });
+
   it("shows a plus when there is no custom color, an edit badge when there is", () => {
     // Without the badge a saved custom color is just another plain circle,
     // indistinguishable from the ten presets beside it — and the "+" the user

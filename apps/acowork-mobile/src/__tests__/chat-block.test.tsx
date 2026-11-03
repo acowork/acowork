@@ -1,0 +1,483 @@
+/**
+ * The session's block on the mobile chat surface (ADR-106 D3/D4/D5/D8/D9/D13).
+ *
+ * Why this file exists: the transcript no longer carries the work — one
+ * bodyless `execution_round` row names a round, everything shown for it is read
+ * from the execution side, and the LAYOUT folds a session's rows into one block.
+ * The failure modes these cases pin are the ones the decision was written
+ * against:
+ *
+ *   1. one block per ROW — a long-lived run became a stack of near-identical
+ *      cards, which is neither the transcript's nor the execution surface's
+ *      grammar (D3/D4);
+ *   2. inventing liveness — drawing "执行中" from anything other than a
+ *      `pending` block read, which lets an unreachable host look like a dead
+ *      node still working (D9);
+ *   3. painting a hole as content — a missing round must say it is missing (D5),
+ *      because inventing an answer would be writing history.
+ *
+ * The block store is MOCKED at its read hook: these cases are about what one
+ * entry implies for the transcript (and static markup runs no effects, so the
+ * real store would never have been read at all), not about batching — that is
+ * `chatBlockStore.test.ts`.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { ItemView, RowView, type ItemProps, type RowProps } from '../screens/chat/AgentChatScreen'
+import { ChatExecutionBlock } from '../components/ChatExecutionBlock'
+import { blockRefOf, blockStatusText, isFailureStatus, truncateLabel } from '../lib/chatBlocks'
+import { buildTranscriptItems, type RunBlock } from '../lib/chatTranscriptGroups'
+import type { ChatBlockEntry, ChatMessageRow } from '../lib/types'
+
+const store = vi.hoisted(() => ({
+  /** The one entry the rendered rounds read, keyed by their ref. */
+  entry: undefined as ChatBlockEntry | undefined,
+  entries: undefined as Record<string, ChatBlockEntry> | undefined,
+  useChatBlocks: vi.fn(),
+  reload: vi.fn(),
+}))
+
+vi.mock('../stores/chatBlockStore', () => ({
+  useChatBlocks: (chatId: string, refs: readonly string[]) =>
+    store.useChatBlocks(chatId, refs),
+  useChatBlockStore: (selector: (s: { reload: typeof store.reload }) => unknown) =>
+    selector({ reload: store.reload }),
+}))
+
+const REF = 'ag|s1|r1'
+
+function refRow(meta: ChatMessageRow['meta'] = {}): ChatMessageRow {
+  return {
+    seq: 3,
+    ts: 1,
+    from: 'ag',
+    kind: 'execution_round',
+    body: '',
+    to: 'u1',
+    meta: {
+      message_id: 'round:r1',
+      agent_instance_id: 'ag',
+      agent_session_id: 's1',
+      round_id: 'r1',
+      ...meta,
+    },
+  } as ChatMessageRow
+}
+
+/** The human's own row that opened a round: folded into the block as its
+ *  question line, never painted twice. */
+function triggerRow(id: string, body: string, seq = 2): ChatMessageRow {
+  return {
+    seq,
+    ts: 0,
+    from: 'u1',
+    kind: 'user_message',
+    body,
+    to: 'ag',
+    meta: { message_id: id },
+  } as ChatMessageRow
+}
+
+/** `undefined` = the read has not landed. */
+function seed(entry?: ChatBlockEntry): void {
+  store.entry = entry
+  store.entries = undefined
+}
+
+/** Every ref of the rendered block resolves to the same entry. */
+function seedEntries(entries: Record<string, ChatBlockEntry>): void {
+  store.entries = entries
+  store.entry = undefined
+}
+
+function entryOf(over: Partial<ChatBlockEntry> = {}): ChatBlockEntry {
+  return {
+    ref: REF,
+    agent_instance_id: 'ag',
+    agent_session_id: 's1',
+    round_id: 'r1',
+    status: 'ok',
+    projection: {
+      round_id: 'r1',
+      terminal: true,
+      status: 'completed',
+      answer: { body: '报表已整理好。', ts: '1' },
+      card: null,
+    },
+    ...over,
+  }
+}
+
+function rowProps(over: Partial<RowProps> = {}): RowProps {
+  return {
+    row: refRow(),
+    chatSessionId: 'cs-1',
+    isSelf: false,
+    selfAvatar: 'me',
+    selfName: 'me',
+    agentAvatar: 'ag',
+    agentName: 'agent',
+    onJumpToExec: () => {},
+    onReplyToRound: () => {},
+    onOpenAttachment: () => {},
+    ...over,
+  }
+}
+
+function renderRow(row: ChatMessageRow, over: Partial<RowProps> = {}): string {
+  return renderToStaticMarkup(<RowView {...rowProps({ row, ...over })} />)
+}
+
+/** Render the transcript the surface renders: the layout folds it, so a block is
+ *  reached through an item, never by hand. */
+function renderRows(rows: ChatMessageRow[], over: Partial<ItemProps> = {}): string {
+  const layout = buildTranscriptItems(rows, (r) => `k:${r.meta?.message_id}`)
+  return renderToStaticMarkup(
+    <>
+      {layout.items.map((item, i) => (
+        <ItemView
+          key={item.kind === 'run' ? item.anchorRow.seq : item.row.seq}
+          item={item}
+          hasFollowUp={i < layout.items.length - 1}
+          {...rowProps(over as Partial<RowProps>)}
+          {...over}
+        />
+      ))}
+    </>,
+  )
+}
+
+/** The single block a set of rows folds into — fails loudly when it is not one. */
+function onlyBlock(rows: ChatMessageRow[]): RunBlock {
+  const run = buildTranscriptItems(rows, (r) => `k:${r.meta?.message_id}`).items.find(
+    (i) => i.kind === 'run',
+  )
+  if (!run || run.kind !== 'run') throw new Error('expected exactly one run item')
+  return run
+}
+
+/** One block, opened: rendered away from the transcript's follow rule, so the
+ *  assertions are about what a round shows rather than whether the block folds. */
+function renderBlock(block: RunBlock, over: Partial<ItemProps> = {}): string {
+  return renderToStaticMarkup(
+    <ItemView
+      item={block}
+      hasFollowUp={false}
+      {...rowProps(over as Partial<RowProps>)}
+      {...over}
+    />,
+  )
+}
+
+beforeEach(() => {
+  store.entry = undefined
+  store.entries = undefined
+  store.useChatBlocks.mockImplementation((_chatId: string, refs: readonly string[]) => {
+    if (store.entries) return store.entries
+    const ref = refs[0]
+    return ref && store.entry ? { [ref]: store.entry } : {}
+  })
+  store.reload.mockClear()
+})
+
+describe('the fold: one block per execution session (D3/D4)', () => {
+  it('the rounds of ONE session fold into a single block anchored at the newest', () => {
+    const rows = [
+      triggerRow('u1', '帮我整理报表'),
+      refRow({ in_reply_to: 'u1' }),
+      triggerRow('u2', '再按月份汇总', 4),
+      refRow({ round_id: 'r2', in_reply_to: 'u2', message_id: 'round:r2' }),
+    ]
+    const blocks = buildTranscriptItems(rows, (r) => `k:${r.meta?.message_id}`).items.filter(
+      (i) => i.kind === 'run',
+    )
+    expect(blocks).toHaveLength(1)
+    const block = onlyBlock(rows)
+    expect(block.rounds.map((r) => r.ref)).toEqual(['ag|s1|r1', 'ag|s1|r2'])
+    // The block sits where the session's most recent work is, not where it began.
+    expect(block.anchorRow.meta?.round_id).toBe('r2')
+    seedEntries({
+      'ag|s1|r1': entryOf({ ref: 'ag|s1|r1' }),
+      'ag|s1|r2': entryOf({ ref: 'ag|s1|r2', round_id: 'r2' }),
+    })
+    const html = renderRows(rows)
+    // One block, two rounds — and the human's own rows are folded INSIDE it, so
+    // the transcript holds no standalone bubble for them (D6's re-delivery rule
+    // is the precedent for "one sentence, one place").
+    expect(html.match(/data-testid="exec-block"/g)).toHaveLength(1)
+    expect(html).toContain('第 1 轮')
+    expect(html).toContain('第 2 轮')
+    expect(html).not.toContain('bubble-raw')
+    // Only the newest round shows its pair: that is what keeps a long run short.
+    expect(html.match(/chat-run-question/g)).toHaveLength(1)
+  })
+
+  it('two execution sessions in one chat stay two blocks, not one merged run', () => {
+    const rows = [
+      triggerRow('u1', '任务甲'),
+      refRow({ in_reply_to: 'u1' }),
+      refRow({ agent_session_id: 's2', round_id: 'r9', in_reply_to: 'u1', message_id: 'round:s2' }),
+    ]
+    const items = buildTranscriptItems(rows, (r) => `k:${r.meta?.message_id}`).items
+    const runs = items.filter((i) => i.kind === 'run') as RunBlock[]
+    expect(runs).toHaveLength(2)
+    // The fan-out trigger belongs to the FIRST block; the second must not render
+    // the same sentence again.
+    expect(runs[0]!.rounds[0]!.showUserLine).toBe(true)
+    expect(runs[1]!.rounds[0]!.showUserLine).toBe(false)
+    seedEntries({
+      'ag|s1|r1': entryOf({ ref: 'ag|s1|r1' }),
+      'ag|s2|r9': entryOf({ ref: 'ag|s2|r9', agent_session_id: 's2', round_id: 'r9' }),
+    })
+    const html = renderBlock(runs[0]!) + renderBlock(runs[1]!)
+    // The question line is rendered once across the two blocks: the second owns
+    // the answer only.
+    expect(html.match(/chat-run-question/g)).toHaveLength(1)
+  })
+
+  it('a reference row with no coordinates is a hole of its own, not a block', () => {
+    expect(renderRow(refRow({ round_id: undefined as never }))).toContain('本轮执行已不可用')
+    expect(renderRow(refRow({ round_id: undefined as never }))).not.toContain('exec-block')
+  })
+})
+
+describe('the block read (D3/D4/D5)', () => {
+  it('a ref is the row coordinate triple — and nothing without all three parts', () => {
+    expect(blockRefOf({ agent_instance_id: 'ag', agent_session_id: 's1', round_id: 'r1' })).toBe(REF)
+    expect(blockRefOf({ agent_instance_id: 'ag', agent_session_id: 's1' })).toBeNull()
+    expect(blockRefOf({ agent_instance_id: 'ag', round_id: 'r1' })).toBeNull()
+    expect(blockRefOf({ agent_session_id: 's1', round_id: 'r1' })).toBeNull()
+    expect(blockRefOf(undefined)).toBeNull()
+  })
+
+  it('a terminal read paints the answer inline, in the chat session it belongs to', () => {
+    seed(entryOf())
+    const html = renderRows([triggerRow('u1', '帮我整理报表'), refRow({ in_reply_to: 'u1' })])
+    expect(html).toContain('data-testid="exec-block"')
+    expect(html).toContain('data-session="ag|s1"')
+    expect(html).toContain(blockStatusText('completed'))
+    expect(html).toContain('报表已整理好')
+    expect(html).toContain('帮我整理报表')
+  })
+
+  it('a read that has not landed holds the line, so a run is not a missing message', () => {
+    seed(undefined)
+    expect(renderRows([refRow()])).toContain('正在加载本轮执行…')
+  })
+
+  it('not_found is an explicit hole (D5)', () => {
+    seed(entryOf({ status: 'not_found', projection: undefined }))
+    expect(renderRows([refRow()])).toContain('本轮执行已不可用')
+  })
+
+  it('a round whose answer is gone reports the outcome, not a blank box', () => {
+    seed(
+      entryOf({
+        projection: { round_id: 'r1', terminal: true, status: 'failed' },
+      }),
+    )
+    expect(renderRows([refRow()])).toContain('本轮执行失败')
+  })
+})
+
+describe('liveness is positive evidence only (D9)', () => {
+  it('pending is the one status that may read "执行中"', () => {
+    seed(
+      entryOf({
+        status: 'pending',
+        source: 'runtime',
+        projection: { round_id: 'r1', terminal: false, status: 'in_progress' },
+      }),
+    )
+    const html = renderRows([refRow()])
+    expect(html).toContain('执行中')
+    // The retired per-round "处理中…" line is gone: the block header carries the
+    // session's state, and a round carries its own read.
+    expect(html).not.toContain('处理中')
+  })
+
+  it('an unreachable read is an outage with a retry, never a run in flight', () => {
+    seed(entryOf({ status: 'unreachable', projection: undefined, detail: 'connection refused' }))
+    const html = renderRows([refRow()])
+    expect(html).toContain('执行所在的主机暂不可达')
+    expect(html).toContain('重试')
+    expect(html).not.toContain('执行中')
+    expect(html).not.toContain('处理中')
+  })
+
+  it('a failed round is worded as a fault, an abort is not', () => {
+    expect(blockStatusText('failed')).toBe('本轮执行失败')
+    expect(blockStatusText('aborted')).toBe('本轮执行已中断')
+    expect(isFailureStatus('failed')).toBe(true)
+    expect(isFailureStatus('timeout')).toBe(true)
+    expect(isFailureStatus('aborted')).toBe(false)
+  })
+})
+
+describe('the decision lives in the block (D8)', () => {
+  it('an approval is one collapsed line that opens the sheet', () => {
+    seed(
+      entryOf({
+        status: 'pending',
+        projection: {
+          round_id: 'r1',
+          terminal: false,
+          status: 'waiting',
+          card: { kind: 'approval', request_id: 'rq-1', prompt: '允许执行 bash？' },
+        },
+      }),
+    )
+    const html = renderRows([refRow()])
+    expect(html).toContain('data-testid="block-card-open"')
+    expect(html).toContain('需要审批')
+    expect(html).toContain('允许执行 bash？')
+  })
+
+  it('a pause is answered by the composer, so it addresses the round (D6 level 1)', () => {
+    seed(
+      entryOf({
+        status: 'pending',
+        projection: {
+          round_id: 'r1',
+          terminal: false,
+          status: 'waiting',
+          card: { kind: 'pause', request_id: 'rq-1', prompt: '下一步要改配置' },
+        },
+      }),
+    )
+    const html = renderRows([refRow()])
+    expect(html).toContain('data-testid="block-reply"')
+    expect(html).toContain('继续执行')
+    expect(html).not.toContain('data-testid="block-card-open"')
+  })
+
+  it('a parked card stays reachable while the block is folded (§6.5)', () => {
+    seed(
+      entryOf({
+        status: 'pending',
+        projection: {
+          round_id: 'r1',
+          terminal: false,
+          status: 'waiting',
+          card: { kind: 'approval', request_id: 'rq-1', prompt: '允许执行 bash？' },
+        },
+      }),
+    )
+    // `hasFollowUp` is what starts a block folded: a parked round must still be
+    // answerable under it, so the card sits outside the folded body.
+    const folded = renderToStaticMarkup(
+      <ChatExecutionBlock
+        block={onlyBlock([refRow()])}
+        chatSessionId="cs-1"
+        hasFollowUp
+        agentAvatar="ag"
+        agentName="agent"
+        onJumpToExec={() => {}}
+        onReplyToRound={() => {}}
+      />,
+    )
+    // The initial state is `!hasFollowUp`, so a folded block shows the card and
+    // no round list.
+    expect(folded).not.toContain('第 1 轮')
+    expect(folded).toContain('data-testid="block-card-open"')
+  })
+
+  it('a viewer who is not the round answerer gets the question, not the buttons (D10)', () => {
+    const card = {
+      kind: 'ask_question',
+      request_id: 'rq-1',
+      prompt: '选哪个格式？',
+      options: ['CSV', 'XLSX'],
+    }
+    seed(entryOf({ projection: { round_id: 'r1', terminal: true, status: 'waiting', card } }))
+    // The block's own gate: the surface hands it the viewer's standing, and a
+    // surface that resolved the viewer as somebody else must still show what the
+    // round is waiting for — with the reason the buttons are gone.
+    const html = renderToStaticMarkup(
+      <ChatExecutionBlock
+        block={onlyBlock([refRow()])}
+        chatSessionId="cs-1"
+        agentAvatar="ag"
+        agentName="agent"
+        onJumpToExec={() => {}}
+        onReplyToRound={() => {}}
+        canAnswer={false}
+      />,
+    )
+    const answerer = renderToStaticMarkup(
+      <ChatExecutionBlock
+        block={onlyBlock([refRow()])}
+        chatSessionId="cs-1"
+        agentAvatar="ag"
+        agentName="agent"
+        onJumpToExec={() => {}}
+        onReplyToRound={() => {}}
+      />,
+    )
+    expect(html).not.toContain('data-testid="block-card-open"')
+    expect(html).toContain('选哪个格式？')
+    expect(html).toContain('只有发起本轮的人可以回复')
+    expect(answerer).toContain('data-testid="block-card-open"')
+    expect(answerer).not.toContain('只有发起本轮的人可以回复')
+  })
+
+  it('the task id rides the block header (D13)', () => {
+    seed(entryOf())
+    const html = renderRows([refRow({ task_id: 't-abc' })])
+    expect(html).toContain('explore-toggle-summary')
+    expect(html).toContain('t-abc')
+    expect(html).not.toContain('chat-task-chip')
+  })
+
+  it('the block header names the run and counts its rounds', () => {
+    seedEntries({
+      'ag|s1|r1': entryOf({ ref: 'ag|s1|r1' }),
+      'ag|s1|r2': entryOf({ ref: 'ag|s1|r2', round_id: 'r2' }),
+    })
+    const html = renderRows([
+      triggerRow('u1', '帮我整理一份季度报表'),
+      refRow({ in_reply_to: 'u1' }),
+      refRow({ round_id: 'r2', message_id: 'round:r2' }),
+    ])
+    expect(html).toContain('2 轮')
+    // Untitled run: the opening question is the name, so a block and the tab
+    // that later shows its session do not name the same run two ways.
+    expect(html).toContain('帮我整理一份季度报表')
+  })
+})
+
+describe('the retired shapes stay retired (D8/D12)', () => {
+  it('a legacy card row paints nothing — the decision is shown in the block', () => {
+    const row = {
+      seq: 4,
+      ts: 2,
+      from: 'ag',
+      kind: 'interaction_request',
+      body: '允许执行 bash？',
+      to: 'u1',
+      meta: { message_id: 'card-1', in_reply_to: 'm1' },
+    } as ChatMessageRow
+    expect(renderRow(row)).toBe('')
+  })
+
+  it('a bodyless Router answer says so instead of collapsing into an empty bubble', () => {
+    const row = {
+      seq: 5,
+      ts: 3,
+      from: 'ag',
+      kind: 'agent_message',
+      body: '',
+      to: 'u1',
+      meta: { message_id: 'm2' },
+    } as ChatMessageRow
+    expect(renderRow(row)).toContain('（无内容）')
+  })
+})
+
+describe('truncateLabel', () => {
+  it('collapses whitespace and bounds one line', () => {
+    expect(truncateLabel('  a\n b  ')).toBe('a b')
+    expect(truncateLabel('')).toBe('')
+    expect(truncateLabel('x'.repeat(80), 34)).toBe(`${'x'.repeat(34)}…`)
+  })
+})

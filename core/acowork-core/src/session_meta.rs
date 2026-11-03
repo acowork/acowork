@@ -542,6 +542,24 @@ impl SessionScope {
             Self::Admin { chats, .. } | Self::User { chats, .. } => chats,
         }
     }
+
+    /// May this caller act **inside** `chat_session_id`?
+    ///
+    /// ADR-106 D7's first wall: a Chat-scoped read must not be served to
+    /// somebody who is not a participant of that Chat, even when the ADR-076
+    /// row-level rules (`is_readable_by`) would let them read the sessions it
+    /// binds. Local mode has no membership table — one human owns everything
+    /// there, so it sees every chat; an account sees only the chats the
+    /// Gateway injected for it. A missing header therefore yields an empty
+    /// membership and denies: fail closed, never fail open.
+    pub fn sees_chat(&self, chat_session_id: &str) -> bool {
+        match self {
+            Self::Unfiltered => true,
+            Self::Admin { chats, .. } | Self::User { chats, .. } => {
+                chats.iter().any(|c| c == chat_session_id)
+            }
+        }
+    }
 }
 
 /// One persisted session, mapped 1:1 onto the `sessions` row.
@@ -825,6 +843,54 @@ pub trait SessionMetaStore: Send + Sync {
             "token_stats not supported by this backend".to_string(),
         ))
     }
+
+    // ── intent routing (ADR-106 D11) ──────────────────────────────────
+    //
+    // Which execution session owns which intent context, and which of those
+    // contexts have ended. This used to live in `intent-sessions.json` and
+    // `terminal-sessions.json` inside the agent's work dir — a second durable
+    // statement of facts the session row already carries, which could (and
+    // did) disagree with the binding after a half-completed routing. The row is
+    // the truth; these are the only writes that touch `intent_key` /
+    // `intent_closed`, and the session's own meta upsert never lists those two
+    // columns, so a `write_meta()` can not erase a routing decision and a
+    // routing decision can not erase a title.
+
+    /// The **open** session owning this intent context, newest first. `None`
+    /// means nothing owns it (never bound, or every holder closed).
+    fn intent_lookup(&self, key: &str) -> Result<Option<String>>;
+
+    /// Bind a session to an intent context. Writing-once-by-convention: a
+    /// session's context is decided when it is created, and rebinding one that
+    /// already answers another context is the bug D11 exists to kill.
+    fn intent_bind(&self, session_id: &str, key: &str) -> Result<()>;
+
+    /// Mark every open binding of `key` closed, returning the session ids it
+    /// changed so the caller can end their execution contexts. Idempotent: a
+    /// second close changes nothing and reports nothing.
+    fn intent_close(&self, key: &str) -> Result<Vec<String>>;
+
+    /// Re-open a session's context mark after its task was reopened: the
+    /// session is live again, so it is routable again.
+    fn intent_reopen(&self, session_id: &str) -> Result<()>;
+
+    /// Every binding, for the Chat Router's candidate filter (the derived index
+    /// D11 replaces the mapping file with). Metadata only, never a transcript.
+    fn intent_bindings(&self) -> Result<Vec<IntentBinding>>;
+}
+
+/// One session's intent-routing binding (ADR-106 D11).
+///
+/// The routing facts a session must state about itself: which intent context it
+/// owns (`conv:task:{project}:{task}` for a PM task, `conv:{conversation_id}`
+/// for an agent-to-agent conversation), and whether that context has ended. A
+/// closed binding is never offered as a routing candidate — routing a follow-up
+/// into a finished task answers into a conversation nobody reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentBinding {
+    pub session_id: String,
+    pub intent_key: String,
+    pub closed: bool,
 }
 
 /// Converts `last_active_at` (RFC3339 string) to the epoch-ms `i64` the
@@ -952,6 +1018,34 @@ mod perf_tests {
         assert!(perf.is_empty());
         assert_eq!(perf.avg_tps(), None);
         assert_eq!(perf.avg_ttft_ms(), None);
+    }
+}
+
+#[cfg(test)]
+mod chat_scope_tests {
+    use super::SessionScope;
+
+    /// ADR-106 D7's first wall. Local mode has no membership table, so one
+    /// human owns every chat; an account is limited to what the Gateway
+    /// injected — and an absent header means nothing is injected, which must
+    /// deny rather than admit everything.
+    #[test]
+    fn chat_membership_is_fail_closed() {
+        assert!(SessionScope::Unfiltered.sees_chat("chat-1"));
+
+        let member = SessionScope::from_headers(Some("alice"), None, Some("chat-1, chat-2"));
+        assert!(member.sees_chat("chat-1"));
+        assert!(member.sees_chat("chat-2"));
+        assert!(!member.sees_chat("chat-3"));
+
+        let no_header = SessionScope::from_headers(Some("alice"), None, None);
+        assert!(!no_header.sees_chat("chat-1"));
+
+        // An administrator may read every *session*, which is a different
+        // question from being a participant of a *chat*.
+        let admin = SessionScope::from_headers(Some("*"), Some("root"), Some("chat-1"));
+        assert!(admin.sees_chat("chat-1"));
+        assert!(!admin.sees_chat("chat-2"));
     }
 }
 

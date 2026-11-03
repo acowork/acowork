@@ -24,6 +24,7 @@ import {
   fetchDefaultChatSession,
   sendChatMessage,
 } from '../lib/api'
+import { TURN_INFLIGHT_DEADLINE_MS, type InflightTurn } from '../lib/chatTurnInflight'
 import { useAuthStore } from './authStore'
 import type { ChatMessageRow, ChatSessionInfo } from '../lib/types'
 
@@ -49,22 +50,66 @@ interface Window {
 interface ChatSessionStore {
   byAgent: Record<string, AgentChatState>
   windows: Record<string, Window>
+  /** The POST this device has in flight. Deliberately NOT the wait-line / lock
+   *  signal on its own: a POST answers as soon as delivery lands (~150 ms),
+   *  while the turn's first durable row can be a minute behind it — that window
+   *  is `inflight`'s job. */
   sending: Record<string, boolean>
+  /** The turn this device sent and has not seen an outcome for, per Chat
+   *  session — ADR-106 D9's first-person claim. Written from the send's own
+   *  response (the id the Gateway gave the human's row), dropped when the
+   *  surface sees a row answer it (`settleTurn`) or when the deadline passes
+   *  (`expireTurn`). In-memory only: a reload — or returning to this screen —
+   *  has no send of its own to claim, and so shows no wait line. */
+  inflight: Record<string, InflightTurn | undefined>
+  /** Stop claiming a turn because the transcript already answers it. */
+  settleTurn(chatSessionId: string, messageId: string): void
+  /** Stop claiming a turn because its outcome rows never arrived. */
+  expireTurn(chatSessionId: string, messageId: string): void
 
   openAgent(agentId: string): Promise<void>
   refresh(chatSessionId: string): Promise<void>
   loadOlder(chatSessionId: string): Promise<void>
-  sendText(chatSessionId: string, text: string, inReplyTo?: string): Promise<boolean>
+  sendText(
+    chatSessionId: string,
+    text: string,
+    inReplyTo?: string,
+    attachmentIds?: string[],
+    address?: ChatAddress,
+  ): Promise<boolean>
   /** The doorbell reaction: re-read the one session that can be on screen. */
   wake(): Promise<void>
 }
 
 const emptyWindow = (): Window => ({ older: [], tail: [], tailLoaded: 0, total: 0, loadingOlder: false })
 
+/** ADR-106 D6/D7's explicit address — the fact the human supplied, which no
+ *  client and no model may re-decide. Mobile is 1:1 only, so the first level of
+ *  the `@` is degenerate: the pick is a single session id, or the refusal to
+ *  continue anything. It is sent only when the composer (or the answer to a
+ *  choice card) actually carries one — an absent address is what puts a turn on
+ *  the ladder's lower levels. */
+export interface ChatAddress {
+  /** 1:1 form of level 2: the session the human named for this agent. */
+  targetSession?: string
+  /** D6's cheap escape beside every suggestion: continue nothing, new work. */
+  forceNew?: boolean
+  /** The id of the row being RE-delivered. Answering a `session_choice` /
+   *  `confirm_continue` card re-sends the human's own utterance, now addressed,
+   *  and the backend dedupes on this id — so the transcript keeps one message
+   *  instead of drawing the same sentence twice. */
+  messageId?: string
+}
+
 export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   byAgent: {},
   windows: {},
   sending: {},
+  inflight: {},
+
+  settleTurn: (chatSessionId, messageId) => dropTurn(chatSessionId, messageId),
+
+  expireTurn: (chatSessionId, messageId) => dropTurn(chatSessionId, messageId),
 
   openAgent: async (agentId) => {
     const existing = get().byAgent[agentId]
@@ -135,14 +180,19 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     }
   },
 
-  sendText: async (chatSessionId, text, inReplyTo) => {
+  sendText: async (chatSessionId, text, inReplyTo, attachmentIds, address) => {
     const me = useAuthStore.getState().me?.user_id
     if (!me || get().sending[chatSessionId]) return false
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }))
     let ok = false
     try {
-      await sendChatMessage(me, chatSessionId, text, inReplyTo)
+      const resp = await sendChatMessage(me, chatSessionId, text, inReplyTo, attachmentIds, address)
       ok = true
+      // The claim starts here, from the id the Gateway gave THIS row. A failed
+      // delivery is not claimed: that arm writes no receipt into the Chat, so a
+      // claim would wait for a row that cannot exist and lock the composer for
+      // the whole deadline.
+      if (resp.status === 'delivered') armTurn(chatSessionId, resp.message_id)
     } catch (e) {
       console.warn('chat send failed:', e)
     } finally {
@@ -167,4 +217,51 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
 /** Presence fan-out target: the chat/changed doorbell also wakes agent chats. */
 export function wakeAgentChat(): void {
   void useChatSessionStore.getState().wake()
+}
+
+// ── The in-flight turn claim (ADR-106 D9) ──────────────────────────────
+//
+// Kept in the store rather than in the screen's state because it is a fact
+// about the SEND, not about what is mounted: navigating to another screen and
+// back must not resurrect a wait line the transcript never answered, and the
+// deadline must still run while no Chat surface is on screen. The screen only
+// READS the claim and hands it back once a row answers it (`settleTurn`).
+//
+// A release is matched against the messageId it may clear so a stale deadline
+// cannot drop a fresher turn's claim. `TURN_INFLIGHT_DEADLINE_MS` is the
+// backstop for the case the surface cannot see: a Runtime that died between
+// delivery and round open writes no outcome row, and without a deadline the
+// composer would stay locked for good.
+
+const turnTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+/** Claim the turn this device just sent, and arm its deadline. */
+function armTurn(chatSessionId: string, messageId: string): void {
+  if (!messageId) return
+  useChatSessionStore.setState((s) => ({
+    inflight: { ...s.inflight, [chatSessionId]: { messageId, at: Date.now() } },
+  }))
+  const prev = turnTimers.get(chatSessionId)
+  if (prev !== undefined) clearTimeout(prev)
+  turnTimers.set(
+    chatSessionId,
+    setTimeout(() => {
+      turnTimers.delete(chatSessionId)
+      dropTurn(chatSessionId, messageId)
+    }, TURN_INFLIGHT_DEADLINE_MS),
+  )
+}
+
+/** Release the claim — only if `messageId` is still the one being claimed. */
+function dropTurn(chatSessionId: string, messageId: string): void {
+  const cur = useChatSessionStore.getState().inflight[chatSessionId]
+  if (!cur || cur.messageId !== messageId) return
+  const timer = turnTimers.get(chatSessionId)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    turnTimers.delete(chatSessionId)
+  }
+  useChatSessionStore.setState((s) => ({
+    inflight: { ...s.inflight, [chatSessionId]: undefined },
+  }))
 }

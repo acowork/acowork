@@ -162,6 +162,18 @@ pub fn is_task_conversation(conversation_id: &str) -> bool {
     conversation_id.starts_with(TASK_CONVERSATION_PREFIX)
 }
 
+/// The task half of a task conversation id, or `None` for any other
+/// conversation. Inverse of [`task_conversation_id`].
+///
+/// ADR-106 D13: the round reference row renders a task chip, and reading the id
+/// out of the Gateway's own routing contract is what lets the Runtime do that
+/// without trusting a `task_id` in a peer's arbitrary params JSON.
+pub fn task_id_from_conversation(conversation_id: &str) -> Option<String> {
+    let rest = conversation_id.strip_prefix(TASK_CONVERSATION_PREFIX)?;
+    let task = rest.split_once(':').map(|(_, task)| task)?;
+    (!task.is_empty()).then(|| task.to_string())
+}
+
 /// The runtime routing key for a task context (see
 /// [`TASK_ROUTING_KEY_PREFIX`]).
 pub fn task_routing_key(project_id: &str, task_id: &str) -> String {
@@ -172,6 +184,46 @@ pub fn task_routing_key(project_id: &str, task_id: &str) -> String {
 /// terminal-mirrored, ADR-099 D5).
 pub fn is_task_routing_key(key: &str) -> bool {
     key.starts_with(TASK_ROUTING_KEY_PREFIX)
+}
+
+/// The Chat content vocabulary (ADR-106 D1).
+///
+/// Exactly four kinds may exist in a Chat transcript, and three processes touch
+/// one — the Gateway writes the human's row, the Runtime writes the round's
+/// reference row and its own speech, the user service stores rows and rejects
+/// what it cannot name. The spelling is stated once here instead of as string
+/// literals in three crates, because a typo across that boundary is not a
+/// compile error: it is a row that silently stops rendering.
+pub mod chat_kinds {
+    /// A human utterance. The Gateway is its only writer, through the chat
+    /// write entries — never through `chat-append`.
+    pub const USER_MESSAGE: &str = "user_message";
+    /// Agent speech inside the chat channel: the Chat Router's own answer,
+    /// which is the only row it still writes (ADR-106 D12). An agent-to-agent
+    /// exchange reaches the chat as a round reference instead, and it is never
+    /// a copy of execution output.
+    pub const AGENT_MESSAGE: &str = "agent_message";
+    /// ADR-106 D3: one round of execution work, recorded as a bodyless
+    /// reference row. The Runtime writes it at the turn boundary and it is the
+    /// only exec-side fact that reaches the Chat transcript.
+    pub const EXECUTION_ROUND: &str = "execution_round";
+    /// A delivery the chat owed the human and could not make, or a limit it
+    /// hit: `delivery_failed` / `budget_exhausted` / `truncated` /
+    /// `unavailable`. Centered status line, never a bubble. The same kind
+    /// carries the addressing questions (ADR-106 D6): `session_choice` when an
+    /// `@` left several sessions it could continue, `confirm_continue` when the
+    /// router proposes one — those rows are empty-bodied and carry `options` in
+    /// `meta`, so the surfaces own the wording and the answer is an ordinary
+    /// second-level `@` rather than a new reply mechanism.
+    pub const SYSTEM_NOTICE: &str = "system_notice";
+
+    /// The kinds `POST /api/intents/chat-append` admits (ADR-106 D1's split of
+    /// producers): everything a cross-process writer may own. `user_message` is
+    /// deliberately absent — a human utterance is written by the Gateway's own
+    /// chat entries, after participant and content gates an append cannot run.
+    pub fn is_appendable(kind: &str) -> bool {
+        matches!(kind, EXECUTION_ROUND | SYSTEM_NOTICE | AGENT_MESSAGE)
+    }
 }
 
 #[cfg(test)]

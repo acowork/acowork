@@ -34,12 +34,12 @@
 // - No @-mention UI: a 1:1 user_agent session has exactly one other
 //   participant (design 27 §5.5.4 "单聊无需 @").
 //
-// The chat stream persists conversation, not progress (ADR-100 revision): the
-// turn's dispatch / round-open milestones are no longer rows, and the live
-// waiting line is DERIVED from "the newest human message has no answer yet"
-// (`chatTurnState.pendingTurn`). Each row that resolved an execution session
-// carries a discrete drill-down into the execution view:
-// `chatStore.openSession(agentId, execSid)` + mode flip (plan 5.3).
+// ADR-106: the chat stream holds conversation plus ONE bodyless reference row per
+// round of work (`execution_round`). What the run did, whether it is still going,
+// and what it is parked on are not chat rows — they are read off the round's
+// projection at render time and drawn inside that row's block
+// (`ChatExecutionBlock`), which also carries the drill into the execution view
+// (`chatStore.openSession(agentId, execSid)` + mode flip, plan 5.3).
 
 import {
   useCallback,
@@ -58,22 +58,19 @@ import {
   Loader2,
   ChevronDown,
   ChevronsDown,
+  AtSign,
 } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
-import { toolbarIconButton } from "../../lib/ui-styles";
+import { composerChip, toolbarIconButton } from "../../lib/ui-styles";
 import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { UserAvatar } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
-import { ViewRunButton } from "./ViewRunButton";
-import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
-import { ReplyQuote, truncateQuote } from "./ReplyQuote";
-import { ChatEventText } from "./ChatEventText";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { detectPaste } from "./pasteDetect";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
@@ -86,28 +83,28 @@ import { ModelMenu, ReasoningEffortMenu } from "./ChatPanel";
 import { useToolbarCollapse } from "../common/useToolbarCollapse";
 import { defaultEffortOf } from "../../lib/modelCapabilities";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
-import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
-import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import { ChatUsageIcon } from "./ChatUsageIcon";
 import { AttachedContextChips } from "./AttachedContextChips";
+import { ChatExecutionBlock } from "./ChatExecutionBlock";
+import { type TranscriptItem } from "./chatTranscriptGroups";
+import { useTranscriptLayout } from "./useTranscriptLayout";
+import { ChatAddressPicker, type AddressPick } from "./ChatAddressPicker";
 import {
-  isFailureStatus,
-  isEmptyTerminalReply,
-  isSystemFallback,
-  isTurnRoutedNotice,
-  pendingTurn,
-  terminalNoticeKey,
-} from "./chatTurnState";
-import { InlineInteractionCard } from "./InlineInteractionCard";
+  buildCardAnswer,
+  directCardAddress,
+  mayAnswerCard,
+  type CardChoice,
+} from "../../lib/chatCardAnswer";
+import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { turnInflight } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 import {
   useChatSessionStore,
-  closedCardIds,
-  humanAnsweredCardIds,
-  chatAnsweredCardIds,
   type ChatMessageRow,
   type ChatSessionConfig,
   type ChatAttachmentMeta,
+  type ChatAddress,
 } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import type { WorkspaceRef } from "../../lib/types";
@@ -125,39 +122,26 @@ interface RowProps {
   row: ChatMessageRow;
   agentId: string;
   /** Chat session the row belongs to — attachment thumbnails are addressed
-   *  through it (the `files/` dir is session-scoped, §4.2.1). */
+   *  through it (the `files/` dir is session-scoped, §4.2.1), and the block
+   *  read is participation-checked against it (ADR-106 D10). */
   chatSessionId: string;
   showHeader: boolean;
-  /** Drill into the execution session that produced this agent message.
-   *  Every `agent_message` with a resolved exec session id is clickable —
-   *  finished, failed or empty-bodied alike (§5.5.5: the exec JSONL stays
-   *  in Agent home). */
-  onJumpToExec: (execSid: string) => void;
-  /** Cards that can no longer be answered — the inline card paints an
-   *  answered/closed receipt for these instead of an answer affordance. */
-  closed: Set<string>;
-  /** The subset of closed cards the human actually replied to. */
-  answered: Set<string>;
-  /** Answer an `interaction_request` card through the chat answer channel. */
-  onAnswer: (row: ChatMessageRow, text: string, immediate: boolean) => void;
-  /** Body of the message that triggered this row's turn (`meta.in_reply_to`).
-   *  Names the run in the drill-down tooltip while the exec session still has
-   *  no title. Resolved by the parent through its message_id → body index. */
-  triggerBody?: string;
-  /** Question text of the `interaction_request` card this row answers, when it
-   *  answers one. Paints the one-line quote above the answer bubble — the
-   *  visible half of the §5.5.4 `in_reply_to` link the answered card used to
-   *  carry. Only cards are quoted: the parent resolves this through a
-   *  card-only index so a reply to any other row kind paints nothing. */
-  replyQuote?: string;
-  /** Kind of the `interaction_request` card this row answers, when it answers
-   *  one. An ask_question/approval answer is a step of the run, not an
-   *  utterance, so it renders as an event line instead of a bubble; a PAUSE
-   *  answer stays a bubble because that text IS the new turn's prompt. */
-  answeredCardKind?: string;
-  /** Cards answered on THIS surface — lets the notice row suppress its
-   *  duplicate resolution receipt. */
-  chatAnswered: Set<string>;
+  /** Drill into the execution session behind a round. The block names the
+   *  instance that hosts it, so the handler takes it — on this surface it is
+   *  always `agentId`, but the row must not have to know that. */
+  onJumpToExec: (agentInstanceId: string, execSid: string) => void;
+  /** Address the composer at one round (ADR-106 D6 level 1): what its
+   *  `pause` card's continue button, and any follow-up on a finished round,
+   *  ride. `quote` is the question the human is answering. */
+  onReplyToRound: (rowId: string, quote: string) => void;
+  /** Answer an addressing card (D6 levels 3 and 5) by re-delivering the
+   *  utterance it asks about, now addressed. The parent hands it only to the
+   *  person the card asked (D10) — `undefined` for anyone else. */
+  onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void;
+  /** The card's question is already answered (a round exists for the message it
+   *  asked about), so its buttons go quiet instead of offering a second
+   *  delivery of the same words. */
+  cardAnswered?: boolean;
 }
 
 /**
@@ -173,124 +157,55 @@ const RowView = memo(function RowView({
   agentId,
   chatSessionId,
   showHeader,
-  onJumpToExec,
-  closed,
-  answered,
-  onAnswer,
-  triggerBody,
-  replyQuote,
-  answeredCardKind,
-  chatAnswered,
+  onChooseCard,
+  cardAnswered,
 }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
   const agentName = agent?.display_name ?? agent?.name ?? "";
 
-  // The exec session this row can drill into. Its name feeds the "view run"
-  // tooltip so the hover says which run it opens, not just "view run". Read
-  // before the kind branches so the store hook stays unconditional. The
-  // routing reaction row (ADR-100 D11) names the task in its bubble, so it
-  // resolves its title through the same hook.
-  const routed = isTurnRoutedNotice(row);
-  const drillSid =
-    row.kind === "agent_message" || routed
-      ? row.meta?.agent_session_id || row.meta?.sender_session_id || ""
-      : undefined;
-  const execRunName = useSessionTitle(agentId, drillSid);
-
-  if (row.kind === "system_notice") {
-    if (routed) {
-      // ADR-100 D11: the routing reaction — the agent's immediate in-chat
-      // answer to "where did my message go". It is a runtime-written row, but
-      // it speaks as the agent: synthesized into the ordinary agent-bubble
-      // path below so it carries the avatar + name header and the drill, and
-      // never paints as a centered system line. The conversational rule it
-      // exists for: a user message is always followed by an agent message.
-      const taskName =
-        execRunName?.trim() || truncateTaskName(triggerBody) || "";
-      row = {
-        ...row,
-        kind: "agent_message",
-        body: t(
-          row.meta?.turn_mode === "new"
-            ? "chatView.notice.turnRoutedNew"
-            : "chatView.notice.turnRoutedContinue",
-          { task: taskName },
-        ),
-      };
-    } else {
-      // Legacy receipts only — the milestones and the router-fallback receipt
-      // are gone from the stream (ADR-100 revision). Whatever survived paints
-      // as a quiet centered line, never as an agent bubble.
-      return (
-        <ChatNoticeEventRow
-          row={row}
-          className="px-4"
-          answered={answered}
-          chatAnswered={chatAnswered}
-        />
-      );
-    }
+  if (row.kind === "execution_round") {
+    // A reference row that names no round (a missing coordinate) has no block to
+    // fold into, so it keeps its own explicit hole (ADR-106 D3). Every row that
+    // DOES name a round is drawn by `ChatExecutionBlock`, one block per execution
+    // session, and reaches that block as a `run` item — not as a row.
+    return (
+      <ChatTurnStatusLine
+        className="px-4"
+        text={t("chatView.block.notFound")}
+        danger={false}
+      />
+    );
   }
 
-  if (row.kind === "interaction_request") {
-    // A decision the agent asked a human to make (ask_question / approval).
-    // It is a durable, actionable row in the stream — answered in place
-    // through the chat answer channel (§5.5.4).
+  if (row.kind === "system_notice") {
+    // Delivery receipts, the budget receipt, and the addressing questions
+    // (ADR-106 D6): quiet centered lines, never agent speech. The routing
+    // milestones this branch used to synthesize into a bubble are gone.
+    const noticeType = row.meta?.notice_type;
+    const choose =
+      (noticeType === "session_choice" ||
+        noticeType === "confirm_continue") &&
+      onChooseCard
+        ? (choice: CardChoice) => onChooseCard(row, choice)
+        : undefined;
     return (
-      <InlineInteractionCard
+      <ChatNoticeEventRow
         row={row}
-        closed={closed}
-        answered={answered}
-        askerName={agentName}
-        onAnswer={onAnswer}
+        className="px-4"
+        onChoose={choose}
+        answered={cardAnswered}
       />
     );
   }
 
   if (row.kind === "agent_message") {
-    // §7.1 outcomes: `failed` / `timeout` are errors and paint as an error
-    // line; `aborted` is the user stopping a run — a fact of the transcript,
-    // not a fault, so it never paints red.
-    const failed = isFailureStatus(row.meta?.status);
-    // The execution session that produced this reply: a 1:1 agent message
-    // carries it as `sender_session_id` (the responder's own session); a
-    // group / routed reply carries `agent_session_id` (routing-resolved).
-    // Either way every agent message is drillable, finished or empty alike.
-    const execSid =
-      row.meta?.agent_session_id || row.meta?.sender_session_id || "";
-    // §5.5.1: the sweeper's fallback receipt is a terminal `agent_message`
-    // the Gateway wrote ON the responder's behalf, so it carries the fixed
-    // wording as a body — `isEmptyTerminalReply` cannot catch it, and it
-    // would otherwise render as an agent bubble reporting its own crash in
-    // the agent's voice. Keyed on the sweeper's own `fallback` stamp, not on
-    // `status`, which a real failure shares.
-    if (isSystemFallback(row)) {
-      return (
-        <ChatTurnStatusLine
-          className="px-4"
-          text={t("chatView.notice.systemFallback", { name: agentName })}
-          danger={false}
-        />
-      );
-    }
-    // A terminal row with nothing in it IS its outcome ("interrupted",
-    // "failed"): paint the centered status line with the drill into the run,
-    // never an agent bubble announcing it in the agent's voice.
-    if (isEmptyTerminalReply(row)) {
-      return (
-        <ChatTurnStatusLine
-          className="px-4"
-          text={t(terminalNoticeKey(row.meta?.status))}
-          danger={failed}
-          onJump={execSid ? () => onJumpToExec(execSid) : undefined}
-          runName={
-            execRunName?.trim() || truncateTaskName(triggerBody) || undefined
-          }
-        />
-      );
-    }
+    // Only the Chat Router's own answer is written under this kind now
+    // (ADR-106 D12) — a plain-text reply to something that opened no run, so
+    // there is no round to drill into and no outcome to report. Older
+    // transcripts may carry a terminal row with no body; the placeholder keeps
+    // those from collapsing into an empty bubble.
     return (
       <div className="px-4 py-1">
         {showHeader && (
@@ -355,18 +270,11 @@ const RowView = memo(function RowView({
                 inner scroll containers (`CodeBlock`, `MermaidBlock`,
                 `.prose-table-scroll`) do their job inside it, which is also
                 the contract Mobile's `.bubble` has always had. */}
-              {(row.body || failed || !row.attachments?.length) && (
+              {(row.body || !row.attachments?.length) && (
                 <div className="inline-block max-w-full rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
-                  {failed && (
-                    <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
-                      {row.meta?.status}
-                    </div>
-                  )}
                   {row.body && <ChatMarkdown content={row.body} />}
-                  {/* Legacy rows without a §7.1 status: there is no outcome to
-                    name, so the placeholder stays deliberately neutral. Modern
-                    empty terminals never reach here — they paint as the status
-                    line above. */}
+                  {/* A bodyless row with no attachments has nothing to say; the
+                    placeholder keeps it from collapsing into an empty bubble. */}
                   {!row.body && !row.attachments?.length && (
                     <span className="italic text-text-tertiary whitespace-nowrap">
                       {t("chatView.emptyAnswer")}
@@ -383,23 +291,6 @@ const RowView = memo(function RowView({
                 wide bubble, leaving a gap far larger than the meta row
                 warrants. */}
               <div className="mt-1 flex items-center gap-2">
-                {/* Drill-into-exec affordance — a discrete control, not a
-                  whole-bubble click, so selecting the reply text never fires a
-                  jump. Present on every agent message with a resolved exec
-                  session, empty body included. The brain glyph (design 27
-                  §6.1) is the same one the exec tabs wear, so the button and
-                  its destination read as the same thing; outline variant
-                  because at 11px the two filled lobes smear into a blob. */}
-                {execSid && (
-                  <ViewRunButton
-                    runName={
-                      execRunName?.trim() ||
-                      truncateTaskName(triggerBody) ||
-                      undefined
-                    }
-                    onJump={() => onJumpToExec(execSid)}
-                  />
-                )}
                 <span className="w-0 shrink overflow-hidden whitespace-nowrap text-10 text-text-tertiary opacity-0 transition-opacity group-hover:w-auto group-hover:opacity-100">
                   {formatBubbleTime(row.ts * 1000)}
                 </span>
@@ -411,29 +302,9 @@ const RowView = memo(function RowView({
     );
   }
 
-  // A decision answered on THIS surface. The card interaction is a step of
-  // the run, not an utterance — so it states itself as a centered event line
-  // ("Answered: <choice>"), the sibling of the unanswered note the card
-  // leaves behind. PAUSE answers are excluded: that text IS the new turn's
-  // prompt and must read as a message.
-  if (
-    row.kind === "user_message" &&
-    answeredCardKind &&
-    answeredCardKind !== "pause" &&
-    !row.attachments?.length
-  ) {
-    const answer = truncateQuote(row.body);
-    return (
-      <ChatEventText
-        anchor="turn"
-        text={t("chatView.cardAnsweredNote", { answer })}
-        title={row.body}
-        className="px-4"
-      />
-    );
-  }
-
-  // user_message (and anything else) — the human side, right-aligned.
+  // user_message (and anything else) — the human side, right-aligned. A
+  // message that continues a round (`in_reply_to` = the reference row) needs no
+  // quote above it: the block it answers is the row directly beneath.
   return (
     <div className="px-4 py-1">
       <div className="flex items-start justify-end gap-2">
@@ -477,9 +348,6 @@ const RowView = memo(function RowView({
                 keeps a file-with-no-words turn from collapsing to a blank
                 row. */}
             <ExecAttachmentLabels labels={row.meta?.exec_attachments} />
-            {/* What this answer answers. The card itself is gone once answered
-                (§5.5.4 records the answer here, not on a receipt). */}
-            <ReplyQuote quote={replyQuote} />
             {row.body && (
               <div className="max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
                 <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
@@ -504,6 +372,42 @@ const RowView = memo(function RowView({
   );
 });
 
+/**
+ * One item of the folded transcript: either a session's block or a row.
+ *
+ * The layout layer (`chatTranscriptGroups`) decides the fold; this is where it
+ * becomes a component. Memoized for the same reason as `RowView` — a keystroke in
+ * the composer re-renders the host, and the window must not re-paint (plan L1).
+ * `item` references come from the memoized layout, so they hold their identity
+ * while the window is unchanged.
+ */
+interface ItemProps extends Omit<RowProps, "row"> {
+  item: TranscriptItem;
+  /** Something follows this block in the transcript — `ExploreBlock`'s
+   *  `hasFollowUpReply`, the one condition that auto-collapses a settled run. */
+  hasFollowUp: boolean;
+}
+
+const ItemView = memo(function ItemView({
+  item,
+  hasFollowUp,
+  ...rowProps
+}: ItemProps) {
+  if (item.kind === "run") {
+    return (
+      <ChatExecutionBlock
+        block={item}
+        chatSessionId={rowProps.chatSessionId}
+        showHeader={rowProps.showHeader}
+        hasFollowUp={hasFollowUp}
+        onJumpToExec={rowProps.onJumpToExec}
+        onReplyToRound={rowProps.onReplyToRound}
+      />
+    );
+  }
+  return <RowView {...rowProps} row={item.row} />;
+});
+
 // ── View ───────────────────────────────────────────────────────────────
 
 interface AgentChatViewProps {
@@ -524,24 +428,23 @@ const EMPTY_REFS: WorkspaceRef[] = [];
  *  band sits here; scrolling into it fires the next older page. */
 const AUTO_LOAD_TOP_PX = 48;
 
-/** Optimistically dismiss the corresponding question/approval card in the
- *  execute session view when the user answers from the chat surface. The
- *  MQTT `event_cleared` path (zero-byte retained publish) is unreliable with
- *  rumqttd for already-connected subscribers, so we clear local state
- *  immediately rather than waiting for the signal. */
-function dismissExecCard(card: ChatMessageRow) {
-  const execSid = card.meta?.agent_session_id;
-  const reqId = card.meta?.interaction?.request_id;
-  const agentId = card.from;
-  if (execSid && reqId && agentId) {
-    useChatStore.getState().resolveQuestion(agentId, reqId, execSid);
-  }
+/** A pending continuation of one round: the reference row's id (what the send
+ *  files as `in_reply_to`, ADR-106 D6 level 1) and the question the human is
+ *  answering, shown in the composer chip. A card no longer has a chat row of
+ *  its own, so the block is what hands this over. */
+interface ReplyTarget {
+  id: string;
+  quote: string;
 }
 
 export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const { t } = useTranslation();
   const win = useChatSessionStore((s) => s.windows[sessionId]);
   const sending = !!useChatSessionStore((s) => s.sending[sessionId]);
+  // The turn this device sent and has not seen an outcome for — the store
+  // claimed it from the send's own response (ADR-106 D9). `undefined` once the
+  // transcript answers it, once the deadline passes, and always after a reload.
+  const inflightTurn = useChatSessionStore((s) => s.inflight[sessionId]);
   const pendingLocateSeq = useChatSessionStore(
     (s) => s.windows[sessionId]?.pendingLocateSeq ?? null,
   );
@@ -558,10 +461,26 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     setMode,
     saveDraft,
     upload,
+    settleTurn,
   } = useChatSessionStore.getState();
 
+  // The agent's own name, for the line that says it is working on this turn.
+  const agentMeta = useAgentStore((s) => s.agents[agentId]?.meta);
+  const agentName = agentMeta?.display_name ?? agentMeta?.name ?? "";
+
   const [input, setInput] = useState("");
-  const [answerTarget, setAnswerTarget] = useState<ChatMessageRow | null>(null);
+  const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  // The second level of the `@` (ADR-106 D7). On this surface the first level is
+  // degenerate — one agent — so the human names only the task. `addressStage` is
+  // where the open list hangs from (`null` = closed), `address` is "what was
+  // chosen for this draft".
+  const [addressStage, setAddressStage] = useState<"button" | "typed" | null>(
+    null,
+  );
+  const [address, setAddress] = useState<AddressPick | null>(null);
+  // The card asks the person who spoke, and in local mode there is exactly one
+  // person but no id to compare against (see `mayAnswerCard`).
+  const me = useAuthStore((s) => s.account?.user_id ?? "");
   // Composer attachments — uploaded into the Chat session's `files/` dir
   // (§4.2.1) before send; the send carries their ids so the durable row and
   // the execution turn both see them.
@@ -577,6 +496,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const pendingRefs = useChatSessionStore((s) => s.attachedContext[sessionId] ?? EMPTY_REFS);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // The `@` toggle, exempt from the address picker's outside-click close so
+  // clicking it again collapses the list instead of close-then-reopen.
+  const addressBtnRef = useRef<HTMLButtonElement>(null);
   const lastCompositionEndRef = useRef(0);
   // The scroll viewport, captured alongside `useStickToBottom`'s callback ref
   // so the locate effect can query `[data-seq]` rows within it.
@@ -629,80 +551,69 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   }, [agentId, gatewayConnected]);
 
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win]);
-  // Virtualization adapters (render-perf L2). Keys are session-qualified:
-  // the shell's measured-height cache is module-level, and `seq` is unique
-  // only WITHIN a chat session. `rowsRef` lets the locate fallback resolve a
-  // seq to an index without re-creating the (stamp-keyed) locate effect.
-  const rowKeyOf = useCallback(
-    (r: ChatMessageRow) => `${sessionId}:${r.seq}`,
-    [sessionId],
-  );
-  const rowsRef = useRef(rows);
-  rowsRef.current = rows;
-  // Coarse pre-measure estimate from body length; `measureElement` corrects
-  // it on first mount and the shell's cache keeps the real height after.
-  const estimateRow = useCallback((r: ChatMessageRow) => {
-    const body = r.body ?? "";
-    const lines = Math.max(1, Math.ceil(body.length / 70));
-    return Math.min(480, 32 + lines * 22);
-  }, []);
-  // message_id → body index, so a reply (whose trigger is only an
-  // `in_reply_to` id) can name the task in its drill-down tooltip when the
-  // execution session has no title yet.
-  const bodyById = useMemo(() => {
-    const m = new Map<string, string>();
+  // D9's claim read against the transcript: this device's send is owed its
+  // first visible outcome until a row answers its id (the round's reference
+  // row, the router's reply, a receipt). `sending` alone only covers the POST —
+  // measured 150 ms — which is what left the 0.1 s … 81 s window blank.
+  const turnLive = turnInflight(rows, inflightTurn);
+  // ONE state drives the line and the lock: a wait line with an unlocked
+  // composer invites the second send this Chat has no queue to absorb, and a
+  // locked composer with no line reads as a broken button.
+  const composerLocked = sending || turnLive;
+  // Hand the claim back as soon as a row answers it, so nothing keeps
+  // asserting a turn the transcript has already settled.
+  useEffect(() => {
+    if (!inflightTurn || turnInflight(rows, inflightTurn)) return;
+    settleTurn(sessionId, inflightTurn.messageId);
+  }, [rows, inflightTurn, sessionId, settleTurn]);
+  // Which messages already have a round: that is what makes an addressing card
+  // answered (the re-delivery leaves the reference row, ADR-106 D3), so the
+  // transcript itself carries the answer — no chat-side flag to keep in sync.
+  const roundTriggers = useMemo(() => {
+    const s = new Set<string>();
     for (const r of rows) {
-      if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
+      if (r.kind === "execution_round" && r.meta?.in_reply_to)
+        s.add(r.meta.in_reply_to);
     }
-    return m;
+    return s;
   }, [rows]);
-  // Card rows only, so an answer can quote the question it answers. Deliberately
-  // separate from `bodyById`: `in_reply_to` also points at plain messages, and
-  // quoting one of those would paint a quote where there is no decision. The
-  // text resolves question-first, exactly as the card itself renders it, so the
-  // quote says what the reader saw on the card (the row body is only a summary).
-  const cardQuoteById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of rows) {
-      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
-      m.set(r.meta.message_id, r.meta.interaction?.question || r.body);
-    }
-    return m;
-  }, [rows]);
-  // Same index, kind instead of question: an answer row needs the card's kind
-  // to decide between event line (ask_question / approval) and bubble (pause).
-  const cardKindById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of rows) {
-      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
-      m.set(r.meta.message_id, r.meta.interaction?.kind ?? "ask_question");
-    }
-    return m;
-  }, [rows]);
+  // Virtualization adapters (render-perf L2): keys, estimates, per-item
+  // attributes and the seq→item index shared with the group panel.
+  const {
+    items,
+    rowsRef,
+    keyOfSeqRef,
+    virtualKeyOf,
+    virtualEstimate,
+    virtualAttrs,
+    seqsByItem,
+  } = useTranscriptLayout(rows, sessionId);
+  const isBubble = (item: TranscriptItem | undefined) =>
+    item?.kind === "row" && item.row.kind === "agent_message";
   // Optimistic exec-session title seed (ADR-099). A Router-created execute
   // session has no list row and often no open tab, so it would read "Untitled"
-  // until the backend's generated title arrives over MQTT. The reply row is now
-  // the first durable place the exec session id appears (the routing pointer
-  // that used to expose it earlier is gone with the ADR-100 revision), so seed
-  // a provisional title off the message that triggered it. `seedOptimisticTitle`
-  // no-ops once any title exists, so the authoritative (possibly LLM-refined)
-  // push always wins afterwards. Guarded per execSid so it fires at most once.
+  // until the backend's generated title arrives over MQTT. The round's
+  // reference row is the first durable place its session id appears, and its
+  // `in_reply_to` names the human message that opened it — so the provisional
+  // title is seeded off that body. `seedOptimisticTitle` no-ops once any title
+  // exists, so the authoritative (possibly LLM-refined) push always wins
+  // afterwards. Guarded per execSid so it fires at most once.
   const seededTitleRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const r of rows) {
       if (
-        r.kind !== "agent_message" ||
-        !r.meta?.sender_session_id ||
+        r.kind !== "execution_round" ||
+        !r.meta?.agent_session_id ||
         !r.meta?.in_reply_to
       ) {
         continue;
       }
-      const execSid = r.meta.sender_session_id;
+      const execSid = r.meta.agent_session_id;
       if (seededTitleRef.current.has(execSid)) continue;
-      // Only pin the execSid once a body is available — the reply row can land a
-      // window before its trigger row is readable, and marking it early would
-      // permanently skip the seed. `seedOptimisticTitle` is itself idempotent,
-      // so re-running on a later `rows` tick is safe.
+      // Only pin the execSid once the trigger's body is available — the
+      // reference row can land a window before its trigger row is readable, and
+      // marking it early would permanently skip the seed. `seedOptimisticTitle`
+      // is itself idempotent, so re-running on a later `rows` tick is safe.
       const body = rows.find(
         (x) => x.meta?.message_id === r.meta?.in_reply_to,
       )?.body;
@@ -712,24 +623,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, agentId]);
-  // Cards that can no longer be answered, and the subset the human replied to
-  // — driving the inline card's answered/closed receipt (§5.5.4). The chat
-  // stream is a pure durable event log now; there is no live projection.
-  const closed = useMemo(() => closedCardIds(rows), [rows]);
-  const answered = useMemo(() => humanAnsweredCardIds(rows), [rows]);
-  const chatAnswered = useMemo(() => chatAnsweredCardIds(rows), [rows]);
-  // Is the newest human message still waiting for an answer? Derived, never
-  // stored — see `chatTurnState`. Suppressed only when a locate is KNOWN to
-  // have parked the window mid-history (a window with newer pages has no
-  // newest message to wait on); a window without position info is treated as
-  // at the tail.
-  const waiting =
-    pendingTurn(rows, sending, closed) && !(win && win.lastPos < win.total - 1);
-  // Name for the waiting line. The turn may have been routed to another agent,
-  // but this surface talks to exactly one — naming it is what makes the line
-  // read as "someone is working on it" instead of a generic spinner.
-  const agentMeta = useAgentStore((s) => s.agents[agentId]?.meta);
-  const pendingName = agentMeta?.display_name ?? agentMeta?.name ?? "";
 
   // Follow rule shared by every chat surface (AgentChatView / GroupChatPanel /
   // InboxPanel): stick to the newest row only while pinned, and never let a
@@ -785,13 +678,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     () => containerRef.current,
     pendingLocateSeq,
     () => clearLocate(sessionId),
-    // Virtualization fallback: the row is in the window but not in the DOM.
+    // Virtualization fallback: the row is in the window but not in the DOM. A
+    // folded row is not in the transcript as its own item either, so its seq
+    // resolves through the layout's `keyOfSeq` to the block that holds it.
     (seq) => {
-      const idx = rowsRef.current.findIndex((r) => r.seq === seq);
-      if (idx < 0) return false;
-      return (
-        listRef.current?.scrollToKey(`${sessionId}:${seq}`, "center") ?? false
-      );
+      const key = keyOfSeqRef.current.get(seq);
+      if (!key) return false;
+      return listRef.current?.scrollToKey(key, "center") ?? false;
     },
     // A locate parks the reader mid-history on purpose: take them out of
     // the follow, or the persistent anchor rides the next commit back to
@@ -802,18 +695,34 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // Stable identities: RowView is memoized, so every prop handed to it must
   // keep its reference across host re-renders (a keystroke in the composer
   // re-renders this host; it must not re-render N rows).
-  const handleAnswer = useCallback(
-    (card: ChatMessageRow, text: string, immediate: boolean) => {
-      if (immediate && text) {
-        stickNow();
-        void sendText(sessionId, text, card.meta?.message_id);
-        dismissExecCard(card);
-        return;
-      }
-      setAnswerTarget(card);
-      textareaRef.current?.focus();
+  // A round's `pause` card is answered with the human's own words, which make
+  // the NEXT turn of that round (ADR-106 D6 level 1) — so this addresses the
+  // composer at the reference row instead of sending anything on its own.
+  const handleReplyToRound = useCallback((rowId: string, quote: string) => {
+    setReplyTarget({ id: rowId, quote });
+    textareaRef.current?.focus();
+  }, []);
+
+  // Answering an addressing card (ADR-106 D6): re-send the human's OWN words
+  // with the address they just chose, keyed by the original row's id so the
+  // transcript keeps one message instead of narrating the decision twice.
+  const answerCard = useCallback(
+    (card: ChatMessageRow, choice: CardChoice) => {
+      const original = rowsRef.current.find(
+        (r) => r.meta?.message_id === card.meta?.in_reply_to,
+      );
+      const answer = buildCardAnswer(card, original, choice);
+      if (!answer) return;
+      void sendText(
+        sessionId,
+        answer.text,
+        undefined,
+        undefined,
+        answer.attachmentIds,
+        directCardAddress(answer),
+      );
     },
-    [sessionId, stickNow, sendText],
+    [sendText, sessionId],
   );
 
   const handleSend = () => {
@@ -825,30 +734,45 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     // have delivered.
     if (
       (!text && attachmentIds.length === 0 && pendingRefs.length === 0) ||
-      sending ||
+      composerLocked ||
       uploading
     ) {
       return;
     }
-    const replyTo = answerTarget?.meta?.message_id;
-    // A card answer continues the ORIGINAL turn deterministically (it does
-    // not go through the Chat Router), so no seed is applied — carrying a
-    // draft there would be meaningless. Plain messages carry the draft;
-    // per ADR-099's 2026-10-28 revision the router-side seed is an initial
-    // value for the session a routing CREATES and is never applied to one
-    // that already exists.
+    const replyTo = replyTarget?.id;
+    // A reply that addresses one round continues THAT run deterministically
+    // (it never goes through the Chat Router, ADR-106 D6 level 1), so no seed
+    // is applied — carrying a draft there would be meaningless. Plain messages
+    // carry the draft; per ADR-099's 2026-10-28 revision the router-side seed
+    // is an initial value for the session a routing CREATES and is never
+    // applied to one that already exists.
     const sessionConfig = replyTo
       ? undefined
       : Object.keys(draft).length > 0
         ? draft
         : undefined;
+    // A level-1 reply already names its session, so the address the human picked
+    // for a plain message must not ride that send — the two are contradictory
+    // instructions and the refusal belongs to the backend, not to a guess here.
+    const chosen = replyTo ? null : address;
+    const wire: ChatAddress | undefined = chosen?.sessionId
+      ? { targetSession: chosen.sessionId }
+      : chosen?.forceNew
+        ? { forceNew: true }
+        : undefined;
     setInput("");
-    const target = answerTarget;
-    setAnswerTarget(null);
+    setReplyTarget(null);
+    setAddress(null);
     setPendingAttachments([]);
     stickNow();
-    void sendText(sessionId, text, replyTo, sessionConfig, attachmentIds);
-    if (target && replyTo) dismissExecCard(target);
+    void sendText(
+      sessionId,
+      text,
+      replyTo,
+      sessionConfig,
+      attachmentIds,
+      wire,
+    );
   };
 
   // Upload each chosen file into the session's `files/` dir and stack a
@@ -996,11 +920,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     },
     [agentId, t, setMode],
   );
-  // The void-returning stable handler handed to memoized rows. An inline
-  // `(sid) => void jumpToExec(sid)` at the call site is a fresh identity every
-  // render and would defeat `RowView`'s memo on every keystroke.
-  const handleJumpToExec = useCallback(
-    (execSid: string) => void jumpToExec(execSid),
+  // The void-returning stable handler handed to memoized rows. An inline arrow
+  // at the call site is a fresh identity every render and would defeat
+  // `RowView`'s memo on every keystroke. The block names the instance hosting
+  // its round; on this surface that is always this agent, so the argument is
+  // dropped — but the row must not have to know that.
+  const handleBlockJump = useCallback(
+    (_agentInstanceId: string, execSid: string) => void jumpToExec(execSid),
     [jumpToExec],
   );
 
@@ -1060,6 +986,28 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     }
   };
 
+  // One picker, two anchor points: the toolbar button opens it under its own
+  // icon, the typed `@` opens it above the composer. `anchorRef` is the button
+  // in both cases, so a click on the toggle still closes what it opened.
+  const addressPicker = (
+    <ChatAddressPicker
+      instanceId={agentId}
+      /** The pair's own chat: the listing is narrowed to what this conversation
+       *  may address, so the id is part of the request, not a label. */
+      chatSessionId={sessionId}
+      anchorRef={addressBtnRef}
+      onPick={(pick) => {
+        setAddress(pick.sessionId || pick.forceNew ? pick : null);
+        setAddressStage(null);
+        textareaRef.current?.focus();
+      }}
+      onClose={() => {
+        setAddressStage(null);
+        textareaRef.current?.focus();
+      }}
+    />
+  );
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Message stream — a relative box so the "back to bottom" arrow floats
@@ -1084,7 +1032,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               )}
             </div>
           )}
-          {rows.length === 0 && (
+          {items.length === 0 && (
             <div className="py-10 text-center text-sm text-text-tertiary">
               {t("chatView.empty")}
             </div>
@@ -1099,73 +1047,67 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           <VirtualRowList
             key={sessionId}
             ref={listRef}
-            items={rows}
-            keyOf={rowKeyOf}
+            items={items}
+            keyOf={virtualKeyOf}
             scrollContainerRef={containerRef}
             followBottom={atBottom}
-            estimateSize={estimateRow}
-            rowAttrs={(r) => ({ "data-seq": r.seq })}
-            rowClassName={(r) =>
+            estimateSize={virtualEstimate}
+            rowAttrs={virtualAttrs}
+            rowClassName={(item) =>
               cn(
                 "scroll-mt-2 transition-colors",
-                highlightSeq === r.seq && "bg-[var(--color-accent)]/10",
+                highlightSeq !== null &&
+                  seqsByItem.get(virtualKeyOf(item))?.has(highlightSeq) &&
+                  "bg-[var(--color-accent)]/10",
               )
             }
-            renderItem={(r, i) => (
-              <RowView
-                row={r}
+            renderItem={(item, i) => (
+              <ItemView
+                item={item}
+                hasFollowUp={i < items.length - 1}
                 agentId={agentId}
                 chatSessionId={sessionId}
                 showHeader={
-                  // Header rule (ADR-100 D11 + the interaction-feel invariant):
-                  // an agent bubble — the routing reaction included — wears the
-                  // avatar+name header unless the row directly above already
-                  // painted one. An empty terminal row is a CENTERED status
-                  // line, not a bubble: it must not fold the header off the
-                  // reply that follows it (that left the answer "孤零零" with no
-                  // avatar). And the reaction row never folds the turn's real
-                  // reply — they are minutes or hours apart, each is its own
-                  // utterance.
-                  (r.kind === "agent_message" || isTurnRoutedNotice(r)) &&
-                  !(
-                    rows[i - 1]?.kind === "agent_message" &&
-                    !isEmptyTerminalReply(rows[i - 1]!)
-                  )
+                  // Adjacent bubbles from the same speaker fold the header; a
+                  // block above is not a bubble, so the reply under it still
+                  // wears its avatar — and a block always starts a new turn.
+                  item.kind === "run" ||
+                  (item.row.kind === "agent_message" &&
+                    !isBubble(items[i - 1]))
                 }
-                onJumpToExec={handleJumpToExec}
-                triggerBody={
-                  r.meta?.in_reply_to
-                    ? bodyById.get(r.meta.in_reply_to)
+                onJumpToExec={handleBlockJump}
+                onReplyToRound={handleReplyToRound}
+                onChooseCard={
+                  item.kind === "row" && mayAnswerCard(item.row, me)
+                    ? answerCard
                     : undefined
                 }
-                replyQuote={
-                  r.meta?.in_reply_to
-                    ? cardQuoteById.get(r.meta.in_reply_to)
-                    : undefined
+                cardAnswered={
+                  item.kind === "row" &&
+                  !!item.row.meta?.in_reply_to &&
+                  roundTriggers.has(item.row.meta.in_reply_to)
                 }
-                answeredCardKind={
-                  r.meta?.in_reply_to
-                    ? cardKindById.get(r.meta.in_reply_to)
-                    : undefined
-                }
-                chatAnswered={chatAnswered}
-                closed={closed}
-                answered={answered}
-                onAnswer={handleAnswer}
               />
             )}
           />
-          {/* The waiting line sits where the answer will land: one aggregated
-            "the agent has your message" indicator, derived from the newest
-            unanswered human row. It replaces the removed dispatch / round-open
-            milestones, and disappears the moment a terminal row arrives. */}
-          {waiting && (
+          {/* D9, first person only: this line claims that a send THIS device
+              made has not been answered yet. It starts from the id that send's
+              response carried and ends at the first row answering it — the
+              round's reference row, the router's own reply, a receipt — or on a
+              deadline, so it cannot outlive the send it belongs to and never
+              fakes liveness for a node that is gone. A transcript SHAPE ("the
+              newest human row has no answer") is still not evidence: after a
+              reload there is nothing to claim. The same flag locks the composer
+              below — a Chat has no queue, so a second send would race a router
+              still deciding the first. The round's own liveness rides inside its
+              block, off the `pending` projection read. */}
+          {composerLocked && (
             <ChatTurnStatusLine
               className="px-4"
               live
               text={
-                pendingName
-                  ? t("chatView.notice.pendingTurn", { name: pendingName })
+                agentName
+                  ? t("chatView.notice.pendingTurn", { name: agentName })
                   : t("chatView.notice.pendingTurnGeneric")
               }
             />
@@ -1193,7 +1135,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         {/* Back-to-bottom arrow — visible only while the reader has scrolled
             up off the tail (and there is content). Same treatment as the
             execute-session button: default-reduced opacity, full on hover. */}
-        {atBottom === false && rows.length > 0 && (
+        {atBottom === false && items.length > 0 && (
           <button
             onClick={stickNow}
             className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
@@ -1204,8 +1146,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         )}
       </div>
 
-      {/* Composer — same chrome as the execution view (plan 5.4). */}
-      <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg">
+      {/* Composer — same chrome as the execution view (plan 5.4). `relative`
+          so the address picker floats above the card like the group's `@`
+          popup does. */}
+      <div className="relative mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg">
         <input
           ref={fileInputRef}
           type="file"
@@ -1213,20 +1157,52 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           className="hidden"
           onChange={handleFilesChosen}
         />
-        {answerTarget && (
+        {replyTarget && (
           <div className="flex items-center gap-1 px-3 pt-2">
-            <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-border-outer text-text-tertiary">
+            <span className={composerChip}>
               {t("chatView.replyingTo")}{" "}
-              {answerTarget.meta?.interaction?.question?.slice(0, 30) || ""}
+              {replyTarget.quote.slice(0, 30)}
               <button
                 type="button"
-                onClick={() => setAnswerTarget(null)}
+                onClick={() => setReplyTarget(null)}
                 className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
                 aria-label={t("chatView.cancelReply")}
               >
                 ×
               </button>
             </span>
+          </div>
+        )}
+        {/* The task this message is addressed to (ADR-106 D7). Shown because an
+            address the surface swallowed would be indistinguishable from one
+            never given — and it is the one fact no model may re-decide. */}
+        {address && !replyTarget && (
+          <div className="flex items-center gap-1 px-3 pt-2">
+            <span className={composerChip}>
+              {t("chatView.address.pick")}:{" "}
+              {address.forceNew
+                ? t("chatView.block.newTask")
+                : address.label || t("chatView.address.pick")}
+              <button
+                type="button"
+                onClick={() => setAddress(null)}
+                className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                aria-label={t("chatView.address.clear")}
+              >
+                ×
+              </button>
+            </span>
+          </div>
+        )}
+        {/* Second level of the `@` — the agent's own routable tasks, opened by
+            typing `@` in the composer: it belongs above the text it was typed
+            into. The button's own popup anchors under that button instead. No
+            `mousedown` preventDefault on this shell: the picker holds a search
+            box, and cancelling a mousedown is precisely what cancels the focus
+            it would hand the input. Every pick path refocuses the composer. */}
+        {addressStage === "typed" && (
+          <div className="absolute bottom-full left-3 z-20 mb-2">
+            {addressPicker}
           </div>
         )}
         {/* Workspace references picked with "Add to Chat" in the right-hand
@@ -1250,11 +1226,32 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder={t("chatPanel.inputMessage")}
-          disabled={sending}
+          placeholder={t("chatView.address.composerHint")}
+          disabled={composerLocked}
           className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
           style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
           onKeyDown={(e) => {
+            /** Typing `@` at the start of a word opens the same task list the
+             *  toolbar button opens (ADR-106 D7) — one gesture on both chats.
+             *  The character is NOT inserted: here the address rides the chip
+             *  above the composer, not the message text, so a leftover `@`
+             *  would be noise the model has to read. A mid-word `@` (an email)
+             *  stays literal, the rule the group's `detectMention` uses. */
+            if (
+              e.key === "@" &&
+              !e.ctrlKey &&
+              !e.metaKey &&
+              !e.altKey &&
+              !e.nativeEvent.isComposing
+            ) {
+              const caret = e.currentTarget.selectionStart ?? input.length;
+              const prev = input[caret - 1];
+              if (!prev || /\s/.test(prev)) {
+                e.preventDefault();
+                setAddressStage("typed");
+                return;
+              }
+            }
             if (e.key !== "Enter" || e.shiftKey) return;
             const elapsed = Date.now() - lastCompositionEndRef.current;
             if (elapsed < 300) return; // IME confirmation — do not send
@@ -1321,6 +1318,30 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             data-toolbar-cluster="right"
             className="flex shrink-0 items-center gap-1"
           >
+            {/* The button opens the list above itself, right-aligned to its own
+                icon — a popup that appeared across the composer from the click
+                would not read as belonging to it. */}
+            <div className="relative">
+              <Tooltip content={t("chatView.address.pick")} variant="plain">
+                <button
+                  ref={addressBtnRef}
+                  className={cn(
+                    toolbarIconButton,
+                    addressStage && "bg-nav-item-hover",
+                  )}
+                  onClick={() => setAddressStage((v) => (v ? null : "button"))}
+                  aria-label={t("chatView.address.pick")}
+                  aria-expanded={addressStage !== null}
+                >
+                  <AtSign size={16} />
+                </button>
+              </Tooltip>
+              {addressStage === "button" && (
+                <div className="absolute bottom-full right-0 z-20 mb-2">
+                  {addressPicker}
+                </div>
+              )}
+            </div>
             {/* Per-chat ledger read (plan §4.6 phase two): the pair's
                 router spend lives on this one agent. */}
             <ChatUsageIcon
@@ -1338,11 +1359,18 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 <Paperclip size={16} />
               </button>
             </Tooltip>
-            <Tooltip content={t("chatPanel.sendMessage")} variant="plain">
+            <Tooltip
+              content={
+                turnLive
+                  ? t("chatView.notice.turnInflightTooltip")
+                  : t("chatPanel.sendMessage")
+              }
+              variant="plain"
+            >
               <button
-                className={cn(toolbarIconButton, sending && "opacity-50")}
+                className={cn(toolbarIconButton, composerLocked && "opacity-50")}
                 onClick={handleSend}
-                disabled={sending}
+                disabled={composerLocked}
                 aria-label={t("chatPanel.sendMessage")}
               >
                 <Send size={16} />

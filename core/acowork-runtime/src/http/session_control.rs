@@ -220,7 +220,7 @@ pub(crate) fn authorize_write(
 ///
 /// Returns the shared handle rather than a guard: `SessionManager`'s
 /// mutating methods need `&mut` across an `.await`, so the caller locks.
-async fn session_manager(
+pub(crate) async fn session_manager(
     state: &HttpState,
 ) -> Result<Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>, ApiError> {
     state
@@ -587,7 +587,8 @@ fn clearable_session_ids(rows: &[(String, SessionMeta)], scope: &SessionScope) -
 ///
 /// Bulk form of [`delete_session`]: each session goes through the same
 /// `SessionManager::delete_session` path (task close, session-meta row in
-/// SQLite, the `{sid}.jsonl` conversation file, latest-session recompute),
+/// SQLite, the `{sid}.jsonl` conversation file and its ADR-106 round side
+/// table, latest-session recompute),
 /// so a cleared agent leaves no orphaned rows or files behind. The
 /// conversation full-text index is purged lazily by its own sweep once the
 /// JSONL files are gone — the same contract single-session delete relies on.

@@ -13,13 +13,14 @@
 //! 2. one short `SessionManager` lock: prompt, candidates, router model;
 //! 3. history read over node-auth HTTP (bounded by a timeout — it is the only
 //!    network hop before the model);
-//! 4. Block B projection + Block C tail, model call(s) — `dispatch` plus
-//!    read-only information tools (`memory_recall`, GET-only `http_request`);
-//!    information rounds stay inside one turn so a full
-//!    user → assistant → tool_call → tool_result → assistant chain is never
-//!    cut across turns;
-//! 5. act: reply (the write-back channel), dispatch to a session, or degrade
-//!    to the pre-ADR-099 deterministic route;
+//! 4. Block B projection + Block C tail, model call(s) — the two acts
+//!    (`new_task`, `propose_existing`) plus read-only information tools
+//!    (`memory_recall`, GET-only `http_request`); information rounds stay inside
+//!    one turn so a full user → assistant → tool_call → tool_result → assistant
+//!    chain is never cut across turns;
+//! 5. act: reply (the write-back channel), start a NEW execution session, ask
+//!    the human to confirm a continuation, or degrade to the pre-ADR-099
+//!    deterministic route — never silently continue a session (ADR-106 D6);
 //! 6. append one line to the decision log.
 //!
 //! Every step runs on the chat's drain task, never on the MQTT inbound loop
@@ -44,13 +45,12 @@ use super::context::{
 use super::decision::{append_decision, DecisionRecord};
 use super::prompt::{build_block_a, surface_label, PersonaSource};
 use super::tool::{
-    memory_recall_tool_name, parse_dispatch, router_tools, AliasTable, DispatchArgs, DispatchError,
-    DISPATCH_TOOL, HTTP_REQUEST_TOOL,
+    memory_recall_tool_name, parse_new_task, parse_propose, router_tools, Act, ActError,
+    AliasTable, HTTP_REQUEST_TOOL, NEW_TASK_TOOL, PROPOSE_TOOL, Target,
 };
 use super::ChatSlot;
 use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::IntentEnvelope;
-use crate::agent::intent_turn::{post_intent_response, IntentTurnContext};
 use crate::agent::session::chat_candidates::{
     self, CandidateSurface, SessionCandidate,
 };
@@ -184,6 +184,58 @@ pub async fn handle_intent(
 /// the per-chat queue instead of routing it inline.
 pub fn is_chat_turn(envelope: &IntentEnvelope) -> bool {
     chat_turn_text(envelope).is_some()
+}
+
+/// ADR-106 D6 levels 1–2: the execution session the **human** addressed this
+/// turn, written by the Gateway when the message replies to a round's
+/// reference row or names a session in the second-level `@`.
+///
+/// `None` means unaddressed — the only case in which a model may decide
+/// anything. An addressed turn is delivered before the Chat Router is consulted,
+/// because a guess that happens to agree with an address is still a guess, and a
+/// guess that disagrees silently overrides the person who typed it.
+///
+/// An empty or blank value reads as absent: "addressed at nothing" and "not
+/// addressed" must not diverge later, and a half-written key is the failure mode
+/// this reader exists to survive.
+pub fn addressed_session(envelope: &IntentEnvelope) -> Option<String> {
+    envelope
+        .params
+        .get(acowork_core::protocol::TARGET_SESSION_PARAM)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// ADR-106 D6 level 3's precondition: the human named **this** agent.
+///
+/// The rule it gates — "one routable session in this chat, so continue it with
+/// no model in the loop" — is deterministic and cheap, which is exactly why it
+/// must not fire on a message nobody addressed. In a group the agent hears
+/// everything; reading idle chatter as an `@` would open execution work on
+/// sentences that were never aimed at anyone.
+pub fn explicit_mention(envelope: &IntentEnvelope) -> bool {
+    envelope
+        .params
+        .get(acowork_core::protocol::EXPLICIT_MENTION_PARAM)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// ADR-106 D6's cheap escape, read off a Chat turn: the human refused
+/// continuation, so no session may be carried forward.
+///
+/// Absent and `false` mean the same thing here, which is why the Gateway writes
+/// the key only when it is true. Skipping continuation is not "route
+/// nowhere": the turn still reaches the ladder's next level, where a new session
+/// may be opened with a fresh brief.
+pub fn force_new(envelope: &IntentEnvelope) -> bool {
+    envelope
+        .params
+        .get(acowork_core::protocol::FORCE_NEW_PARAM)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// Whether the router is switched on for this agent.
@@ -356,6 +408,10 @@ async fn run_turn(
     // snapshotted. Under the global lock it would make `POST /sessions` and
     // every other session operation queue behind a filesystem walk.
     let candidate_rows = chat_candidates::scan_rows(&deps.work_dir);
+    // Same read-as-you-can discipline: the intent bindings are another disk
+    // scan (ADR-106 D11 — they live on the session rows now), so they are
+    // collected outside the lock and handed to `resolve_candidates` as data.
+    let candidate_bindings = chat_candidates::scan_bindings(&deps.work_dir);
 
     // ── Short lock: prompt + candidates + router model ──────────────────
     let prepared = {
@@ -384,6 +440,7 @@ async fn run_turn(
         );
         let candidates = guard.resolve_candidates(
             &candidate_rows,
+            &candidate_bindings,
             &chat_id,
             Some(envelope.from.as_str()).filter(|s| !s.is_empty()),
             candidate_surface(&chat_kind),
@@ -467,7 +524,6 @@ async fn run_turn(
         aliases.insert(alias.clone(), candidate.session_id.clone());
         lines.push(CandidateLine {
             alias,
-            current: candidate.current,
             status: candidate.status.label().to_string(),
             age: relative_age(now_secs, candidate.last_active_secs),
             origin: candidate.origin.label().to_string(),
@@ -557,7 +613,7 @@ async fn run_turn(
         Ok(r) => r,
         Err(reason) => {
             trace.write("fallback", None, "error", Some(reason.clone()), None);
-            return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
+            return degrade(deps, envelope, &chat_id, reason, &rows).await;
         }
     };
 
@@ -572,10 +628,10 @@ async fn run_turn(
     // this single request only; the write-back persists the final text, so
     // no tool traffic ever enters Block B.
     loop {
-        // A dispatch - even after earlier lookups - outranks executing
-        // more info calls: routing is the turn's decision, the lookups
-        // were only context for it.
-        if dispatch_call(&response).is_some() {
+        // An act - even after earlier lookups - outranks executing more info
+        // calls: the act is the turn's decision, the lookups were only context
+        // for it.
+        if act_call(&response).is_some() {
             break;
         }
         let info_calls: Vec<ToolCall> = response
@@ -584,7 +640,7 @@ async fn run_turn(
             .map(|calls| {
                 calls
                     .iter()
-                    .filter(|call| call.function.name != DISPATCH_TOOL)
+                    .filter(|call| !is_act(&call.function.name))
                     .cloned()
                     .collect()
             })
@@ -613,16 +669,16 @@ async fn run_turn(
             Ok(r) => r,
             Err(reason) => {
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
+                return degrade(deps, envelope, &chat_id, reason, &rows).await;
             }
         };
     }
 
     // ── Act ────────────────────────────────────────────────────────────
-    let mut dispatch: Option<(DispatchArgs, String)> = None;
-    if let Some(call) = dispatch_call(&response) {
-        match parse_arguments(&call, &aliases) {
-            Ok(args) => dispatch = Some((args, call_label(&call))),
+    let mut act: Option<(Act, String)> = None;
+    if let Some(call) = act_call(&response) {
+        match parse_act(&call, &aliases) {
+            Ok(parsed) => act = Some((parsed, call_label(&call))),
             Err(err) => {
                 // Exactly one retry with the validation error fed back as a
                 // tool result (ADR-099 §5). A second failure degrades — a
@@ -639,23 +695,21 @@ async fn run_turn(
                 match calls.call(request.clone()).await {
                     Ok(retry) => {
                         response = retry;
-                        if let Some(second) = dispatch_call(&response) {
-                            match parse_arguments(&second, &aliases) {
-                                Ok(args) => dispatch = Some((args, call_label(&second))),
+                        if let Some(second) = act_call(&response) {
+                            match parse_act(&second, &aliases) {
+                                Ok(parsed) => act = Some((parsed, call_label(&second))),
                                 Err(again) => {
-                                    let reason = format!(
-                                        "invalid dispatch twice: {}",
-                                        again.message()
-                                    );
+                                    let reason =
+                                        format!("invalid act twice: {}", again.message());
                                     trace.write("fallback", None, "error", Some(reason.clone()), None);
-                                    return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
+                                    return degrade(deps, envelope, &chat_id, reason, &rows).await;
                                 }
                             }
                         }
                     }
                     Err(reason) => {
                         trace.write("fallback", None, "error", Some(reason.clone()), None);
-                        return degrade(deps, envelope, &chat_id, reason, &rows, true).await;
+                        return degrade(deps, envelope, &chat_id, reason, &rows).await;
                     }
                 }
             }
@@ -663,26 +717,28 @@ async fn run_turn(
     }
 
     let usage = response.usage.clone();
-    match dispatch {
+    match act {
         None => {
             let body = response.content.trim().to_string();
             if body.is_empty() {
                 trace.write("fallback", None, "error", Some("empty reply".into()), None);
-                return degrade(deps, envelope, &chat_id, "empty reply".to_string(), &rows, true).await;
+                return degrade(deps, envelope, &chat_id, "empty reply".to_string(), &rows).await;
             }
-            let sent = post_intent_response(
+            // ADR-106 D12: the router's own answer is a chat-native row, so it
+            // is written here and not carried back through an intent response —
+            // this is the only place `agent_message` is still produced, and the
+            // Gateway closes the tracked request off that row's `in_reply_to`.
+            // The idempotency key is the request id, so a redelivered turn
+            // leaves no second answer beside the first.
+            let sent = crate::agent::intent_turn::append_chat_row(
                 &deps.instance_id,
                 &deps.gateway_host,
                 &deps.node_token,
-                // No session pointer: the row is the router's own answer, and
-                // an empty id is what tells the surface there is nothing to
-                // open (design 29 §7.2).
-                "",
-                &IntentTurnContext::new(&envelope.message_id, &envelope.from, &envelope.action),
-                // The router's fallback is a finished answer, not a turn that
-                // paused or was stopped.
-                crate::agent::intent_turn::TurnOutcome::Completed,
+                &chat_id,
+                acowork_core::intent::chat_kinds::AGENT_MESSAGE,
+                &envelope.from,
                 &body,
+                crate::agent::intent_turn::router_answer_meta(&envelope.message_id),
             )
             .await;
             match sent {
@@ -692,29 +748,75 @@ async fn run_turn(
                 }
                 Err(e) => {
                     trace.write("fallback", None, "error", Some(e.clone()), None);
-                    degrade(deps, envelope, &chat_id, format!("reply write-back failed: {e}"), &rows, false).await
+                    degrade(deps, envelope, &chat_id, format!("reply write-back failed: {e}"), &rows).await
                 }
             }
         }
-        Some((args, label)) => {
-            // A `dispatch` without `session_config` still honours the user's
-            // draft configuration when it starts a new session — that is the
-            // whole point of not forcing a new session on a config change.
+        Some((Act::Propose(proposal), label)) => {
+            // The act IS the question. Nothing is delivered: continuing a
+            // session is addressing, and addressing belongs to the human
+            // (ADR-106 D6). The card names the candidate, the router's reason
+            // for proposing it, and the "new task" escape beside it.
+            //
+            // The label is this turn's own candidate title, looked up by the id
+            // the alias resolved to — a card naming a session the human cannot
+            // see in [candidates] would be a decision made from private state.
+            let title = prepared
+                .candidates
+                .iter()
+                .find(|c| c.session_id == proposal.session_id)
+                .map(|c| c.title.clone())
+                .unwrap_or_else(|| proposal.alias.clone());
+            let option = serde_json::json!({
+                "session_id": proposal.session_id,
+                "label": title,
+                "why": proposal.why,
+            });
+            let asked = crate::agent::intent_turn::emit_session_choice(
+                &deps.instance_id,
+                &deps.gateway_host,
+                &deps.node_token,
+                &chat_id,
+                &envelope.from,
+                &envelope.in_reply_to,
+                &envelope.message_id,
+                "confirm_continue",
+                vec![option],
+            )
+            .await;
+            match asked {
+                Ok(()) => {
+                    trace.write(&label, Some(&proposal.session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)));
+                    Outcome::Handled
+                }
+                Err(e) => {
+                    // A question that could not be written must not be answered
+                    // by delivering after all — that is the act this arm refuses
+                    // to perform. The deterministic route is honest instead: it
+                    // continues a session only when there is exactly one to
+                    // continue.
+                    let reason = format!("proposal card write failed: {e}");
+                    trace.write(&label, None, "error", Some(reason.clone()), None);
+                    degrade(deps, envelope, &chat_id, reason, &rows).await
+                }
+            }
+        }
+        Some((Act::NewTask(args), label)) => {
+            // A `new_task` without `session_config` still honours the user's
+            // draft configuration — that is the whole point of not forcing a
+            // new session on a config change.
             let seed = args
                 .seed
                 .clone()
                 .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
-            // The router's `message` is a brief, and whether this turn needs
-            // one is NOT decided by the model's `target` argument: an
-            // existing session may have vanished from disk, in which case
-            // `chat_dispatch` opens a fresh one and reports `opened_new`.
-            // So the brief waits until the target is actually resolved.
-            let brief = args.message.clone();
-            let target = args.target.clone();
+            // `opened_new` is read back from the dispatch rather than assumed:
+            // `Target::New` creates, and the brief must not be dropped if that
+            // ever stops being true — the new session would open on raw text.
+            let brief = Some(args.message.clone());
             let delivered = {
                 let mut guard = session_manager.lock().await;
                 match guard
-                    .chat_dispatch(&chat_id, target, seed, Some(envelope.from.as_str()))
+                    .chat_dispatch(&chat_id, Target::New, seed, Some(envelope.from.as_str()))
                     .await
                 {
                     Ok((session_id, opened_new)) => {
@@ -748,7 +850,7 @@ async fn run_turn(
                                 message_id: envelope.message_id.clone(),
                                 surface: crate::agent::intent_turn::TurnSurface::new(
                                     chat_id.clone(),
-                                    envelope.message_id.clone(),
+                                    &envelope.message_id,
                                     &envelope.from,
                                     envelope.has_human,
                                 ),
@@ -767,8 +869,20 @@ async fn run_turn(
                                 in_reply_to: envelope.in_reply_to.clone(),
                                 // The router only takes Chat-originated
                                 // turns (policy.router_eligible); a PM
-                                // dispatch's brief never arrives here.
+                                // dispatch's brief never arrives here. The task
+                                // id is still parsed off the conversation key so
+                                // the two transports state the same fact the same
+                                // way — empty for a chat conversation.
                                 assignment_brief: String::new(),
+                                task_id: acowork_core::intent::task_id_from_conversation(
+                                    &envelope.conversation_id,
+                                )
+                                .unwrap_or_default(),
+                                // ADR-106 D3: the routing's own verdict, carried
+                                // to the round's reference row because the loop
+                                // cannot see it — it replaces the retired
+                                // `turn_routed` reaction row.
+                                opened_new: Some(opened_new),
                             },
                         );
                         (Ok((session_id, opened_new)), sent)
@@ -777,52 +891,25 @@ async fn run_turn(
                 }
             };
             match delivered {
-                (Ok((session_id, opened_new)), Ok(())) => {
-                    // ADR-100 D11: the routing reaction. The dispatch/start
-                    // *progress* milestones stay runtime-only (D10) — what is
-                    // written here is the one conversational fact the Chat
-                    // turn owes immediately: "your message went to a new task
-                    // / continues task X". It lands the moment the target is
-                    // resolved, minutes or hours before the answer, and it is
-                    // durable because "which task handled this message" is a
-                    // fact of the conversation, not of the progress bar.
-                    // Best-effort: a lost row costs the reaction, never the
-                    // delivery (the turn runs regardless).
-                    if let Err(e) = crate::agent::intent_turn::append_chat_row(
-                        &deps.instance_id,
-                        &deps.gateway_host,
-                        &deps.node_token,
-                        &chat_id,
-                        "system_notice",
-                        &envelope.from,
-                        "",
-                        crate::agent::intent_turn::turn_routed_meta(
-                            &envelope.message_id,
-                            &session_id,
-                            opened_new,
-                        ),
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            chat_id = %chat_id,
-                            message_id = %envelope.message_id,
-                            error = %e,
-                            "routing reaction row failed — non-fatal"
-                        );
-                    }
+                (Ok((session_id, _opened_new)), Ok(())) => {
+                    // ADR-106 D3: no reaction row is written here. "Your message
+                    // went to a new task / continues task X" is now stated by the
+                    // round's reference row (`opened_new` on it), which the
+                    // runtime writes when the round actually opens — before that
+                    // the message is only queued, and a reaction claiming a round
+                    // that has not started would be a promise, not a fact.
                     trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
                 (Ok(_), Err(e)) => {
-                    let reason = format!("dispatch delivery failed: {e}");
+                    let reason = format!("new_task delivery failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows, true).await
+                    degrade(deps, envelope, &chat_id, reason, &rows).await
                 }
                 (Err(e), _) => {
-                    let reason = format!("dispatch target resolution failed: {e}");
+                    let reason = format!("new_task session creation failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows, true).await
+                    degrade(deps, envelope, &chat_id, reason, &rows).await
                 }
             }
         }
@@ -995,7 +1082,7 @@ async fn execute_info_tool(
             .collect::<Vec<_>>()
             .join(", ");
         return format!(
-            "Error: `{name}` is not available on a chat turn — valid tools: {DISPATCH_TOOL}, {available} (GET only for {HTTP_REQUEST_TOOL})"
+            "Error: `{name}` is not available on a chat turn — valid tools: {NEW_TASK_TOOL}, {PROPOSE_TOOL}, {available} (GET only for {HTTP_REQUEST_TOOL})"
         );
     };
     let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
@@ -1073,27 +1160,41 @@ fn truncate_info_result(text: &str) -> String {
     format!("{}…[truncated]", &text[..end])
 }
 
-fn dispatch_call(response: &ChatResponse) -> Option<ToolCall> {
-    response
-        .tool_calls
-        .as_ref()?
+/// The turn's act call, if the model made one.
+///
+/// When a model emits both acts in one response the **proposal wins**: it is the
+/// arm that delivers nothing, so a self-contradictory answer costs the human one
+/// click instead of moving their message into a session nobody addressed.
+fn act_call(response: &ChatResponse) -> Option<ToolCall> {
+    let calls = response.tool_calls.as_ref()?;
+    calls
         .iter()
-        .find(|call| call.function.name == super::tool::DISPATCH_TOOL)
+        .find(|call| call.function.name == PROPOSE_TOOL)
+        .or_else(|| calls.iter().find(|call| call.function.name == NEW_TASK_TOOL))
         .cloned()
 }
 
-fn parse_arguments(call: &ToolCall, aliases: &AliasTable) -> Result<DispatchArgs, DispatchError> {
-    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
-    parse_dispatch(&args, aliases)
+/// Either act name — the information-round filter must not run an act as a
+/// lookup, and a refusal text must name what the model may actually call.
+fn is_act(name: &str) -> bool {
+    name == NEW_TASK_TOOL || name == PROPOSE_TOOL
 }
 
-/// `dispatch:S1` / `dispatch:new` — the decision label for the log.
+fn parse_act(call: &ToolCall, aliases: &AliasTable) -> Result<Act, ActError> {
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+    if call.function.name == PROPOSE_TOOL {
+        parse_propose(&args, aliases).map(Act::Propose)
+    } else {
+        parse_new_task(&args).map(Act::NewTask)
+    }
+}
+
+/// `new_task` / `propose_existing:S3` — the decision label for the log.
 fn call_label(call: &ToolCall) -> String {
     let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
     match raw.get("target").and_then(Value::as_str).map(str::trim) {
-        Some(target) if target.eq_ignore_ascii_case("new") => "dispatch:new".to_string(),
-        Some(target) => format!("dispatch:{}", target.to_ascii_uppercase()),
-        None => "dispatch:?".to_string(),
+        Some(target) if !target.is_empty() => format!("{}:{}", call.function.name, target),
+        _ => call.function.name.to_string(),
     }
 }
 
@@ -1147,16 +1248,19 @@ fn task_label(conversation_id: &str) -> Option<String> {
 /// `rows` are the chat rows this turn had already read (empty when history
 /// itself failed): they become a bounded excerpt the caller attaches to the
 /// degraded route's first message, so a fresh session is not left with raw
-/// text alone. `notify` posts the one conversational fact the degraded turn
-/// owes the human — the router could not decide and the message was
-/// forwarded automatically — best-effort like the routing reaction row.
+/// text alone.
+///
+/// ADR-106: no receipt row is written for the degradation. The fallback route
+/// runs a round, and that round's reference row is the record the human needs;
+/// a `system_notice` announcing "the router could not decide" is a progress
+/// fact about a component, not a channel fact, and it used to key off the
+/// retired `rf:` prefix.
 async fn degrade(
     deps: &RouterDeps,
     envelope: &IntentEnvelope,
     chat_id: &str,
     reason: String,
     rows: &[ChatRow],
-    notify: bool,
 ) -> Outcome {
     tracing::warn!(
         chat_id = %chat_id,
@@ -1164,25 +1268,6 @@ async fn degrade(
         reason = %reason,
         "chat router degraded to the deterministic route"
     );
-    if notify
-        && let Err(e) = crate::agent::intent_turn::append_chat_row(
-            &deps.instance_id,
-            &deps.gateway_host,
-            &deps.node_token,
-            chat_id,
-            "system_notice",
-            &envelope.from,
-            "",
-            crate::agent::intent_turn::router_fallback_meta(&envelope.message_id),
-        )
-        .await
-    {
-        tracing::warn!(
-            chat_id = %chat_id,
-            error = %e,
-            "router fallback receipt row failed — non-fatal"
-        );
-    }
     Outcome::Fallback {
         reason,
         chat_excerpt: chat_tail_excerpt(rows, &deps.instance_id),
@@ -1351,7 +1436,7 @@ fn dispatch_content(opened_new: bool, brief: Option<&str>, user_text: &str) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::super::tool::Target;
+    use super::super::tool::{NewTaskArgs, ProposeArgs};
     use super::*;
     use crate::agent::session::chat_candidates::{CandidateOrigin, CandidateStatus};
     use acowork_core::providers::mock::{MockProvider, MockResponse};
@@ -1461,6 +1546,88 @@ mod tests {
         }]));
         assert!(calls(&failing, &d).call(request()).await.is_err());
         assert_eq!(ledger.records.lock().unwrap().len(), 2);
+    }
+
+    /// Params carrying (or not carrying) an explicit session address.
+    fn addressed_params(session: Option<&str>) -> Value {
+        let mut params = serde_json::json!({ "message": "go on" });
+        if let Some(session) = session {
+            params.as_object_mut().unwrap().insert(
+                acowork_core::protocol::TARGET_SESSION_PARAM.to_string(),
+                serde_json::json!(session),
+            );
+        }
+        params
+    }
+
+    /// ADR-106 D6 level 1: the address is read off the params the Gateway wrote.
+    /// An absent, blank or non-string value all read as "the human addressed
+    /// nothing", so the turn reaches the router instead of being delivered at an
+    /// empty address — the two failures must not look alike later.
+    #[test]
+    fn an_addressed_turn_reads_the_session_and_a_blank_one_does_not() {
+        assert_eq!(
+            addressed_session(&envelope("user_message", "cs-1", addressed_params(Some("s-9"))))
+                .as_deref(),
+            Some("s-9")
+        );
+        // Surrounding whitespace is not part of an id, but the intent is real.
+        assert_eq!(
+            addressed_session(&envelope(
+                "user_message",
+                "cs-1",
+                addressed_params(Some("  s-9  "))
+            ))
+            .as_deref(),
+            Some("s-9")
+        );
+
+        for session in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                addressed_session(&envelope("user_message", "cs-1", addressed_params(session)))
+                    .as_deref(),
+                None,
+                "{session:?} must not read as addressed"
+            );
+        }
+        // A wrong-typed value is a half-written key, not an address.
+        for junk in [serde_json::json!(null), serde_json::json!(7)] {
+            let mut params = serde_json::json!({ "message": "go on" });
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert(acowork_core::protocol::TARGET_SESSION_PARAM.to_string(), junk);
+            assert_eq!(
+                addressed_session(&envelope("user_message", "cs-1", params)).as_deref(),
+                None
+            );
+        }
+    }
+
+    /// The two flags gate a deterministic rule and a refusal, so an absent key,
+    /// a `false` and a wrong-typed value must all read as "no special handling" —
+    /// and one of them being true must not imply the other is.
+    #[test]
+    fn the_addressing_flags_are_independent_and_default_to_false() {
+        let bare = envelope("user_message", "cs-1", addressed_params(None));
+        assert!(!explicit_mention(&bare));
+        assert!(!force_new(&bare));
+
+        let mut params = addressed_params(None);
+        params.as_object_mut().unwrap().insert(
+            acowork_core::protocol::EXPLICIT_MENTION_PARAM.to_string(),
+            serde_json::json!(true),
+        );
+        let mentioned = envelope("user_message", "cs-1", params);
+        assert!(explicit_mention(&mentioned));
+        assert!(!force_new(&mentioned), "an @ is not a request for new work");
+
+        let mut params = addressed_params(None);
+        params
+            .as_object_mut()
+            .unwrap()
+            .insert(acowork_core::protocol::FORCE_NEW_PARAM.to_string(), serde_json::json!("yes"));
+        assert!(!force_new(&envelope("user_message", "cs-1", params)));
     }
 
     fn envelope(kind: &str, chat_id: &str, params: Value) -> IntentEnvelope {
@@ -1818,28 +1985,42 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_arguments_are_parsed_from_the_tool_call() {
+    fn act_arguments_are_parsed_from_the_tool_call() {
         let aliases = AliasTable::from([("S1".to_string(), "sess-1".to_string())]);
-        let call = ToolCall {
+        let proposal = ToolCall {
             id: "call-1".into(),
             call_type: "function".into(),
             function: acowork_core::providers::traits::FunctionCall {
-                name: super::super::tool::DISPATCH_TOOL.into(),
-                arguments: r#"{"target":"S1"}"#.into(),
+                name: super::super::tool::PROPOSE_TOOL.into(),
+                arguments: r#"{"target":"S1","why":"same login bug"}"#.into(),
             },
         };
-        let parsed = parse_arguments(&call, &aliases).unwrap();
-        assert_eq!(parsed.target, Target::Existing("sess-1".into()));
-        assert_eq!(call_label(&call), "dispatch:S1");
+        assert_eq!(
+            parse_act(&proposal, &aliases).unwrap(),
+            Act::Propose(ProposeArgs {
+                alias: "S1".into(),
+                session_id: "sess-1".into(),
+                why: "same login bug".into(),
+            })
+        );
+        assert_eq!(call_label(&proposal), "propose_existing:S1");
 
-        let new = ToolCall {
+        let task = ToolCall {
             function: acowork_core::providers::traits::FunctionCall {
-                name: super::super::tool::DISPATCH_TOOL.into(),
-                arguments: r#"{"target":"New"}"#.into(),
+                name: super::super::tool::NEW_TASK_TOOL.into(),
+                arguments: r#"{"message":"do the thing"}"#.into(),
             },
-            ..call
+            ..proposal
         };
-        assert_eq!(call_label(&new), "dispatch:new");
+        assert_eq!(
+            parse_act(&task, &aliases).unwrap(),
+            Act::NewTask(NewTaskArgs {
+                message: "do the thing".into(),
+                seed: None,
+            })
+        );
+        // `new_task` addresses nothing, so its label carries no target.
+        assert_eq!(call_label(&task), "new_task");
     }
 
     #[test]
@@ -1848,15 +2029,12 @@ mod tests {
             id: "c".into(),
             call_type: "function".into(),
             function: acowork_core::providers::traits::FunctionCall {
-                name: super::super::tool::DISPATCH_TOOL.into(),
+                name: super::super::tool::NEW_TASK_TOOL.into(),
                 arguments: "{not json".into(),
             },
         };
-        assert_eq!(
-            parse_arguments(&call, &AliasTable::new()),
-            Err(DispatchError::MissingTarget)
-        );
-        assert_eq!(call_label(&call), "dispatch:?");
+        assert_eq!(parse_act(&call, &AliasTable::new()), Err(ActError::MissingBrief));
+        assert_eq!(call_label(&call), "new_task");
     }
 
     #[test]
@@ -1868,11 +2046,9 @@ mod tests {
             status: CandidateStatus::Idle,
             origin: CandidateOrigin::Chat,
             last_active_secs: 1_700_000_000,
-            current: false,
         };
         let line = CandidateLine {
             alias: "S1".into(),
-            current: candidate.current,
             status: candidate.status.label().into(),
             age: relative_age(1_700_000_120, candidate.last_active_secs),
             origin: candidate.origin.label().into(),

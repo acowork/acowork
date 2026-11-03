@@ -135,10 +135,13 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// (ADR-076 §决策 4 — the column is the session's initiator, and `user_id`
 /// belongs to the account system); 9 = `chat_token_usage` ledger table
 /// (Chat Router token accounting — one aggregate row per Chat session,
-/// no conversation state); 10 = `chat_token_usage.history_tokens` (the
-/// router's projected-history occupancy — the only number comparable to
-/// the `chat_router.history_max_tokens` budget).
-pub const SCHEMA_VERSION: i64 = 10;
+/// no conversation state); 10 = `sessions.intent_key` / `intent_closed`
+/// (ADR-106 D11 — the intent context a session owns, and that context's
+/// terminal mark, both on the session's own row instead of a side file);
+/// 11 = `chat_token_usage.history_tokens` (the router's projected-history
+/// occupancy — the only number comparable to the
+/// `chat_router.history_max_tokens` budget).
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -271,6 +274,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
         9,
         "CREATE TABLE IF NOT EXISTS chat_token_usage ( \n             chat_session_id          TEXT PRIMARY KEY, \n             chat_kind                TEXT, \n             created_at               INTEGER NOT NULL, \n             last_active_at           INTEGER NOT NULL, \n             llm_call_count           INTEGER NOT NULL DEFAULT 0, \n             token_last_input         INTEGER NOT NULL DEFAULT 0, \n             token_last_output        INTEGER NOT NULL DEFAULT 0, \n             token_total_input        INTEGER NOT NULL DEFAULT 0, \n             token_total_output       INTEGER NOT NULL DEFAULT 0, \n             token_last_cache_read    INTEGER NOT NULL DEFAULT 0, \n             token_last_cache_write   INTEGER NOT NULL DEFAULT 0, \n             token_total_cache_read   INTEGER NOT NULL DEFAULT 0, \n             token_total_cache_write  INTEGER NOT NULL DEFAULT 0, \n             model_usage              TEXT \n         ); \n         CREATE INDEX IF NOT EXISTS idx_chat_token_usage_last_active \n             ON chat_token_usage(last_active_at DESC);",
     ),
+    // ADR-106 D11: the intent-routing binding stops living in a side file with a
+    // competing truth (`intent-sessions.json` / `terminal-sessions.json`) and
+    // moves onto the session's own row. `intent_key` is the intent context the
+    // session owns (`conv:task:{project}:{task}` for a PM task); `intent_closed`
+    // is that context's terminal mark, so a finished task is never offered as a
+    // routing candidate again. Both are NULL/0 on every pre-existing row, which
+    // reads as "bound to nothing" — the routing table they replace was itself a
+    // hint, and a lost binding costs one fresh session, never a wrong route.
+    // Written only by `SessionMetaStore::intent_*`, never by the session's own
+    // meta upsert, so the two writers can never erase each other.
+    (
+        10,
+        "ALTER TABLE sessions ADD COLUMN intent_key TEXT; \n         ALTER TABLE sessions ADD COLUMN intent_closed INTEGER NOT NULL DEFAULT 0; \n         CREATE INDEX IF NOT EXISTS idx_sessions_intent_key \n             ON sessions(intent_key);",
+    ),
     // The Chat Session Router's *history occupancy* — how many tokens the
     // projected history window (Block B, design 29 §4) actually cost on the
     // most recent turn. This is NOT the provider-reported prompt count
@@ -286,7 +303,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     // rejects a `WHERE` clause on `ADD COLUMN`), so `apply_migrations`
     // checks `has_column` and skips it when the column is already there.
     (
-        10,
+        11,
         "ALTER TABLE chat_token_usage ADD COLUMN history_tokens INTEGER;",
     ),
 ];
@@ -323,13 +340,13 @@ pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Res
             if *target == 8 && !has_column(&tx, "sessions", "user_id")? {
                 continue;
             }
-            // The v10 column-adding step has the same problem from the other
+            // The v11 column-adding step has the same problem from the other
             // side: SQLite rejects a `WHERE` clause on `ADD COLUMN`
             // outright, so the guard cannot live in the SQL. Skip the
             // statement when the column is already there — a database
             // written by a build that shipped the column before stamping
             // the version must still open.
-            if *target == 10 && has_column(&tx, "chat_token_usage", "history_tokens")? {
+            if *target == 11 && has_column(&tx, "chat_token_usage", "history_tokens")? {
                 continue;
             }
             tx.execute_batch(sql)?;
@@ -445,14 +462,14 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
     }
 
-    /// The v10 step adds the router's history-occupancy column to the
-    /// Chat ledger. A store written by v9 must gain the column AND keep
+    /// The v11 step adds the router's history-occupancy column to the
+    /// Chat ledger. A store written by v10 must gain the column AND keep
     /// its rows — a broken step here would leave every installed
     /// workspace's chat ledger unreadable.
     #[test]
-    fn migration_10_adds_the_history_tokens_column_and_keeps_the_rows() {
+    fn migration_11_adds_the_history_tokens_column_and_keeps_the_rows() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
-        // The v9 shape: the ledger table without the column.
+        // The v10 shape: the ledger table without the column.
         conn.execute_batch(
             "CREATE TABLE chat_token_usage ( \
                  chat_session_id TEXT PRIMARY KEY, \
@@ -463,9 +480,9 @@ mod tests {
              ); \
              INSERT INTO chat_token_usage (chat_session_id, created_at, last_active_at) \
                  VALUES ('c-1', 0, 0); \
-             PRAGMA user_version = 9;",
+             PRAGMA user_version = 10;",
         )
-        .expect("seed v9 store");
+        .expect("seed v10 store");
 
         apply_migrations(&mut conn).expect("migrate");
 
@@ -498,12 +515,12 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
     }
 
-    /// The v10 step is guarded against an already-present column: a
+    /// The v11 step is guarded against an already-present column: a
     /// database written by a build that shipped the column before
     /// stamping the version must still open, not fail on a duplicate
     /// `ADD COLUMN`.
     #[test]
-    fn migration_10_is_a_noop_when_the_column_is_already_present() {
+    fn migration_11_is_a_noop_when_the_column_is_already_present() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
         conn.execute_batch(
             "CREATE TABLE chat_token_usage ( \
@@ -514,7 +531,7 @@ mod tests {
                  llm_call_count INTEGER NOT NULL DEFAULT 0, \
                  history_tokens INTEGER \
              ); \
-             PRAGMA user_version = 9;",
+             PRAGMA user_version = 10;",
         )
         .expect("seed already-migrated store");
 

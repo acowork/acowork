@@ -81,6 +81,11 @@ pub(crate) struct AgentBootContext {
     pub responses_compat_cache:
         Option<Arc<crate::providers::responses_compat::ResponsesCompatCache>>,
 
+    /// Parameter-trim cache for Anthropic-protocol providers (persisted to
+    /// `{work_dir}/config/provider_compat_anthropic.json`).
+    pub anthropic_compat_cache:
+        Option<Arc<crate::providers::anthropic_compat::AnthropicCompatCache>>,
+
     // Embedding provider (None when Tier-1 ONNX provider construction failed —
     // memory then degrades to text-only search via memory::manager fallback)
     pub emb_provider: Option<Arc<dyn crate::embedding::EmbeddingProvider>>,

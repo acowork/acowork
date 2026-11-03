@@ -157,17 +157,57 @@ describe("ChatUsageIcon", () => {
     // serving model is named (the old headline line that duplicated it is
     // gone by request).
     expect(screen.getAllByText("openai/gpt-4o").length).toBe(1);
-    // The share row renders value · percentage; the two halves are
-    // separate text nodes, so assert on the assembled dialog text.
-    expect(
-      screen.getByRole("dialog", { name: "chatUsage.title" }).textContent,
-    ).toMatch(/\d+\.\dK · 100%/);
+    // The share row renders the model's WHOLE-CHAT cumulative tokens. A
+    // single-model chat shows no percentage: "100%" is not information and
+    // reads like it belongs to the headline's per-turn percent.
+    const dialogText = screen.getByRole("dialog", { name: "chatUsage.title" })
+      .textContent;
+    expect(dialogText).toMatch(/13\.0K/);
+    expect(dialogText).not.toMatch(/100\s*%/);
+    // The cumulative measure is spelled out in the section header itself, so
+    // the two numbers cannot be read as the headline's per-turn figure.
+    expect(dialogText).toContain("chatUsage.byModel");
+    expect(screen.getByText("chatUsage.usedThisTurn")).toBeTruthy();
     // The cumulative ledger counters are deliberately absent.
     expect(screen.queryByText("chatUsage.llmCalls")).toBeNull();
     expect(screen.queryByText("chatUsage.totalInput")).toBeNull();
     expect(screen.queryByText("chatUsage.totalOutput")).toBeNull();
     expect(screen.queryByText("chatUsage.cacheRead")).toBeNull();
     expect(screen.queryByText("chatUsage.byAgent")).toBeNull();
+  });
+
+  it("shows the model share only when there is more than one model to compare", async () => {
+    const item = (
+      provider: string,
+      model: string,
+      input: number,
+    ): ChatUsageSummary["modelItems"][number] => ({
+      provider,
+      model,
+      total_input: input,
+      total_output: 0,
+      total_cache_read: 0,
+      total_cache_write: 0,
+      total_cost: 0.1,
+    });
+    mocks.fetchChatUsage.mockResolvedValue(
+      summary({
+        llmCallCount: 2,
+        totalInput: 3_000,
+        perAgent: [agentRow(3_000, 2)],
+        modelItems: [item("openai", "gpt-4o", 2_000), item("anthropic", "claude-sonnet-5", 1_000)],
+      }),
+    );
+    const { container } = render(
+      <ChatUsageIcon agentIds={["agent-x"]} chatSessionId="c-1" />,
+    );
+    await waitFor(() => expect(mocks.fetchChatUsage).toHaveBeenCalled());
+    fireEvent.mouseEnter(container.firstElementChild!);
+    const dialogText = screen.getByRole("dialog", { name: "chatUsage.title" })
+      .textContent;
+    // 2,000 / 3,000 = 66.7%, 1,000 / 3,000 = 33.3%.
+    expect(dialogText).toMatch(/2\.0K\s*·\s*66\.7%/);
+    expect(dialogText).toMatch(/1\.0K\s*·\s*33\.3%/);
   });
 
   it("names the serving model once, in the by-model breakdown only", async () => {
@@ -245,6 +285,60 @@ describe("ChatUsageIcon", () => {
     expect(
       screen.getByTitle("chatUsage.usedNotMeasured"),
     ).toBeTruthy();
+  });
+
+  it("keeps one type scale: the section headers all sit on the same step", async () => {
+    mocks.fetchChatUsage.mockResolvedValue(
+      summary({
+        llmCallCount: 5,
+        totalCacheRead: 400,
+        totalInput: 1_000,
+        totalOutput: 100,
+        perAgent: [
+          { ...agentRow(600, 3), agentId: "a-1" },
+          { ...agentRow(500, 2), agentId: "a-2" },
+        ],
+        modelItems: [
+          {
+            provider: "openai",
+            model: "gpt-4o",
+            total_input: 1_100,
+            total_output: 0,
+            total_cache_read: 400,
+            total_cache_write: 0,
+            total_cost: 0.2,
+          },
+        ],
+      }),
+    );
+    const { container } = render(
+      <ChatUsageIcon agentIds={["a-1", "a-2"]} chatSessionId="c-1" />,
+    );
+    await waitFor(() => expect(mocks.fetchChatUsage).toHaveBeenCalled());
+    fireEvent.mouseEnter(container.firstElementChild!);
+    const dialog = screen.getByRole("dialog", { name: "chatUsage.title" });
+
+    // The popover owns a fixed set of steps — the exec surface's grammar:
+    // section header / row / helper / button + the headline figure. Anything
+    // else is an accident (the "why is `By model` bigger than its own column
+    // header" report).
+    const ALLOWED = ["text-sm", "text-xs", "text-10", "text-11", "text-[clamp(1.125rem,4.5vw,1.375rem)]"];
+    // Only size-looking utilities (text-sm / text-10 / text-[13px] /
+    // text-xl …) — colors (`text-red-600`), alignment (`text-center`) and
+    // the `text-text-*` tokens are not sizes.
+    const SIZE_RE = /^text-(\[.*\]|base|lg|sm|xs|\d+|\d?xl)$/;
+    const steps = [...dialog.querySelectorAll<HTMLElement>("*")].flatMap((el) =>
+      (el.getAttribute("class") ?? "").split(/\s+/).filter((c) => SIZE_RE.test(c)),
+    );
+    expect(steps.length).toBeGreaterThan(0);
+    for (const step of steps) expect(ALLOWED).toContain(step);
+
+    // All three section headers are on the ONE header step.
+    const headerSize = (key: string) =>
+      screen.getByText(key).getAttribute("class")?.match(/\btext-(sm|xs|10|11)\b/)?.[0];
+    expect(headerSize("contextUsage.cacheHitLabel")).toBe("text-sm");
+    expect(headerSize("chatUsage.byModel")).toBe("text-sm");
+    expect(headerSize("chatUsage.byAgent")).toBe("text-sm");
   });
 
   it("splits by agent only when more than one participant carries a row", async () => {

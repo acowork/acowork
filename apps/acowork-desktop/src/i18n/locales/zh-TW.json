@@ -262,6 +262,7 @@
     "notice": {
       "pendingTurn": "{{name}}正在處理…",
       "pendingTurnGeneric": "正在處理…",
+      "turnInflightTooltip": "上一則訊息正在處理中",
       "interrupted": "本輪執行已中斷",
       "failed": "本輪執行失敗",
       "timeout": "本輪執行逾時",

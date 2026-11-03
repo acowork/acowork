@@ -18,6 +18,30 @@
 //   4. Unbalanced braces like `{name` or `name}` — ERROR
 //   5. Empty braces `{}` or `{{}}` — ERROR
 //
+// Why the key-resolution pass exists too:
+//   When `t("a.b.c")` finds no key and the call passes no fallback, i18next
+//   returns the KEY PATH ITSELF, which then paints the UI (e.g. a block header
+//   reading `chatView.block.roundCount` instead of `3 rounds`). Placeholder
+//   linting alone cannot see that, and the unit tests mock i18n and assert on
+//   key paths, so neither could they. This pass resolves every statically
+//   analysable call site against the locale files.
+//
+// Rules enforced per call site (`scripts/check-i18n.mjs` pass 2):
+//   6. `t("a.b")` in src/ must resolve in en.json — en is `fallbackLng`, so a
+//      miss there is what actually paints the key path. ERROR
+//   7. `t("a.b")` must also resolve in zh-CN.json, else the Chinese UI silently
+//      degrades to English. ERROR
+//   Exemptions: call sites passing `defaultValue` or a positional fallback
+//   string (they render fallback text, never the key path), and `key_one` /
+//   `key_other` plural forms, which satisfy the plain key.
+//   ja / ko / zh-TW are not enforced — `fallbackLng` covers them.
+//
+// Known limit: keys handed to `t()` through a variable (the `STATE_KEYS` map in
+// components/chat/ChatExecutionBlock.tsx is one) are invisible to a static
+// scan. A broader rule — "every dotted string literal in src is a key" — was
+// tried and rejected: most of those literals are API field paths and filenames
+// (`attachment.size`, `contextUsage.usage_percent`, `messages.jsonl`).
+//
 // Usage:
 //   node scripts/check-i18n.mjs
 //   npm run check:i18n
@@ -33,6 +57,17 @@ const __dirname = dirname(__filename);
 
 // i18n locale directory is at <projectRoot>/src/i18n/locales
 const LOCALES_DIR = resolve(__dirname, "..", "src", "i18n", "locales");
+const SRC_DIR = resolve(__dirname, "..", "src");
+
+// Locales every used key must resolve in, with the reason for each.
+const ENFORCED_LOCALES = [
+    { file: "en.json", why: "it is fallbackLng — a miss renders the key path in the UI" },
+    { file: "zh-CN.json", why: "a miss makes the Chinese UI fall back to English" },
+];
+
+// Literal call sites: `t("ns.key")` / `t('ns.key')` / `i18n.t("ns.key")`.
+// `\b` keeps `it("…")`, `split("…")` and friends out of the match.
+const KEY_CALL_RE = /\bt\(\s*["']([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)["']/g;
 
 /**
  * Walk a plain object recursively, calling `visit(value, path)` for every
@@ -109,6 +144,125 @@ function truncate(s, max = 60) {
     return s.slice(0, max - 1) + "…";
 }
 
+/**
+ * Source files under `dir` that can hold call sites. Test files are skipped:
+ * they mock i18n and assert on key paths on purpose, so their keys are not
+ * evidence about the shipped UI.
+ */
+function listSourceFiles(dir, out = []) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".vite") continue;
+        const p = join(dir, entry.name);
+        if (entry.isDirectory()) {
+            listSourceFiles(p, out);
+        } else if (/\.(ts|tsx)$/.test(entry.name) && !/\.(test|spec)\.(ts|tsx)$/.test(entry.name)) {
+            out.push(p);
+        }
+    }
+    return out;
+}
+
+/** Look up a dot-separated key path in a parsed locale object. */
+function resolvePath(obj, key) {
+    let cur = obj;
+    for (const seg of key.split(".")) {
+        if (cur === null || typeof cur !== "object") return undefined;
+        cur = cur[seg];
+    }
+    return cur;
+}
+
+/** A key resolves if the plain form or either plural form is present. */
+function isPresent(obj, key) {
+    return (
+        resolvePath(obj, key) !== undefined ||
+        resolvePath(obj, `${key}_one`) !== undefined ||
+        resolvePath(obj, `${key}_other`) !== undefined
+    );
+}
+
+/**
+ * Argument text of the call whose `(` is at `openIdx` — paren-balanced, with
+ * string literals skipped so a `)` inside a fallback string cannot end the
+ * window early. Falls back to a bounded window if the scan never balances.
+ */
+function argText(text, openIdx) {
+    let depth = 0;
+    for (let i = openIdx; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '"' || ch === "'" || ch === "`") {
+            i = closeQuoteIdx(text, i, ch);
+            continue;
+        }
+        if (ch === "(") depth++;
+        else if (ch === ")") {
+            depth--;
+            if (depth === 0) return text.slice(openIdx + 1, i);
+        }
+    }
+    return text.slice(openIdx + 1, openIdx + 400);
+}
+
+/** Index of the closing quote of the literal opening at `i`. */
+function closeQuoteIdx(text, i, quote) {
+    for (let j = i + 1; j < text.length; j++) {
+        if (text[j] === "\\") j++;
+        else if (text[j] === quote) return j;
+    }
+    return text.length;
+}
+
+/**
+ * Whether the call passes its own fallback text — `defaultValue:` in the
+ * options object, or a positional string default (`t(key, "Fallback")`).
+ * Such call sites render the fallback, never the key path, so they are exempt.
+ */
+function hasFallback(args) {
+    return /(^|[{,;\s])defaultValue\s*:/.test(args) || /^\s*,\s*["'`]/.test(args);
+}
+
+/**
+ * Collect every literal `t("ns.key")` in src/: key -> first file seen plus a
+ * `hard` flag. `hard` is AND-semantics across call sites — one unguarded use
+ * is enough to paint the key path, even if other uses pass a default.
+ */
+function collectUsedKeys() {
+    const used = new Map();
+    for (const file of listSourceFiles(SRC_DIR)) {
+        const text = readFileSync(file, "utf8");
+        KEY_CALL_RE.lastIndex = 0;
+        let m;
+        while ((m = KEY_CALL_RE.exec(text)) !== null) {
+            const key = m[1];
+            const parenIdx = text.indexOf("(", m.index);
+            const entry = used.get(key) || { file: relative(process.cwd(), file), hard: false };
+            if (!hasFallback(argText(text, parenIdx))) entry.hard = true;
+            used.set(key, entry);
+        }
+    }
+    return used;
+}
+
+/**
+ * Pass 2: every hard-used key must resolve in the enforced locales.
+ * Returns report lines, one per violation.
+ */
+function checkKeyResolution(parsedLocales) {
+    const used = collectUsedKeys();
+    const errors = [];
+    let missingTotal = 0;
+    for (const [key, entry] of [...used.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+        if (!entry.hard) continue;
+        for (const { file, why } of ENFORCED_LOCALES) {
+            const locale = parsedLocales.get(file);
+            if (!locale || isPresent(locale, key)) continue;
+            missingTotal++;
+            errors.push(`  - ${key}: not found in ${file} (${why}) — used at ${entry.file}`);
+        }
+    }
+    return { checked: used.size, missing: missingTotal, errors };
+}
+
 function main() {
     const files = readdirSync(LOCALES_DIR).filter((f) => f.endsWith(".json"));
     if (files.length === 0) {
@@ -118,6 +272,7 @@ function main() {
 
     let totalErrors = 0;
     const reportLines = [];
+    const parsedLocales = new Map();
 
     for (const file of files) {
         const filePath = join(LOCALES_DIR, file);
@@ -128,6 +283,7 @@ function main() {
             console.error(`[check-i18n] Failed to parse ${relative(process.cwd(), filePath)}: ${e.message}`);
             process.exit(1);
         }
+        parsedLocales.set(file, data);
 
         const fileErrors = [];
         walk(data, "", (value, path) => {
@@ -139,21 +295,34 @@ function main() {
 
         if (fileErrors.length > 0) {
             totalErrors += fileErrors.length;
-            reportLines.push(`\n[${relative(process.cwd(), filePath)}] ${fileErrors.length} violation(s):`);
+            reportLines.push(`\n[${relative(process.cwd(), filePath)}] ${fileErrors.length} placeholder violation(s):`);
             reportLines.push(...fileErrors);
         }
     }
 
+    // Pass 2 — keys used by the UI must actually exist.
+    const resolution = checkKeyResolution(parsedLocales);
+    if (resolution.missing > 0) {
+        totalErrors += resolution.missing;
+        reportLines.push(`\n[${resolution.checked} t() keys scanned] ${resolution.missing} unresolved key(s):`);
+        reportLines.push(...resolution.errors);
+    }
+
     if (totalErrors === 0) {
-        console.log(`[check-i18n] OK — all ${files.length} locale files use valid i18next double-brace placeholders.`);
+        console.log(
+            `[check-i18n] OK — ${resolution.checked} scanned call sites resolve in ${ENFORCED_LOCALES
+                .map((l) => l.file)
+                .join(" + ")}, and all ${files.length} locale files use valid i18next double-brace placeholders.`,
+        );
         process.exit(0);
     }
 
-    console.error("\n[check-i18n] FAILED — i18n placeholder lint errors detected:");
+    console.error("\n[check-i18n] FAILED — i18n errors detected:");
     console.error(reportLines.join("\n"));
-    console.error(`\nTotal: ${totalErrors} violation(s) across ${files.length} file(s).`);
+    console.error(`\nTotal: ${totalErrors} violation(s) across ${files.length} locale file(s).`);
     console.error("\nFix: i18next requires DOUBLE braces `{{name}}`, not single `{name}`.");
-    console.error("Single braces render as literal text and (if followed by uppercase CSS) may look like uppercase placeholders.\n");
+    console.error("Single braces render as literal text and (if followed by uppercase CSS) may look like uppercase placeholders.");
+    console.error("An unresolved key renders the key path itself — add the translation, or pass `defaultValue`.");
     process.exit(1);
 }
 

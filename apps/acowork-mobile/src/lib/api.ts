@@ -19,9 +19,11 @@
 
 import { newId } from './id'
 import type { ChatTransport } from '../stores/chatStore'
+import type { ChatAddress } from '../stores/chatSessionStore'
 import type {
   AccountMe,
   AgentRow,
+  ChatBlockEntry,
   ChatMessage,
   ChatMessagesPage,
   ChatSessionInfo,
@@ -309,6 +311,37 @@ export async function fetchSessions(agentId: string, page: number): Promise<{ it
 }
 
 /**
+ * ADR-106 D7: the second level of the `@` — the execution sessions THIS Chat may
+ * address, read off the node that hosts the agent.
+ *
+ * The same listing as `fetchSessions`, narrowed by `chat_session_id` / `surface`:
+ * the narrowing is the Runtime's permission rule (a 1:1 lists this chat's runs
+ * plus the human's own hand-started ones, never finished work), so it runs
+ * server-side and BEFORE pagination — `hasMore` walks only what is legal to
+ * name here. One list, one filter: a second endpoint would be the same question
+ * asked twice, with two answers that can drift.
+ */
+export async function fetchChatSessions(
+  agentId: string,
+  chatSessionId: string,
+  surface: 'direct' | 'group',
+  page: number,
+): Promise<{ items: SessionInfo[]; hasMore: boolean }> {
+  if (!agentId || !chatSessionId) return { items: [], hasMore: false }
+  const query = new URLSearchParams({
+    page: String(page),
+    size: '20',
+    chat_session_id: chatSessionId,
+    surface,
+  })
+  const r = await req<SessionsPage>(
+    'GET',
+    `/api/agents/${encodeURIComponent(agentId)}/sessions?${query}`,
+  )
+  return { items: (r.sessions ?? []).map(mapSessionRow), hasMore: (r.page ?? page) < (r.total_pages ?? page) }
+}
+
+/**
  * Conversation JSONL → chat bubbles. user/assistant render as text bubbles;
  * `tool_call` / `tool_result` / `thought` are emitted with a payload type tag
  * so `foldToolCalls` can group them into ExploreBlock. `system` / `compaction`
@@ -589,23 +622,82 @@ export async function fetchChatMessages(
 }
 
 /**
+ * The round contents behind the chat's `execution_round` rows
+ * (`GET /api/chat-blocks/{chatId}?refs=` — ADR-106 D4/D5/D9).
+ *
+ * Refs are the rows' own coordinate triples (`instance|session|round`); the
+ * Gateway composes its disposable projection cache with a live read of the
+ * hosting Runtime, participation-checked against THIS chat (D10) — which is
+ * why the chat id is part of the address and not a filter.
+ *
+ * It goes through `req`, not a bare fetch: the block read is an ordinary
+ * authenticated GET, and the 401 rotation ladder is the app's only one.
+ * An empty ref list is answered client-side — the route makes `refs`
+ * mandatory (422 without it), and asking for nothing must not look like an
+ * outage in the transcript.
+ */
+export async function fetchChatBlocks(
+  chatSessionId: string,
+  refs: string[],
+): Promise<ChatBlockEntry[]> {
+  if (!chatSessionId || refs.length === 0) return []
+  const query = refs.map(encodeURIComponent).join(',')
+  const body = await req<{ blocks?: ChatBlockEntry[] }>(
+    'GET',
+    `/api/chat-blocks/${encodeURIComponent(chatSessionId)}?refs=${query}`,
+  )
+  return body?.blocks ?? []
+}
+
+/**
+ * `POST /api/intents/chat-message` answers with the row it wrote and whether
+ * anybody took it. The id is the durable `message_id` the Gateway assigned to
+ * the human's row — the key every outcome row of this turn threads itself to
+ * under `meta.in_reply_to`, and therefore the only id the Chat surface may
+ * claim an in-flight turn with (ADR-106 D9). `status` is `"delivered"` or
+ * `"failed"`: a failed 1:1 delivery writes no receipt into the Chat, so the
+ * surface must not wait on one.
+ */
+export interface ChatSendResponse {
+  message_id: string
+  status: string
+  error_code?: string
+  error?: string
+}
+
+/**
  * Post one turn into a Chat session. Goes through the intent channel
  * (`POST /api/intents/chat-message`), NOT a session-scoped write: the
  * durable row lands before delivery resolves (design 27 §5.1), so the
  * caller re-reads after the response regardless of the delivery outcome.
- * `inReplyTo` is a card's `message_id` when answering a decision card.
+ * `inReplyTo` is a REFERENCE ROW's `message_id` — ADR-106 D6 level 1: a turn
+ * addressed that way continues exactly that round and never reaches the
+ * Chat Router.
+ *
+ * `address` is the fact the human supplied (D6/D7): the task to continue, or
+ * the refusal to continue anything, plus the `message_id` of the row being
+ * RE-delivered when a `session_choice` / `confirm_continue` card is answered.
+ * Absent = no address, which is what leaves a message on the ladder's lower
+ * levels; inventing one here would take the Router's answer away from a turn
+ * that needs it.
  */
 export async function sendChatMessage(
   me: string,
   chatSessionId: string,
   text: string,
   inReplyTo?: string,
-): Promise<void> {
-  await req<void>('POST', '/api/intents/chat-message', {
+  attachmentIds?: string[],
+  address?: ChatAddress,
+): Promise<ChatSendResponse> {
+  return req<ChatSendResponse>('POST', '/api/intents/chat-message', {
     chat_session_id: chatSessionId,
     from_user: me,
     text,
     in_reply_to: inReplyTo ?? '',
+    ...(attachmentIds && attachmentIds.length > 0 ? { attachment_ids: attachmentIds } : {}),
+    ...(address?.targetSession ? { target_session: address.targetSession } : {}),
+    ...(address?.forceNew ? { force_new: true } : {}),
+    ...(address?.messageId ? { message_id: address.messageId } : {}),
   })
 }
 

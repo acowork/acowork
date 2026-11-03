@@ -806,12 +806,12 @@ fn unaddressed_group_message_reaches_the_default_responder() {
     assert_eq!(json_parse(&body)["routed"].as_str(), Some("archived"));
 }
 
-/// The card-answer channel of `chat-message` also serves group sessions
-/// (§5.5.4: the card names its own agent), but a group session has no
-/// blanket delivery target — a plain message or an answer naming a
-/// non-card row must be refused, not silently delivered.
+/// ADR-106 D6 level 1: `chat-message` in a group session only serves a reply
+/// that names an `execution_round` reference row, because that row is what
+/// carries the agent/instance coordinates the delivery needs. A plain message
+/// or a reply naming anything else must be refused, not silently delivered.
 #[test]
-fn chat_message_in_group_answers_cards_only() {
+fn chat_message_in_group_addresses_reference_rows_only() {
     let _serial = lock_chain();
     let (gw, token, root) = boot_multi_user("groupmsg");
     let http = gw.http_port;
@@ -827,11 +827,11 @@ fn chat_message_in_group_answers_cards_only() {
     let (code, body, _) = http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&m).unwrap(), &token);
     assert_eq!(code, 400, "plain group message refused on chat-message: {body}");
 
-    // An answer naming a row that is not a card is refused too (there is
-    // no derivable delivery target).
+    // A reply naming a row that is not a reference row is refused too (there
+    // is no derivable delivery target).
     let a = serde_json::json!({"chat_session_id": gsid, "from_user": root, "text": "answer", "in_reply_to": "no-such-message"});
     let (code, body, _) = http_post_json_auth(http, "/api/intents/chat-message", &serde_json::to_vec(&a).unwrap(), &token);
-    assert_eq!(code, 400, "group answer must name an interaction_request card: {body}");
+    assert_eq!(code, 400, "group reply must name an execution_round block: {body}");
 }
 
 /// Design 27 §5.4.3 form ②: A–B intents share ONE agent-agent channel —

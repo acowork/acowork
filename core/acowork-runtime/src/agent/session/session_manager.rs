@@ -458,15 +458,6 @@ pub struct SessionManager {
     /// whole config (which owns the `chunk_tx` mpsc Sender consumed
     /// elsewhere).
     package_dir: PathBuf,
-    /// Design 27 §3.2/§6.1: intent-context → execution-session routing
-    /// table (chat/conv keys). Loaded from the work dir so a restart
-    /// keeps follow-up turns on the session that holds the conversation.
-    /// Owned by the manager — the routing entry points are its only writers.
-    intent_map: std::sync::Mutex<super::intent_routing::IntentSessionMap>,
-    /// ADR-099 D5: session ids whose PM task is over. Written when the
-    /// Gateway closes an intent context, read by the candidate builder so a
-    /// finished task is never offered again.
-    terminal_sessions: super::intent_routing::TerminalSessions,
 }
 
 impl SessionManager {
@@ -487,17 +478,6 @@ impl SessionManager {
         // moved into `self.config` (struct literal consumes it). Same
         // pattern as the two Arc clones above.
         let package_dir = config.package_dir.clone();
-
-        // Design 27 §3.2: routing table lives next to the agent's other
-        // work-dir state; load-or-empty, never fatal.
-        let intent_map = super::intent_routing::IntentSessionMap::load(
-            std::path::Path::new(&core.config.work_dir),
-        );
-        // ADR-099 D5: the terminal-session mirror lives next to the routing
-        // table; load-or-empty, never fatal (see `TerminalSessions`).
-        let terminal_sessions = super::intent_routing::TerminalSessions::load(
-            std::path::Path::new(&core.config.work_dir),
-        );
 
         Self {
             core,
@@ -524,8 +504,6 @@ impl SessionManager {
             latest_session,
             session_configs,
             package_dir,
-            intent_map: std::sync::Mutex::new(intent_map),
-            terminal_sessions,
         }
     }
 
@@ -561,6 +539,42 @@ impl SessionManager {
         }
     }
 
+    /// The Chat session an execution session belongs to — ADR-106 D11's single
+    /// durable truth, read from the session's own record.
+    ///
+    /// Live first (an in-memory session holds the newest value), then the meta
+    /// store: most chat candidates are idle-evicted, so a binding check that
+    /// only looked at live sessions would read "unbound" for a session that is
+    /// firmly bound and hand it to the wrong chat.
+    pub(crate) fn bound_chat(&self, session_id: &str) -> Option<String> {
+        if let Some(handle) = self.get_session(session_id)
+            && let Some(conv) = &handle.conversation
+            && let Some(chat) = conv.chat_session_id().filter(|s| !s.is_empty())
+        {
+            return Some(chat);
+        }
+        let dir = std::path::Path::new(&self.core.config.work_dir).join("conversations");
+        crate::conversation::read_session_meta(&dir, session_id)
+            .ok()
+            .and_then(|meta| meta.chat_session_id.filter(|s| !s.is_empty()))
+    }
+
+    /// The agent's session-meta store — ADR-106 D11's one home for what a
+    /// session is bound to (its Chat) and what it owns (its intent context).
+    ///
+    /// Reached through `conversation`'s process-wide registry, so it is the same
+    /// connection every other session-meta read uses. The `intent_*` calls are
+    /// the only writers of the two intent columns, and the session's own
+    /// `write_meta` never lists them, so neither writer can erase the other.
+    fn meta_store(
+        &self,
+    ) -> Result<std::sync::Arc<dyn acowork_core::session_meta::SessionMetaStore>> {
+        crate::conversation::session_meta_store(
+            &std::path::Path::new(&self.core.config.work_dir).join("conversations"),
+        )
+        .map_err(|e| RuntimeError::Config(format!("session meta store unavailable: {e}")))
+    }
+
     /// Design 27 §6.1: resolve (or create) the execution session that owns an
     /// intent context for this agent. `key` comes from
     /// `intent_routing::routing_key`. A mapped session that is still Active is
@@ -586,24 +600,24 @@ impl SessionManager {
         source_chat_session_id: Option<&str>,
         initiator: Option<&str>,
     ) -> Result<(String, bool)> {
-        let mapped = {
-            let map = self
-                .intent_map
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            map.get(key).map(|e| e.session_id.clone())
-        };
+        // ADR-106 D11: the binding is a column on the session's own row, read
+        // through the meta store — there is no side file, so no second truth that
+        // can fall out of step with the session it names.
+        let store = self.meta_store()?;
+        let mapped = store
+            .intent_lookup(key)
+            .map_err(|e| RuntimeError::Config(format!("intent routing read failed: {e}")))?;
         // Design 27 §4.5: the seed is a suggestion inside this agent's own
         // allowed set; one that survives clamping empty carries no opinion.
         let seed = self.clamp_seed(seed);
-        // ADR-099: the binding follows the envelope's `source_chat_session_id`
-        // first — a PM task dispatched from the project group must be bound to
-        // that group so it can be continued there. Legacy `chat:` keys still
-        // derive it from the key itself; every other key binds nothing.
+        // ADR-099: the binding follows the envelope's `source_chat_session_id` —
+        // a PM task dispatched from the project group must be bound to that group
+        // so it can be continued there. A key that arrives with no Chat binds
+        // nothing (ADR-106 D11 retired deriving a Chat id from a `chat:` key —
+        // Chat turns no longer route through a mapping at all).
         let chat_id = source_chat_session_id
             .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .or_else(|| super::intent_routing::chat_id_from_key(key));
+            .filter(|s| !s.is_empty());
         if let Some(sid) = &mapped {
             if self.get_session(sid).is_some() {
                 // ADR-099: an explicit `session_config` never forces a new
@@ -628,11 +642,16 @@ impl SessionManager {
         }
         let new_sid = self.create_intent_session(initiator, seed.as_ref()).await?;
         self.stamp_chat_binding(chat_id, &new_sid);
-        self.intent_map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key.to_string(), new_sid.clone())
-            .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
+        if let Err(e) = store.intent_bind(&new_sid, key) {
+            // The session is live and taking the turn; losing only the binding
+            // costs the NEXT follow-up one fresh session, so it is logged rather
+            // than failed. A whole delivery that errors back would throw the
+            // human's message away to protect a hint.
+            tracing::warn!(
+                key, session_id = %new_sid, error = %e,
+                "intent routing bind failed — a follow-up on this context may open a fresh session"
+            );
+        }
         Ok((new_sid, true))
     }
 
@@ -672,8 +691,11 @@ impl SessionManager {
     /// the older sessions the candidate list exists for.
     ///
     /// The Runtime-only facts are folded in here — live status (busy / idle /
-    /// broken), the `chat:` mapping (the `current` mark) and which sessions
-    /// belong to a PM task chain.
+    /// broken) and, from `bindings`, which sessions belong to a PM task chain and
+    /// which of those are over (ADR-106 D11: both read off the sessions' own
+    /// rows). There is no `current` mark any more — nothing maps a Chat to one
+    /// session, and the transcript's reference rows are the record of what this
+    /// chat has actually run.
     ///
     /// The visibility rules themselves live in
     /// [`crate::agent::session::chat_candidates::build_candidates`], which is
@@ -681,6 +703,7 @@ impl SessionManager {
     pub fn resolve_candidates(
         &self,
         rows: &[(String, crate::conversation::SessionMeta)],
+        bindings: &[acowork_core::session_meta::IntentBinding],
         chat_session_id: &str,
         owner_user_id: Option<&str>,
         surface: crate::agent::session::chat_candidates::CandidateSurface,
@@ -695,27 +718,19 @@ impl SessionManager {
             }
         }
 
-        let chat_key = super::intent_routing::chat_key(chat_session_id, owner_user_id.unwrap_or(""));
-        let mut current: Option<String> = None;
+        // ADR-106 D11: the task chains and the terminal marks come from the
+        // sessions' own rows. `bindings` was read off disk before this lock was
+        // taken, exactly like `rows`.
         let mut task_ids = HashSet::new();
-        {
-            let map = self
-                .intent_map
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(entry) = map.get(&chat_key) {
-                current = Some(entry.session_id.clone());
+        let mut terminal = HashSet::new();
+        for binding in bindings {
+            if acowork_core::intent::is_task_routing_key(&binding.intent_key) {
+                task_ids.insert(binding.session_id.clone());
             }
-            for (key, entry) in map.iter() {
-                if acowork_core::intent::is_task_routing_key(key) {
-                    task_ids.insert(entry.session_id.clone());
-                }
+            if binding.closed {
+                terminal.insert(binding.session_id.clone());
             }
         }
-        // A PM task's terminal state is mirrored here by
-        // `close_intent_context` (the Gateway calls it once on the task's
-        // terminal transition).
-        let terminal = self.terminal_sessions.ids();
         build_candidates(
             rows,
             &live,
@@ -723,7 +738,6 @@ impl SessionManager {
                 chat_session_id,
                 owner_user_id,
                 surface,
-                current_session_id: current.as_deref(),
                 task_session_ids: &task_ids,
                 terminal_session_ids: &terminal,
                 max,
@@ -731,16 +745,110 @@ impl SessionManager {
         )
     }
 
-    /// ADR-099: deliver a routed Chat message to the session the router
-    /// picked, and keep the `chat:` mapping in step with that choice.
+    /// The level-3 candidate set of one chat: every execution session this
+    /// initiator may continue in it, newest first.
+    ///
+    /// Exposed as a list because D6 needs the count, not one answer: zero means
+    /// there is nothing to continue and the ladder moves on, one means the
+    /// continuation is a fact, and several means the Runtime is being asked to
+    /// choose — which it is not allowed to do silently.
+    pub fn chat_continuations(
+        &self,
+        chat_session_id: &str,
+        initiator: Option<&str>,
+        surface: crate::agent::session::chat_candidates::CandidateSurface,
+    ) -> Vec<crate::agent::session::chat_candidates::SessionCandidate> {
+        use crate::agent::session::chat_candidates::{
+            deliverable_candidates, scan_bindings, scan_rows,
+        };
+
+        if chat_session_id.is_empty() {
+            return Vec::new();
+        }
+        let work_dir = &self.core.config.work_dir;
+        let rows = scan_rows(work_dir);
+        let terminal: HashSet<String> = scan_bindings(work_dir)
+            .iter()
+            .filter(|binding| binding.closed)
+            .map(|binding| binding.session_id.clone())
+            .collect();
+        deliverable_candidates(&rows, chat_session_id, initiator, surface, &terminal)
+    }
+
+    /// ADR-106 D6 level 3, deterministic form: the session this chat may
+    /// continue, but only when there is exactly one candidate and therefore no
+    /// decision to make.
+    ///
+    /// This replaces the retired `chat:{chat_session_id}:{initiator}` mapping. It
+    /// answers the same question ("where does this follow-up go?") from the
+    /// binding on the sessions' own rows (D11) instead of a pointer the Runtime
+    /// had to keep in step with sessions it does not own — and when the chat
+    /// holds several sessions it reports `None`, because "the most recent one" is
+    /// a guess about intent, not a fact about address.
+    ///
+    /// Reads the session-meta index off disk. That is a filesystem walk under
+    /// this lock, accepted here because this is the no-router path: the router
+    /// turn does the same read outside the lock (see [`Self::resolve_candidates`]).
+    pub fn chat_continuation(
+        &self,
+        chat_session_id: &str,
+        initiator: Option<&str>,
+        surface: crate::agent::session::chat_candidates::CandidateSurface,
+    ) -> Option<String> {
+        let candidates = self.chat_continuations(chat_session_id, initiator, surface);
+        match candidates.as_slice() {
+            [only] => Some(only.session_id.clone()),
+            _ => None,
+        }
+    }
+
+    /// ADR-106 D6 level 3, several-candidate form: ask the human which session
+    /// the `@` meant instead of picking one.
+    ///
+    /// Thin wrapper over [`crate::agent::intent_turn::emit_session_choice`]
+    /// carrying this agent's own write coordinates: the row is authored by the
+    /// agent instance (a participant of the chat), which is what the Gateway's
+    /// `chat-append` gate checks.
+    pub async fn emit_session_choice(
+        &self,
+        chat_session_id: &str,
+        to: &str,
+        in_reply_to: &str,
+        request_message_id: &str,
+        notice_type: &str,
+        options: Vec<serde_json::Value>,
+    ) -> std::result::Result<(), String> {
+        let gateway_host = self
+            .core
+            .config
+            .gateway_host
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let node_token = self.core.config.mqtt_password.clone().unwrap_or_default();
+        crate::agent::intent_turn::emit_session_choice(
+            &self.core.config.agent_instance_id,
+            &gateway_host,
+            &node_token,
+            chat_session_id,
+            to,
+            in_reply_to,
+            request_message_id,
+            notice_type,
+            options,
+        )
+        .await
+    }
+
+    /// ADR-099: deliver a routed Chat message into the session the router picked.
     ///
     /// - `Target::New` always creates; `Target::Existing` reuses, reopening a
     ///   closed session when needed and falling back to a fresh one when the
     ///   target no longer exists on disk.
-    /// - The mapping is re-pointed at the chosen session, because the
-    ///   candidate list reads it. Selecting an older session is a legitimate
-    ///   choice ("continue that thing from before") and must not leave the chat
-    ///   pointing somewhere else.
+    /// - The Chat binding is stamped on the session it names, and that is the
+    ///   whole routing state a Chat has (ADR-106 D11): no "current session"
+    ///   mapping is re-pointed, because a Chat's continuity is its transcript —
+    ///   the reference rows say which sessions this chat has run, and the
+    ///   candidate list is derived from those same session rows.
     /// - Nothing else opens a new session. A compacted session continues to
     ///   accept turns in place — compaction's whole purpose — and the router is
     ///   the only judge of whether this turn is new work.
@@ -757,19 +865,38 @@ impl SessionManager {
     ) -> Result<(String, bool)> {
         use crate::agent::chat_router::tool::Target;
 
-        let key = super::intent_routing::chat_key(chat_session_id, initiator.unwrap_or(""));
         let seed = self.clamp_seed(seed);
 
         let existing = match target {
             Target::New => None,
             Target::Existing(session_id) => {
+                // ADR-106 D11: a session belongs to exactly one Chat, and the
+                // binding on its own record is that truth. Addressing a session
+                // that belongs to another chat is never honoured — dispatching
+                // into it would stamp this chat onto someone else's work and
+                // render its blocks in the wrong transcript (acceptance 9).
+                // Refusing the delivery is the honest failure: an address that
+                // cannot be served must not be answered with a different one.
+                if let Some(owner) = self.bound_chat(&session_id)
+                    && !chat_session_id.is_empty()
+                    && owner != chat_session_id
+                {
+                    tracing::warn!(
+                        session_id = %session_id, bound_chat = %owner, asked_from = %chat_session_id,
+                        "chat dispatch addressed a session owned by another chat — refusing"
+                    );
+                    return Err(RuntimeError::Config(format!(
+                        "addressed session {session_id} belongs to another chat session"
+                    )));
+                }
                 let alive = self.get_session(&session_id).is_some()
                     || self.resume_session(&session_id).await?.is_some();
                 if alive {
-                    // A reopened task must be routable again: the terminal
-                    // mirror is a hint, the live session is the truth.
-                    if let Err(e) = self.terminal_sessions.forget(&session_id) {
-                        tracing::warn!(session_id = %session_id, error = %e, "terminal-session mirror rewrite failed");
+                    // A reopened task must be routable again: the terminal mark
+                    // is a leftover from the last close, the live session is the
+                    // truth (ADR-106 D11: the mark is a column on its own row).
+                    if let Err(e) = self.meta_store()?.intent_reopen(&session_id) {
+                        tracing::warn!(session_id = %session_id, error = %e, "intent terminal-mark reopen failed");
                     }
                     Some(session_id)
                 } else {
@@ -783,23 +910,12 @@ impl SessionManager {
         };
 
         if let Some(session_id) = existing {
-            let already_current = {
-                let map = self
-                    .intent_map
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                matches!(map.get(&key), Some(entry) if entry.session_id == session_id)
-            };
-            if !already_current {
-                self.intent_map
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(key.clone(), session_id.clone())
-                    .map_err(|e| {
-                        RuntimeError::Config(format!("intent routing persist failed: {e}"))
-                    })?;
-                self.stamp_chat_binding(Some(chat_session_id), &session_id);
-            }
+            // ADR-106 D11: the binding is the only fact to record, and recording
+            // it is idempotent — an already-bound session keeps its own Chat, and
+            // one that arrived without a binding (a manual run the human just
+            // addressed by name) takes this chat as its owner, which is what lets
+            // its blocks be cached and rendered here.
+            self.stamp_chat_binding(Some(chat_session_id), &session_id);
             // ADR-099 revision: a seed is the chat's preference for the work it
             // has not started yet, not a command into a running session. A Chat
             // is one conversation over several execution sessions — possibly
@@ -811,47 +927,29 @@ impl SessionManager {
 
         let new_sid = self.create_intent_session(initiator, seed.as_ref()).await?;
         self.stamp_chat_binding(Some(chat_session_id), &new_sid);
-        self.intent_map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, new_sid.clone())
-            .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
         Ok((new_sid, true))
     }
 
     /// Design 27 §6.2: a PM task reaching a terminal state ends its
-    /// logical execution context — close the mapped session and drop the
-    /// mapping. Idempotent: unknown keys are a no-op.
+    /// logical execution context — close the session holding it and mark the
+    /// binding closed. Idempotent: an unknown key is a no-op.
     ///
-    /// ADR-099 D5: a `conv:task:` key also records the session id in the
-    /// terminal mirror, so the Chat Router stops offering it as a candidate.
-    /// `chat:` / `conv:` keys describe a conversation, not a finished task —
-    /// they are never closed on their own; the router re-points a chat at
-    /// another session when the user starts new work.
+    /// ADR-106 D11: the mark is a column on that session's own row, so one write
+    /// both ends the routing binding (`intent_lookup` returns open rows only) and
+    /// takes the session out of the Chat Router's candidate list. Only a task key
+    /// is ever closed here — a `conv:` context describes a conversation, not a
+    /// finished task, and nothing ends it on its own.
     pub async fn close_intent_context(&mut self, key: &str) -> Result<()> {
-        let mapped = self
-            .intent_map
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .map(|e| e.session_id.clone());
-        if let Some(sid) = mapped {
-            // The mirror is advisory: a failed write must not block the close.
-            if acowork_core::intent::is_task_routing_key(key)
-                && let Err(e) = self.terminal_sessions.record(&sid)
-            {
-                tracing::warn!(key, session_id = %sid, error = %e, "terminal-session mirror rewrite failed");
-            }
+        let closed = self
+            .meta_store()?
+            .intent_close(key)
+            .map_err(|e| RuntimeError::Config(format!("intent close failed: {e}")))?;
+        for sid in closed {
             // `close_session` errors when the session already exited —
             // idempotent close, log-and-continue.
             if let Err(e) = self.close_session(&sid).await {
                 tracing::debug!(key, session_id = %sid, error = %e, "intent context session already closed");
             }
-            self.intent_map
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(key)
-                .map_err(|e| RuntimeError::Config(format!("intent routing persist failed: {e}")))?;
             tracing::info!(key, session_id = %sid, "Intent execution context closed (task terminal, design 27 §6.2)");
         }
         Ok(())
@@ -1854,6 +1952,23 @@ impl SessionManager {
                     path = %file_path.display(),
                     error = %e,
                     "Failed to delete session JSONL file"
+                );
+            }
+        }
+
+        // 3b. ADR-106 D4: the round side table goes with the transcript it
+        // indexes. Leaving it behind would keep a derivable-but-unreferenced
+        // record of what was said in a session the user deleted.
+        let rounds_path = crate::rounds::rounds_path(&conversations_dir, session_id);
+        match std::fs::remove_file(&rounds_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    path = %rounds_path.display(),
+                    error = %e,
+                    "Failed to delete round side table"
                 );
             }
         }
@@ -5744,10 +5859,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 
-    /// Design 27 §8.2: a session created through a `chat:` routing key is
-    /// bound to that Chat session and stamped `Members`-visible on disk —
-    /// the binding is what the read check matches the injected scope
-    /// against. `conv:` keys must not get the binding (pre-Wave-4 shape).
+    /// Design 27 §8.2 / ADR-106 D11: the Chat binding travels with the intent's
+    /// source, not with its routing key — a context dispatched from a group is
+    /// bound to that group and stamped `Members`-visible on disk, which is what
+    /// the read check matches the injected scope against. An intent with no
+    /// source chat binds nothing (pre-Wave-4 shape).
     #[tokio::test]
     async fn chat_routed_sessions_carry_the_members_binding() {
         use crate::conversation::{SessionScope, SessionVisibility, read_session_meta};
@@ -5788,44 +5904,33 @@ mod tests {
         let conversations = work_dir.join("conversations");
 
         let (sid, _) = manager
-            .route_intent_session("chat:cs-group-1", None, None, None)
-            .await
-            .expect("route chat session");
-        let meta = read_session_meta(&conversations, &sid).expect("read chat-bound meta");
-        assert_eq!(meta.visibility, Some(SessionVisibility::Members));
-        assert_eq!(meta.chat_session_id.as_deref(), Some("cs-group-1"));
-        // The routing reuse path must not re-stamp or lose the binding.
-        let (sid2, _) = manager
-            .route_intent_session("chat:cs-group-1", None, None, None)
-            .await
-            .expect("reuse chat session");
-        assert_eq!(sid, sid2, "same chat session, same execution session");
-        let meta2 = read_session_meta(&conversations, &sid2).expect("reread meta");
-        assert_eq!(meta2.chat_session_id.as_deref(), Some("cs-group-1"));
-
-        // ADR-076 §决策 4: two members addressing the same agent in the same
-        // group chat are two pieces of work. Their routing keys differ, so
-        // the second @ opens its own session instead of typing into the
-        // first one's (the multi-user execution session the design forbids).
-        let (alice_sid, alice_new) = manager
             .route_intent_session(
-                &crate::agent::session::intent_routing::chat_key("cs-group-1", "u-alice"),
+                "conv:c-group-1",
                 None,
                 Some("cs-group-1"),
                 Some("u-alice"),
             )
             .await
-            .expect("route alice");
-        let (bob_sid, bob_new) = manager
-            .route_intent_session(
-                &crate::agent::session::intent_routing::chat_key("cs-group-1", "u-bob"),
-                None,
-                Some("cs-group-1"),
-                Some("u-bob"),
-            )
+            .expect("route chat session");
+        let meta = read_session_meta(&conversations, &sid).expect("read chat-bound meta");
+        assert_eq!(meta.visibility, Some(SessionVisibility::Members));
+        assert_eq!(meta.chat_session_id.as_deref(), Some("cs-group-1"));
+        assert_eq!(meta.initiator.as_deref(), Some("u-alice"));
+
+        // ADR-076 §决策 4: two members addressing the same agent in the same
+        // group chat are two pieces of work, so each dispatch owns its session —
+        // nobody types into somebody else's conversation, and an admin cannot
+        // write either of them.
+        use crate::agent::chat_router::tool::Target;
+        let (alice_sid, alice_new) = manager
+            .chat_dispatch("cs-group-1", Target::New, None, Some("u-alice"))
             .await
-            .expect("route bob");
-        assert!(alice_new && bob_new, "a different initiator is a new task");
+            .expect("dispatch alice");
+        let (bob_sid, bob_new) = manager
+            .chat_dispatch("cs-group-1", Target::New, None, Some("u-bob"))
+            .await
+            .expect("dispatch bob");
+        assert!(alice_new && bob_new, "a dispatch creates its own session");
         assert_ne!(alice_sid, bob_sid, "one execution session per initiator");
         let alice_meta = read_session_meta(&conversations, &alice_sid).expect("alice meta");
         let bob_meta = read_session_meta(&conversations, &bob_sid).expect("bob meta");
@@ -5838,6 +5943,42 @@ mod tests {
         assert!(
             !alice_meta.is_writable_by(&SessionScope::admin("u-admin")),
             "and neither must an admin"
+        );
+
+        // The routing reuse path must not re-stamp or lose the binding, and
+        // addressing a session that belongs to another chat is refused rather
+        // than re-bound (D11 / acceptance 9): delivering into it would render
+        // another chat's work inside this transcript.
+        let (sid2, opened_new) = manager
+            .chat_dispatch("cs-group-1", Target::Existing(sid.clone()), None, Some("u-alice"))
+            .await
+            .expect("reuse chat session");
+        assert_eq!(sid, sid2, "same chat session, same execution session");
+        assert!(!opened_new, "an address that exists opens nothing");
+        let (foreign_sid, _) = manager
+            .chat_dispatch("cs-other-chat", Target::New, None, Some("u-carol"))
+            .await
+            .expect("dispatch in another chat");
+        assert!(
+            manager
+                .chat_dispatch(
+                    "cs-group-1",
+                    Target::Existing(foreign_sid.clone()),
+                    None,
+                    Some("u-alice"),
+                )
+                .await
+                .is_err(),
+            "a session bound to another chat is never delivered into here"
+        );
+        let meta2 = read_session_meta(&conversations, &sid).expect("reread meta");
+        assert_eq!(meta2.chat_session_id.as_deref(), Some("cs-group-1"));
+        let foreign_meta =
+            read_session_meta(&conversations, &foreign_sid).expect("reread foreign meta");
+        assert_eq!(
+            foreign_meta.chat_session_id.as_deref(),
+            Some("cs-other-chat"),
+            "the refused address left the other chat's binding untouched"
         );
 
         // A `conv:` key keeps the pre-Wave-4 shape: no binding, private.
@@ -5860,14 +6001,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work_dir);
     }
 
-    /// ADR-099 D5: a PM task dispatched from a group chat is bound to that
-    /// group even though it routes on a `conv:task:` key — that binding is
-    /// what lets the group ask a follow-up about the task. When the task
-    /// reaches a terminal state the session enters the terminal mirror (and
-    /// thus leaves every candidate list), and an intent without a source chat
-    /// still binds nothing.
+    /// ADR-099 D5 / ADR-106 D11: a PM task dispatched from a group chat is bound
+    /// to that group even though it routes on a `conv:task:` key — that binding
+    /// is what lets the group ask a follow-up about the task. When the task
+    /// reaches a terminal state the session's own row carries the closed mark
+    /// (and thus leaves every candidate list), and an intent without a source
+    /// chat still binds nothing.
     #[tokio::test]
-    async fn task_sessions_bind_their_source_group_and_terminal_closes_are_mirrored() {
+    async fn task_sessions_bind_their_source_group_and_terminal_closes_are_recorded() {
         use crate::conversation::{read_session_meta, SessionVisibility};
 
         let work_dir =
@@ -5918,11 +6059,24 @@ mod tests {
         assert_eq!(meta.visibility, Some(SessionVisibility::Members));
 
         manager.close_intent_context(key).await.expect("close terminal");
-        assert!(manager.terminal_sessions.contains(&sid));
-        // The mirror is rebuilt from disk: a restart keeps the exclusion.
-        assert!(
-            crate::agent::session::intent_routing::TerminalSessions::load(&work_dir).contains(&sid)
+        // One durable truth (D11): the session's own row. A closed context
+        // routes to nobody, while the binding stays recorded so the candidate
+        // builder still knows this chain is over — and it survives a restart
+        // because it is a column, not a process-side cache.
+        let store = crate::conversation::session_meta_store(&conversations).expect("meta store");
+        assert_eq!(
+            store.intent_lookup(key).expect("lookup"),
+            None,
+            "a closed context must not be reused by a follow-up"
         );
+        let bindings = store.intent_bindings().expect("bindings");
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| binding.session_id == sid && binding.closed),
+            "the closed chain still reads as terminal"
+        );
+        drop(store);
         // Closing ends the context, never the history.
         let meta2 = read_session_meta(&conversations, &sid).expect("meta survives close");
         assert_eq!(meta2.chat_session_id.as_deref(), Some("cs-project-group"));
@@ -5980,7 +6134,7 @@ mod tests {
         )));
 
         let (sid, first_new) = manager
-            .route_intent_session("chat:cs-not3", None, None, None)
+            .route_intent_session("conv:c-not3", None, None, None)
             .await
             .expect("create chat session");
         assert!(first_new, "a first routing creates the session");
@@ -5991,7 +6145,7 @@ mod tests {
             ..Default::default()
         };
         let (sid2, opened_new) = manager
-            .route_intent_session("chat:cs-not3", Some(seed), None, None)
+            .route_intent_session("conv:c-not3", Some(seed), None, None)
             .await
             .expect("reuse under a config seed");
         assert_eq!(sid, sid2, "a config seed alone creates nothing");
@@ -6047,12 +6201,11 @@ mod tests {
         (manager, work_dir)
     }
 
-    /// ADR-099 revision: a `session_config` draft is an initial value for the
-    /// session a dispatch CREATES. On either reuse branch — the target already
-    /// being the mapped session, or a different live session whose mapping the
-    /// dispatch re-points — the reused session keeps its own config, because a
-    /// Chat may have several execution sessions live at once and a message must
-    /// not re-model or re-home one the user is watching.
+    /// ADR-099 revision / ADR-106 D11: a `session_config` draft is an initial
+    /// value for the session a dispatch CREATES. On the reuse branch the session
+    /// keeps its own config, because a Chat may have several execution sessions
+    /// live at once and a message must not re-model or re-home one the user is
+    /// watching. Nothing is ever re-pointed: a Chat has no "current session".
     #[tokio::test]
     async fn chat_dispatch_applies_the_seed_only_when_it_opens_a_session() {
         use crate::agent::chat_router::tool::Target;
@@ -6081,13 +6234,13 @@ mod tests {
             "the session created by this dispatch takes the seed"
         );
 
-        // Reuse branch A — target is the mapped session: no re-point, and the
-        // session's own config stays as it is.
+        // Reuse branch A — target is the session already bound to this chat:
+        // the session's own config stays as it is.
         let (same, opened_new) = manager
             .chat_dispatch("cs-cur", Target::Existing(cur.clone()), Some(effort("low")), None)
             .await
             .expect("dispatch to the current session");
-        assert_eq!(same, cur, "continuing the mapped target creates nothing");
+        assert_eq!(same, cur, "continuing a bound target creates nothing");
         assert!(!opened_new, "a reuse reports opened_new = false");
         assert_eq!(
             effective(&manager, &cur).as_deref(),
@@ -6095,8 +6248,8 @@ mod tests {
             "a reused session is not re-configured by the draft"
         );
 
-        // Reuse branch B — target is a different live session: the chat mapping
-        // follows the choice; the session's config does not follow the draft.
+        // Reuse branch B — target is a different live session of the same chat:
+        // the address is honoured, the session's config does not follow the draft.
         let (other, _) = manager
             .chat_dispatch("cs-two", Target::New, Some(effort("medium")), None)
             .await
@@ -6119,28 +6272,24 @@ mod tests {
         assert_eq!(
             effective(&manager, &other).as_deref(),
             Some("medium"),
-            "switching to a live session is a reuse, not a creation — its own config wins"
+            "a dispatch into another session does not re-configure it"
         );
         assert_eq!(effective(&manager, &prev).as_deref(), None);
-        // The chat now resolves to the session it was pointed at.
-        let (reused, _) = manager
-            .route_intent_session("chat:cs-two", None, None, None)
-            .await
-            .expect("mapping follows the dispatch");
-        assert_eq!(reused, other, "the mapping was re-pointed");
-
-        // The intent path holds the same rule: a seed on a mapped, live session
-        // is not applied.
-        let (again, _) = manager
-            .route_intent_session("chat:cs-two", Some(effort("high")), None, None)
-            .await
-            .expect("routing the next message reuses it");
-        assert_eq!(again, other);
-        assert_eq!(
-            effective(&manager, &other).as_deref(),
-            Some("medium"),
-            "route_intent_session reuses without re-configuring"
-        );
+        // ADR-106 D11: the chat keeps every session bound to it. There is no
+        // mapping to re-point, so addressing an older session leaves the others
+        // where they were — the transcript's reference rows are the record of
+        // which one this turn ran in.
+        let conversations = work_dir.join("conversations");
+        for sid in [&other, &prev] {
+            assert_eq!(
+                crate::conversation::read_session_meta(&conversations, sid)
+                    .expect("meta")
+                    .chat_session_id
+                    .as_deref(),
+                Some("cs-two"),
+                "both sessions stay bound to the chat they were dispatched for"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }
@@ -6163,28 +6312,38 @@ mod tests {
             .expect("first dispatch creates");
         assert!(fresh, "Target::New on a fresh chat creates a session");
 
-        // Registry reuse: same chat, same session, not new.
-        let (again, again_new) = manager
-            .route_intent_session("chat:cs-open", None, None, None)
-            .await
-            .expect("mapping reuse");
-        assert_eq!(again, first);
-        assert!(!again_new, "a mapped session is never 'new'");
+        // ADR-106 D6 level 3: with exactly one routable session in the chat, the
+        // deterministic continuation names it — no registry, no guess.
+        use crate::agent::session::chat_candidates::CandidateSurface;
+        assert_eq!(
+            manager
+                .chat_continuation("cs-open", None, CandidateSurface::Direct)
+                .as_deref(),
+            Some(first.as_str()),
+            "one candidate is the whole answer"
+        );
 
-        // Existing-target dispatch to the mapped session: reuse, not new.
+        // Existing-target dispatch to that session: reuse, not new.
         let (_, onto_same) = manager
             .chat_dispatch("cs-open", Target::Existing(first.clone()), None, None)
             .await
             .expect("existing target");
         assert!(!onto_same, "dispatch(existing) never reports new");
 
-        // A second chat creating its own session is new again.
+        // A second session of the same chat creating its own is new again — and
+        // makes the continuation ambiguous, because two candidates is a decision
+        // about intent, not a fact about address.
         let (second, fresh2) = manager
             .chat_dispatch("cs-open", Target::New, None, None)
             .await
             .expect("second dispatch creates");
         assert!(fresh2, "Target::New always starts fresh");
         assert_ne!(second, first);
+        assert_eq!(
+            manager.chat_continuation("cs-open", None, CandidateSurface::Direct),
+            None,
+            "several routable sessions continue nothing"
+        );
 
         // A brand-new registry key creates — and is reported as new, so a
         // first PM task also gets an honest "启动新任务" reaction.

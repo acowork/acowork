@@ -29,11 +29,33 @@
  *     router's history budget the most recent turn actually consumed.
  *     This is the Chat-side analogue of the exec surface's
  *     `used / window`.
- *   - the small `Used X / Y` = the same two numbers in absolute tokens.
+ *   - the small `Used this turn X / Y` = the same two numbers in absolute
+ *     tokens. "this turn" is stated because the popover carries a SECOND
+ *     measure that is cumulative — see below.
  *   - the pencil edits `Y` — the SAME field the Agent Setup panel's
  *     "Chat Session Router" card edits
  *     (`chat_router.history_max_tokens`, see `lib/chatRouterConfig.ts`).
  *     One value, two surfaces, one wire field.
+ *
+ * **Two different measures live in this one card** (the reason each section
+ * header names its own measure): the headline is a PER-TURN snapshot (the
+ * latest router turn's projected history window, `history_tokens`), while the
+ * `By model` / `By agent` rows are WHOLE-CHAT cumulative `total_input +
+ * total_output`. A chat with one turn shows the same tokens in both; after
+ * that the cumulative figure keeps growing past the per-turn one — a mismatch
+ * by design, not a miscomputation. The model share percentage only renders
+ * when more than one model appears: a lone `100%` carries no information and
+ * reads like it belongs to the headline's percent.
+ *
+ * **One type scale, four steps** (borrowed wholesale from the exec surface so
+ * the two popovers cannot drift): `text-sm` for the popover title and every
+ * section header — the measure goes in the label, the exec surface's
+ * "Cache hit rate (cumulative)" grammar — `text-xs` for rows and their
+ * sub-lines, `text-10` for editor helpers and errors, `text-11` for the
+ * editor's buttons, plus the shared `clamp()` headline figure. Do not add a
+ * size outside that set; a section header and its column caption at two
+ * different sizes was exactly the "why is `By model` bigger than `chat total`"
+ * report.
  *
  * **Data.** The token ledger each agent participant keeps for the chat
  * (`chat_token_usage`, plan §4.6 phase two) — cumulative spend attributed
@@ -309,7 +331,12 @@ export function ChatUsageIcon({
                     : undefined
                 }
               >
-                {t("contextUsage.used")} {" "}
+                {/* "this turn" is load-bearing: the headline's `used` is the
+                    LATEST router turn's history-window occupancy, while the
+                    by-model rows below are whole-chat cumulative. Two
+                    different measures in one card, so each one says which
+                    it is. */}
+                {t("chatUsage.usedThisTurn")} {" "}
                 <span className="font-mono text-text-secondary ">
                   {formatTokens(usedTokens ?? undefined)}
                 </span>
@@ -444,7 +471,13 @@ export function ChatUsageIcon({
                 {segments.length > 0 && (
                   <>
                     <div className="mt-2 border-t border-border-divider pt-2">
-                      <div className="mb-1 text-text-tertiary">
+                      {/* Section header = the popover's ONE header step
+                          (`text-sm`, the cache block's size), with the
+                          measure in the label itself — the exec surface's
+                          grammar ("Cache hit rate (cumulative)"). A separate
+                          smaller column caption put two font sizes on one
+                          line and read as an accident. */}
+                      <div className="mb-1 text-sm font-normal text-text-secondary">
                         {t("chatUsage.byModel")}
                       </div>
                       {segments.map((seg) => (
@@ -464,7 +497,12 @@ export function ChatUsageIcon({
                             </span>
                           </span>
                           <span className="ml-2 shrink-0 font-mono text-text-tertiary">
-                            {formatTokens(seg.value)} · {seg.sharePct}%
+                            {formatTokens(seg.value)}
+                            {/* A share is only information when there is
+                                another model to compare against; a lone
+                                "100%" reads like it belongs to the
+                                headline's percent and is pure noise. */}
+                            {segments.length > 1 && ` · ${seg.sharePct}%`}
                           </span>
                         </div>
                       ))}
@@ -473,7 +511,7 @@ export function ChatUsageIcon({
                 )}
                 {multiAgent && (
                   <div className="mt-2 border-t border-border-divider pt-2">
-                    <div className="mb-1 text-text-tertiary">
+                    <div className="mb-1 text-sm font-normal text-text-secondary">
                       {t("chatUsage.byAgent")}
                     </div>
                     {summary.perAgent.map(({ agentId, row }) => (
@@ -484,12 +522,15 @@ export function ChatUsageIcon({
                         <span className="truncate text-text-secondary">
                           {resolveName?.(agentId) || agentId.slice(0, 8)}
                         </span>
+                        {/* Tokens only. The call count used to ride along
+                            as a bare `· 4` — a second unlabelled number,
+                            and one the docstring above already promised
+                            not to render (ledger bookkeeping). */}
                         <span className="ml-2 shrink-0 font-mono text-text-tertiary">
                           {formatTokens(
                             (row?.tokens.total_input ?? 0) +
                               (row?.tokens.total_output ?? 0),
-                          )}{" "}
-                          · {row?.llm_call_count ?? 0}
+                          )}
                         </span>
                       </div>
                     ))}

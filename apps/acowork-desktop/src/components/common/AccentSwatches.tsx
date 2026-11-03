@@ -25,6 +25,12 @@ import { Tooltip } from "../common/Tooltip";
  * one while a preset is active (its swatch, unringed), and a saved one that is
  * active (its swatch, ringed). Collapsing the first two is what made a custom
  * color look destroyed the moment the user tried a preset.
+ *
+ * Clicking the slot IS the choice: it commits the saved custom color as the
+ * active accent and only then opens the picker for an optional re-pick.
+ * Making the commit depend on the picker firing `change` meant "I just want to
+ * switch to my custom color" was impossible — a user who closed the picker
+ * without touching it stayed on the preset.
  */
 export function AccentSwatches({
   value,
@@ -92,7 +98,15 @@ export function AccentSwatches({
       <Tooltip content={t("accentColors.custom")} variant="plain">
         <button
           type="button"
-          onClick={() => inputRef.current?.click()}
+          onClick={() => {
+            // Switching to the saved custom color is a complete action on its
+            // own — commit it before the picker opens, so closing the picker
+            // untouched leaves the custom slot selected. With no custom color
+            // yet there is nothing to select; the picker's `change` supplies
+            // it.
+            if (hasCustom && !customActive) onChange(customColor);
+            inputRef.current?.click();
+          }}
           aria-label={t("accentColors.custom")}
           aria-pressed={customActive}
           data-accent-id="custom"

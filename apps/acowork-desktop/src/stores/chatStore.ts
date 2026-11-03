@@ -22,6 +22,8 @@ import { verifyAgentHealth, fetchProviderModels } from "../lib/gateway-api";
 import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
+import { blockRefOf } from "../lib/chatBlocks";
+import { noteRoundState } from "./chatBlockStore";
 import type { LlmAvailability } from "../lib/llmAvailability";
 import { llmAvailabilityFromWire } from "../lib/llmAvailability";
 
@@ -4939,6 +4941,28 @@ export function handleMessageEvent(
         node_id: data.node_id,
         instance_id: data.instance_id,
       });
+      break;
+    }
+
+    case "round_state": {
+      // ADR-106 revision (2026-11-03): the round doorbell, published by the
+      // EXECUTION session when one of its rounds reaches a terminal outcome or
+      // parks on a card. Deliberately NOT a content event: `data.session_id` is
+      // the execution session, and nothing here may touch that session's
+      // transcript — the signal only tells the Chat block named by
+      // `chat_session_id` + the round coordinates that its projection read is
+      // worth doing now. The block content itself still comes from
+      // `GET /api/chat-blocks` (D4), which is what keeps D3's zero-write rule
+      // intact: a notification is not a second copy of the data.
+      const ref = blockRefOf({
+        agent_instance_id: agentId,
+        agent_session_id: (data.session_id as string | undefined) ?? "",
+        round_id: (data.round_id as string | undefined) ?? "",
+      });
+      const chatId = (data.chat_session_id as string | undefined) ?? "";
+      if (ref && chatId) {
+        noteRoundState(chatId, ref);
+      }
       break;
     }
 

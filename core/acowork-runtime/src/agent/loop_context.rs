@@ -632,6 +632,7 @@ impl AgentLoop {
                 provider_key_vault: &self.core.provider_key_vault,
                 compat_cache: self.core.compat_cache.as_ref(),
                     responses_compat_cache: self.core.responses_compat_cache.as_ref(),
+                    anthropic_compat_cache: self.core.anthropic_compat_cache.as_ref(),
             },
         ) {
             Some(p) => {

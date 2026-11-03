@@ -560,6 +560,19 @@ async fn relay_chunk_event_mqtt(
         ChunkEvent::LoopDetectedPaused { message, .. } => {
             publisher.publish_loop_detected_paused(sid, &message).await;
         }
+
+        // ADR-106 revision (2026-11-03): the round doorbell. QoS 1 and NOT
+        // retained — a re-subscribing Desktop must not be told to re-read a
+        // round that ended hours ago; the interval backstop plus the retained
+        // `sessions/{sid}/state` snapshot cover a missed frame.
+        ChunkEvent::RoundState {
+            round_id,
+            chat_session_id,
+        } => {
+            publisher
+                .publish_round_state(sid, &round_id, &chat_session_id)
+                .await;
+        }
     }
 }
 

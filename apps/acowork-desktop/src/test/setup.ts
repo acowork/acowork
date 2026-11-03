@@ -38,3 +38,12 @@ if (typeof Blob !== "undefined" && typeof Blob.prototype.arrayBuffer !== "functi
     });
   };
 }
+
+/**
+ * jsdom also ships no `Element.scrollIntoView`, which the @ picker calls to
+ * follow its highlighted row. A no-op keeps the picker mountable; nothing
+ * asserts on scroll position.
+ */
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+}

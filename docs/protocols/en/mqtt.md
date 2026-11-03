@@ -289,6 +289,10 @@ acowork/agents/{agent_id}/
             ├── compacting_ended      # context compaction ended
             ├── context_usage         # context usage
             ├── memory_updated        # reserved (proto field 16): no publisher — since ADR-101 memory is not in the Runtime
+            ├── round_state           # ADR-106 revision 2026-11-03 "round doorbell": the round reached a terminal
+            │                         #   outcome, or parked on a card a human must answer
+            │                         #   payload = { round_id, chat_session_id } (coordinates only; the read supplies the word)
+            │                         #   QoS 1, non-retained; says only "worth re-reading the projection", carries no body (ADR-106 D3 / D4)
             └── skill_executed        # skill execution completed
 └── memory/                           # [Reserved namespace, never published]
     └── nodes/                        # node-level increment events (unimplemented)

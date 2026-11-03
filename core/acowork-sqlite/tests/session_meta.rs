@@ -553,8 +553,12 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
 
     // A v1 database: build it fully, then roll it back to the shape every
     // database created before ADR-076 has (no `initiator` / `visibility` /
-    // `perf_*` / `chat_session_id`, `user_version = 1`) and let the store
-    // upgrade it again.
+    // `perf_*` / `chat_session_id` / `model_usage` / `intent_key` /
+    // `intent_closed`, `user_version = 1`) and let the store upgrade it again.
+    // Every column a migration adds must be dropped here: a migration step is
+    // keyed on the stored version alone, so a leftover column makes its `ALTER`
+    // fail on reopen — which is the correct loud answer to a fixture that does
+    // not actually look like the version it claims.
     let old = dir.path().join("old.sqlite");
     let _ = open_pair(&old);
     open_raw(&old)
@@ -567,6 +571,9 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              ALTER TABLE sessions DROP COLUMN perf_ttft_ms_samples;
              ALTER TABLE sessions DROP COLUMN chat_session_id;
              ALTER TABLE sessions DROP COLUMN model_usage;
+             DROP INDEX IF EXISTS idx_sessions_intent_key;
+             ALTER TABLE sessions DROP COLUMN intent_key;
+             ALTER TABLE sessions DROP COLUMN intent_closed;
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -659,7 +666,8 @@ fn v6_migration_backfills_unknown_breakdown_and_aggregate() -> AcoworkResult<()>
     let path = dir.path().join("store.sqlite");
 
     // Build a current store (all migrations), then roll it back to the v5
-    // shape: no `model_usage` column, no `token_stats` table, version 5.
+    // shape: no `model_usage` column, no `token_stats` table, no ADR-106 D11
+    // routing columns, version 5.
     // The `last_compaction_summary` column is re-added because a genuine v5
     // database had it (migration 5) — the v7 step drops it again on reopen.
     {
@@ -701,6 +709,9 @@ fn v6_migration_backfills_unknown_breakdown_and_aggregate() -> AcoworkResult<()>
             "ALTER TABLE sessions RENAME COLUMN initiator TO user_id;
              DROP TABLE token_stats;
              ALTER TABLE sessions DROP COLUMN model_usage;
+             DROP INDEX IF EXISTS idx_sessions_intent_key;
+             ALTER TABLE sessions DROP COLUMN intent_key;
+             ALTER TABLE sessions DROP COLUMN intent_closed;
              ALTER TABLE sessions ADD COLUMN last_compaction_summary TEXT;
              PRAGMA user_version = 5;",
         )

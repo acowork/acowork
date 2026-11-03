@@ -163,6 +163,18 @@ export const testResultBase =
 export const bannerSlot =
   "mt-1.5 flex justify-center px-6";
 
+/**
+ * Composer chip — the small inline badge above the chat input ("replying to",
+ * "addressing", "/active skill").
+ *
+ * One recipe on purpose: the chips are the same affordance on every chat
+ * surface, and the accent may only ever survive here as a background WASH —
+ * never as the border, never as the label. `chatChipChrome.test.tsx` pins that
+ * rule against this token, so a call site cannot drift on its own.
+ */
+export const composerChip =
+  "inline-flex items-center gap-1 rounded border border-border-outer bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium text-text-tertiary";
+
 export const testResultSuccess =
   "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400";
 

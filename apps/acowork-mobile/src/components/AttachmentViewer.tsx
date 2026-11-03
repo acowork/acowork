@@ -78,12 +78,17 @@ function ImageAttachmentViewer({
   }, [chatSessionId, attachment.id])
 
   return (
-    <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={attachment.name}>
+    <div
+      className="attachment-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={attachment.filename}
+    >
       {/* Tapping anywhere closes: the whole surface is the dismiss target, so a
           full-bleed photo never traps the user behind a tiny × in a corner. */}
       <button type="button" className="attachment-lightbox-surface" onClick={onClose}>
         {url ? (
-          <img className="attachment-lightbox-img" src={url} alt={attachment.name} />
+          <img className="attachment-lightbox-img" src={url} alt={attachment.filename} />
         ) : (
           <span className="attachment-lightbox-status">
             {failed ? '图片已不可用' : '加载中…'}
@@ -91,7 +96,7 @@ function ImageAttachmentViewer({
         )}
       </button>
       <div className="attachment-lightbox-bar">
-        <span className="attachment-lightbox-name">{attachment.name}</span>
+        <span className="attachment-lightbox-name">{attachment.filename}</span>
         <span className="attachment-lightbox-size">{humanSize(attachment.size)}</span>
       </div>
     </div>
@@ -127,7 +132,11 @@ function SheetAttachmentViewer({
   }, [chatSessionId, attachment.id, kind])
 
   return (
-    <Sheet open onClose={onClose} title={`${attachment.name} · ${humanSize(attachment.size)}`}>
+    <Sheet
+      open
+      onClose={onClose}
+      title={`${attachment.filename} · ${humanSize(attachment.size)}`}
+    >
       {kind === 'text' ? (
         state === 'ready' ? (
           <pre className="attachment-text">{text}</pre>
