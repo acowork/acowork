@@ -1,6 +1,7 @@
 //! Agent module
 
 pub mod agent_core;
+pub mod attachment_to_document;
 pub mod attachment_to_image;
 pub mod bootstrap_autobio;
 pub mod budget_guard;

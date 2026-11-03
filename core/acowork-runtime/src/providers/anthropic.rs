@@ -432,6 +432,7 @@ struct ContentBlockStart {
 /// corresponding Anthropic content block type:
 /// - `ContentPart::Text` → `{"type": "text", "text": "..."}`
 /// - `ContentPart::ImageUrl` → `{"type": "image", "source": {"type": "base64", ...}}`
+/// - `ContentPart::Document` → `{"type": "document", "source": {"type": "base64", ...}, "title": ...}`
 ///
 /// When `content_parts` is None, falls back to a single text block from `content`.
 fn build_anthropic_content(msg: &ChatMessage) -> serde_json::Value {
@@ -460,6 +461,21 @@ fn build_anthropic_content(msg: &ChatMessage) -> serde_json::Value {
                                 "media_type": media_type,
                                 "data": data
                             }
+                        }));
+                    }
+                    ContentPart::Document { document } => {
+                        // PDF document input is GA on the Messages API, so no
+                        // beta header accompanies this. `title` is the only
+                        // place the name can go, and it is what the model uses
+                        // to talk about the file back to the user.
+                        blocks.push(serde_json::json!({
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": document.media_type,
+                                "data": document.data
+                            },
+                            "title": document.filename
                         }));
                     }
                 }
@@ -1378,6 +1394,36 @@ mod tests {
             "user text missing from {blocks:?}"
         );
         assert!(blocks.iter().any(|b| b["type"] == "image"));
+    }
+
+    /// A document block, on the wire shape Anthropic accepts today: base64
+    /// source plus a `title`, and no beta header — PDF input is GA, and
+    /// sending `anthropic-beta` for it would pin the request to a surface the
+    /// Gateway may not advertise.
+    #[test]
+    fn document_part_becomes_an_anthropic_document_block() {
+        let msg = ChatMessage::user_multimodal(
+            "what does the table on page 3 say",
+            vec![ContentPart::document(
+                "JVBERi0=".to_string(),
+                "report.pdf".to_string(),
+                Some(12),
+            )],
+        );
+        let content = build_anthropic_content(&msg);
+        let blocks = content.as_array().unwrap_or_else(|| panic!("not an array: {content}"));
+        let doc = blocks
+            .iter()
+            .find(|b| b["type"] == "document")
+            .unwrap_or_else(|| panic!("no document block in {blocks:?}"));
+        assert_eq!(doc["source"]["type"], "base64");
+        assert_eq!(doc["source"]["media_type"], "application/pdf");
+        assert_eq!(doc["source"]["data"], "JVBERi0=");
+        assert_eq!(doc["title"], "report.pdf");
+        // The user's words ride along, as with images.
+        assert!(blocks
+            .iter()
+            .any(|b| b["type"] == "text" && b["text"] == "what does the table on page 3 say"));
     }
 
     #[test]

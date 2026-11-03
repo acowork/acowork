@@ -678,6 +678,11 @@ impl ContextBuilder {
         // from a vision model to a text-only model mid-session — the session
         // history still contains base64 image data that would otherwise be
         // sent to a model that cannot process it.
+        //
+        // A deny-list, not a keep-`Text`-only allow-list: a model may declare
+        // `pdf` input without `image`, and dropping the document part here
+        // would cost the turn its file on a path that has nothing to do with
+        // images. Documents are 7.7's business.
         if let Some(caps) = gateway_capabilities {
             let supports_image = caps
                 .modalities
@@ -687,13 +692,62 @@ impl ContextBuilder {
             if !supports_image {
                 for msg in &mut messages {
                     if let Some(ref mut parts) = msg.content_parts {
-                        // Keep only Text parts, strip ImageUrl parts
-                        parts.retain(|p| matches!(p, ContentPart::Text { .. }));
+                        // Strip ImageUrl parts, leave the rest of the list alone
+                        parts.retain(|p| !matches!(p, ContentPart::ImageUrl { .. }));
                         // If no text parts remain, set content_parts to None
                         // to avoid sending an empty array to the API.
                         if parts.is_empty() {
                             msg.content_parts = None;
                         }
+                    }
+                }
+            }
+        }
+
+        // 7.7 Filter document content_parts, two ways round from images
+        //
+        // (a) Capability. A `document` block on an endpoint that does not take
+        //     one is a hard 400 that costs the whole turn, so the gate is
+        //     `model_accepts_pdf` — the same rule the derivation used to
+        //     decide whether to inline, and the one that reads an unknown
+        //     capability as "do not send". Images get the opposite treatment
+        //     above because a model that cannot see an image still answers.
+        // (b) Turn. A document belongs to the turn that attached it and to no
+        //     other: `content_parts` live in the session history and are
+        //     replayed on every request, so a 30-page PDF would cost ~45k
+        //     tokens per call for the rest of the session. Only Block B's last
+        //     user message keeps its documents — and the file does not
+        //     disappear, because the blob stays on disk and the hint path
+        //     names it, so `doc_reader` can still open it on any later round.
+        //
+        // Stripping is the whole remedy here; the provider layer's own
+        // "this format has no document block" warnings would otherwise fire
+        // on every replayed round.
+        let document_slot = if crate::agent::attachment_to_document::model_accepts_pdf(
+            gateway_capabilities,
+        ) {
+            messages
+                .iter()
+                .rposition(|m| matches!(m.role, MessageRole::User))
+        } else {
+            None
+        };
+        let has_document = messages.iter().any(|m| {
+            m.content_parts.as_deref().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .any(|p| matches!(p, ContentPart::Document { .. }))
+            })
+        });
+        if has_document {
+            for (idx, msg) in messages.iter_mut().enumerate() {
+                if Some(idx) == document_slot {
+                    continue;
+                }
+                if let Some(ref mut parts) = msg.content_parts {
+                    parts.retain(|p| !matches!(p, ContentPart::Document { .. }));
+                    if parts.is_empty() {
+                        msg.content_parts = None;
                     }
                 }
             }
@@ -1886,6 +1940,119 @@ mod tests {
         assert_eq!(info.agent_total_output_tokens, Some(7_890));
         assert_eq!(info.agent_total_cache_read_tokens, Some(11_111));
         assert_eq!(info.agent_total_cache_write_tokens, Some(222));
+    }
+
+    // ── 7.7: document content parts ─────────────────────────────────
+
+    fn pdf_modality_caps() -> ModelCapabilitiesInfo {
+        let mut caps = test_caps(200_000, 8_192);
+        caps.modalities = Some(acowork_core::protocol::ModelModalities {
+            input: vec!["text".into(), "image".into(), "pdf".into()],
+            output: vec!["text".into()],
+        });
+        caps
+    }
+
+    fn text_only_caps() -> ModelCapabilitiesInfo {
+        let mut caps = test_caps(200_000, 8_192);
+        caps.modalities = Some(acowork_core::protocol::ModelModalities {
+            input: vec!["text".into(), "image".into()],
+            output: vec!["text".into()],
+        });
+        caps
+    }
+
+    fn document_turn(text: &str) -> ChatMessage {
+        ChatMessage::user_multimodal(text, vec![ContentPart::document("JVBERi0=", "a.pdf", Some(2))])
+    }
+
+    /// A model with no declared `pdf` input must not be handed the document it
+    /// would reject with a 400 — the words of the message survive, because they
+    /// never lived in the part list.
+    #[test]
+    fn test_build_strips_documents_when_the_model_declares_no_pdf_input() {
+        let mut history = HistoryManager::new(10_000);
+        history.append(document_turn("read this"));
+
+        let builder = ContextBuilder::new("You are a helper.".to_string());
+        let request = builder.build(&history, Some(&text_only_caps()), 32_768);
+        let user = request.messages.last().unwrap();
+        assert!(
+            user.content_parts.is_none(),
+            "an empty part list is dropped, not sent as []"
+        );
+        assert_eq!(user.content, "read this");
+
+        // No capability info at all is the same answer: an unverifiable model
+        // is not a model we may push a document to.
+        let blind = ContextBuilder::new("You are a helper.".to_string());
+        let blind_request = blind.build(&history, None, 32_768);
+        assert!(blind_request.messages.last().unwrap().content_parts.is_none());
+    }
+
+    /// The same PDF must not ride along on every later request of the session:
+    /// `content_parts` come from history, so without this rule a 30-page PDF is
+    /// re-sent — and re-counted — for the rest of the conversation. Only the
+    /// turn that attached it keeps the bytes.
+    #[test]
+    fn test_build_keeps_documents_on_the_current_turn_only() {
+        let mut history = HistoryManager::new(10_000);
+        history.append(document_turn("first question"));
+        history.append(ChatMessage::assistant("first answer"));
+        history.append(document_turn("second question"));
+
+        let builder = ContextBuilder::new("You are a helper.".to_string());
+        let request = builder.build(&history, Some(&pdf_modality_caps()), 32_768);
+        // system, user(1), assistant, user(2)
+        assert_eq!(request.messages.len(), 4);
+        assert!(
+            request.messages[1].content_parts.is_none(),
+            "the earlier round loses its document"
+        );
+        assert_eq!(request.messages[1].content, "first question");
+        let current = request.messages.last().unwrap();
+        assert!(
+            matches!(
+                current.content_parts.as_deref(),
+                Some([ContentPart::Document { .. }])
+            ),
+            "the turn that attached the PDF keeps it"
+        );
+    }
+
+    /// The two filters must not trip over each other: a model that declares
+    /// `pdf` but no `image` (7.6 strips, 7.7 keeps) should lose the screenshot
+    /// and keep the document. A keep-`Text`-only allow-list in 7.6 used to eat
+    /// the document on that path.
+    #[test]
+    fn test_build_strips_images_but_keeps_documents_for_a_pdf_only_model() {
+        let mut caps = pdf_modality_caps();
+        caps.modalities = Some(acowork_core::protocol::ModelModalities {
+            input: vec!["text".into(), "pdf".into()],
+            output: vec!["text".into()],
+        });
+        let mut msg = ChatMessage::user_multimodal(
+            "the chart on page 4, beside this screenshot",
+            vec![ContentPart::document("JVBERi0=", "a.pdf", Some(2))],
+        );
+        msg.content_parts
+            .as_mut()
+            .unwrap()
+            .push(ContentPart::image_url("data:image/png;base64,AAAA"));
+        let mut history = HistoryManager::new(10_000);
+        history.append(msg);
+
+        let builder = ContextBuilder::new("You are a helper.".to_string());
+        let request = builder.build(&history, Some(&caps), 32_768);
+        let user = request.messages.last().unwrap();
+        assert!(
+            matches!(
+                user.content_parts.as_deref(),
+                Some([ContentPart::Document { .. }])
+            ),
+            "the document must outlive the image filter, got {:?}",
+            user.content_parts
+        );
     }
 }
 

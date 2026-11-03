@@ -11,6 +11,7 @@
 //! Also provides:
 //! - Full-field ChatMessage counting (role, name, tool_calls)
 //! - Image token estimation per protocol type
+//! - Document (PDF) token estimation per page
 
 use acowork_core::protocol::ProtocolType;
 use acowork_core::providers::traits::ChatMessage;
@@ -68,6 +69,27 @@ pub fn estimate_image_tokens(
             (w * h) / 258
         }
     }
+}
+
+// ── Document Token Estimation ──────────────────────────────────────
+
+/// Tokens one inlined PDF page is estimated to cost.
+///
+/// Anthropic publishes a figure for PDF pages and bills by it; the other houses
+/// that accept file input publish nothing comparable. One number for all of
+/// them is the deliberate choice: this estimate feeds the context meter and the
+/// compaction decision, where being roughly right everywhere beats being
+/// exactly right on one provider.
+pub const TOKENS_PER_PDF_PAGE: u64 = 1_500;
+
+/// Estimate the token cost of an inlined document.
+///
+/// `None` page count counts as nothing — the same best-effort rule that makes
+/// an image with no known protocol type uncounted. It is a real understatement,
+/// which is why the derivation that produces document parts refuses to inline a
+/// PDF whose page tree it cannot read rather than rely on this arm.
+pub fn estimate_document_tokens(page_count: Option<u32>) -> u64 {
+    page_count.map_or(0, |pages| TOKENS_PER_PDF_PAGE * u64::from(pages))
 }
 
 // ── Token Counter ───────────────────────────────────────────────────────
@@ -182,6 +204,12 @@ impl TokenCounter {
                             }
                             // If protocol_type is unknown, skip image tokens (best-effort)
                         }
+                        // Not gated on `protocol_type` the way an image is: a
+                        // document's cost does not depend on a tiling scheme,
+                        // and the meter has to see this weight on every path.
+                        acowork_core::providers::traits::ContentPart::Document { document } => {
+                            tokens += estimate_document_tokens(document.page_count);
+                        }
                     }
                 }
             }
@@ -244,6 +272,47 @@ mod tests {
         assert!(
             with_text >= text_only,
             "image turn ({with_text}) must not cost less than the same text alone ({text_only})"
+        );
+    }
+
+    /// A 30-page PDF is not a rounding error: it is roughly 45k tokens, and the
+    /// context meter and the compaction decision only see that weight if the
+    /// document part is counted.
+    #[test]
+    fn document_turn_is_counted_by_its_page_count() {
+        use acowork_core::providers::traits::{ChatMessage, ContentPart};
+        let counter = TokenCounter::new();
+        let text = "what does page 12 of this say?";
+
+        let pages = |count: Option<u32>| {
+            counter.count_message(
+                &ChatMessage::user_multimodal(
+                    text,
+                    vec![ContentPart::document("JVBERi0=", "deck.pdf", count)],
+                ),
+                None,
+            )
+        };
+        let text_only = counter.count_message(&ChatMessage::user(text), None);
+        assert_eq!(
+            pages(Some(30)) - text_only,
+            30 * TOKENS_PER_PDF_PAGE,
+            "the page count is the whole bill"
+        );
+        // An unknown page count is not charged — the same best-effort rule the
+        // image path follows when no protocol type is known.
+        assert_eq!(pages(None), text_only);
+        assert_eq!(estimate_document_tokens(None), 0);
+        // Independent of `protocol_type`, which the image arm needs.
+        assert_eq!(
+            counter.count_message(
+                &ChatMessage::user_multimodal(
+                    text,
+                    vec![ContentPart::document("JVBERi0=", "deck.pdf", Some(4))]
+                ),
+                Some(&ProtocolType::Anthropic),
+            ),
+            pages(Some(4))
         );
     }
 

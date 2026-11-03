@@ -405,6 +405,23 @@ fn build_content_value(m: &ChatMessage) -> serde_json::Value {
                         }
                         arr.push(serde_json::json!({ "type": "image_url", "image_url": img }));
                     }
+                    ContentPart::Document { document } => {
+                        // Chat Completions wants a *file* block whose data is a
+                        // data URI — the opposite convention from the domain
+                        // part, which deliberately stores bare base64 so one
+                        // payload can serve every provider. Prefix built here,
+                        // and only here.
+                        arr.push(serde_json::json!({
+                            "type": "file",
+                            "file": {
+                                "filename": document.filename,
+                                "file_data": format!(
+                                    "data:{};base64,{}",
+                                    document.media_type, document.data
+                                )
+                            }
+                        }));
+                    }
                 }
             }
             serde_json::Value::Array(arr)
@@ -1466,6 +1483,36 @@ mod tests {
             "user text missing from {arr:?}"
         );
         assert!(arr.iter().any(|p| p["type"] == "image_url"));
+    }
+
+    /// Chat Completions file input is the one block that wants a **data URI**,
+    /// so this test exists mainly to pin the prefix down: bare base64 here is
+    /// accepted by no endpoint.
+    #[test]
+    fn document_part_becomes_a_file_block_with_a_data_uri() {
+        let msg = ChatMessage::user_multimodal(
+            "what does the table on page 3 say",
+            vec![ContentPart::document(
+                "JVBERi0=".to_string(),
+                "report.pdf".to_string(),
+                Some(12),
+            )],
+        );
+        let content = build_content_value(&msg);
+        let arr = content.as_array().unwrap_or_else(|| panic!("not an array: {content}"));
+        let file = arr
+            .iter()
+            .find(|p| p["type"] == "file")
+            .unwrap_or_else(|| panic!("no file block in {arr:?}"));
+        assert_eq!(file["file"]["filename"], "report.pdf");
+        assert_eq!(
+            file["file"]["file_data"],
+            "data:application/pdf;base64,JVBERi0="
+        );
+        assert!(arr
+            .iter()
+            .any(|p| p["type"] == "text" && p["text"] == "what does the table on page 3 say"));
+        assert!(!arr.iter().any(|p| p["type"] == "image_url"));
     }
 
     #[test]

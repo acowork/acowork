@@ -1143,20 +1143,24 @@ impl SessionTask {
                     // loop run (safety net for idle sessions).
                     agent_loop.core.debug_observer.check_pending_injection();
 
-                    // ── ADR-046: synthesise image content parts from attached_items ──
+                    // ── ADR-046: synthesise multimodal content parts from attached_items ──
                     //
                     // Pre-ADR-046, the frontend inlined base64 image payloads in
                     // `params.content_parts`. ADR-046 moved attachment metadata
                     // into `attached_items` (the `image_upload` variant carries
                     // document_id / format / dimensions only — never raw bytes).
                     //
-                    // The Runtime now reads each image blob from the
-                    // `AttachmentService` slot populated in Phase B and emits
-                    // `ContentPart::ImageUrl` entries; any legacy `content_parts`
-                    // sent by the frontend are preserved (text first) and the
-                    // derived images are appended. If `attached_items` is
-                    // None/empty, `content_parts` is forwarded unchanged — the
-                    // legacy pre-046 path stays bit-compatible.
+                    // The Runtime now reads each blob from the `AttachmentService`
+                    // slot populated in Phase B and emits `ContentPart::ImageUrl`
+                    // for images plus `ContentPart::Document` for PDFs a
+                    // document-capable model accepts (see
+                    // [`crate::agent::attachment_to_document`] for why that one
+                    // is gated and the image path is not). Any legacy
+                    // `content_parts` sent by the frontend are preserved (text
+                    // first) and the derived parts are appended. If
+                    // `attached_items` is None/empty, `content_parts` is
+                    // forwarded unchanged — the legacy pre-046 path stays
+                    // bit-compatible.
                     //
                     // Read errors are not silently dropped — they short-circuit
                     // the chat turn with the same `ChunkEvent::Error` shape used
@@ -1199,23 +1203,46 @@ impl SessionTask {
                         Vec<acowork_core::providers::traits::ContentPart>,
                     > = match attached_items.as_deref() {
                         Some(items) if !items.is_empty() => {
-                            match crate::agent::attachment_to_image::derive_image_parts(
-                                agent_loop.core.attachment_service(),
-                                items,
-                            )
-                            .await
-                            {
-                                Ok(derived) => {
-                                    crate::agent::attachment_to_image::merge_content_parts(
-                                        content_parts,
-                                        derived,
-                                    )
+                            // Document parts need the model this turn will
+                            // actually talk to, so the capability is resolved
+                            // here rather than inside the derivation: a model
+                            // switch mid-session changes what may be inlined.
+                            let caps = agent_loop
+                                .session
+                                .model
+                                .as_deref()
+                                .and_then(|m| agent_loop.get_model_capabilities(m));
+                            // Two derivations, one failure surface: an
+                            // attachment the runtime cannot read stops the turn
+                            // whichever channel it belonged to.
+                            let derived: Result<
+                                Option<Vec<acowork_core::providers::traits::ContentPart>>,
+                                crate::error::RuntimeError,
+                            > = match (
+                                crate::agent::attachment_to_document::derive_document_parts(
+                                    agent_loop.core.attachment_service(),
+                                    items,
+                                    caps.as_ref(),
+                                )
+                                .await,
+                                crate::agent::attachment_to_image::derive_image_parts(
+                                    agent_loop.core.attachment_service(),
+                                    items,
+                                )
+                                .await,
+                            ) {
+                                (Ok(documents), Ok(images)) => {
+                                    Ok(merge_turn_parts(content_parts, documents, images))
                                 }
+                                (Err(e), _) | (_, Err(e)) => Err(e),
+                            };
+                            match derived {
+                                Ok(parts) => parts,
                                 Err(e) => {
                                     tracing::error!(
                                         session_id = %session_id,
                                         error = %e,
-                                        "Failed to derive image content_parts from attached_items"
+                                        "Failed to derive attachment content_parts from attached_items"
                                     );
                                     let (user_message, detail, error_type) = e.error_info();
                                     // A chat-surface turn already has its
@@ -1593,28 +1620,38 @@ impl SessionTask {
                             if items.is_empty() {
                                 None
                             } else {
-                                // Images flow to the LLM multimodally, same
-                                // as the execution surface; a derive failure
-                                // only drops the image parts (the file hint
+                                // Images and documents flow to the LLM the same
+                                // way they do on the execution surface; a derive
+                                // failure only drops the parts (the file hint
                                 // below already stands). The hint itself is
                                 // built once, after the workspace references
                                 // join this turn's attachment list.
-                                match crate::agent::attachment_to_image::derive_image_parts(
-                                    agent_loop.core.attachment_service(),
-                                    &items,
-                                )
-                                .await
-                                {
-                                    Ok(derived) => {
+                                let caps = agent_loop
+                                    .session
+                                    .model
+                                    .as_deref()
+                                    .and_then(|m| agent_loop.get_model_capabilities(m));
+                                match (
+                                    crate::agent::attachment_to_document::derive_document_parts(
+                                        agent_loop.core.attachment_service(),
+                                        &items,
+                                        caps.as_ref(),
+                                    )
+                                    .await,
+                                    crate::agent::attachment_to_image::derive_image_parts(
+                                        agent_loop.core.attachment_service(),
+                                        &items,
+                                    )
+                                    .await,
+                                ) {
+                                    (Ok(documents), Ok(images)) => {
                                         intent_content_parts =
-                                            crate::agent::attachment_to_image::merge_content_parts(
-                                                None, derived,
-                                            )
+                                            merge_turn_parts(None, documents, images)
                                     }
-                                    Err(e) => tracing::warn!(
+                                    (Err(e), _) | (_, Err(e)) => tracing::warn!(
                                         session_id = %session_id,
                                         error = %e,
-                                        "chat attachment image parts unavailable, documents only"
+                                        "chat attachment content parts unavailable, hint only"
                                     ),
                                 }
                                 Some(items)
@@ -2220,6 +2257,10 @@ fn refresh_builtin_tools_dependents(core: &mut AgentCore, context_builder: &mut 
 //   workspace file   → - file: `<abs_path>`
 //   workspace sel    → - file: `<abs_path>` (L10-L25)  (range collapsed when same line)
 //   file_upload      → - file: `<filename>` (id=<doc_id>, format=<fmt>, path=<abs_path>)
+//                        A `pdf` additionally flows as `ContentPart::Document`
+//                        when the model declares that input — the hint is sent
+//                        either way, because it is what the `doc_reader`
+//                        fallback reads the file by.
 //   image_upload     → (no hint — flows via multimodal ContentPart::ImageUrl)
 //   attached_folder  → (no hint — no single-tool way to enumerate a folder)
 //
@@ -2394,6 +2435,46 @@ fn merge_intent_attachments(
     Some(merged)
 }
 
+/// Assemble one turn's part list: the caller's own parts first, then whole
+/// documents, then images.
+///
+/// The order is a reading order, not a technical necessity — every provider
+/// takes the list as it comes. Text first because it is what the human typed;
+/// documents before images because a document is "this file" while an image
+/// is "these pictures", and the large object reads more naturally first when
+/// both arrived in the same message.
+///
+/// `None` when everything is empty: a multimodal message with no parts is
+/// rejected by some providers, and a plain `ChatMessage::user(text)` is what
+/// the caller falls back to (the same contract
+/// [`crate::agent::attachment_to_image`] has always kept).
+fn merge_turn_parts(
+    frontend_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+    documents: Vec<acowork_core::providers::traits::ContentPart>,
+    images: Vec<acowork_core::providers::traits::ContentPart>,
+) -> Option<Vec<acowork_core::providers::traits::ContentPart>> {
+    let mut all: Vec<acowork_core::providers::traits::ContentPart> = frontend_parts
+        .unwrap_or_default();
+    if all.is_empty() && documents.is_empty() && images.is_empty() {
+        return None;
+    }
+    all.extend(documents);
+    all.extend(images);
+    Some(all)
+}
+
+/// Append the attachment block a turn's prompt carries, one line per
+/// attachable item:
+/// - `attached_file` / `attached_selection` / `attached_folder` — the workspace path
+/// - `image_upload` — no line; its bytes travel as a `ContentPart::ImageUrl`
+/// - `file_upload` — the on-disk path, **and** a PDF additionally travels as a
+///   `ContentPart::Document` when the model declares pdf input
+///
+/// The hint is emitted whether or not the bytes were inlined, and it is never
+/// stripped by the inlining: on the degraded paths (no pdf capability, over
+/// budget, a mid-session model switch that drops the part) this line is the
+/// only pointer the agent has left to the file. See
+/// [`crate::agent::attachment_to_document`] for the gate.
 fn build_attachment_hint(
     user_content: &str,
     items: Option<&[acowork_core::protocol::AttachedItem]>,
@@ -2593,6 +2674,31 @@ mod tests {
         let both = merge_intent_attachments(Some(vec![upload.clone()]), vec![reference()]).unwrap();
         assert_eq!(both.len(), 2);
         assert_eq!(both[0], upload, "the pulled upload keeps its slot ahead of the reference");
+    }
+
+    /// The turn's part list reads text, then whole documents, then images, and
+    /// an empty assembly is `None` rather than an empty array — some providers
+    /// reject a multimodal message with no parts.
+    #[test]
+    fn test_merge_turn_parts_reads_text_then_documents_then_images() {
+        use super::merge_turn_parts;
+        use acowork_core::providers::traits::ContentPart;
+
+        let text = || ContentPart::text("look at these");
+        let document = || ContentPart::document("JVBERi0=", "report.pdf", Some(1));
+        let image = || ContentPart::image_url("data:image/png;base64,AAAA");
+
+        assert!(merge_turn_parts(None, Vec::new(), Vec::new()).is_none());
+        let merged = merge_turn_parts(Some(vec![text()]), vec![document()], vec![image()]).unwrap();
+        assert!(matches!(&merged[0], ContentPart::Text { .. }));
+        assert!(
+            matches!(&merged[1], ContentPart::Document { .. }),
+            "the document is the larger object and reads first"
+        );
+        assert!(matches!(&merged[2], ContentPart::ImageUrl { .. }));
+        // A documents-only turn (the common PDF case) still gets its parts.
+        let docs_only = merge_turn_parts(None, vec![document()], Vec::new()).unwrap();
+        assert_eq!(docs_only.len(), 1);
     }
 
     // -----------------------------------------------------------------

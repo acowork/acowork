@@ -181,6 +181,17 @@ fn convert_messages(messages: &[ChatMessage]) -> Vec<OllamaMessage> {
                                     ),
                                 }
                             }
+                            // Ollama's chat schema has one `images` array and no
+                            // file slot, so a document part cannot be expressed
+                            // here at all. Dropping it costs the request no
+                            // content: the attachment hint stays in the text and
+                            // `doc_reader` is how an ollama model reaches the
+                            // file, which is the path the runtime picked for
+                            // models without document input in the first place.
+                            ContentPart::Document { document } => tracing::warn!(
+                                filename = %document.filename,
+                                "ollama has no document input; the agent reads this file through doc_reader"
+                            ),
                         }
                     }
                     if !payloads.is_empty() {
@@ -378,6 +389,25 @@ mod tests {
         let msg = ChatMessage::user_multimodal("see the link", vec![image("https://x/y.png")]);
         let json = serde_json::to_value(convert_messages(&[msg])).unwrap();
         assert_eq!(json[0]["content"], "see the link");
+        assert!(json[0].get("images").is_none(), "got {json}");
+    }
+
+    /// There is no file slot in Ollama's chat schema, so a document part can
+    /// only be dropped — and it must be dropped *as a part*, never smuggled
+    /// into `images[]`, where base64 of a PDF would be decoded as a picture.
+    /// The hint in the text is what carries the file to `doc_reader`.
+    #[test]
+    fn document_is_dropped_without_poisoning_images() {
+        let msg = ChatMessage::user_multimodal(
+            "summarise this",
+            vec![acowork_core::providers::traits::ContentPart::document(
+                "JVBERi0=",
+                "report.pdf",
+                Some(3),
+            )],
+        );
+        let json = serde_json::to_value(convert_messages(&[msg])).unwrap();
+        assert_eq!(json[0]["content"], "summarise this");
         assert!(json[0].get("images").is_none(), "got {json}");
     }
 
