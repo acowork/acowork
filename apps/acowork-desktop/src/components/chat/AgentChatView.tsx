@@ -447,6 +447,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   const pendingRefs = useChatSessionStore((s) => s.attachedContext[sessionId] ?? EMPTY_REFS);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // The `@` toggle, exempt from the address picker's outside-click close so
+  // clicking it again collapses the list instead of close-then-reopen.
+  const addressBtnRef = useRef<HTMLButtonElement>(null);
   const lastCompositionEndRef = useRef(0);
   // The scroll viewport, captured alongside `useStickToBottom`'s callback ref
   // so the locate effect can query `[data-seq]` rows within it.
@@ -1094,6 +1097,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               instanceId={agentId}
               chatSessionId={sessionId}
               surface="direct"
+              anchorRef={addressBtnRef}
               onPick={(pick) => {
                 setAddress(pick.sessionId || pick.forceNew ? pick : null);
                 setAddressStage(false);
@@ -1198,6 +1202,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 message, not an action on the transcript. */}
             <Tooltip content={t("chatView.address.pick")} variant="plain">
               <button
+                ref={addressBtnRef}
                 className={cn(
                   toolbarIconButton,
                   addressStage && "bg-nav-item-hover",

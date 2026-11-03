@@ -141,6 +141,35 @@ describe("ChatAddressPicker", () => {
     expect(vi.mocked(fetchChatCandidates)).toHaveBeenCalledTimes(2);
   });
 
+  it("closes when the pointer goes down outside it", async () => {
+    const { onClose } = picker();
+    const list = await screen.findByTestId("chat-address-picker");
+    fireEvent.mouseDown(list);
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.mouseDown(document.body);
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("leaves the opening control alone, so its own toggle still closes it", async () => {
+    const onClose = vi.fn();
+    const anchor = document.createElement("button");
+    document.body.appendChild(anchor);
+    render(
+      <ChatAddressPicker
+        instanceId="agent-a"
+        chatSessionId="grp-1"
+        surface="group"
+        anchorRef={{ current: anchor }}
+        onPick={vi.fn()}
+        onClose={onClose}
+      />,
+    );
+    await screen.findByTestId("chat-address-picker");
+    fireEvent.mouseDown(anchor);
+    expect(onClose).not.toHaveBeenCalled();
+    anchor.remove();
+  });
+
   it("shows whose tasks these are on a multi-party surface", async () => {
     picker();
     expect(await screen.findByText("chatView.address.subject:Architect")).toBeTruthy();

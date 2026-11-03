@@ -25,7 +25,13 @@
  * the traversal.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { Loader2, Plus } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
@@ -60,6 +66,10 @@ interface ChatAddressPickerProps {
    *  must not read as the group's whole session list. */
   agentName?: string;
   className?: string;
+  /** The control that opened the list. Pointer-downs on it are exempt from the
+   *  outside-click close, so a toggle button can still close what it opened
+   *  (closing on its mousedown and re-opening on its click would fight). */
+  anchorRef?: RefObject<HTMLElement | null>;
 }
 
 /** One line of the list. `session` rows carry the candidate; the two fixed rows
@@ -84,6 +94,7 @@ export function ChatAddressPicker({
   onClose,
   agentName,
   className,
+  anchorRef,
 }: ChatAddressPickerProps) {
   const { t } = useTranslation();
   const [candidates, setCandidates] = useState<ChatCandidate[] | null>(null);
@@ -115,6 +126,20 @@ export function ChatAddressPicker({
   useEffect(() => {
     listRef.current?.focus();
   }, []);
+
+  // A popup only its opener can dismiss does not read as a popup: pointer-down
+  // anywhere outside closes it, the same `mousedown` + `contains` shape every
+  // other popover in this app uses (ChatPanel's menus, `useContextMenu`).
+  useEffect(() => {
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (listRef.current?.contains(target)) return;
+      if (anchorRef?.current?.contains(target)) return;
+      onClose();
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [onClose, anchorRef]);
 
   const rows: Row[] = [
     { kind: "new" },
