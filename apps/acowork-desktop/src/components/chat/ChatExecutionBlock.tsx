@@ -115,10 +115,14 @@ function statusKey(status: string): string {
       return "chatView.notice.timeout";
     case "waiting":
       return "chatView.notice.waiting";
+    case "in_progress":
+      return "chatView.block.inProgress";
     case "unknown":
       return "chatView.block.unknown";
     default:
-      return "chatView.block.inProgress";
+      // "in progress" is a claim that needs evidence (D9): an unrecognised — or
+      // missing — status is an unknown outcome, never a running one.
+      return "chatView.block.unknown";
   }
 }
 
@@ -183,36 +187,66 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   // D9: a `pending` read is the ONLY positive evidence a round is still going.
   // `session_state` says what the session is doing, but a block whose read came
   // back terminal is history even if the session has since started another turn.
-  const inProgress = block.rounds.some(
-    (r) => entries[r.ref]?.status === "pending",
-  );
+  // The round that speaks for the block is its NEWEST one — the block is anchored
+  // at it, so it is the round the reader is looking at. An older read that never
+  // resolves must not keep a finished run looking live: "how did this end" is a
+  // question about the newest round, not a vote across the session.
+  const newest = block.rounds[block.rounds.length - 1];
+  const newestEntry = newest ? entries[newest.ref] : undefined;
+  const newestPending = newestEntry?.status === "pending";
+  // A round parked on a card is not running — it is waiting for the human, and
+  // saying "executing" over an unanswered card is the one thing D8 forbids: the
+  // reader was told to wait when the block was in fact waiting for them.
+  const parked = newestPending && !!newestEntry?.projection?.card;
+  const outcomeStatus = newestPending
+    ? parked
+      ? "waiting"
+      : "in_progress"
+    : newestEntry?.status === "ok"
+      ? (newestEntry.projection?.status ?? "unknown")
+      : // A hole or an outage says what it is (D9): no read is not evidence of a
+        // running round, and a missing state word is not evidence of a finished
+        // one either.
+        "unknown";
+  const inProgress = outcomeStatus === "in_progress";
   // A round parked on a decision the human has not answered: the block must be
   // open to be answerable, which is `ExploreBlock`'s pending-approval rule.
   const hasOpenCard = block.rounds.some((r) => {
     const entry = entries[r.ref];
     return entry?.projection?.card && entry.status === "pending";
   });
-
-  const newest = block.rounds[block.rounds.length - 1];
-  const newestEntry = newest ? entries[newest.ref] : undefined;
-  const outcomeStatus =
-    newestEntry?.status === "pending"
-      ? "in_progress"
-      : (newestEntry?.projection?.status ?? "");
   const shownState =
-    (sessionStatus && isProcessing(sessionStatus)
+    (inProgress && sessionStatus && isProcessing(sessionStatus)
       ? stateText(t, sessionStatus)
-      : "") ||
-    (outcomeStatus ? t(statusKey(outcomeStatus)) : "");
+      : "") || t(statusKey(outcomeStatus));
 
-  // Rounds beyond the recent window stay in the block, one click away.
+  // Rounds beyond the recent window stay in the block, one click away — except
+  // the ones the transcript could not draw anywhere else. Two kinds qualify:
+  //  * a round that owns this Chat's own question. Its `user_message` row was
+  //    folded into the block (one sentence, one place), so windowing the round
+  //    away hides the human's own words from the whole transcript and leaves the
+  //    visible rows looking like the agent answering questions nobody asked here;
+  //  * a round parked on an unanswered card: an answerable thing behind "show
+  //    earlier" is not answerable (D8).
+  // Rounds the block produced on its own — the human turned to the execution
+  // surface, or the session kept iterating — stay behind the reveal, which is
+  // what keeps a long run from pushing the transcript down.
   const [revealed, setRevealed] = useState(0);
+  const pinned = new Set<number>();
+  block.rounds.forEach((round, i) => {
+    if (round.showUserLine && round.triggerRow) pinned.add(i);
+    const entry = entries[round.ref];
+    if (entry?.status === "pending" && entry.projection?.card) pinned.add(i);
+  });
   const start = Math.max(
     0,
     block.rounds.length - RECENT_ROUNDS - revealed,
   );
-  const shown = block.rounds.slice(start);
-  const hiddenOlder = start;
+  const shownIndices = block.rounds
+    .map((_, i) => i)
+    .filter((i) => i >= start || pinned.has(i));
+  const shown = shownIndices.map((i) => block.rounds[i]!);
+  const hiddenOlder = block.rounds.length - shownIndices.length;
 
   // `ExploreBlock`'s state machine, on the same conditions: open while it is the
   // freshest thing on screen, fold once the conversation moves past it, and never
@@ -378,11 +412,14 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                       <RoundItem
                         key={round.ref}
                         round={round}
-                        index={block.rounds.length - shown.length + i}
+                        /** The row's label is its position in the SESSION's list,
+                         *  so a pinned round above the window keeps its own
+                         *  number instead of being renumbered by the window. */
+                        index={shownIndices[i]!}
                         /** The freshest round of an open block shows its pair;
                          *  earlier ones fold to one line, the way a long run's
                          *  older tool calls do. */
-                        defaultOpen={i === shown.length - 1}
+                        defaultOpen={shownIndices[i] === block.rounds.length - 1}
                         chatSessionId={chatSessionId}
                         instanceId={instanceId}
                         execSid={execSid}
@@ -442,17 +479,27 @@ function RoundItem({
     summarize(question) ||
     summarize(round.roundRow.meta?.assignment_brief ?? "") ||
     t("chatView.block.noQuestion");
-  const inProgress = entry?.status === "pending";
-  const status = inProgress ? "in_progress" : (projection?.status ?? "");
+  const pending = entry?.status === "pending";
+  const card = projection?.card ?? null;
+  // A row parked on a card is waiting for the human, not executing — the same
+  // rule the header follows, because a row that says "running" over the card it
+  // is waiting on is the block contradicting its own buttons.
+  const status = !pending
+    ? entry?.status === "ok"
+      ? (projection?.status ?? "unknown")
+      : "unknown"
+    : card
+      ? "waiting"
+      : "in_progress";
+  const inProgress = status === "in_progress";
   const failed = status === "failed" || status === "timeout";
   const userStopped = status === "aborted" || status === "interrupted";
-  const card = projection?.card ?? null;
 
   // A card the human has not answered yet must be on screen, not behind a
   // closed row — the block opened for it, so the row opens too.
   useEffect(() => {
-    if (card && inProgress) setOpen(true);
-  }, [card, inProgress]);
+    if (card && pending) setOpen(true);
+  }, [card, pending]);
 
   return (
     <div className="min-w-0" data-seq={round.roundRow.seq}>
@@ -471,6 +518,8 @@ function RoundItem({
         </button>
         {inProgress ? (
           <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-zinc-300 dark:bg-zinc-500" />
+        ) : status === "waiting" ? (
+          <Pause className="h-3 w-3 shrink-0 text-amber-500" />
         ) : failed ? (
           <X className="h-3 w-3 shrink-0 text-red-500" />
         ) : userStopped ? (

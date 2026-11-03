@@ -353,12 +353,26 @@ describe("ChatExecutionBlock", () => {
       },
     };
     // The read is TERMINAL: D9 says the run is history, so no spinner and no
-    // "in progress" copy may ride in on the session's own state — the state
-    // only refines what the header reads.
-    const { container } = renderBlock({ [REF1]: entryOf({}) });
-    expect(headerText(container)).toContain("chatView.block.state.toolExecuting");
+    // "in progress" copy may ride in on the session's own state (t-1b7bdb21).
+    // The state word refines a LIVE claim; it never upgrades a settled one,
+    // because the session may already be busy with a round this Chat holds no
+    // row for — and that must not make a finished block read as running.
+    const settled = renderBlock({ [REF1]: entryOf({}) });
+    expect(headerText(settled.container)).toContain("chatView.block.completed");
     expect(document.querySelector(".animate-spin")).toBeNull();
     expect(screen.queryByText("chatView.block.inProgress")).toBeNull();
+
+    // The same live state over a block whose own newest read IS pending: now it
+    // refines the header, because there really is a round in flight.
+    settled.unmount();
+    const live = renderBlock({
+      [REF1]: entryOf({
+        status: "pending",
+        projection: { round_id: "r1", terminal: false, status: "in_progress" },
+      }),
+    });
+    expect(headerText(live.container)).toContain("chatView.block.state.toolExecuting");
+    expect(live.container.querySelector(".animate-spin")).toBeTruthy();
   });
 
   it("the drill keeps its own chrome and sits above the block", () => {
@@ -456,5 +470,134 @@ describe("ChatExecutionBlock", () => {
     expect(screen.getByText("chatView.notice.failed")).toBeTruthy();
     expect(screen.queryByTestId("md")).toBeNull();
     expect(document.querySelector(".animate-spin")).toBeNull();
+  });
+});
+
+/**
+ * A block's header is its claim about ONE session, and the reported failure was
+ * that the claim lied twice over (t-1b7bdb21):
+ *   1. the human's own sentence disappeared — the round that owns a folded chat
+ *      question sat outside the recent-rounds window, so the only place the
+ *      sentence was ever drawn was hidden, and the visible rows looked like the
+ *      agent answering questions nobody had asked in this Chat;
+ *   2. the state word answered "is ANY round of this session pending" instead of
+ *      "how did the round you are reading end" — a run parked on a card read as
+ *      "still executing" (it is waiting for the human), a settled newest round
+ *      still spun while an older read was pending, and a hole said nothing at
+ *      all.
+ */
+describe("ChatExecutionBlock — what a session's header claims (t-1b7bdb21)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store.chat = { agentStates: {} };
+  });
+
+  const REF3 = "ag|s1|r3";
+
+  /** A round that owns a folded chat question. */
+  function askedRound(roundId: string, seq: number, questionSeq: number, question: string): RoundItem {
+    return { ...roundOf(roundId, seq), triggerRow: triggerRow(questionSeq, question) };
+  }
+  function completed(ref: string, body: string): ChatBlockEntry {
+    return entryOf({
+      ref,
+      round_id: ref.split("|")[2],
+      status: "ok",
+      projection: { round_id: ref.split("|")[2]!, terminal: true, status: "completed", answer: { body, ts: "1" } },
+    });
+  }
+
+  it("never hides the round that carries this Chat's own question", () => {
+    // The live shape: one chat question opened round 1, then the human kept
+    // nudging from the execution surface, so rounds 2 and 3 answer sentences the
+    // Chat never saw. Hiding round 1 hid the human's sentence from the whole
+    // transcript — a folded row has no other place to be drawn.
+    const { container } = renderBlock(
+      {
+        [REF1]: completed(REF1, "answer one"),
+        [REF2]: completed(REF2, "answer two"),
+        [REF3]: completed(REF3, "answer three"),
+      },
+      {},
+      blockOf([
+        askedRound("r1", 2, 1, "修复分页不满屏"),
+        roundOf("r2", 4),
+        roundOf("r3", 6),
+      ]),
+    );
+
+    // Every round is rendered, so nothing is behind "earlier rounds".
+    expect(screen.getAllByText("chatView.block.roundN")).toHaveLength(3);
+    expect(screen.queryByText("chatView.block.olderRounds")).toBeNull();
+    // The question is on screen in the row of the round it opened: a closed
+    // round carries its sentence on the one-line label.
+    expect(container.querySelector('[data-seq="2"]')?.textContent).toContain(
+      "修复分页不满屏",
+    );
+  });
+
+  it("keeps answering reachable: a round parked on a card is never windowed away", () => {
+    const card: ChatBlockEntry = entryOf({
+      ref: REF1,
+      status: "pending",
+      projection: {
+        round_id: "r1",
+        terminal: false,
+        status: "waiting",
+        answer: { body: "need approval", ts: "1" },
+        card: { kind: "approval", request_id: "q1", prompt: "Approve `bash`?" },
+      },
+    });
+    renderBlock(
+      { [REF1]: card, [REF2]: completed(REF2, "b"), [REF3]: completed(REF3, "c") },
+      {},
+      blockOf([roundOf("r1", 2), roundOf("r2", 4), roundOf("r3", 6)]),
+    );
+    // D8: an unanswered card must stay on screen — an answerable thing behind a
+    // "show earlier" click is not answerable.
+    expect(screen.getByText("Approve `bash`?")).toBeTruthy();
+  });
+
+  it("a settled block reads Done even when an older round's read still says pending", () => {
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({ ref: REF1, status: "pending" }),
+        [REF2]: completed(REF2, "the newest answer"),
+      },
+      {},
+      blockOf([roundOf("r1", 2), roundOf("r2", 4)]),
+    );
+    // The newest round is the block's claim; an older read that never resolves
+    // must not keep the whole run looking live.
+    expect(headerText(container)).toContain("chatView.block.completed");
+    expect(container.querySelector(".animate-spin")).toBeNull();
+  });
+
+  it("a round parked on a card reads as waiting for the human, not as running", () => {
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          ref: REF1,
+          status: "pending",
+          projection: {
+            round_id: "r1",
+            terminal: false,
+            status: "waiting",
+            card: { kind: "approval", request_id: "q1", prompt: "Approve?" },
+          },
+        }),
+      },
+    );
+    expect(headerText(container)).toContain("chatView.notice.waiting");
+    expect(container.querySelector(".animate-spin")).toBeNull();
+  });
+
+  it("a newest read that is a hole says so instead of claiming a state", () => {
+    const { container } = renderBlock({
+      [REF1]: entryOf({ ref: REF1, status: "not_found", projection: undefined }),
+    });
+    // D9: "in progress" is a positive claim; a missing read is not evidence of it.
+    expect(headerText(container)).toContain("chatView.block.unknown");
+    expect(headerText(container)).not.toContain("chatView.block.inProgress");
   });
 });
